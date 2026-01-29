@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from typing import List, Tuple
 
 from pydantic import HttpUrl
+
+logger = logging.getLogger(__name__)
 
 from .llm import LLMClient
 from .models import (
@@ -67,6 +70,14 @@ class ResearchAgent:
             - Returns ResearchAgentOutput with query_plan (list), references (list,
               length <= brief_input.max_results), notes (str or None).
         """
+        brief_preview = (
+            (brief_input.brief[:77] + "...") if len(brief_input.brief) > 80 else brief_input.brief
+        )
+        logger.info(
+            "Starting research: brief=%s, max_results=%s",
+            brief_preview,
+            brief_input.max_results,
+        )
         normalized = self._parse_brief(brief_input)
         queries = self._generate_queries(brief_input, normalized)
         candidates = self._run_searches(queries, brief_input)
@@ -74,7 +85,11 @@ class ResearchAgent:
         scored_docs = self._score_documents(documents, brief_input)
         references = self._summarize_documents(scored_docs, brief_input)
         notes = self._synthesize_overview(brief_input, references)
-
+        logger.info(
+            "Research complete: %s references, notes=%s",
+            len(references),
+            notes is not None,
+        )
         return ResearchAgentOutput(query_plan=queries, references=references, notes=notes)
 
     # Steps --------------------------------------------------------------
@@ -84,6 +99,7 @@ class ResearchAgent:
         Preconditions: brief_input is a valid ResearchBriefInput.
         Postconditions: Returns a dict with keys core_topics, angle, constraints.
         """
+        logger.info("Parsing brief...")
         prompt = BRIEF_PARSING_PROMPT + "\n\n" + f"Brief: {brief_input.brief}\n"
         if brief_input.audience:
             prompt += f"Audience: {brief_input.audience}\n"
@@ -103,6 +119,7 @@ class ResearchAgent:
         Preconditions: brief_input valid; normalized has core_topics, angle, constraints.
         Postconditions: Returns non-empty list of SearchQuery (fallback to brief if needed).
         """
+        logger.info("Generating search queries...")
         prompt = QUERY_GENERATION_PROMPT.format(
             core_topics=normalized.get("core_topics"),
             angle=normalized.get("angle"),
@@ -129,6 +146,7 @@ class ResearchAgent:
         if not queries:
             queries.append(SearchQuery(query_text=brief_input.brief, intent="overview"))
 
+        logger.info("Generated %s search queries", len(queries))
         return queries
 
     def _run_searches(
@@ -140,10 +158,16 @@ class ResearchAgent:
         Preconditions: queries non-empty; brief_input valid.
         Postconditions: Returns list of CandidateResult, deduplicated by URL.
         """
+        logger.info("Running web searches...")
         seen_urls = set()
         candidates: List[CandidateResult] = []
+        n_queries = len(queries)
 
-        for query in queries:
+        for i, query in enumerate(queries):
+            query_preview = (
+                (query.query_text[:77] + "...") if len(query.query_text) > 80 else query.query_text
+            )
+            logger.info("Running search %s/%s: %s", i + 1, n_queries, query_preview)
             results = self.web_search.search(
                 query,
                 max_results=brief_input.per_query_limit,
@@ -156,6 +180,7 @@ class ResearchAgent:
                 seen_urls.add(url_str)
                 candidates.append(result)
 
+        logger.info("Found %s unique candidates", len(candidates))
         return candidates
 
     def _fetch_documents(
@@ -167,9 +192,9 @@ class ResearchAgent:
         Preconditions: candidates and brief_input valid.
         Postconditions: Returns list of SourceDocument (best-effort; fetch failures skipped).
         """
-        documents: List[SourceDocument] = []
-        # Cap total documents to avoid excessive latency/cost.
         max_docs = min(self.max_fetch_documents, len(candidates))
+        logger.info("Fetching up to %s documents...", max_docs)
+        documents: List[SourceDocument] = []
 
         for candidate in candidates[:max_docs]:
             try:
@@ -179,6 +204,7 @@ class ResearchAgent:
                 continue
             documents.append(doc)
 
+        logger.info("Fetched %s documents", len(documents))
         return documents
 
     def _score_documents(
@@ -192,6 +218,7 @@ class ResearchAgent:
         Preconditions: documents and brief_input valid.
         Postconditions: Returns list of (document, relevance_score, type_label) sorted by score descending.
         """
+        logger.info("Scoring documents for relevance...")
         scored: List[Tuple[SourceDocument, float, str]] = []
 
         for doc in documents:
@@ -207,9 +234,11 @@ class ResearchAgent:
                 score = 0.0
             type_label = data.get("type") or None
             scored.append((doc, float(score), type_label))
+            logger.debug("Scored doc: title=%s, score=%s, type=%s", doc.title, score, type_label)
 
         # Sort by relevance descending.
         scored.sort(key=lambda t: t[1], reverse=True)
+        logger.info("Scored %s documents", len(scored))
         return scored
 
     def _summarize_documents(
@@ -221,9 +250,12 @@ class ResearchAgent:
         Preconditions: scored_docs and brief_input valid.
         Postconditions: Returns list of ResearchReference, length <= brief_input.max_results.
         """
+        logger.info("Summarizing references...")
         references: List[ResearchReference] = []
+        cap = min(len(scored_docs), brief_input.max_results)
 
-        for doc, score, type_label in scored_docs[: brief_input.max_results]:
+        for idx, (doc, score, type_label) in enumerate(scored_docs[: brief_input.max_results]):
+            logger.debug("Summarizing reference %s/%s", idx + 1, cap)
             excerpt = doc.content[:8000]
             prompt = DOC_SUMMARIZATION_PROMPT + "\n\n" + (
                 f"Brief:\n{brief_input.brief}\n"
@@ -255,6 +287,7 @@ class ResearchAgent:
                 )
             )
 
+        logger.info("Produced %s references", len(references))
         return references
 
     def _synthesize_overview(
@@ -267,8 +300,10 @@ class ResearchAgent:
         Postconditions: Returns overview string or None if references empty.
         """
         if not references:
+            logger.info("Skipping overview (no references)")
             return None
 
+        logger.info("Synthesizing final overview...")
         refs_for_prompt = []
         for ref in references:
             refs_for_prompt.append(
@@ -294,12 +329,16 @@ class ResearchAgent:
             outline = data.get("outline")
             if isinstance(analysis, str) and isinstance(outline, list):
                 bullets = "\n".join(f"- {item}" for item in outline)
+                logger.info("Overview complete")
                 return f"{analysis}\n\nSuggested outline:\n{bullets}"
             if isinstance(analysis, str):
+                logger.info("Overview complete")
                 return analysis
 
         if isinstance(data, str):
+            logger.info("Overview complete")
             return data
 
+        logger.info("Overview complete")
         return None
 

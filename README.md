@@ -50,6 +50,27 @@ for ref in result.references:
     print(ref.title, ref.url)
 ```
 
+## Logging
+
+The research agent logs progress to the `strands_research_agent.agent` logger so you can see what it is doing at each step (parsing brief, generating queries, running searches, fetching and scoring documents, summarizing references, synthesizing the overview). By default the library does not configure handlers; enable logging in your application to see output.
+
+**Console (INFO):**
+
+```python
+import logging
+logging.basicConfig(level=logging.INFO)
+# then run your agent
+```
+
+**Target the agent logger only (e.g. INFO or DEBUG):**
+
+```python
+import logging
+logging.getLogger("strands_research_agent.agent").setLevel(logging.INFO)
+# add a handler if the root logger has none
+logging.getLogger("strands_research_agent.agent").addHandler(logging.StreamHandler())
+```
+
 ## Project layout
 
 - `strands_research_agent/models.py` – Input/output models and internal data structures.
