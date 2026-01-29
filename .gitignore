@@ -1,0 +1,20 @@
+# Bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Package metadata
+*.egg-info/
+
+# Pytest
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Built eggs
+*.egg
+
+# Environment / secrets
+.env
