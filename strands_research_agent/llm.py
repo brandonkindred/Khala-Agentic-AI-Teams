@@ -1,0 +1,157 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+import json
+import re
+from typing import Any, Dict
+
+import httpx
+
+
+class LLMClient(ABC):
+    """
+    Minimal abstraction around an LLM client.
+
+    The concrete implementation should adapt your Strands runtime's
+    LLM interface to this method.
+    """
+
+    @abstractmethod
+    def complete_json(self, prompt: str, *, temperature: float = 0.0) -> Dict[str, Any]:
+        """
+        Run the model with the given prompt and return a JSON-decoded dict.
+
+        Implementations are responsible for:
+        - adding any system messages
+        - choosing the underlying model
+        - parsing the model output as JSON and returning it
+        """
+
+
+class DummyLLMClient(LLMClient):
+    """
+    A no-op implementation useful for tests and environments without an LLM.
+
+    It returns very rough, heuristic outputs instead of calling a real model.
+    This is NOT meant for production use but is handy to keep the agent runnable.
+    """
+
+    def complete_json(self, prompt: str, *, temperature: float = 0.0) -> Dict[str, Any]:
+        # This is intentionally simplistic and only for demonstration/testing.
+        lowered = prompt.lower()
+        if "core_topics" in lowered and "angle" in lowered and "constraints" in lowered:
+            return {
+                "core_topics": ["general topic inferred from brief"],
+                "angle": "overview",
+                "constraints": [],
+            }
+        if '"queries"' in lowered and "query_text" in lowered:
+            return {
+                "queries": [
+                    {"query_text": "example overview query", "intent": "overview"},
+                    {"query_text": "example how-to query", "intent": "how-to"},
+                ]
+            }
+        if "relevance_score" in lowered and "type" in lowered:
+            return {
+                "relevance_score": 0.5,
+                "type": "guides",
+                "tags": ["placeholder"],
+            }
+        if '"summary"' in lowered and '"key_points"' in lowered:
+            return {
+                "summary": "Placeholder summary for this document.",
+                "key_points": ["Point 1", "Point 2"],
+                "is_promotional": False,
+            }
+        # Final synthesis prompt
+        return {
+            "analysis": "High-level synthesis is not available in DummyLLMClient.",
+            "outline": ["Intro", "Body", "Conclusion"],
+        }
+
+
+class OllamaLLMClient(LLMClient):
+    """
+    LLM client implementation that talks to a local Ollama instance.
+
+    It assumes an OpenAI-compatible chat completions API exposed by Ollama
+    (as provided by `ollama serve`) and uses httpx under the hood.
+    """
+
+    def __init__(
+        self,
+        model: str = "llama3.1",
+        *,
+        base_url: str = "http://127.0.0.1:11434",
+        timeout: float = 120.0,
+    ) -> None:
+        """
+        :param model: Name of the Ollama model to use (e.g. 'llama3.1').
+        :param base_url: Base URL of the Ollama server.
+        :param timeout: Request timeout in seconds.
+        """
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    def _extract_json(self, text: str) -> Dict[str, Any]:
+        """
+        Extract and parse a JSON object from the model's text response.
+
+        Ollama models may wrap JSON in prose or code fences. This helper
+        attempts to robustly pull out the first JSON object.
+        """
+        # Strip typical markdown code fences if present
+        fenced_match = re.search(r"```(?:json)?(.*)```", text, flags=re.DOTALL | re.IGNORECASE)
+        if fenced_match:
+            text = fenced_match.group(1).strip()
+
+        # Try direct JSON parse first
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+        # Fallback: take the first {...} block
+        obj_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if obj_match:
+            candidate = obj_match.group(0)
+            return json.loads(candidate)
+
+        # As a last resort, raise a clear error so callers can handle it.
+        raise ValueError(f"Could not parse JSON from Ollama response: {text!r}")
+
+    def complete_json(self, prompt: str, *, temperature: float = 0.0) -> Dict[str, Any]:
+        """
+        Call the Ollama chat completions API and return a parsed JSON dict.
+        """
+        system_message = (
+            "You are a strict JSON generator used by an automated research agent. "
+            "You MUST respond with a single valid JSON object only, with no "
+            "explanatory text, no Markdown, and no code fences."
+        )
+
+        payload = {
+            "model": self.model,
+            "temperature": temperature,
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt},
+            ],
+        }
+
+        url = f"{self.base_url}/v1/chat/completions"
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.post(url, json=payload)
+            response.raise_for_status()
+
+        data = response.json()
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as exc:
+            raise RuntimeError(f"Unexpected Ollama response format: {data!r}") from exc
+
+        return self._extract_json(content)
+
+
