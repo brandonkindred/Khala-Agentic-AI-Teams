@@ -84,4 +84,6 @@ def test_research_agent_run_end_to_end() -> None:
     assert ref.summary.startswith("Test summary")
     assert ref.key_points
     assert result.query_plan, "Expected non-empty query plan"
+    assert result.compiled_document, "Expected compiled document with links and summaries"
+    assert "URL:" in result.compiled_document and "Summary:" in result.compiled_document
 
