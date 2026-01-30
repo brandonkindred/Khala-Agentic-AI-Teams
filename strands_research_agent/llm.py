@@ -94,7 +94,7 @@ class OllamaLLMClient(LLMClient):
         model: str = "llama3.1",
         *,
         base_url: str = "http://127.0.0.1:11434",
-        timeout: float = 120.0,
+        timeout: float = 1800.0,
     ) -> None:
         """
         :param model: Name of the Ollama model to use (e.g. 'llama3.1').

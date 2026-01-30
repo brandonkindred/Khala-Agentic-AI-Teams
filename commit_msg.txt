@@ -1,0 +1,6 @@
+Design by Contract: document violations and implement DbC compliance
+
+Add docs/DESIGN_BY_CONTRACT_VIOLATIONS.md. Fix create_research_agent to use
+passed llm_client. Add pre/postconditions and invariants to agent, llm,
+models, web_fetch, web_search. Add assertions for key preconditions.
+All tests pass.

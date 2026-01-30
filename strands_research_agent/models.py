@@ -123,4 +123,8 @@ class ResearchAgentOutput(BaseModel):
         None,
         description="Optional high-level synthesis, caveats, and suggestions.",
     )
+    compiled_document: Optional[str] = Field(
+        None,
+        description="Formatted document listing the most relevant and factually accurate links with a summary of content for each.",
+    )
 

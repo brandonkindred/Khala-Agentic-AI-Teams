@@ -25,6 +25,7 @@ from .prompts import (
 )
 from .tools.web_search import TavilyWebSearch
 from .tools.web_fetch import SimpleWebFetcher
+from .agent_cache import AgentCache
 
 
 class ResearchAgent:
@@ -42,6 +43,7 @@ class ResearchAgent:
         web_search: TavilyWebSearch | None = None,
         web_fetcher: SimpleWebFetcher | None = None,
         max_fetch_documents: int = 20,
+        cache: AgentCache | None = None,
     ) -> None:
         """
         Preconditions:
@@ -57,6 +59,7 @@ class ResearchAgent:
         self.web_search = web_search or TavilyWebSearch()
         self.web_fetcher = web_fetcher or SimpleWebFetcher()
         self.max_fetch_documents = max_fetch_documents
+        self.cache = cache
 
     # Public API ---------------------------------------------------------
 
@@ -64,11 +67,14 @@ class ResearchAgent:
         """
         Execute the full research workflow and return structured output.
 
+        If cache is enabled, will resume from the last completed step on failure.
+
         Preconditions:
             - brief_input is a valid ResearchBriefInput (e.g. from model_validate).
         Postconditions:
             - Returns ResearchAgentOutput with query_plan (list), references (list,
-              length <= brief_input.max_results), notes (str or None).
+              length <= brief_input.max_results), notes (str or None), and
+              compiled_document (formatted document of most relevant links with summaries).
         """
         brief_preview = (
             (brief_input.brief[:77] + "...") if len(brief_input.brief) > 80 else brief_input.brief
@@ -78,19 +84,95 @@ class ResearchAgent:
             brief_preview,
             brief_input.max_results,
         )
-        normalized = self._parse_brief(brief_input)
-        queries = self._generate_queries(brief_input, normalized)
-        candidates = self._run_searches(queries, brief_input)
-        documents = self._fetch_documents(candidates, brief_input)
-        scored_docs = self._score_documents(documents, brief_input)
-        references = self._summarize_documents(scored_docs, brief_input)
-        notes = self._synthesize_overview(brief_input, references)
+
+        # Try to load checkpoint
+        cached_state = None
+        if self.cache:
+            cached_state = self.cache.load_checkpoint(brief_input)
+            if cached_state:
+                logger.info("Resuming from checkpoint: last_step=%s", cached_state.last_completed_step)
+
+        # Step 1: Parse brief
+        if cached_state and cached_state.normalized:
+            logger.info("Using cached normalized brief")
+            normalized = cached_state.normalized
+        else:
+            normalized = self._parse_brief(brief_input)
+            if self.cache:
+                self.cache.save_checkpoint(brief_input, "normalized", normalized=normalized)
+
+        # Step 2: Generate queries
+        if cached_state and cached_state.queries:
+            logger.info("Using cached queries (%s)", len(cached_state.queries))
+            queries = [SearchQuery(**q) for q in cached_state.queries]
+        else:
+            queries = self._generate_queries(brief_input, normalized)
+            if self.cache:
+                self.cache.save_checkpoint(brief_input, "queries", queries=queries)
+
+        # Step 3: Run searches
+        if cached_state and cached_state.candidates:
+            logger.info("Using cached candidates (%s)", len(cached_state.candidates))
+            candidates = [CandidateResult(**c) for c in cached_state.candidates]
+        else:
+            candidates = self._run_searches(queries, brief_input)
+            if self.cache:
+                self.cache.save_checkpoint(brief_input, "candidates", candidates=candidates)
+
+        # Step 4: Fetch documents
+        if cached_state and cached_state.documents:
+            logger.info("Using cached documents (%s)", len(cached_state.documents))
+            documents = [SourceDocument(**d) for d in cached_state.documents]
+        else:
+            documents = self._fetch_documents(candidates, brief_input)
+            if self.cache:
+                self.cache.save_checkpoint(brief_input, "documents", documents=documents)
+
+        # Step 5: Score documents
+        if cached_state and cached_state.scored_docs:
+            logger.info("Using cached scored documents (%s)", len(cached_state.scored_docs))
+            scored_docs = [
+                (SourceDocument(**item[0]), item[1], item[2])
+                for item in cached_state.scored_docs
+            ]
+        else:
+            scored_docs = self._score_documents(documents, brief_input)
+            if self.cache:
+                self.cache.save_checkpoint(brief_input, "scored_docs", scored_docs=scored_docs)
+
+        # Step 6: Summarize documents
+        if cached_state and cached_state.references:
+            logger.info("Using cached references (%s)", len(cached_state.references))
+            references = [ResearchReference(**r) for r in cached_state.references]
+        else:
+            references = self._summarize_documents(scored_docs, brief_input)
+            if self.cache:
+                self.cache.save_checkpoint(brief_input, "references", references=references)
+
+        # Step 7: Synthesize overview
+        if cached_state and cached_state.notes is not None:
+            logger.info("Using cached notes")
+            notes = cached_state.notes
+        else:
+            notes = self._synthesize_overview(brief_input, references)
+            if self.cache:
+                self.cache.save_checkpoint(brief_input, "notes", notes=notes)
+
+        # Step 8: Compile document (most relevant links with summaries)
+        compiled_document = self._compile_document(brief_input, references)
+
         logger.info(
-            "Research complete: %s references, notes=%s",
+            "Research complete: %s references, notes=%s, compiled_document=%s",
             len(references),
             notes is not None,
+            len(compiled_document) if compiled_document else 0,
         )
-        return ResearchAgentOutput(query_plan=queries, references=references, notes=notes)
+        return ResearchAgentOutput(
+            query_plan=queries,
+            references=references,
+            notes=notes,
+            compiled_document=compiled_document,
+        )
 
     # Steps --------------------------------------------------------------
 
@@ -341,4 +423,50 @@ class ResearchAgent:
 
         logger.info("Overview complete")
         return None
+
+    def _compile_document(
+        self,
+        brief_input: ResearchBriefInput,
+        references: List[ResearchReference],
+    ) -> str:
+        """
+        Build a formatted document listing the most relevant and factually accurate
+        links with a summary of content for each. References are already ordered by
+        relevance from the scoring step.
+
+        Preconditions: brief_input and references valid.
+        Postconditions: Returns a single string document; empty string if no references.
+        """
+        if not references:
+            logger.info("Skipping compiled document (no references)")
+            return ""
+
+        logger.info("Compiling document with %s links and summaries", len(references))
+        lines = [
+            "=" * 60,
+            "Compiled Research: Most Relevant Sources",
+            "=" * 60,
+            "",
+            f"Topic: {brief_input.brief}",
+            "",
+            "Sources (ordered by relevance, with summaries):",
+            "",
+        ]
+        for i, ref in enumerate(references, start=1):
+            lines.append(f"--- {i}. {ref.title} ---")
+            lines.append(f"URL: {ref.url}")
+            lines.append("")
+            lines.append("Summary:")
+            lines.append(ref.summary)
+            if ref.key_points:
+                lines.append("")
+                lines.append("Key points:")
+                for point in ref.key_points:
+                    lines.append(f"  • {point}")
+            if ref.relevance_score is not None:
+                lines.append("")
+                lines.append(f"(Relevance score: {ref.relevance_score:.2f})")
+            lines.append("")
+        lines.append("=" * 60)
+        return "\n".join(lines)
 
