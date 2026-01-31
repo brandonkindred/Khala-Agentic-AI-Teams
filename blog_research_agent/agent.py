@@ -15,6 +15,7 @@ from .models import (
     SearchQuery,
     CandidateResult,
     SourceDocument,
+    AcademicPaper,
 )
 from .prompts import (
     BRIEF_PARSING_PROMPT,
@@ -22,9 +23,11 @@ from .prompts import (
     DOC_RELEVANCE_SCORING_PROMPT,
     DOC_SUMMARIZATION_PROMPT,
     FINAL_SYNTHESIS_PROMPT,
+    SIMILAR_TOPICS_PROMPT,
 )
 from .tools.web_search import TavilyWebSearch
 from .tools.web_fetch import SimpleWebFetcher
+from .tools.arxiv_search import search_arxiv
 from .agent_cache import AgentCache
 
 
@@ -131,10 +134,17 @@ class ResearchAgent:
         # Step 5: Score documents
         if cached_state and cached_state.scored_docs:
             logger.info("Using cached scored documents (%s)", len(cached_state.scored_docs))
-            scored_docs = [
-                (SourceDocument(**item[0]), item[1], item[2])
-                for item in cached_state.scored_docs
-            ]
+            scored_docs = []
+            for item in cached_state.scored_docs:
+                # Support old format [doc, score, type] and new [doc, relevance, authority, accuracy, type]
+                if len(item) >= 5:
+                    scored_docs.append((
+                        SourceDocument(**item[0]), item[1], item[2], item[3], item[4]
+                    ))
+                else:
+                    scored_docs.append((
+                        SourceDocument(**item[0]), item[1], 0.5, 0.5, item[2] if len(item) > 2 else None
+                    ))
         else:
             scored_docs = self._score_documents(documents, brief_input)
             if self.cache:
@@ -158,13 +168,22 @@ class ResearchAgent:
             if self.cache:
                 self.cache.save_checkpoint(brief_input, "notes", notes=notes)
 
-        # Step 8: Compile document (most relevant links with summaries)
-        compiled_document = self._compile_document(brief_input, references)
+        # Step 8: Fetch academic sources (arXiv)
+        academic_papers = self._fetch_academic_papers(brief_input)
+
+        # Step 9: Similar topics (score > 70%)
+        similar_topics = self._get_similar_topics(brief_input, references)
+
+        # Step 10: Compile document (Blog Post Research format)
+        compiled_document = self._compile_document(
+            brief_input, references, notes, academic_papers, similar_topics
+        )
 
         logger.info(
-            "Research complete: %s references, notes=%s, compiled_document=%s",
+            "Research complete: %s references, %s academic papers, %s similar topics, compiled_document=%s",
             len(references),
-            notes is not None,
+            len(academic_papers),
+            len(similar_topics),
             len(compiled_document) if compiled_document else 0,
         )
         return ResearchAgentOutput(
@@ -172,6 +191,8 @@ class ResearchAgent:
             references=references,
             notes=notes,
             compiled_document=compiled_document,
+            academic_papers=academic_papers,
+            similar_topics=similar_topics,
         )
 
     # Steps --------------------------------------------------------------
@@ -293,15 +314,15 @@ class ResearchAgent:
         self,
         documents: List[SourceDocument],
         brief_input: ResearchBriefInput,
-    ) -> List[Tuple[SourceDocument, float, str]]:
+    ) -> List[Tuple[SourceDocument, float, float, float, str]]:
         """
-        Use the LLM to produce a relevance score and type for each document.
+        Use the LLM to produce relevance, authority, accuracy scores and type for each document.
 
         Preconditions: documents and brief_input valid.
-        Postconditions: Returns list of (document, relevance_score, type_label) sorted by score descending.
+        Postconditions: Returns list of (document, relevance, authority, accuracy, type_label) sorted by relevance descending.
         """
-        logger.info("Scoring documents for relevance...")
-        scored: List[Tuple[SourceDocument, float, str]] = []
+        logger.info("Scoring documents for relevance, authority, and accuracy...")
+        scored: List[Tuple[SourceDocument, float, float, float, str]] = []
 
         for doc in documents:
             excerpt = doc.content[:4000]
@@ -311,12 +332,24 @@ class ResearchAgent:
                 f"Document excerpt:\n{excerpt}\n"
             )
             data = self.llm.complete_json(prompt, temperature=0.0)
-            score = data.get("relevance_score")
-            if not isinstance(score, (int, float)):
-                score = 0.0
+            rel = data.get("relevance_score")
+            auth = data.get("authority_score")
+            acc = data.get("accuracy_score")
+            if not isinstance(rel, (int, float)):
+                rel = 0.0
+            if not isinstance(auth, (int, float)):
+                auth = 0.5
+            if not isinstance(acc, (int, float)):
+                acc = 0.5
+            relevance = max(0.0, min(1.0, float(rel)))
+            authority = max(0.0, min(1.0, float(auth)))
+            accuracy = max(0.0, min(1.0, float(acc)))
             type_label = data.get("type") or None
-            scored.append((doc, float(score), type_label))
-            logger.debug("Scored doc: title=%s, score=%s, type=%s", doc.title, score, type_label)
+            scored.append((doc, relevance, authority, accuracy, type_label))
+            logger.debug(
+                "Scored doc: title=%s, relevance=%s, authority=%s, accuracy=%s, type=%s",
+                doc.title, relevance, authority, accuracy, type_label,
+            )
 
         # Sort by relevance descending.
         scored.sort(key=lambda t: t[1], reverse=True)
@@ -325,7 +358,7 @@ class ResearchAgent:
 
     def _summarize_documents(
         self,
-        scored_docs: List[Tuple[SourceDocument, float, str]],
+        scored_docs: List[Tuple[SourceDocument, float, float, float, str]],
         brief_input: ResearchBriefInput,
     ) -> List[ResearchReference]:
         """
@@ -336,7 +369,7 @@ class ResearchAgent:
         references: List[ResearchReference] = []
         cap = min(len(scored_docs), brief_input.max_results)
 
-        for idx, (doc, score, type_label) in enumerate(scored_docs[: brief_input.max_results]):
+        for idx, (doc, relevance, authority, accuracy, type_label) in enumerate(scored_docs[: brief_input.max_results]):
             logger.debug("Summarizing reference %s/%s", idx + 1, cap)
             excerpt = doc.content[:8000]
             prompt = DOC_SUMMARIZATION_PROMPT + "\n\n" + (
@@ -365,7 +398,9 @@ class ResearchAgent:
                     key_points=key_points,
                     type=type_label,
                     recency=None,  # Could be set from publish_date/metadata in the future
-                    relevance_score=float(score),
+                    relevance_score=relevance,
+                    authority_score=authority,
+                    accuracy_score=accuracy,
                 )
             )
 
@@ -424,49 +459,131 @@ class ResearchAgent:
         logger.info("Overview complete")
         return None
 
+    def _fetch_academic_papers(self, brief_input: ResearchBriefInput) -> List[AcademicPaper]:
+        """
+        Search arXiv for papers relevant to the brief. Returns list of AcademicPaper.
+
+        Preconditions: brief_input valid.
+        Postconditions: Returns list of AcademicPaper (title, url, overview_or_summary); may be empty on failure.
+        """
+        try:
+            papers = search_arxiv(
+                brief_input.brief,
+                max_results=5,
+                timeout=15.0,
+            )
+            return papers
+        except Exception as e:
+            logger.warning("arXiv search failed, skipping academic sources: %s", e)
+            return []
+
+    def _get_similar_topics(
+        self,
+        brief_input: ResearchBriefInput,
+        references: List[ResearchReference],
+    ) -> List[str]:
+        """
+        Use LLM to suggest similar topics with similarity scores; return topics with score > 70%.
+
+        Preconditions: brief_input and references valid.
+        Postconditions: Returns list of topic strings (similarity_score >= 0.7).
+        """
+        if not references:
+            return []
+        refs_preview = "\n".join(
+            f"- {ref.title}: {ref.summary[:150]}..." if len(ref.summary) > 150 else f"- {ref.title}: {ref.summary}"
+            for ref in references[:5]
+        )
+        prompt = SIMILAR_TOPICS_PROMPT + "\n\n" + (
+            f"Brief:\n{brief_input.brief}\n\n"
+            f"References found:\n{refs_preview}\n"
+        )
+        try:
+            data = self.llm.complete_json(prompt, temperature=0.2)
+            items = data.get("similar_topics") or []
+            topics: List[str] = []
+            for item in items if isinstance(items, list) else []:
+                if isinstance(item, dict):
+                    topic = item.get("topic")
+                    score = item.get("similarity_score")
+                    if topic and score is not None:
+                        try:
+                            s = float(score)
+                            if s >= 0.7:
+                                topics.append(str(topic).strip())
+                        except (TypeError, ValueError):
+                            pass
+            return topics[:15]
+        except Exception as e:
+            logger.warning("Similar topics step failed: %s", e)
+            return []
+
     def _compile_document(
         self,
         brief_input: ResearchBriefInput,
         references: List[ResearchReference],
+        notes: str | None,
+        academic_papers: List[AcademicPaper],
+        similar_topics: List[str],
     ) -> str:
         """
-        Build a formatted document listing the most relevant and factually accurate
-        links with a summary of content for each. References are already ordered by
-        relevance from the scoring step.
+        Build the compiled document in Blog Post Research format.
 
-        Preconditions: brief_input and references valid.
-        Postconditions: Returns a single string document; empty string if no references.
+        Format:
+        # Blog Post Research
+        - summary of the sources that were found
+        ## Sources
+        1. URL
+        -- Summary
+        ...
+        ## Academic sources (a list of links to research papers on arxiv.org)
+        1. Paper URL
+        -- Overview/summary
+        ...
+        ## Similar topics
+        - List of topics with similarity > 70%
         """
-        if not references:
-            logger.info("Skipping compiled document (no references)")
-            return ""
-
-        logger.info("Compiling document with %s links and summaries", len(references))
         lines = [
-            "=" * 60,
-            "Compiled Research: Most Relevant Sources",
-            "=" * 60,
-            "",
-            f"Topic: {brief_input.brief}",
-            "",
-            "Sources (ordered by relevance, with summaries):",
+            "# Blog Post Research",
             "",
         ]
-        for i, ref in enumerate(references, start=1):
-            lines.append(f"--- {i}. {ref.title} ---")
-            lines.append(f"URL: {ref.url}")
-            lines.append("")
-            lines.append("Summary:")
-            lines.append(ref.summary)
-            if ref.key_points:
+        # Summary of the sources that were found
+        if notes:
+            summary_line = notes.replace("\n", " ").strip()[:2000]
+            lines.append("- " + summary_line)
+        else:
+            lines.append("- Summary of sources: " + (
+                f"Found {len(references)} web source(s) and {len(academic_papers)} academic paper(s) relevant to \"{brief_input.brief[:80]}...\"." if len(brief_input.brief) > 80 else f"Found {len(references)} web source(s) and {len(academic_papers)} academic paper(s) relevant to \"{brief_input.brief}\"."
+            ))
+        lines.append("")
+        lines.append("## Sources")
+        lines.append("")
+        if references:
+            for i, ref in enumerate(references, start=1):
+                lines.append(f"{i}. {ref.url}")
+                lines.append(f"-- {ref.summary.strip()}")
                 lines.append("")
-                lines.append("Key points:")
-                for point in ref.key_points:
-                    lines.append(f"  • {point}")
-            if ref.relevance_score is not None:
-                lines.append("")
-                lines.append(f"(Relevance score: {ref.relevance_score:.2f})")
+        else:
+            lines.append("(No web sources found.)")
             lines.append("")
-        lines.append("=" * 60)
-        return "\n".join(lines)
+        lines.append("## Academic sources (a list of links to research papers on arxiv.org)")
+        lines.append("")
+        if academic_papers:
+            for i, paper in enumerate(academic_papers, start=1):
+                lines.append(f"{i}. {paper.url}")
+                lines.append(f"-- {paper.overview_or_summary.strip()}")
+                lines.append("")
+        else:
+            lines.append("(No academic papers found.)")
+            lines.append("")
+        lines.append("## Similar topics")
+        lines.append("")
+        if similar_topics:
+            for topic in similar_topics:
+                lines.append(f"- {topic}")
+            lines.append("")
+        else:
+            lines.append("(No similar topics with score > 70%.)")
+            lines.append("")
+        return "\n".join(lines).strip()
 

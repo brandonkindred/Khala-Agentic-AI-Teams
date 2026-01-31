@@ -65,6 +65,8 @@ class DummyLLMClient(LLMClient):
         if "relevance_score" in lowered and "type" in lowered:
             return {
                 "relevance_score": 0.5,
+                "authority_score": 0.5,
+                "accuracy_score": 0.5,
                 "type": "guides",
                 "tags": ["placeholder"],
             }
@@ -90,6 +92,20 @@ class DummyLLMClient(LLMClient):
                     {"title": "Example title 10: Deep Dive", "probability_of_success": 0.52},
                 ],
                 "outline": "# Blog Outline (Dummy)\n\n## 1. Introduction\n- Hook from research; key stat or question.\n- State what the reader will learn.\n\n## 2. Main Section A\n- Key point from source 1.\n- Supporting detail.\n\n## 3. Main Section B\n- Key point from source 2.\n- Example or quote.\n\n## 4. Conclusion\n- Recap and CTA.",
+            }
+        # Blog draft prompt (research + outline -> draft)
+        if '"draft"' in lowered and ("style guide" in lowered or "research document" in lowered or "outline" in lowered):
+            return {
+                "draft": "# Example Draft (Dummy)\n\nThis is a placeholder draft. Use a real LLM to generate the full post.\n\n## Introduction\n\nHook and stakes would go here.\n\n## Main content\n\nSections from the outline, using the research document.\n\n## Wrap up\n\nRecap and one practical next step.",
+            }
+        # Similar topics prompt
+        if "similar_topics" in lowered and "similarity_score" in lowered:
+            return {
+                "similar_topics": [
+                    {"topic": "Related topic A", "similarity_score": 0.85},
+                    {"topic": "Related topic B", "similarity_score": 0.78},
+                    {"topic": "Related topic C", "similarity_score": 0.72},
+                ],
             }
         # Final synthesis prompt
         return {

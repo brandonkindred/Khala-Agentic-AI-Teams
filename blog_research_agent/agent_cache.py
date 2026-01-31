@@ -144,15 +144,21 @@ class AgentCache:
             state.documents = [d.model_dump() if hasattr(d, "model_dump") else d for d in documents]
         elif step_name == "scored_docs" and "scored_docs" in kwargs:
             scored_docs = kwargs["scored_docs"]
-            # Serialize tuples as lists for JSON: [doc_dict, score, type_label]
-            state.scored_docs = [
-                [
-                    doc.model_dump() if hasattr(doc, "model_dump") else doc,
-                    score,
-                    type_label,
-                ]
-                for doc, score, type_label in scored_docs
-            ]
+            # Serialize as [doc_dict, relevance, authority, accuracy, type_label]
+            state.scored_docs = []
+            for t in scored_docs:
+                if len(t) >= 5:
+                    doc, rel, auth, acc, type_label = t[0], t[1], t[2], t[3], t[4]
+                    state.scored_docs.append([
+                        doc.model_dump() if hasattr(doc, "model_dump") else doc,
+                        rel, auth, acc, type_label,
+                    ])
+                else:
+                    doc, score, type_label = t[0], t[1], t[2] if len(t) > 2 else None
+                    state.scored_docs.append([
+                        doc.model_dump() if hasattr(doc, "model_dump") else doc,
+                        score, 0.5, 0.5, type_label,
+                    ])
         elif step_name == "references" and "references" in kwargs:
             references = kwargs["references"]
             state.references = [

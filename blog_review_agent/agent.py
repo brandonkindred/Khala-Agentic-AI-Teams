@@ -8,8 +8,10 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from .llm import LLMClient
-from .models import BlogReviewInput, BlogReviewOutput, TitleChoice, ResearchReference
+from blog_research_agent.llm import LLMClient
+from blog_research_agent.models import ResearchReference
+
+from .models import BlogReviewInput, BlogReviewOutput, TitleChoice
 from .prompts import BLOG_REVIEW_PROMPT
 
 logger = logging.getLogger(__name__)

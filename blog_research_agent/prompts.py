@@ -33,19 +33,23 @@ Return JSON with a list under the key "queries", where each item has:
 - "intent": short label like "overview", "how-to", "stats", "risks", "case-studies", etc."""
 
 
-DOC_RELEVANCE_SCORING_PROMPT = """You are an assistant that scores relevance and tags for a web document.
+DOC_RELEVANCE_SCORING_PROMPT = """You are an assistant that scores relevance, authority, accuracy, and tags for a web document.
 
 You are given:
 - a research brief
 - a candidate document (title + extracted text)
 
 Your task:
-1. Decide how relevant this document is to the brief (0 to 1, with 1 being extremely relevant).
-2. Briefly classify the type: e.g. "guides", "academic", "news", "tooling", "docs", "blog", "report".
-3. Provide up to 3 short tags capturing the document's focus (e.g. "best-practices", "case-studies", "benchmarks").
+1. Relevance (0–1): How relevant is this document to the brief? 1 = extremely relevant.
+2. Authority (0–1): How authoritative is the source? Consider publisher/site credibility, author expertise, institutional backing. 1 = highly authoritative (e.g. official docs, known experts, reputable orgs).
+3. Accuracy (0–1): How factually accurate and reliable does the content appear? Consider citations, consistency, lack of speculation. 1 = high confidence in accuracy.
+4. Briefly classify the type: e.g. "guides", "academic", "news", "tooling", "docs", "blog", "report".
+5. Provide up to 3 short tags capturing the document's focus (e.g. "best-practices", "case-studies", "benchmarks").
 
 Return JSON with keys:
 - relevance_score: float between 0 and 1
+- authority_score: float between 0 and 1
+- accuracy_score: float between 0 and 1
 - type: string
 - tags: list of strings
 Keep the analysis brief; do not include the full document text in the response."""
@@ -84,34 +88,17 @@ Your tasks:
 Return a compact, paragraph-style analysis followed by a short suggested outline as bullet points."""
 
 
-# ---------------------------------------------------------------------------
-# Blog review agent (titles + outline from brief + sources)
-# ---------------------------------------------------------------------------
+SIMILAR_TOPICS_PROMPT = """You are a research assistant.
 
-BLOG_REVIEW_PROMPT = """You are an expert content strategist and editor.
+You will receive:
+- the original research brief
+- a short list of reference titles/summaries that were found
 
-You will be given:
-1. The original content brief (topic, audience, tone/purpose).
-2. A list of researched sources with summaries and key points.
+Your task: Suggest 5 to 10 related topics that a reader might also want to explore. For each topic, estimate how similar it is to the brief (0 to 1, where 1 is very similar). Only include topics that are clearly related.
 
-Your tasks:
+Return JSON with a single key "similar_topics" whose value is a list of objects, each with:
+- "topic": string (short phrase, e.g. "LLM observability tools")
+- "similarity_score": float between 0 and 1
 
-**Part 1 – Title choices**
-Produce exactly 10 catchy title/soundbite options that are likely to drive conversion (clicks, shares, or sign-ups). Each title should:
-- Be concise and memorable (ideally under 70 characters for headlines).
-- Speak to the audience and promise clear value or intrigue.
-- Be grounded in the research so the post can deliver on the promise.
-
-For each title, provide a probability_of_success (float between 0 and 1) representing your estimate of how likely this title is to reach a large audience (e.g. go viral, get high engagement, or convert well). Consider clarity, curiosity, relevance, and shareability.
-
-**Part 2 – Blog outline**
-Write a detailed outline for the blog post that:
-- Uses the research sources to structure the narrative.
-- Includes section headings and subheadings.
-- Under each section, add brief notes and details (facts, quotes, examples, or angles from the sources) that would be useful for writing the first draft.
-- Ensures the outline is actionable: a writer could draft from it without re-reading all sources.
-
-Return a single JSON object with exactly these keys:
-- "title_choices": list of 10 objects, each with "title" (string) and "probability_of_success" (float 0–1).
-- "outline": string containing the full outline with sections, subheadings, and notes (use newlines and indentation; may be multi-paragraph)."""
+Sort by similarity_score descending. Keep topic phrases concise (under 60 characters)."""
 

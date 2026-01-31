@@ -2,9 +2,9 @@
 
 import pytest
 
-from strands_research_agent.blog_review_agent import BlogReviewAgent
-from strands_research_agent.llm import DummyLLMClient
-from strands_research_agent.models import BlogReviewInput, ResearchReference
+from blog_review_agent import BlogReviewAgent, BlogReviewInput
+from blog_research_agent.models import ResearchReference
+from blog_research_agent.llm import DummyLLMClient
 
 
 def test_blog_review_agent_run() -> None:

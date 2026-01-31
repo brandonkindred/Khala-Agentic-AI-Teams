@@ -18,6 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 
-[tool.setuptools]
-packages = ["strands_research_agent"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["blog_research_agent*", "blog_review_agent*", "blog_draft_agent*"]
+namespaces = false
 

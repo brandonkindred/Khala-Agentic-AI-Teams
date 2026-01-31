@@ -86,7 +86,7 @@ class ResearchReference(BaseModel):
     """
     Normalized reference returned by the agent.
 
-    Invariants: relevance_score in [0.0, 1.0] when present.
+    Invariants: relevance_score, authority_score, accuracy_score in [0.0, 1.0] when present.
     """
 
     title: str
@@ -106,7 +106,30 @@ class ResearchReference(BaseModel):
         None,
         ge=0.0,
         le=1.0,
-        description="Composite relevance score between 0 and 1.",
+        description="Relevance to the brief (0–1).",
+    )
+    authority_score: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Authority of the source (0–1): publisher/site credibility, expertise.",
+    )
+    accuracy_score: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Factual accuracy / reliability of the content (0–1).",
+    )
+
+
+class AcademicPaper(BaseModel):
+    """A research paper from arXiv (or similar) with link and overview/summary."""
+
+    title: str = Field(..., description="Paper title.")
+    url: HttpUrl = Field(..., description="Link to the paper (e.g. arxiv.org abstract page).")
+    overview_or_summary: str = Field(
+        ...,
+        description="Overview or summary of the research paper (e.g. abstract or LLM summary).",
     )
 
 
@@ -125,54 +148,14 @@ class ResearchAgentOutput(BaseModel):
     )
     compiled_document: Optional[str] = Field(
         None,
-        description="Formatted document listing the most relevant and factually accurate links with a summary of content for each.",
+        description="Formatted document in Blog Post Research format (sources, academic sources, similar topics).",
     )
-
-
-# ---------------------------------------------------------------------------
-# Blog review agent (titles + outline from brief + sources)
-# ---------------------------------------------------------------------------
-
-
-class TitleChoice(BaseModel):
-    """A candidate title/soundbite with estimated probability of reaching a large audience."""
-
-    title: str = Field(..., description="Catchy title or soundbite aimed at conversion.")
-    probability_of_success: float = Field(
-        ...,
-        ge=0.0,
-        le=1.0,
-        description="Estimated probability (0–1) of success at reaching a large audience.",
+    academic_papers: List[AcademicPaper] = Field(
+        default_factory=list,
+        description="Research papers from arXiv (or similar) relevant to the brief.",
     )
-
-
-class BlogReviewInput(BaseModel):
-    """Input for the blog review agent: original brief context and researched sources."""
-
-    brief: str = Field(..., description="Original content brief or topic.")
-    audience: Optional[str] = Field(
-        None,
-        description="Intended audience (e.g. 'CTOs', 'beginners').",
-    )
-    tone_or_purpose: Optional[str] = Field(
-        None,
-        description="Desired tone or purpose, e.g. 'educational', 'technical deep-dive'.",
-    )
-    references: List[ResearchReference] = Field(
-        ...,
-        description="List of researched sources (summaries and key points) to use for titles and outline.",
-    )
-
-
-class BlogReviewOutput(BaseModel):
-    """Output from the blog review agent: title choices and blog outline."""
-
-    title_choices: List[TitleChoice] = Field(
-        ...,
-        description="Top 10 catchy title/soundbite choices with probability of success.",
-    )
-    outline: str = Field(
-        ...,
-        description="Detailed blog post outline with notes and details useful for a first draft.",
+    similar_topics: List[str] = Field(
+        default_factory=list,
+        description="Topics with similarity to the brief (score > 70%).",
     )
 

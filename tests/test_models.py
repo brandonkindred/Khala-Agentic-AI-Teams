@@ -1,4 +1,4 @@
-from strands_research_agent.models import (
+from blog_research_agent.models import (
     ResearchBriefInput,
     ResearchAgentOutput,
     ResearchReference,

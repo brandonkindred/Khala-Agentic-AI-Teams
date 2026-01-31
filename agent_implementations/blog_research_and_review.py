@@ -8,17 +8,17 @@ The blog review agent takes the brief + researched sources and produces:
 
 import logging
 
-from strands_research_agent.agent import ResearchAgent
-from strands_research_agent.agent_cache import AgentCache
-from strands_research_agent.blog_review_agent import BlogReviewAgent
-from strands_research_agent.models import ResearchBriefInput, BlogReviewInput
-from strands_research_agent.llm import OllamaLLMClient  # or DummyLLMClient for tests
+from blog_research_agent.agent import ResearchAgent
+from blog_research_agent.agent_cache import AgentCache
+from blog_research_agent.models import ResearchBriefInput
+from blog_research_agent.llm import OllamaLLMClient
+from blog_review_agent import BlogReviewAgent, BlogReviewInput
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 llm_client = OllamaLLMClient(
     model="deepseek-r1",
-    timeout=600.0,
+    timeout=1800.0,
 )
 
 # 1. Research
@@ -28,7 +28,7 @@ brief = ResearchBriefInput(
     brief="LLM observability best practices for large enterprises",
     audience="CTOs and platform teams",
     tone_or_purpose="technical deep-dive",
-    max_results=8,
+    max_results=20,
 )
 research_result = research_agent.run(brief)
 

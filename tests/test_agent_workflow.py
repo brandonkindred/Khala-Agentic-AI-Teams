@@ -1,6 +1,8 @@
-from strands_research_agent.agent import ResearchAgent
-from strands_research_agent.llm import LLMClient
-from strands_research_agent.models import ResearchBriefInput, SearchQuery, CandidateResult, SourceDocument
+from unittest.mock import patch
+
+from blog_research_agent.agent import ResearchAgent
+from blog_research_agent.llm import LLMClient
+from blog_research_agent.models import ResearchBriefInput, SearchQuery, CandidateResult, SourceDocument
 
 
 class StubLLM(LLMClient):
@@ -24,6 +26,8 @@ class StubLLM(LLMClient):
         if "relevance_score" in lowered and "type" in lowered:
             return {
                 "relevance_score": 0.9,
+                "authority_score": 0.8,
+                "accuracy_score": 0.85,
                 "type": "guides",
                 "tags": ["testing"],
             }
@@ -32,6 +36,13 @@ class StubLLM(LLMClient):
                 "summary": "Test summary.",
                 "key_points": ["Key point A", "Key point B"],
                 "is_promotional": False,
+            }
+        if "similar_topics" in lowered and "similarity_score" in lowered:
+            return {
+                "similar_topics": [
+                    {"topic": "Related topic A", "similarity_score": 0.85},
+                    {"topic": "Related topic B", "similarity_score": 0.75},
+                ],
             }
         return {
             "analysis": "Test analysis.",
@@ -70,14 +81,16 @@ def test_research_agent_run_end_to_end() -> None:
     llm = StubLLM()
     agent = ResearchAgent(llm_client=llm, web_search=StubSearch(), web_fetcher=StubFetcher())
 
-    brief = ResearchBriefInput(
-        brief="Test brief about a topic",
-        audience="Testers",
-        tone_or_purpose="educational",
-        max_results=3,
-    )
+    # Avoid real arXiv HTTP calls in tests
+    with patch("blog_research_agent.agent.search_arxiv", return_value=[]):
+        brief = ResearchBriefInput(
+            brief="Test brief about a topic",
+            audience="Testers",
+            tone_or_purpose="educational",
+            max_results=3,
+        )
 
-    result = agent.run(brief)
+        result = agent.run(brief)
 
     assert result.references, "Expected at least one reference"
     ref = result.references[0]
@@ -85,5 +98,11 @@ def test_research_agent_run_end_to_end() -> None:
     assert ref.key_points
     assert result.query_plan, "Expected non-empty query plan"
     assert result.compiled_document, "Expected compiled document with links and summaries"
-    assert "URL:" in result.compiled_document and "Summary:" in result.compiled_document
+    assert "# Blog Post Research" in result.compiled_document
+    assert "## Sources" in result.compiled_document
+    assert "## Academic sources" in result.compiled_document
+    assert "## Similar topics" in result.compiled_document
+    assert "example.com" in result.compiled_document or "http" in result.compiled_document
+    assert "-- " in result.compiled_document
+    assert result.similar_topics or "Similar" in result.compiled_document
 
