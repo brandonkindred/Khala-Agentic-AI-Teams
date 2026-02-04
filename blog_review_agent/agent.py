@@ -5,7 +5,9 @@ title choices (with success probability) and a detailed blog outline.
 
 from __future__ import annotations
 
+import ast
 import logging
+import re
 from typing import List
 
 from blog_research_agent.llm import LLMClient
@@ -35,7 +37,7 @@ def _format_references_for_prompt(references: List[ResearchReference]) -> str:
 class BlogReviewAgent:
     """
     Agent that reviews a brief and researched sources to produce:
-    1. Top 10 catchy title/soundbite choices with probability of success.
+    1. Top 5 high-quality title choices with probability of success.
     2. A detailed blog post outline with notes useful for a first draft.
     """
 
@@ -54,7 +56,7 @@ class BlogReviewAgent:
         Preconditions:
             - review_input is a valid BlogReviewInput (brief + references).
         Postconditions:
-            - Returns BlogReviewOutput with exactly 10 title_choices and a non-empty outline.
+            - Returns BlogReviewOutput with up to 5 title_choices and a non-empty outline.
         """
         logger.info(
             "Blog review: brief=%s, %s sources",
@@ -76,19 +78,40 @@ class BlogReviewAgent:
         context.append(refs_text)
 
         prompt = BLOG_REVIEW_PROMPT + "\n\n" + "\n".join(context)
-        data = self.llm.complete_json(prompt, temperature=0.4)
+        try:
+            data = self.llm.complete_json(prompt, temperature=0.4)
+        except ValueError as e:
+            # LLM may return prose instead of JSON; use raw text as outline
+            msg = str(e)
+            prefix = "Could not parse JSON from Ollama response: "
+            if msg.startswith(prefix):
+                try:
+                    raw = ast.literal_eval(msg[len(prefix) :])
+                    data = {"title_choices": [], "outline": raw}
+                except (ValueError, SyntaxError):
+                    raise
+            else:
+                raise
 
         title_choices_data = data.get("title_choices") or []
         outline_raw = data.get("outline") or ""
 
-        # Build TitleChoice list (take up to 10, clamp probability)
+        # Build TitleChoice list (take up to 5, clamp probability). Reject placeholder-like titles.
+        def _is_placeholder(t: str) -> bool:
+            lower = t.lower()
+            if "title option" in lower or "placeholder" in lower or "example title" in lower:
+                return True
+            if re.search(r"\boption\s*\d+\b", lower):  # "option 1", "option 2"
+                return True
+            return False
+
         title_choices: List[TitleChoice] = []
-        for item in title_choices_data[:10]:
+        for item in title_choices_data[:5]:
             if not isinstance(item, dict):
                 continue
-            title = item.get("title") or ""
+            title = (item.get("title") or "").strip()
             prob = item.get("probability_of_success")
-            if not title:
+            if not title or _is_placeholder(title):
                 continue
             if prob is not None:
                 try:
@@ -100,15 +123,6 @@ class BlogReviewAgent:
             else:
                 title_choices.append(TitleChoice(title=title, probability_of_success=0.5))
 
-        # If we got fewer than 10, pad with placeholders so we always return 10
-        while len(title_choices) < 10:
-            title_choices.append(
-                TitleChoice(
-                    title=f"Title option {len(title_choices) + 1} (review suggested)",
-                    probability_of_success=0.5,
-                )
-            )
-
         outline = outline_raw.strip() or "No outline generated; please try again with more sources."
 
         logger.info(
@@ -116,4 +130,4 @@ class BlogReviewAgent:
             len(title_choices),
             len(outline),
         )
-        return BlogReviewOutput(title_choices=title_choices[:10], outline=outline)
+        return BlogReviewOutput(title_choices=title_choices, outline=outline)

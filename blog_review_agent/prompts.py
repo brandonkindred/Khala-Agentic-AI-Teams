@@ -11,12 +11,16 @@ You will be given:
 Your tasks:
 
 **Part 1 – Title choices**
-Produce exactly 10 catchy title/soundbite options that are likely to drive conversion (clicks, shares, or sign-ups). Each title should:
-- Be concise and memorable (ideally under 70 characters for headlines).
+Produce exactly 5 high-quality, specific title options. Each title MUST:
+- Be grounded in the brief and research—reference concrete topics, outcomes, or angles from the sources.
+- Be concise and memorable (ideally under 70 characters).
 - Speak to the audience and promise clear value or intrigue.
-- Be grounded in the research so the post can deliver on the promise.
+- Avoid generic phrases like "A Complete Guide", "Everything You Need", "Title option N", or "Option N"—use specific, differentiated wording that reflects the actual content.
 
-For each title, provide a probability_of_success (float between 0 and 1) representing your estimate of how likely this title is to reach a large audience (e.g. go viral, get high engagement, or convert well). Consider clarity, curiosity, relevance, and shareability.
+Good examples (specific to content): "Why LLM Observability Is Non-Negotiable for Enterprise AI", "From Experiment to Production: What CTOs Get Wrong About LLM Monitoring"
+Bad examples (too generic): "A Complete Guide to AI", "Title option 1", "5 Key Takeaways"
+
+For each title, provide a probability_of_success (float 0–1) for likelihood of reaching a large audience. Prioritize titles that are specific to the brief over vague or templated options.
 
 **Part 2 – Blog outline**
 Write a detailed outline for the blog post that:
@@ -26,5 +30,7 @@ Write a detailed outline for the blog post that:
 - Ensures the outline is actionable: a writer could draft from it without re-reading all sources.
 
 Return a single JSON object with exactly these keys:
-- "title_choices": list of 10 objects, each with "title" (string) and "probability_of_success" (float 0–1).
-- "outline": string containing the full outline with sections, subheadings, and notes (use newlines and indentation; may be multi-paragraph)."""
+- "title_choices": list of exactly 5 objects, each with "title" (string) and "probability_of_success" (float 0–1).
+- "outline": string containing the full outline with sections, subheadings, and notes (use newlines and indentation; may be multi-paragraph).
+
+Respond with valid JSON only. No explanatory text, markdown, or code fences."""

@@ -7,6 +7,7 @@ The blog review agent takes the brief + researched sources and produces:
 """
 
 import logging
+logger = logging.getLogger(__name__)
 
 from blog_research_agent.agent import ResearchAgent
 from blog_research_agent.agent_cache import AgentCache
@@ -31,6 +32,7 @@ brief = ResearchBriefInput(
     max_results=20,
 )
 research_result = research_agent.run(brief)
+logger.info("RESEARCH RESULT DOCUMENT: \n ---------------------------------------- \n %s", research_result)
 
 # 2. Blog review (titles + outline from brief + sources)
 review_agent = BlogReviewAgent(llm_client=llm_client)
@@ -41,6 +43,8 @@ review_input = BlogReviewInput(
     references=research_result.references,
 )
 review_result = review_agent.run(review_input)
+logger.info("OUTLINE DOCUMENT: \n ---------------------------------------- \n %s", review_result)
+
 
 # 3. Output
 print("\n--- Top 10 title choices (with probability of success) ---")

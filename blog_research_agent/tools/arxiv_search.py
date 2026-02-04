@@ -16,7 +16,7 @@ from ..models import AcademicPaper
 
 logger = logging.getLogger(__name__)
 
-ARXiv_API = "http://export.arxiv.org/api/query"
+ARXiv_API = "https://export.arxiv.org/api/query"
 NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 
@@ -55,7 +55,7 @@ def search_arxiv(
     url = f"{ARXiv_API}?{urllib.parse.urlencode(params)}"
 
     try:
-        with httpx.Client(timeout=timeout) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
             resp = client.get(url)
     except httpx.HTTPError as exc:
         raise ArxivSearchError(f"arXiv request failed: {exc}") from exc

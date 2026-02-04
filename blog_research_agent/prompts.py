@@ -85,7 +85,11 @@ Your tasks:
 3. Surface any obvious gaps where more research could help.
 4. Suggest a high-level outline for a content piece that uses these references.
 
-Return a compact, paragraph-style analysis followed by a short suggested outline as bullet points."""
+Return a single JSON object with:
+- "analysis": string (compact paragraph-style synthesis)
+- "outline": list of strings (high-level outline bullets)
+
+No other text or markdown."""
 
 
 SIMILAR_TOPICS_PROMPT = """You are a research assistant.

@@ -8,7 +8,7 @@ from blog_research_agent.llm import DummyLLMClient
 
 
 def test_blog_review_agent_run() -> None:
-    """BlogReviewAgent returns 10 title choices and a non-empty outline."""
+    """BlogReviewAgent returns 5 title choices and a non-empty outline."""
     llm = DummyLLMClient()
     agent = BlogReviewAgent(llm_client=llm)
 
@@ -27,7 +27,7 @@ def test_blog_review_agent_run() -> None:
 
     result = agent.run(review_input)
 
-    assert len(result.title_choices) == 10
+    assert len(result.title_choices) == 5
     for tc in result.title_choices:
         assert tc.title
         assert 0.0 <= tc.probability_of_success <= 1.0

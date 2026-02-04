@@ -47,7 +47,7 @@ class BlogReviewOutput(BaseModel):
 
     title_choices: List[TitleChoice] = Field(
         ...,
-        description="Top 10 catchy title/soundbite choices with probability of success.",
+        description="Top 5 high-quality title choices with probability of success.",
     )
     outline: str = Field(
         ...,

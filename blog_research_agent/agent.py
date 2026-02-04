@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import logging
 from typing import List, Tuple
 
@@ -437,7 +438,20 @@ class ResearchAgent:
             f"Brief:\n{brief_input.brief}\n\n"
             f"References (JSON):\n{refs_for_prompt}\n"
         )
-        data = self.llm.complete_json(prompt, temperature=0.3)
+        try:
+            data = self.llm.complete_json(prompt, temperature=0.3)
+        except ValueError as e:
+            # LLM may return prose/markdown instead of JSON; treat as analysis
+            msg = str(e)
+            prefix = "Could not parse JSON from Ollama response: "
+            if msg.startswith(prefix):
+                try:
+                    raw = ast.literal_eval(msg[len(prefix) :])
+                    data = {"analysis": raw, "outline": []}
+                except (ValueError, SyntaxError):
+                    raise
+            else:
+                raise
 
         # Some LLM implementations may just return a string analysis;
         # we support both dict and string responses here.
