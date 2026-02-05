@@ -1,12 +1,10 @@
 """
-Example: run research agent, then blog review agent, then blog draft agent.
+Example: run research agent, then blog review agent, then blog draft agent
+with an iterative draft-editor loop.
 
-The blog review agent takes the brief + researched sources and produces:
-1. Top 10 catchy title choices with probability of success.
-2. A detailed blog outline with notes for the first draft.
-
-The blog draft agent takes the research document + outline and produces
-a full blog post draft compliant with the brand and writing style guide.
+The draft agent writes a draft, the copy editor provides feedback, and the
+draft agent revises based on feedback. This loop runs a configurable number
+of times (default: 3).
 """
 
 import logging
@@ -19,11 +17,15 @@ from blog_research_agent.agent_cache import AgentCache
 from blog_research_agent.models import ResearchBriefInput
 from blog_research_agent.llm import OllamaLLMClient
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
-from blog_draft_agent import BlogDraftAgent, DraftInput
+from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput
+from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 STYLE_GUIDE_PATH = Path(__file__).resolve().parent.parent / "docs" / "brandon_kindred_brand_and_writing_style_guide.md"
+
+# Number of draft-editor loop iterations (1 = draft only, no revisions; 3 = draft + 2 revision cycles)
+DRAFT_EDITOR_ITERATIONS = 3
 
 llm_client = OllamaLLMClient(
     model="deepseek-r1",
@@ -64,14 +66,53 @@ if not research_document and research_result.references:
             parts.append("  Key points: " + "; ".join(ref.key_points[:3]))
     research_document = "\n".join(parts)
 
+style_guide_text = STYLE_GUIDE_PATH.read_text().strip() if STYLE_GUIDE_PATH.exists() else None
+
 draft_agent = BlogDraftAgent(llm_client=llm_client, default_style_guide_path=STYLE_GUIDE_PATH)
-draft_input = DraftInput(
-    research_document=research_document,
-    outline=review_result.outline,
-    audience=brief.audience,
-    tone_or_purpose=brief.tone_or_purpose,
-)
-draft_result = draft_agent.run(draft_input)
+copy_editor_agent = BlogCopyEditorAgent(llm_client=llm_client, default_style_guide_path=STYLE_GUIDE_PATH)
+
+# Draft-editor loop: draft -> editor feedback -> revise (repeat)
+draft_result = None
+for iteration in range(1, DRAFT_EDITOR_ITERATIONS + 1):
+    if iteration == 1:
+        # Initial draft
+        draft_input = DraftInput(
+            research_document=research_document,
+            outline=review_result.outline,
+            audience=brief.audience,
+            tone_or_purpose=brief.tone_or_purpose,
+            style_guide=style_guide_text,
+        )
+        draft_result = draft_agent.run(draft_input)
+        logger.info("Draft iteration %s: initial draft, length=%s", iteration, len(draft_result.draft))
+    else:
+        # Copy editor reviews, then draft agent revises
+        copy_editor_input = CopyEditorInput(
+            draft=draft_result.draft,
+            audience=brief.audience,
+            tone_or_purpose=brief.tone_or_purpose,
+            style_guide=style_guide_text,
+        )
+        copy_editor_result = copy_editor_agent.run(copy_editor_input)
+        logger.info(
+            "Copy editor iteration %s: %s feedback items",
+            iteration,
+            len(copy_editor_result.feedback_items),
+        )
+
+        revise_input = ReviseDraftInput(
+            draft=draft_result.draft,
+            feedback_items=copy_editor_result.feedback_items,
+            feedback_summary=copy_editor_result.summary,
+            research_document=research_document,
+            outline=review_result.outline,
+            audience=brief.audience,
+            tone_or_purpose=brief.tone_or_purpose,
+            style_guide=style_guide_text,
+        )
+        draft_result = draft_agent.revise(revise_input)
+        logger.info("Draft iteration %s: revised, length=%s", iteration, len(draft_result.draft))
+
 logger.info("DRAFT DOCUMENT: \n ---------------------------------------- \n %s", draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else ""))
 
 # 4. Output

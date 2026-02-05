@@ -14,4 +14,15 @@ Your task: Write a full first draft of the blog post in Markdown. The draft must
 
 Return a single JSON object with exactly one key: "draft". The value must be the complete blog post in Markdown (headings, paragraphs, lists, code blocks as needed). Do not truncate. Do not add keys other than "draft"."""
 
+REVISE_DRAFT_PROMPT = """You are a blog post writer revising a draft based on copy editor feedback.
+
+You will be given:
+1. A brand and writing style guide.
+2. The current draft (Markdown).
+3. Copy editor feedback: a list of issues with locations, descriptions, and suggested fixes.
+
+Your task: Revise the draft to address the feedback. Apply every must_fix and should_fix item. Consider the consider items where they improve the piece. Preserve the draft's structure, facts, and substance. Do not remove content unless the feedback explicitly asks for it. Output the complete revised draft.
+
+Return a single JSON object with exactly one key: "draft". The value must be the complete revised blog post in Markdown. Do not truncate. Do not add keys other than "draft"."""
+
 MINIMAL_STYLE_REMINDER = """Style rules to follow: Write like a human mentor. Use short sentences and plain words (8th grade level). No em dashes or en dashes; use commas or separate sentences. Short paragraphs (2–4 sentences). Use headings often; make them descriptive. No corporate buzzwords, no hype. Define technical terms on first use. Prefer concrete examples. Hook at the start; recap and one practical next step at the end. Avoid emojis. Lists only when they clarify steps or comparisons."""

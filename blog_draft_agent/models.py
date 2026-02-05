@@ -4,9 +4,11 @@ Models for the blog draft agent (draft from research document + outline).
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
+
+from blog_copy_editor_agent.models import FeedbackItem
 
 
 class DraftInput(BaseModel):
@@ -41,3 +43,28 @@ class DraftOutput(BaseModel):
         ...,
         description="Full blog post draft in Markdown, compliant with the provided style guide.",
     )
+
+
+class ReviseDraftInput(BaseModel):
+    """Input for revising a draft based on copy editor feedback."""
+
+    draft: str = Field(..., description="The current draft to revise.")
+    feedback_items: List[FeedbackItem] = Field(
+        ...,
+        description="Copy editor feedback to apply when revising.",
+    )
+    feedback_summary: Optional[str] = Field(
+        None,
+        description="Overall copy editor summary (for context).",
+    )
+    research_document: Optional[str] = Field(
+        None,
+        description="Original research document (for context when revising).",
+    )
+    outline: Optional[str] = Field(
+        None,
+        description="Original outline (for context when revising).",
+    )
+    audience: Optional[str] = Field(None, description="Intended audience.")
+    tone_or_purpose: Optional[str] = Field(None, description="Desired tone or purpose.")
+    style_guide: Optional[str] = Field(None, description="Full brand and writing style guide.")

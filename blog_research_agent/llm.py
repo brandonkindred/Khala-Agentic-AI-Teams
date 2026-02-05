@@ -88,6 +88,11 @@ class DummyLLMClient(LLMClient):
                 ],
                 "outline": "# Blog Outline (Dummy)\n\n## 1. Introduction\n- Hook from research; key stat or question.\n- State what the reader will learn.\n\n## 2. Main Section A\n- Key point from source 1.\n- Supporting detail.\n\n## 3. Main Section B\n- Key point from source 2.\n- Example or quote.\n\n## 4. Conclusion\n- Recap and CTA.",
             }
+        # Blog draft revise prompt (draft + feedback -> revised draft)
+        if "revising" in lowered and "copy editor feedback" in lowered and '"draft"' in lowered:
+            return {
+                "draft": "# Revised Draft (Dummy)\n\nThis is a placeholder revised draft. Use a real LLM to apply copy editor feedback.\n\n## Introduction\n\nRevised based on feedback.\n\n## Wrap up\n\nRecap and one practical next step.",
+            }
         # Blog draft prompt (research + outline -> draft)
         if '"draft"' in lowered and ("style guide" in lowered or "research document" in lowered or "outline" in lowered):
             return {
