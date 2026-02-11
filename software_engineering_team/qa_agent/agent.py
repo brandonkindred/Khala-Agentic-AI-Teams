@@ -53,12 +53,10 @@ class QAExpertAgent:
                         location=b.get("location", ""),
                         steps_to_reproduce=b.get("steps_to_reproduce", ""),
                         expected_vs_actual=b.get("expected_vs_actual", ""),
+                        recommendation=b.get("recommendation", ""),
                     )
                 )
 
-        fixed_code = data.get("fixed_code", input_data.code)
-        if fixed_code and "\\n" in fixed_code:
-            fixed_code = fixed_code.replace("\\n", "\n")
         integration_tests = data.get("integration_tests", "")
         if integration_tests and "\\n" in integration_tests:
             integration_tests = integration_tests.replace("\\n", "\n")
@@ -69,16 +67,13 @@ class QAExpertAgent:
         if readme_content and "\\n" in readme_content:
             readme_content = readme_content.replace("\\n", "\n")
 
-        has_fixes = bool(fixed_code and fixed_code.strip() != (input_data.code or "").strip())
         critical_bugs = [b for b in bugs if b.severity in ("critical", "high")]
-        approved = len(critical_bugs) == 0 or has_fixes
+        approved = len(critical_bugs) == 0
 
-        logger.info("QA: done, %s bugs found, approved=%s, changes_pushed=%s", len(bugs), approved, has_fixes)
+        logger.info("QA: done, %s issues found, approved=%s", len(bugs), approved)
         return QAOutput(
             bugs_found=bugs,
-            fixed_code=fixed_code,
             approved=approved,
-            changes_pushed=has_fixes,
             integration_tests=integration_tests,
             unit_tests=unit_tests,
             test_plan=data.get("test_plan", ""),

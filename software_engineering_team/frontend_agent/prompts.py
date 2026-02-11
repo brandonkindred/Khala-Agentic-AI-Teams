@@ -17,9 +17,10 @@ FRONTEND_PROMPT = """You are a Senior Frontend Software Engineer expert in Angul
 - Task description
 - Requirements
 - Optional: architecture, existing code, API endpoints
+- Optional: qa_issues, security_issues (lists of issues to fix – implement the recommended fixes)
 
 **Your task:**
-Implement the requested frontend functionality using Angular. Follow the architecture when provided. Produce production-quality code that STRICTLY adheres to the coding standards above:
+Implement the requested frontend functionality using Angular. When qa_issues or security_issues are provided, implement the fixes described in each issue's "recommendation" field. Modify the existing code accordingly – do not create separate fix files. Follow the architecture when provided. Produce production-quality code that STRICTLY adheres to the coding standards above:
 - Design by Contract on all public methods and services
 - SOLID principles (especially SRP, DIP in component/service design)
 - JSDoc on every class, component, and method (how used, why it exists, constraints)

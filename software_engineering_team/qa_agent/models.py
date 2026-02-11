@@ -8,13 +8,17 @@ from shared.models import SystemArchitecture
 
 
 class BugReport(BaseModel):
-    """A bug identified during testing."""
+    """A bug or quality issue identified during QA review."""
 
     severity: str  # critical, high, medium, low
     description: str
     location: str = ""
     steps_to_reproduce: str = ""
     expected_vs_actual: str = ""
+    recommendation: str = Field(
+        default="",
+        description="Concrete recommendation for the coding agent: what to implement to fix this issue.",
+    )
 
 
 class QAInput(BaseModel):
@@ -30,17 +34,15 @@ class QAInput(BaseModel):
 class QAOutput(BaseModel):
     """Output from the QA Expert agent."""
 
-    bugs_found: List[BugReport] = Field(default_factory=list)
-    fixed_code: str = Field(default="", description="Code with bug fixes applied")
+    bugs_found: List[BugReport] = Field(
+        default_factory=list,
+        description="List of QA issues for the coding agent to fix. Coding agent implements fixes.",
+    )
     approved: bool = Field(
         default=True,
-        description="True when code passes review (no critical bugs or fixes applied). Merge when approved.",
+        description="True when code passes review (no critical/high bugs). Merge when approved.",
     )
-    changes_pushed: bool = Field(
-        default=False,
-        description="True when fixed_code was pushed to the feature branch (differs from input).",
-    )
-    integration_tests: str = Field(default="", description="Integration test code")
+    integration_tests: str = Field(default="", description="Integration test code (for QA-only tasks)")
     unit_tests: str = Field(default="", description="Unit tests for 85%+ coverage")
     test_plan: str = ""
     summary: str = ""

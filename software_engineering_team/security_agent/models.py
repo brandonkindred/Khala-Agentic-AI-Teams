@@ -30,15 +30,13 @@ class SecurityInput(BaseModel):
 class SecurityOutput(BaseModel):
     """Output from the Cybersecurity Expert agent."""
 
-    vulnerabilities: List[SecurityVulnerability] = Field(default_factory=list)
-    fixed_code: str = Field(default="", description="Code with security fixes applied")
+    vulnerabilities: List[SecurityVulnerability] = Field(
+        default_factory=list,
+        description="List of security issues for the coding agent to fix. Coding agent implements fixes.",
+    )
     approved: bool = Field(
         default=True,
-        description="True when code passes review (no critical vulnerabilities or fixes applied). Merge when approved.",
-    )
-    changes_pushed: bool = Field(
-        default=False,
-        description="True when fixed_code was pushed to the feature branch (differs from input).",
+        description="True when code passes review (no critical/high vulnerabilities). Merge when approved.",
     )
     summary: str = ""
     remediations: List[dict] = Field(default_factory=list)

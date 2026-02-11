@@ -1,6 +1,6 @@
 """Models for the Backend Expert agent."""
 
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -16,6 +16,14 @@ class BackendInput(BaseModel):
     architecture: Optional[SystemArchitecture] = None
     existing_code: Optional[str] = None
     api_spec: Optional[str] = None
+    qa_issues: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="QA issues to fix. Implement fixes and commit to feature branch.",
+    )
+    security_issues: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Security issues to fix. Implement fixes and commit to feature branch.",
+    )
 
 
 class BackendOutput(BaseModel):

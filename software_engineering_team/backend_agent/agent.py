@@ -42,6 +42,18 @@ class BackendExpertAgent:
             context_parts.extend(["", "**Existing code:**", input_data.existing_code])
         if input_data.api_spec:
             context_parts.extend(["", "**API spec:**", input_data.api_spec])
+        if input_data.qa_issues:
+            qa_text = "\n".join(
+                f"- [{i.get('severity')}] {i.get('description')} (location: {i.get('location')})\n  Recommendation: {i.get('recommendation')}"
+                for i in input_data.qa_issues
+            )
+            context_parts.extend(["", "**QA issues to fix (implement these):**", qa_text])
+        if input_data.security_issues:
+            sec_text = "\n".join(
+                f"- [{i.get('severity')}] {i.get('category')}: {i.get('description')} (location: {i.get('location')})\n  Recommendation: {i.get('recommendation')}"
+                for i in input_data.security_issues
+            )
+            context_parts.extend(["", "**Security issues to fix (implement these):**", sec_text])
 
         prompt = BACKEND_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         data = self.llm.complete_json(prompt, temperature=0.2)

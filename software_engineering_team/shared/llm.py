@@ -72,8 +72,7 @@ class DummyLLMClient(LLMClient):
         if "security" in lowered and "vulnerabilities" in lowered:
             return {
                 "vulnerabilities": [],
-                "fixed_code": "// No changes needed (dummy)",
-                "suggested_commit_message": "fix(security): apply security review",
+                "summary": "No security issues found (dummy)",
             }
         if "devops" in lowered or "pipeline" in lowered:
             return {
@@ -102,7 +101,6 @@ class DummyLLMClient(LLMClient):
         if "integration_test" in lowered or "readme_content" in lowered or ("bugs_found" in lowered and "test_plan" in lowered):
             return {
                 "bugs_found": [],
-                "fixed_code": "",
                 "integration_tests": "# Dummy integration test",
                 "unit_tests": "# Dummy unit tests for 85% coverage",
                 "test_plan": "Dummy test plan",

@@ -56,20 +56,13 @@ class CybersecurityExpertAgent:
                     )
                 )
 
-        fixed_code = data.get("fixed_code", input_data.code)
-        if fixed_code and "\\n" in fixed_code:
-            fixed_code = fixed_code.replace("\\n", "\n")
-
-        has_fixes = bool(fixed_code and fixed_code.strip() != (input_data.code or "").strip())
         critical_vulns = [v for v in vulnerabilities if v.severity in ("critical", "high")]
-        approved = len(critical_vulns) == 0 or has_fixes
+        approved = len(critical_vulns) == 0
 
-        logger.info("Security: done, %s vulnerabilities found, approved=%s, changes_pushed=%s", len(vulnerabilities), approved, has_fixes)
+        logger.info("Security: done, %s issues found, approved=%s", len(vulnerabilities), approved)
         return SecurityOutput(
             vulnerabilities=vulnerabilities,
-            fixed_code=fixed_code,
             approved=approved,
-            changes_pushed=has_fixes,
             summary=data.get("summary", ""),
             remediations=data.get("remediations", []),
             suggested_commit_message=data.get("suggested_commit_message", ""),

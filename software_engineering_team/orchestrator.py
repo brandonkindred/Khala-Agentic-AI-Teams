@@ -75,6 +75,16 @@ def _task_requirements(task) -> str:
     return "\n\n".join(parts) if parts else task.description
 
 
+MAX_REVIEW_ITERATIONS = 5
+
+
+def _issues_to_dicts(qa_bugs, sec_vulns) -> tuple:
+    """Convert QA/Security outputs to dict lists for coding agent input."""
+    qa_list = [b.model_dump() if hasattr(b, "model_dump") else b.dict() for b in (qa_bugs or [])]
+    sec_list = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in (sec_vulns or [])]
+    return qa_list, sec_list
+
+
 def _read_repo_code(repo_path: Path, extensions: List[str] = None) -> str:
     """Read code files from repo, concatenated."""
     if extensions is None:
@@ -196,56 +206,75 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
 
                 elif task.assignee == "backend":
                     from backend_agent.models import BackendInput
-                    result = agents["backend"].run(BackendInput(
-                        task_description=task.description,
-                        requirements=_task_requirements(task),
-                        architecture=architecture,
-                        language="python",
-                    ))
-                    write_agent_output(path, result, subdir="backend")
-                    # QA + Security review
-                    code_to_review = _read_repo_code(path)
                     from qa_agent.models import QAInput
                     from security_agent.models import SecurityInput
-                    qa_result = agents["qa"].run(QAInput(code=code_to_review, language="python", task_description=task.description, architecture=architecture))
-                    sec_result = agents["security"].run(SecurityInput(code=code_to_review, language="python", task_description=task.description, architecture=architecture))
-                    if qa_result.fixed_code and qa_result.fixed_code != code_to_review:
-                        write_agent_output(path, {"fixed_code": qa_result.fixed_code, "commit_message": "fix: QA fixes", "fix_path": "backend/qa_fixes.py"}, subdir="")
-                    if sec_result.fixed_code and sec_result.fixed_code != code_to_review:
-                        write_agent_output(path, {"fixed_code": sec_result.fixed_code, "commit_message": "fix: security fixes", "fix_path": "backend/security_fixes.py"}, subdir="")
-                    approved = qa_result.approved and sec_result.approved
-                    if approved:
+                    qa_issues, sec_issues = [], []
+                    result = None
+                    merged = False
+                    for iteration in range(MAX_REVIEW_ITERATIONS):
+                        result = agents["backend"].run(BackendInput(
+                            task_description=task.description,
+                            requirements=_task_requirements(task),
+                            architecture=architecture,
+                            language="python",
+                            qa_issues=qa_issues,
+                            security_issues=sec_issues,
+                        ))
+                        ok, msg = write_agent_output(path, result, subdir="backend")
+                        if not ok and iteration == 0:
+                            logger.warning("Backend write failed: %s", msg)
+                        code_to_review = _read_repo_code(path)
+                        qa_result = agents["qa"].run(QAInput(code=code_to_review, language="python", task_description=task.description, architecture=architecture))
+                        sec_result = agents["security"].run(SecurityInput(code=code_to_review, language="python", task_description=task.description, architecture=architecture))
+                        if qa_result.approved and sec_result.approved:
+                            checkout_branch(path, DEVELOPMENT_BRANCH)
+                            merge_branch(path, branch_name, DEVELOPMENT_BRANCH)
+                            delete_branch(path, branch_name)
+                            logger.info("Feature branch %s was successfully merged to development", branch_name)
+                            merged = True
+                            break
+                        qa_issues, sec_issues = _issues_to_dicts(qa_result.bugs_found, sec_result.vulnerabilities)
+                        if not qa_issues and not sec_issues:
+                            break
+                    if not merged:
                         checkout_branch(path, DEVELOPMENT_BRANCH)
-                        merge_branch(path, branch_name, DEVELOPMENT_BRANCH)
-                        delete_branch(path, branch_name)
-                    add_task_result(job_id, {"task_id": task_id, "assignee": task.assignee, "summary": result.summary or "Done"}, CACHE_DIR)
+                    add_task_result(job_id, {"task_id": task_id, "assignee": task.assignee, "summary": (result.summary if result else "Done") or "Done"}, CACHE_DIR)
                     completed.add(task_id)
 
                 elif task.assignee == "frontend":
                     from frontend_agent.models import FrontendInput
-                    result = agents["frontend"].run(FrontendInput(
-                        task_description=task.description,
-                        requirements=_task_requirements(task),
-                        architecture=architecture,
-                    ))
-                    ok, msg = write_agent_output(path, result, subdir="frontend")
-                    if not ok:
-                        logger.warning("Frontend write failed: %s", msg)
-                    code_to_review = _read_repo_code(path, [".ts", ".tsx", ".html", ".scss"])
                     from qa_agent.models import QAInput
                     from security_agent.models import SecurityInput
-                    qa_result = agents["qa"].run(QAInput(code=code_to_review, language="typescript", task_description=task.description, architecture=architecture))
-                    sec_result = agents["security"].run(SecurityInput(code=code_to_review, language="typescript", task_description=task.description, architecture=architecture))
-                    if qa_result.fixed_code and qa_result.fixed_code != code_to_review:
-                        write_agent_output(path, {"fixed_code": qa_result.fixed_code, "commit_message": "fix: QA fixes", "fix_path": "frontend/qa_fixes.ts"}, subdir="")
-                    if sec_result.fixed_code and sec_result.fixed_code != code_to_review:
-                        write_agent_output(path, {"fixed_code": sec_result.fixed_code, "commit_message": "fix: security fixes", "fix_path": "frontend/security_fixes.ts"}, subdir="")
-                    approved = qa_result.approved and sec_result.approved
-                    if approved:
+                    qa_issues, sec_issues = [], []
+                    result = None
+                    merged = False
+                    for iteration in range(MAX_REVIEW_ITERATIONS):
+                        result = agents["frontend"].run(FrontendInput(
+                            task_description=task.description,
+                            requirements=_task_requirements(task),
+                            architecture=architecture,
+                            qa_issues=qa_issues,
+                            security_issues=sec_issues,
+                        ))
+                        ok, msg = write_agent_output(path, result, subdir="frontend")
+                        if not ok and iteration == 0:
+                            logger.warning("Frontend write failed: %s", msg)
+                        code_to_review = _read_repo_code(path, [".ts", ".tsx", ".html", ".scss"])
+                        qa_result = agents["qa"].run(QAInput(code=code_to_review, language="typescript", task_description=task.description, architecture=architecture))
+                        sec_result = agents["security"].run(SecurityInput(code=code_to_review, language="typescript", task_description=task.description, architecture=architecture))
+                        if qa_result.approved and sec_result.approved:
+                            checkout_branch(path, DEVELOPMENT_BRANCH)
+                            merge_branch(path, branch_name, DEVELOPMENT_BRANCH)
+                            delete_branch(path, branch_name)
+                            logger.info("Feature branch %s was successfully merged to development", branch_name)
+                            merged = True
+                            break
+                        qa_issues, sec_issues = _issues_to_dicts(qa_result.bugs_found, sec_result.vulnerabilities)
+                        if not qa_issues and not sec_issues:
+                            break
+                    if not merged:
                         checkout_branch(path, DEVELOPMENT_BRANCH)
-                        merge_branch(path, branch_name, DEVELOPMENT_BRANCH)
-                        delete_branch(path, branch_name)
-                    add_task_result(job_id, {"task_id": task_id, "assignee": task.assignee, "summary": result.summary or "Done"}, CACHE_DIR)
+                    add_task_result(job_id, {"task_id": task_id, "assignee": task.assignee, "summary": (result.summary if result else "Done") or "Done"}, CACHE_DIR)
                     completed.add(task_id)
 
                 else:
