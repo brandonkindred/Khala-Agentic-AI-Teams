@@ -1,0 +1,174 @@
+"""
+Run the software engineering team pipeline.
+
+Flow:
+1. Architecture Expert designs system from product requirements
+2. Tech Lead breaks down work and assigns tasks
+3. Specialists (DevOps, Security, Backend, Frontend, QA) execute tasks in order
+4. Each specialist uses the architecture when implementing or validating
+
+Usage:
+  cd software_engineering_team
+  python -m agent_implementations.run_team
+
+Or with path setup from project root:
+  python software_engineering_team/agent_implementations/run_team.py
+"""
+
+import _path_setup  # noqa: F401
+
+import logging
+
+from shared.llm import DummyLLMClient, OllamaLLMClient
+from shared.models import ProductRequirements
+from architecture_agent import ArchitectureExpertAgent, ArchitectureInput
+from tech_lead_agent import TechLeadAgent, TechLeadInput
+from devops_agent import DevOpsExpertAgent, DevOpsInput
+from security_agent import CybersecurityExpertAgent, SecurityInput
+from backend_agent import BackendExpertAgent, BackendInput
+from frontend_agent import FrontendExpertAgent, FrontendInput
+from qa_agent import QAExpertAgent, QAInput
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+# Use DummyLLMClient for testing without an LLM; switch to OllamaLLMClient for real runs
+USE_DUMMY = True
+LLM = DummyLLMClient() if USE_DUMMY else OllamaLLMClient(model="deepseek-r1", timeout=1800.0)
+
+# Example product requirements
+REQUIREMENTS = ProductRequirements(
+    title="User Authentication API",
+    description="Build a REST API for user authentication with signup, login, and token refresh. "
+    "Must support email/password and integrate with a frontend Angular app.",
+    acceptance_criteria=[
+        "POST /auth/signup creates a new user",
+        "POST /auth/login returns JWT tokens",
+        "POST /auth/refresh refreshes access token",
+        "Protected routes require valid Bearer token",
+        "Frontend can call all endpoints and display auth state",
+    ],
+    constraints=[
+        "Use Python FastAPI or Java Spring Boot for backend",
+        "Use Angular for frontend",
+        "JWT for session management",
+        "Docker for deployment",
+    ],
+    priority="high",
+)
+
+
+def main() -> None:
+    # 1. Architecture Expert designs the system
+    logger.info("=== Architecture Expert ===")
+    arch_agent = ArchitectureExpertAgent(llm_client=LLM)
+    arch_input = ArchitectureInput(
+        requirements=REQUIREMENTS,
+        technology_preferences=["Python", "FastAPI", "Angular", "PostgreSQL", "Docker"],
+    )
+    arch_output = arch_agent.run(arch_input)
+    architecture = arch_output.architecture
+    logger.info("Architecture: %s", architecture.overview[:200] + "..." if len(architecture.overview) > 200 else architecture.overview)
+
+    # 2. Tech Lead plans and assigns tasks
+    logger.info("=== Tech Lead ===")
+    tech_lead = TechLeadAgent(llm_client=LLM)
+    tech_lead_input = TechLeadInput(requirements=REQUIREMENTS, architecture=architecture)
+    tech_lead_output = tech_lead.run(tech_lead_input)
+    assignment = tech_lead_output.assignment
+    logger.info("Tasks: %s", [t.id for t in assignment.tasks])
+
+    # 3. Execute tasks by specialist
+    agent_map = {
+        "devops": DevOpsExpertAgent(LLM),
+        "security": CybersecurityExpertAgent(LLM),
+        "backend": BackendExpertAgent(LLM),
+        "frontend": FrontendExpertAgent(LLM),
+        "qa": QAExpertAgent(LLM),
+    }
+
+    for task_id in assignment.execution_order:
+        task = next((t for t in assignment.tasks if t.id == task_id), None)
+        if not task or task.assignee not in agent_map:
+            continue
+
+        logger.info("=== Task %s (%s) -> %s ===", task.id, task.type.value, task.assignee)
+        agent = agent_map[task.assignee]
+
+        if task.assignee == "devops":
+            result = agent.run(
+                DevOpsInput(
+                    task_description=task.description,
+                    requirements=task.requirements,
+                    architecture=architecture,
+                )
+            )
+            logger.info("DevOps: %s", result.summary[:150] if result.summary else "Done")
+
+        elif task.assignee == "backend":
+            result = agent.run(
+                BackendInput(
+                    task_description=task.description,
+                    requirements=task.requirements,
+                    architecture=architecture,
+                    language="python",
+                )
+            )
+            logger.info("Backend: %s", result.summary[:150] if result.summary else "Done")
+            if result.code:
+                # Security review of backend code
+                sec_result = agent_map["security"].run(
+                    SecurityInput(code=result.code, language="python", task_description=task.description)
+                )
+                logger.info("Security: %s vulnerabilities", len(sec_result.vulnerabilities))
+                # QA review
+                qa_result = agent_map["qa"].run(
+                    QAInput(code=sec_result.fixed_code, language="python", task_description=task.description)
+                )
+                logger.info("QA: %s bugs, integration tests: %s chars", len(qa_result.bugs_found), len(qa_result.integration_tests))
+
+        elif task.assignee == "frontend":
+            result = agent.run(
+                FrontendInput(
+                    task_description=task.description,
+                    requirements=task.requirements,
+                    architecture=architecture,
+                )
+            )
+            logger.info("Frontend: %s", result.summary[:150] if result.summary else "Done")
+            if result.code:
+                sec_result = agent_map["security"].run(
+                    SecurityInput(code=result.code, language="typescript", task_description=task.description)
+                )
+                qa_result = agent_map["qa"].run(
+                    QAInput(code=sec_result.fixed_code, language="typescript", task_description=task.description)
+                )
+                logger.info("Security: %s vulns, QA: %s bugs", len(sec_result.vulnerabilities), len(qa_result.bugs_found))
+
+        elif task.assignee == "security":
+            result = agent.run(
+                SecurityInput(
+                    code="",  # Security tasks may review architecture or existing artifacts
+                    task_description=task.description,
+                    architecture=architecture,
+                )
+            )
+            logger.info("Security: %s", result.summary[:150] if result.summary else "Done")
+
+        elif task.assignee == "qa":
+            result = agent.run(
+                QAInput(
+                    code="",  # QA may run on consolidated codebase
+                    task_description=task.description,
+                    architecture=architecture,
+                )
+            )
+            logger.info("QA: %s", result.summary[:150] if result.summary else "Done")
+
+    print("\n--- Team pipeline complete ---")
+    print("Architecture:", architecture.overview[:300] + "..." if len(architecture.overview) > 300 else architecture.overview)
+    print("\nTasks executed:", assignment.execution_order)
+
+
+if __name__ == "__main__":
+    main()

@@ -5,6 +5,8 @@ Uses the provided text as the brief so you can get title choices and outline
 without running the full research pipeline.
 """
 
+import _path_setup  # noqa: F401  # Add blogging to path when run from project root
+
 import logging
 
 from blog_research_agent.llm import OllamaLLMClient  # or DummyLLMClient for quick test

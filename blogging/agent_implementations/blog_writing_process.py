@@ -7,6 +7,8 @@ draft agent revises based on feedback. This loop runs a configurable number
 of times (default: 3).
 """
 
+import _path_setup  # noqa: F401  # Add blogging to path when run from project root
+
 import logging
 from pathlib import Path
 

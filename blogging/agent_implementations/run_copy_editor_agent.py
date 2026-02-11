@@ -5,6 +5,8 @@ Loads the Brandon Kindred style guide from docs/ and provides feedback
 on how well the draft aligns with the brand and writing style.
 """
 
+import _path_setup  # noqa: F401  # Add blogging to path when run from project root
+
 import logging
 from pathlib import Path
 

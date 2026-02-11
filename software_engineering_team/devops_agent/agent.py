@@ -1,0 +1,53 @@
+"""DevOps Expert agent: CI/CD, IaC, Docker, networking."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict
+
+from shared.llm import LLMClient
+
+from .models import DevOpsInput, DevOpsOutput
+from .prompts import DEVOPS_PROMPT
+
+logger = logging.getLogger(__name__)
+
+
+class DevOpsExpertAgent:
+    """
+    DevOps expert specializing in CI/CD pipelines, IaC, Dockerization, and networking.
+    """
+
+    def __init__(self, llm_client: LLMClient) -> None:
+        assert llm_client is not None, "llm_client is required"
+        self.llm = llm_client
+
+    def run(self, input_data: DevOpsInput) -> DevOpsOutput:
+        """Create or extend CI/CD, IaC, and Docker configurations."""
+        context_parts = [
+            f"**Task:** {input_data.task_description}",
+            f"**Requirements:** {input_data.requirements}",
+        ]
+        if input_data.architecture:
+            context_parts.extend([
+                "",
+                "**Architecture:**",
+                input_data.architecture.overview,
+                *[f"- {c.name} ({c.type}): {c.technology or 'TBD'}" for c in input_data.architecture.components],
+            ])
+        if input_data.existing_pipeline:
+            context_parts.extend(["", "**Existing Pipeline:**", input_data.existing_pipeline])
+        if input_data.tech_stack:
+            context_parts.extend(["", "**Tech Stack:**", ", ".join(input_data.tech_stack)])
+
+        prompt = DEVOPS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
+        data = self.llm.complete_json(prompt, temperature=0.2)
+
+        return DevOpsOutput(
+            pipeline_yaml=data.get("pipeline_yaml", ""),
+            iac_content=data.get("iac_content", ""),
+            dockerfile=data.get("dockerfile", ""),
+            docker_compose=data.get("docker_compose", ""),
+            summary=data.get("summary", ""),
+            artifacts=data.get("artifacts", {}),
+        )

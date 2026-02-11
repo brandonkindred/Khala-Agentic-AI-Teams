@@ -6,6 +6,8 @@ that complies with it. Pass your own research_document and outline, or
 use placeholders for testing.
 """
 
+import _path_setup  # noqa: F401  # Add blogging to path when run from project root
+
 import logging
 from pathlib import Path
 
