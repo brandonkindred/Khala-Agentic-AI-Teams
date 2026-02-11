@@ -77,6 +77,9 @@ class TechLeadAgent:
                     task_type = TaskType(t.get("type", "backend"))
                 except ValueError:
                     task_type = TaskType.BACKEND
+                acc = t.get("acceptance_criteria") or []
+                if not isinstance(acc, list):
+                    acc = [str(acc)] if acc else []
                 tasks.append(
                     Task(
                         id=t["id"],
@@ -85,6 +88,8 @@ class TechLeadAgent:
                         assignee=assignee,
                         requirements=t.get("requirements", ""),
                         dependencies=t.get("dependencies", []),
+                        label=t.get("label"),
+                        acceptance_criteria=acc,
                         status=TaskStatus.PENDING,
                     )
                 )

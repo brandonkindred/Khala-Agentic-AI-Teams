@@ -91,6 +91,14 @@ class Task(BaseModel):
     assignee: str  # agent identifier
     requirements: str = ""
     dependencies: List[str] = Field(default_factory=list)
+    label: Optional[str] = Field(
+        None,
+        description="Short descriptive label for the task, e.g. backend-todo-crud-api",
+    )
+    acceptance_criteria: List[str] = Field(
+        default_factory=list,
+        description="Specific, testable acceptance criteria for this task",
+    )
     status: TaskStatus = TaskStatus.PENDING
     feature_branch_name: Optional[str] = Field(
         None,

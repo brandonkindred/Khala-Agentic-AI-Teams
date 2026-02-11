@@ -67,6 +67,14 @@ def _get_agents(llm):
     }
 
 
+def _task_requirements(task) -> str:
+    """Build full requirements string including acceptance criteria."""
+    parts = [task.requirements] if task.requirements else []
+    if getattr(task, "acceptance_criteria", None):
+        parts.append("Acceptance criteria: " + "; ".join(task.acceptance_criteria))
+    return "\n\n".join(parts) if parts else task.description
+
+
 def _read_repo_code(repo_path: Path, extensions: List[str] = None) -> str:
     """Read code files from repo, concatenated."""
     if extensions is None:
@@ -138,6 +146,8 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                 "dependencies": t.dependencies,
                 "status": "pending",
                 "feature_branch_name": f"feature/{t.id}",
+                "label": getattr(t, "label", None),
+                "acceptance_criteria": getattr(t, "acceptance_criteria", []),
             }
             for t in assignment.tasks
         ]
@@ -171,7 +181,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                     from devops_agent.models import DevOpsInput
                     result = agents["devops"].run(DevOpsInput(
                         task_description=task.description,
-                        requirements=task.requirements,
+                        requirements=_task_requirements(task),
                         architecture=architecture,
                     ))
                     subdir = "devops"
@@ -188,7 +198,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                     from backend_agent.models import BackendInput
                     result = agents["backend"].run(BackendInput(
                         task_description=task.description,
-                        requirements=task.requirements,
+                        requirements=_task_requirements(task),
                         architecture=architecture,
                         language="python",
                     ))
@@ -215,7 +225,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                     from frontend_agent.models import FrontendInput
                     result = agents["frontend"].run(FrontendInput(
                         task_description=task.description,
-                        requirements=task.requirements,
+                        requirements=_task_requirements(task),
                         architecture=architecture,
                     ))
                     ok, msg = write_agent_output(path, result, subdir="frontend")
