@@ -31,6 +31,7 @@ Return a single JSON object with:
 - "fixed_code": string (the code with security fixes applied)
 - "summary": string (overall assessment)
 - "remediations": list of {"issue", "fix_applied"} for each fix
+- "suggested_commit_message": string (Conventional Commits: type(scope): description, e.g. fix(security): remediate SQL injection)
 
 If no vulnerabilities are found, return empty vulnerabilities list and fixed_code equal to the original code. Be thorough but avoid false positives.
 

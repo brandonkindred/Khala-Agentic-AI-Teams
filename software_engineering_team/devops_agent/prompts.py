@@ -33,6 +33,7 @@ Return a single JSON object with:
 - "docker_compose": string (docker-compose.yml if applicable, else empty)
 - "summary": string (what you created and why)
 - "artifacts": object with filenames as keys and content as values (for additional configs)
+- "suggested_commit_message": string (Conventional Commits: type(scope): description, e.g. ci: add GitHub Actions pipeline)
 
 If a section is not needed for the task, use empty string. Prefer realistic, production-ready configurations.
 

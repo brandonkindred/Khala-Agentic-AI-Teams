@@ -38,6 +38,7 @@ Return a single JSON object with:
 - "summary": string (overall assessment, include coverage estimate)
 - "live_test_notes": string (what to verify when running the app: endpoints, UI flows, etc.)
 - "readme_content": string (README.md sections for build, run, test, deploy - or full README if creating)
+- "suggested_commit_message": string (Conventional Commits: type(scope): description, e.g. test: add integration tests for auth)
 
 Be thorough. Consider edge cases, error handling, and concurrency. Integration tests should be runnable.
 

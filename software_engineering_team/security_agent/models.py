@@ -34,3 +34,7 @@ class SecurityOutput(BaseModel):
     fixed_code: str = Field(default="", description="Code with security fixes applied")
     summary: str = ""
     remediations: List[dict] = Field(default_factory=list)
+    suggested_commit_message: str = Field(
+        default="",
+        description="Conventional Commits format, e.g. fix(security): remediate SQL injection",
+    )

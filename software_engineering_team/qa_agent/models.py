@@ -38,3 +38,7 @@ class QAOutput(BaseModel):
     summary: str = ""
     live_test_notes: str = Field(default="", description="Notes from running the application")
     readme_content: str = Field(default="", description="README.md content for build, run, test, deploy")
+    suggested_commit_message: str = Field(
+        default="",
+        description="Conventional Commits format, e.g. test: add integration tests for auth",
+    )

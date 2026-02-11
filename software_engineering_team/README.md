@@ -26,6 +26,7 @@ All agents enforce these rules for produced code:
 | **Test Coverage** | Minimum 85% coverage; CI fails if below |
 | **README** | Must include build, run, test, and deploy instructions |
 | **Git Branching** | Work on `development` branch; PR to merge into `main`. Tech Lead creates `development` if missing |
+| **Commit Messages** | Conventional Commits format: `type(scope): description` (feat, fix, docs, test, ci, etc.) |
 
 ## Flow
 

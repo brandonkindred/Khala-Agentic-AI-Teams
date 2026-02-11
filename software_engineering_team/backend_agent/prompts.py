@@ -32,6 +32,7 @@ Return a single JSON object with:
 - "summary": string (what you implemented)
 - "files": object with filenames as keys and content as values (for multi-file deliverables)
 - "tests": string (unit/integration test code)
+- "suggested_commit_message": string (Conventional Commits: type(scope): description, e.g. feat(auth): add login endpoint)
 
 If "files" is used, "code" can be empty or contain the primary file. Ensure code is complete and runnable.
 

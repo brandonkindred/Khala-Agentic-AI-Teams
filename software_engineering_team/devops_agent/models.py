@@ -26,3 +26,7 @@ class DevOpsOutput(BaseModel):
     docker_compose: str = Field(default="", description="Docker Compose if applicable")
     summary: str = ""
     artifacts: Dict[str, str] = Field(default_factory=dict)
+    suggested_commit_message: str = Field(
+        default="",
+        description="Conventional Commits format, e.g. ci: add GitHub Actions pipeline",
+    )

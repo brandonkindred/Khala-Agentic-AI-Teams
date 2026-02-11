@@ -50,4 +50,5 @@ class DevOpsExpertAgent:
             docker_compose=data.get("docker_compose", ""),
             summary=data.get("summary", ""),
             artifacts=data.get("artifacts", {}),
+            suggested_commit_message=data.get("suggested_commit_message", ""),
         )

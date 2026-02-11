@@ -26,3 +26,7 @@ class BackendOutput(BaseModel):
     summary: str = ""
     files: Dict[str, str] = Field(default_factory=dict)
     tests: str = ""
+    suggested_commit_message: str = Field(
+        default="",
+        description="Conventional Commits format, e.g. feat(api): add user authentication",
+    )

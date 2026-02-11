@@ -52,4 +52,5 @@ class FrontendExpertAgent:
             summary=data.get("summary", ""),
             files=data.get("files", {}),
             components=data.get("components", []),
+            suggested_commit_message=data.get("suggested_commit_message", ""),
         )

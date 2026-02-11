@@ -64,4 +64,5 @@ class CybersecurityExpertAgent:
             fixed_code=fixed_code,
             summary=data.get("summary", ""),
             remediations=data.get("remediations", []),
+            suggested_commit_message=data.get("suggested_commit_message", ""),
         )

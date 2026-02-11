@@ -24,3 +24,7 @@ class FrontendOutput(BaseModel):
     summary: str = ""
     files: Dict[str, str] = Field(default_factory=dict)
     components: List[str] = Field(default_factory=list)
+    suggested_commit_message: str = Field(
+        default="",
+        description="Conventional Commits format, e.g. feat(ui): add login component",
+    )

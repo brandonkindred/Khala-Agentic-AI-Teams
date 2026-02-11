@@ -77,4 +77,5 @@ class QAExpertAgent:
             summary=data.get("summary", ""),
             live_test_notes=data.get("live_test_notes", ""),
             readme_content=readme_content,
+            suggested_commit_message=data.get("suggested_commit_message", ""),
         )

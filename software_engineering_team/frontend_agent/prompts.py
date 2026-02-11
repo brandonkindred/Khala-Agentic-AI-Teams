@@ -31,6 +31,7 @@ Return a single JSON object with:
 - "summary": string (what you implemented)
 - "files": object with filenames as keys and content as values (e.g. component.ts, template.html, styles.scss)
 - "components": list of component names created
+- "suggested_commit_message": string (Conventional Commits: type(scope): description, e.g. feat(ui): add login component)
 
 Ensure code follows Angular best practices. Use standalone components when appropriate.
 

@@ -44,6 +44,23 @@ CODING_STANDARDS = """
    - Create feature/task branches off `development`, NOT off `main`
    - When work is complete, create a Pull Request to merge `development` into `main`
    - If `development` branch does not exist, the Tech Lead creates it before any commits
+
+7. **Commit Messages** – All commit messages MUST follow Conventional Commits (semantic-versioning compliant):
+   - Format: `type(scope): description`
+   - Types: feat (feature), fix (bug), docs, style, refactor, perf, test, build, ci, chore
+   - Scope: optional module/component (e.g. api, auth, frontend)
+   - Description: imperative, lowercase, no period at end
+   - Examples: `feat(auth): add JWT refresh endpoint`, `fix(api): handle null user in login`
+   - Breaking changes: append `!` after type or add `BREAKING CHANGE:` in footer
+"""
+
+COMMIT_MESSAGE_STANDARDS = """
+**Commit messages (Conventional Commits – semantic-versioning compliant):**
+- Format: type(scope): description
+- Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore
+- Scope: optional (e.g. api, auth, frontend)
+- Description: imperative mood, lowercase, no period
+- Example: feat(auth): add JWT refresh endpoint
 """
 
 GIT_BRANCHING_RULES = """
@@ -51,4 +68,5 @@ GIT_BRANCHING_RULES = """
 - Branch off `development` (or `develop`) for all work; never branch off `main`
 - Create Pull Request to merge `development` → `main` when all development is complete
 - Tech Lead must ensure `development` branch exists before team commits; create it if missing
+- All commits use Conventional Commits format (semantic-versioning compliant)
 """

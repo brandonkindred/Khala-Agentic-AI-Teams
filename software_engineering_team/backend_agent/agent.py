@@ -58,4 +58,5 @@ class BackendExpertAgent:
             summary=data.get("summary", ""),
             files=data.get("files", {}),
             tests=tests,
+            suggested_commit_message=data.get("suggested_commit_message", ""),
         )

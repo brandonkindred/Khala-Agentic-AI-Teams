@@ -52,9 +52,17 @@ class DummyLLMClient(LLMClient):
                 ],
             }
         if "security" in lowered and "vulnerabilities" in lowered:
-            return {"vulnerabilities": [], "fixed_code": "// No changes needed (dummy)"}
+            return {
+                "vulnerabilities": [],
+                "fixed_code": "// No changes needed (dummy)",
+                "suggested_commit_message": "fix(security): apply security review",
+            }
         if "devops" in lowered or "pipeline" in lowered:
-            return {"pipeline_yaml": "# Dummy pipeline", "iac_content": "# Dummy IaC"}
+            return {
+                "pipeline_yaml": "# Dummy pipeline",
+                "iac_content": "# Dummy IaC",
+                "suggested_commit_message": "ci: add pipeline configuration",
+            }
         if "integration_test" in lowered or "readme_content" in lowered or ("bugs_found" in lowered and "test_plan" in lowered):
             return {
                 "bugs_found": [],
@@ -65,6 +73,7 @@ class DummyLLMClient(LLMClient):
                 "summary": "Dummy QA assessment",
                 "live_test_notes": "Dummy live test notes",
                 "readme_content": "# Dummy README - build, run, test, deploy sections",
+                "suggested_commit_message": "test: add integration tests",
             }
         # Spec parsing prompt
         if "acceptance_criteria" in lowered and "specification" in lowered:
