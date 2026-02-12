@@ -45,7 +45,15 @@ class DevOpsExpertAgent:
         data = self.llm.complete_json(prompt, temperature=0.2)
 
         summary = data.get("summary", "")
-        logger.info("DevOps: done, summary=%s chars", len(summary))
+        needs_clarification = bool(data.get("needs_clarification", False))
+        clarification_requests = data.get("clarification_requests") or []
+        if not isinstance(clarification_requests, list):
+            clarification_requests = [str(clarification_requests)] if clarification_requests else []
+
+        logger.info(
+            "DevOps: done, summary=%s chars, needs_clarification=%s",
+            len(summary), needs_clarification,
+        )
         return DevOpsOutput(
             pipeline_yaml=data.get("pipeline_yaml", ""),
             iac_content=data.get("iac_content", ""),
@@ -54,4 +62,6 @@ class DevOpsExpertAgent:
             summary=summary,
             artifacts=data.get("artifacts", {}),
             suggested_commit_message=data.get("suggested_commit_message", ""),
+            needs_clarification=needs_clarification,
+            clarification_requests=clarification_requests,
         )

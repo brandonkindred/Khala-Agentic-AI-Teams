@@ -30,3 +30,11 @@ class DevOpsOutput(BaseModel):
         default="",
         description="Conventional Commits format, e.g. ci: add GitHub Actions pipeline",
     )
+    needs_clarification: bool = Field(
+        default=False,
+        description="When True, task is ambiguous; do not implement until clarification_requests are answered",
+    )
+    clarification_requests: List[str] = Field(
+        default_factory=list,
+        description="Specific questions for Tech Lead when task is poorly defined",
+    )

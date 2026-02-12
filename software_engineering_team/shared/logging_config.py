@@ -15,8 +15,15 @@ from typing import Optional
 LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
 LOG_DATE_FORMAT = "%H:%M:%S"
 
-# Agent logger names (enable DEBUG for verbose step-by-step visibility)
+# Agent and infrastructure logger names (enable DEBUG for verbose step-by-step visibility)
 AGENT_LOGGERS = [
+    # Orchestrator and infrastructure
+    "orchestrator",
+    "shared.git_utils",
+    "shared.repo_writer",
+    "shared.job_store",
+    "shared.command_runner",
+    # Agent loggers
     "architecture_agent.agent",
     "tech_lead_agent.agent",
     "backend_agent.agent",
@@ -24,6 +31,7 @@ AGENT_LOGGERS = [
     "devops_agent.agent",
     "security_agent.agent",
     "qa_agent.agent",
+    "code_review_agent.agent",
     "spec_parser",
     "api.main",
 ]

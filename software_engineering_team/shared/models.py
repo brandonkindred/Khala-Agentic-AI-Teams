@@ -87,25 +87,55 @@ class Task(BaseModel):
 
     id: str
     type: TaskType
-    description: str
+    title: str = Field(
+        default="",
+        description="Descriptive title for the task, e.g. 'Backend Todo CRUD API'",
+    )
+    description: str = Field(
+        default="",
+        description="In-depth description of outcomes based on the spec",
+    )
+    user_story: str = Field(
+        default="",
+        description="User story in the format: As a <role>, I want <goal> so that <benefit>",
+    )
     assignee: str  # agent identifier
     requirements: str = ""
     dependencies: List[str] = Field(default_factory=list)
-    label: Optional[str] = Field(
-        None,
-        description="Short descriptive label for the task, e.g. backend-todo-crud-api",
-    )
     acceptance_criteria: List[str] = Field(
         default_factory=list,
-        description="Specific, testable acceptance criteria for this task",
+        description="Specific, testable acceptance criteria for this task (3-7 items)",
     )
     status: TaskStatus = TaskStatus.PENDING
     feature_branch_name: Optional[str] = Field(
         None,
-        description="Feature branch for this task, e.g. feature/t1-backend-auth",
+        description="Feature branch for this task, e.g. feature/backend-todo-crud-api",
     )
     output: Optional[str] = None
     artifacts: Dict[str, str] = Field(default_factory=dict)
+
+
+class TaskUpdate(BaseModel):
+    """Completion report from a specialist agent after finishing a task."""
+
+    task_id: str = Field(..., description="ID of the completed task")
+    agent_type: str = Field(..., description="Type of agent that completed the task: backend, frontend, devops")
+    status: str = Field(
+        default="completed",
+        description="Completion status: completed, failed, partial",
+    )
+    summary: str = Field(
+        default="",
+        description="Agent's summary of what was done",
+    )
+    files_changed: List[str] = Field(
+        default_factory=list,
+        description="List of files created or modified",
+    )
+    needs_followup: bool = Field(
+        default=False,
+        description="Whether the agent flagged follow-up work is needed",
+    )
 
 
 class TaskAssignment(BaseModel):

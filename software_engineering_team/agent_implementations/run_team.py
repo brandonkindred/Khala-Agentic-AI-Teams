@@ -79,6 +79,9 @@ def main() -> None:
         spec_content=REQUIREMENTS.description,
     )
     tech_lead_output = tech_lead.run(tech_lead_input)
+    if tech_lead_output.spec_clarification_needed:
+        logger.warning("Spec is unclear. Clarification needed: %s", tech_lead_output.clarification_questions)
+        return
     assignment = tech_lead_output.assignment
     logger.info("Tasks: %s", [t.id for t in assignment.tasks])
 
@@ -123,6 +126,7 @@ def main() -> None:
                 BackendInput(
                     task_description=task.description,
                     requirements=task.requirements,
+                    user_story=getattr(task, "user_story", "") or "",
                     architecture=architecture,
                     language="python",
                 )
@@ -137,6 +141,7 @@ def main() -> None:
                 FrontendInput(
                     task_description=task.description,
                     requirements=task.requirements,
+                    user_story=getattr(task, "user_story", "") or "",
                     architecture=architecture,
                 )
             )

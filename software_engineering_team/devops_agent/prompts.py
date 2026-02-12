@@ -34,6 +34,11 @@ Return a single JSON object with:
 - "summary": string (what you created and why)
 - "artifacts": object with filenames as keys and content as values (for additional configs)
 - "suggested_commit_message": string (Conventional Commits: type(scope): description, e.g. ci: add GitHub Actions pipeline)
+- "needs_clarification": boolean (set to true ONLY when the task is ambiguous or missing critical information)
+- "clarification_requests": list of strings (specific questions for the Tech Lead when needs_clarification is true)
+
+**When to request clarification:**
+If the task is vague about CI provider, deployment target, or tech stack expectations, set needs_clarification=true and list specific questions (e.g. "Which CI provider: GitHub Actions or GitLab CI?", "What is the deployment target?"). Do NOT guess—request clarification. If the task is clear enough, set needs_clarification=false and provide implementation.
 
 If a section is not needed for the task, use empty string. Prefer realistic, production-ready configurations.
 

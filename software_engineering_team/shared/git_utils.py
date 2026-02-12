@@ -40,6 +40,9 @@ def create_feature_branch(repo_path: str | Path, base_branch: str, feature_name:
     Create and checkout a feature branch from base_branch.
     feature_name: e.g. "t3-backend-auth" (will become feature/t3-backend-auth).
 
+    If the branch already exists (e.g. from a previous run), it is deleted
+    and recreated from the base branch so the task gets a clean start.
+
     Returns (success, message).
     """
     path = Path(repo_path).resolve()
@@ -48,7 +51,21 @@ def create_feature_branch(repo_path: str | Path, base_branch: str, feature_name:
     branch_name = f"feature/{feature_name}" if not feature_name.startswith("feature/") else feature_name
     code, out = _run_git(path, ["git", "checkout", "-b", branch_name, base_branch])
     if code != 0:
-        return False, f"Failed to create branch {branch_name}: {out}"
+        if "already exists" in out:
+            # Stale branch from a previous run — delete and recreate
+            logger.warning(
+                "Branch '%s' already exists, deleting and recreating from '%s'",
+                branch_name, base_branch,
+            )
+            _run_git(path, ["git", "checkout", base_branch])
+            del_code, del_out = _run_git(path, ["git", "branch", "-D", branch_name])
+            if del_code != 0:
+                return False, f"Failed to delete stale branch {branch_name}: {del_out}"
+            code2, out2 = _run_git(path, ["git", "checkout", "-b", branch_name, base_branch])
+            if code2 != 0:
+                return False, f"Failed to recreate branch {branch_name}: {out2}"
+        else:
+            return False, f"Failed to create branch {branch_name}: {out}"
     logger.info("Created branch '%s' from '%s'", branch_name, base_branch)
     return True, branch_name
 

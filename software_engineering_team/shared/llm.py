@@ -4,12 +4,19 @@ LLM client abstraction for software engineering team agents.
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 import json
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Union
 
 import httpx
+
+# Environment variables for LLM configuration
+ENV_LLM_PROVIDER = "SW_LLM_PROVIDER"  # "dummy" or "ollama"
+ENV_LLM_MODEL = "SW_LLM_MODEL"  # model name for ollama
+ENV_LLM_BASE_URL = "SW_LLM_BASE_URL"  # ollama base URL
+ENV_LLM_TIMEOUT = "SW_LLM_TIMEOUT"  # timeout in seconds
 
 
 class LLMClient(ABC):
@@ -37,8 +44,28 @@ class LLMClient(ABC):
 class DummyLLMClient(LLMClient):
     """No-op implementation for tests and environments without an LLM."""
 
+    # Counter to generate unique file content per invocation, avoiding "no changes to commit"
+    _call_counter: int = 0
+
+    @staticmethod
+    def _extract_task_hint(prompt: str) -> str:
+        """Extract a task identifier from the prompt to generate unique per-task output."""
+        import hashlib
+        # Look for **Task:** lines in the prompt
+        for line in prompt.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("**Task:**"):
+                hint = stripped.replace("**Task:**", "").strip()[:80]
+                return hint
+        # Fallback: hash a portion of the prompt for uniqueness
+        return hashlib.md5(prompt[:500].encode()).hexdigest()[:12]
+
     def complete_json(self, prompt: str, *, temperature: float = 0.0) -> Dict[str, Any]:
         lowered = prompt.lower()
+        DummyLLMClient._call_counter += 1
+        counter = DummyLLMClient._call_counter
+        task_hint = self._extract_task_hint(prompt)
+
         # Architecture prompt is more specific (architecture_document); check before Tech Lead
         if "architecture_document" in lowered and "components" in lowered and "overview" in lowered:
             return {
@@ -46,57 +73,274 @@ class DummyLLMClient(LLMClient):
                 "architecture_document": "# System Architecture (Dummy)\n\nPlaceholder architecture.",
                 "components": [{"name": "API", "type": "backend"}, {"name": "WebApp", "type": "frontend"}],
             }
+        # Tech Lead codebase analysis prompt (Step 1 of multi-step planning)
+        if "codebase audit" in lowered and "files_inventory" in lowered:
+            return {
+                "files_inventory": [
+                    {"path": "initial_spec.md", "language": "markdown", "purpose": "Project specification", "key_exports": []},
+                ],
+                "frameworks": {"backend": "unknown", "frontend": "unknown", "database": "unknown", "testing": "unknown", "cicd": "unknown", "other": []},
+                "existing_functionality": ["Project specification document exists"],
+                "partial_implementations": [],
+                "gaps": ["No application code exists yet", "No backend framework set up", "No frontend framework set up", "No CI/CD pipeline", "No database configuration", "No tests"],
+                "code_conventions": {"naming": "unknown", "structure": "flat", "config_approach": "unknown"},
+                "summary": "The repository contains only the project specification (initial_spec.md). No application code, infrastructure, or tests exist yet. The entire application needs to be built from scratch according to the spec.",
+            }
+        # Tech Lead spec analysis prompt (Step 2 of multi-step planning)
+        if "deep analysis" in lowered and "total_deliverable_count" in lowered:
+            return {
+                "data_entities": [{"name": "User", "attributes": ["id", "email", "password_hash", "created_at"], "relationships": [], "validation_rules": ["email must be valid", "password required"]}],
+                "api_endpoints": [
+                    {"method": "POST", "path": "/auth/signup", "description": "Create new user account", "auth_required": False},
+                    {"method": "POST", "path": "/auth/login", "description": "Authenticate user and return JWT", "auth_required": False},
+                    {"method": "POST", "path": "/auth/refresh", "description": "Refresh access token", "auth_required": True},
+                    {"method": "GET", "path": "/api/users/me", "description": "Get current user profile", "auth_required": True},
+                ],
+                "ui_screens": [
+                    {"name": "Login Page", "description": "User login form", "components": ["LoginForm", "ErrorDisplay"], "states": ["idle", "loading", "error", "success"]},
+                    {"name": "Registration Page", "description": "User registration form", "components": ["RegistrationForm", "ErrorDisplay"], "states": ["idle", "loading", "error", "success"]},
+                    {"name": "Dashboard", "description": "Main authenticated view", "components": ["Navbar", "UserProfile"], "states": ["loading", "loaded"]},
+                ],
+                "user_flows": [
+                    {"name": "User Registration", "steps": ["Navigate to signup", "Fill form", "Submit", "Receive confirmation", "Redirect to login"]},
+                    {"name": "User Login", "steps": ["Navigate to login", "Enter credentials", "Submit", "Receive JWT", "Redirect to dashboard"]},
+                ],
+                "non_functional": [
+                    {"category": "security", "requirement": "Passwords must be hashed with bcrypt"},
+                    {"category": "security", "requirement": "JWT tokens must expire"},
+                    {"category": "performance", "requirement": "API response time under 500ms"},
+                ],
+                "infrastructure": [
+                    {"category": "deployment", "requirement": "Docker containerization"},
+                    {"category": "cicd", "requirement": "Automated CI/CD pipeline"},
+                ],
+                "integrations": [],
+                "total_deliverable_count": 18,
+                "summary": "The spec requires a full-stack authentication application with user registration, login, token refresh, and protected routes. The backend needs FastAPI with JWT auth, the frontend needs Angular with login/registration/dashboard screens, and DevOps needs Docker and CI/CD.",
+            }
+        # Tech Lead evaluate QA prompt (create fix tasks from QA feedback)
+        if "qa agent has reviewed code" in lowered and "fix tasks" in lowered:
+            return {"tasks": [], "rationale": "QA approved; no fix tasks needed (dummy)."}
+        # Tech Lead should run security prompt
+        if "run security review now" in lowered and "90%" in lowered:
+            return {"run_security": False, "rationale": "Code coverage not yet at 90% (dummy)."}
+        # Tech Lead review progress prompt
+        if "reviewing the progress" in lowered and "spec_compliance_pct" in lowered:
+            return {
+                "tasks": [],
+                "spec_compliance_pct": 50,
+                "gaps_identified": [],
+                "rationale": "Progress review complete. Current tasks cover the planned scope (dummy).",
+            }
+        # Tech Lead refine task prompt (clarification)
+        if "clarification questions from specialist" in lowered:
+            return {
+                "title": "Refined Task Title",
+                "description": "Refined task description with additional details from spec. The implementation should follow Angular best practices using standalone components and reactive forms. All public methods must have JSDoc documentation. Error states must be handled with user-friendly messages.",
+                "user_story": "As a user, I want refined functionality so that the feature works as specified in the requirements.",
+                "requirements": "Detailed requirements addressing clarification questions. Use Angular Material for UI components. Implement loading spinners during async operations. Handle HTTP errors with retry logic.",
+                "acceptance_criteria": ["Criterion 1: Component renders without errors", "Criterion 2: User interactions trigger correct API calls", "Criterion 3: Error states display meaningful messages"],
+            }
         # Tech Lead prompt asks for tasks + execution_order – return granular plan with descriptive IDs
         if ("execution_order" in lowered or "task_assignments" in lowered) and "tasks" in lowered:
             return {
                 "tasks": [
-                    {"id": "git-setup", "label": "Git setup", "type": "git_setup", "description": "Ensure development branch exists", "assignee": "devops", "requirements": "Create development branch from main if missing", "acceptance_criteria": ["Development branch exists"], "dependencies": []},
-                    {"id": "devops-dockerfile", "label": "DevOps Dockerfile", "type": "devops", "description": "Create Dockerfile for the application", "assignee": "devops", "requirements": "Multi-stage Dockerfile, Python/Node base, build and run config", "acceptance_criteria": ["Dockerfile builds", "Image runs"], "dependencies": ["git-setup"]},
-                    {"id": "devops-ci-pipeline", "label": "DevOps CI pipeline", "type": "devops", "description": "Create CI/CD pipeline (GitHub Actions or similar)", "assignee": "devops", "requirements": "Pipeline runs on push, lint, test, build steps", "acceptance_criteria": ["CI runs on push", "Tests executed"], "dependencies": ["devops-dockerfile"]},
-                    {"id": "backend-data-models", "label": "Backend data models", "type": "backend", "description": "Define Pydantic/SQLAlchemy models for domain entities", "assignee": "backend", "requirements": "Models match spec, validation, relationships", "acceptance_criteria": ["Models defined", "Validation works"], "dependencies": ["devops-ci-pipeline"]},
-                    {"id": "backend-crud-api", "label": "Backend CRUD API", "type": "backend", "description": "Implement REST CRUD endpoints for main entities", "assignee": "backend", "requirements": "GET list, POST create, GET by id, PUT update, DELETE", "acceptance_criteria": ["Endpoints respond correctly", "404 for missing"], "dependencies": ["backend-data-models"]},
-                    {"id": "backend-validation", "label": "Backend validation", "type": "backend", "description": "Add input validation and error handling to API", "assignee": "backend", "requirements": "Pydantic validation, 422 on invalid input", "acceptance_criteria": ["Invalid input rejected", "Clear error messages"], "dependencies": ["backend-crud-api"]},
-                    {"id": "frontend-app-shell", "label": "Frontend app shell", "type": "frontend", "description": "Create Angular app shell, routing, layout", "assignee": "frontend", "requirements": "App component, routing module, main layout", "acceptance_criteria": ["App loads", "Routing works"], "dependencies": ["devops-ci-pipeline"]},
-                    {"id": "frontend-list-component", "label": "Frontend list component", "type": "frontend", "description": "Implement list view component for main entities", "assignee": "frontend", "requirements": "Fetch from API, display list, loading state", "acceptance_criteria": ["List displays data", "Loading indicator"], "dependencies": ["frontend-app-shell", "backend-crud-api"]},
-                    {"id": "frontend-form-component", "label": "Frontend form component", "type": "frontend", "description": "Implement add/edit form with validation", "assignee": "frontend", "requirements": "Reactive forms, validation, submit to API", "acceptance_criteria": ["Form validates", "Submit creates/updates"], "dependencies": ["frontend-list-component"]},
-                    {"id": "frontend-detail-component", "label": "Frontend detail component", "type": "frontend", "description": "Implement detail view and delete confirmation", "assignee": "frontend", "requirements": "Detail view, delete with confirmation", "acceptance_criteria": ["Detail shows", "Delete works"], "dependencies": ["frontend-list-component"]},
-                    {"id": "security-backend-review", "label": "Security backend review", "type": "security", "description": "Review backend code for vulnerabilities", "assignee": "security", "requirements": "Check injection, auth, input sanitization", "acceptance_criteria": ["No critical vulns"], "dependencies": ["backend-validation"]},
-                    {"id": "security-frontend-review", "label": "Security frontend review", "type": "security", "description": "Review frontend code for XSS and other issues", "assignee": "security", "requirements": "Check XSS, CSRF, sensitive data exposure", "acceptance_criteria": ["No critical vulns"], "dependencies": ["frontend-form-component", "frontend-detail-component"]},
-                    {"id": "qa-integration-tests", "label": "QA integration tests", "type": "qa", "description": "Add integration tests for API and critical flows", "assignee": "qa", "requirements": "Test CRUD, error cases, coverage", "acceptance_criteria": ["Tests pass", "Coverage adequate"], "dependencies": ["security-backend-review", "security-frontend-review"]},
-                    {"id": "qa-readme", "label": "QA README", "type": "qa", "description": "Document build, run, test, deploy instructions", "assignee": "qa", "requirements": "README.md with all sections", "acceptance_criteria": ["README complete", "Instructions work"], "dependencies": ["qa-integration-tests"]},
+                    {
+                        "id": "git-setup",
+                        "title": "Initialize Git Development Branch",
+                        "type": "git_setup",
+                        "description": "Ensure the development branch exists and is properly configured for the feature branch workflow. If the development branch does not yet exist, create it from the main branch. Verify that the branch is checked out and the git history is clean with no uncommitted changes. This is the foundational step that enables all subsequent feature branches to be created from a stable base.",
+                        "user_story": "As a developer, I want a dedicated development branch so that all feature branches are created from a stable integration point and merged back systematically without disrupting the main branch.",
+                        "assignee": "devops",
+                        "requirements": "Create development branch from main if missing. Checkout the development branch. Verify git status is clean.",
+                        "acceptance_criteria": ["Development branch exists and is checked out", "Git status shows clean working directory", "Branch is created from main or master"],
+                        "dependencies": [],
+                    },
+                    {
+                        "id": "devops-dockerfile",
+                        "title": "Multi-Stage Application Dockerfile with Dev and Prod Targets",
+                        "type": "devops",
+                        "description": "Create a multi-stage Dockerfile that supports both development and production builds for the full-stack application. The first stage should use python:3.11-slim as the base image and install all Python backend dependencies from requirements.txt. The second stage should use node:18-alpine to build the Angular frontend with ng build --configuration production. The final production stage should combine the backend ASGI server (uvicorn) with the compiled frontend static assets served from a /static directory. Include a .dockerignore file to exclude node_modules, __pycache__, .git, and test directories from the build context. The dev target should mount source code as a volume and enable hot-reload for both backend and frontend.",
+                        "user_story": "As a developer, I want a multi-stage Dockerfile so that I can build optimized production images while also having a fast development workflow with hot-reload capabilities.",
+                        "assignee": "devops",
+                        "requirements": "Multi-stage Dockerfile with python:3.11-slim backend stage, node:18-alpine frontend build stage, and slim production stage. Include .dockerignore. Dev target with volume mounts. Production target under 200MB.",
+                        "acceptance_criteria": ["Dockerfile builds successfully with docker build", "Production image size is under 200MB", "Multi-stage build separates build dependencies from runtime", "Dev target supports hot-reload via volume mounts", ".dockerignore excludes node_modules, __pycache__, .git"],
+                        "dependencies": ["git-setup"],
+                    },
+                    {
+                        "id": "devops-docker-compose",
+                        "title": "Docker Compose for Local Development Environment",
+                        "type": "devops",
+                        "description": "Create a docker-compose.yml file that orchestrates the local development environment with three services: the FastAPI backend (port 8000), the Angular frontend dev server (port 4200), and a PostgreSQL 15 database (port 5432). The backend service should use the dev target from the Dockerfile and mount the backend source directory for hot-reload. The frontend service should run ng serve with --poll 2000 for file watching inside Docker. The database service should use a named volume for data persistence and initialize with a healthcheck. Include environment variables for database connection string, JWT secret, and CORS allowed origins. Add a .env.example file documenting all required environment variables.",
+                        "user_story": "As a developer, I want a docker-compose setup so that I can spin up the entire application stack locally with a single command and have changes reflected immediately during development.",
+                        "assignee": "devops",
+                        "requirements": "docker-compose.yml with backend (port 8000), frontend (port 4200), and PostgreSQL 15 (port 5432) services. Named volumes for DB persistence. Environment variables via .env file. Health checks on database.",
+                        "acceptance_criteria": ["docker-compose up starts all three services", "Backend is accessible at http://localhost:8000", "Frontend dev server is accessible at http://localhost:4200", "Database persists data across restarts via named volume", ".env.example documents all required environment variables"],
+                        "dependencies": ["devops-dockerfile"],
+                    },
+                    {
+                        "id": "devops-ci-pipeline",
+                        "title": "GitHub Actions CI Pipeline with Lint, Test, and Build Stages",
+                        "type": "devops",
+                        "description": "Create a GitHub Actions CI/CD pipeline configuration at .github/workflows/ci.yml that triggers on push to the development branch and on pull requests targeting development. The pipeline should have three sequential jobs: (1) lint - run flake8 and mypy on backend Python code and ng lint on frontend TypeScript code, (2) test - run pytest with coverage reporting for backend and ng test --no-watch --code-coverage for frontend, (3) build - build the Docker production image and verify it starts without errors. Each job should use appropriate caching (pip cache, npm cache) to speed up builds. The pipeline should fail fast if any stage fails and report test coverage as a PR comment.",
+                        "user_story": "As a developer, I want an automated CI pipeline so that every push and pull request is validated for code quality, test coverage, and build integrity before merging.",
+                        "assignee": "devops",
+                        "requirements": "GitHub Actions workflow at .github/workflows/ci.yml. Trigger on push to development and PRs. Three jobs: lint (flake8, mypy, ng lint), test (pytest --cov, ng test --code-coverage), build (docker build). Pip and npm caching. Fail-fast on errors.",
+                        "acceptance_criteria": ["CI triggers on push to development branch", "CI triggers on pull requests to development", "Lint stage runs flake8, mypy, and ng lint", "Test stage runs pytest and ng test with coverage", "Build stage builds Docker image successfully", "Pipeline uses caching for pip and npm dependencies"],
+                        "dependencies": ["devops-docker-compose"],
+                    },
+                    {
+                        "id": "backend-data-models",
+                        "title": "Domain Entity Data Models with Pydantic Schemas and SQLAlchemy ORM",
+                        "type": "backend",
+                        "description": "Define all domain entity data models using both Pydantic (for API request/response validation) and SQLAlchemy (for database ORM). Create a User model with fields: id (UUID, primary key, auto-generated), email (unique, validated format), password_hash (string, never exposed in API responses), display_name (string, 2-50 chars), is_active (boolean, default True), created_at (datetime, auto-set), and updated_at (datetime, auto-updated). Create corresponding Pydantic schemas: UserCreate (email + password + display_name), UserUpdate (optional fields), UserResponse (excludes password_hash), and UserInDB (includes password_hash for internal use). Set up the SQLAlchemy engine configuration to read DATABASE_URL from environment variables with a fallback to SQLite for development. Include an Alembic migration configuration file for future schema migrations. All models must enforce Design by Contract with precondition validation on field lengths and formats.",
+                        "user_story": "As a backend developer, I want well-defined data models with Pydantic validation and SQLAlchemy ORM mappings so that the API can validate input data, serialize responses correctly, and persist entities to the database with referential integrity.",
+                        "assignee": "backend",
+                        "requirements": "User model with id (UUID), email (unique), password_hash, display_name, is_active, created_at, updated_at. Pydantic schemas: UserCreate, UserUpdate, UserResponse, UserInDB. SQLAlchemy Base, engine, SessionLocal. DATABASE_URL from env. Alembic config stub. Design by Contract on all validators.",
+                        "acceptance_criteria": ["User SQLAlchemy model maps to 'users' table with all specified fields", "UserCreate schema validates email format and password length (min 8 chars)", "UserResponse schema excludes password_hash field", "Database engine reads DATABASE_URL from environment with SQLite fallback", "All models have docstrings explaining purpose, constraints, and usage"],
+                        "dependencies": ["devops-ci-pipeline"],
+                    },
+                    {
+                        "id": "backend-crud-api",
+                        "title": "RESTful CRUD API Endpoints for Domain Entities with FastAPI Router",
+                        "type": "backend",
+                        "description": "Implement REST CRUD API endpoints for the User entity using FastAPI's APIRouter. Create a dedicated router module at backend/routers/users.py with the following endpoints: GET /api/users (list all users with pagination via query params page=1&per_page=20, returns paginated response with total count), POST /api/users (create new user, hash password with bcrypt, return 201 with UserResponse), GET /api/users/{user_id} (get single user by UUID, return 404 if not found), PUT /api/users/{user_id} (partial update of user fields, return 404 if not found, validate input), DELETE /api/users/{user_id} (soft delete by setting is_active=False, return 204 on success, 404 if not found). Each endpoint must use dependency injection for the database session. Create a main.py FastAPI application that mounts the users router and includes CORS middleware allowing the Angular frontend origin. Include proper HTTP status codes, response models, and OpenAPI documentation tags.",
+                        "user_story": "As an API consumer, I want RESTful CRUD endpoints for managing users so that the frontend application can create, list, view, update, and delete user accounts through a well-documented API.",
+                        "assignee": "backend",
+                        "requirements": "FastAPI APIRouter at /api/users. Endpoints: GET list (paginated), POST create (201), GET by id (404 handling), PUT update (partial), DELETE soft-delete (204). Bcrypt password hashing. Dependency-injected DB sessions. CORS middleware. OpenAPI tags.",
+                        "acceptance_criteria": ["GET /api/users returns 200 with paginated list including total count", "GET /api/users?page=2&per_page=10 returns correct page", "POST /api/users with valid body returns 201 with UserResponse (no password_hash)", "POST /api/users with duplicate email returns 409 Conflict", "GET /api/users/{id} returns 404 for non-existent UUID", "PUT /api/users/{id} updates only provided fields and returns 200", "DELETE /api/users/{id} sets is_active=False and returns 204"],
+                        "dependencies": ["backend-data-models"],
+                    },
+                    {
+                        "id": "backend-validation",
+                        "title": "Input Validation Middleware and Structured Error Responses",
+                        "type": "backend",
+                        "description": "Add comprehensive input validation and structured error handling to all API endpoints. Create a custom exception handler middleware that catches ValidationError (Pydantic), HTTPException (FastAPI), and generic exceptions, returning a consistent JSON error response format: {\"error\": {\"code\": \"VALIDATION_ERROR\", \"message\": \"Human-readable message\", \"details\": [{\"field\": \"email\", \"message\": \"Invalid email format\"}]}}. Add request ID tracking via a middleware that generates a UUID for each request and includes it in the response headers (X-Request-ID) and error responses. Implement rate limiting on the POST /api/users endpoint (max 10 requests per minute per IP) to prevent abuse. Add input sanitization to strip leading/trailing whitespace from string fields and normalize email addresses to lowercase. All validation must follow Design by Contract: document preconditions in docstrings and enforce them with explicit checks before processing.",
+                        "user_story": "As an API consumer, I want clear, structured validation errors with request tracking so that I can quickly identify and fix invalid input, and as a system operator, I want rate limiting so that the API is protected from abuse.",
+                        "assignee": "backend",
+                        "requirements": "Custom exception handler middleware returning {error: {code, message, details}}. Request ID middleware (X-Request-ID header). Rate limiting on POST endpoints (10/min/IP). Input sanitization (trim whitespace, lowercase emails). Design by Contract on all validators.",
+                        "acceptance_criteria": ["Invalid input returns 422 with structured error format including field-level details", "All error responses include X-Request-ID header", "POST /api/users is rate-limited to 10 requests per minute per IP", "Email addresses are normalized to lowercase before storage", "String fields are trimmed of leading/trailing whitespace", "Generic exceptions return 500 with error code INTERNAL_ERROR and request ID"],
+                        "dependencies": ["backend-crud-api"],
+                    },
+                    {
+                        "id": "frontend-app-shell",
+                        "title": "Angular Application Shell with Routing, Layout, and Navigation Components",
+                        "type": "frontend",
+                        "description": "Create the Angular application shell that serves as the foundation for all frontend features. Generate the Angular project using Angular CLI with standalone components enabled. Configure the Angular Router with lazy-loaded routes for the main feature areas: '/' (redirect to /dashboard), '/login', '/register', '/dashboard', '/users', and '/users/:id'. Create a MainLayoutComponent that renders a responsive header with the application logo and title, a sidebar navigation menu with links to Dashboard and Users sections, and a footer with copyright information. The header should include a user avatar dropdown (placeholder for future auth integration) and a mobile hamburger menu that toggles the sidebar. Use Angular Material (MatToolbar, MatSidenav, MatList, MatIcon) for consistent Material Design styling. Create an AppShellModule that declares the layout components and exports them for use by feature modules. Include a loading bar component (MatProgressBar) at the top of the page that activates during route transitions.",
+                        "user_story": "As a user, I want a well-structured application with clear navigation so that I can easily move between the dashboard, user list, and detail views without confusion, and the interface feels responsive on both desktop and mobile devices.",
+                        "assignee": "frontend",
+                        "requirements": "Angular CLI project with standalone components. Lazy-loaded routes: /, /login, /register, /dashboard, /users, /users/:id. MainLayoutComponent with MatToolbar header, MatSidenav sidebar, footer. Mobile-responsive hamburger menu. Angular Material theming. Loading bar on route transitions. AppShellModule.",
+                        "acceptance_criteria": ["Angular app loads without errors at http://localhost:4200", "Router navigates between /dashboard, /users, /users/:id views", "MainLayoutComponent renders header with logo, sidebar with nav links, and footer", "Sidebar collapses to hamburger menu on mobile viewport (< 768px)", "Route transitions show MatProgressBar loading indicator", "Lazy loading is configured for feature modules (verified in network tab)"],
+                        "dependencies": ["devops-ci-pipeline"],
+                    },
+                    {
+                        "id": "frontend-list-component",
+                        "title": "User List View Component with API Integration, Pagination, and State Management",
+                        "type": "frontend",
+                        "description": "Implement the UserListComponent that fetches user data from the backend REST API (GET /api/users) and displays it in a Material Design data table. The component must handle three distinct UI states: (1) Loading state - display a MatSpinner centered on the page while the API request is in flight, (2) Empty state - show an illustration with 'No users found' message and a 'Create First User' call-to-action button when the API returns an empty list, (3) Data state - render a MatTable with columns for display_name, email, is_active (as a colored badge), and created_at (formatted as relative time, e.g. '2 hours ago'). Implement pagination using MatPaginator with page sizes [10, 20, 50] and default page size of 20. Each row should be clickable, navigating to /users/:id. Add a search bar at the top that filters by email or display_name (debounced 300ms, calls API with query param). Create a UserService (injectable) that encapsulates all HTTP calls to /api/users and returns Observables. Handle HTTP errors by displaying a MatSnackBar with the error message and a 'Retry' action.",
+                        "user_story": "As a user, I want to see a paginated list of all users with search functionality so that I can quickly find and select a user to view their details, even when there are hundreds of records.",
+                        "assignee": "frontend",
+                        "requirements": "UserListComponent with MatTable, MatPaginator, MatSpinner, empty state. UserService (injectable) for GET /api/users with pagination and search query params. Debounced search (300ms). Three UI states: loading, empty, data. Row click navigates to /users/:id. Error handling with MatSnackBar.",
+                        "acceptance_criteria": ["UserListComponent displays data from GET /api/users in a MatTable", "Loading state shows MatSpinner while API request is pending", "Empty state shows 'No users found' message with 'Create First User' button", "MatPaginator supports page sizes [10, 20, 50] with default 20", "Clicking a table row navigates to /users/:id", "Search bar filters by email/display_name with 300ms debounce", "HTTP errors display MatSnackBar with error message and Retry action"],
+                        "dependencies": ["frontend-app-shell", "backend-crud-api"],
+                    },
+                    {
+                        "id": "frontend-form-component",
+                        "title": "User Create/Edit Form with Reactive Validation and API Submission",
+                        "type": "frontend",
+                        "description": "Implement the UserFormComponent using Angular Reactive Forms that serves both create and edit modes. In create mode (route: /users/new), display a form with fields: display_name (required, 2-50 chars), email (required, valid email format), and password (required, min 8 chars, must contain uppercase, lowercase, and number). In edit mode (route: /users/:id/edit), pre-populate the form by fetching the user from GET /api/users/:id, and make the password field optional (only update if provided). Each field should show inline validation errors as the user types (not on pristine fields). The submit button should be disabled when the form is invalid. On submit, call POST /api/users (create) or PUT /api/users/:id (update) via the UserService. Show a MatProgressBar during submission. On success, display a MatSnackBar confirmation message and navigate back to the user list. On API error (e.g. 409 duplicate email), display the server error message inline under the relevant field. Include a 'Cancel' button that navigates back without saving.",
+                        "user_story": "As a user, I want a validated form to create and edit user accounts so that I receive immediate feedback on input errors before submitting, and the form clearly communicates success or failure after submission.",
+                        "assignee": "frontend",
+                        "requirements": "UserFormComponent with Angular Reactive Forms. Create mode (/users/new) and edit mode (/users/:id/edit). Fields: display_name (required, 2-50 chars), email (required, email format), password (required for create, optional for edit, min 8 chars with complexity). Inline validation errors. Disabled submit when invalid. MatProgressBar during submission. Success/error MatSnackBar. Cancel navigation. Server error mapping to fields.",
+                        "acceptance_criteria": ["Create form at /users/new validates all required fields before enabling submit", "Edit form at /users/:id/edit pre-populates with existing user data", "Inline validation errors appear after field is touched (not on pristine)", "Password field enforces min 8 chars with uppercase, lowercase, and number", "Submit button is disabled when form is invalid", "Successful create shows 'User created' snackbar and navigates to user list", "API error 409 shows 'Email already exists' inline under email field", "Cancel button navigates back without saving"],
+                        "dependencies": ["frontend-list-component"],
+                    },
+                    {
+                        "id": "frontend-detail-component",
+                        "title": "User Detail View with Profile Display and Delete Confirmation Dialog",
+                        "type": "frontend",
+                        "description": "Implement the UserDetailComponent that displays comprehensive user information on a dedicated page (route: /users/:id). Fetch the user from GET /api/users/:id and display all fields in a Material Design card layout: display_name as the card title, email with a mailto link, account status (is_active) as a colored chip (green for active, red for inactive), created_at and updated_at formatted as locale-specific dates. Include an 'Edit' button that navigates to /users/:id/edit and a 'Delete' button styled in warn color. When the Delete button is clicked, open a MatDialog confirmation with the message 'Are you sure you want to delete {display_name}? This action cannot be undone.' with 'Cancel' and 'Delete' action buttons. On confirmation, call DELETE /api/users/:id via the UserService. On success, show a MatSnackBar 'User deleted' and navigate back to the user list. On error, show the error message in a MatSnackBar. Handle the case where the user ID does not exist (404) by showing a 'User not found' message with a 'Back to list' link.",
+                        "user_story": "As a user, I want to view complete user profile details and have the ability to edit or delete the account with a confirmation step so that I can manage individual users confidently without accidental deletions.",
+                        "assignee": "frontend",
+                        "requirements": "UserDetailComponent at /users/:id. Material card layout with all user fields. Edit button -> /users/:id/edit. Delete button opens MatDialog confirmation. DELETE /api/users/:id on confirm. Success snackbar + navigate to list. 404 handling with 'User not found' message.",
+                        "acceptance_criteria": ["Detail view displays all user fields in a Material card", "Email is rendered as a clickable mailto link", "Active status shows as green chip, inactive as red chip", "Edit button navigates to /users/:id/edit", "Delete button opens MatDialog with confirmation message", "Confirming delete calls DELETE /api/users/:id and navigates to list", "404 response shows 'User not found' with 'Back to list' link", "Created/updated dates are formatted in locale-specific format"],
+                        "dependencies": ["frontend-list-component"],
+                    },
                 ],
-                "execution_order": ["git-setup", "devops-dockerfile", "devops-ci-pipeline", "backend-data-models", "backend-crud-api", "backend-validation", "frontend-app-shell", "frontend-list-component", "frontend-form-component", "frontend-detail-component", "security-backend-review", "security-frontend-review", "qa-integration-tests", "qa-readme"],
-                "rationale": "Granular plan: git setup, devops (Docker + CI), backend (models -> CRUD -> validation), frontend (shell -> list -> form/detail), security review, QA tests and README.",
-                "summary": "15 tasks covering full spec: git, devops (2), backend (3), frontend (4), security (2), qa (2). Every spec requirement mapped to tasks.",
+                "execution_order": [
+                    "git-setup", "devops-dockerfile", "devops-docker-compose", "devops-ci-pipeline",
+                    "backend-data-models", "backend-crud-api", "backend-validation",
+                    "frontend-app-shell", "frontend-list-component", "frontend-form-component", "frontend-detail-component",
+                ],
+                "rationale": "Granular plan following dependency order: git setup, then devops (Dockerfile -> Compose -> CI), then backend (models -> CRUD -> validation), then frontend (shell -> list -> form/detail). Security and QA are invoked automatically by the orchestrator after coding tasks. Each task is scoped to a single focused deliverable with detailed descriptions enabling autonomous implementation.",
+                "summary": "11 tasks covering full spec: git (1), devops (3), backend (3), frontend (4). Every spec requirement is mapped to specific tasks with detailed descriptions, user stories, and testable acceptance criteria. The plan follows strict dependency ordering so each task can build on completed work.",
+                "requirement_task_mapping": [
+                    {"spec_item": "User data model with email, password, profile fields", "task_ids": ["backend-data-models"]},
+                    {"spec_item": "REST CRUD API for user management", "task_ids": ["backend-crud-api"]},
+                    {"spec_item": "Input validation and error handling", "task_ids": ["backend-validation"]},
+                    {"spec_item": "Docker containerization", "task_ids": ["devops-dockerfile", "devops-docker-compose"]},
+                    {"spec_item": "CI/CD pipeline", "task_ids": ["devops-ci-pipeline"]},
+                    {"spec_item": "Angular application with routing", "task_ids": ["frontend-app-shell"]},
+                    {"spec_item": "User list view with pagination", "task_ids": ["frontend-list-component"]},
+                    {"spec_item": "User create/edit form with validation", "task_ids": ["frontend-form-component"]},
+                    {"spec_item": "User detail view with delete", "task_ids": ["frontend-detail-component"]},
+                    {"spec_item": "See specification document", "task_ids": ["backend-data-models", "backend-crud-api", "backend-validation", "frontend-app-shell", "frontend-list-component", "frontend-form-component", "frontend-detail-component"]},
+                ],
+                "clarification_questions": [],
+            }
+        # Code review agent - must come before generic backend/frontend matches
+        if "senior code reviewer" in lowered and ("approved" in lowered or "issues" in lowered):
+            return {
+                "approved": True,
+                "issues": [],
+                "summary": "Code review passed (dummy). Code meets basic standards and follows project conventions.",
+                "spec_compliance_notes": "Code aligns with task requirements and acceptance criteria.",
+                "suggested_commit_message": "",
             }
         if "security" in lowered and "vulnerabilities" in lowered:
             return {
                 "vulnerabilities": [],
                 "summary": "No security issues found (dummy)",
             }
+        # DevOps agent – generate unique content per task using counter
         if "devops" in lowered or "pipeline" in lowered:
             return {
-                "pipeline_yaml": "# Dummy pipeline\nname: ci\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo build",
-                "iac_content": "# Dummy IaC",
-                "dockerfile": "FROM python:3.11-slim\nWORKDIR /app\nCOPY . .\nCMD [\"python\", \"-m\", \"http.server\"]",
-                "suggested_commit_message": "ci: add pipeline configuration",
+                "pipeline_yaml": f"# CI Pipeline (task #{counter})\nname: ci\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: echo 'Build step {counter}'",
+                "iac_content": f"# Infrastructure as Code (task #{counter})\nresource \"docker_image\" \"app\" {{\n  name = \"app:latest\"\n}}",
+                "dockerfile": f"# Dockerfile (task #{counter})\nFROM python:3.11-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install -r requirements.txt\nCOPY . .\nEXPOSE 8000\nCMD [\"uvicorn\", \"main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]",
+                "docker_compose": f"# Docker Compose (task #{counter})\nversion: '3.8'\nservices:\n  backend:\n    build: .\n    ports:\n      - '8000:8000'\n  db:\n    image: postgres:15\n    ports:\n      - '5432:5432'",
+                "summary": f"DevOps configuration generated for: {task_hint[:60]}",
+                "suggested_commit_message": f"ci: add devops configuration (task #{counter})",
             }
+        # Backend agent – generate unique files per task based on task hint and counter
         if "backend" in lowered and "language" in lowered and ("code" in lowered or "files" in lowered):
+            # Derive a module name from the task hint for unique filenames
+            slug = re.sub(r"[^a-z0-9]+", "_", task_hint.lower())[:40].strip("_") or f"module_{counter}"
             return {
-                "code": "# Dummy backend API\nfrom fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get(\"/\")\ndef root():\n    return {\"status\": \"ok\"}\n",
+                "code": f'"""\nBackend module: {task_hint}\nGenerated as task #{counter}\n"""\nfrom fastapi import APIRouter, Depends, HTTPException\nfrom pydantic import BaseModel\n\nrouter = APIRouter(prefix="/api", tags=["{slug}"])\n\n\nclass {slug.title().replace("_", "")}Request(BaseModel):\n    """Request model for {task_hint}."""\n    name: str\n\n\nclass {slug.title().replace("_", "")}Response(BaseModel):\n    """Response model for {task_hint}."""\n    id: int\n    name: str\n\n\n@router.get("/{slug}")\ndef list_items():\n    """List all items for {task_hint}."""\n    return []\n\n\n@router.post("/{slug}", status_code=201)\ndef create_item(data: {slug.title().replace("_", "")}Request):\n    """Create item for {task_hint}."""\n    return {slug.title().replace("_", "")}Response(id=1, name=data.name)\n',
                 "language": "python",
-                "summary": "Dummy backend implementation",
-                "files": {"main.py": "from fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get(\"/\")\ndef root():\n    return {\"status\": \"ok\"}\n"},
-                "tests": "# Dummy tests\ndef test_root():\n    assert True\n",
-                "suggested_commit_message": "feat(api): add backend API",
+                "summary": f"Backend implementation for: {task_hint}",
+                "files": {
+                    f"{slug}.py": f'"""\nBackend module: {task_hint}\n"""\nfrom fastapi import APIRouter, HTTPException\nfrom pydantic import BaseModel\n\nrouter = APIRouter(prefix="/api", tags=["{slug}"])\n\n\nclass ItemRequest(BaseModel):\n    name: str\n\n\n@router.get("/{slug}")\ndef list_items():\n    return []\n\n\n@router.post("/{slug}", status_code=201)\ndef create_item(data: ItemRequest):\n    return {{"id": 1, "name": data.name}}\n',
+                    f"tests/test_{slug}.py": f'"""Tests for {task_hint}."""\nimport pytest\n\n\ndef test_{slug}_list():\n    """Test list endpoint returns empty list."""\n    assert [] == []\n\n\ndef test_{slug}_create():\n    """Test create returns correct structure."""\n    result = {{"id": 1, "name": "test"}}\n    assert result["id"] == 1\n',
+                },
+                "tests": f'"""Tests for {task_hint}."""\nimport pytest\n\n\ndef test_{slug}():\n    assert True\n',
+                "suggested_commit_message": f"feat(api): implement {slug.replace('_', ' ')}",
             }
+        # Frontend agent – generate unique Angular files per task based on task hint and counter
         if "frontend" in lowered and "angular" in lowered and "component" in lowered:
+            slug = re.sub(r"[^a-z0-9]+", "-", task_hint.lower())[:40].strip("-") or f"component-{counter}"
+            class_name = "".join(w.capitalize() for w in slug.split("-")) + "Component"
+            selector = f"app-{slug}"
             return {
-                "code": "import { Component } from '@angular/core';\n\n@Component({ selector: 'app-root', template: '<p>Dummy</p>' })\nexport class AppComponent {}\n",
-                "summary": "Dummy frontend implementation",
-                "files": {"app.component.ts": "import { Component } from '@angular/core';\n\n@Component({ selector: 'app-root', template: '<p>Dummy</p>' })\nexport class AppComponent {}\n"},
-                "components": ["AppComponent"],
-                "suggested_commit_message": "feat(ui): add frontend component",
+                "code": f"import {{ Component, OnInit }} from '@angular/core';\nimport {{ CommonModule }} from '@angular/common';\n\n/**\n * {class_name}\n * Implements: {task_hint}\n * Generated as task #{counter}\n */\n@Component({{\n  selector: '{selector}',\n  standalone: true,\n  imports: [CommonModule],\n  template: `\n    <div class=\"{slug}-container\">\n      <h2>{task_hint}</h2>\n      <p>Component implementation placeholder</p>\n    </div>\n  `,\n  styles: [`\n    .{slug}-container {{\n      padding: 16px;\n      max-width: 1200px;\n      margin: 0 auto;\n    }}\n  `]\n}})\nexport class {class_name} implements OnInit {{\n  /** Initialize the component and load data. */\n  ngOnInit(): void {{\n    console.log('{class_name} initialized');\n  }}\n}}\n",
+                "summary": f"Frontend component for: {task_hint}",
+                "files": {
+                    f"{slug}/{slug}.component.ts": f"import {{ Component, OnInit }} from '@angular/core';\nimport {{ CommonModule }} from '@angular/common';\n\n@Component({{\n  selector: '{selector}',\n  standalone: true,\n  imports: [CommonModule],\n  template: `<div class=\"{slug}\"><h2>{task_hint}</h2></div>`,\n}})\nexport class {class_name} implements OnInit {{\n  ngOnInit(): void {{\n    console.log('{class_name} initialized');\n  }}\n}}\n",
+                    f"{slug}/{slug}.component.spec.ts": f"import {{ ComponentFixture, TestBed }} from '@angular/core/testing';\nimport {{ {class_name} }} from './{slug}.component';\n\ndescribe('{class_name}', () => {{\n  let component: {class_name};\n  let fixture: ComponentFixture<{class_name}>;\n\n  beforeEach(async () => {{\n    await TestBed.configureTestingModule({{\n      imports: [{class_name}],\n    }}).compileComponents();\n    fixture = TestBed.createComponent({class_name});\n    component = fixture.componentInstance;\n    fixture.detectChanges();\n  }});\n\n  it('should create', () => {{\n    expect(component).toBeTruthy();\n  }});\n}});\n",
+                },
+                "components": [class_name],
+                "suggested_commit_message": f"feat(ui): add {slug} component",
             }
         if "integration_test" in lowered or "readme_content" in lowered or ("bugs_found" in lowered and "test_plan" in lowered):
             return {
@@ -108,6 +352,7 @@ class DummyLLMClient(LLMClient):
                 "live_test_notes": "Dummy live test notes",
                 "readme_content": "# Dummy README - build, run, test, deploy sections",
                 "suggested_commit_message": "test: add integration tests",
+                "approved": True,
             }
         # Spec parsing prompt
         if "acceptance_criteria" in lowered and "specification" in lowered:
@@ -175,3 +420,25 @@ class OllamaLLMClient(LLMClient):
         data = response.json()
         content = data["choices"][0]["message"]["content"]
         return self._extract_json(content)
+
+
+def get_llm_client() -> Union["DummyLLMClient", "OllamaLLMClient"]:
+    """
+    Create LLM client from environment configuration.
+
+    Environment variables:
+    - SW_LLM_PROVIDER: "dummy" (default) or "ollama"
+    - SW_LLM_MODEL: model name for ollama (default: deepseek-r1)
+    - SW_LLM_BASE_URL: ollama base URL (default: http://127.0.0.1:11434)
+    - SW_LLM_TIMEOUT: timeout in seconds (default: 1800)
+    """
+    provider = (os.environ.get(ENV_LLM_PROVIDER) or "dummy").lower().strip()
+    if provider == "ollama":
+        model = os.environ.get(ENV_LLM_MODEL) or "deepseek-r1"
+        base_url = os.environ.get(ENV_LLM_BASE_URL) or "http://127.0.0.1:11434"
+        try:
+            timeout = float(os.environ.get(ENV_LLM_TIMEOUT) or "1800")
+        except ValueError:
+            timeout = 1800.0
+        return OllamaLLMClient(model=model, base_url=base_url, timeout=timeout)
+    return DummyLLMClient()

@@ -54,10 +54,25 @@ Or from the project root:
 python software_engineering_team/agent_implementations/run_team.py
 ```
 
-By default, the script uses `DummyLLMClient` for testing without an LLM. To use a real model (e.g. Ollama):
+By default, the script uses `DummyLLMClient` for testing without an LLM. To use a real model (e.g. Ollama), set environment variables or edit `run_team.py` and set `USE_DUMMY = False`.
 
-1. Edit `run_team.py` and set `USE_DUMMY = False`.
-2. Ensure Ollama is running with a model (e.g. `ollama run deepseek-r1`).
+**LLM configuration (environment variables):**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SW_LLM_PROVIDER` | `dummy` or `ollama` | `dummy` |
+| `SW_LLM_MODEL` | Model name for Ollama | `deepseek-r1` |
+| `SW_LLM_BASE_URL` | Ollama API base URL | `http://127.0.0.1:11434` |
+| `SW_LLM_TIMEOUT` | Timeout in seconds | `1800` |
+
+Example with Ollama:
+```bash
+export SW_LLM_PROVIDER=ollama
+export SW_LLM_MODEL=deepseek-r1
+python -m agent_implementations.run_team
+```
+
+Ensure Ollama is running with the model (e.g. `ollama run deepseek-r1`).
 
 ## API
 

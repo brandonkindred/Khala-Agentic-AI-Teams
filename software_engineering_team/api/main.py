@@ -11,7 +11,7 @@ import logging
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -55,6 +55,14 @@ class RunTeamResponse(BaseModel):
     message: str = Field(default="Orchestrator started. Poll GET /run-team/{job_id} for status.")
 
 
+class FailedTaskDetail(BaseModel):
+    """Detail about a single failed task."""
+
+    task_id: str = Field(..., description="ID of the failed task.")
+    title: str = Field(default="", description="Task title.")
+    reason: str = Field(default="", description="Why the task failed.")
+
+
 class JobStatusResponse(BaseModel):
     """Response from GET /run-team/{job_id}."""
 
@@ -68,6 +76,10 @@ class JobStatusResponse(BaseModel):
     task_ids: list = Field(default_factory=list, description="Task IDs in execution order.")
     progress: Optional[int] = Field(None, description="Progress percentage.")
     error: Optional[str] = Field(None, description="Error message if failed.")
+    failed_tasks: List[FailedTaskDetail] = Field(
+        default_factory=list,
+        description="Details about tasks that failed, including the reason for failure.",
+    )
 
 
 def _run_orchestrator_background(job_id: str, repo_path: str) -> None:
@@ -127,6 +139,16 @@ def get_job_status(job_id: str) -> JobStatusResponse:
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
+    raw_failed = data.get("failed_tasks") or []
+    failed_tasks = [
+        FailedTaskDetail(
+            task_id=ft.get("task_id", ""),
+            title=ft.get("title", ""),
+            reason=ft.get("reason", ""),
+        )
+        for ft in raw_failed
+    ]
+
     return JobStatusResponse(
         job_id=job_id,
         status=data.get("status", JOB_STATUS_PENDING),
@@ -138,6 +160,65 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         task_ids=data.get("execution_order", []),
         progress=data.get("progress"),
         error=data.get("error"),
+        failed_tasks=failed_tasks,
+    )
+
+
+class RetryResponse(BaseModel):
+    """Response from POST /run-team/{job_id}/retry-failed."""
+
+    job_id: str = Field(..., description="Job ID.")
+    status: str = Field(default="running", description="Status after retry start.")
+    retrying_tasks: List[str] = Field(default_factory=list, description="Task IDs being retried.")
+    message: str = Field(default="")
+
+
+def _run_retry_background(job_id: str) -> None:
+    """Run retry in background thread."""
+    try:
+        from orchestrator import run_failed_tasks
+        run_failed_tasks(job_id)
+    except Exception as e:
+        logger.exception("Retry orchestrator failed")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+
+
+@app.post(
+    "/run-team/{job_id}/retry-failed",
+    response_model=RetryResponse,
+    summary="Retry failed tasks",
+    description="Re-run only the tasks that failed in a previous job run. "
+    "The job must have completed with failed tasks.",
+)
+def retry_failed_tasks(job_id: str) -> RetryResponse:
+    """
+    Retry the failed tasks from a previous job run.
+
+    Only works if the job has completed and has failed tasks.
+    """
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    status = data.get("status")
+    if status == "running":
+        raise HTTPException(status_code=409, detail="Job is still running")
+
+    failed_tasks = data.get("failed_tasks") or []
+    if not failed_tasks:
+        raise HTTPException(status_code=400, detail="No failed tasks to retry")
+
+    failed_ids = [ft.get("task_id", "") for ft in failed_tasks]
+
+    thread = threading.Thread(target=_run_retry_background, args=(job_id,))
+    thread.daemon = True
+    thread.start()
+
+    return RetryResponse(
+        job_id=job_id,
+        status="running",
+        retrying_tasks=failed_ids,
+        message=f"Retrying {len(failed_ids)} failed tasks. Poll GET /run-team/{job_id} for status.",
     )
 
 
