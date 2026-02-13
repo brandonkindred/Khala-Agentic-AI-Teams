@@ -1,6 +1,6 @@
 """Models for the DevOps Expert agent."""
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,10 @@ class DevOpsInput(BaseModel):
     architecture: Optional[SystemArchitecture] = None
     existing_pipeline: Optional[str] = None
     tech_stack: Optional[List[str]] = None  # e.g. ["python", "docker", "kubernetes"]
+    target_repo: Optional[Literal["backend", "frontend"]] = Field(
+        default=None,
+        description="Which application repo to containerize: backend (Python/FastAPI) or frontend (Node/Angular). When set, produce a Dockerfile and CI appropriate for that repo only.",
+    )
 
 
 class DevOpsOutput(BaseModel):

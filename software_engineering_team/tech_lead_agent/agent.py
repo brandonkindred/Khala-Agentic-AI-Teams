@@ -598,31 +598,51 @@ class TechLeadAgent:
         )
 
         try:
-            # Ask LLM if docs need updating
-            context_parts = [
-                f"**Task ID:** {task_update.task_id}",
-                f"**Agent type:** {task_update.agent_type}",
-                f"**Status:** {task_update.status}",
-                f"**Summary:** {task_update.summary}",
-                f"**Files changed:** {', '.join(task_update.files_changed) if task_update.files_changed else 'None reported'}",
-                "",
-                "**Current codebase state (excerpt):**",
-                (codebase_summary or "")[:4000] + ("..." if len(codebase_summary or "") > 4000 else ""),
-            ]
+            path = Path(repo_path).resolve()
+            readme_file = path / "README.md"
+            readme_missing_or_empty = (
+                not readme_file.exists() or not readme_file.read_text(encoding="utf-8", errors="replace").strip()
+            )
+            force_docs_because_readme_empty = (
+                readme_missing_or_empty
+                and task_update.agent_type in ("backend", "frontend")
+            )
 
-            prompt = TECH_LEAD_TRIGGER_DOCS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-            data = self.llm.complete_json(prompt, temperature=0.1)
+            # Ask LLM if docs need updating (unless we already force due to empty README)
+            should_update = force_docs_because_readme_empty
+            rationale = ""
+            if not force_docs_because_readme_empty:
+                context_parts = [
+                    f"**Task ID:** {task_update.task_id}",
+                    f"**Agent type:** {task_update.agent_type}",
+                    f"**Status:** {task_update.status}",
+                    f"**Summary:** {task_update.summary}",
+                    f"**Files changed:** {', '.join(task_update.files_changed) if task_update.files_changed else 'None reported'}",
+                    "",
+                    "**Current codebase state (excerpt):**",
+                    (codebase_summary or "")[:4000] + ("..." if len(codebase_summary or "") > 4000 else ""),
+                ]
+                if readme_missing_or_empty:
+                    context_parts.insert(0, "**Repository README.md:** missing or empty (you MUST set should_update_docs to true).")
 
-            should_update = bool(data.get("should_update_docs", False))
-            rationale = data.get("rationale", "")
+                prompt = TECH_LEAD_TRIGGER_DOCS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
+                data = self.llm.complete_json(prompt, temperature=0.1)
+                should_update = bool(data.get("should_update_docs", False))
+                rationale = data.get("rationale", "")
+
             logger.info(
-                "Tech Lead: should_update_docs=%s for task %s (%s)",
+                "Tech Lead: should_update_docs=%s for task %s (%s)%s",
                 should_update,
                 task_update.task_id,
-                rationale[:100],
+                rationale[:100] if rationale else "N/A",
+                " (forced: README missing or empty)" if force_docs_because_readme_empty else "",
             )
 
             if not should_update:
+                logger.info(
+                    "Tech Lead: skipping documentation update for task %s (should_update_docs=false)",
+                    task_update.task_id,
+                )
                 return
 
             # Trigger the Documentation Agent's full workflow
@@ -652,3 +672,91 @@ class TechLeadAgent:
                 task_update.task_id,
                 e,
             )
+
+    def trigger_devops_for_backend(
+        self,
+        devops_agent,
+        repo_path,
+        architecture,
+        spec_content: str,
+        existing_pipeline: str | None = None,
+    ) -> bool:
+        """
+        Trigger the DevOps agent to add containerization and deployment for the backend repo.
+        Writes Dockerfile, CI/CD, etc. into the backend repository.
+        Returns True if run and write succeeded, False otherwise (non-blocking).
+        """
+        from pathlib import Path
+        from devops_agent.models import DevOpsInput
+        from shared.repo_writer import write_agent_output
+
+        path = Path(repo_path).resolve()
+        if not (path / ".git").exists():
+            logger.warning("Tech Lead: skip DevOps for backend (not a git repo): %s", path)
+            return False
+        logger.info("Tech Lead: triggering DevOps for backend repo (containerize and deploy)")
+        try:
+            result = devops_agent.run(DevOpsInput(
+                task_description="Add containerization and deployment for the backend application. Produce a Dockerfile and CI/CD so this repo can be built and deployed. Backend is Python/FastAPI.",
+                requirements="Dockerfile for Python/FastAPI (pip install, uvicorn). CI/CD: install deps, run tests (pytest), build image. Make repo self-contained for build and deploy.",
+                architecture=architecture,
+                existing_pipeline=existing_pipeline if existing_pipeline and existing_pipeline != "# No code files found" else None,
+                tech_stack=["Python", "FastAPI", "PostgreSQL", "Docker"],
+                target_repo="backend",
+            ))
+            if result.needs_clarification and result.clarification_requests:
+                logger.warning("Tech Lead: DevOps (backend) requested clarification (non-blocking): %s", result.clarification_requests[:1])
+                return False
+            ok, msg = write_agent_output(path, result, subdir="")
+            if ok:
+                logger.info("Tech Lead: DevOps for backend completed: %s", result.summary[:100] if result.summary else "ok")
+            else:
+                logger.warning("Tech Lead: DevOps for backend write failed: %s", msg)
+            return ok
+        except Exception as e:
+            logger.warning("Tech Lead: DevOps for backend failed (non-blocking): %s", e)
+            return False
+
+    def trigger_devops_for_frontend(
+        self,
+        devops_agent,
+        repo_path,
+        architecture,
+        spec_content: str,
+        existing_pipeline: str | None = None,
+    ) -> bool:
+        """
+        Trigger the DevOps agent to add containerization and deployment for the frontend repo.
+        Writes Dockerfile, CI/CD, etc. into the frontend repository.
+        Returns True if run and write succeeded, False otherwise (non-blocking).
+        """
+        from pathlib import Path
+        from devops_agent.models import DevOpsInput
+        from shared.repo_writer import write_agent_output
+
+        path = Path(repo_path).resolve()
+        if not (path / ".git").exists():
+            logger.warning("Tech Lead: skip DevOps for frontend (not a git repo): %s", path)
+            return False
+        logger.info("Tech Lead: triggering DevOps for frontend repo (containerize and deploy)")
+        try:
+            result = devops_agent.run(DevOpsInput(
+                task_description="Add containerization and deployment for the frontend application. Produce a Dockerfile and CI/CD so this repo can be built and deployed. Frontend is Angular/Node.",
+                requirements="Dockerfile: multi-stage build (npm ci, ng build; serve with nginx or Node). CI/CD: install deps, run tests, build image. Make repo self-contained for build and deploy.",
+                architecture=architecture,
+                existing_pipeline=existing_pipeline if existing_pipeline and existing_pipeline != "# No code files found" else None,
+                tech_stack=["Angular", "Node", "Docker"],
+                target_repo="frontend",
+            ))
+            if result.needs_clarification and result.clarification_requests:
+                logger.warning("Tech Lead: DevOps (frontend) requested clarification (non-blocking): %s", result.clarification_requests[:1])
+                return False
+            ok, msg = write_agent_output(path, result, subdir="")
+            if ok:
+                logger.info("Tech Lead: DevOps for frontend completed: %s", result.summary[:100] if result.summary else "ok")
+            else:
+                logger.warning("Tech Lead: DevOps for frontend write failed: %s", msg)
+            return ok
+        except Exception as e:
+            logger.warning("Tech Lead: DevOps for frontend failed (non-blocking): %s", e)
+            return False

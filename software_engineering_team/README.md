@@ -40,6 +40,10 @@ All agents enforce these rules for produced code:
    - QA runs only after Security has reviewed the code
 5. Specialists execute in dependency order; outputs (code) are passed to Security and QA.
 
+## Requirements
+
+- **Frontend builds:** NVM and Node v22.12+ (or v20.19+). The pipeline uses NVM to run Angular CLI. Install [NVM](https://github.com/nvm-sh/nvm) and run `nvm install 22.12`.
+
 ## Quick Start
 
 ```bash

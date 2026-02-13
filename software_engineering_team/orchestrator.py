@@ -484,37 +484,10 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                 logger.info("[%s] Git setup task auto-completed", task_id)
                 continue
             if task.assignee == "devops":
-                from devops_agent.models import DevOpsInput
-                existing_pipeline = _read_repo_code(path, [".yml", ".yaml"])
-                current_task = task
-                result = None
-                for _ in range(MAX_CLARIFICATION_REFINEMENTS + 1):
-                    result = agents["devops"].run(DevOpsInput(
-                        task_description=current_task.description,
-                        requirements=_task_requirements(current_task),
-                        architecture=architecture,
-                        existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
-                        tech_stack=["Python", "FastAPI", "Angular", "PostgreSQL", "Docker"],
-                    ))
-                    if not result.needs_clarification or not result.clarification_requests:
-                        break
-                    current_task = tech_lead.refine_task(
-                        current_task, result.clarification_requests, spec_content, architecture,
-                    )
-                if result and not result.needs_clarification:
-                    ok, _ = write_agent_output(path, result, subdir="devops")
-                    if ok:
-                        completed.add(task_id)
-                        task_update = _build_task_update(task_id, "devops", result)
-                        _run_tech_lead_review(
-                            tech_lead, task_update, spec_content, architecture,
-                            all_tasks, completed, _remaining_queue_ids(), path,
-                            doc_agent=agents.get("documentation"),
-                        )
-                    else:
-                        failed[task_id] = "Write failed"
-                else:
-                    failed[task_id] = "Agent needs clarification after refinements"
+                # Defer containerization to after backend and frontend complete; skip early devops run.
+                completed.add(task_id)
+                logger.info("[%s] DevOps task deferred; will run after backend and frontend complete", task_id)
+                continue
 
         # Backend and frontend workers run in parallel (one task per agent type at a time)
         def _backend_worker() -> None:
@@ -582,6 +555,15 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                         failed[task_id] = f"Unhandled exception: {e}"
                     logger.exception("[%s] Backend task exception", task_id)
                 logger.info("[%s] <<< Backend worker done", task_id)
+
+            # After backend agent is done with all tasks for this repo, containerize it
+            devops_agent = agents.get("devops")
+            if devops_agent and backend_dir.is_dir() and (backend_dir / ".git").exists():
+                existing_pipeline = _read_repo_code(backend_dir, [".yml", ".yaml"])
+                tech_lead.trigger_devops_for_backend(
+                    devops_agent, backend_dir, architecture, spec_content,
+                    existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+                )
 
         def _frontend_worker() -> None:
             while True:
@@ -747,6 +729,15 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                     logger.exception("[%s] Frontend task exception", task_id)
                     checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
 
+            # After frontend agent is done with all tasks for this repo, containerize it
+            devops_agent = agents.get("devops")
+            if devops_agent and frontend_dir.is_dir() and (frontend_dir / ".git").exists():
+                existing_pipeline = _read_repo_code(frontend_dir, [".yml", ".yaml"])
+                tech_lead.trigger_devops_for_frontend(
+                    devops_agent, frontend_dir, architecture, spec_content,
+                    existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+                )
+
         t_backend = threading.Thread(target=_backend_worker)
         t_frontend = threading.Thread(target=_frontend_worker)
         t_backend.start()
@@ -770,6 +761,21 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             logger.warning(
                 "Unprocessed tasks still in queues: backend=%s, frontend=%s",
                 len(backend_queue), len(frontend_queue),
+            )
+
+        # DevOps: containerize every git repo created by the pipeline (backend and frontend)
+        devops_agent = agents.get("devops")
+        if devops_agent and backend_dir.is_dir() and (backend_dir / ".git").exists():
+            existing_pipeline = _read_repo_code(backend_dir, [".yml", ".yaml"])
+            tech_lead.trigger_devops_for_backend(
+                devops_agent, backend_dir, architecture, spec_content,
+                existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+            )
+        if devops_agent and frontend_dir.is_dir() and (frontend_dir / ".git").exists():
+            existing_pipeline = _read_repo_code(frontend_dir, [".yml", ".yaml"])
+            tech_lead.trigger_devops_for_frontend(
+                devops_agent, frontend_dir, architecture, spec_content,
+                existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
             )
 
         # Persist failed task details and retryable state in job store
@@ -821,6 +827,43 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                     ))
                     if sec_result.vulnerabilities:
                         logger.warning("Security (frontend) found %s vulnerabilities", len(sec_result.vulnerabilities))
+
+        # Final documentation pass: ensure README exists in backend and frontend repos if missing/empty
+        doc_agent = agents.get("documentation")
+        if doc_agent and completed_code_task_ids:
+            for repo_name, repo_dir in [("backend", backend_dir), ("frontend", frontend_dir)]:
+                if not repo_dir.is_dir() or not (repo_dir / ".git").exists():
+                    continue
+                readme_path = repo_dir / "README.md"
+                if readme_path.exists() and readme_path.read_text(encoding="utf-8", errors="replace").strip():
+                    continue
+                logger.info(
+                    "Final documentation pass: %s repo README missing or empty, running Documentation Agent",
+                    repo_name,
+                )
+                try:
+                    codebase_content = _truncate_for_context(
+                        _read_repo_code(
+                            repo_dir,
+                            [".py"] if repo_name == "backend" else [".ts", ".tsx", ".html", ".scss"],
+                        ),
+                        MAX_EXISTING_CODE_CHARS,
+                    )
+                    doc_agent.run_full_workflow(
+                        repo_path=repo_dir,
+                        task_id=f"final-docs-{repo_name}",
+                        task_summary="Update all project documentation; ensure README and key sections exist.",
+                        agent_type=repo_name,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                        codebase_content=codebase_content,
+                    )
+                except Exception as doc_err:
+                    logger.warning(
+                        "Final documentation pass failed for %s repo (non-blocking): %s",
+                        repo_name,
+                        doc_err,
+                    )
 
         update_job(job_id, status=JOB_STATUS_COMPLETED, progress=100, current_task=None)
 
@@ -1049,6 +1092,21 @@ def run_failed_tasks(job_id: str) -> None:
                 task_obj = all_tasks.get(tid)
                 title = task_obj.title if task_obj else tid
                 logger.warning("  [%s] %s — Reason: %s", tid, title, reason)
+
+        # DevOps: containerize every git repo that exists (same as main run)
+        devops_agent = agents.get("devops")
+        if devops_agent and backend_dir.is_dir() and (backend_dir / ".git").exists():
+            existing_pipeline = _read_repo_code(backend_dir, [".yml", ".yaml"])
+            tech_lead.trigger_devops_for_backend(
+                devops_agent, backend_dir, architecture, spec_content,
+                existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+            )
+        if devops_agent and frontend_dir.is_dir() and (frontend_dir / ".git").exists():
+            existing_pipeline = _read_repo_code(frontend_dir, [".yml", ".yaml"])
+            tech_lead.trigger_devops_for_frontend(
+                devops_agent, frontend_dir, architecture, spec_content,
+                existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+            )
 
         failed_details = [
             {"task_id": tid, "reason": reason, "title": (all_tasks.get(tid).title if all_tasks.get(tid) else tid)}

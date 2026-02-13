@@ -105,7 +105,7 @@ Implement the requested frontend functionality using Angular. When qa_issues or 
 - SOLID principles (especially SRP, DIP in component/service design)
 - JSDoc on every class, component, and method (how used, why it exists, constraints)
 - Unit/component tests achieving at least 85% coverage
-- Code must compile with `ng build` without errors
+- Code must compile with `ng build` without errors (requires Node v20.19+ or v22.12+; use NVM and `.nvmrc` in the project)
 
 **Output format:**
 Return a single JSON object with:

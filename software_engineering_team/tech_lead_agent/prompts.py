@@ -519,6 +519,8 @@ TECH_LEAD_TRIGGER_DOCS_PROMPT = """You are a Staff-level Tech Lead. A specialist
 - Only internal comments or documentation strings changed
 - The change was a trivial fix with no user-facing impact
 
+**CRITICAL:** If the repository's README.md is missing or empty, you MUST set should_update_docs to true so that documentation can be created.
+
 **Input:**
 - Task that just completed (ID, agent type, summary, files changed)
 - Current state of the codebase

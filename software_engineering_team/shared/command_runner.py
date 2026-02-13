@@ -263,10 +263,21 @@ def run_command_with_nvm(
             stdout="",
             stderr="NVM not found; cannot switch Node version",
         )
+    # Version check: fail fast if Node is below Angular CLI minimum (v20.19 or v22.12)
+    version_check = (
+        "node -e 'var v=process.versions.node.split(\".\").map(Number);"
+        "var maj=v[0],min=v[1];"
+        "if(maj>22)process.exit(0);"
+        "if(maj===22&&min>=12)process.exit(0);"
+        "if(maj===20&&min>=19)process.exit(0);"
+        "console.error(\"Node \"+process.version+\" is below Angular CLI minimum v20.19/v22.12\");"
+        "process.exit(1);'"
+    )
     script = (
         f"{nvm_prefix} && "
-        f"(nvm install {node_version} --no-progress && nvm use {node_version}) || "
-        f"(nvm install {NVM_NODE_FALLBACK_VERSION} --no-progress && nvm use {NVM_NODE_FALLBACK_VERSION}) && "
+        f"{{ nvm install {node_version} --no-progress && nvm use {node_version}; }} || "
+        f"{{ nvm install {NVM_NODE_FALLBACK_VERSION} --no-progress && nvm use {NVM_NODE_FALLBACK_VERSION}; }} && "
+        f"{version_check} && "
         f"{shlex.join(cmd)}"
     )
     logger.info(
@@ -322,8 +333,9 @@ def run_command_with_nvm(
 def run_ng_build_with_nvm_fallback(project_path: str | Path) -> CommandResult:
     """
     Run ng build with Node version Angular CLI needs. When NVM is available, use
-    NVM to install and use ANGULAR_NODE_VERSION (22.12) first; only fall back to
-    system Node when NVM is not found.
+    NVM to install and use ANGULAR_NODE_VERSION (22.12) first. When NVM is not
+    found, return an explicit failure instead of using system Node (which is
+    often too old).
     """
     if _get_nvm_script_prefix() is not None:
         logger.info("Running ng build with NVM (node %s)", ANGULAR_NODE_VERSION)
@@ -333,7 +345,23 @@ def run_ng_build_with_nvm_fallback(project_path: str | Path) -> CommandResult:
             node_version=ANGULAR_NODE_VERSION,
             timeout=BUILD_TIMEOUT,
         )
-    return run_ng_build(project_path)
+    msg = (
+        "NVM not found. Angular CLI requires Node v20.19+ or v22.12+. "
+        "Install NVM (https://github.com/nvm-sh/nvm) and run: nvm install 22.12"
+    )
+    try:
+        r = subprocess.run(
+            ["node", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if r.returncode == 0 and (r.stdout or r.stderr or "").strip():
+            ver = (r.stdout or r.stderr or "").strip()
+            msg += f" System Node is {ver}."
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        pass
+    return CommandResult(success=False, exit_code=-1, stdout="", stderr=msg)
 
 
 def run_ng_serve_smoke_test(project_path: str | Path, port: int = 4299) -> CommandResult:
@@ -351,11 +379,13 @@ def run_ng_serve_smoke_test(project_path: str | Path, port: int = 4299) -> Comma
     nvm_prefix = _get_nvm_script_prefix()
     if nvm_prefix is not None:
         script = (
-            f"{nvm_prefix} && nvm install {ANGULAR_NODE_VERSION} --no-progress; "
-            f"nvm use {ANGULAR_NODE_VERSION} && npx ng serve --port {port} --no-open"
+            f"{nvm_prefix} && "
+            f"{{ nvm install {ANGULAR_NODE_VERSION} --no-progress && nvm use {ANGULAR_NODE_VERSION}; }} || "
+            f"{{ nvm install {NVM_NODE_FALLBACK_VERSION} --no-progress && nvm use {NVM_NODE_FALLBACK_VERSION}; }} && "
+            f"npx ng serve --port {port} --no-open"
         )
         run_cmd: list[str] = ["bash", "-c", script]
-        logger.info("Using NVM (node %s) for ng serve smoke test", ANGULAR_NODE_VERSION)
+        logger.info("Using NVM (node %s, fallback %s) for ng serve smoke test", ANGULAR_NODE_VERSION, NVM_NODE_FALLBACK_VERSION)
     else:
         run_cmd = ["npx", "ng", "serve", "--port", str(port), "--no-open"]
 
@@ -746,6 +776,9 @@ def ensure_frontend_project_initialized(project_dir: str | Path) -> CommandResul
     _write_if_missing(app / "app.component.scss", "/* App root styles */\n")
     _write_if_missing(app / "app.config.ts", _MINIMAL_APP_CONFIG_TS)
     _write_if_missing(app / "app.routes.ts", _MINIMAL_APP_ROUTES_TS)
+
+    # Step 6: Pin Node version for nvm use
+    _write_if_missing(cwd / ".nvmrc", ANGULAR_NODE_VERSION + "\n")
 
     logger.info("Frontend project initialized successfully at %s", cwd)
     return CommandResult(

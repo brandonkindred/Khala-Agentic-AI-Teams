@@ -40,6 +40,12 @@ class DevOpsExpertAgent:
             context_parts.extend(["", "**Existing Pipeline:**", input_data.existing_pipeline])
         if input_data.tech_stack:
             context_parts.extend(["", "**Tech Stack:**", ", ".join(input_data.tech_stack)])
+        if getattr(input_data, "target_repo", None):
+            context_parts.extend([
+                "",
+                "**Target repo:** You are producing containerization and deployment artifacts for this application repo only.",
+                f"- target_repo={input_data.target_repo}",
+            ])
 
         prompt = DEVOPS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         data = self.llm.complete_json(prompt, temperature=0.2)
