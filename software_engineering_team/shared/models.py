@@ -20,6 +20,7 @@ class TaskType(str, Enum):
     BACKEND = "backend"
     FRONTEND = "frontend"
     QA = "qa"
+    DOCUMENTATION = "documentation"
 
 
 class TaskStatus(str, Enum):

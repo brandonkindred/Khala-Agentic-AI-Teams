@@ -52,6 +52,39 @@ CODING_STANDARDS = """
    - Description: imperative, lowercase, no period at end
    - Examples: `feat(auth): add JWT refresh endpoint`, `fix(api): handle null user in login`
    - Breaking changes: append `!` after type or add `BREAKING CHANGE:` in footer
+
+8. **Naming Conventions** – All names (files, folders, classes, functions, variables) must follow professional standards:
+
+   **General rules (ALL languages):**
+   - Names describe WHAT the thing IS or DOES – never derived from a task description
+   - Names must be 1-3 words maximum (e.g. `user-list`, `auth_service`, `TaskController`)
+   - BANNED words in file/folder/class names: `implement`, `create`, `build`, `setup`, `configure`, `add`, `make`, `define`, `develop`, `write`, `design`, `establish`, `the`, `that`, `with`, `using`, `which`, `for`, `and`, `a`, `an`
+   - To derive a name: extract the core NOUN from the requirement, discard all verbs and filler words
+   - Example: task "Implement the UserForm component using reactive forms" → name is `user-form`, NOT `implement-the-userform-component-using`
+
+   **Python:**
+   - Modules/files: `snake_case` (e.g. `user_service.py`, `task_router.py`, `auth_middleware.py`)
+   - Functions/variables: `snake_case` (e.g. `get_user_by_id`, `is_authenticated`)
+   - Classes: `PascalCase` (e.g. `UserService`, `TaskRepository`, `AuthMiddleware`)
+   - Constants: `UPPER_SNAKE_CASE` (e.g. `MAX_RETRIES`, `DEFAULT_PAGE_SIZE`)
+   - GOOD: `user_service.py`, `task_router.py`, `auth.py`, `models.py`
+   - BAD: `implement_user_registration_with_email.py`, `create_the_authentication_service.py`
+
+   **TypeScript / Angular:**
+   - Files/folders: `kebab-case` (e.g. `user-list/`, `task-detail.component.ts`, `auth.service.ts`)
+   - Component selectors: `kebab-case` with `app-` prefix (e.g. `app-user-list`, `app-nav-bar`)
+   - Classes/components: `PascalCase` (e.g. `UserListComponent`, `AuthService`, `TaskDetailComponent`)
+   - Variables/methods: `camelCase` (e.g. `getUserById`, `isLoading`, `taskList`)
+   - GOOD: `user-list/`, `task-form/`, `app-shell/`, `nav-bar/`, `auth.service.ts`
+   - BAD: `implement-the-userlistcomponent-that/`, `create-the-angular-application-shell/`
+
+   **Java:**
+   - Classes: `PascalCase` (e.g. `UserController`, `TaskService`, `AuthFilter`)
+   - Methods/variables: `camelCase` (e.g. `getUserById`, `isAuthenticated`)
+   - Packages: all lowercase (e.g. `com.app.controller`, `com.app.service`)
+   - Constants: `UPPER_SNAKE_CASE` (e.g. `MAX_RETRIES`)
+   - GOOD: `UserController.java`, `TaskService.java`, `AuthFilter.java`
+   - BAD: `ImplementUserRegistrationEndpoint.java`, `CreateTheAuthenticationService.java`
 """
 
 COMMIT_MESSAGE_STANDARDS = """

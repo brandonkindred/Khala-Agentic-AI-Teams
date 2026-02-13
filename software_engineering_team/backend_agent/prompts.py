@@ -45,11 +45,33 @@ BACKEND_PROMPT = """You are a Senior Backend Software Engineer. You implement pr
    - Repositories: `src/main/java/com/app/repository/<Resource>Repository.java`
    - Tests: `src/test/java/com/app/<Resource>Test.java`
 
-4. **File naming rules:**
-   - Python: snake_case for modules and functions (e.g., `task_router.py`, `user_service.py`)
-   - Java: PascalCase for classes (e.g., `TaskController.java`)
+4. **File naming rules (CRITICAL – violations will be rejected):**
+
+   **How to derive a file/module name (FOLLOW THIS ALGORITHM):**
+   a. Read the task description and identify the core NOUN – what is the resource or module? (e.g., "user", "task", "auth", "order")
+   b. DISCARD all verbs and filler words: implement, create, build, add, setup, configure, make, define, develop, write, design, establish, the, that, with, using, which, for, and, a, an, endpoint, service, module
+   c. Convert the remaining 1-3 word noun phrase to the appropriate case (snake_case for Python, PascalCase for Java)
+   d. If the result is longer than 25 characters, shorten it
+
+   **Examples of correct name derivation:**
+   - Task: "Create user registration endpoint with email validation" → `user_registration.py` or `app/routers/users.py`
+   - Task: "Implement CRUD endpoints for tasks with pagination" → `app/routers/tasks.py`
+   - Task: "Build the authentication service with JWT" → `app/services/auth.py`
+   - Task: "Define data models and database schema for orders" → `app/models/order.py`
+   - Task: "Add input validation middleware" → `app/middleware/validation.py`
+
+   **Python:** snake_case for modules and functions (e.g., `task_router.py`, `user_service.py`)
+   **Java:** PascalCase for classes (e.g., `TaskController.java`, `UserService.java`)
+
+   **GOOD names:** `user_service.py`, `task_router.py`, `auth.py`, `order_model.py`, `UserController.java`
+   **BAD names (NEVER USE):** `implement_user_registration_with_email.py`, `create_the_authentication_service.py`, `build_crud_endpoints_for_tasks.py`
+
+   **HARD RULES:**
    - Names must be short and descriptive (1-3 words max)
-   - NEVER use task descriptions as file names
+   - NEVER use the task description as a file name – extract the noun only
+   - NEVER start a name with a verb (implement_, create_, build_, add_, setup_, etc.)
+   - NEVER include filler words (_the_, _that_, _with_, _using_, _which_, _for_)
+   - Names that violate these rules WILL BE REJECTED and the task will fail
 
 5. **Code must be complete and runnable:**
    - All imports must be valid

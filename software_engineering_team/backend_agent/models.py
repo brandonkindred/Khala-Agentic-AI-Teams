@@ -1,5 +1,7 @@
 """Models for the Backend Expert agent."""
 
+from __future__ import annotations
+
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -58,3 +60,59 @@ class BackendOutput(BaseModel):
         default_factory=list,
         description="Specific questions for Tech Lead when task is poorly defined",
     )
+
+
+class ReviewIterationRecord(BaseModel):
+    """Record of a single review iteration within the workflow loop."""
+
+    iteration: int = Field(description="1-based iteration number")
+    build_passed: bool = True
+    build_errors: str = ""
+    code_review_approved: bool = True
+    code_review_issue_count: int = 0
+    qa_approved: bool = True
+    qa_issue_count: int = 0
+    dbc_already_compliant: bool = True
+    dbc_comments_added: int = 0
+    dbc_comments_updated: int = 0
+    action_taken: str = Field(
+        default="",
+        description="What the agent did in response: 'fixed_build', 'fixed_review_issues', 'fixed_qa_issues', 'no_issues'",
+    )
+
+
+class BackendWorkflowResult(BaseModel):
+    """
+    Full result of the backend agent's autonomous workflow.
+
+    Captures the outcome of the 9-step lifecycle:
+    1. Create feature branch
+    2. Generate code
+    3. Commit code
+    4. Trigger QA + DBC reviews
+    5. Wait for review responses
+    6. Fix issues and commit
+    7. Merge to development
+    8. Delete feature branch
+    9. Notify tech lead
+
+    Postconditions:
+        - If success is True, the feature branch has been merged and deleted.
+        - If success is False, failure_reason describes why.
+        - review_history contains a record for each review iteration attempted.
+    """
+
+    task_id: str = Field(description="ID of the task that was executed")
+    success: bool = Field(default=False, description="True when code was merged to development")
+    branch_name: str = Field(default="", description="Feature branch name used (e.g. feature/task-id)")
+    iterations_used: int = Field(default=0, description="Number of review iterations completed")
+    final_files: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Final set of files written to the repository",
+    )
+    review_history: List[ReviewIterationRecord] = Field(
+        default_factory=list,
+        description="Record of each review iteration for auditability",
+    )
+    summary: str = Field(default="", description="Final summary of what was implemented")
+    failure_reason: str = Field(default="", description="Reason for failure if success is False")

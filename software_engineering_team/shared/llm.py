@@ -41,6 +41,68 @@ class LLMClient(ABC):
         return json.dumps(result)
 
 
+# Words to strip when extracting a component/module name from a task description.
+# These are verbs and filler words that describe the task, not the thing being built.
+_STRIP_VERBS = {
+    "implement", "create", "build", "add", "setup", "set", "up", "configure",
+    "make", "define", "develop", "write", "design", "establish", "generate",
+    "fetches", "displays", "handles", "manages", "processes", "returns",
+    "provides", "supports", "includes", "enables", "renders",
+}
+_STRIP_FILLERS = {
+    "the", "that", "with", "using", "which", "for", "and", "a", "an", "to",
+    "of", "in", "on", "by", "from", "into", "as", "via", "its", "all",
+    "application", "system", "project", "based", "proper", "production",
+    "quality", "complete", "full", "new", "existing",
+    "angular", "react", "vue", "spring", "fastapi", "flask", "django",
+}
+_STRIP_SUFFIXES = {
+    "component", "service", "module", "endpoint", "endpoints", "middleware",
+    "guard", "pipe", "directive", "interceptor", "controller", "repository",
+}
+
+
+def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 25) -> str:
+    """
+    Extract a short, meaningful name from a task description hint.
+
+    Strips leading verbs, filler words, and generic suffixes to produce
+    a 1-3 word noun phrase suitable for file/folder names.
+
+    Args:
+        hint: Task description text (e.g. "Implement the UserFormComponent using reactive forms")
+        separator: Word separator for the output ("-" for kebab-case, "_" for snake_case)
+        max_length: Maximum length of the resulting name
+
+    Returns:
+        A short name like "user-form" or "user_form"
+
+    Examples:
+        >>> _extract_name_from_hint("Implement the UserFormComponent using Angular reactive forms")
+        'user-form'
+        >>> _extract_name_from_hint("Create user registration endpoint with email validation", "_")
+        'user_registration'
+        >>> _extract_name_from_hint("Build the task list component with pagination")
+        'task-list'
+    """
+    # Split PascalCase/camelCase words (e.g. "UserFormComponent" -> "User Form Component")
+    expanded = re.sub(r"([a-z])([A-Z])", r"\1 \2", hint)
+    # Normalize to lowercase words
+    words = re.sub(r"[^a-z0-9\s]+", " ", expanded.lower()).split()
+    # Strip verbs, fillers, and generic suffixes
+    filtered = [
+        w for w in words
+        if w not in _STRIP_VERBS and w not in _STRIP_FILLERS and w not in _STRIP_SUFFIXES
+    ]
+    # Take first 3 meaningful words
+    name_words = filtered[:3] if filtered else words[:2]
+    result = separator.join(name_words)
+    # Truncate to max_length
+    if len(result) > max_length:
+        result = result[:max_length].rstrip(separator)
+    return result or f"item{separator}1"
+
+
 class DummyLLMClient(LLMClient):
     """No-op implementation for tests and environments without an LLM."""
 
@@ -74,7 +136,7 @@ class DummyLLMClient(LLMClient):
                 "components": [{"name": "API", "type": "backend"}, {"name": "WebApp", "type": "frontend"}],
             }
         # Tech Lead codebase analysis prompt (Step 1 of multi-step planning)
-        if "codebase audit" in lowered and "files_inventory" in lowered:
+        elif "codebase audit" in lowered and "files_inventory" in lowered:
             return {
                 "files_inventory": [
                     {"path": "initial_spec.md", "language": "markdown", "purpose": "Project specification", "key_exports": []},
@@ -87,7 +149,7 @@ class DummyLLMClient(LLMClient):
                 "summary": "The repository contains only the project specification (initial_spec.md). No application code, infrastructure, or tests exist yet. The entire application needs to be built from scratch according to the spec.",
             }
         # Tech Lead spec analysis prompt (Step 2 of multi-step planning)
-        if "deep analysis" in lowered and "total_deliverable_count" in lowered:
+        elif "deep analysis" in lowered and "total_deliverable_count" in lowered:
             return {
                 "data_entities": [{"name": "User", "attributes": ["id", "email", "password_hash", "created_at"], "relationships": [], "validation_rules": ["email must be valid", "password required"]}],
                 "api_endpoints": [
@@ -119,13 +181,13 @@ class DummyLLMClient(LLMClient):
                 "summary": "The spec requires a full-stack authentication application with user registration, login, token refresh, and protected routes. The backend needs FastAPI with JWT auth, the frontend needs Angular with login/registration/dashboard screens, and DevOps needs Docker and CI/CD.",
             }
         # Tech Lead evaluate QA prompt (create fix tasks from QA feedback)
-        if "qa agent has reviewed code" in lowered and "fix tasks" in lowered:
+        elif "qa agent has reviewed code" in lowered and "fix tasks" in lowered:
             return {"tasks": [], "rationale": "QA approved; no fix tasks needed (dummy)."}
         # Tech Lead should run security prompt
-        if "run security review now" in lowered and "90%" in lowered:
+        elif "run security review now" in lowered and "90%" in lowered:
             return {"run_security": False, "rationale": "Code coverage not yet at 90% (dummy)."}
         # Tech Lead review progress prompt
-        if "reviewing the progress" in lowered and "spec_compliance_pct" in lowered:
+        elif "reviewing the progress" in lowered and "spec_compliance_pct" in lowered:
             return {
                 "tasks": [],
                 "spec_compliance_pct": 50,
@@ -133,7 +195,7 @@ class DummyLLMClient(LLMClient):
                 "rationale": "Progress review complete. Current tasks cover the planned scope (dummy).",
             }
         # Tech Lead refine task prompt (clarification)
-        if "clarification questions from specialist" in lowered:
+        elif "clarification questions from specialist" in lowered:
             return {
                 "title": "Refined Task Title",
                 "description": "Refined task description with additional details from spec. The implementation should follow Angular best practices using standalone components and reactive forms. All public methods must have JSDoc documentation. Error states must be handled with user-friendly messages.",
@@ -142,7 +204,7 @@ class DummyLLMClient(LLMClient):
                 "acceptance_criteria": ["Criterion 1: Component renders without errors", "Criterion 2: User interactions trigger correct API calls", "Criterion 3: Error states display meaningful messages"],
             }
         # Tech Lead prompt asks for tasks + execution_order – return granular plan with descriptive IDs
-        if ("execution_order" in lowered or "task_assignments" in lowered) and "tasks" in lowered:
+        elif ("execution_order" in lowered or "task_assignments" in lowered) and "tasks" in lowered:
             return {
                 "tasks": [
                     {
@@ -288,8 +350,8 @@ class DummyLLMClient(LLMClient):
                 ],
                 "clarification_questions": [],
             }
-        # Code review agent - must come before generic backend/frontend matches
-        if "senior code reviewer" in lowered and ("approved" in lowered or "issues" in lowered):
+        # Code review agent
+        elif "senior code reviewer" in lowered and ("approved" in lowered or "issues" in lowered):
             return {
                 "approved": True,
                 "issues": [],
@@ -297,13 +359,49 @@ class DummyLLMClient(LLMClient):
                 "spec_compliance_notes": "Code aligns with task requirements and acceptance criteria.",
                 "suggested_commit_message": "",
             }
-        if "security" in lowered and "vulnerabilities" in lowered:
+        elif "security" in lowered and "vulnerabilities" in lowered:
             return {
                 "vulnerabilities": [],
                 "summary": "No security issues found (dummy)",
             }
+        # Backend agent – generate unique files per task based on task hint and counter
+        # NOTE: Uses the agent's unique role identifier from BACKEND_PROMPT to avoid
+        # matching DevOps/Frontend prompts that share CODING_STANDARDS keywords.
+        elif "senior backend software engineer" in lowered:
+            # Derive a short module name from the task hint (e.g. "user_registration")
+            slug = _extract_name_from_hint(task_hint, separator="_", max_length=25) or f"module_{counter}"
+            class_prefix = slug.title().replace("_", "")
+            return {
+                "code": f'"""\nBackend module: {task_hint}\nGenerated as task #{counter}\n"""\nfrom fastapi import APIRouter, Depends, HTTPException\nfrom pydantic import BaseModel\n\nrouter = APIRouter(prefix="/api", tags=["{slug}"])\n\n\nclass {class_prefix}Request(BaseModel):\n    """Request model for {task_hint}."""\n    name: str\n\n\nclass {class_prefix}Response(BaseModel):\n    """Response model for {task_hint}."""\n    id: int\n    name: str\n\n\n@router.get("/{slug}")\ndef list_items():\n    """List all items for {task_hint}."""\n    return []\n\n\n@router.post("/{slug}", status_code=201)\ndef create_item(data: {class_prefix}Request):\n    """Create item for {task_hint}."""\n    return {class_prefix}Response(id=1, name=data.name)\n',
+                "language": "python",
+                "summary": f"Backend implementation for: {task_hint}",
+                "files": {
+                    f"app/routers/{slug}.py": f'"""\nBackend module: {task_hint}\n"""\nfrom fastapi import APIRouter, HTTPException\nfrom pydantic import BaseModel\n\nrouter = APIRouter(prefix="/api", tags=["{slug}"])\n\n\nclass ItemRequest(BaseModel):\n    name: str\n\n\n@router.get("/{slug}")\ndef list_items():\n    return []\n\n\n@router.post("/{slug}", status_code=201)\ndef create_item(data: ItemRequest):\n    return {{"id": 1, "name": data.name}}\n',
+                    f"tests/test_{slug}.py": f'"""Tests for {task_hint}."""\nimport pytest\n\n\ndef test_{slug}_list():\n    """Test list endpoint returns empty list."""\n    assert [] == []\n\n\ndef test_{slug}_create():\n    """Test create returns correct structure."""\n    result = {{"id": 1, "name": "test"}}\n    assert result["id"] == 1\n',
+                },
+                "tests": f'"""Tests for {task_hint}."""\nimport pytest\n\n\ndef test_{slug}():\n    assert True\n',
+                "suggested_commit_message": f"feat(api): implement {slug.replace('_', ' ')}",
+            }
+        # Frontend agent – generate unique Angular files per task based on task hint and counter
+        # NOTE: Uses the agent's unique role identifier from FRONTEND_PROMPT to avoid
+        # matching DevOps prompts that share CODING_STANDARDS keywords.
+        elif "senior frontend software engineer" in lowered:
+            # Derive a short component name from the task hint (e.g. "user-form")
+            slug = _extract_name_from_hint(task_hint, separator="-", max_length=25) or f"component-{counter}"
+            class_name = "".join(w.capitalize() for w in slug.split("-")) + "Component"
+            selector = f"app-{slug}"
+            return {
+                "code": f"import {{ Component, OnInit }} from '@angular/core';\nimport {{ CommonModule }} from '@angular/common';\n\n/**\n * {class_name}\n * Implements: {task_hint}\n * Generated as task #{counter}\n */\n@Component({{\n  selector: '{selector}',\n  standalone: true,\n  imports: [CommonModule],\n  template: `\n    <div class=\"{slug}-container\">\n      <h2>{task_hint}</h2>\n      <p>Component implementation placeholder</p>\n    </div>\n  `,\n  styles: [`\n    .{slug}-container {{\n      padding: 16px;\n      max-width: 1200px;\n      margin: 0 auto;\n    }}\n  `]\n}})\nexport class {class_name} implements OnInit {{\n  /** Initialize the component and load data. */\n  ngOnInit(): void {{\n    console.log('{class_name} initialized');\n  }}\n}}\n",
+                "summary": f"Frontend component for: {task_hint}",
+                "files": {
+                    f"src/app/components/{slug}/{slug}.component.ts": f"import {{ Component, OnInit }} from '@angular/core';\nimport {{ CommonModule }} from '@angular/common';\n\n@Component({{\n  selector: '{selector}',\n  standalone: true,\n  imports: [CommonModule],\n  template: `<div class=\"{slug}\"><h2>{task_hint}</h2></div>`,\n}})\nexport class {class_name} implements OnInit {{\n  ngOnInit(): void {{\n    console.log('{class_name} initialized');\n  }}\n}}\n",
+                    f"src/app/components/{slug}/{slug}.component.spec.ts": f"import {{ ComponentFixture, TestBed }} from '@angular/core/testing';\nimport {{ {class_name} }} from './{slug}.component';\n\ndescribe('{class_name}', () => {{\n  let component: {class_name};\n  let fixture: ComponentFixture<{class_name}>;\n\n  beforeEach(async () => {{\n    await TestBed.configureTestingModule({{\n      imports: [{class_name}],\n    }}).compileComponents();\n    fixture = TestBed.createComponent({class_name});\n    component = fixture.componentInstance;\n    fixture.detectChanges();\n  }});\n\n  it('should create', () => {{\n    expect(component).toBeTruthy();\n  }});\n}});\n",
+                },
+                "components": [class_name],
+                "suggested_commit_message": f"feat(ui): add {slug} component",
+            }
         # DevOps agent – generate unique content per task using counter
-        if "devops" in lowered or "pipeline" in lowered:
+        elif "devops" in lowered or "pipeline" in lowered:
             return {
                 "pipeline_yaml": f"# CI Pipeline (task #{counter})\nname: ci\non: [push]\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: echo 'Build step {counter}'",
                 "iac_content": f"# Infrastructure as Code (task #{counter})\nresource \"docker_image\" \"app\" {{\n  name = \"app:latest\"\n}}",
@@ -312,37 +410,38 @@ class DummyLLMClient(LLMClient):
                 "summary": f"DevOps configuration generated for: {task_hint[:60]}",
                 "suggested_commit_message": f"ci: add devops configuration (task #{counter})",
             }
-        # Backend agent – generate unique files per task based on task hint and counter
-        if "backend" in lowered and "language" in lowered and ("code" in lowered or "files" in lowered):
-            # Derive a module name from the task hint for unique filenames
-            slug = re.sub(r"[^a-z0-9]+", "_", task_hint.lower())[:40].strip("_") or f"module_{counter}"
+        # Documentation agent - README prompt
+        elif "technical writer" in lowered and "readme_content" in lowered and "readme_changed" in lowered:
             return {
-                "code": f'"""\nBackend module: {task_hint}\nGenerated as task #{counter}\n"""\nfrom fastapi import APIRouter, Depends, HTTPException\nfrom pydantic import BaseModel\n\nrouter = APIRouter(prefix="/api", tags=["{slug}"])\n\n\nclass {slug.title().replace("_", "")}Request(BaseModel):\n    """Request model for {task_hint}."""\n    name: str\n\n\nclass {slug.title().replace("_", "")}Response(BaseModel):\n    """Response model for {task_hint}."""\n    id: int\n    name: str\n\n\n@router.get("/{slug}")\ndef list_items():\n    """List all items for {task_hint}."""\n    return []\n\n\n@router.post("/{slug}", status_code=201)\ndef create_item(data: {slug.title().replace("_", "")}Request):\n    """Create item for {task_hint}."""\n    return {slug.title().replace("_", "")}Response(id=1, name=data.name)\n',
-                "language": "python",
-                "summary": f"Backend implementation for: {task_hint}",
-                "files": {
-                    f"{slug}.py": f'"""\nBackend module: {task_hint}\n"""\nfrom fastapi import APIRouter, HTTPException\nfrom pydantic import BaseModel\n\nrouter = APIRouter(prefix="/api", tags=["{slug}"])\n\n\nclass ItemRequest(BaseModel):\n    name: str\n\n\n@router.get("/{slug}")\ndef list_items():\n    return []\n\n\n@router.post("/{slug}", status_code=201)\ndef create_item(data: ItemRequest):\n    return {{"id": 1, "name": data.name}}\n',
-                    f"tests/test_{slug}.py": f'"""Tests for {task_hint}."""\nimport pytest\n\n\ndef test_{slug}_list():\n    """Test list endpoint returns empty list."""\n    assert [] == []\n\n\ndef test_{slug}_create():\n    """Test create returns correct structure."""\n    result = {{"id": 1, "name": "test"}}\n    assert result["id"] == 1\n',
-                },
-                "tests": f'"""Tests for {task_hint}."""\nimport pytest\n\n\ndef test_{slug}():\n    assert True\n',
-                "suggested_commit_message": f"feat(api): implement {slug.replace('_', ' ')}",
+                "readme_content": f"# Project\n\nAuto-generated documentation (task #{counter}).\n\n## Prerequisites\n\n- Python 3.11+\n- Node 18+\n- Docker\n\n## Installation\n\n```bash\npip install -r requirements.txt\n```\n\n## Running\n\n```bash\nuvicorn main:app --reload\n```\n\n## Testing\n\n```bash\npytest\n```\n\n## Deployment\n\nSee docker-compose.yml\n",
+                "readme_changed": True,
+                "summary": f"Updated README with project setup and usage instructions (task #{counter})",
+                "suggested_commit_message": f"docs(readme): update project documentation (task #{counter})",
             }
-        # Frontend agent – generate unique Angular files per task based on task hint and counter
-        if "frontend" in lowered and "angular" in lowered and "component" in lowered:
-            slug = re.sub(r"[^a-z0-9]+", "-", task_hint.lower())[:40].strip("-") or f"component-{counter}"
-            class_name = "".join(w.capitalize() for w in slug.split("-")) + "Component"
-            selector = f"app-{slug}"
+        # Documentation agent - contributors prompt
+        elif "contributors.md" in lowered and "contributors_content" in lowered and "contributors_changed" in lowered:
             return {
-                "code": f"import {{ Component, OnInit }} from '@angular/core';\nimport {{ CommonModule }} from '@angular/common';\n\n/**\n * {class_name}\n * Implements: {task_hint}\n * Generated as task #{counter}\n */\n@Component({{\n  selector: '{selector}',\n  standalone: true,\n  imports: [CommonModule],\n  template: `\n    <div class=\"{slug}-container\">\n      <h2>{task_hint}</h2>\n      <p>Component implementation placeholder</p>\n    </div>\n  `,\n  styles: [`\n    .{slug}-container {{\n      padding: 16px;\n      max-width: 1200px;\n      margin: 0 auto;\n    }}\n  `]\n}})\nexport class {class_name} implements OnInit {{\n  /** Initialize the component and load data. */\n  ngOnInit(): void {{\n    console.log('{class_name} initialized');\n  }}\n}}\n",
-                "summary": f"Frontend component for: {task_hint}",
-                "files": {
-                    f"{slug}/{slug}.component.ts": f"import {{ Component, OnInit }} from '@angular/core';\nimport {{ CommonModule }} from '@angular/common';\n\n@Component({{\n  selector: '{selector}',\n  standalone: true,\n  imports: [CommonModule],\n  template: `<div class=\"{slug}\"><h2>{task_hint}</h2></div>`,\n}})\nexport class {class_name} implements OnInit {{\n  ngOnInit(): void {{\n    console.log('{class_name} initialized');\n  }}\n}}\n",
-                    f"{slug}/{slug}.component.spec.ts": f"import {{ ComponentFixture, TestBed }} from '@angular/core/testing';\nimport {{ {class_name} }} from './{slug}.component';\n\ndescribe('{class_name}', () => {{\n  let component: {class_name};\n  let fixture: ComponentFixture<{class_name}>;\n\n  beforeEach(async () => {{\n    await TestBed.configureTestingModule({{\n      imports: [{class_name}],\n    }}).compileComponents();\n    fixture = TestBed.createComponent({class_name});\n    component = fixture.componentInstance;\n    fixture.detectChanges();\n  }});\n\n  it('should create', () => {{\n    expect(component).toBeTruthy();\n  }});\n}});\n",
-                },
-                "components": [class_name],
-                "suggested_commit_message": f"feat(ui): add {slug} component",
+                "contributors_content": f"# Contributors\n\n| Agent | Role | Contributions |\n|-------|------|---------------|\n| Backend Agent | Backend Engineer | API endpoints, data models |\n| Frontend Agent | Frontend Engineer | Angular components, UI |\n| DevOps Agent | Infrastructure | Docker, CI/CD |\n| Documentation Agent | Technical Writer | README, docs |\n",
+                "contributors_changed": True,
+                "summary": f"Updated contributors list (task #{counter})",
             }
-        if "integration_test" in lowered or "readme_content" in lowered or ("bugs_found" in lowered and "test_plan" in lowered):
+        # Tech Lead trigger documentation prompt
+        elif "documentation update needed" in lowered and "should_update_docs" in lowered:
+            return {
+                "should_update_docs": True,
+                "rationale": "Task completed with code changes that affect project setup or usage (dummy).",
+            }
+        # DbC Comments agent
+        elif "design by contract" in lowered and "comments_added" in lowered and "already_compliant" in lowered:
+            return {
+                "files": {},
+                "comments_added": 0,
+                "comments_updated": 0,
+                "already_compliant": True,
+                "summary": "All code fully complies with Design by Contract principles. Excellent documentation!",
+                "suggested_commit_message": "docs(dbc): verify Design by Contract compliance",
+            }
+        elif "integration_test" in lowered or "readme_content" in lowered or ("bugs_found" in lowered and "test_plan" in lowered):
             return {
                 "bugs_found": [],
                 "integration_tests": "# Dummy integration test",
@@ -355,7 +454,7 @@ class DummyLLMClient(LLMClient):
                 "approved": True,
             }
         # Spec parsing prompt
-        if "acceptance_criteria" in lowered and "specification" in lowered:
+        elif "acceptance_criteria" in lowered and "specification" in lowered:
             return {
                 "title": "Software Project",
                 "description": "Project specification (parsed from initial_spec.md).",

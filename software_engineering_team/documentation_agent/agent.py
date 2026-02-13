@@ -1,0 +1,424 @@
+"""Documentation agent: maintains README.md and project documentation."""
+
+from __future__ import annotations
+
+import logging
+import time
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from shared.git_utils import (
+    DEVELOPMENT_BRANCH,
+    checkout_branch,
+    create_feature_branch,
+    delete_branch,
+    merge_branch,
+    write_files_and_commit,
+)
+from shared.llm import LLMClient
+
+from .models import DocumentationInput, DocumentationOutput, DocumentationStatus
+from .prompts import DOCUMENTATION_CONTRIBUTORS_PROMPT, DOCUMENTATION_README_PROMPT
+
+logger = logging.getLogger(__name__)
+
+# Maximum time (seconds) for the full documentation workflow before forced cleanup
+MAX_WORKFLOW_SECONDS = 300
+
+# Maximum characters of codebase content to send to the LLM
+MAX_CODEBASE_CHARS = 40000
+
+
+class DocumentationAgent:
+    """
+    Documentation agent that maintains README.md and CONTRIBUTORS.md for the project.
+    Triggered by the Tech Lead after each task completes.
+
+    Preconditions:
+        - llm_client must be a valid, non-None LLMClient instance
+
+    Postconditions:
+        - Agent is ready to generate documentation via run() or run_full_workflow()
+
+    Invariants:
+        - Documentation updates never block the main pipeline (fail-safe)
+        - Git branches are always cleaned up, even on failure
+    """
+
+    def __init__(self, llm_client: LLMClient) -> None:
+        """
+        Initialize the Documentation agent.
+
+        Preconditions:
+            - llm_client is not None
+
+        Postconditions:
+            - self.llm is set to the provided client
+        """
+        assert llm_client is not None, "llm_client is required"
+        self.llm = llm_client
+
+    def run(self, input_data: DocumentationInput) -> DocumentationOutput:
+        """
+        Generate updated documentation based on the current codebase state.
+        This method only generates content -- it does NOT perform git operations.
+
+        Preconditions:
+            - input_data contains valid repo_path and task_id
+            - input_data.codebase_content is a non-empty string
+
+        Postconditions:
+            - Returns DocumentationOutput with updated readme and/or contributors content
+            - readme_changed and contributors_changed flags accurately reflect whether updates occurred
+
+        Raises:
+            Exception: If LLM calls fail (handled internally, returns partial output)
+        """
+        logger.info(
+            "Documentation: generating docs for task %s (agent=%s)",
+            input_data.task_id,
+            input_data.agent_type,
+        )
+
+        # Truncate codebase if too large
+        codebase = input_data.codebase_content or ""
+        if len(codebase) > MAX_CODEBASE_CHARS:
+            codebase = codebase[:MAX_CODEBASE_CHARS] + (
+                f"\n\n... [truncated, {len(codebase) - MAX_CODEBASE_CHARS} more chars]"
+            )
+
+        # --- Step 1: Update README.md ---
+        readme_content = ""
+        readme_changed = False
+        readme_summary = ""
+        commit_message = "docs(readme): update project documentation"
+
+        try:
+            readme_context = [
+                f"**Task just completed:** {input_data.task_id} ({input_data.agent_type})",
+                f"**Task summary:** {input_data.task_summary}",
+            ]
+
+            if input_data.existing_readme:
+                readme_context.extend([
+                    "",
+                    "**Current README.md:**",
+                    "---",
+                    input_data.existing_readme,
+                    "---",
+                ])
+            else:
+                readme_context.append("\n**Current README.md:** (none -- create from scratch)")
+
+            if input_data.spec_content:
+                spec_excerpt = input_data.spec_content
+                if len(spec_excerpt) > 12000:
+                    spec_excerpt = spec_excerpt[:12000] + "..."
+                readme_context.extend([
+                    "",
+                    "**Project specification:**",
+                    "---",
+                    spec_excerpt,
+                    "---",
+                ])
+
+            if input_data.architecture:
+                readme_context.extend([
+                    "",
+                    "**Architecture overview:**",
+                    input_data.architecture.overview,
+                ])
+
+            readme_context.extend([
+                "",
+                "**Full codebase:**",
+                "---",
+                codebase,
+                "---",
+            ])
+
+            prompt = DOCUMENTATION_README_PROMPT + "\n\n---\n\n" + "\n".join(readme_context)
+            data = self.llm.complete_json(prompt, temperature=0.2)
+
+            readme_content = data.get("readme_content", "")
+            readme_changed = bool(data.get("readme_changed", False))
+            readme_summary = data.get("summary", "")
+            commit_message = data.get(
+                "suggested_commit_message",
+                "docs(readme): update project documentation",
+            )
+
+            # Safety: if content was returned but flag says unchanged, check for real diff
+            if readme_content and not readme_changed:
+                if readme_content.strip() != (input_data.existing_readme or "").strip():
+                    readme_changed = True
+
+        except Exception as e:
+            logger.warning("Documentation: README generation failed: %s", e)
+            readme_summary = f"README update skipped due to error: {e}"
+
+        # --- Step 2: Check CONTRIBUTORS.md ---
+        contributors_content = ""
+        contributors_changed = False
+        contributors_summary = ""
+
+        try:
+            contrib_context = [
+                f"**Task just completed:** {input_data.task_id}",
+                f"**Agent type:** {input_data.agent_type}",
+                f"**Task summary:** {input_data.task_summary}",
+            ]
+
+            if input_data.existing_contributors:
+                contrib_context.extend([
+                    "",
+                    "**Current CONTRIBUTORS.md:**",
+                    "---",
+                    input_data.existing_contributors,
+                    "---",
+                ])
+            else:
+                contrib_context.append(
+                    "\n**Current CONTRIBUTORS.md:** (none -- create if appropriate)"
+                )
+
+            if input_data.spec_content:
+                contrib_context.extend([
+                    "",
+                    "**Project specification (excerpt):**",
+                    (input_data.spec_content or "")[:4000],
+                ])
+
+            prompt = DOCUMENTATION_CONTRIBUTORS_PROMPT + "\n\n---\n\n" + "\n".join(contrib_context)
+            data = self.llm.complete_json(prompt, temperature=0.2)
+
+            contributors_content = data.get("contributors_content", "")
+            contributors_changed = bool(data.get("contributors_changed", False))
+            contributors_summary = data.get("summary", "")
+
+        except Exception as e:
+            logger.warning("Documentation: CONTRIBUTORS check failed: %s", e)
+            contributors_summary = f"CONTRIBUTORS check skipped due to error: {e}"
+
+        # Build combined summary
+        summaries = []
+        if readme_summary:
+            summaries.append(f"README: {readme_summary}")
+        if contributors_summary:
+            summaries.append(f"CONTRIBUTORS: {contributors_summary}")
+        combined_summary = "; ".join(summaries) if summaries else "No documentation changes."
+
+        logger.info(
+            "Documentation: done, readme_changed=%s, contributors_changed=%s",
+            readme_changed,
+            contributors_changed,
+        )
+
+        return DocumentationOutput(
+            readme_content=readme_content,
+            contributors_content=contributors_content,
+            readme_changed=readme_changed,
+            contributors_changed=contributors_changed,
+            summary=combined_summary,
+            suggested_commit_message=commit_message,
+        )
+
+    def run_full_workflow(
+        self,
+        repo_path: str | Path,
+        task_id: str,
+        task_summary: str,
+        agent_type: str,
+        spec_content: str,
+        architecture: Any,
+        codebase_content: str,
+        on_status: Optional[Callable[[DocumentationStatus, str], None]] = None,
+    ) -> DocumentationOutput:
+        """
+        End-to-end documentation workflow: branch, generate, commit, merge, cleanup.
+
+        Preconditions:
+            - repo_path points to a valid git repository
+            - task_id is a non-empty string
+            - The repository is currently on the development branch
+
+        Postconditions:
+            - If successful: docs are updated and merged to development, branch is deleted
+            - If failed: branch is cleaned up, development branch is checked out
+            - Returns DocumentationOutput describing what was done
+
+        Invariants:
+            - The repository is always left on the development branch
+            - No documentation failure blocks the main pipeline
+        """
+        path = Path(repo_path).resolve()
+        branch_name = f"docs/{task_id}"
+        workflow_start = time.monotonic()
+
+        def _update(status: DocumentationStatus, detail: str = "") -> None:
+            if on_status:
+                on_status(status, detail)
+            logger.info("DocAgent [%s]: %s %s", task_id, status.value, detail)
+
+        def _elapsed() -> float:
+            return time.monotonic() - workflow_start
+
+        def _check_timeout() -> bool:
+            if _elapsed() > MAX_WORKFLOW_SECONDS:
+                logger.warning(
+                    "DocAgent [%s]: workflow timeout (%.1fs > %ss), aborting",
+                    task_id,
+                    _elapsed(),
+                    MAX_WORKFLOW_SECONDS,
+                )
+                return True
+            return False
+
+        _update(DocumentationStatus.STARTING)
+
+        try:
+            # Step 1: Create docs branch
+            ok, msg = create_feature_branch(path, DEVELOPMENT_BRANCH, f"docs/{task_id}")
+            if not ok:
+                logger.warning("DocAgent [%s]: branch creation failed: %s", task_id, msg)
+                _update(DocumentationStatus.FAILED, f"Branch creation failed: {msg}")
+                return DocumentationOutput(
+                    summary=f"Documentation update skipped: branch creation failed ({msg})",
+                )
+
+            if _check_timeout():
+                _update(DocumentationStatus.FAILED, "timeout")
+                self._cleanup_branch(path, branch_name)
+                return DocumentationOutput(summary="Documentation update skipped: timeout")
+
+            # Step 2: Read existing docs
+            _update(DocumentationStatus.REVIEWING_CODEBASE)
+            existing_readme = self._read_file(path / "README.md")
+            existing_contributors = self._read_file(path / "CONTRIBUTORS.md")
+
+            # Step 3: Generate documentation
+            _update(DocumentationStatus.UPDATING_README)
+            input_data = DocumentationInput(
+                repo_path=str(path),
+                task_id=task_id,
+                task_summary=task_summary,
+                agent_type=agent_type,
+                spec_content=spec_content,
+                architecture=architecture,
+                codebase_content=codebase_content,
+                existing_readme=existing_readme,
+                existing_contributors=existing_contributors,
+            )
+
+            result = self.run(input_data)
+
+            if _check_timeout():
+                _update(DocumentationStatus.FAILED, "timeout")
+                self._cleanup_branch(path, branch_name)
+                return DocumentationOutput(summary="Documentation update skipped: timeout")
+
+            # Step 4: Write and commit if changes were made
+            files_to_write: Dict[str, str] = {}
+            if result.readme_changed and result.readme_content:
+                files_to_write["README.md"] = result.readme_content
+            if result.contributors_changed and result.contributors_content:
+                files_to_write["CONTRIBUTORS.md"] = result.contributors_content
+
+            if not files_to_write:
+                logger.info("DocAgent [%s]: no documentation changes needed", task_id)
+                _update(DocumentationStatus.COMPLETE, "no changes")
+                self._cleanup_branch(path, branch_name)
+                return result
+
+            _update(DocumentationStatus.COMMITTING)
+            ok, msg = write_files_and_commit(
+                path,
+                files_to_write,
+                result.suggested_commit_message,
+            )
+            if not ok:
+                logger.warning("DocAgent [%s]: commit failed: %s", task_id, msg)
+                _update(DocumentationStatus.FAILED, f"Commit failed: {msg}")
+                self._cleanup_branch(path, branch_name)
+                return DocumentationOutput(
+                    summary=f"Documentation commit failed: {msg}",
+                )
+
+            if _check_timeout():
+                _update(DocumentationStatus.FAILED, "timeout")
+                self._cleanup_branch(path, branch_name)
+                return DocumentationOutput(summary="Documentation update skipped: timeout")
+
+            # Step 5: Merge to development
+            _update(DocumentationStatus.MERGING)
+            merge_ok, merge_msg = merge_branch(path, branch_name, DEVELOPMENT_BRANCH)
+            if not merge_ok:
+                logger.warning("DocAgent [%s]: merge failed: %s", task_id, merge_msg)
+                _update(DocumentationStatus.FAILED, f"Merge failed: {merge_msg}")
+                self._cleanup_branch(path, branch_name)
+                return DocumentationOutput(
+                    summary=f"Documentation merge failed: {merge_msg}",
+                    readme_changed=result.readme_changed,
+                    contributors_changed=result.contributors_changed,
+                )
+
+            # Step 6: Delete docs branch
+            delete_branch(path, branch_name)
+            checkout_branch(path, DEVELOPMENT_BRANCH)
+
+            elapsed = _elapsed()
+            _update(DocumentationStatus.COMPLETE, f"in {elapsed:.1f}s")
+            logger.info(
+                "DocAgent [%s]: documentation updated and merged in %.1fs (files: %s)",
+                task_id,
+                elapsed,
+                list(files_to_write.keys()),
+            )
+            return result
+
+        except Exception as e:
+            logger.exception("DocAgent [%s]: workflow failed with exception", task_id)
+            _update(DocumentationStatus.FAILED, str(e))
+            self._cleanup_branch(path, branch_name)
+            return DocumentationOutput(
+                summary=f"Documentation update failed: {e}",
+            )
+
+    def _cleanup_branch(self, repo_path: Path, branch_name: str) -> None:
+        """
+        Clean up a documentation branch on failure.
+
+        Preconditions:
+            - repo_path is a valid git repository path
+
+        Postconditions:
+            - Repository is checked out to the development branch
+            - The docs branch is deleted if it exists
+        """
+        try:
+            checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+            delete_branch(repo_path, branch_name)
+        except Exception as cleanup_err:
+            logger.warning(
+                "DocAgent: branch cleanup failed for %s: %s",
+                branch_name,
+                cleanup_err,
+            )
+
+    @staticmethod
+    def _read_file(file_path: Path) -> str:
+        """
+        Read a file and return its content, or empty string if not found.
+
+        Preconditions:
+            - file_path is a Path object
+
+        Postconditions:
+            - Returns the file content as a string, or empty string if file doesn't exist
+        """
+        try:
+            if file_path.exists():
+                return file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            logger.warning("DocAgent: failed to read %s: %s", file_path, e)
+        return ""

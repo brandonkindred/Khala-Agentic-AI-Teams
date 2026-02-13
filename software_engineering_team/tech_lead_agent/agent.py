@@ -19,6 +19,7 @@ from .prompts import (
     TECH_LEAD_REFINE_TASK_PROMPT,
     TECH_LEAD_REVIEW_PROGRESS_PROMPT,
     TECH_LEAD_SHOULD_RUN_SECURITY_PROMPT,
+    TECH_LEAD_TRIGGER_DOCS_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -560,3 +561,94 @@ class TechLeadAgent:
             logger.info("Tech Lead: identified gaps: %s", [g[:60] for g in gaps[:5]])
 
         return new_tasks
+
+    def trigger_documentation_update(
+        self,
+        doc_agent,
+        repo_path,
+        task_update: TaskUpdate,
+        spec_content: str,
+        architecture,
+        codebase_summary: str,
+    ) -> None:
+        """
+        Decide whether documentation needs updating after a task completes,
+        and if so, trigger the Documentation Agent to update README.md and CONTRIBUTORS.md.
+
+        Preconditions:
+            - doc_agent is a valid DocumentationAgent instance
+            - repo_path is a valid git repository path
+            - task_update contains details about the just-completed task
+
+        Postconditions:
+            - If docs need updating: Documentation Agent runs full workflow (branch, update, merge)
+            - If docs don't need updating: only a log message is produced
+            - Any failure is logged but does not raise (non-blocking)
+
+        Invariants:
+            - The repository is always left on the development branch
+            - Documentation failures never block the main pipeline
+        """
+        from pathlib import Path
+
+        logger.info(
+            "Tech Lead: evaluating documentation update for task %s (%s)",
+            task_update.task_id,
+            task_update.agent_type,
+        )
+
+        try:
+            # Ask LLM if docs need updating
+            context_parts = [
+                f"**Task ID:** {task_update.task_id}",
+                f"**Agent type:** {task_update.agent_type}",
+                f"**Status:** {task_update.status}",
+                f"**Summary:** {task_update.summary}",
+                f"**Files changed:** {', '.join(task_update.files_changed) if task_update.files_changed else 'None reported'}",
+                "",
+                "**Current codebase state (excerpt):**",
+                (codebase_summary or "")[:4000] + ("..." if len(codebase_summary or "") > 4000 else ""),
+            ]
+
+            prompt = TECH_LEAD_TRIGGER_DOCS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
+            data = self.llm.complete_json(prompt, temperature=0.1)
+
+            should_update = bool(data.get("should_update_docs", False))
+            rationale = data.get("rationale", "")
+            logger.info(
+                "Tech Lead: should_update_docs=%s for task %s (%s)",
+                should_update,
+                task_update.task_id,
+                rationale[:100],
+            )
+
+            if not should_update:
+                return
+
+            # Trigger the Documentation Agent's full workflow
+            logger.info(
+                "Tech Lead: triggering Documentation Agent for task %s",
+                task_update.task_id,
+            )
+            doc_result = doc_agent.run_full_workflow(
+                repo_path=repo_path,
+                task_id=task_update.task_id,
+                task_summary=task_update.summary,
+                agent_type=task_update.agent_type,
+                spec_content=spec_content,
+                architecture=architecture,
+                codebase_content=codebase_summary,
+            )
+            logger.info(
+                "Tech Lead: Documentation Agent completed for task %s: %s",
+                task_update.task_id,
+                doc_result.summary[:200] if doc_result.summary else "no summary",
+            )
+
+        except Exception as e:
+            # Non-blocking: documentation failure should never stop the pipeline
+            logger.warning(
+                "Tech Lead: documentation update failed for task %s (non-blocking): %s",
+                task_update.task_id,
+                e,
+            )

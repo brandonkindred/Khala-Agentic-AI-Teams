@@ -23,10 +23,31 @@ FRONTEND_PROMPT = """You are a Senior Frontend Software Engineer expert in Angul
 
 **CRITICAL RULES - Angular Naming & File Structure:**
 
-1. **Component/service names MUST be short, descriptive kebab-case identifiers** derived from what the component DOES, NOT from the task description.
-   - GOOD: `task-list`, `app-shell`, `todo-item`, `login-form`, `dashboard`, `nav-bar`, `task-detail`
-   - BAD: `create-the-angular-application-shell-tha`, `implement-user-authentication-for`, `build-the-task-list-component-with`
-   - RULE: Component names must be 1-3 words max in kebab-case (e.g., `task-list`, `app-header`). NEVER use the task description as a name.
+1. **Component/service names MUST be short, descriptive kebab-case identifiers** derived from WHAT the component IS, NOT from the task description.
+
+   **How to derive a name (FOLLOW THIS ALGORITHM):**
+   a. Read the task description and identify the core NOUN – what is the thing being built? (e.g., "user form", "task list", "app shell", "nav bar")
+   b. DISCARD all verbs and filler words: implement, create, build, add, setup, configure, make, define, develop, write, design, establish, the, that, with, using, which, for, and, a, an, component, service, module
+   c. Convert the remaining 1-3 word noun phrase to kebab-case
+   d. If the result is longer than 25 characters, shorten it
+
+   **Examples of correct name derivation:**
+   - Task: "Implement the UserFormComponent using Angular reactive forms" → Name: `user-form`
+   - Task: "Create the Angular application shell with routing and navigation" → Name: `app-shell`
+   - Task: "Build the task list component with pagination and filtering" → Name: `task-list`
+   - Task: "Implement the UserListComponent that fetches and displays users" → Name: `user-list`
+   - Task: "Create landing page component with hero section" → Name: `landing-page`
+   - Task: "Add error handling interceptor and error pages" → Name: `error-handler`
+
+   **GOOD names:** `task-list`, `app-shell`, `todo-item`, `login-form`, `dashboard`, `nav-bar`, `task-detail`, `user-form`, `user-list`, `landing-page`
+   **BAD names (NEVER USE):** `create-the-angular-application-shell-tha`, `implement-user-authentication-for`, `build-the-task-list-component-with`, `implement-the-userformcomponent-using-an`, `implement-the-userlistcomponent-that-fet`
+
+   **HARD RULES:**
+   - Component/folder names must be 1-3 words max in kebab-case (e.g., `task-list`, `app-header`)
+   - NEVER use the task description as a name – extract the noun only
+   - NEVER start a name with a verb (implement-, create-, build-, add-, setup-, etc.)
+   - NEVER include filler words (the-, that-, with-, using-, which-, for-)
+   - Names that violate these rules WILL BE REJECTED and the task will fail
 
 2. **All file paths MUST follow Angular project structure:**
    - Components: `src/app/components/<component-name>/<component-name>.component.ts` (and `.html`, `.scss`, `.spec.ts`)

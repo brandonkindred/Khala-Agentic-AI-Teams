@@ -32,6 +32,8 @@ AGENT_LOGGERS = [
     "security_agent.agent",
     "qa_agent.agent",
     "code_review_agent.agent",
+    "dbc_comments_agent.agent",
+    "documentation_agent.agent",
     "spec_parser",
     "api.main",
 ]

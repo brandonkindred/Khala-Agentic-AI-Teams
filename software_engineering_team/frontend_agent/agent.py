@@ -14,9 +14,20 @@ from .prompts import FRONTEND_PROMPT
 logger = logging.getLogger(__name__)
 
 # Validation constants
-MAX_PATH_SEGMENT_LENGTH = 40
+MAX_PATH_SEGMENT_LENGTH = 30
 ANGULAR_PATH_PATTERN = re.compile(r"^src/")
-BAD_NAME_PATTERN = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[a-z]+-[a-z]+-[a-z]+")  # 6+ hyphenated words = likely sentence
+BAD_NAME_PATTERN = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[a-z]+")  # 4+ hyphenated words = likely sentence
+VERB_PREFIX_PATTERN = re.compile(
+    r"^(implement|create|build|setup|configure|add|make|define|develop|write|design|establish)-"
+)
+FILLER_WORD_PATTERN = re.compile(r"-(the|that|with|using|which|for|and|a|an)-")
+
+# Well-known directory names that are always allowed
+_ALLOWED_DIRS = frozenset({
+    "src", "app", "lib", "components", "services", "models", "guards", "pipes",
+    "shared", "pages", "features", "assets", "styles", "environments", "modules",
+    "interceptors", "directives", "utils", "helpers", "test", "spec", "dist", "node_modules",
+})
 
 
 def _validate_file_paths(files: Dict[str, str]) -> tuple[Dict[str, str], list[str]]:
@@ -24,23 +35,39 @@ def _validate_file_paths(files: Dict[str, str]) -> tuple[Dict[str, str], list[st
     Validate and sanitize file paths from LLM output.
 
     Returns (validated_files, warnings).
-    Rejects files with path segments > MAX_PATH_SEGMENT_LENGTH or names
-    that look like task descriptions.
+    Rejects files with:
+    - Path segments > MAX_PATH_SEGMENT_LENGTH
+    - Names that look like sentences (4+ hyphenated words)
+    - Names starting with verbs (implement-, create-, build-, etc.)
+    - Names containing filler words (-the-, -with-, -using-, etc.)
+    - Empty content
     """
     validated = {}
     warnings = []
     for path, content in files.items():
-        # Check for overly long path segments (likely task-description-as-name)
         segments = path.split("/")
         bad_segment = False
         for seg in segments:
             name_part = seg.split(".")[0]  # strip extension
+            if not name_part:
+                continue
+            # Skip well-known directory names
+            if name_part.lower() in _ALLOWED_DIRS:
+                continue
             if len(name_part) > MAX_PATH_SEGMENT_LENGTH:
                 warnings.append(f"Path segment too long (likely task description as name): '{seg}' in '{path}'")
                 bad_segment = True
                 break
             if BAD_NAME_PATTERN.match(name_part):
-                warnings.append(f"Path segment looks like a sentence, not a component name: '{seg}' in '{path}'")
+                warnings.append(f"Path segment looks like a sentence (4+ hyphenated words): '{seg}' in '{path}'")
+                bad_segment = True
+                break
+            if VERB_PREFIX_PATTERN.match(name_part):
+                warnings.append(f"Path segment starts with a verb (task description as name): '{seg}' in '{path}'")
+                bad_segment = True
+                break
+            if FILLER_WORD_PATTERN.search(name_part):
+                warnings.append(f"Path segment contains filler words (task description as name): '{seg}' in '{path}'")
                 bad_segment = True
                 break
         if bad_segment:

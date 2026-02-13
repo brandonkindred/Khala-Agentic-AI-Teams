@@ -17,18 +17,44 @@ from .git_utils import write_files_and_commit
 logger = logging.getLogger(__name__)
 
 # Maximum length for any single path segment (directory or filename without extension)
-MAX_SEGMENT_LENGTH = 40
+MAX_SEGMENT_LENGTH = 30
 
-# Pattern that matches names with 6+ hyphenated words (likely a sentence, not a component name)
-_SENTENCE_NAME_RE = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[a-z]+-[a-z]+-[a-z]+")
+# Pattern that matches names with 4+ hyphenated words (likely a sentence, not a component name)
+_SENTENCE_NAME_RE = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[a-z]+")
+
+# Pattern that matches names with 4+ underscored words (sentence-like Python names)
+_SENTENCE_NAME_SNAKE_RE = re.compile(r"^[a-z]+_[a-z]+_[a-z]+_[a-z]+_[a-z]+")
+
+# Pattern that rejects segments starting with common verbs (task-description-as-name)
+_VERB_PREFIX_RE = re.compile(
+    r"^(implement|create|build|setup|configure|add|make|define|develop|write|design|establish)[_-]"
+)
+
+# Pattern that detects filler words embedded in path segments
+_FILLER_WORD_RE = re.compile(
+    r"[_-](the|that|with|using|which|for|and|a|an)[_-]"
+)
+
+# Well-known directory names that are always allowed regardless of other rules
+_ALLOWED_DIRS = frozenset({
+    "src", "app", "lib", "tests", "test", "spec", "components", "services",
+    "models", "schemas", "routers", "controllers", "guards", "pipes", "shared",
+    "pages", "features", "assets", "styles", "environments", "infrastructure",
+    "config", "utils", "helpers", "middleware", "interceptors", "directives",
+    "modules", "repository", "main", "node_modules", "dist", "build",
+})
 
 
 def _validate_paths(files: Dict[str, str], subdir: str = "") -> Tuple[Dict[str, str], List[str]]:
     """
     Validate file paths from agent output. Rejects paths with:
     - Segments longer than MAX_SEGMENT_LENGTH (likely task-description-as-name)
-    - Segments that look like sentences (6+ hyphenated words)
+    - Segments that look like sentences (4+ hyphenated/underscored words)
+    - Segments starting with verbs (implement-, create-, build-, etc.)
+    - Segments containing filler words (-the-, -with-, -using-, etc.)
     - Empty file content
+
+    Well-known directory names (src, app, components, etc.) are always allowed.
 
     Returns (validated_files, warnings).
     """
@@ -42,6 +68,9 @@ def _validate_paths(files: Dict[str, str], subdir: str = "") -> Tuple[Dict[str, 
             name_part = seg.split(".")[0]  # strip extension
             if not name_part:
                 continue
+            # Skip well-known directory names
+            if name_part.lower() in _ALLOWED_DIRS:
+                continue
             if len(name_part) > MAX_SEGMENT_LENGTH:
                 warnings.append(
                     f"REJECTED: path segment '{seg}' is {len(name_part)} chars "
@@ -51,8 +80,29 @@ def _validate_paths(files: Dict[str, str], subdir: str = "") -> Tuple[Dict[str, 
                 break
             if _SENTENCE_NAME_RE.match(name_part):
                 warnings.append(
-                    f"REJECTED: path segment '{seg}' looks like a sentence, "
+                    f"REJECTED: path segment '{seg}' looks like a sentence (4+ hyphenated words), "
                     f"not a proper component/module name: '{path}'"
+                )
+                bad = True
+                break
+            if _SENTENCE_NAME_SNAKE_RE.match(name_part):
+                warnings.append(
+                    f"REJECTED: path segment '{seg}' looks like a sentence (5+ underscored words), "
+                    f"not a proper module name: '{path}'"
+                )
+                bad = True
+                break
+            if _VERB_PREFIX_RE.match(name_part):
+                warnings.append(
+                    f"REJECTED: path segment '{seg}' starts with a verb "
+                    f"(task description as name): '{path}'"
+                )
+                bad = True
+                break
+            if _FILLER_WORD_RE.search(name_part):
+                warnings.append(
+                    f"REJECTED: path segment '{seg}' contains filler words "
+                    f"(task description as name): '{path}'"
                 )
                 bad = True
                 break

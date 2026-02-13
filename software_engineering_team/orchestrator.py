@@ -44,11 +44,13 @@ logger = logging.getLogger(__name__)
 
 
 def _get_agents(llm):
-    """Lazy init agents including the code review agent."""
+    """Lazy init agents including the code review, documentation, and DbC comments agents."""
     from architecture_agent import ArchitectureExpertAgent, ArchitectureInput
     from backend_agent import BackendExpertAgent, BackendInput
     from code_review_agent import CodeReviewAgent, CodeReviewInput
+    from dbc_comments_agent import DbcCommentsAgent, DbcCommentsInput
     from devops_agent import DevOpsExpertAgent, DevOpsInput
+    from documentation_agent import DocumentationAgent, DocumentationInput
     from frontend_agent import FrontendExpertAgent, FrontendInput
     from qa_agent import QAExpertAgent, QAInput
     from security_agent import CybersecurityExpertAgent, SecurityInput
@@ -63,6 +65,8 @@ def _get_agents(llm):
         "security": CybersecurityExpertAgent(llm),
         "qa": QAExpertAgent(llm),
         "code_review": CodeReviewAgent(llm),
+        "dbc_comments": DbcCommentsAgent(llm),
+        "documentation": DocumentationAgent(llm),
     }
 
 
@@ -135,6 +139,69 @@ def _build_task_update(task_id: str, agent_type: str, result, status: str = "com
     )
 
 
+def _run_dbc_comments_review(
+    agents: dict,
+    repo_path: Path,
+    task_id: str,
+    language: str,
+    task_description: str,
+    architecture,
+) -> None:
+    """
+    Run the Design by Contract Comments agent on the current feature branch.
+    Adds DbC-compliant comments to all methods, functions, and classes.
+    Commits changes to the branch if any comments were added.
+
+    Preconditions:
+        - The current branch is the feature branch with code to review
+        - agents dict contains a "dbc_comments" key
+
+    Postconditions:
+        - If comments were added, they are committed to the current branch
+        - If code was already compliant, a praise message is logged
+        - Any failures are logged but do not block the pipeline
+    """
+    from dbc_comments_agent.models import DbcCommentsInput
+    from shared.git_utils import write_files_and_commit
+
+    try:
+        dbc_code = _read_repo_code(repo_path)
+        if not dbc_code or dbc_code == "# No code files found":
+            logger.info("[%s] DbC: no code files to review, skipping", task_id)
+            return
+
+        dbc_result = agents["dbc_comments"].run(DbcCommentsInput(
+            code=dbc_code,
+            language=language,
+            task_description=task_description,
+            architecture=architecture,
+        ))
+
+        if not dbc_result.already_compliant and dbc_result.files:
+            ok, msg = write_files_and_commit(
+                repo_path,
+                dbc_result.files,
+                dbc_result.suggested_commit_message,
+            )
+            if ok:
+                logger.info(
+                    "[%s] DbC: added %s comments, updated %s -- committed to branch",
+                    task_id,
+                    dbc_result.comments_added,
+                    dbc_result.comments_updated,
+                )
+            else:
+                logger.warning("[%s] DbC: commit failed: %s", task_id, msg)
+        else:
+            logger.info(
+                "[%s] DbC: code complies with Design by Contract -- great job coding!",
+                task_id,
+            )
+    except Exception as e:
+        # Non-blocking: DbC failure should never stop the pipeline
+        logger.warning("[%s] DbC: review failed (non-blocking): %s", task_id, e)
+
+
 def _run_tech_lead_review(
     tech_lead,
     task_update: TaskUpdate,
@@ -144,10 +211,12 @@ def _run_tech_lead_review(
     completed: set,
     execution_queue: list,
     repo_path: Path,
+    doc_agent=None,
 ) -> None:
     """
     Ask the Tech Lead to review progress after a task completes.
     If the Tech Lead identifies gaps, new tasks are added to the execution queue.
+    After review, the Tech Lead triggers the Documentation Agent if available.
     """
     completed_tasks = [t for tid, t in all_tasks.items() if tid in completed]
     remaining_ids = set(execution_queue)
@@ -172,6 +241,17 @@ def _run_tech_lead_review(
             "Tech Lead review: added %s new tasks from progress review: %s",
             len(new_tasks),
             [t.id for t in new_tasks],
+        )
+
+    # Tech Lead triggers the Documentation Agent to update project docs
+    if doc_agent:
+        tech_lead.trigger_documentation_update(
+            doc_agent=doc_agent,
+            repo_path=repo_path,
+            task_update=task_update,
+            spec_content=spec_content,
+            architecture=architecture,
+            codebase_summary=codebase_summary,
         )
 
 
@@ -380,6 +460,12 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             "=== Starting task execution: %s tasks in queue ===", total_tasks,
         )
 
+        # SEQUENTIAL EXECUTION INVARIANT: Only one coding agent works at a time.
+        # All tasks are processed one-by-one in this synchronous while loop.
+        # No threading, no asyncio -- the loop blocks until each agent finishes
+        # (including any documentation/review sub-agents) before starting the next.
+        _active_task_id: str | None = None
+
         while execution_queue and max_passes > 0:
             max_passes -= 1
             task_id = execution_queue.pop(0)
@@ -388,10 +474,17 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                 logger.warning("Task %s not found in task registry - skipping", task_id)
                 continue
 
+            # Enforce single-agent-at-a-time invariant
+            assert _active_task_id is None, (
+                f"Sequential execution violated: starting {task_id} while "
+                f"{_active_task_id} is still active"
+            )
+            _active_task_id = task_id
+
             task_counter += 1
             task_start_time = time.monotonic()
             logger.info(
-                "=== [%s/%s] Starting task %s (type=%s, assignee=%s) ===",
+                "=== [%s/%s] Starting task %s (type=%s, assignee=%s) [exclusive] ===",
                 task_counter, total_tasks, task_id, task.type.value, task.assignee,
             )
             update_job(job_id, current_task=task_id)
@@ -403,12 +496,16 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                     logger.info("[%s] Git setup task auto-completed", task_id)
                     continue
 
-                # Create feature branch
-                ok, msg = create_feature_branch(path, DEVELOPMENT_BRANCH, task_id)
-                if not ok:
-                    logger.error("[%s] Feature branch creation FAILED: %s", task_id, msg)
-                    failed[task_id] = f"Feature branch creation failed: {msg}"
-                    continue
+                # Backend agent manages its own branch lifecycle
+                if task.assignee == "backend":
+                    pass  # Branch creation handled inside run_workflow()
+                else:
+                    # Create feature branch for non-backend agents
+                    ok, msg = create_feature_branch(path, DEVELOPMENT_BRANCH, task_id)
+                    if not ok:
+                        logger.error("[%s] Feature branch creation FAILED: %s", task_id, msg)
+                        failed[task_id] = f"Feature branch creation failed: {msg}"
+                        continue
 
                 if task.assignee == "devops":
                     logger.info("[%s] Phase 1: DevOps agent implementing task", task_id)
@@ -463,153 +560,55 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                         _run_tech_lead_review(
                             tech_lead, task_update, spec_content, architecture,
                             all_tasks, completed, execution_queue, path,
+                            doc_agent=agents.get("documentation"),
                         )
                     else:
                         failed[task_id] = failure_reason
                         logger.warning("[%s] Task FAILED after %.1fs: %s", task_id, elapsed, failure_reason)
 
                 elif task.assignee == "backend":
-                    # ── SEQUENTIAL CODING: Backend agent has exclusive repo access ──
-                    logger.info("[%s] >>> Backend agent acquiring coding slot (other agents wait)", task_id)
-                    from backend_agent.models import BackendInput
-                    from qa_agent.models import QAInput
-                    qa_issues, sec_issues = [], []
-                    code_review_issues = []
-                    result = None
-                    merged = False
+                    # ── Backend agent runs its own autonomous workflow ──
+                    logger.info("[%s] >>> Backend agent workflow starting", task_id)
                     task_completed = False
                     failure_reason = ""
-                    current_task = task
 
-                    # Phase 1: Clarification loop
-                    for clarification_round in range(MAX_CLARIFICATION_REFINEMENTS + 1):
-                        logger.info(
-                            "[%s] Phase 1: Backend agent coding (round %s/%s, review_issues=%s)",
-                            task_id, clarification_round + 1, MAX_CLARIFICATION_REFINEMENTS + 1,
-                            len(code_review_issues),
-                        )
-                        existing_code = _truncate_for_context(
-                            _read_repo_code(path),
-                            MAX_EXISTING_CODE_CHARS,
-                        )
-                        result = agents["backend"].run(BackendInput(
-                            task_description=current_task.description,
-                            requirements=_task_requirements(current_task),
-                            user_story=getattr(current_task, "user_story", "") or "",
-                            spec_content=_truncate_for_context(spec_content, MAX_EXISTING_CODE_CHARS),
-                            architecture=architecture,
-                            language="python",
-                            existing_code=existing_code if existing_code and existing_code != "# No code files found" else None,
-                            qa_issues=qa_issues,
-                            security_issues=sec_issues,
-                            code_review_issues=code_review_issues,
-                        ))
-                        if result.needs_clarification and result.clarification_requests:
-                            if clarification_round < MAX_CLARIFICATION_REFINEMENTS:
-                                logger.info("Backend requested clarification for %s: refining task", task_id)
-                                current_task = tech_lead.refine_task(
-                                    current_task, result.clarification_requests, spec_content, architecture,
-                                )
-                                continue
-                            else:
-                                failure_reason = "Agent still needs clarification after max refinements"
-                                logger.warning("Task %s still needs clarification - skipping", task_id)
-                                checkout_branch(path, DEVELOPMENT_BRANCH)
-                                break
-                        # Have code - write it
-                        ok, msg = write_agent_output(path, result, subdir="backend")
-                        if not ok:
-                            failure_reason = f"Write failed: {msg}"
-                            logger.warning("[%s] Backend write failed: %s", task_id, msg)
-                            checkout_branch(path, DEVELOPMENT_BRANCH)
-                            break
+                    # Collect context lists for the Tech Lead notification inside the workflow
+                    completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
+                    remaining_ids = set(execution_queue)
+                    remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in remaining_ids]
 
-                        # Phase 2: Build verification
-                        logger.info("[%s] Phase 2: Build verification", task_id)
-                        build_ok, build_errors = _run_build_verification(path, "backend", task_id)
-                        if not build_ok:
-                            logger.warning("[%s] Build FAILED - sending errors back to agent", task_id)
-                            code_review_issues = [{"severity": "critical", "category": "logic",
-                                                   "file_path": "", "description": f"Build/test failed: {build_errors[:2000]}",
-                                                   "suggestion": "Fix the compilation/test errors"}]
-                            continue  # retry with build errors as code review issues
-
-                        # Phase 3: Code review
-                        logger.info(
-                            "[%s] Phase 3: Code review (round %s/%s)",
-                            task_id, clarification_round + 1, MAX_CLARIFICATION_REFINEMENTS + 1,
-                        )
-                        code_on_branch = _read_repo_code(path)
-                        review_result = _run_code_review(
-                            agents, code_on_branch, spec_content, current_task,
-                            "python", architecture, existing_code,
-                        )
-                        _log_code_review_result(review_result, task_id)
-
-                        if not review_result.approved:
-                            # Code review found issues - send back to backend agent for fixes
-                            code_review_issues = _code_review_issues_to_dicts(review_result.issues)
-                            if clarification_round < MAX_CLARIFICATION_REFINEMENTS:
-                                logger.info(
-                                    "[%s] Sending %s review issues back to backend agent for fixes",
-                                    task_id, len(review_result.issues),
-                                )
-                                continue  # retry with code review issues
-                            else:
-                                logger.warning(
-                                    "[%s] Code review still failing after max iterations - proceeding to QA anyway",
-                                    task_id,
-                                )
-
-                        # Phase 4: QA review
-                        logger.info("[%s] Phase 4: QA review", task_id)
-                        code_to_review = _read_repo_code(path)
-                        qa_result = agents["qa"].run(QAInput(
-                            code=code_to_review, language="python",
-                            task_description=current_task.description, architecture=architecture,
-                        ))
-                        fix_tasks = tech_lead.evaluate_qa_and_create_fix_tasks(
-                            current_task, qa_result, spec_content, architecture,
-                        )
-                        if fix_tasks:
-                            for ft in fix_tasks:
-                                all_tasks[ft.id] = ft
-                                execution_queue.insert(0, ft.id)
-                            logger.info("Tech Lead created %s fix tasks from QA feedback", len(fix_tasks))
-
-                        # Phase 5: Merge
-                        logger.info("[%s] Phase 5: Merge to development", task_id)
-                        merge_ok, merge_msg = merge_branch(path, branch_name, DEVELOPMENT_BRANCH)
-                        if merge_ok:
-                            delete_branch(path, branch_name)
-                            merged = True
-                            task_completed = True
-                            completed_code_task_ids.append(task_id)
-                            logger.info("[%s] Feature branch %s merged to development", task_id, branch_name)
-                        else:
-                            failure_reason = f"Merge failed: {merge_msg}"
-                            logger.warning("[%s] Merge FAILED: %s", task_id, merge_msg)
-                        checkout_branch(path, DEVELOPMENT_BRANCH)
-                        break  # task done (merged or merge-failed)
+                    workflow_result = agents["backend"].run_workflow(
+                        repo_path=path,
+                        task=task,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                        qa_agent=agents["qa"],
+                        dbc_agent=agents["dbc_comments"],
+                        code_review_agent=agents["code_review"],
+                        tech_lead=tech_lead,
+                        build_verifier=_run_build_verification,
+                        doc_agent=agents.get("documentation"),
+                        completed_tasks=completed_tasks_list,
+                        remaining_tasks=remaining_tasks_list,
+                        all_tasks=all_tasks,
+                        execution_queue=execution_queue,
+                    )
 
                     elapsed = time.monotonic() - task_start_time
-                    if not merged:
-                        checkout_branch(path, DEVELOPMENT_BRANCH)
-                    if task_completed:
+                    if workflow_result.success:
+                        task_completed = True
                         completed.add(task_id)
+                        completed_code_task_ids.append(task_id)
                         logger.info(
-                            "[%s] Task COMPLETED in %.1fs (completed: %s/%s)",
-                            task_id, elapsed, len(completed), total_tasks,
-                        )
-                        task_update = _build_task_update(task_id, "backend", result)
-                        _run_tech_lead_review(
-                            tech_lead, task_update, spec_content, architecture,
-                            all_tasks, completed, execution_queue, path,
+                            "[%s] Task COMPLETED in %.1fs (%d review iterations, completed: %s/%s)",
+                            task_id, elapsed, workflow_result.iterations_used,
+                            len(completed), total_tasks,
                         )
                     else:
-                        failed[task_id] = failure_reason or "Backend agent produced no output"
-                        logger.warning("[%s] Task FAILED after %.1fs: %s", task_id, elapsed, failed[task_id])
-                    logger.info("[%s] <<< Backend agent releasing coding slot", task_id)
+                        failure_reason = workflow_result.failure_reason or "Backend workflow produced no output"
+                        failed[task_id] = failure_reason
+                        logger.warning("[%s] Task FAILED after %.1fs: %s", task_id, elapsed, failure_reason)
+                    logger.info("[%s] <<< Backend agent workflow complete", task_id)
 
                 elif task.assignee == "frontend":
                     # ── SEQUENTIAL CODING: Frontend agent has exclusive repo access ──
@@ -727,8 +726,15 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                                 execution_queue.insert(0, ft.id)
                             logger.info("Tech Lead created %s fix tasks from QA feedback", len(fix_tasks))
 
-                        # Phase 5: Merge to development and cleanup
-                        logger.info("[%s] Phase 5: Merge to development", task_id)
+                        # Phase 5: DbC Comments review
+                        logger.info("[%s] Phase 5: DbC comments review", task_id)
+                        _run_dbc_comments_review(
+                            agents, path, task_id, "typescript",
+                            current_task.description, architecture,
+                        )
+
+                        # Phase 6: Merge to development and cleanup
+                        logger.info("[%s] Phase 6: Merge to development", task_id)
                         merge_ok, merge_msg = merge_branch(path, branch_name, DEVELOPMENT_BRANCH)
                         if merge_ok:
                             delete_branch(path, branch_name)
@@ -755,6 +761,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                         _run_tech_lead_review(
                             tech_lead, task_update, spec_content, architecture,
                             all_tasks, completed, execution_queue, path,
+                            doc_agent=agents.get("documentation"),
                         )
                     else:
                         failed[task_id] = failure_reason or "Frontend agent produced no output"
@@ -770,6 +777,9 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                 logger.exception("[%s] Task FAILED with exception after %.1fs", task_id, elapsed)
                 failed[task_id] = f"Unhandled exception: {e}"
                 checkout_branch(path, DEVELOPMENT_BRANCH)
+            finally:
+                # Release the single-agent-at-a-time slot
+                _active_task_id = None
 
         # Log final execution summary
         logger.info(
@@ -917,13 +927,41 @@ def run_failed_tasks(job_id: str) -> None:
                     logger.info("[%s] Git setup task auto-completed", task_id)
                     continue
 
-                ok, msg = create_feature_branch(path, DEVELOPMENT_BRANCH, task_id)
-                if not ok:
-                    logger.error("[%s] Feature branch creation FAILED: %s", task_id, msg)
-                    failed[task_id] = f"Feature branch creation failed: {msg}"
-                    continue
+                if task.assignee == "backend":
+                    # Backend agent manages its own branch lifecycle via run_workflow()
+                    completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
+                    remaining_ids = set(execution_queue)
+                    remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in remaining_ids]
 
-                if task.assignee == "devops":
+                    workflow_result = agents["backend"].run_workflow(
+                        repo_path=path,
+                        task=task,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                        qa_agent=agents["qa"],
+                        dbc_agent=agents["dbc_comments"],
+                        code_review_agent=agents["code_review"],
+                        tech_lead=tech_lead,
+                        build_verifier=_run_build_verification,
+                        doc_agent=agents.get("documentation"),
+                        completed_tasks=completed_tasks_list,
+                        remaining_tasks=remaining_tasks_list,
+                        all_tasks=all_tasks,
+                        execution_queue=execution_queue,
+                    )
+                    if workflow_result.success:
+                        completed.add(task_id)
+                        completed_code_task_ids.append(task_id)
+                    else:
+                        failed[task_id] = workflow_result.failure_reason or "Backend workflow produced no output"
+
+                elif task.assignee == "devops":
+                    ok, msg = create_feature_branch(path, DEVELOPMENT_BRANCH, task_id)
+                    if not ok:
+                        logger.error("[%s] Feature branch creation FAILED: %s", task_id, msg)
+                        failed[task_id] = f"Feature branch creation failed: {msg}"
+                        continue
+
                     from devops_agent.models import DevOpsInput
                     existing_pipeline = _read_repo_code(path, [".yml", ".yaml"])
                     result = agents["devops"].run(DevOpsInput(
@@ -945,44 +983,13 @@ def run_failed_tasks(job_id: str) -> None:
                         failed[task_id] = f"Write failed: {msg}"
                     checkout_branch(path, DEVELOPMENT_BRANCH)
 
-                elif task.assignee == "backend":
-                    from backend_agent.models import BackendInput
-                    existing_code = _truncate_for_context(_read_repo_code(path), MAX_EXISTING_CODE_CHARS)
-                    code_review_issues: list = []
-                    task_completed_be = False
-                    failure_reason_be = ""
-                    for attempt in range(MAX_CLARIFICATION_REFINEMENTS + 1):
-                        result = agents["backend"].run(BackendInput(
-                            task_description=task.description,
-                            requirements=_task_requirements(task),
-                            user_story=getattr(task, "user_story", "") or "",
-                            spec_content=_truncate_for_context(spec_content, MAX_EXISTING_CODE_CHARS),
-                            architecture=architecture,
-                            language="python",
-                            existing_code=existing_code if existing_code and existing_code != "# No code files found" else None,
-                            qa_issues=[],
-                            security_issues=[],
-                            code_review_issues=code_review_issues,
-                        ))
-                        ok, msg = write_agent_output(path, result, subdir="backend")
-                        if not ok:
-                            failure_reason_be = f"Write failed: {msg}"
-                            break
-                        merge_ok, merge_msg = merge_branch(path, branch_name, DEVELOPMENT_BRANCH)
-                        if merge_ok:
-                            delete_branch(path, branch_name)
-                            task_completed_be = True
-                        else:
-                            failure_reason_be = f"Merge failed: {merge_msg}"
-                        break
-                    if task_completed_be:
-                        completed.add(task_id)
-                        completed_code_task_ids.append(task_id)
-                    else:
-                        failed[task_id] = failure_reason_be or "Backend agent produced no output"
-                    checkout_branch(path, DEVELOPMENT_BRANCH)
-
                 elif task.assignee == "frontend":
+                    ok, msg = create_feature_branch(path, DEVELOPMENT_BRANCH, task_id)
+                    if not ok:
+                        logger.error("[%s] Feature branch creation FAILED: %s", task_id, msg)
+                        failed[task_id] = f"Feature branch creation failed: {msg}"
+                        continue
+
                     from frontend_agent.models import FrontendInput
                     existing_code = _truncate_for_context(
                         _read_repo_code(path, [".ts", ".tsx", ".html", ".scss"]),
