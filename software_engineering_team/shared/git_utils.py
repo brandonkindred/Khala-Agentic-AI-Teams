@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -193,12 +193,24 @@ Thumbs.db
 """
 
 
-def initialize_new_repo(repo_path: str | Path) -> Tuple[bool, str]:
+def initialize_new_repo(
+    repo_path: str | Path,
+    *,
+    gitignore_content: str | None = None,
+) -> Tuple[bool, str]:
     """
     Initialize a directory as a new git repo: init, .gitignore, README.md, CONTRIBUTORS.md,
     initial commit, rename master to main, create and checkout development branch.
 
     If the path is already a git repo, ensures development branch exists and checks it out.
+    Writes .gitignore, README.md, CONTRIBUTORS.md only if they do not already exist
+    (so callers can pre-create them with desired content).
+
+    Args:
+        repo_path: Path to the directory to initialize.
+        gitignore_content: Optional content for .gitignore. If provided and .gitignore
+            does not exist, this is used; otherwise _DEFAULT_GITIGNORE is used.
+
     Returns (success, message).
     """
     path = Path(repo_path).resolve()
@@ -214,10 +226,15 @@ def initialize_new_repo(repo_path: str | Path) -> Tuple[bool, str]:
     if code != 0:
         return False, f"git init failed: {out}"
 
-    # 2. .gitignore, README.md, CONTRIBUTORS.md
-    (path / ".gitignore").write_text(_DEFAULT_GITIGNORE, encoding="utf-8")
-    (path / "README.md").write_text("", encoding="utf-8")
-    (path / "CONTRIBUTORS.md").write_text("", encoding="utf-8")
+    # 2. .gitignore, README.md, CONTRIBUTORS.md (only if missing)
+    gitignore_path = path / ".gitignore"
+    if not gitignore_path.exists():
+        content = gitignore_content if gitignore_content is not None else _DEFAULT_GITIGNORE
+        gitignore_path.write_text(content, encoding="utf-8")
+    if not (path / "README.md").exists():
+        (path / "README.md").write_text("", encoding="utf-8")
+    if not (path / "CONTRIBUTORS.md").exists():
+        (path / "CONTRIBUTORS.md").write_text("", encoding="utf-8")
 
     # 3. Initial commit
     code, out = _run_git(path, ["git", "add", "-A"])
@@ -275,3 +292,67 @@ def ensure_development_branch(repo_path: str | Path) -> Tuple[bool, str]:
         return False, f"Failed to create development branch: {out}"
     logger.info("Created branch '%s' from '%s'", DEVELOPMENT_BRANCH, base)
     return True, f"Created branch '{DEVELOPMENT_BRANCH}' from '{base}'"
+
+
+def ensure_files_committed_on_main(
+    repo_path: str | Path,
+    file_paths: List[str],
+    *,
+    commit_message: str = "Add README, CONTRIBUTORS, .gitignore",
+) -> Tuple[bool, str]:
+    """
+    Ensure the given files are committed on the main branch.
+    Checkouts main, adds the files, commits if there are changes, then checkouts development.
+    Idempotent: no-op if files are already committed.
+
+    Returns (success, message).
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+
+    # Check if main branch exists
+    code, out = _run_git(path, ["git", "branch", "-a"])
+    if code != 0:
+        return False, f"git branch failed: {out}"
+    branches = [b.strip().lstrip("* ").split("/")[-1] for b in out.splitlines() if b.strip()]
+    if MAIN_BRANCH not in branches and "master" not in branches:
+        return False, "Neither 'main' nor 'master' branch found"
+
+    base = MAIN_BRANCH if MAIN_BRANCH in branches else "master"
+    current_branch_code, current_out = _run_git(path, ["git", "branch", "--show-current"])
+    current_branch = (current_out or "").strip() if current_branch_code == 0 else ""
+
+    # Checkout main
+    code, out = _run_git(path, ["git", "checkout", base])
+    if code != 0:
+        return False, f"Failed to checkout {base}: {out}"
+
+    # Add the files
+    for fp in file_paths:
+        if (path / fp).exists():
+            code, out = _run_git(path, ["git", "add", fp])
+            if code != 0:
+                _run_git(path, ["git", "checkout", current_branch or DEVELOPMENT_BRANCH])
+                return False, f"git add {fp} failed: {out}"
+
+    # Check if there are changes to commit
+    code, out = _run_git(path, ["git", "status", "--porcelain"])
+    if code != 0:
+        _run_git(path, ["git", "checkout", current_branch or DEVELOPMENT_BRANCH])
+        return False, f"git status failed: {out}"
+
+    if out.strip():
+        code, out = _run_git(path, ["git", "commit", "-m", commit_message])
+        if code != 0:
+            _run_git(path, ["git", "checkout", current_branch or DEVELOPMENT_BRANCH])
+            return False, f"git commit failed: {out}"
+        logger.info("Committed %s on %s", file_paths, base)
+
+    # Checkout back to development (or original branch)
+    target = current_branch if current_branch and current_branch != base else DEVELOPMENT_BRANCH
+    code, out = _run_git(path, ["git", "checkout", target])
+    if code != 0:
+        return False, f"Failed to checkout {target}: {out}"
+
+    return True, f"Files committed on {base}"

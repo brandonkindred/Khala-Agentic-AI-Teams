@@ -56,12 +56,22 @@ class ConceptIdea(BaseModel):
     concept: str
     target_platforms: List[Platform]
     linked_goals: List[str] = Field(default_factory=list)
+    primary_hook: str = ""
+    suggested_visual: str = ""
+    content_format: str = ""  # e.g. carousel, reel, thread, long-form, story
+    cta_variant: str = ""
     brand_fit_score: float = Field(ge=0, le=1)
     audience_resonance_score: float = Field(ge=0, le=1)
     goal_alignment_score: float = Field(ge=0, le=1)
     estimated_engagement_probability: float = Field(ge=0, le=1)
     risk_level: str = "low"
     risk_reasons: List[str] = Field(default_factory=list)
+
+
+class RiskReason(BaseModel):
+    category: str  # e.g. overclaim, regulatory, brand_guideline_violation, sensitivity
+    message: str
+
 
 
 class ContentPlan(BaseModel):

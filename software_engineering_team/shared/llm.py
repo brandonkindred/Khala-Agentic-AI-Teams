@@ -4,6 +4,7 @@ LLM client abstraction for software engineering team agents.
 
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
 import json
@@ -17,6 +18,21 @@ ENV_LLM_PROVIDER = "SW_LLM_PROVIDER"  # "dummy" or "ollama"
 ENV_LLM_MODEL = "SW_LLM_MODEL"  # model name for ollama
 ENV_LLM_BASE_URL = "SW_LLM_BASE_URL"  # ollama base URL
 ENV_LLM_TIMEOUT = "SW_LLM_TIMEOUT"  # timeout in seconds
+
+logger = logging.getLogger(__name__)
+
+
+def get_llm_config_summary() -> str:
+    """
+    Return a short summary of the effective LLM provider and model from env vars.
+    Used for prominent logging at startup and on each request.
+    """
+    provider = (os.environ.get(ENV_LLM_PROVIDER) or "ollama").lower().strip()
+    if provider == "ollama":
+        model = os.environ.get(ENV_LLM_MODEL) or "qwen3-coder:480b-cloud"
+        base_url = os.environ.get(ENV_LLM_BASE_URL) or "http://127.0.0.1:11434"
+        return f"provider={provider}, model={model}, base_url={base_url}"
+    return f"provider={provider}"
 
 
 class LLMClient(ABC):
@@ -490,16 +506,25 @@ class OllamaLLMClient(LLMClient):
         try:
             return json.loads(text)
         except Exception:
-            pass
+            logger.debug("Primary JSON parse failed; attempting object extraction fallback")
         obj_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
         if obj_match:
             try:
                 return json.loads(obj_match.group(0))
             except Exception:
-                pass
-        raise ValueError(f"Could not parse JSON from response: {text!r}")
+                logger.debug("Object extraction JSON parse failed; falling back to raw content wrapper")
+        # As a final fallback, return the raw content in a JSON object so that
+        # callers never crash the orchestrator on non-JSON responses (e.g. mermaid).
+        # Downstream agents that expect structured fields should defensively use .get().
+        logger.warning("Could not parse structured JSON from LLM response; returning raw content wrapper")
+        return {"content": text.strip()}
 
     def complete_json(self, prompt: str, *, temperature: float = 0.0) -> Dict[str, Any]:
+        logger.info(
+            "*** ACTIVE LLM MODEL (REQUEST) *** provider=ollama, model=%s, base_url=%s",
+            self.model,
+            self.base_url,
+        )
         system_message = (
             "You are a strict JSON generator. Respond with a single valid JSON object only, "
             "no explanatory text, no Markdown, no code fences."
@@ -526,18 +551,27 @@ def get_llm_client() -> Union["DummyLLMClient", "OllamaLLMClient"]:
     Create LLM client from environment configuration.
 
     Environment variables:
-    - SW_LLM_PROVIDER: "dummy" (default) or "ollama"
-    - SW_LLM_MODEL: model name for ollama (default: qwen2.5-coder)
+    - SW_LLM_PROVIDER: "ollama" (default) or "dummy"
+    - SW_LLM_MODEL: model name for ollama (default: qwen3-coder:480b-cloud)
     - SW_LLM_BASE_URL: ollama base URL (default: http://127.0.0.1:11434)
     - SW_LLM_TIMEOUT: timeout in seconds (default: 1800)
     """
-    provider = (os.environ.get(ENV_LLM_PROVIDER) or "dummy").lower().strip()
+    provider = (os.environ.get(ENV_LLM_PROVIDER) or "ollama").lower().strip()
     if provider == "ollama":
-        model = os.environ.get(ENV_LLM_MODEL) or "qwen2.5-coder"
+        model = os.environ.get(ENV_LLM_MODEL) or "qwen3-coder:480b-cloud"
         base_url = os.environ.get(ENV_LLM_BASE_URL) or "http://127.0.0.1:11434"
         try:
             timeout = float(os.environ.get(ENV_LLM_TIMEOUT) or "1800")
         except ValueError:
             timeout = 1800.0
-        return OllamaLLMClient(model=model, base_url=base_url, timeout=timeout)
+        client = OllamaLLMClient(model=model, base_url=base_url, timeout=timeout)
+        logger.info(
+            "*** ACTIVE LLM MODEL *** %s",
+            get_llm_config_summary(),
+        )
+        return client
+    logger.info(
+        "*** ACTIVE LLM MODEL *** %s",
+        get_llm_config_summary(),
+    )
     return DummyLLMClient()

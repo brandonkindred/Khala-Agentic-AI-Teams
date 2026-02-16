@@ -6,7 +6,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -32,7 +32,7 @@ class RunMarketingTeamRequest(BaseModel):
     llm_model_name: str = Field(..., description="Name of local LLM model to use")
     brand_name: str = Field(default="Brand")
     target_audience: str = Field(default="general audience")
-    goals: list[str] = Field(default_factory=lambda: ["engagement", "follower growth"])
+    goals: List[str] = Field(default_factory=lambda: ["engagement", "follower growth"])
     voice_and_tone: str = Field(default="professional, clear, and human")
     cadence_posts_per_day: int = Field(default=2, ge=1)
     duration_days: int = Field(default=14, ge=1)
@@ -66,7 +66,7 @@ class MarketingJobStatusResponse(BaseModel):
 
 
 class PerformanceIngestRequest(BaseModel):
-    observations: list[PostPerformanceObservation] = Field(default_factory=list)
+    observations: List[PostPerformanceObservation] = Field(default_factory=list)
 
 
 class PerformanceIngestResponse(BaseModel):
