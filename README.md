@@ -138,4 +138,7 @@ Interactive docs: http://localhost:8000/docs
 ## License
 
 This repository is provided as an example implementation for building Strands-style research agents.
+## Additional teams
+
+- `social_media_marketing_team/` – Multi-agent social marketing workflow with platform specialists (LinkedIn, Facebook, Instagram, X), proposal collaboration with orchestrator consensus, human approval gate, and 14-day cadence planning defaults.
 
