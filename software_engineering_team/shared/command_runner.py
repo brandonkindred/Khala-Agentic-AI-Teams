@@ -364,6 +364,25 @@ def run_ng_build_with_nvm_fallback(project_path: str | Path) -> CommandResult:
     return CommandResult(success=False, exit_code=-1, stdout="", stderr=msg)
 
 
+def ensure_frontend_dependencies_installed(project_path: str | Path) -> CommandResult:
+    """
+    Run npm install so dependencies are installed before the frontend agent runs.
+    Uses NVM when available for consistent Node version. If package.json does not
+    exist, returns success (no-op) so callers do not block.
+    """
+    cwd = Path(project_path).resolve()
+    if not (cwd / "package.json").exists():
+        return CommandResult(success=True, exit_code=0, stdout="", stderr="")
+    if _get_nvm_script_prefix() is not None:
+        return run_command_with_nvm(
+            ["npm", "install"],
+            cwd=cwd,
+            node_version=ANGULAR_NODE_VERSION,
+            timeout=BUILD_TIMEOUT,
+        )
+    return run_command(["npm", "install"], cwd=cwd, timeout=BUILD_TIMEOUT)
+
+
 def run_ng_serve_smoke_test(project_path: str | Path, port: int = 4299) -> CommandResult:
     """
     Start `ng serve` briefly to confirm the app compiles and starts.

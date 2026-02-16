@@ -597,6 +597,15 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                             failed[task_id] = f"Feature branch failed: {msg}"
                         continue
 
+                    from shared.command_runner import ensure_frontend_dependencies_installed
+                    install_result = ensure_frontend_dependencies_installed(frontend_dir)
+                    if not install_result.success:
+                        with state_lock:
+                            failed[task_id] = "Frontend dependency install failed: " + (
+                                install_result.error_summary or install_result.stderr or "unknown"
+                            )
+                        continue
+
                     from frontend_agent.models import FrontendInput
                     from qa_agent.models import QAInput
                     qa_issues, sec_issues = [], []
