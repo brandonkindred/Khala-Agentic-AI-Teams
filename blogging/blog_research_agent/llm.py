@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import json
 import re
+from threading import Lock
 from typing import Any, Dict
 
 import httpx
@@ -15,6 +16,19 @@ class LLMClient(ABC):
     The concrete implementation should adapt your Strands runtime's
     LLM interface to this method.
     """
+
+    def __init__(self) -> None:
+        self._request_count = 0
+        self._request_count_lock = Lock()
+
+    @property
+    def request_count(self) -> int:
+        """Total number of LLM requests made through this client instance."""
+        return self._request_count
+
+    def _increment_request_count(self) -> None:
+        with self._request_count_lock:
+            self._request_count += 1
 
     @abstractmethod
     def complete_json(self, prompt: str, *, temperature: float = 0.0) -> Dict[str, Any]:
@@ -42,11 +56,16 @@ class DummyLLMClient(LLMClient):
     This is NOT meant for production use but is handy to keep the agent runnable.
     """
 
+    def __init__(self) -> None:
+        super().__init__()
+
     def complete_json(self, prompt: str, *, temperature: float = 0.0) -> Dict[str, Any]:
         """
         Preconditions: prompt non-empty; 0.0 <= temperature <= 2.0.
         Postconditions: Returns dict; never None. Heuristic outputs for testing only.
         """
+        self._increment_request_count()
+
         # This is intentionally simplistic and only for demonstration/testing.
         lowered = prompt.lower()
         if "core_topics" in lowered and "angle" in lowered and "constraints" in lowered:
@@ -173,6 +192,8 @@ class OllamaLLMClient(LLMClient):
             - timeout > 0.
             - base_url is a non-empty string.
         """
+        super().__init__()
+
         assert model, "model name is required"
         assert timeout > 0, "timeout must be positive"
         assert base_url, "base_url is required"
@@ -240,6 +261,8 @@ class OllamaLLMClient(LLMClient):
         Preconditions: prompt non-empty; 0.0 <= temperature <= 2.0.
         Postconditions: Returns dict; never None. Raises on API or parse failure.
         """
+        self._increment_request_count()
+
         system_message = (
             "You are a strict JSON generator used by an automated research agent. "
             "You MUST respond with a single valid JSON object only, with no "

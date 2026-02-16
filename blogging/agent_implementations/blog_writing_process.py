@@ -116,6 +116,7 @@ for iteration in range(1, DRAFT_EDITOR_ITERATIONS + 1):
         logger.info("Draft iteration %s: revised, length=%s", iteration, len(draft_result.draft))
 
 logger.info("DRAFT DOCUMENT: \n ---------------------------------------- \n %s", draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else ""))
+logger.info("Total LLM requests across blog agents: %s", llm_client.request_count)
 
 # 4. Output
 print("\n--- Top 10 title choices (with probability of success) ---")

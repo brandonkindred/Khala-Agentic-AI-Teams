@@ -155,6 +155,8 @@ def research_and_review(request: ResearchAndReviewRequest) -> ResearchAndReviewR
         logger.exception("Failed to initialize agents")
         raise HTTPException(status_code=500, detail=f"Agent initialization failed: {e}") from e
 
+    llm_requests_before = _llm_client.request_count if _llm_client is not None else 0
+
     # Build brief text (include title concept if provided)
     brief_text = request.brief.strip()
     if request.title_concept:
@@ -186,6 +188,12 @@ def research_and_review(request: ResearchAndReviewRequest) -> ResearchAndReviewR
     except Exception as e:
         logger.exception("Review agent failed")
         raise HTTPException(status_code=500, detail=f"Review failed: {e}") from e
+
+    llm_requests_after = _llm_client.request_count if _llm_client is not None else llm_requests_before
+    logger.info(
+        "Completed research-and-review pipeline with %s LLM requests",
+        llm_requests_after - llm_requests_before,
+    )
 
     return ResearchAndReviewResponse(
         title_choices=[
