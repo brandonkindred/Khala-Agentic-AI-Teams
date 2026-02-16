@@ -65,18 +65,18 @@ By default, the script uses `DummyLLMClient` for testing without an LLM. To use 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SW_LLM_PROVIDER` | `dummy` or `ollama` | `dummy` |
-| `SW_LLM_MODEL` | Model name for Ollama | `deepseek-r1` |
+| `SW_LLM_MODEL` | Model name for Ollama | `qwen2.5-coder` |
 | `SW_LLM_BASE_URL` | Ollama API base URL | `http://127.0.0.1:11434` |
 | `SW_LLM_TIMEOUT` | Timeout in seconds | `1800` |
 
 Example with Ollama:
 ```bash
 export SW_LLM_PROVIDER=ollama
-export SW_LLM_MODEL=deepseek-r1
+export SW_LLM_MODEL=qwen2.5-coder
 python -m agent_implementations.run_team
 ```
 
-Ensure Ollama is running with the model (e.g. `ollama run deepseek-r1`).
+Ensure Ollama is running with the model (e.g. `ollama run qwen2.5-coder`).
 
 ## API
 

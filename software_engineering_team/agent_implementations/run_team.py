@@ -33,8 +33,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 logger = logging.getLogger(__name__)
 
 # Use DummyLLMClient for testing without an LLM; switch to OllamaLLMClient for real runs
-USE_DUMMY = True
-LLM = DummyLLMClient() if USE_DUMMY else OllamaLLMClient(model="deepseek-r1", timeout=1800.0)
+USE_DUMMY = False
+LLM = DummyLLMClient() if USE_DUMMY else OllamaLLMClient(model="qwen2.5-coder", timeout=1800.0)
 
 # Example product requirements
 REQUIREMENTS = ProductRequirements(

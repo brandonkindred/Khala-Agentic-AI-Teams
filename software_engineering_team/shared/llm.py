@@ -527,13 +527,13 @@ def get_llm_client() -> Union["DummyLLMClient", "OllamaLLMClient"]:
 
     Environment variables:
     - SW_LLM_PROVIDER: "dummy" (default) or "ollama"
-    - SW_LLM_MODEL: model name for ollama (default: deepseek-r1)
+    - SW_LLM_MODEL: model name for ollama (default: qwen2.5-coder)
     - SW_LLM_BASE_URL: ollama base URL (default: http://127.0.0.1:11434)
     - SW_LLM_TIMEOUT: timeout in seconds (default: 1800)
     """
     provider = (os.environ.get(ENV_LLM_PROVIDER) or "dummy").lower().strip()
     if provider == "ollama":
-        model = os.environ.get(ENV_LLM_MODEL) or "deepseek-r1"
+        model = os.environ.get(ENV_LLM_MODEL) or "qwen2.5-coder"
         base_url = os.environ.get(ENV_LLM_BASE_URL) or "http://127.0.0.1:11434"
         try:
             timeout = float(os.environ.get(ENV_LLM_TIMEOUT) or "1800")
