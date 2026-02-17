@@ -68,3 +68,12 @@ class FrontendOutput(BaseModel):
         default_factory=list,
         description="npm package names to install, e.g. ['@ngrx/store', 'ngx-toastr']",
     )
+
+
+class FrontendWorkflowResult(BaseModel):
+    """Result of the frontend agent's autonomous workflow."""
+
+    task_id: str = Field(description="ID of the task that was executed")
+    success: bool = Field(default=False, description="True when code was merged to development")
+    failure_reason: str = Field(default="", description="Reason for failure if success is False")
+    summary: str = Field(default="", description="Final summary of what was implemented")

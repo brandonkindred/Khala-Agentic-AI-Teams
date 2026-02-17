@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import threading
+import time
 from abc import ABC, abstractmethod
 import json
 import re
@@ -18,8 +21,39 @@ ENV_LLM_PROVIDER = "SW_LLM_PROVIDER"  # "dummy" or "ollama"
 ENV_LLM_MODEL = "SW_LLM_MODEL"  # model name for ollama
 ENV_LLM_BASE_URL = "SW_LLM_BASE_URL"  # ollama base URL
 ENV_LLM_TIMEOUT = "SW_LLM_TIMEOUT"  # timeout in seconds
+ENV_LLM_MAX_RETRIES = "SW_LLM_MAX_RETRIES"  # max retries for temporary errors (default 4)
+ENV_LLM_BACKOFF_BASE = "SW_LLM_BACKOFF_BASE"  # base seconds for exponential backoff (default 2)
+ENV_LLM_BACKOFF_MAX = "SW_LLM_BACKOFF_MAX_SECONDS"  # max backoff seconds (default 60)
+ENV_LLM_MAX_CONCURRENCY = "SW_LLM_MAX_CONCURRENCY"  # max concurrent complete_json calls (default 2)
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Domain-specific exceptions for LLM errors
+# ---------------------------------------------------------------------------
+
+
+class LLMError(Exception):
+    """Base exception for LLM-related errors."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, cause: Exception | None = None):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.cause = cause
+
+
+class LLMRateLimitError(LLMError):
+    """Raised when the LLM returns 429 Too Many Requests and retries are exhausted."""
+
+
+class LLMTemporaryError(LLMError):
+    """Raised when the LLM returns 5xx or network errors and retries are exhausted."""
+
+
+class LLMPermanentError(LLMError):
+    """Raised for 4xx errors (except 429) or malformed responses. Do not retry."""
 
 
 def get_llm_config_summary() -> str:
@@ -488,7 +522,63 @@ class DummyLLMClient(LLMClient):
                 "constraints": [],
                 "priority": "medium",
             }
+        # Integration agent – validate backend-frontend API contract
+        elif "integration expert" in lowered and "backend code" in lowered and "frontend code" in lowered:
+            return {
+                "issues": [],
+                "passed": True,
+                "summary": "Backend and frontend API contract aligned (dummy).",
+                "fix_task_suggestions": [],
+            }
+        # Acceptance verifier agent – per-criterion verification
+        elif "acceptance criteria verifier" in lowered and "per_criterion" in lowered:
+            return {
+                "per_criterion": [
+                    {"criterion": "Criterion 1", "satisfied": True, "evidence": "Code implements the requirement."},
+                    {"criterion": "Criterion 2", "satisfied": True, "evidence": "Code implements the requirement."},
+                ],
+                "all_satisfied": True,
+                "summary": "All acceptance criteria satisfied (dummy).",
+            }
         return {"output": "Dummy response", "status": "ok"}
+
+
+def _parse_retry_config() -> tuple[int, float, float]:
+    """Parse retry-related environment variables. Returns (max_retries, backoff_base, backoff_max)."""
+    try:
+        max_retries = int(os.environ.get(ENV_LLM_MAX_RETRIES) or "4")
+    except ValueError:
+        max_retries = 4
+    try:
+        backoff_base = float(os.environ.get(ENV_LLM_BACKOFF_BASE) or "2")
+    except ValueError:
+        backoff_base = 2.0
+    try:
+        backoff_max = float(os.environ.get(ENV_LLM_BACKOFF_MAX) or "60")
+    except ValueError:
+        backoff_max = 60.0
+    return max_retries, backoff_base, backoff_max
+
+
+def _get_llm_concurrency_limit() -> int:
+    """Return max concurrent complete_json calls from env (default 2)."""
+    try:
+        return max(1, int(os.environ.get(ENV_LLM_MAX_CONCURRENCY) or "2"))
+    except ValueError:
+        return 2
+
+
+# Module-level semaphore for Ollama LLM concurrency (shared across client instances)
+_ollama_semaphore: threading.BoundedSemaphore | None = None
+
+
+def _get_ollama_semaphore() -> threading.BoundedSemaphore:
+    """Lazily create the global Ollama concurrency semaphore."""
+    global _ollama_semaphore
+    if _ollama_semaphore is None:
+        limit = _get_llm_concurrency_limit()
+        _ollama_semaphore = threading.BoundedSemaphore(limit)
+    return _ollama_semaphore
 
 
 class OllamaLLMClient(LLMClient):
@@ -547,6 +637,9 @@ class OllamaLLMClient(LLMClient):
         return {"content": text.strip()}
 
     def complete_json(self, prompt: str, *, temperature: float = 0.0) -> Dict[str, Any]:
+        max_retries, backoff_base, backoff_max = _parse_retry_config()
+        sem = _get_ollama_semaphore()
+
         logger.info(
             "*** ACTIVE LLM MODEL (REQUEST) *** provider=ollama, model=%s, base_url=%s",
             self.model,
@@ -565,12 +658,129 @@ class OllamaLLMClient(LLMClient):
             ],
         }
         url = f"{self.base_url}/v1/chat/completions"
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(url, json=payload)
-            response.raise_for_status()
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
-        return self._extract_json(content)
+
+        last_error: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                with sem:
+                    with httpx.Client(timeout=self.timeout) as client:
+                        response = client.post(url, json=payload)
+                        status = response.status_code
+
+                        if status == 200:
+                            try:
+                                data = response.json()
+                            except json.JSONDecodeError as e:
+                                raise LLMPermanentError(f"Malformed LLM response (invalid JSON): {e}") from e
+                            content = self._parse_response_content(data)
+                            return self._extract_json(content)
+
+                        if status == 429:
+                            last_error = LLMRateLimitError(
+                                f"LLM rate limited (429) after {attempt + 1} attempt(s)",
+                                status_code=429,
+                            )
+                            retry_after = response.headers.get("Retry-After")
+                            if retry_after and retry_after.isdigit():
+                                wait = min(float(retry_after), backoff_max)
+                            else:
+                                wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                            if attempt < max_retries:
+                                logger.warning(
+                                    "LLM 429 rate limit, retrying in %.1fs (attempt %d/%d)",
+                                    wait, attempt + 1, max_retries + 1,
+                                )
+                                time.sleep(wait)
+                                continue
+                            raise last_error
+
+                        if 500 <= status < 600:
+                            last_error = LLMTemporaryError(
+                                f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}",
+                                status_code=status,
+                            )
+                            if attempt < max_retries:
+                                wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                                logger.warning(
+                                    "LLM 5xx error, retrying in %.1fs (attempt %d/%d)",
+                                    wait, attempt + 1, max_retries + 1,
+                                )
+                                time.sleep(wait)
+                                continue
+                            raise last_error
+
+                        if 400 <= status < 500:
+                            raise LLMPermanentError(
+                                f"LLM client error {status}: {response.text[:300]}",
+                                status_code=status,
+                            )
+
+                        raise LLMPermanentError(
+                            f"Unexpected LLM response status {status}: {response.text[:200]}",
+                            status_code=status,
+                        )
+            except (LLMPermanentError, LLMRateLimitError, LLMTemporaryError):
+                raise
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code if e.response else None
+                if status == 429:
+                    last_error = LLMRateLimitError(str(e), status_code=429, cause=e)
+                    if attempt < max_retries:
+                        wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                        logger.warning("LLM 429, retrying in %.1fs (attempt %d/%d)", wait, attempt + 1, max_retries + 1)
+                        time.sleep(wait)
+                        continue
+                    raise last_error
+                if status and 500 <= status < 600:
+                    last_error = LLMTemporaryError(str(e), status_code=status, cause=e)
+                    if attempt < max_retries:
+                        wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                        logger.warning("LLM 5xx, retrying in %.1fs (attempt %d/%d)", wait, attempt + 1, max_retries + 1)
+                        time.sleep(wait)
+                        continue
+                    raise last_error
+                if status and 400 <= status < 500:
+                    raise LLMPermanentError(str(e), status_code=status, cause=e)
+                raise LLMPermanentError(str(e), status_code=status, cause=e)
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadTimeout) as e:
+                last_error = LLMTemporaryError(
+                    f"LLM connection/timeout error: {e}",
+                    cause=e,
+                )
+                if attempt < max_retries:
+                    wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                    logger.warning(
+                        "LLM connection error, retrying in %.1fs (attempt %d/%d): %s",
+                        wait, attempt + 1, max_retries + 1, e,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise last_error
+
+        if last_error:
+            raise last_error
+        raise LLMTemporaryError("LLM request failed after all retries")
+
+    def _parse_response_content(self, data: dict) -> str:
+        """Extract content from Ollama/OpenAI-compatible response. Raises LLMPermanentError if malformed."""
+        try:
+            choices = data.get("choices")
+            if not choices or not isinstance(choices, list):
+                raise LLMPermanentError("Unexpected response format from LLM: missing or invalid 'choices'")
+            first = choices[0]
+            if not isinstance(first, dict):
+                raise LLMPermanentError("Unexpected response format from LLM: invalid choice object")
+            msg = first.get("message")
+            if not msg or not isinstance(msg, dict):
+                raise LLMPermanentError("Unexpected response format from LLM: missing or invalid 'message'")
+            content = msg.get("content")
+            if content is None:
+                raise LLMPermanentError("Unexpected response format from LLM: missing 'content'")
+            return str(content)
+        except LLMPermanentError:
+            raise
+        except (KeyError, IndexError, TypeError) as e:
+            raise LLMPermanentError(f"Unexpected response format from LLM: {e}") from e
 
 
 def get_llm_client() -> Union["DummyLLMClient", "OllamaLLMClient"]:

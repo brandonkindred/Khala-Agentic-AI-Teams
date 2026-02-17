@@ -101,6 +101,108 @@ MAX_SAME_BUILD_FAILURES = 3  # Stop retrying if build fails identically this man
 MAX_CLARIFICATION_ROUNDS = 5
 MAX_EXISTING_CODE_CHARS = 40_000
 
+# Patterns that indicate pytest failed due to missing /test-generic-error route or
+# exception handler re-raising (test client gets exception instead of response).
+# When matched, we give the agent a targeted suggestion instead of generic "fix errors".
+# This special handling ensures the agent receives an explicit instruction to preserve
+# the route and return JSONResponse, avoiding repeated build failures.
+EXCEPTION_HANDLER_TEST_PATTERNS = (
+    "test-generic-error",
+    "test_generic_exception_handler",
+    "test_error_handlers",
+)
+
+
+# Test-only routes that must be preserved when modifying app/main.py.
+# Scanned from tests/ via client.get("/...") or similar.
+_TEST_ROUTE_PATTERNS = ("/test-generic-error",)
+
+
+def _test_routes_referenced_in_tests(repo_path: Path) -> List[str]:
+    """Scan tests/ for routes that tests call (e.g. client.get(\"/test-generic-error\"))."""
+    tests_dir = repo_path / "tests"
+    if not tests_dir.exists() or not tests_dir.is_dir():
+        return []
+    found: List[str] = []
+    for f in tests_dir.rglob("test_*.py"):
+        if not f.is_file():
+            continue
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+            for route in _TEST_ROUTE_PATTERNS:
+                if route in content and route not in found:
+                    found.append(route)
+        except Exception:
+            pass
+    return found
+
+
+def _test_routes_missing_from_main_py(repo_path: Path, files: Dict[str, str]) -> List[str]:
+    """Return routes that tests reference but are missing from main.py in files."""
+    required = _test_routes_referenced_in_tests(repo_path)
+    if not required:
+        return []
+    main_content = ""
+    for path in ("app/main.py", "main.py"):
+        if path in files:
+            main_content = files.get(path, "")
+            break
+    if not main_content:
+        return []  # No main.py in output, nothing to check
+    missing = [r for r in required if r not in main_content]
+    return missing
+
+
+def _build_code_review_issues_for_missing_test_routes() -> List[Dict[str, Any]]:
+    """Build code_review_issues for pre-write check: tests reference routes missing from main.py."""
+    suggestion = (
+        "Tests expect the route `/test-generic-error` and a generic "
+        "exception handler that returns a JSONResponse (e.g. status_code=500). "
+        "Preserve this route in `app/main.py` and ensure the handler does not "
+        "re-raise; otherwise the test client gets an exception and the test fails."
+    )
+    return [
+        {
+            "severity": "critical",
+            "category": "build",
+            "file_path": "app/main.py",
+            "description": "Pre-write check: tests reference /test-generic-error but app/main.py does not include it.",
+            "suggestion": suggestion,
+        }
+    ]
+
+
+def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[str, Any]]:
+    """Build code_review_issues from build/test failure output.
+
+    When failure matches exception-handler test patterns, returns a targeted
+    suggestion (preserve /test-generic-error, return JSONResponse) and file_path
+    app/main.py so the agent knows exactly what to fix.
+    """
+    is_exception_handler_failure = any(
+        p in build_errors for p in EXCEPTION_HANDLER_TEST_PATTERNS
+    )
+    if is_exception_handler_failure:
+        suggestion = (
+            "Tests expect the route `/test-generic-error` and a generic "
+            "exception handler that returns a JSONResponse (e.g. status_code=500). "
+            "Preserve this route in `app/main.py` and ensure the handler does not "
+            "re-raise; otherwise the test client gets an exception and the test fails."
+        )
+        file_path = "app/main.py"
+    else:
+        suggestion = "Fix the compilation/test errors"
+        file_path = ""
+    return [
+        {
+            "severity": "critical",
+            "category": "build",
+            "file_path": file_path,
+            "description": f"Build/test failed: {build_errors[:2500]}",
+            "suggestion": suggestion,
+        }
+    ]
+
 
 def _read_repo_code(repo_path: Path, extensions: List[str] | None = None) -> str:
     """Read code files from repo, concatenated.
@@ -177,9 +279,11 @@ class BackendExpertAgent:
         spec_content: str,
         architecture: Optional[SystemArchitecture],
         qa_agent: Any,
+        security_agent: Any,
         dbc_agent: Any,
         code_review_agent: Any,
-        tech_lead: Any,
+        acceptance_verifier_agent: Any | None = None,
+        tech_lead: Any = None,  # Required but default None for backward compat in tests
         build_verifier: Callable[..., Tuple[bool, str]],
         doc_agent: Any | None = None,
         completed_tasks: List[Task] | None = None,
@@ -222,6 +326,7 @@ class BackendExpertAgent:
             spec_content: Full project specification text.
             architecture: System architecture (may be None).
             qa_agent: QA Expert agent instance.
+            security_agent: Security (Cybersecurity) agent instance.
             dbc_agent: DbC Comments agent instance.
             code_review_agent: Code Review agent instance.
             tech_lead: Tech Lead agent instance.
@@ -242,7 +347,7 @@ class BackendExpertAgent:
             delete_branch,
             merge_branch,
         )
-        from shared.repo_writer import write_agent_output
+        from shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
 
         task_id = task.id
         workflow_start = time.monotonic()
@@ -340,19 +445,41 @@ class BackendExpertAgent:
 
         # ── Step 3: Write files and commit ──────────────────────────────────
         logger.info("[%s] WORKFLOW Step 3/9: Writing files and committing", task_id)
+        # Pre-write check: if tests reference /test-generic-error but main.py doesn't include it, regenerate
+        for _ in range(MAX_SAME_BUILD_FAILURES):
+            missing = _test_routes_missing_from_main_py(repo_path, result.files)
+            if not missing:
+                break
+            logger.warning(
+                "[%s] WORKFLOW Step 3: Pre-write: tests reference %s but main.py missing; regenerating",
+                task_id,
+                missing,
+            )
+            result = self._regenerate_with_issues(
+                repo_path=repo_path,
+                current_task=current_task,
+                spec_content=spec_content,
+                architecture=architecture,
+                code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+            )
         ok, write_msg = write_agent_output(repo_path, result, subdir="")
         if not ok:
+            failure_reason = (
+                "Backend agent did not propose any file changes for this task"
+                if write_msg == NO_FILES_TO_WRITE_MSG
+                else f"Initial write failed: {write_msg}"
+            )
             logger.error(
-                "[%s] WORKFLOW FAILED at Step 3: Write failed: %s",
+                "[%s] WORKFLOW FAILED at Step 3: %s",
                 task_id,
-                write_msg,
+                failure_reason,
             )
             checkout_branch(repo_path, DEVELOPMENT_BRANCH)
             return BackendWorkflowResult(
                 task_id=task_id,
                 success=False,
                 branch_name=branch_name,
-                failure_reason=f"Initial write failed: {write_msg}",
+                failure_reason=failure_reason,
             )
         logger.info("[%s] WORKFLOW   Initial commit successful", task_id)
 
@@ -418,16 +545,8 @@ class BackendExpertAgent:
                     )
                     break
 
-                # Feed build errors back as code-review issues and regenerate
-                code_review_issues = [
-                    {
-                        "severity": "critical",
-                        "category": "build",
-                        "file_path": "",
-                        "description": f"Build/test failed: {build_errors[:2000]}",
-                        "suggestion": "Fix the compilation/test errors",
-                    }
-                ]
+                # Feed build errors back as code-review issues and regenerate.
+                code_review_issues = _build_code_review_issues_for_build_failure(build_errors)
                 result = self._regenerate_with_issues(
                     repo_path=repo_path,
                     current_task=current_task,
@@ -435,6 +554,25 @@ class BackendExpertAgent:
                     architecture=architecture,
                     code_review_issues=code_review_issues,
                 )
+                # Pre-write check: if tests reference /test-generic-error but result's
+                # main.py doesn't include it, regenerate with targeted issue before writing.
+                for _ in range(MAX_SAME_BUILD_FAILURES):
+                    missing = _test_routes_missing_from_main_py(repo_path, result.files)
+                    if not missing:
+                        break
+                    logger.warning(
+                        "[%s] WORKFLOW   [%d] Pre-write: tests reference %s but main.py missing; regenerating",
+                        task_id,
+                        iteration,
+                        missing,
+                    )
+                    result = self._regenerate_with_issues(
+                        repo_path=repo_path,
+                        current_task=current_task,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                        code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+                    )
                 ok, write_msg = write_agent_output(repo_path, result, subdir="")
                 if not ok:
                     logger.error(
@@ -501,6 +639,24 @@ class BackendExpertAgent:
                     architecture=architecture,
                     code_review_issues=cr_issues,
                 )
+                # Pre-write check: preserve test-only routes in main.py
+                for _ in range(MAX_SAME_BUILD_FAILURES):
+                    missing = _test_routes_missing_from_main_py(repo_path, result.files)
+                    if not missing:
+                        break
+                    logger.warning(
+                        "[%s] WORKFLOW   [%d] Pre-write: tests reference %s but main.py missing; regenerating",
+                        task_id,
+                        iteration,
+                        missing,
+                    )
+                    result = self._regenerate_with_issues(
+                        repo_path=repo_path,
+                        current_task=current_task,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                        code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+                    )
                 ok, write_msg = write_agent_output(repo_path, result, subdir="")
                 if not ok:
                     logger.error(
@@ -517,13 +673,140 @@ class BackendExpertAgent:
                 iteration,
             )
 
-            # ─── 4c. QA review ──────────────────────────────────────────
+            # ─── 4b2. Acceptance criteria verification (optional) ───────
+            if acceptance_verifier_agent and getattr(current_task, "acceptance_criteria", None):
+                code_for_verify = _read_repo_code(repo_path)
+                if code_for_verify and code_for_verify != "# No code files found":
+                    from acceptance_verifier_agent.models import AcceptanceVerifierInput
+                    av_result = acceptance_verifier_agent.run(AcceptanceVerifierInput(
+                        code=code_for_verify,
+                        task_description=current_task.description,
+                        acceptance_criteria=current_task.acceptance_criteria,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                        language="python",
+                    ))
+                    if not av_result.all_satisfied:
+                        unsatisfied = [c for c in av_result.per_criterion if not c.satisfied]
+                        logger.warning(
+                            "[%s] WORKFLOW   [%d] Acceptance verifier: %s/%s criteria unsatisfied",
+                            task_id,
+                            iteration,
+                            len(unsatisfied),
+                            len(av_result.per_criterion),
+                        )
+                        code_review_issues = [
+                            {
+                                "severity": "major",
+                                "category": "acceptance_criteria",
+                                "file_path": "",
+                                "description": f"Criterion not satisfied: {c.criterion}. Evidence: {c.evidence}",
+                                "suggestion": f"Implement or fix code to satisfy: {c.criterion}",
+                            }
+                            for c in unsatisfied
+                        ]
+                        result = self._regenerate_with_issues(
+                            repo_path=repo_path,
+                            current_task=current_task,
+                            spec_content=spec_content,
+                            architecture=architecture,
+                            code_review_issues=code_review_issues,
+                        )
+                        for _ in range(MAX_SAME_BUILD_FAILURES):
+                            missing = _test_routes_missing_from_main_py(repo_path, result.files)
+                            if not missing:
+                                break
+                            result = self._regenerate_with_issues(
+                                repo_path=repo_path,
+                                current_task=current_task,
+                                spec_content=spec_content,
+                                architecture=architecture,
+                                code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+                            )
+                        ok, write_msg = write_agent_output(repo_path, result, subdir="")
+                        if not ok:
+                            logger.error(
+                                "[%s] WORKFLOW   [%d] Write failed after acceptance verifier fix: %s",
+                                task_id,
+                                iteration,
+                                write_msg,
+                            )
+                        continue  # Re-run from build verification
+
+            # ─── 4c. Security review ────────────────────────────────────
+            logger.info(
+                "[%s] WORKFLOW   [%d] Triggering Security review...",
+                task_id,
+                iteration,
+            )
+            security_issues = self._run_security_review(
+                security_agent=security_agent,
+                repo_path=repo_path,
+                task=current_task,
+                architecture=architecture,
+            )
+            record.security_approved = len(security_issues) == 0
+            record.security_issue_count = len(security_issues)
+
+            if security_issues:
+                logger.warning(
+                    "[%s] WORKFLOW   [%d] Security: found %d issues",
+                    task_id,
+                    iteration,
+                    len(security_issues),
+                )
+                for i, issue in enumerate(security_issues, 1):
+                    logger.warning(
+                        "[%s] WORKFLOW     Security Issue %d: [%s] %s",
+                        task_id,
+                        i,
+                        issue.get("severity", "unknown"),
+                        issue.get("description", "")[:120],
+                    )
+                record.action_taken = "fixed_security_issues"
+                review_history.append(record)
+
+                result = self._regenerate_with_issues(
+                    repo_path=repo_path,
+                    current_task=current_task,
+                    spec_content=spec_content,
+                    architecture=architecture,
+                    security_issues=security_issues,
+                )
+                for _ in range(MAX_SAME_BUILD_FAILURES):
+                    missing = _test_routes_missing_from_main_py(repo_path, result.files)
+                    if not missing:
+                        break
+                    result = self._regenerate_with_issues(
+                        repo_path=repo_path,
+                        current_task=current_task,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                        code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+                    )
+                ok, write_msg = write_agent_output(repo_path, result, subdir="")
+                if not ok:
+                    logger.error(
+                        "[%s] WORKFLOW   [%d] Write failed after security fix: %s",
+                        task_id,
+                        iteration,
+                        write_msg,
+                    )
+                continue  # Re-run from build verification
+
+            logger.info(
+                "[%s] WORKFLOW   [%d] Security: APPROVED",
+                task_id,
+                iteration,
+            )
+
+            # ─── 4d. QA review ──────────────────────────────────────────
             logger.info(
                 "[%s] WORKFLOW   [%d] Triggering QA review...",
                 task_id,
                 iteration,
             )
-            qa_issues = self._run_qa_review(
+            qa_issues, qa_output = self._run_qa_review(
                 qa_agent=qa_agent,
                 repo_path=repo_path,
                 task=current_task,
@@ -531,6 +814,13 @@ class BackendExpertAgent:
             )
             record.qa_approved = len(qa_issues) == 0
             record.qa_issue_count = len(qa_issues)
+
+            # Persist QA-generated artifacts (tests, README) when provided
+            artifacts_written = self._persist_qa_artifacts(
+                repo_path=repo_path,
+                qa_output=qa_output,
+                task_id=task_id,
+            )
 
             if qa_issues:
                 logger.warning(
@@ -548,7 +838,7 @@ class BackendExpertAgent:
                         issue.get("description", "")[:120],
                     )
 
-            # ─── 4d. DBC comments review ────────────────────────────────
+            # ─── 4e. DBC comments review ────────────────────────────────
             logger.info(
                 "[%s] WORKFLOW   [%d] Triggering DBC comments review...",
                 task_id,
@@ -584,6 +874,38 @@ class BackendExpertAgent:
             # ─── Step 5: Check if there are issues to fix ───────────────
             has_issues = len(qa_issues) > 0
             if not has_issues:
+                # If we just wrote new tests, re-run build verification to ensure they pass
+                if artifacts_written:
+                    logger.info(
+                        "[%s] WORKFLOW   [%d] Re-running build verification for QA-persisted tests...",
+                        task_id,
+                        iteration,
+                    )
+                    build_ok, build_errors = build_verifier(repo_path, "backend", task_id)
+                    if not build_ok:
+                        logger.warning(
+                            "[%s] WORKFLOW   [%d] Build failed after QA artifact persist: %s",
+                            task_id,
+                            iteration,
+                            build_errors[:500],
+                        )
+                        code_review_issues = _build_code_review_issues_for_build_failure(build_errors)
+                        result = self._regenerate_with_issues(
+                            repo_path=repo_path,
+                            current_task=current_task,
+                            spec_content=spec_content,
+                            architecture=architecture,
+                            code_review_issues=code_review_issues,
+                        )
+                        ok, write_msg = write_agent_output(repo_path, result, subdir="")
+                        if not ok:
+                            logger.error(
+                                "[%s] WORKFLOW   [%d] Write failed after build fix: %s",
+                                task_id,
+                                iteration,
+                                write_msg,
+                            )
+                        continue  # Re-run from build verification
                 logger.info(
                     "[%s] WORKFLOW   [%d] All reviews passed -- no issues to fix",
                     task_id,
@@ -610,6 +932,24 @@ class BackendExpertAgent:
                     architecture=architecture,
                     qa_issues=qa_issues,
                 )
+                # Pre-write check: preserve test-only routes in main.py
+                for _ in range(MAX_SAME_BUILD_FAILURES):
+                    missing = _test_routes_missing_from_main_py(repo_path, result.files)
+                    if not missing:
+                        break
+                    logger.warning(
+                        "[%s] WORKFLOW   [%d] Pre-write: tests reference %s but main.py missing; regenerating",
+                        task_id,
+                        iteration,
+                        missing,
+                    )
+                    result = self._regenerate_with_issues(
+                        repo_path=repo_path,
+                        current_task=current_task,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                        code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+                    )
                 ok, write_msg = write_agent_output(repo_path, result, subdir="")
                 if not ok:
                     logger.error(
@@ -856,23 +1196,66 @@ class BackendExpertAgent:
         )
 
     @staticmethod
+    def _run_security_review(
+        *,
+        security_agent: Any,
+        repo_path: Path,
+        task: Task,
+        architecture: Optional[SystemArchitecture],
+    ) -> List[Dict[str, Any]]:
+        """
+        Invoke the Security agent and return issues as a list of dicts.
+
+        Preconditions:
+            - security_agent is initialised.
+            - Code is committed on the current branch.
+
+        Postconditions:
+            - Returns a (possibly empty) list of security issue dicts.
+            - Each dict has keys: severity, category, description, location, recommendation.
+        """
+        from security_agent.models import SecurityInput
+
+        code_to_review = _read_repo_code(repo_path)
+        if not code_to_review or code_to_review == "# No code files found":
+            return []
+
+        sec_result = security_agent.run(
+            SecurityInput(
+                code=code_to_review,
+                language="python",
+                task_description=task.description,
+                architecture=architecture,
+            )
+        )
+
+        if sec_result.approved:
+            return []
+
+        return [
+            v.model_dump() if hasattr(v, "model_dump") else v.dict()
+            for v in (sec_result.vulnerabilities or [])
+        ]
+
+    @staticmethod
     def _run_qa_review(
         *,
         qa_agent: Any,
         repo_path: Path,
         task: Task,
         architecture: Optional[SystemArchitecture],
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], Any]:
         """
-        Invoke the QA agent and return issues as a list of dicts.
+        Invoke the QA agent and return issues plus full output.
 
         Preconditions:
             - ``qa_agent`` is initialised.
             - Code is committed on the current branch.
 
         Postconditions:
-            - Returns a (possibly empty) list of QA issue dicts.
-            - Each dict has keys: severity, description, location, recommendation.
+            - Returns (issues_list, QAOutput).
+            - issues_list is a (possibly empty) list of QA issue dicts.
+            - QAOutput contains integration_tests, unit_tests, readme_content for persistence.
         """
         from qa_agent.models import QAInput
 
@@ -886,13 +1269,76 @@ class BackendExpertAgent:
             )
         )
 
-        if qa_result.approved:
-            return []
+        issues = []
+        if not qa_result.approved:
+            issues = [
+                b.model_dump() if hasattr(b, "model_dump") else b.dict()
+                for b in (qa_result.bugs_found or [])
+            ]
+        return issues, qa_result
 
-        return [
-            b.model_dump() if hasattr(b, "model_dump") else b.dict()
-            for b in (qa_result.bugs_found or [])
-        ]
+    @staticmethod
+    def _persist_qa_artifacts(
+        *,
+        repo_path: Path,
+        qa_output: Any,
+        task_id: str,
+    ) -> bool:
+        """
+        Persist QA-generated integration_tests, unit_tests, and readme_content to the repo.
+
+        When QA returns non-empty artifacts, writes them to appropriate files and commits.
+        New tests are picked up by the next build verification (pytest).
+
+        Returns True if any test files were written (so caller can re-run build verification).
+        """
+        from shared.git_utils import write_files_and_commit
+
+        files_to_write: Dict[str, str] = {}
+        safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in task_id)[:50]
+
+        if getattr(qa_output, "integration_tests", "").strip():
+            content = qa_output.integration_tests.strip()
+            if "import pytest" not in content and "import unittest" not in content:
+                content = "import pytest\n\n" + content
+            files_to_write[f"tests/test_integration_qa_{safe_id}.py"] = content
+
+        if getattr(qa_output, "unit_tests", "").strip():
+            content = qa_output.unit_tests.strip()
+            if "import pytest" not in content and "import unittest" not in content:
+                content = "import pytest\n\n" + content
+            files_to_write[f"tests/test_unit_qa_{safe_id}.py"] = content
+
+        if getattr(qa_output, "readme_content", "").strip():
+            files_to_write["README.md"] = qa_output.readme_content.strip()
+
+        if not files_to_write:
+            return False
+
+        try:
+            tests_dir = repo_path / "tests"
+            tests_dir.mkdir(parents=True, exist_ok=True)
+            msg = getattr(qa_output, "suggested_commit_message", "") or "test(qa): add QA-generated tests and docs"
+            if not msg or len(msg) < 10:
+                msg = "test(qa): add QA-generated tests and docs"
+            ok, err = write_files_and_commit(repo_path, files_to_write, msg)
+            if ok:
+                logger.info(
+                    "[%s] Persisted QA artifacts: %s",
+                    task_id,
+                    list(files_to_write.keys()),
+                )
+                # Return True if we wrote any test files (integration or unit)
+                return any(
+                    p.startswith("tests/") and p.endswith(".py")
+                    for p in files_to_write
+                )
+            else:
+                logger.warning("[%s] Failed to persist QA artifacts: %s", task_id, err)
+                return False
+        except Exception as e:
+            logger.warning("[%s] Persist QA artifacts failed (non-blocking): %s", task_id, e)
+            return False
 
     @staticmethod
     def _run_dbc_review(

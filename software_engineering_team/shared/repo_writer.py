@@ -16,6 +16,9 @@ from .git_utils import write_files_and_commit
 
 logger = logging.getLogger(__name__)
 
+# Distinct error message when agent produced no file changes (LLM returned empty files dict)
+NO_FILES_TO_WRITE_MSG = "No files to write"
+
 # Maximum length for any single path segment (directory or filename without extension)
 MAX_SEGMENT_LENGTH = 30
 
@@ -234,7 +237,7 @@ def write_agent_output(
             files[".gitignore"] = merged_content
 
     if not files:
-        return False, "No files to write"
+        return False, NO_FILES_TO_WRITE_MSG
 
     # Validate paths before writing
     validated_files, warnings = _validate_paths(files, subdir)

@@ -74,6 +74,8 @@ class ReviewIterationRecord(BaseModel):
     build_errors: str = ""
     code_review_approved: bool = True
     code_review_issue_count: int = 0
+    security_approved: bool = True
+    security_issue_count: int = 0
     qa_approved: bool = True
     qa_issue_count: int = 0
     dbc_already_compliant: bool = True
@@ -81,7 +83,7 @@ class ReviewIterationRecord(BaseModel):
     dbc_comments_updated: int = 0
     action_taken: str = Field(
         default="",
-        description="What the agent did in response: 'fixed_build', 'fixed_review_issues', 'fixed_qa_issues', 'no_issues'",
+        description="What the agent did in response: 'fixed_build', 'fixed_review_issues', 'fixed_security_issues', 'fixed_qa_issues', 'no_issues'",
     )
 
 

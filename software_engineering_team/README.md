@@ -6,13 +6,19 @@ A multi-agent system that simulates a real software engineering team with a mix 
 
 | Agent | Role | Expertise |
 |-------|------|------------|
-| **Tech Lead** | Staff-level orchestrator | Uses initial_spec to generate full build plan; distributes work by dependency (Security only after code exists); tracks progress |
+| **Tech Lead** | Staff-level orchestrator | Uses initial_spec to generate full build plan; distributes work by dependency; tracks progress; triggers documentation |
 | **Architecture Expert** | System designer | Designs system architecture from requirements; output used by all other agents |
 | **DevOps Expert** | Infrastructure specialist | CI/CD pipelines, IaC (Terraform, etc.), Docker, networking |
-| **Cybersecurity Expert** | Security specialist | Reviews code for security flaws; remediates vulnerabilities |
-| **Backend Expert** | Backend engineer | Implements solutions in Python or Java |
-| **Frontend Expert** | Frontend engineer | Implements solutions in Angular |
-| **QA Expert** | Quality assurance | Reviews for bugs, fixes them, writes integration tests, performs live testing |
+| **Cybersecurity Expert** | Security specialist | Reviews code for security flaws per task (backend and frontend); remediates vulnerabilities |
+| **Backend Expert** | Backend engineer | Implements solutions in Python or Java; runs autonomous workflow with quality gates |
+| **Frontend Expert** | Frontend engineer | Implements solutions in Angular; runs unified workflow mirroring backend |
+| **QA Expert** | Quality assurance | Reviews for bugs; produces integration/unit tests and README content (persisted to repo) |
+| **Code Review Agent** | Code reviewer | Reviews code against spec, standards, and acceptance criteria |
+| **Acceptance Verifier** | Criteria checker | Verifies each task acceptance criterion is satisfied with evidence |
+| **Integration Agent** | Full-stack validator | Validates backend-frontend API contract alignment after workers complete |
+| **Accessibility Expert** | A11y specialist | Reviews frontend for WCAG 2.2 compliance |
+| **DbC Comments Agent** | Design by Contract | Adds pre/postconditions and invariants to code |
+| **Documentation Agent** | Technical writer | Updates README and project docs |
 
 ## Coding Standards
 
@@ -30,15 +36,23 @@ All agents enforce these rules for produced code:
 
 ## Flow
 
-1. **Git setup** – Ensure `development` branch exists (created from `main` if missing).
-2. **Load spec** – Read `initial_spec.md` from the repo.
-3. **Architecture Expert** designs the system from product requirements.
-4. **Tech Lead** retrieves the spec, generates a complete build plan, and assigns tasks with dependencies:
-   - DevOps (CI/CD, Docker) runs early
-   - Backend and Frontend implement per spec
-   - Security runs only after Backend/Frontend have produced code to review
-   - QA runs only after Security has reviewed the code
-5. Specialists execute in dependency order; outputs (code) are passed to Security and QA.
+1. **Load spec** – Read `initial_spec.md` from the repo.
+2. **Architecture Expert** designs the system from product requirements.
+3. **Tech Lead** generates a complete build plan and assigns tasks (git_setup, devops, backend, frontend).
+4. **Backend and Frontend workers** run in parallel. Each task follows a unified workflow:
+   - Create feature branch
+   - Generate code (with clarification loop via Tech Lead if needed)
+   - **Build verification** (pytest for backend, ng build for frontend)
+   - **Code review** (against spec and standards)
+   - **Acceptance criteria verification** (optional; per-criterion check)
+   - **Security review** (per task for backend; per task for frontend)
+   - **QA review** (backend: bugs + persisted integration/unit tests and README)
+   - **Accessibility review** (frontend only)
+   - **DbC comments** (add pre/postconditions)
+   - Merge to development, Tech Lead review, Documentation update
+5. **Integration phase** – After workers complete, Integration Agent validates backend-frontend API contract alignment.
+6. **Final security** (full codebase) and **documentation** pass when Tech Lead requests.
+7. **Retry path** – Failed tasks are retried through the same full workflow (build, code review, QA, a11y, security, DBC).
 
 ## Requirements
 
@@ -68,6 +82,10 @@ By default, the script uses `DummyLLMClient` for testing without an LLM. To use 
 | `SW_LLM_MODEL` | Model name for Ollama | `qwen2.5-coder` |
 | `SW_LLM_BASE_URL` | Ollama API base URL | `http://127.0.0.1:11434` |
 | `SW_LLM_TIMEOUT` | Timeout in seconds | `1800` |
+| `SW_LLM_MAX_RETRIES` | Max retries for 429/5xx errors | `4` |
+| `SW_LLM_BACKOFF_BASE` | Base seconds for exponential backoff | `2` |
+| `SW_LLM_BACKOFF_MAX_SECONDS` | Max backoff seconds | `60` |
+| `SW_LLM_MAX_CONCURRENCY` | Max concurrent LLM calls | `2` |
 
 Example with Ollama:
 ```bash
@@ -149,6 +167,20 @@ setup_logging(level=logging.INFO, log_file=Path("agent.log"))
 pytest tests/ -v --log-cli-level=INFO
 ```
 
+## Pipeline Diagram
+
+```
+Spec → Architecture → Tech Lead Plan
+         ↓
+    [Backend Worker]     [Frontend Worker]
+    (run_workflow)       (run_workflow)
+    Build → CodeReview → AcceptanceVerifier → Security → QA → DBC → Merge
+         ↓                      ↓
+    Integration Agent (backend + frontend contract alignment)
+         ↓
+    Final Security + Documentation
+```
+
 ## Project Layout
 
 ```
@@ -164,6 +196,12 @@ software_engineering_team/
 ├── backend_agent/
 ├── frontend_agent/
 ├── qa_agent/
+├── integration_agent/   # Full-stack API contract validation
+├── acceptance_verifier_agent/
+├── code_review_agent/
+├── dbc_comments_agent/
+├── accessibility_agent/
+├── documentation_agent/
 ├── agent_implementations/
 │   ├── run_team.py   # CLI orchestration script
 │   └── run_api_server.py

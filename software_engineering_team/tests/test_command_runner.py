@@ -68,6 +68,16 @@ def test_command_result_pytest_error_summary_extracts_errors_section() -> None:
     assert "sqlalchemy" in summary
 
 
+def test_command_result_pytest_error_summary_preserves_up_to_max_chars() -> None:
+    """pytest_error_summary preserves up to max_chars (default 2500) for agent feedback."""
+    long_failure = "= FAILURES =\n" + "x" * 3000
+    r = CommandResult(success=False, exit_code=1, stdout=long_failure, stderr="")
+    summary = r.pytest_error_summary()
+    assert len(summary) <= 2500 + 50  # 2500 + "... [truncated]" and newline
+    assert "= FAILURES =" in summary
+    assert "[truncated]" in summary
+
+
 def test_is_ng_build_environment_failure_success_returns_false() -> None:
     """is_ng_build_environment_failure returns False when result is success."""
     r = CommandResult(success=True, exit_code=0, stdout="", stderr="")

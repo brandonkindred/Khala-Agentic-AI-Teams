@@ -90,12 +90,14 @@ BACKEND_PROMPT = """You are a Senior Backend Software Engineer. You implement pr
    - Define ALL request and response bodies in `app/schemas/<resource>.py` as Pydantic BaseModel classes with standard types only (str, int, bool, float, datetime, Optional[...], list[...]). Use these schema classes in route signatures (e.g. `body: TaskCreate`, `response_model=TaskResponse`).
    - Do NOT define Pydantic models inline inside router files for use as request bodies; FastAPI/Pydantic can fail with "no validator found for X" if the model is not properly importable or uses unsupported types. Import schemas from `app.schemas.<resource>`.
 
-5c. **Exception handlers and existing tests:**
-   - If the project has tests that call routes like `/test-generic-error` or similar (for testing exception handlers), either preserve those routes in `app/main.py` or update the tests to match your changes. Exception handlers must return a proper JSON response (e.g. `JSONResponse(status_code=500, content={...})`) and must NOT re-raise; otherwise the test client may receive an exception instead of a response and tests will fail.
+5c. **Exception handlers and existing tests (CRITICAL when modifying app/main.py):**
+   - **When modifying `app/main.py`:** You MUST preserve any route that existing tests call (e.g. `/test-generic-error`). Before changing `app/main.py`, check the `tests/` directory for `client.get(...)` / `client.post(...)` paths; if tests reference a path, that path MUST remain in the app.
+   - Exception handlers must return a proper JSON response (e.g. `JSONResponse(status_code=500, content={...})`) and must NOT re-raise. If a handler re-raises, the test client receives an exception instead of an HTTP response and tests will fail.
 
 6. **Build configuration and app entry point (REQUIRED when your changes affect them):**
    - When you add or remove any dependency (any import from PyPI or third-party package), you **must** update `requirements.txt` in the "files" dict with the new dependency and version. If the project uses `pyproject.toml`, update that as well.
    - When you add new routers, APIRouter modules, or services that must be mounted or registered on the app, you **must** update `app/main.py` in the "files" dict so that the new router is included (e.g. `app.include_router(...)`) and the application remains runnable. Never leave new routers unregistered.
+   - When updating `app/main.py`, preserve existing test-only routes (e.g. `/test-generic-error`) used by `tests/test_error_handlers.py` or similar; do not remove them.
    - If existing code already has `app/main.py` or `requirements.txt`, your output must include the updated versions of those files whenever your task adds dependencies or new route modules. The "files" dict must contain the full updated content for each file you change.
 
 7. **Code must integrate with the existing project.** If existing code is provided, your output must work alongside it. Import and use existing modules where appropriate. Do not duplicate existing functionality.

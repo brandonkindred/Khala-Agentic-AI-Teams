@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
+
 # Path setup when run as module
 import sys
 _team_dir = Path(__file__).resolve().parent
@@ -30,6 +32,12 @@ from shared.git_utils import (
     delete_branch,
     ensure_development_branch,
     merge_branch,
+)
+from shared.llm import (
+    LLMError,
+    LLMPermanentError,
+    LLMRateLimitError,
+    LLMTemporaryError,
 )
 from shared.job_store import (
     JOB_STATUS_COMPLETED,
@@ -56,12 +64,15 @@ def _get_agents(llm):
     from documentation_agent import DocumentationAgent, DocumentationInput
     from frontend_agent import FrontendExpertAgent, FrontendInput
     from git_setup_agent import GitSetupAgent
+    from integration_agent import IntegrationAgent, IntegrationInput
     from qa_agent import QAExpertAgent, QAInput
     from security_agent import CybersecurityExpertAgent, SecurityInput
     from tech_lead_agent import TechLeadAgent, TechLeadInput
 
     return {
         "architecture": ArchitectureExpertAgent(llm),
+        "integration": IntegrationAgent(llm),
+        "acceptance_verifier": AcceptanceVerifierAgent(llm),
         "tech_lead": TechLeadAgent(llm),
         "devops": DevOpsExpertAgent(llm),
         "backend": BackendExpertAgent(llm),
@@ -400,6 +411,15 @@ def _run_build_verification(
             if not test_result.success:
                 # Use pytest-specific summary so agent sees actual error (ImportError, etc.) not session header
                 summary = test_result.pytest_error_summary()
+                # When failure matches exception-handler test patterns, append canonical FIX line
+                # so the backend agent gets an explicit instruction even if traceback is long.
+                # This prevents repeated failures when the agent drops /test-generic-error from main.py.
+                from backend_agent.agent import EXCEPTION_HANDLER_TEST_PATTERNS
+                if any(p in summary for p in EXCEPTION_HANDLER_TEST_PATTERNS):
+                    summary += (
+                        "\n\nFIX: Preserve the /test-generic-error route in app/main.py and "
+                        "ensure the exception handler returns JSONResponse; do not re-raise."
+                    )
                 logger.warning("Tests failed for task %s: %s", task_id, summary[:1200])
                 return False, summary
         logger.info("Build verification passed for backend task %s", task_id)
@@ -567,8 +587,10 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                         spec_content=spec_content,
                         architecture=architecture,
                         qa_agent=agents["qa"],
+                        security_agent=agents["security"],
                         dbc_agent=agents["dbc_comments"],
                         code_review_agent=agents["code_review"],
+                        acceptance_verifier_agent=agents.get("acceptance_verifier"),
                         tech_lead=tech_lead,
                         build_verifier=_run_build_verification,
                         doc_agent=agents.get("documentation"),
@@ -587,6 +609,15 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                         else:
                             failed[task_id] = workflow_result.failure_reason or "Backend workflow failed"
                             logger.warning("[%s] Backend FAILED after %.1fs: %s", task_id, elapsed, failed[task_id])
+                except (LLMError, httpx.HTTPError) as e:
+                    with state_lock:
+                        if isinstance(e, (LLMRateLimitError, LLMTemporaryError)):
+                            failed[task_id] = "LLM rate limited or temporarily unavailable – please retry later"
+                        elif isinstance(e, LLMPermanentError):
+                            failed[task_id] = str(e)
+                        else:
+                            failed[task_id] = f"LLM error: {e}"
+                    logger.warning("[%s] Backend task LLM/HTTP error: %s", task_id, e)
                 except Exception as e:
                     with state_lock:
                         failed[task_id] = f"Unhandled exception: {e}"
@@ -614,7 +645,6 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                 update_job(job_id, current_task=task_id)
                 logger.info("[%s] >>> Frontend worker starting task %s", task_id, task_id)
                 task_start_time = time.monotonic()
-                branch_name = f"feature/{task_id}"
                 try:
                     from shared.command_runner import ensure_frontend_project_initialized
                     init_result = ensure_frontend_project_initialized(frontend_dir)
@@ -628,183 +658,63 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                             with state_lock:
                                 failed[task_id] = f"Git setup failed: {gs_result.message}"
                             continue
-                    ok, msg = create_feature_branch(frontend_dir, DEVELOPMENT_BRANCH, task_id)
-                    if not ok:
+
+                    completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
+                    remaining_ids = set(_remaining_queue_ids())
+                    remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in remaining_ids]
+                    completed_with_current = completed_tasks_list + [task]
+
+                    def _append_backend_task(nt) -> None:
                         with state_lock:
-                            failed[task_id] = f"Feature branch failed: {msg}"
-                        continue
+                            all_tasks[nt.id] = nt
+                            backend_queue.insert(0, nt.id)
 
-                    from shared.command_runner import ensure_frontend_dependencies_installed
-                    install_result = ensure_frontend_dependencies_installed(frontend_dir)
-                    if not install_result.success:
+                    def _append_frontend_task_id(tid: str) -> None:
                         with state_lock:
-                            failed[task_id] = "Frontend dependency install failed: " + (
-                                install_result.error_summary or install_result.stderr or "unknown"
-                            )
-                        continue
+                            frontend_queue.append(tid)
 
-                    from frontend_agent.models import FrontendInput
-                    from qa_agent.models import QAInput
-                    qa_issues, sec_issues, a11y_issues = [], [], []
-                    code_review_issues = []
-                    result = None
-                    merged = False
-                    task_completed = False
-                    failure_reason = ""
-                    current_task = task
-
-                    for iteration_round in range(MAX_CODE_REVIEW_ITERATIONS):
-                        existing_code = _truncate_for_context(
-                            _read_repo_code(frontend_dir, [".ts", ".tsx", ".html", ".scss"]),
-                            MAX_EXISTING_CODE_CHARS,
-                        )
-                        api_endpoints = _truncate_for_context(
-                            _read_repo_code(backend_dir, [".py"]),
-                            MAX_API_SPEC_CHARS,
-                        )
-                        result = agents["frontend"].run(FrontendInput(
-                            task_description=current_task.description,
-                            requirements=_task_requirements(current_task),
-                            user_story=getattr(current_task, "user_story", "") or "",
-                            spec_content=_truncate_for_context(spec_content, MAX_EXISTING_CODE_CHARS),
-                            architecture=architecture,
-                            existing_code=existing_code if existing_code and existing_code != "# No code files found" else None,
-                            api_endpoints=api_endpoints if api_endpoints and api_endpoints != "# No code files found" else None,
-                            qa_issues=qa_issues,
-                            security_issues=sec_issues,
-                            accessibility_issues=a11y_issues,
-                            code_review_issues=code_review_issues,
-                        ))
-                        if result.needs_clarification and result.clarification_requests:
-                            if iteration_round < MAX_CLARIFICATION_REFINEMENTS:
-                                current_task = tech_lead.refine_task(
-                                    current_task, result.clarification_requests, spec_content, architecture,
-                                )
-                                code_review_issues = []
-                                continue
-                            failure_reason = "Agent needs clarification after max refinements"
-                            checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
-                            break
-
-                        ok, msg = write_agent_output(frontend_dir, result, subdir="")
-                        if not ok:
-                            failure_reason = f"Write failed: {msg}"
-                            checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
-                            break
-
-                        if result.npm_packages_to_install:
-                            install_cmd = ["npm", "install", "--save"] + result.npm_packages_to_install
-                            install_res = run_command_with_nvm(install_cmd, cwd=frontend_dir)
-                            if not install_res.success:
-                                logger.warning(
-                                    "[%s] npm install for packages %s failed: %s",
-                                    task_id, result.npm_packages_to_install, install_res.stderr[:500],
-                                )
-
-                        build_ok, build_errors = _run_build_verification(frontend_dir, "frontend", task_id)
-                        if not build_ok:
-                            if build_errors.startswith("ENV:"):
-                                failure_reason = "Unsupported environment: " + build_errors[4:].strip()[:500]
-                                checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
-                                break
-                            code_review_issues = [{"severity": "critical", "category": "logic",
-                                                   "file_path": "", "description": f"ng build failed: {build_errors[:2000]}",
-                                                   "suggestion": "Fix the Angular compilation errors"}]
-                            continue
-
-                        code_on_branch = _read_repo_code(frontend_dir, [".ts", ".tsx", ".html", ".scss"])
-                        existing_code = _truncate_for_context(code_on_branch, MAX_EXISTING_CODE_CHARS)
-                        review_result = _run_code_review(
-                            agents, code_on_branch, spec_content, current_task,
-                            "typescript", architecture, existing_code,
-                        )
-                        _log_code_review_result(review_result, task_id)
-                        if not review_result.approved:
-                            code_review_issues = _code_review_issues_to_dicts(review_result.issues)
-                            if iteration_round < MAX_CODE_REVIEW_ITERATIONS - 1:
-                                continue
-
-                        code_to_review = _read_repo_code(frontend_dir, [".ts", ".tsx", ".html", ".scss"])
-                        qa_result = agents["qa"].run(QAInput(
-                            code=code_to_review, language="typescript",
-                            task_description=current_task.description, architecture=architecture,
-                        ))
-                        a11y_result = agents["accessibility"].run(AccessibilityInput(
-                            code=code_to_review, language="typescript",
-                            task_description=current_task.description, architecture=architecture,
-                        ))
-                        from security_agent.models import SecurityInput
-                        sec_result = agents["security"].run(SecurityInput(
-                            code=code_to_review, language="typescript",
-                            task_description=current_task.description, architecture=architecture,
-                        ))
-                        qa_issues = [b.model_dump() if hasattr(b, "model_dump") else b.dict() for b in (qa_result.bugs_found or [])]
-                        a11y_issues = [i.model_dump() if hasattr(i, "model_dump") else i.dict() for i in (a11y_result.issues or [])]
-                        sec_issues = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in (sec_result.vulnerabilities or [])]
-                        all_approved = qa_result.approved and a11y_result.approved and sec_result.approved
-                        if not all_approved:
-                            if not qa_result.approved:
-                                logger.info("[%s] QA not approved (%s issues) - passing to frontend for fix", task_id, len(qa_issues))
-                            if not a11y_result.approved:
-                                logger.info("[%s] Accessibility not approved (%s issues) - passing to frontend for fix", task_id, len(a11y_issues))
-                            if not sec_result.approved:
-                                logger.info("[%s] Security not approved (%s issues) - passing to frontend for fix", task_id, len(sec_issues))
-                            if iteration_round < MAX_CODE_REVIEW_ITERATIONS - 1:
-                                code_review_issues = []
-                                continue
-                            failure_reason = "QA, accessibility, or security did not approve after max iterations"
-                            checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
-                            break
-                        fix_tasks = tech_lead.evaluate_qa_and_create_fix_tasks(
-                            current_task, qa_result, spec_content, architecture,
-                        )
-                        if fix_tasks:
-                            backend_fix_tasks = [ft for ft in fix_tasks if getattr(ft, "assignee", None) == "backend"]
-                            with state_lock:
-                                for ft in fix_tasks:
-                                    all_tasks[ft.id] = ft
-                                for ft in backend_fix_tasks:
-                                    backend_queue.insert(0, ft.id)
-                            if backend_fix_tasks:
-                                logger.info("Tech Lead created %s backend fix tasks from QA feedback", len(backend_fix_tasks))
-
-                        _run_dbc_comments_review(
-                            agents, frontend_dir, task_id, "typescript",
-                            current_task.description, architecture,
-                        )
-                        merge_ok, merge_msg = merge_branch(frontend_dir, branch_name, DEVELOPMENT_BRANCH)
-                        if merge_ok:
-                            delete_branch(frontend_dir, branch_name)
-                            merged = True
-                            task_completed = True
-                            with state_lock:
-                                completed.add(task_id)
-                                completed_code_task_ids.append(task_id)
-                        else:
-                            failure_reason = f"Merge failed: {merge_msg}"
-                        checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
-                        break
+                    workflow_result = agents["frontend"].run_workflow(
+                        repo_path=frontend_dir,
+                        backend_dir=backend_dir,
+                        task=task,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                        qa_agent=agents["qa"],
+                        accessibility_agent=agents["accessibility"],
+                        security_agent=agents["security"],
+                        code_review_agent=agents["code_review"],
+                        acceptance_verifier_agent=agents.get("acceptance_verifier"),
+                        dbc_agent=agents["dbc_comments"],
+                        tech_lead=tech_lead,
+                        build_verifier=_run_build_verification,
+                        doc_agent=agents.get("documentation"),
+                        completed_tasks=completed_with_current,
+                        remaining_tasks=remaining_tasks_list,
+                        all_tasks=all_tasks,
+                        append_backend_task_fn=_append_backend_task,
+                        append_frontend_task_fn=_append_frontend_task_id,
+                    )
 
                     elapsed = time.monotonic() - task_start_time
-                    if not merged:
-                        checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
-                    if task_completed:
-                        with state_lock:
+                    with state_lock:
+                        if workflow_result.success:
                             completed.add(task_id)
-                        task_update = _build_task_update(task_id, "frontend", result)
-                        def _append_frontend_task_id(tid: str) -> None:
-                            with state_lock:
-                                frontend_queue.append(tid)
-                        _run_tech_lead_review(
-                            tech_lead, task_update, spec_content, architecture,
-                            all_tasks, completed, _remaining_queue_ids(), frontend_dir,
-                            doc_agent=agents.get("documentation"),
-                            append_task_id_fn=_append_frontend_task_id,
-                        )
-                    else:
-                        with state_lock:
-                            failed[task_id] = failure_reason or "Frontend agent produced no output"
-                    logger.info("[%s] <<< Frontend worker done (completed=%s)", task_id, task_completed)
+                            completed_code_task_ids.append(task_id)
+                            logger.info("[%s] Frontend COMPLETED in %.1fs", task_id, elapsed)
+                        else:
+                            failed[task_id] = workflow_result.failure_reason or "Frontend workflow failed"
+                            logger.warning("[%s] Frontend FAILED after %.1fs: %s", task_id, elapsed, failed[task_id])
+                    logger.info("[%s] <<< Frontend worker done (completed=%s)", task_id, workflow_result.success)
+                except (LLMError, httpx.HTTPError) as e:
+                    with state_lock:
+                        if isinstance(e, (LLMRateLimitError, LLMTemporaryError)):
+                            failed[task_id] = "LLM rate limited or temporarily unavailable – please retry later"
+                        elif isinstance(e, LLMPermanentError):
+                            failed[task_id] = str(e)
+                        else:
+                            failed[task_id] = f"LLM error: {e}"
+                    logger.warning("[%s] Frontend task LLM/HTTP error: %s", task_id, e)
+                    checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
                 except Exception as e:
                     with state_lock:
                         failed[task_id] = f"Unhandled exception: {e}"
@@ -844,6 +754,39 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                 "Unprocessed tasks still in queues: backend=%s, frontend=%s",
                 len(backend_queue), len(frontend_queue),
             )
+
+        # Integration phase: validate backend-frontend API contract alignment
+        integration_agent = agents.get("integration")
+        has_backend = backend_dir.is_dir() and any(backend_dir.rglob("*.py"))
+        has_frontend = frontend_dir.is_dir() and any(frontend_dir.rglob("*.ts"))
+        if integration_agent and has_backend and has_frontend and completed_code_task_ids:
+            try:
+                from integration_agent.models import IntegrationInput
+                code_backend = _read_repo_code(backend_dir, [".py"])
+                code_frontend = _read_repo_code(frontend_dir, [".ts", ".tsx", ".html", ".scss"])
+                if code_backend != "# No code files found" and code_frontend != "# No code files found":
+                    int_result = integration_agent.run(IntegrationInput(
+                        backend_code=code_backend,
+                        frontend_code=code_frontend,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                    ))
+                    if not int_result.passed:
+                        logger.warning(
+                            "Integration agent found %s issues (%s critical/high)",
+                            len(int_result.issues),
+                            len([i for i in int_result.issues if i.severity in ("critical", "high")]),
+                        )
+                        for i, issue in enumerate(int_result.issues[:10], 1):
+                            logger.warning(
+                                "  [%s] %s: %s (backend: %s, frontend: %s)",
+                                i, issue.severity, issue.description[:100],
+                                issue.backend_location or "n/a", issue.frontend_location or "n/a",
+                            )
+                    else:
+                        logger.info("Integration agent: passed (no critical/high contract mismatches)")
+            except Exception as int_err:
+                logger.warning("Integration phase failed (non-blocking): %s", int_err)
 
         # DevOps: containerize every git repo created by the pipeline (backend and frontend)
         devops_agent = agents.get("devops")
@@ -1034,7 +977,6 @@ def run_failed_tasks(job_id: str) -> None:
                 task_counter, total_tasks, task_id, task.type.value, task.assignee,
             )
             update_job(job_id, current_task=task_id)
-            branch_name = f"feature/{task_id}"
 
             try:
                 if task.type.value == "git_setup":
@@ -1058,8 +1000,10 @@ def run_failed_tasks(job_id: str) -> None:
                         spec_content=spec_content,
                         architecture=architecture,
                         qa_agent=agents["qa"],
+                        security_agent=agents["security"],
                         dbc_agent=agents["dbc_comments"],
                         code_review_agent=agents["code_review"],
+                        acceptance_verifier_agent=agents.get("acceptance_verifier"),
                         tech_lead=tech_lead,
                         build_verifier=_run_build_verification,
                         doc_agent=agents.get("documentation"),
@@ -1096,61 +1040,45 @@ def run_failed_tasks(job_id: str) -> None:
                         if not gs_result.success:
                             failed_retry[task_id] = f"Git setup failed: {gs_result.message}"
                             continue
-                    ok, msg = create_feature_branch(frontend_dir, DEVELOPMENT_BRANCH, task_id)
-                    if not ok:
-                        failed_retry[task_id] = f"Feature branch failed: {msg}"
-                        continue
 
-                    from frontend_agent.models import FrontendInput
-                    from qa_agent.models import QAInput
-                    existing_code = _truncate_for_context(
-                        _read_repo_code(frontend_dir, [".ts", ".tsx", ".html", ".scss"]),
-                        MAX_EXISTING_CODE_CHARS,
+                    completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
+                    remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in execution_queue]
+                    completed_with_current = completed_tasks_list + [task]
+
+                    def _append_backend_task_retry(nt) -> None:
+                        all_tasks[nt.id] = nt
+                        execution_queue.insert(0, nt.id)
+
+                    def _append_frontend_task_id_retry(tid: str) -> None:
+                        execution_queue.append(tid)
+
+                    workflow_result = agents["frontend"].run_workflow(
+                        repo_path=frontend_dir,
+                        backend_dir=backend_dir,
+                        task=task,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                        qa_agent=agents["qa"],
+                        accessibility_agent=agents["accessibility"],
+                        security_agent=agents["security"],
+                        code_review_agent=agents["code_review"],
+                        acceptance_verifier_agent=agents.get("acceptance_verifier"),
+                        dbc_agent=agents["dbc_comments"],
+                        tech_lead=tech_lead,
+                        build_verifier=_run_build_verification,
+                        doc_agent=agents.get("documentation"),
+                        completed_tasks=completed_with_current,
+                        remaining_tasks=remaining_tasks_list,
+                        all_tasks=all_tasks,
+                        append_backend_task_fn=_append_backend_task_retry,
+                        append_frontend_task_fn=_append_frontend_task_id_retry,
                     )
-                    api_endpoints = _truncate_for_context(
-                        _read_repo_code(backend_dir, [".py"]),
-                        MAX_API_SPEC_CHARS,
-                    )
-                    code_review_issues_fe: list = []
-                    task_completed_fe = False
-                    failure_reason_fe = ""
-                    for attempt in range(MAX_CODE_REVIEW_ITERATIONS):
-                        result = agents["frontend"].run(FrontendInput(
-                            task_description=task.description,
-                            requirements=_task_requirements(task),
-                            user_story=getattr(task, "user_story", "") or "",
-                            spec_content=_truncate_for_context(spec_content, MAX_EXISTING_CODE_CHARS),
-                            architecture=architecture,
-                            existing_code=existing_code if existing_code and existing_code != "# No code files found" else None,
-                            api_endpoints=api_endpoints if api_endpoints and api_endpoints != "# No code files found" else None,
-                            qa_issues=[],
-                            security_issues=[],
-                            code_review_issues=code_review_issues_fe,
-                        ))
-                        ok, msg = write_agent_output(frontend_dir, result, subdir="")
-                        if not ok:
-                            failure_reason_fe = f"Write failed: {msg}"
-                            break
-                        if result.npm_packages_to_install:
-                            install_cmd = ["npm", "install", "--save"] + result.npm_packages_to_install
-                            install_res = run_command_with_nvm(install_cmd, cwd=frontend_dir)
-                            if not install_res.success:
-                                logger.warning(
-                                    "[%s] npm install for packages %s failed: %s",
-                                    task_id, result.npm_packages_to_install, install_res.stderr[:500],
-                                )
-                        merge_ok, merge_msg = merge_branch(frontend_dir, branch_name, DEVELOPMENT_BRANCH)
-                        if merge_ok:
-                            delete_branch(frontend_dir, branch_name)
-                            task_completed_fe = True
-                        else:
-                            failure_reason_fe = f"Merge failed: {merge_msg}"
-                        break
-                    if task_completed_fe:
+
+                    if workflow_result.success:
                         completed.add(task_id)
                         completed_code_task_ids.append(task_id)
                     else:
-                        failed_retry[task_id] = failure_reason_fe or "Frontend agent produced no output"
+                        failed_retry[task_id] = workflow_result.failure_reason or "Frontend workflow produced no output"
                     checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
 
                 else:

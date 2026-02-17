@@ -1156,6 +1156,8 @@ env/
 htmlcov/
 .tox/
 .nox/
+*.db
+test.db
 
 # IDE
 .idea/
