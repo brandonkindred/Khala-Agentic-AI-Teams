@@ -140,11 +140,13 @@ sequenceDiagram
 
 ### Prerequisites
 - Python 3.10+
-- Dependencies installed from repo root (`requirements.txt` includes FastAPI/uvicorn).
 
 ### Install dependencies
 
+Install from the **repo root** `requirements.txt` (includes FastAPI, uvicorn, and shared deps). Run this from the project root so the same environment is used when starting the API:
+
 ```bash
+# From project root
 pip install -r requirements.txt
 ```
 

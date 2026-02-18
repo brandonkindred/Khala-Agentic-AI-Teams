@@ -18,6 +18,7 @@ Or with path setup from project root:
 import _path_setup  # noqa: F401
 
 import logging
+from pathlib import Path
 
 from shared.llm import DummyLLMClient, OllamaLLMClient
 from shared.models import ProductRequirements, TaskType
@@ -26,6 +27,7 @@ from tech_lead_agent import TechLeadAgent, TechLeadInput
 from devops_agent import DevOpsExpertAgent, DevOpsInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
 from backend_agent import BackendExpertAgent, BackendInput
+from backend_agent.agent import _read_openapi_spec_from_repo
 from frontend_agent import FrontendExpertAgent, FrontendInput
 from qa_agent import QAExpertAgent, QAInput
 
@@ -122,6 +124,7 @@ def main() -> None:
             logger.info("DevOps: %s", result.summary[:150] if result.summary else "Done")
 
         elif task.assignee == "backend":
+            api_spec = _read_openapi_spec_from_repo(Path.cwd())
             result = agent.run(
                 BackendInput(
                     task_description=task.description,
@@ -129,6 +132,7 @@ def main() -> None:
                     user_story=getattr(task, "user_story", "") or "",
                     architecture=architecture,
                     language="python",
+                    api_spec=api_spec,
                 )
             )
             logger.info("Backend: %s", result.summary[:150] if result.summary else "Done")

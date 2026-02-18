@@ -281,6 +281,31 @@ def _truncate_for_context(text: str, max_chars: int) -> str:
     return text[:max_chars] + f"\n\n... [truncated, {len(text) - max_chars} more chars]"
 
 
+MAX_OPENAPI_SPEC_CHARS = 100_000  # 100KB limit for OpenAPI spec context
+
+
+def _read_openapi_spec_from_repo(repo_path: Path) -> Optional[str]:
+    """Read existing OpenAPI spec from repo (openapi.yaml, openapi.json, docs/openapi.yaml).
+
+    Returns truncated content or None if not found. Used to pass existing spec as api_spec
+    so the backend agent can extend/align with it.
+    """
+    candidates = [
+        repo_path / "openapi.yaml",
+        repo_path / "openapi.json",
+        repo_path / "docs" / "openapi.yaml",
+        repo_path / "docs" / "openapi.json",
+    ]
+    for p in candidates:
+        if p.is_file():
+            try:
+                content = p.read_text(encoding="utf-8", errors="replace")
+                return _truncate_for_context(content, MAX_OPENAPI_SPEC_CHARS)
+            except Exception as e:
+                logger.debug("Could not read OpenAPI spec %s: %s", p, e)
+    return None
+
+
 def _task_requirements(task: Task) -> str:
     """Build full requirements string from a Task object."""
     parts: List[str] = []
@@ -461,6 +486,7 @@ class BackendExpertAgent:
                         if existing_code and existing_code != "# No code files found"
                         else None
                     ),
+                    api_spec=_read_openapi_spec_from_repo(repo_path),
                 )
             )
 
@@ -1257,6 +1283,7 @@ class BackendExpertAgent:
                     if existing_code and existing_code != "# No code files found"
                     else None
                 ),
+                api_spec=_read_openapi_spec_from_repo(repo_path),
                 qa_issues=qa_issues or [],
                 security_issues=security_issues or [],
                 code_review_issues=code_review_issues or [],

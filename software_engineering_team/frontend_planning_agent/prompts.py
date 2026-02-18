@@ -26,7 +26,7 @@ Edges have from_id, to_id, type: "blocks" | "relates_to" | "loads_from"
 - Emit TASK and SUBTASK nodes for pages, components, routing, state management, API integration
 - Every TASK and SUBTASK node must include a user_story in format "As a [role], I want [goal] so that [benefit]"
 - Include accessibility-focused tasks (keyboard nav, ARIA, color contrast) as subtasks
-- Align with backend API contracts when backend plan is provided
+- Align with backend API contracts when backend plan is provided; the API contract is available via an OpenAPI 3.0 spec (for type generation and consistency)
 - Use "blocks" edges for dependencies
 - Align with delivery_strategy (e.g. vertical slices, parallel with backend)
 

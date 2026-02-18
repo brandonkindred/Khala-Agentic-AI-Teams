@@ -1,112 +1,88 @@
-# Strands Research Agent
+# Strands Agents
 
-This repository provides a Python-based **Strands-style research agent** that takes a short content brief, performs web research, and returns a curated list of **relevant, high-quality references** with summaries and key points.
+This repository provides **multiple Strands-style agent systems** in a monorepo:
 
-The agent is designed to be embedded into a Strands agents environment or any Python application that needs structured research results based on a high-level brief.
+- **Blogging** – Research, review, draft, copy-edit, and publication agents for content creation (web + arXiv research, title/outline generation, draft with style guide, copy-editor loop, platform-specific output for Medium/dev.to/Substack).
+- **Software engineering team** – Full dev team simulation from spec: architecture, Tech Lead, backend/frontend workers, DevOps, security, QA, code review, accessibility, and more. Reads `initial_spec.md` from a git repo and produces working code.
+- **Social media marketing team** – Campaign planning with collaboration agents, human approval gate, and platform specialists (LinkedIn, Facebook, Instagram, X). Produces execution-ready content plans.
 
-## Features
+## Project structure
 
-- Accepts a short content brief plus optional audience and purpose.
-- Generates multiple targeted web search queries from the brief.
-- Fetches and skims candidate pages from the public web.
-- Ranks sources by relevance, authority, recency, and diversity.
-- Returns structured references with summaries and key points.
-- Exposes models and a `ResearchAgent` class that can be wired into a Strands runtime.
+```
+strands-agents/
+├── api/                    # Blog research-and-review HTTP API (port 8000)
+├── blogging/               # Blogging agent suite (research, review, draft, copy-edit, publication)
+├── software_engineering_team/   # Full software dev team simulation
+├── social_media_marketing_team/ # Campaign planning with platform specialists
+└── requirements.txt        # Shared dependencies
+```
+
+| Directory | Description |
+|-----------|-------------|
+| [blogging/](blogging/README.md) | Research, review, draft, copy-editor, and publication agents. Full pipeline from brief to platform-ready posts. |
+| [software_engineering_team/](software_engineering_team/README.md) | Multi-agent dev team: architecture, Tech Lead, backend/frontend, DevOps, security, QA, code review, accessibility, documentation. |
+| [social_media_marketing_team/](social_media_marketing_team/README.md) | Cross-platform campaign planning with human approval, collaboration agents, and LinkedIn/Facebook/Instagram/X specialists. |
+
+```mermaid
+flowchart LR
+  Root[Repository Root]
+  Blog[blogging]
+  SW[software_engineering_team]
+  Soc[social_media_marketing_team]
+  Root --> Blog
+  Root --> SW
+  Root --> Soc
+  Blog --> Research[Research]
+  Blog --> Review[Review]
+  Blog --> Draft[Draft]
+  Blog --> CopyEd[Copy Editor]
+  Blog --> Pub[Publication]
+  SW --> Orch[Orchestrator]
+  Orch --> Plan[Project Planning]
+  Orch --> Arch[Architecture]
+  Orch --> Workers[Backend Frontend DevOps ...]
+  Soc --> SMM[SMM Orchestrator]
+  SMM --> Collab[Collaboration Agents]
+  SMM --> Platform[Platform Specialists]
+```
 
 ## Quick start
 
-1. **Install dependencies**
+### Dependencies
+
+Install shared dependencies from the repo root:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. **Configure environment**
+The `blogging/` and `software_engineering_team/` directories have their own `requirements.txt` for team-specific runs. See each team's README for details.
 
-- Set a `TAVILY_API_KEY` environment variable (or adapt the `web_search` tool to your preferred search API).
+### How to run each team
 
-3. **Use the agent in Python**
+| Team | Directory | Command | Port |
+|------|------------|---------|------|
+| **Blog research & review API** | `blogging/` | `cd blogging && python agent_implementations/run_api_server.py` | 8000 |
+| **Blog API (from root)** | repo root | `PYTHONPATH=blogging uvicorn api.main:app --reload --host 0.0.0.0 --port 8000` | 8000 |
+| **Software engineering team** | `software_engineering_team/` | See [software_engineering_team/README.md](software_engineering_team/README.md) for CLI and API | 8000 |
+| **Social media marketing** | package | `uvicorn social_media_marketing_team.api.main:app --host 0.0.0.0 --port 8010` | 8010 |
 
-```python
-from blog_research_agent.agent import ResearchAgent
-from blog_research_agent.models import ResearchBriefInput
-from blog_research_agent.llm import OllamaLLMClient  # or your own LLM client
+**Environment variables:**
 
-llm_client = OllamaLLMClient(  # points at local Ollama (127.0.0.1:11434) by default
-    model="llama3.1",  # change to your preferred Ollama model
-)
-agent = ResearchAgent(llm_client=llm_client)
+- **Blogging (research):** Set `TAVILY_API_KEY` for web search (or adapt the web search tool to your preferred API).
+- **Software engineering:** See `SW_LLM_*` variables in [software_engineering_team/README.md](software_engineering_team/README.md).
 
-brief = ResearchBriefInput(
-    brief="LLM observability best practices for large enterprises",
-    audience="CTOs and platform teams",
-    tone_or_purpose="technical deep-dive",
-    max_results=8,
-)
+## Blog research & review API
 
-result = agent.run(brief)
+The blog API exposes the **research + review** pipeline only (title choices, outline, compiled document). The full blogging pipeline (draft, copy-editor, publication) is in [blogging/README.md](blogging/README.md).
 
-for ref in result.references:
-    print(ref.title, ref.url)
-```
-
-## Logging
-
-The research agent logs progress to the `blog_research_agent.agent` logger so you can see what it is doing at each step (parsing brief, generating queries, running searches, fetching and scoring documents, summarizing references, synthesizing the overview). By default the library does not configure handlers; enable logging in your application to see output.
-
-**Console (INFO):**
-
-```python
-import logging
-logging.basicConfig(level=logging.INFO)
-# then run your agent
-```
-
-**Target the agent logger only (e.g. INFO or DEBUG):**
-
-```python
-import logging
-logging.getLogger("blog_research_agent.agent").setLevel(logging.INFO)
-# add a handler if the root logger has none
-logging.getLogger("blog_research_agent.agent").addHandler(logging.StreamHandler())
-```
-
-## Project layout
-
-Each agent lives in its own folder with its supporting code and resources.
-
-**Research agent** (`blog_research_agent/`):
-
-- `blog_research_agent/models.py` – Input/output models and internal data structures.
-- `blog_research_agent/tools/web_search.py` – Web search tool wrapper.
-- `blog_research_agent/tools/web_fetch.py` – Web fetch/scrape tool.
-- `blog_research_agent/prompts.py` – Prompt templates for LLM calls.
-- `blog_research_agent/agent.py` – Core research agent implementation.
-- `blog_research_agent/strands_integration.py` – Helper for wiring into a Strands runtime.
-- `blog_research_agent/agent_cache.py` – Checkpoint/resume cache for the research agent.
-
-**Review agent** (`blog_review_agent/`):
-
-- `blog_review_agent/agent.py` – Blog review agent (title choices + outline from brief + sources).
-- `blog_review_agent/models.py` – TitleChoice, BlogReviewInput, BlogReviewOutput.
-- `blog_review_agent/prompts.py` – Prompt for titles and outline.
-
-**Draft agent** (`blog_draft_agent/`):
-
-- `blog_draft_agent/agent.py` – Blog draft agent (draft from research document + outline, compliant with a style guide).
-- `blog_draft_agent/models.py` – DraftInput, DraftOutput.
-- `blog_draft_agent/prompts.py` – Prompt for draft generation. Use `docs/brandon_kindred_brand_and_writing_style_guide.md` as the style guide.
-
-## API
-
-A FastAPI server exposes the research-and-review pipeline as an HTTP endpoint.
-
-**Start the server:**
+**Start the server** (from `blogging/` directory):
 
 ```bash
-uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
-# or
-python3 agent_implementations/run_api_server.py
+cd blogging
+pip install -r requirements.txt
+python agent_implementations/run_api_server.py
+# or: uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 **POST `/research-and-review`** – Run research and review agents.
@@ -135,10 +111,10 @@ Response: `title_choices`, `outline`, `compiled_document`, `notes`.
 
 Interactive docs: http://localhost:8000/docs
 
+## Blogging agents
+
+The blogging suite includes Research, Review, Draft, Copy Editor, and Publication agents. For full agent descriptions, project layout, and pipeline (research → review → draft → copy-editor loop → publication), see [blogging/README.md](blogging/README.md).
+
 ## License
 
 This repository is provided as an example implementation for building Strands-style research agents.
-## Additional teams
-
-- `social_media_marketing_team/` – Multi-agent social marketing workflow with platform specialists (LinkedIn, Facebook, Instagram, X), proposal collaboration with orchestrator consensus, human approval gate, and 14-day cadence planning defaults.
-

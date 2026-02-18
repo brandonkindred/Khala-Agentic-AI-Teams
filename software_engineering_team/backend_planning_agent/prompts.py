@@ -29,6 +29,7 @@ Edges have from_id, to_id, type: "blocks" | "relates_to" | "exposes_api"
 - Include git_setup and devops tasks if scaffolding is needed
 - Dependencies: use "blocks" edges (A blocks B = A must complete before B)
 - Align with delivery_strategy from project overview (e.g. backend-first, vertical slices)
+- **OpenAPI 3.0**: API-related backend tasks (endpoints, routers, CRUD APIs) must include an acceptance criterion that the API exposes an OpenAPI 3.0 spec suitable for: (1) cloud API gateway imports (e.g. AWS API Gateway, Azure API Management), (2) client type/code generation (e.g. TypeScript types, SDKs). For backend API EPIC/FEATURE nodes, include in outputs that "OpenAPI 3.0 spec must be available (runtime and optionally static file)."
 
 **Output format:**
 Return a single JSON object with:

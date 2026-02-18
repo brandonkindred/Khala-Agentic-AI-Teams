@@ -19,6 +19,7 @@ Add edges type "documents" from doc task to feature task.
 **Rules:**
 - Add README/setup docs, API docs for key endpoints, ADRs when relevant
 - Keep minimal - 1-3 doc tasks for typical projects
+- API documentation tasks should reference the OpenAPI spec (e.g. /openapi.json or repo openapi.yaml/docs/openapi.yaml) and briefly state how it can be used for API gateways and client code/type generation
 
 **Output format:**
 Return JSON with "nodes", "edges", "summary". Valid JSON only."""

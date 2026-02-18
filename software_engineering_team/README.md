@@ -7,6 +7,8 @@ A multi-agent system that simulates a real software engineering team with a mix 
 | Agent | Role | Expertise |
 |-------|------|------------|
 | **Tech Lead** | Staff-level orchestrator | Uses initial_spec to generate full build plan; distributes work by dependency; tracks progress; triggers documentation |
+| **Project Planning Agent** | Spec reviewer | Reviews `initial_spec.md`, produces features/functionality overview; used by Tech Lead and Architecture |
+| **Git Setup Agent** | Repo setup | Creates `work_path/backend` and `work_path/frontend` clones/branches; ensures `development` branch |
 | **Architecture Expert** | System designer | Designs system architecture from requirements; output used by all other agents |
 | **DevOps Expert** | Infrastructure specialist | CI/CD pipelines, IaC (Terraform, etc.), Docker, networking |
 | **Cybersecurity Expert** | Security specialist | Reviews code for security flaws per task (backend and frontend); remediates vulnerabilities |
@@ -37,9 +39,10 @@ All agents enforce these rules for produced code:
 ## Flow
 
 1. **Load spec** – Read `initial_spec.md` from the repo.
-2. **Architecture Expert** designs the system from product requirements.
-3. **Tech Lead** generates a complete build plan and assigns tasks (git_setup, devops, backend, frontend).
-4. **Backend and Frontend workers** run in parallel. Each task follows a unified workflow:
+2. **Project Planning** produces a features/functionality document from the spec.
+3. **Tech Lead** (using planning sub-agents: backend, frontend, data, test, performance, documentation, quality gates) and **Architecture Expert** iterate until tasks and architecture align.
+4. **Tech Lead** generates a complete build plan and assigns tasks (git_setup, devops, backend, frontend).
+5. **Backend and Frontend workers** run in parallel. Each task follows a unified workflow:
    - Create feature branch
    - Generate code (with clarification loop via Tech Lead if needed)
    - **Build verification** (pytest for backend, ng build for frontend)
@@ -50,9 +53,9 @@ All agents enforce these rules for produced code:
    - **Accessibility review** (frontend only)
    - **DbC comments** (add pre/postconditions)
    - Merge to development, Tech Lead review, Documentation update
-5. **Integration phase** – After workers complete, Integration Agent validates backend-frontend API contract alignment.
-6. **Final security** (full codebase) and **documentation** pass when Tech Lead requests.
-7. **Retry path** – Failed tasks are retried through the same full workflow (build, code review, QA, a11y, security, DBC).
+6. **Integration phase** – After workers complete, Integration Agent validates backend-frontend API contract alignment.
+7. **Final security** (full codebase) and **documentation** pass when Tech Lead requests.
+8. **Retry path** – Failed tasks are retried through the same full workflow (build, code review, QA, a11y, security, DBC).
 
 ## Requirements
 
@@ -176,7 +179,7 @@ pytest tests/ -v --log-cli-level=INFO
 ## Pipeline Diagram
 
 ```
-Spec → Architecture → Tech Lead Plan
+Spec → Project Planning → Architecture + Tech Lead (alignment loop)
          ↓
     [Backend Worker]     [Frontend Worker]
     (run_workflow)       (run_workflow)
@@ -194,7 +197,11 @@ software_engineering_team/
 ├── api/
 │   └── main.py       # FastAPI app with /run-team endpoint
 ├── spec_parser.py    # Parses initial_spec.md into ProductRequirements
-├── shared/            # LLM client, models, coding_standards, git_utils
+├── orchestrator.py   # Main pipeline orchestration
+├── shared/           # LLM client, models, coding_standards, git_utils
+├── planning/         # planning_graph, validation, planning_review
+├── project_planning_agent/
+├── git_setup_agent/
 ├── architecture_agent/
 ├── tech_lead_agent/
 ├── devops_agent/
@@ -208,6 +215,13 @@ software_engineering_team/
 ├── dbc_comments_agent/
 ├── accessibility_agent/
 ├── documentation_agent/
+├── backend_planning_agent/
+├── frontend_planning_agent/
+├── data_planning_agent/
+├── test_planning_agent/
+├── performance_planning_agent/
+├── documentation_planning_agent/
+├── quality_gate_planning_agent/
 ├── agent_implementations/
 │   ├── run_team.py   # CLI orchestration script
 │   └── run_api_server.py
@@ -218,6 +232,8 @@ software_engineering_team/
 ├── pyproject.toml
 └── requirements.txt
 ```
+
+The Tech Lead invokes planning agents (backend, frontend, data, test, performance, documentation, quality gates) internally when creating task details and aligning with Architecture.
 
 Each agent has:
 - `agent.py` – Core logic

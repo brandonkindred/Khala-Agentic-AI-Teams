@@ -23,6 +23,8 @@ Then produce a ProjectOverview that frames the engagement for downstream planner
 - Balance speed with quality: avoid "big bang" approaches
 - Consider dependencies: backend APIs often unblock frontend work
 
+**Constraint (when the spec includes a public REST API):** The system's public REST API must expose an OpenAPI 3.0 specification so that it can be consumed by cloud API gateways (e.g. AWS API Gateway, Azure API Management) and by clients for type/code generation.
+
 **Output format:**
 Return a single JSON object with:
 - "features_and_functionality": string (markdown: high-level list of required features and functionalities; use newlines for readability)

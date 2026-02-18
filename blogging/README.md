@@ -1,17 +1,41 @@
-# Strands Research Agent
+# Blogging Agent Suite
 
-This repository provides a Python-based **Strands-style research agent** that takes a short content brief, performs web research, and returns a curated list of **relevant, high-quality references** with summaries and key points.
+This package provides the **blogging agent suite**: research, review, draft, copy-edit, and publication (with optional platform-specific output for Medium, dev.to, and Substack).
 
-The agent is designed to be embedded into a Strands agents environment or any Python application that needs structured research results based on a high-level brief.
+## Agents overview
+
+| Agent | Role |
+|-------|------|
+| **Research** | Brief → web (Tavily) + arXiv search → ranked references, compiled document, notes |
+| **Review** | Brief + references → title choices + outline |
+| **Draft** | Research document + outline + style guide → draft; supports revise-from-feedback (e.g. from Copy Editor) |
+| **Copy Editor** | Draft → feedback items and summary (for Draft revision loop) |
+| **Publication** | Submit draft → pending; human approve → write to `blog_posts`, generate Medium/dev.to/Substack versions; reject → optional revision loop with Draft + Copy Editor |
+
+## Full pipeline
+
+```
+Research → Review → Draft → (optional) Draft ↔ Copy Editor revision loop → (optional) Publication
+```
+
+- **Research** fetches and ranks sources from the web and arXiv.
+- **Review** produces title choices and a detailed outline.
+- **Draft** writes the initial draft from research + outline; uses `docs/brandon_kindred_brand_and_writing_style_guide.md` as the style guide.
+- **Copy Editor** reviews the draft and returns feedback; the **Draft** agent revises based on feedback. This loop runs a configurable number of times (e.g. 3).
+- **Publication** receives the final draft: submit → human approve/reject. On approve: write to `blog_posts/`, generate platform-specific versions. On reject: optional revision loop with Draft + Copy Editor.
+
+**Example scripts:**
+- [blogging/agent_implementations/blog_writing_process.py](agent_implementations/blog_writing_process.py) – Full pipeline: research → review → draft → copy-editor loop.
+- [blogging/agent_implementations/run_publication_agent.py](agent_implementations/run_publication_agent.py) – Publication agent (submit, approve, reject, revision loop).
 
 ## Features
 
 - Accepts a short content brief plus optional audience and purpose.
 - Generates multiple targeted web search queries from the brief.
-- Fetches and skims candidate pages from the public web.
+- Fetches and skims candidate pages from the public web (Tavily) and arXiv.
 - Ranks sources by relevance, authority, recency, and diversity.
 - Returns structured references with summaries and key points.
-- Exposes models and a `ResearchAgent` class that can be wired into a Strands runtime.
+- Exposes models and agent classes that can be wired into a Strands runtime.
 
 ## Quick start
 
@@ -50,63 +74,15 @@ for ref in result.references:
     print(ref.title, ref.url)
 ```
 
-## Logging
+## Run the API
 
-The research agent logs progress to the `blog_research_agent.agent` logger so you can see what it is doing at each step (parsing brief, generating queries, running searches, fetching and scoring documents, summarizing references, synthesizing the overview). By default the library does not configure handlers; enable logging in your application to see output.
-
-**Console (INFO):**
-
-```python
-import logging
-logging.basicConfig(level=logging.INFO)
-# then run your agent
-```
-
-**Target the agent logger only (e.g. INFO or DEBUG):**
-
-```python
-import logging
-logging.getLogger("blog_research_agent.agent").setLevel(logging.INFO)
-# add a handler if the root logger has none
-logging.getLogger("blog_research_agent.agent").addHandler(logging.StreamHandler())
-```
-
-## Project layout
-
-Each agent lives in its own folder with its supporting code and resources.
-
-**Research agent** (`blog_research_agent/`):
-
-- `blog_research_agent/models.py` – Input/output models and internal data structures.
-- `blog_research_agent/tools/web_search.py` – Web search tool wrapper.
-- `blog_research_agent/tools/web_fetch.py` – Web fetch/scrape tool.
-- `blog_research_agent/prompts.py` – Prompt templates for LLM calls.
-- `blog_research_agent/agent.py` – Core research agent implementation.
-- `blog_research_agent/strands_integration.py` – Helper for wiring into a Strands runtime.
-- `blog_research_agent/agent_cache.py` – Checkpoint/resume cache for the research agent.
-
-**Review agent** (`blog_review_agent/`):
-
-- `blog_review_agent/agent.py` – Blog review agent (title choices + outline from brief + sources).
-- `blog_review_agent/models.py` – TitleChoice, BlogReviewInput, BlogReviewOutput.
-- `blog_review_agent/prompts.py` – Prompt for titles and outline.
-
-**Draft agent** (`blog_draft_agent/`):
-
-- `blog_draft_agent/agent.py` – Blog draft agent (draft from research document + outline, compliant with a style guide).
-- `blog_draft_agent/models.py` – DraftInput, DraftOutput.
-- `blog_draft_agent/prompts.py` – Prompt for draft generation. Use `docs/brandon_kindred_brand_and_writing_style_guide.md` as the style guide.
-
-## API
-
-A FastAPI server exposes the research-and-review pipeline as an HTTP endpoint.
-
-**Start the server:**
+Run from the **blogging** directory (or from repo root with `PYTHONPATH=blogging` if using root `api.main`):
 
 ```bash
-uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+cd blogging
+python agent_implementations/run_api_server.py
 # or
-python3 agent_implementations/run_api_server.py
+uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 **POST `/research-and-review`** – Run research and review agents.
@@ -135,7 +111,59 @@ Response: `title_choices`, `outline`, `compiled_document`, `notes`.
 
 Interactive docs: http://localhost:8000/docs
 
+## Style guide
+
+The Draft and Copy Editor agents use `docs/brandon_kindred_brand_and_writing_style_guide.md` as the style guide. Pass a custom path via `default_style_guide_path` when instantiating the agents.
+
+## Logging
+
+The research agent logs progress to the `blog_research_agent.agent` logger. Enable logging in your application to see output:
+
+```python
+import logging
+logging.basicConfig(level=logging.INFO)
+# then run your agent
+```
+
+Target the agent logger only:
+
+```python
+logging.getLogger("blog_research_agent.agent").setLevel(logging.INFO)
+logging.getLogger("blog_research_agent.agent").addHandler(logging.StreamHandler())
+```
+
+## Project layout
+
+```
+blogging/
+├── api/
+│   └── main.py              # FastAPI app (research-and-review endpoint)
+├── blog_research_agent/     # Web + arXiv research
+│   ├── agent.py
+│   ├── models.py
+│   ├── prompts.py
+│   ├── agent_cache.py
+│   ├── strands_integration.py
+│   └── tools/
+│       ├── web_search.py    # Tavily web search
+│       ├── web_fetch.py     # Web fetch/scrape
+│       └── arxiv_search.py # arXiv search
+├── blog_review_agent/       # Title choices + outline
+├── blog_draft_agent/        # Draft from research + outline; revise from feedback
+├── blog_copy_editor_agent/  # Draft → feedback items
+├── blog_publication_agent/  # Submit, approve/reject, platform versions
+├── agent_implementations/
+│   ├── run_api_server.py
+│   ├── run_research_agent.py
+│   ├── run_draft_agent.py
+│   ├── run_copy_editor_agent.py
+│   ├── run_publication_agent.py
+│   └── blog_writing_process.py   # Full pipeline example
+├── docs/
+│   └── brandon_kindred_brand_and_writing_style_guide.md
+└── requirements.txt
+```
+
 ## License
 
 This repository is provided as an example implementation for building Strands-style research agents.
-
