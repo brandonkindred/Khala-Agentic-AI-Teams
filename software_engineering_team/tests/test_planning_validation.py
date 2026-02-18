@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from planning.planning_graph import (
+from planning_team.planning_graph import (
     EdgeType,
     PlanningDomain,
     PlanningEdge,
@@ -12,7 +12,7 @@ from planning.planning_graph import (
     PlanningNode,
     PlanningNodeKind,
 )
-from planning.validation import format_validation_report, validate_planning_graph
+from planning_team.validation import format_validation_report, validate_planning_graph
 
 
 def test_validate_empty_graph_fails():

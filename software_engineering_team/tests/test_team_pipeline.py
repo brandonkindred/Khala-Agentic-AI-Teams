@@ -9,7 +9,7 @@ from architecture_agent import ArchitectureExpertAgent, ArchitectureInput
 from tech_lead_agent import TechLeadAgent, TechLeadInput
 from devops_agent import DevOpsExpertAgent, DevOpsInput
 from backend_agent import BackendExpertAgent, BackendInput
-from frontend_agent import FrontendExpertAgent, FrontendInput
+from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
 from qa_agent import QAExpertAgent, QAInput
 

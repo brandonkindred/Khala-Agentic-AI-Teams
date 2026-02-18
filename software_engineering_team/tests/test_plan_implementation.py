@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from backend_agent.agent import BackendExpertAgent
-from frontend_agent.agent import FrontendExpertAgent
+from frontend_team.feature_agent.agent import FrontendExpertAgent
 from shared.llm import DummyLLMClient
 
 

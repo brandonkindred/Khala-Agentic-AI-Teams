@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from project_planning_agent.models import (
+from planning_team.project_planning_agent.models import (
     ProjectOverview,
     build_fallback_overview_from_requirements,
 )

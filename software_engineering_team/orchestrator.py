@@ -53,7 +53,7 @@ from shared.job_store import (
     update_job,
 )
 from shared.command_runner import run_command_with_nvm
-from planning.plan_dir import ensure_plan_dir
+from planning_team.plan_dir import ensure_plan_dir
 from shared.development_plan_writer import (
     write_architecture_plan,
     write_features_and_functionality_plan,
@@ -68,31 +68,31 @@ logger = logging.getLogger(__name__)
 
 def _get_agents(llm):
     """Lazy init agents including the code review, documentation, and DbC comments agents."""
-    from accessibility_agent import AccessibilityExpertAgent, AccessibilityInput
+    from frontend_team.accessibility_agent import AccessibilityExpertAgent, AccessibilityInput
     from architecture_agent import ArchitectureExpertAgent, ArchitectureInput
     from backend_agent import BackendExpertAgent, BackendInput
-    from project_planning_agent import ProjectPlanningAgent, ProjectPlanningInput
+    from planning_team.project_planning_agent import ProjectPlanningAgent, ProjectPlanningInput
     from code_review_agent import CodeReviewAgent, CodeReviewInput
     from dbc_comments_agent import DbcCommentsAgent, DbcCommentsInput
     from devops_agent import DevOpsExpertAgent, DevOpsInput
     from documentation_agent import DocumentationAgent, DocumentationInput
-    from frontend_agent import FrontendExpertAgent, FrontendInput
+    from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
     from git_setup_agent import GitSetupAgent
     from integration_agent import IntegrationAgent, IntegrationInput
     from qa_agent import QAExpertAgent, QAInput
     from security_agent import CybersecurityExpertAgent, SecurityInput
-    from api_contract_planning_agent import ApiContractPlanningAgent
-    from data_architecture_agent import DataArchitectureAgent
-    from devops_planning_agent import DevOpsPlanningAgent
-    from frontend_architecture_agent import FrontendArchitectureAgent
-    from infrastructure_planning_agent import InfrastructurePlanningAgent
-    from observability_planning_agent import ObservabilityPlanningAgent
-    from performance_planning_doc_agent import PerformancePlanningDocAgent
-    from qa_test_strategy_agent import QaTestStrategyAgent
-    from security_planning_agent import SecurityPlanningAgent
-    from spec_intake_agent import SpecIntakeAgent
+    from planning_team.api_contract_planning_agent import ApiContractPlanningAgent
+    from planning_team.data_architecture_agent import DataArchitectureAgent
+    from planning_team.devops_planning_agent import DevOpsPlanningAgent
+    from planning_team.frontend_architecture_agent import FrontendArchitectureAgent
+    from planning_team.infrastructure_planning_agent import InfrastructurePlanningAgent
+    from planning_team.observability_planning_agent import ObservabilityPlanningAgent
+    from planning_team.performance_planning_doc_agent import PerformancePlanningDocAgent
+    from planning_team.qa_test_strategy_agent import QaTestStrategyAgent
+    from planning_team.security_planning_agent import SecurityPlanningAgent
+    from planning_team.spec_intake_agent import SpecIntakeAgent, SpecIntakeInput, validated_spec_to_requirements
     from tech_lead_agent import TechLeadAgent, TechLeadInput
-    from ui_ux_design_agent import UiUxDesignAgent
+    from planning_team.ui_ux_design_agent import UiUxDesignAgent
     from acceptance_verifier_agent import AcceptanceVerifierAgent
 
     return {
@@ -530,6 +530,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
         spec_intake_agent = agents.get("spec_intake")
         if spec_intake_agent:
             try:
+                from planning_team.spec_intake_agent import SpecIntakeInput, validated_spec_to_requirements
                 spec_intake_output = spec_intake_agent.run(SpecIntakeInput(
                     spec_content=spec_content,
                     plan_dir=plan_dir,
@@ -547,7 +548,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
         project_planning_agent = agents.get("project_planning")
         if project_planning_agent:
             try:
-                from project_planning_agent.models import ProjectPlanningInput, build_fallback_overview_from_requirements
+                from planning_team.project_planning_agent.models import ProjectPlanningInput, build_fallback_overview_from_requirements
                 repo_summary = _truncate_for_context(_read_repo_code(path), 2000)
                 pp_input = ProjectPlanningInput(
                     requirements=requirements,
@@ -601,7 +602,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
         else:
             # No project planning agent; build fallback so downstream agents always get an overview
             try:
-                from project_planning_agent.models import build_fallback_overview_from_requirements
+                from planning_team.project_planning_agent.models import build_fallback_overview_from_requirements
                 fallback = build_fallback_overview_from_requirements(requirements)
                 project_overview = model_to_dict(fallback)
                 logger.info("Project Planning: no agent configured, using fallback overview")
@@ -625,7 +626,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
         features_and_functionality_doc = (project_overview.get("features_and_functionality_doc") or "").strip()
         from architecture_agent.models import ArchitectureInput
         from tech_lead_agent.models import TechLeadInput
-        from planning.planning_review import check_tasks_architecture_alignment, check_spec_conformance
+        from planning_team.planning_review import check_tasks_architecture_alignment, check_spec_conformance
 
         arch_agent = agents["architecture"]
         tech_lead = agents["tech_lead"]
@@ -781,7 +782,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             logger.debug("API Contract planning skipped: %s", e)
         try:
             if agents.get("data_architecture"):
-                from data_architecture_agent.models import DataArchitectureInput
+                from planning_team.data_architecture_agent.models import DataArchitectureInput
                 data_out = agents["data_architecture"].run(DataArchitectureInput(
                     spec_content=spec_content,
                     architecture_overview=arch_overview,
@@ -805,7 +806,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             logger.debug("UI/UX planning skipped: %s", e)
         try:
             if agents.get("infrastructure"):
-                from infrastructure_planning_agent.models import InfrastructurePlanningInput
+                from planning_team.infrastructure_planning_agent.models import InfrastructurePlanningInput
                 infra_out = agents["infrastructure"].run(InfrastructurePlanningInput(
                     architecture_overview=arch_overview,
                     tenancy_model=tenancy,
@@ -817,7 +818,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             logger.debug("Infrastructure planning skipped: %s", e)
         try:
             if agents.get("frontend_architecture"):
-                from frontend_architecture_agent.models import FrontendArchitectureInput
+                from planning_team.frontend_architecture_agent.models import FrontendArchitectureInput
                 agents["frontend_architecture"].run(FrontendArchitectureInput(
                     spec_content=spec_content,
                     architecture_overview=arch_overview,
@@ -829,7 +830,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             logger.debug("Frontend Architecture planning skipped: %s", e)
         try:
             if agents.get("devops_planning"):
-                from devops_planning_agent.models import DevOpsPlanningInput
+                from planning_team.devops_planning_agent.models import DevOpsPlanningInput
                 dev_out = agents["devops_planning"].run(DevOpsPlanningInput(
                     architecture_overview=arch_overview,
                     infrastructure_doc=infra_doc,
@@ -854,7 +855,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             logger.debug("QA Test Strategy planning skipped: %s", e)
         try:
             if agents.get("security_planning"):
-                from security_planning_agent import SecurityPlanningInput
+                from planning_team.security_planning_agent import SecurityPlanningInput
                 agents["security_planning"].run(SecurityPlanningInput(
                     spec_content=spec_content,
                     architecture_overview=arch_overview,
@@ -866,7 +867,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             logger.debug("Security planning skipped: %s", e)
         try:
             if agents.get("observability"):
-                from observability_planning_agent.models import ObservabilityPlanningInput
+                from planning_team.observability_planning_agent.models import ObservabilityPlanningInput
                 agents["observability"].run(ObservabilityPlanningInput(
                     architecture_overview=arch_overview,
                     infrastructure_doc=infra_doc,
@@ -878,7 +879,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             logger.debug("Observability planning skipped: %s", e)
         try:
             if agents.get("performance_doc"):
-                from performance_planning_doc_agent.models import PerformancePlanningDocInput
+                from planning_team.performance_planning_doc_agent.models import PerformancePlanningDocInput
                 agents["performance_doc"].run(PerformancePlanningDocInput(
                     spec_content=spec_content,
                     architecture_overview=arch_overview,
@@ -890,7 +891,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
 
         # Planning consolidation: master plan, risk register, ship checklist
         try:
-            from planning.planning_consolidation import run_planning_consolidation
+            from planning_team.planning_consolidation import run_planning_consolidation
             run_planning_consolidation(plan_dir, assignment, architecture, project_overview)
         except Exception as e:
             logger.warning("Planning consolidation skipped: %s", e)

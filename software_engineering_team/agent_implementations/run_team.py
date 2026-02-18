@@ -28,7 +28,7 @@ from devops_agent import DevOpsExpertAgent, DevOpsInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
 from backend_agent import BackendExpertAgent, BackendInput
 from backend_agent.agent import _read_openapi_spec_from_repo
-from frontend_agent import FrontendExpertAgent, FrontendInput
+from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
 from qa_agent import QAExpertAgent, QAInput
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

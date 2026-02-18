@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from frontend_agent import FrontendExpertAgent, FrontendInput, FrontendOutput
+from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput, FrontendOutput
 from shared.llm import DummyLLMClient
 
 
@@ -544,7 +544,7 @@ def test_read_repo_code_excludes_node_modules_and_dist(tmp_path):
     """_read_repo_code excludes node_modules, dist, and .angular so code review stays under body limit."""
     from pathlib import Path
 
-    from frontend_agent.agent import _read_repo_code
+    from frontend_team.feature_agent.agent import _read_repo_code
 
     (tmp_path / "src" / "app").mkdir(parents=True)
     (tmp_path / "node_modules" / "foo").mkdir(parents=True)

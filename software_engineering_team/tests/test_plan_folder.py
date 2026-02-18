@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from planning.plan_dir import ensure_plan_dir, get_plan_dir
+from planning_team.plan_dir import ensure_plan_dir, get_plan_dir
 from shared.development_plan_writer import (
     write_architecture_plan,
     write_project_overview_plan,
@@ -36,7 +36,7 @@ def test_get_plan_dir_resolves_path(tmp_path: Path) -> None:
 
 def test_write_project_overview_plan_uses_plan_dir(tmp_path: Path) -> None:
     """write_project_overview_plan writes to plan/ when plan_dir provided."""
-    from project_planning_agent.models import ProjectOverview
+    from planning_team.project_planning_agent.models import ProjectOverview
 
     overview = ProjectOverview(
         primary_goal="Test goal",

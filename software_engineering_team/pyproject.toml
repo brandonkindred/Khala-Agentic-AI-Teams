@@ -26,7 +26,7 @@ pythonpath = ["."]
 addopts = "-v"
 
 [tool.coverage.run]
-source = ["shared", "frontend_agent"]
+source = ["shared", "frontend_team"]
 omit = [
     "*/tests/*",
     "*/__pycache__/*",
@@ -55,7 +55,7 @@ include = [
     "devops_agent*",
     "security_agent*",
     "backend_agent*",
-    "frontend_agent*",
+    "frontend_team*",
     "qa_agent*",
 ]
 namespaces = false

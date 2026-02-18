@@ -9,8 +9,8 @@ import pytest
 from shared.llm import DummyLLMClient
 from shared.models import Task, TaskType
 
-from frontend_agent import FrontendExpertAgent
-from frontend_agent.models import FrontendWorkflowResult
+from frontend_team.feature_agent import FrontendExpertAgent
+from frontend_team.feature_agent.models import FrontendWorkflowResult
 from frontend_team import FrontendOrchestratorAgent
 from frontend_team.orchestrator import _is_lightweight_task
 
@@ -28,7 +28,7 @@ def test_frontend_orchestrator_run_workflow_signature_matches_frontend_expert() 
         f"missing {fe_params - fo_params}"
     )
 
-    # Return type: both return FrontendWorkflowResult (from frontend_agent.models)
+    # Return type: both return FrontendWorkflowResult (from frontend_team.feature_agent.models)
     assert FrontendOrchestratorAgent.run_workflow.__annotations__.get("return") is None or (
         "FrontendWorkflowResult" in str(FrontendOrchestratorAgent.run_workflow.__annotations__.get("return", ""))
     )

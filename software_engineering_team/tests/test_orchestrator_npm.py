@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from frontend_agent import FrontendOutput
+from frontend_team.feature_agent import FrontendOutput
 from shared.command_runner import CommandResult
 import shared.command_runner as command_runner_module
 

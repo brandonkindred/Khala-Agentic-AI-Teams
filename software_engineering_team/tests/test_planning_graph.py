@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from planning.planning_graph import (
+from planning_team.planning_graph import (
     PlanningDomain,
     PlanningEdge,
     PlanningGraph,

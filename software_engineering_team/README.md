@@ -222,41 +222,54 @@ software_engineering_team/
 ├── spec_parser.py    # Parses initial_spec.md into ProductRequirements
 ├── orchestrator.py   # Main pipeline orchestration
 ├── shared/           # LLM client, models, coding_standards, git_utils
-├── planning/         # planning_graph, validation, planning_review
-├── project_planning_agent/
 ├── git_setup_agent/
 ├── architecture_agent/
 ├── tech_lead_agent/
 ├── devops_agent/
 ├── security_agent/
 ├── backend_agent/
-├── frontend_agent/        # Feature Implementation (used by Frontend Orchestrator)
-├── frontend_team/         # Frontend Engineering Team: UX, UI, Design System, Architect, UX Engineer, Performance, Build/Release, Orchestrator
+├── frontend_team/         # All frontend engineering agents
+│   ├── feature_agent/    # FrontendExpertAgent (implementation)
+│   ├── accessibility_agent/
+│   ├── ux_designer/
+│   ├── ui_designer/
+│   ├── design_system/
+│   ├── frontend_architect/
+│   ├── ux_engineer/
+│   ├── performance_engineer/
+│   ├── build_release/
+│   └── orchestrator.py   # FrontendOrchestratorAgent
 ├── qa_agent/
 ├── integration_agent/   # Full-stack API contract validation
 ├── acceptance_verifier_agent/
 ├── code_review_agent/
 ├── dbc_comments_agent/
-├── accessibility_agent/
 ├── documentation_agent/
-├── backend_planning_agent/
-├── frontend_planning_agent/
-├── data_planning_agent/
-├── test_planning_agent/
-├── performance_planning_agent/
-├── documentation_planning_agent/
-├── quality_gate_planning_agent/
-├── spec_intake_agent/
-├── api_contract_planning_agent/
-├── data_architecture_agent/
-├── ui_ux_design_agent/
-├── frontend_architecture_agent/
-├── infrastructure_planning_agent/
-├── devops_planning_agent/
-├── qa_test_strategy_agent/
-├── security_planning_agent/
-├── observability_planning_agent/
-├── performance_planning_doc_agent/
+├── planning_team/           # All planning agents and infrastructure
+│   ├── plan_dir.py          # ensure_plan_dir, get_plan_dir
+│   ├── planning_graph.py   # PlanningGraph, compile to TaskAssignment
+│   ├── planning_review.py  # alignment, spec conformance
+│   ├── planning_consolidation.py
+│   ├── validation.py
+│   ├── spec_intake_agent/
+│   ├── project_planning_agent/
+│   ├── api_contract_planning_agent/
+│   ├── data_architecture_agent/
+│   ├── ui_ux_design_agent/
+│   ├── frontend_architecture_agent/
+│   ├── backend_planning_agent/
+│   ├── frontend_planning_agent/
+│   ├── data_planning_agent/
+│   ├── infrastructure_planning_agent/
+│   ├── devops_planning_agent/
+│   ├── qa_test_strategy_agent/
+│   ├── test_planning_agent/
+│   ├── security_planning_agent/
+│   ├── observability_planning_agent/
+│   ├── performance_planning_agent/
+│   ├── performance_planning_doc_agent/
+│   ├── documentation_planning_agent/
+│   └── quality_gate_planning_agent/
 ├── agent_implementations/
 │   ├── run_team.py   # CLI orchestration script
 │   └── run_api_server.py

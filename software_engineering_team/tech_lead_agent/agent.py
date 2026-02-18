@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from planning.planning_graph import (
+from planning_team.planning_graph import (
     PlanningDomain,
     PlanningGraph,
     PlanningNode,
@@ -174,8 +174,8 @@ class TechLeadAgent:
         Run the multi-agent planning pipeline (Backend + Frontend planners).
         Returns TechLeadOutput if successful and valid, else None.
         """
-        from backend_planning_agent import BackendPlanningAgent, BackendPlanningInput
-        from frontend_planning_agent import FrontendPlanningAgent, FrontendPlanningInput
+        from planning_team.backend_planning_agent import BackendPlanningAgent, BackendPlanningInput
+        from planning_team.frontend_planning_agent import FrontendPlanningAgent, FrontendPlanningInput
 
         reqs = input_data.requirements
         arch = input_data.architecture
@@ -239,7 +239,7 @@ class TechLeadAgent:
 
         # Data planner (optional)
         try:
-            from data_planning_agent import DataPlanningAgent, DataPlanningInput
+            from planning_team.data_planning_agent import DataPlanningAgent, DataPlanningInput
             data_planner = DataPlanningAgent(self.llm)
             data_output = data_planner.run(DataPlanningInput(
                 requirements=reqs,
@@ -259,7 +259,7 @@ class TechLeadAgent:
             and n.domain in (PlanningDomain.BACKEND, PlanningDomain.FRONTEND)
         ]
         try:
-            from test_planning_agent import TestPlanningAgent, TestPlanningInput
+            from planning_team.test_planning_agent import TestPlanningAgent, TestPlanningInput
             test_planner = TestPlanningAgent(self.llm)
             test_output = test_planner.run(TestPlanningInput(
                 requirements=reqs,
@@ -275,7 +275,7 @@ class TechLeadAgent:
 
         # Performance planner (apply node_budgets to merged nodes)
         try:
-            from performance_planning_agent import PerformancePlanningAgent, PerformancePlanningInput
+            from planning_team.performance_planning_agent import PerformancePlanningAgent, PerformancePlanningInput
             perf_planner = PerformancePlanningAgent(self.llm)
             perf_output = perf_planner.run(PerformancePlanningInput(
                 requirements=reqs,
@@ -295,7 +295,7 @@ class TechLeadAgent:
 
         # Documentation planner
         try:
-            from documentation_planning_agent import DocumentationPlanningAgent, DocumentationPlanningInput
+            from planning_team.documentation_planning_agent import DocumentationPlanningAgent, DocumentationPlanningInput
             doc_planner = DocumentationPlanningAgent(self.llm)
             doc_output = doc_planner.run(DocumentationPlanningInput(
                 requirements=reqs,
@@ -311,7 +311,7 @@ class TechLeadAgent:
 
         # Quality gate planner (apply quality_gates to merged nodes)
         try:
-            from quality_gate_planning_agent import QualityGatePlanningAgent, QualityGatePlanningInput
+            from planning_team.quality_gate_planning_agent import QualityGatePlanningAgent, QualityGatePlanningInput
             qg_planner = QualityGatePlanningAgent(self.llm)
             qg_output = qg_planner.run(QualityGatePlanningInput(
                 task_ids=executable_ids,
@@ -343,7 +343,7 @@ class TechLeadAgent:
                 ],
             )
             merged.add_node(git_node)
-            from planning.planning_graph import EdgeType, PlanningEdge
+            from planning_team.planning_graph import EdgeType, PlanningEdge
             for nid, node in list(merged.nodes.items()):
                 if node.kind in (PlanningNodeKind.TASK, PlanningNodeKind.SUBTASK) and node.domain != PlanningDomain.GIT_SETUP:
                     merged.add_edge(PlanningEdge(from_id="git-setup-repos", to_id=nid, type=EdgeType.BLOCKS))
@@ -354,7 +354,7 @@ class TechLeadAgent:
         )
 
         # Run planning graph validation and build report
-        from planning.validation import format_validation_report, validate_planning_graph
+        from planning_team.validation import format_validation_report, validate_planning_graph
         is_valid, val_errors = validate_planning_graph(merged, requirement_count=len(reqs.acceptance_criteria or []))
         domain_counts = {}
         for n in merged.nodes.values():

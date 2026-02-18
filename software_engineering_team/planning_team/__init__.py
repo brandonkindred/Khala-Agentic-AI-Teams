@@ -1,4 +1,4 @@
-"""Planning layer: PlanningGraph, domain planners, and compiler."""
+"""Planning team: all planning agents and shared planning infrastructure."""
 
 from .planning_graph import (
     PlanningEdge,

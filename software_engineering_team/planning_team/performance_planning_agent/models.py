@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from planning.planning_graph import PlanningGraph
+from planning_team.planning_graph import PlanningGraph
 from shared.models import ProductRequirements, SystemArchitecture
 
 

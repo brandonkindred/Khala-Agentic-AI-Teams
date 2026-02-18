@@ -668,7 +668,7 @@ class FrontendExpertAgent:
                 task_description=current_task.description,
                 architecture=architecture,
             ))
-            from accessibility_agent.models import AccessibilityInput
+            from frontend_team.accessibility_agent.models import AccessibilityInput
             a11y_result = accessibility_agent.run(AccessibilityInput(
                 code=code_to_review,
                 language="typescript",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from planning.planning_graph import (
+from planning_team.planning_graph import (
     EdgeType,
     PlanningDomain,
     PlanningEdge,

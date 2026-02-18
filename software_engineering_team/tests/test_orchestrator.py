@@ -197,11 +197,11 @@ def test_run_orchestrator_uses_fallback_overview_when_planning_raises(tmp_path: 
     with patch("orchestrator.update_job"):
         with patch("orchestrator._get_agents", return_value=mock_agents):
             with patch(
-                "planning.planning_review.check_tasks_architecture_alignment",
+                "planning_team.planning_review.check_tasks_architecture_alignment",
                 return_value=(True, []),
             ):
                 with patch(
-                    "planning.planning_review.check_spec_conformance",
+                    "planning_team.planning_review.check_spec_conformance",
                     return_value=(True, []),
                 ):
                     with patch(
@@ -270,7 +270,7 @@ def test_run_orchestrator_fails_job_when_planning_and_fallback_both_fail(tmp_pat
                 ),
             ):
                 with patch(
-                    "project_planning_agent.models.build_fallback_overview_from_requirements",
+                    "planning_team.project_planning_agent.models.build_fallback_overview_from_requirements",
                     side_effect=Exception("Fallback failed"),
                 ):
                     orchestrator.run_orchestrator(job_id, str(tmp_path))

@@ -15,8 +15,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from shared.llm import LLMClient
 from shared.models import SystemArchitecture, Task, TaskUpdate
 
-from frontend_agent import FrontendExpertAgent, FrontendInput
-from frontend_agent.models import FrontendOutput, FrontendWorkflowResult
+from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
+from frontend_team.feature_agent.models import FrontendOutput, FrontendWorkflowResult
 
 from .models import (
     DesignSystemOutput,
@@ -477,7 +477,7 @@ class FrontendOrchestratorAgent:
                 task_description=current_task.description,
                 architecture=architecture,
             ))
-            from accessibility_agent.models import AccessibilityInput
+            from frontend_team.accessibility_agent.models import AccessibilityInput
             a11y_task_desc = current_task.description
             if FRONTEND_A11Y_CHECKLIST:
                 a11y_task_desc += "\n\n" + FRONTEND_A11Y_CHECKLIST
