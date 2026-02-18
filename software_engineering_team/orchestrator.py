@@ -491,6 +491,246 @@ def _run_build_verification(
     return True, ""
 
 
+def _run_backend_frontend_workers(
+    *,
+    job_id: str,
+    path: Path,
+    backend_dir: Path,
+    frontend_dir: Path,
+    backend_queue: List[str],
+    frontend_queue: List[str],
+    all_tasks: Dict[str, Any],
+    completed: set,
+    failed: Dict[str, str],
+    completed_code_task_ids: List[str],
+    spec_content: str,
+    architecture: Any,
+    agents: Dict[str, Any],
+    tech_lead: Any,
+    total_tasks: int,
+    is_retry: bool = False,
+) -> None:
+    """
+    Run backend and frontend workers in parallel (1 backend task, 1 frontend task at a time).
+    Mutates completed, failed, backend_queue, frontend_queue, all_tasks.
+    """
+    state_lock = threading.Lock()
+    llm_limit_exceeded = [False]  # mutable ref for workers
+
+    def _remaining_queue_ids() -> List[str]:
+        with state_lock:
+            return list(backend_queue) + list(frontend_queue)
+
+    def _backend_worker() -> None:
+        while True:
+            with state_lock:
+                if llm_limit_exceeded[0]:
+                    break
+                if not backend_queue:
+                    break
+                task_id = backend_queue.pop(0)
+                task = all_tasks.get(task_id)
+            if not task:
+                continue
+            update_job(job_id, current_task=task_id)
+            log_prefix = "[RETRY] " if is_retry else ""
+            logger.info("%s[%s] >>> Backend worker starting task %s", log_prefix, task_id, task_id)
+            task_start_time = time.monotonic()
+            try:
+                from shared.command_runner import ensure_backend_project_initialized
+                init_result = ensure_backend_project_initialized(backend_dir)
+                if not init_result.success:
+                    with state_lock:
+                        failed[task_id] = f"Backend init failed: {init_result.error_summary}"
+                    continue
+                if not (backend_dir / ".git").exists():
+                    gs_result = agents["git_setup"].run(backend_dir)
+                    if not gs_result.success:
+                        with state_lock:
+                            failed[task_id] = f"Git setup failed: {gs_result.message}"
+                        continue
+                completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
+                remaining_ids = set(_remaining_queue_ids()) - {task_id}
+                remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in remaining_ids]
+
+                def _append_backend_task(nt) -> None:
+                    with state_lock:
+                        all_tasks[nt.id] = nt
+                        backend_queue.append(nt.id)
+
+                workflow_result = agents["backend"].run_workflow(
+                    repo_path=backend_dir,
+                    task=task,
+                    spec_content=spec_content,
+                    architecture=architecture,
+                    qa_agent=agents["qa"],
+                    security_agent=agents["security"],
+                    dbc_agent=agents["dbc_comments"],
+                    code_review_agent=agents["code_review"],
+                    acceptance_verifier_agent=agents.get("acceptance_verifier"),
+                    tech_lead=tech_lead,
+                    build_verifier=_run_build_verification,
+                    doc_agent=agents.get("documentation"),
+                    completed_tasks=completed_tasks_list,
+                    remaining_tasks=remaining_tasks_list,
+                    all_tasks=all_tasks,
+                    execution_queue=backend_queue,
+                    append_task_fn=_append_backend_task,
+                )
+                elapsed = time.monotonic() - task_start_time
+                with state_lock:
+                    if workflow_result.success:
+                        completed.add(task_id)
+                        completed_code_task_ids.append(task_id)
+                        logger.info("%s[%s] Backend COMPLETED in %.1fs", log_prefix, task_id, elapsed)
+                    else:
+                        failed[task_id] = workflow_result.failure_reason or "Backend workflow failed"
+                        logger.warning("%s[%s] Backend FAILED after %.1fs: %s", log_prefix, task_id, elapsed, failed[task_id])
+            except (LLMError, httpx.HTTPError) as e:
+                with state_lock:
+                    if isinstance(e, LLMRateLimitError):
+                        llm_limit_exceeded[0] = True
+                        failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
+                    elif isinstance(e, LLMTemporaryError):
+                        failed[task_id] = "LLM rate limited or temporarily unavailable – please retry later"
+                    elif isinstance(e, LLMPermanentError):
+                        failed[task_id] = str(e)
+                    else:
+                        failed[task_id] = f"LLM error: {e}"
+                if isinstance(e, LLMRateLimitError):
+                    logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
+                else:
+                    logger.warning("%s[%s] Backend task LLM/HTTP error: %s", log_prefix, task_id, e)
+            except Exception as e:
+                with state_lock:
+                    failed[task_id] = f"Unhandled exception: {e}"
+                logger.exception("%s[%s] Backend task exception", log_prefix, task_id)
+            logger.info("%s[%s] <<< Backend worker done", log_prefix, task_id)
+
+        # After backend agent is done with all tasks for this repo, containerize it
+        devops_agent = agents.get("devops")
+        if devops_agent and backend_dir.is_dir() and (backend_dir / ".git").exists():
+            existing_pipeline = _read_repo_code(backend_dir, [".yml", ".yaml"])
+            tech_lead.trigger_devops_for_backend(
+                devops_agent, backend_dir, architecture, spec_content,
+                existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+            )
+
+    def _frontend_worker() -> None:
+        while True:
+            with state_lock:
+                if llm_limit_exceeded[0]:
+                    break
+                if not frontend_queue:
+                    break
+                task_id = frontend_queue.pop(0)
+                task = all_tasks.get(task_id)
+            if not task:
+                continue
+            update_job(job_id, current_task=task_id)
+            log_prefix = "[RETRY] " if is_retry else ""
+            logger.info("%s[%s] >>> Frontend worker starting task %s", log_prefix, task_id, task_id)
+            task_start_time = time.monotonic()
+            try:
+                from shared.command_runner import ensure_frontend_project_initialized
+                init_result = ensure_frontend_project_initialized(frontend_dir)
+                if not init_result.success:
+                    with state_lock:
+                        failed[task_id] = f"Frontend init failed: {init_result.error_summary}"
+                    continue
+                if not (frontend_dir / ".git").exists():
+                    gs_result = agents["git_setup"].run(frontend_dir)
+                    if not gs_result.success:
+                        with state_lock:
+                            failed[task_id] = f"Git setup failed: {gs_result.message}"
+                        continue
+
+                completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
+                remaining_ids = set(_remaining_queue_ids())
+                remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in remaining_ids]
+                completed_with_current = completed_tasks_list + [task]
+
+                def _append_backend_task(nt) -> None:
+                    with state_lock:
+                        all_tasks[nt.id] = nt
+                        backend_queue.insert(0, nt.id)
+
+                def _append_frontend_task_id(tid: str) -> None:
+                    with state_lock:
+                        frontend_queue.append(tid)
+
+                workflow_result = agents["frontend"].run_workflow(
+                    repo_path=frontend_dir,
+                    backend_dir=backend_dir,
+                    task=task,
+                    spec_content=spec_content,
+                    architecture=architecture,
+                    qa_agent=agents["qa"],
+                    accessibility_agent=agents["accessibility"],
+                    security_agent=agents["security"],
+                    code_review_agent=agents["code_review"],
+                    acceptance_verifier_agent=agents.get("acceptance_verifier"),
+                    dbc_agent=agents["dbc_comments"],
+                    tech_lead=tech_lead,
+                    build_verifier=_run_build_verification,
+                    doc_agent=agents.get("documentation"),
+                    completed_tasks=completed_with_current,
+                    remaining_tasks=remaining_tasks_list,
+                    all_tasks=all_tasks,
+                    append_backend_task_fn=_append_backend_task,
+                    append_frontend_task_fn=_append_frontend_task_id,
+                )
+
+                elapsed = time.monotonic() - task_start_time
+                with state_lock:
+                    if workflow_result.success:
+                        completed.add(task_id)
+                        completed_code_task_ids.append(task_id)
+                        logger.info("%s[%s] Frontend COMPLETED in %.1fs", log_prefix, task_id, elapsed)
+                    else:
+                        failed[task_id] = workflow_result.failure_reason or "Frontend workflow failed"
+                        logger.warning("%s[%s] Frontend FAILED after %.1fs: %s", log_prefix, task_id, elapsed, failed[task_id])
+                logger.info("%s[%s] <<< Frontend worker done (completed=%s)", log_prefix, task_id, workflow_result.success)
+            except (LLMError, httpx.HTTPError) as e:
+                with state_lock:
+                    if isinstance(e, LLMRateLimitError):
+                        llm_limit_exceeded[0] = True
+                        failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
+                    elif isinstance(e, LLMTemporaryError):
+                        failed[task_id] = "LLM rate limited or temporarily unavailable – please retry later"
+                    elif isinstance(e, LLMPermanentError):
+                        failed[task_id] = str(e)
+                    else:
+                        failed[task_id] = f"LLM error: {e}"
+                if isinstance(e, LLMRateLimitError):
+                    logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
+                else:
+                    logger.warning("%s[%s] Frontend task LLM/HTTP error: %s", log_prefix, task_id, e)
+                checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
+            except Exception as e:
+                with state_lock:
+                    failed[task_id] = f"Unhandled exception: {e}"
+                logger.exception("%s[%s] Frontend task exception", log_prefix, task_id)
+                checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
+
+            # After frontend agent is done with all tasks for this repo, containerize it
+            devops_agent = agents.get("devops")
+            if devops_agent and frontend_dir.is_dir() and (frontend_dir / ".git").exists():
+                existing_pipeline = _read_repo_code(frontend_dir, [".yml", ".yaml"])
+                tech_lead.trigger_devops_for_frontend(
+                    devops_agent, frontend_dir, architecture, spec_content,
+                    existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+                )
+
+    logger.info("Running with parallel workers: 1 backend task, 1 frontend task at a time")
+    t_backend = threading.Thread(target=_backend_worker)
+    t_frontend = threading.Thread(target=_frontend_worker)
+    t_backend.start()
+    t_frontend.start()
+    t_backend.join()
+    t_frontend.join()
+
+
 def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
     """
     Main orchestration loop. Runs in background thread.
@@ -924,13 +1164,6 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
         backend_queue: List[str] = [tid for tid in full_order if all_tasks.get(tid) and all_tasks[tid].assignee == "backend"]
         frontend_queue: List[str] = [tid for tid in full_order if all_tasks.get(tid) and all_tasks[tid].assignee == "frontend"]
         total_tasks = len(prefix_queue) + len(backend_queue) + len(frontend_queue)
-        state_lock = threading.Lock()
-        llm_limit_exceeded = False
-
-        # Remaining task ids (still in backend/frontend queues) for Tech Lead
-        def _remaining_queue_ids() -> List[str]:
-            with state_lock:
-                return list(backend_queue) + list(frontend_queue)
 
         logger.info(
             "=== Starting task execution: prefix=%s, backend=%s, frontend=%s ===",
@@ -954,214 +1187,26 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                 continue
 
         # Backend and frontend workers run in parallel (one task per agent type at a time)
-        def _backend_worker() -> None:
-            nonlocal llm_limit_exceeded
-            while True:
-                with state_lock:
-                    if llm_limit_exceeded:
-                        break
-                    if not backend_queue:
-                        break
-                    task_id = backend_queue.pop(0)
-                    task = all_tasks.get(task_id)
-                if not task:
-                    continue
-                update_job(job_id, current_task=task_id)
-                logger.info("[%s] >>> Backend worker starting task %s", task_id, task_id)
-                task_start_time = time.monotonic()
-                try:
-                    from shared.command_runner import ensure_backend_project_initialized
-                    init_result = ensure_backend_project_initialized(backend_dir)
-                    if not init_result.success:
-                        with state_lock:
-                            failed[task_id] = f"Backend init failed: {init_result.error_summary}"
-                        continue
-                    if not (backend_dir / ".git").exists():
-                        gs_result = agents["git_setup"].run(backend_dir)
-                        if not gs_result.success:
-                            with state_lock:
-                                failed[task_id] = f"Git setup failed: {gs_result.message}"
-                            continue
-                    completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
-                    remaining_ids = set(_remaining_queue_ids()) - {task_id}
-                    remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in remaining_ids]
+        _run_backend_frontend_workers(
+            job_id=job_id,
+            path=path,
+            backend_dir=backend_dir,
+            frontend_dir=frontend_dir,
+            backend_queue=backend_queue,
+            frontend_queue=frontend_queue,
+            all_tasks=all_tasks,
+            completed=completed,
+            failed=failed,
+            completed_code_task_ids=completed_code_task_ids,
+            spec_content=spec_content,
+            architecture=architecture,
+            agents=agents,
+            tech_lead=tech_lead,
+            total_tasks=total_tasks,
+            is_retry=False,
+        )
 
-                    def _append_backend_task(nt) -> None:
-                        with state_lock:
-                            all_tasks[nt.id] = nt
-                            backend_queue.append(nt.id)
-
-                    workflow_result = agents["backend"].run_workflow(
-                        repo_path=backend_dir,
-                        task=task,
-                        spec_content=spec_content,
-                        architecture=architecture,
-                        qa_agent=agents["qa"],
-                        security_agent=agents["security"],
-                        dbc_agent=agents["dbc_comments"],
-                        code_review_agent=agents["code_review"],
-                        acceptance_verifier_agent=agents.get("acceptance_verifier"),
-                        tech_lead=tech_lead,
-                        build_verifier=_run_build_verification,
-                        doc_agent=agents.get("documentation"),
-                        completed_tasks=completed_tasks_list,
-                        remaining_tasks=remaining_tasks_list,
-                        all_tasks=all_tasks,
-                        execution_queue=backend_queue,
-                        append_task_fn=_append_backend_task,
-                    )
-                    elapsed = time.monotonic() - task_start_time
-                    with state_lock:
-                        if workflow_result.success:
-                            completed.add(task_id)
-                            completed_code_task_ids.append(task_id)
-                            logger.info("[%s] Backend COMPLETED in %.1fs", task_id, elapsed)
-                        else:
-                            failed[task_id] = workflow_result.failure_reason or "Backend workflow failed"
-                            logger.warning("[%s] Backend FAILED after %.1fs: %s", task_id, elapsed, failed[task_id])
-                except (LLMError, httpx.HTTPError) as e:
-                    with state_lock:
-                        if isinstance(e, LLMRateLimitError):
-                            llm_limit_exceeded = True
-                            failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
-                        elif isinstance(e, LLMTemporaryError):
-                            failed[task_id] = "LLM rate limited or temporarily unavailable – please retry later"
-                        elif isinstance(e, LLMPermanentError):
-                            failed[task_id] = str(e)
-                        else:
-                            failed[task_id] = f"LLM error: {e}"
-                    if isinstance(e, LLMRateLimitError):
-                        logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
-                    else:
-                        logger.warning("[%s] Backend task LLM/HTTP error: %s", task_id, e)
-                except Exception as e:
-                    with state_lock:
-                        failed[task_id] = f"Unhandled exception: {e}"
-                    logger.exception("[%s] Backend task exception", task_id)
-                logger.info("[%s] <<< Backend worker done", task_id)
-
-            # After backend agent is done with all tasks for this repo, containerize it
-            devops_agent = agents.get("devops")
-            if devops_agent and backend_dir.is_dir() and (backend_dir / ".git").exists():
-                existing_pipeline = _read_repo_code(backend_dir, [".yml", ".yaml"])
-                tech_lead.trigger_devops_for_backend(
-                    devops_agent, backend_dir, architecture, spec_content,
-                    existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
-                )
-
-        def _frontend_worker() -> None:
-            nonlocal llm_limit_exceeded
-            while True:
-                with state_lock:
-                    if llm_limit_exceeded:
-                        break
-                    if not frontend_queue:
-                        break
-                    task_id = frontend_queue.pop(0)
-                    task = all_tasks.get(task_id)
-                if not task:
-                    continue
-                update_job(job_id, current_task=task_id)
-                logger.info("[%s] >>> Frontend worker starting task %s", task_id, task_id)
-                task_start_time = time.monotonic()
-                try:
-                    from shared.command_runner import ensure_frontend_project_initialized
-                    init_result = ensure_frontend_project_initialized(frontend_dir)
-                    if not init_result.success:
-                        with state_lock:
-                            failed[task_id] = f"Frontend init failed: {init_result.error_summary}"
-                        continue
-                    if not (frontend_dir / ".git").exists():
-                        gs_result = agents["git_setup"].run(frontend_dir)
-                        if not gs_result.success:
-                            with state_lock:
-                                failed[task_id] = f"Git setup failed: {gs_result.message}"
-                            continue
-
-                    completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
-                    remaining_ids = set(_remaining_queue_ids())
-                    remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in remaining_ids]
-                    completed_with_current = completed_tasks_list + [task]
-
-                    def _append_backend_task(nt) -> None:
-                        with state_lock:
-                            all_tasks[nt.id] = nt
-                            backend_queue.insert(0, nt.id)
-
-                    def _append_frontend_task_id(tid: str) -> None:
-                        with state_lock:
-                            frontend_queue.append(tid)
-
-                    workflow_result = agents["frontend"].run_workflow(
-                        repo_path=frontend_dir,
-                        backend_dir=backend_dir,
-                        task=task,
-                        spec_content=spec_content,
-                        architecture=architecture,
-                        qa_agent=agents["qa"],
-                        accessibility_agent=agents["accessibility"],
-                        security_agent=agents["security"],
-                        code_review_agent=agents["code_review"],
-                        acceptance_verifier_agent=agents.get("acceptance_verifier"),
-                        dbc_agent=agents["dbc_comments"],
-                        tech_lead=tech_lead,
-                        build_verifier=_run_build_verification,
-                        doc_agent=agents.get("documentation"),
-                        completed_tasks=completed_with_current,
-                        remaining_tasks=remaining_tasks_list,
-                        all_tasks=all_tasks,
-                        append_backend_task_fn=_append_backend_task,
-                        append_frontend_task_fn=_append_frontend_task_id,
-                    )
-
-                    elapsed = time.monotonic() - task_start_time
-                    with state_lock:
-                        if workflow_result.success:
-                            completed.add(task_id)
-                            completed_code_task_ids.append(task_id)
-                            logger.info("[%s] Frontend COMPLETED in %.1fs", task_id, elapsed)
-                        else:
-                            failed[task_id] = workflow_result.failure_reason or "Frontend workflow failed"
-                            logger.warning("[%s] Frontend FAILED after %.1fs: %s", task_id, elapsed, failed[task_id])
-                    logger.info("[%s] <<< Frontend worker done (completed=%s)", task_id, workflow_result.success)
-                except (LLMError, httpx.HTTPError) as e:
-                    with state_lock:
-                        if isinstance(e, LLMRateLimitError):
-                            llm_limit_exceeded = True
-                            failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
-                        elif isinstance(e, LLMTemporaryError):
-                            failed[task_id] = "LLM rate limited or temporarily unavailable – please retry later"
-                        elif isinstance(e, LLMPermanentError):
-                            failed[task_id] = str(e)
-                        else:
-                            failed[task_id] = f"LLM error: {e}"
-                    if isinstance(e, LLMRateLimitError):
-                        logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
-                    else:
-                        logger.warning("[%s] Frontend task LLM/HTTP error: %s", task_id, e)
-                    checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
-                except Exception as e:
-                    with state_lock:
-                        failed[task_id] = f"Unhandled exception: {e}"
-                    logger.exception("[%s] Frontend task exception", task_id)
-                    checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
-
-            # After frontend agent is done with all tasks for this repo, containerize it
-            devops_agent = agents.get("devops")
-            if devops_agent and frontend_dir.is_dir() and (frontend_dir / ".git").exists():
-                existing_pipeline = _read_repo_code(frontend_dir, [".yml", ".yaml"])
-                tech_lead.trigger_devops_for_frontend(
-                    devops_agent, frontend_dir, architecture, spec_content,
-                    existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
-                )
-
-        t_backend = threading.Thread(target=_backend_worker)
-        t_frontend = threading.Thread(target=_frontend_worker)
-        t_backend.start()
-        t_frontend.start()
-        t_backend.join()
-        t_frontend.join()
-
+        llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed.values())
         remaining_in_queues = len(backend_queue) + len(frontend_queue)
         # Log final execution summary
         logger.info(
@@ -1387,75 +1432,39 @@ def run_failed_tasks(job_id: str) -> None:
 
         tech_lead = agents["tech_lead"]
 
-        # Execute only the failed tasks (sequential retry; use correct repo per assignee)
+        # Partition failed tasks into backend/frontend queues; handle devops/git_setup in prefix
         completed = set()
         failed_retry: Dict[str, str] = {}
-        completed_code_task_ids = []
-        execution_queue = list(failed_ids)
-        total_tasks = len(execution_queue)
-        task_counter = 0
-        max_passes = total_tasks * 3
-        llm_limit_exceeded = False
+        completed_code_task_ids: List[str] = []
 
-        while execution_queue and max_passes > 0:
-            if llm_limit_exceeded:
-                break
-            max_passes -= 1
-            task_id = execution_queue.pop(0)
+        retry_prefix = [
+            tid for tid in failed_ids
+            if all_tasks.get(tid) and (
+                all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops"
+            )
+        ]
+        retry_backend_queue = [
+            tid for tid in failed_ids
+            if all_tasks.get(tid) and all_tasks[tid].assignee == "backend"
+        ]
+        retry_frontend_queue = [
+            tid for tid in failed_ids
+            if all_tasks.get(tid) and all_tasks[tid].assignee == "frontend"
+        ]
+        total_tasks = len(retry_prefix) + len(retry_backend_queue) + len(retry_frontend_queue)
+
+        # Run prefix (devops, git_setup) sequentially
+        for task_id in retry_prefix:
             task = all_tasks.get(task_id)
             if not task:
-                logger.warning("Task %s not found in task registry - skipping", task_id)
                 continue
-
-            task_counter += 1
-            task_start_time = time.monotonic()
-            logger.info(
-                "=== [RETRY %s/%s] Starting task %s (type=%s, assignee=%s) ===",
-                task_counter, total_tasks, task_id, task.type.value, task.assignee,
-            )
             update_job(job_id, current_task=task_id)
-
-            try:
-                if task.type.value == "git_setup":
-                    completed.add(task_id)
-                    logger.info("[%s] Git setup task auto-completed", task_id)
-                    continue
-
-                if task.assignee == "backend":
-                    if not (backend_dir / ".git").exists():
-                        gs_result = agents["git_setup"].run(backend_dir)
-                        if not gs_result.success:
-                            failed_retry[task_id] = f"Git setup failed: {gs_result.message}"
-                            continue
-                    completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
-                    remaining_ids = set(execution_queue)
-                    remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in remaining_ids]
-
-                    workflow_result = agents["backend"].run_workflow(
-                        repo_path=backend_dir,
-                        task=task,
-                        spec_content=spec_content,
-                        architecture=architecture,
-                        qa_agent=agents["qa"],
-                        security_agent=agents["security"],
-                        dbc_agent=agents["dbc_comments"],
-                        code_review_agent=agents["code_review"],
-                        acceptance_verifier_agent=agents.get("acceptance_verifier"),
-                        tech_lead=tech_lead,
-                        build_verifier=_run_build_verification,
-                        doc_agent=agents.get("documentation"),
-                        completed_tasks=completed_tasks_list,
-                        remaining_tasks=remaining_tasks_list,
-                        all_tasks=all_tasks,
-                        execution_queue=execution_queue,
-                    )
-                    if workflow_result.success:
-                        completed.add(task_id)
-                        completed_code_task_ids.append(task_id)
-                    else:
-                        failed_retry[task_id] = workflow_result.failure_reason or "Backend workflow produced no output"
-
-                elif task.assignee == "devops":
+            if task.type.value == "git_setup":
+                completed.add(task_id)
+                logger.info("[%s] Git setup task auto-completed (retry)", task_id)
+                continue
+            if task.assignee == "devops":
+                try:
                     from devops_agent.models import DevOpsInput
                     existing_pipeline = _read_repo_code(path, [".yml", ".yaml"])
                     result = agents["devops"].run(DevOpsInput(
@@ -1470,79 +1479,35 @@ def run_failed_tasks(job_id: str) -> None:
                         completed.add(task_id)
                     else:
                         failed_retry[task_id] = f"Write failed: {msg}"
+                except Exception as e:
+                    failed_retry[task_id] = f"DevOps failed: {e}"
 
-                elif task.assignee == "frontend":
-                    if not (frontend_dir / ".git").exists():
-                        gs_result = agents["git_setup"].run(frontend_dir)
-                        if not gs_result.success:
-                            failed_retry[task_id] = f"Git setup failed: {gs_result.message}"
-                            continue
+        # Run backend and frontend in parallel (1 backend task, 1 frontend task at a time)
+        if retry_backend_queue or retry_frontend_queue:
+            logger.info(
+                "=== Retry: running with parallel workers (backend=%s, frontend=%s) ===",
+                len(retry_backend_queue), len(retry_frontend_queue),
+            )
+            _run_backend_frontend_workers(
+                job_id=job_id,
+                path=path,
+                backend_dir=backend_dir,
+                frontend_dir=frontend_dir,
+                backend_queue=retry_backend_queue,
+                frontend_queue=retry_frontend_queue,
+                all_tasks=all_tasks,
+                completed=completed,
+                failed=failed_retry,
+                completed_code_task_ids=completed_code_task_ids,
+                spec_content=spec_content,
+                architecture=architecture,
+                agents=agents,
+                tech_lead=tech_lead,
+                total_tasks=total_tasks,
+                is_retry=True,
+            )
 
-                    completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
-                    remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in execution_queue]
-                    completed_with_current = completed_tasks_list + [task]
-
-                    def _append_backend_task_retry(nt) -> None:
-                        all_tasks[nt.id] = nt
-                        execution_queue.insert(0, nt.id)
-
-                    def _append_frontend_task_id_retry(tid: str) -> None:
-                        execution_queue.append(tid)
-
-                    workflow_result = agents["frontend"].run_workflow(
-                        repo_path=frontend_dir,
-                        backend_dir=backend_dir,
-                        task=task,
-                        spec_content=spec_content,
-                        architecture=architecture,
-                        qa_agent=agents["qa"],
-                        accessibility_agent=agents["accessibility"],
-                        security_agent=agents["security"],
-                        code_review_agent=agents["code_review"],
-                        acceptance_verifier_agent=agents.get("acceptance_verifier"),
-                        dbc_agent=agents["dbc_comments"],
-                        tech_lead=tech_lead,
-                        build_verifier=_run_build_verification,
-                        doc_agent=agents.get("documentation"),
-                        completed_tasks=completed_with_current,
-                        remaining_tasks=remaining_tasks_list,
-                        all_tasks=all_tasks,
-                        append_backend_task_fn=_append_backend_task_retry,
-                        append_frontend_task_fn=_append_frontend_task_id_retry,
-                    )
-
-                    if workflow_result.success:
-                        completed.add(task_id)
-                        completed_code_task_ids.append(task_id)
-                    else:
-                        failed_retry[task_id] = workflow_result.failure_reason or "Frontend workflow produced no output"
-                    checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
-
-                else:
-                    completed.add(task_id)
-
-                elapsed = time.monotonic() - task_start_time
-                if task_id in completed:
-                    logger.info("[%s] Retry COMPLETED in %.1fs", task_id, elapsed)
-                else:
-                    logger.warning("[%s] Retry FAILED after %.1fs: %s", task_id, elapsed, failed_retry.get(task_id, "unknown"))
-
-            except LLMRateLimitError:
-                llm_limit_exceeded = True
-                failed_retry[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
-                logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
-                if task.assignee == "backend":
-                    checkout_branch(backend_dir, DEVELOPMENT_BRANCH)
-                elif task.assignee == "frontend":
-                    checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
-            except Exception as e:
-                elapsed = time.monotonic() - task_start_time
-                logger.exception("[%s] Retry FAILED with exception after %.1fs", task_id, elapsed)
-                failed_retry[task_id] = f"Unhandled exception: {e}"
-                if task.assignee == "backend":
-                    checkout_branch(backend_dir, DEVELOPMENT_BRANCH)
-                elif task.assignee == "frontend":
-                    checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
+        llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed_retry.values())
 
         # Final summary
         logger.info(

@@ -39,6 +39,11 @@ class FrontendInput(BaseModel):
         default_factory=list,
         description="Code review issues to resolve. Fix each issue before re-submitting.",
     )
+    suggested_tests_from_qa: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Suggested unit_tests and integration_tests from QA/testing sub-agent. "
+        "Keys: 'unit_tests', 'integration_tests'. Integrate into appropriate .spec.ts and e2e files.",
+    )
 
 
 class FrontendOutput(BaseModel):

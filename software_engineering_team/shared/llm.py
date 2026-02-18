@@ -674,8 +674,10 @@ class OllamaLLMClient(LLMClient):
 
         # If still no JSON, try extracting files from raw content so backend/frontend get usable output
         try:
-            from shared.llm_response_utils import extract_files_from_content
+            from shared.llm_response_utils import extract_files_from_content, heuristic_extract_files_from_content
             extracted = extract_files_from_content(text)
+            if not extracted:
+                extracted = heuristic_extract_files_from_content(text, (".py", ".ts", ".html", ".scss", ".css", ".json"))
             if isinstance(extracted, dict) and extracted:
                 return {"files": extracted}
         except Exception:

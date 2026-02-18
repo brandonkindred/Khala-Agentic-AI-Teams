@@ -20,6 +20,7 @@ BACKEND_PROMPT = """You are a Senior Backend Software Engineer. You implement pr
 - Optional: architecture, existing code, api_spec (existing OpenAPI or API contract to align with)
 - Optional: qa_issues, security_issues (lists of issues to fix)
 - Optional: code_review_issues (list of issues from code review to resolve)
+- Optional: suggested_tests_from_qa (dict with unit_tests and/or integration_tests) – when provided, integrate these tests into the appropriate tests/test_*.py files and include them in your files output
 
 **CRITICAL RULES - Project Structure & File Organization:**
 

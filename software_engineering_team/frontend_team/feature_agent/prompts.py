@@ -40,6 +40,7 @@ Do NOT recreate these files unless you need to modify them (e.g. adding new rout
 - Optional: architecture, existing code, API endpoints
 - Optional: qa_issues, security_issues, accessibility_issues (lists of issues to fix)
 - Optional: code_review_issues (list of issues from code review to resolve)
+- Optional: suggested_tests_from_qa (dict with "unit_tests" and/or "integration_tests" keys) – when provided, you MUST integrate these tests into the appropriate .spec.ts files and e2e/integration test files. Add or update component spec files, service spec files, and integration tests. Include all test files in your "files" output.
 
 **Angular template – ARIA and custom attributes:**
 - ARIA attributes (aria-expanded, aria-label, aria-controls, aria-hidden, etc.) are NOT native DOM properties. Angular will fail with NG8002 if you bind them directly.

@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 # Validation constants
 MAX_PATH_SEGMENT_LENGTH = 30
+# Test files (test_*.py) may have longer descriptive names; allow up to 45 chars
+MAX_TEST_FILE_SEGMENT_LENGTH = 45
 BAD_NAME_PATTERN = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[a-z]+")  # 4+ hyphenated words = likely sentence
 BAD_NAME_SNAKE_PATTERN = re.compile(r"^[a-z]+_[a-z]+_[a-z]+_[a-z]+_[a-z]+")  # 5+ underscored words = likely sentence
 VERB_PREFIX_PATTERN = re.compile(
@@ -63,7 +65,11 @@ def _validate_file_paths(files: Dict[str, str]) -> tuple[Dict[str, str], list[st
             # Skip well-known directory names
             if name_part.lower() in _ALLOWED_DIRS:
                 continue
-            if len(name_part) > MAX_PATH_SEGMENT_LENGTH:
+            # Test files (test_*.py) may have longer descriptive names
+            max_len = MAX_TEST_FILE_SEGMENT_LENGTH if (
+                name_part.startswith("test_") and seg.endswith(".py")
+            ) else MAX_PATH_SEGMENT_LENGTH
+            if len(name_part) > max_len:
                 warnings.append(f"Path segment too long: '{seg}' in '{path}'")
                 bad_segment = True
                 break
@@ -595,6 +601,7 @@ class BackendExpertAgent:
         last_build_error_sig: Optional[str] = None
         consecutive_same_build_failures = 0
         repeated_build_failure_reason: Optional[str] = None
+        write_tests_requested = False
 
         for iteration in range(1, MAX_REVIEW_ITERATIONS + 1):
             iter_start = time.monotonic()
@@ -646,8 +653,33 @@ class BackendExpertAgent:
                     )
                     break
 
-                # Feed build errors back as code-review issues and regenerate.
-                code_review_issues = _build_code_review_issues_for_build_failure(build_errors)
+                # Invoke testing sub-agent to analyze build errors and produce fix recommendations
+                code_on_branch = _read_repo_code(repo_path)
+                from qa_agent.models import QAInput as QAI
+                qa_fix_result = qa_agent.run(QAI(
+                    code=code_on_branch,
+                    language="python",
+                    task_description=current_task.description,
+                    architecture=architecture,
+                    build_errors=build_errors[:4000],
+                    request_mode="fix_build",
+                ))
+                qa_issues = [
+                    b.model_dump() if hasattr(b, "model_dump") else b.dict()
+                    for b in (qa_fix_result.bugs_found or [])
+                ]
+                if not qa_issues:
+                    # Fallback: convert code_review_issues to qa_issues format
+                    cr_issues = _build_code_review_issues_for_build_failure(build_errors)
+                    qa_issues = [
+                        {
+                            "severity": i.get("severity", "critical"),
+                            "description": i.get("description", ""),
+                            "location": i.get("file_path", ""),
+                            "recommendation": i.get("suggestion", "Fix the build/test errors"),
+                        }
+                        for i in cr_issues
+                    ]
                 # Escalate when same error repeats: add failing test content and clearer instructions
                 if consecutive_same_build_failures >= 2:
                     failing_test_file = (
@@ -682,19 +714,18 @@ class BackendExpertAgent:
                                 pass
                         else:
                             escalation_desc += f"\n\nFailing test file: {failing_test_file} (file not found in repo)."
-                    code_review_issues.insert(0, {
+                    qa_issues.insert(0, {
                         "severity": "critical",
-                        "category": "build",
-                        "file_path": failing_test_file or "",
                         "description": escalation_desc,
-                        "suggestion": escalation_suggestion,
+                        "location": failing_test_file or "",
+                        "recommendation": escalation_suggestion,
                     })
                 result = self._regenerate_with_issues(
                     repo_path=repo_path,
                     current_task=current_task,
                     spec_content=spec_content,
                     architecture=architecture,
-                    code_review_issues=code_review_issues,
+                    qa_issues=qa_issues,
                 )
                 # Pre-write check: if tests reference /test-generic-error but result's
                 # main.py doesn't include it, regenerate with targeted issue before writing.
@@ -730,6 +761,41 @@ class BackendExpertAgent:
                 task_id,
                 iteration,
             )
+
+            # After first successful build: have testing sub-agent write unit and integration tests
+            if not write_tests_requested:
+                write_tests_requested = True
+                code_on_branch = _read_repo_code(repo_path)
+                from qa_agent.models import QAInput as QAI
+                qa_tests_result = qa_agent.run(QAI(
+                    code=code_on_branch,
+                    language="python",
+                    task_description=current_task.description,
+                    architecture=architecture,
+                    request_mode="write_tests",
+                ))
+                tests_dict = {}
+                if getattr(qa_tests_result, "unit_tests", "").strip():
+                    tests_dict["unit_tests"] = qa_tests_result.unit_tests.strip()
+                if getattr(qa_tests_result, "integration_tests", "").strip():
+                    tests_dict["integration_tests"] = qa_tests_result.integration_tests.strip()
+                if tests_dict:
+                    result = self._regenerate_with_issues(
+                        repo_path=repo_path,
+                        current_task=current_task,
+                        spec_content=spec_content,
+                        architecture=architecture,
+                        suggested_tests_from_qa=tests_dict,
+                    )
+                    ok, write_msg = write_agent_output(repo_path, result, subdir="")
+                    if not ok:
+                        logger.warning(
+                            "[%s] WORKFLOW   [%d] Write failed after QA suggested tests: %s",
+                            task_id,
+                            iteration,
+                            write_msg,
+                        )
+                    continue
 
             # ─── 4b. Code review ────────────────────────────────────────
             logger.info(
@@ -1035,13 +1101,37 @@ class BackendExpertAgent:
                             iteration,
                             build_errors[:500],
                         )
-                        code_review_issues = _build_code_review_issues_for_build_failure(build_errors)
+                        code_on_branch = _read_repo_code(repo_path)
+                        from qa_agent.models import QAInput as QAI
+                        qa_fix_result = qa_agent.run(QAI(
+                            code=code_on_branch,
+                            language="python",
+                            task_description=current_task.description,
+                            architecture=architecture,
+                            build_errors=build_errors[:4000],
+                            request_mode="fix_build",
+                        ))
+                        qa_issues_artifact = [
+                            b.model_dump() if hasattr(b, "model_dump") else b.dict()
+                            for b in (qa_fix_result.bugs_found or [])
+                        ]
+                        if not qa_issues_artifact:
+                            cr_issues = _build_code_review_issues_for_build_failure(build_errors)
+                            qa_issues_artifact = [
+                                {
+                                    "severity": i.get("severity", "critical"),
+                                    "description": i.get("description", ""),
+                                    "location": i.get("file_path", ""),
+                                    "recommendation": i.get("suggestion", "Fix the build/test errors"),
+                                }
+                                for i in cr_issues
+                            ]
                         result = self._regenerate_with_issues(
                             repo_path=repo_path,
                             current_task=current_task,
                             spec_content=spec_content,
                             architecture=architecture,
-                            code_review_issues=code_review_issues,
+                            qa_issues=qa_issues_artifact,
                         )
                         ok, write_msg = write_agent_output(repo_path, result, subdir="")
                         if not ok:
@@ -1271,13 +1361,14 @@ class BackendExpertAgent:
         qa_issues: List[Dict[str, Any]] | None = None,
         security_issues: List[Dict[str, Any]] | None = None,
         code_review_issues: List[Dict[str, Any]] | None = None,
+        suggested_tests_from_qa: Optional[Dict[str, str]] = None,
     ) -> BackendOutput:
         """
         Re-invoke the code generator with issues to fix.
 
         Preconditions:
             - ``repo_path`` is checked out on the feature branch.
-            - At least one of the issue lists is non-empty.
+            - At least one of the issue lists or suggested_tests_from_qa is non-empty.
 
         Postconditions:
             - Returns a new ``BackendOutput`` with fixes applied.
@@ -1304,6 +1395,7 @@ class BackendExpertAgent:
                 qa_issues=qa_issues or [],
                 security_issues=security_issues or [],
                 code_review_issues=code_review_issues or [],
+                suggested_tests_from_qa=suggested_tests_from_qa,
             )
         )
 
@@ -1649,6 +1741,13 @@ class BackendExpertAgent:
             context_parts.extend(["", "**Existing code:**", input_data.existing_code])
         if input_data.api_spec:
             context_parts.extend(["", "**API spec:**", input_data.api_spec])
+        if input_data.suggested_tests_from_qa:
+            tests_block = ["", "**Suggested tests from QA/testing sub-agent – integrate these into your tests/test_*.py files:**"]
+            if input_data.suggested_tests_from_qa.get("unit_tests"):
+                tests_block.extend(["", "**Unit tests:**", "```", input_data.suggested_tests_from_qa["unit_tests"], "```"])
+            if input_data.suggested_tests_from_qa.get("integration_tests"):
+                tests_block.extend(["", "**Integration tests:**", "```", input_data.suggested_tests_from_qa["integration_tests"], "```"])
+            context_parts.extend(tests_block)
 
         prompt = BACKEND_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         mode = "problem_solving" if has_issues else "initial"
@@ -1711,7 +1810,17 @@ class BackendExpertAgent:
                 logger.warning(
                     "Backend: produced no files and no code (failure_class=empty_completion); re-prompting once",
                 )
-                prompt = prompt + empty_retry_prompt
+                # If files were rejected by validation, surface those errors so the LLM can fix filenames
+                if raw_files and validation_warnings:
+                    validation_retry = (
+                        "\n\n**CRITICAL - Your file paths were REJECTED by validation:**\n"
+                        + "\n".join(f"- {w}" for w in validation_warnings)
+                        + "\n\nFix the file paths (e.g. use shorter names like test_tenant_model_qa.py instead of "
+                        "test_unit_qa_backend-tenant-model-task.py) and return valid JSON with the 'files' key."
+                    )
+                    prompt = prompt + validation_retry
+                else:
+                    prompt = prompt + empty_retry_prompt
                 continue
 
             # If all files were rejected but we have code, that's a problem (no retry)

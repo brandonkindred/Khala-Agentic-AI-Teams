@@ -29,6 +29,15 @@ class QAInput(BaseModel):
     task_description: str = ""
     architecture: Optional[SystemArchitecture] = None
     run_instructions: Optional[str] = None
+    build_errors: Optional[str] = Field(
+        default=None,
+        description="Compiler/build or syntax error output when code failed to build.",
+    )
+    request_mode: Optional[str] = Field(
+        default=None,
+        description="Mode: 'fix_build' (analyze build errors, produce fix recommendations), "
+        "'write_tests' (produce unit_tests and integration_tests), or None (general bug review).",
+    )
 
 
 class QAOutput(BaseModel):

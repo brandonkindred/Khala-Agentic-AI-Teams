@@ -305,6 +305,13 @@ class FrontendExpertAgent:
             context_parts.extend(["", "**Existing code:**", input_data.existing_code])
         if input_data.api_endpoints:
             context_parts.extend(["", "**API endpoints:**", input_data.api_endpoints])
+        if input_data.suggested_tests_from_qa:
+            tests_block = ["", "**Suggested tests from QA/testing sub-agent – integrate these into your .spec.ts and e2e files:**"]
+            if input_data.suggested_tests_from_qa.get("unit_tests"):
+                tests_block.extend(["", "**Unit tests:**", "```", input_data.suggested_tests_from_qa["unit_tests"], "```"])
+            if input_data.suggested_tests_from_qa.get("integration_tests"):
+                tests_block.extend(["", "**Integration tests:**", "```", input_data.suggested_tests_from_qa["integration_tests"], "```"])
+            context_parts.extend(tests_block)
 
         prompt = FRONTEND_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         mode = "problem_solving" if has_issues else "initial"
@@ -365,7 +372,16 @@ class FrontendExpertAgent:
                 logger.warning(
                     "Frontend: produced no files and no code (failure_class=empty_completion); re-prompting once",
                 )
-                prompt = prompt + empty_retry_prompt
+                # If files were rejected by validation, surface those errors so the LLM can fix filenames
+                if raw_files and validation_warnings:
+                    validation_retry = (
+                        "\n\n**CRITICAL - Your file paths were REJECTED by validation:**\n"
+                        + "\n".join(f"- {w}" for w in validation_warnings)
+                        + "\n\nFix the file paths (e.g. use shorter names, paths under src/) and return valid JSON with the 'files' key."
+                    )
+                    prompt = prompt + validation_retry
+                else:
+                    prompt = prompt + empty_retry_prompt
                 continue
 
             break
@@ -483,10 +499,12 @@ class FrontendExpertAgent:
         sec_issues: List[Dict[str, Any]] = []
         a11y_issues: List[Dict[str, Any]] = []
         code_review_issues: List[Dict[str, Any]] = []
+        suggested_tests_from_qa: Optional[Dict[str, str]] = None
         result: Optional[FrontendOutput] = None
         current_task = task
         last_build_error_sig = ""
         consecutive_same_build_failures = 0
+        write_tests_requested = False
 
         for iteration_round in range(MAX_CODE_REVIEW_ITERATIONS):
             existing_code = _truncate_for_context(
@@ -510,6 +528,7 @@ class FrontendExpertAgent:
                 security_issues=sec_issues,
                 accessibility_issues=a11y_issues,
                 code_review_issues=code_review_issues,
+                suggested_tests_from_qa=suggested_tests_from_qa,
             ))
 
             if result.needs_clarification and result.clarification_requests:
@@ -574,30 +593,65 @@ class FrontendExpertAgent:
                             f"Last error: {build_errors[:500]}"
                         ),
                     )
-                code_review_issues = [{
-                    "severity": "critical",
-                    "category": "logic",
-                    "file_path": "",
-                    "description": f"ng build failed: {build_errors[:2000]}",
-                    "suggestion": "Fix the Angular compilation errors",
-                }]
-                if consecutive_same_build_failures >= 2:
-                    code_review_issues.insert(0, {
+                # Invoke testing sub-agent to analyze build errors and produce fix recommendations
+                code_on_branch = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
+                from qa_agent.models import QAInput as QAI
+                qa_fix_result = qa_agent.run(QAI(
+                    code=code_on_branch,
+                    language="typescript",
+                    task_description=current_task.description,
+                    architecture=architecture,
+                    build_errors=build_errors[:4000],
+                    request_mode="fix_build",
+                ))
+                qa_issues = [
+                    b.model_dump() if hasattr(b, "model_dump") else b.dict()
+                    for b in (qa_fix_result.bugs_found or [])
+                ]
+                if not qa_issues:
+                    # Fallback to generic code_review_issues if QA returns nothing
+                    qa_issues = [{
                         "severity": "critical",
-                        "category": "build",
-                        "file_path": "",
+                        "description": f"ng build failed: {build_errors[:2000]}",
+                        "recommendation": "Fix the Angular compilation errors",
+                    }]
+                if consecutive_same_build_failures >= 2:
+                    qa_issues.insert(0, {
+                        "severity": "critical",
                         "description": (
                             f"ESCALATION: This build error has occurred {consecutive_same_build_failures} times. "
-                            "Focus ONLY on fixing this specific error. Make minimal, targeted changes. "
-                            "Create the missing component file or fix the import path as indicated."
+                            "Focus ONLY on fixing this specific error. Make minimal, targeted changes."
                         ),
-                        "suggestion": "Apply the minimal fix indicated by the error message.",
+                        "recommendation": "Apply the minimal fix indicated by the error message.",
                     })
+                code_review_issues = []
                 continue
 
             consecutive_same_build_failures = 0
             last_build_error_sig = ""
 
+            # After first successful build: have testing sub-agent write unit and integration tests
+            if not write_tests_requested:
+                write_tests_requested = True
+                code_on_branch = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
+                from qa_agent.models import QAInput as QAI
+                qa_tests_result = qa_agent.run(QAI(
+                    code=code_on_branch,
+                    language="typescript",
+                    task_description=current_task.description,
+                    architecture=architecture,
+                    request_mode="write_tests",
+                ))
+                tests_dict = {}
+                if qa_tests_result.unit_tests:
+                    tests_dict["unit_tests"] = qa_tests_result.unit_tests
+                if qa_tests_result.integration_tests:
+                    tests_dict["integration_tests"] = qa_tests_result.integration_tests
+                if tests_dict:
+                    suggested_tests_from_qa = tests_dict
+                    continue
+
+            suggested_tests_from_qa = None  # Clear after use so we don't re-pass on code review loop
             code_on_branch = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
             existing_code_ctx = _truncate_for_context(code_on_branch, MAX_EXISTING_CODE_CHARS)
             from code_review_agent.models import MAX_CODE_REVIEW_CHARS

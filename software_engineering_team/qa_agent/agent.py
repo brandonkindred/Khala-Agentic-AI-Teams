@@ -8,7 +8,7 @@ from typing import Any, Dict
 from shared.llm import LLMClient
 
 from .models import BugReport, QAInput, QAOutput
-from .prompts import QA_PROMPT
+from .prompts import QA_PROMPT, QA_PROMPT_FIX_BUILD, QA_PROMPT_WRITE_TESTS
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,17 @@ class QAExpertAgent:
 
     def run(self, input_data: QAInput) -> QAOutput:
         """Review code, fix bugs, and produce integration tests."""
-        logger.info("QA: reviewing %s chars of code", len(input_data.code or ""))
+        logger.info(
+            "QA: reviewing %s chars of code, mode=%s",
+            len(input_data.code or ""),
+            input_data.request_mode or "default",
+        )
+        base_prompt = QA_PROMPT
+        if input_data.request_mode == "fix_build" and input_data.build_errors:
+            base_prompt = QA_PROMPT + "\n\n" + QA_PROMPT_FIX_BUILD
+        elif input_data.request_mode == "write_tests":
+            base_prompt = QA_PROMPT + "\n\n" + QA_PROMPT_WRITE_TESTS
+
         context_parts = [
             f"**Language:** {input_data.language}",
             f"**Code to review:**",
@@ -39,8 +49,10 @@ class QAExpertAgent:
             context_parts.append(f"**Architecture:** {input_data.architecture.overview}")
         if input_data.run_instructions:
             context_parts.append(f"**Run instructions:** {input_data.run_instructions}")
+        if input_data.build_errors:
+            context_parts.append(f"**Build/compiler errors:**\n```\n{input_data.build_errors}\n```")
 
-        prompt = QA_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
+        prompt = base_prompt + "\n\n---\n\n" + "\n".join(context_parts)
         data = self.llm.complete_json(prompt, temperature=0.1)
 
         bugs = []

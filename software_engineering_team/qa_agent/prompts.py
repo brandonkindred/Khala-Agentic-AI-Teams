@@ -41,3 +41,21 @@ Return a single JSON object with:
 Be thorough. Each recommendation must be actionable – the coding agent should know exactly what to implement.
 
 Respond with valid JSON only. Escape newlines in code strings as \\n. No explanatory text outside JSON."""
+
+QA_PROMPT_FIX_BUILD = """
+**MODE: fix_build** – The code below FAILED to build. Build/compiler output is provided.
+Your task: Analyze the build errors and produce bug reports with clear "recommendation" for the coding agent.
+- Identify the root cause (e.g. missing import, wrong path, type error, syntax error).
+- For each error, provide: severity (critical for build failures), description, location (file:line), recommendation.
+- The recommendation must be concrete: what exact change to make (import, fix path, add type, etc.).
+- If multiple errors, list each with its fix. The coding agent will implement them.
+"""
+
+QA_PROMPT_WRITE_TESTS = """
+**MODE: write_tests** – Focus on producing unit_tests and integration_tests for the code below.
+- For Angular/TypeScript: use Jasmine/Karma for unit tests (*.spec.ts), Cypress or Angular integration for e2e.
+- For Python: use pytest for unit and integration tests.
+- Return complete, runnable test code in the "unit_tests" and "integration_tests" fields.
+- Map unit tests to the component/service/file being tested. Integration tests should cover key user flows.
+- The coding agent will integrate these tests into the appropriate files.
+"""

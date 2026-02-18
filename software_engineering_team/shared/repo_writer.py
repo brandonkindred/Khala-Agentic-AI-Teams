@@ -21,6 +21,8 @@ NO_FILES_TO_WRITE_MSG = "No files to write"
 
 # Maximum length for any single path segment (directory or filename without extension)
 MAX_SEGMENT_LENGTH = 30
+# Test files (test_*.py) may have longer descriptive names; allow up to 45 chars
+MAX_TEST_FILE_SEGMENT_LENGTH = 45
 
 # Pattern that matches names with 4+ hyphenated words (likely a sentence, not a component name)
 _SENTENCE_NAME_RE = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[a-z]+")
@@ -81,10 +83,14 @@ def _validate_paths(files: Dict[str, str], subdir: str = "") -> Tuple[Dict[str, 
             # Skip well-known directory names
             if name_part.lower() in _ALLOWED_DIRS:
                 continue
-            if len(name_part) > MAX_SEGMENT_LENGTH:
+            # Test files (test_*.py) may have longer descriptive names
+            max_len = MAX_TEST_FILE_SEGMENT_LENGTH if (
+                name_part.startswith("test_") and seg.endswith(".py")
+            ) else MAX_SEGMENT_LENGTH
+            if len(name_part) > max_len:
                 warnings.append(
                     f"REJECTED: path segment '{seg}' is {len(name_part)} chars "
-                    f"(max {MAX_SEGMENT_LENGTH}) - likely task description as name: '{path}'"
+                    f"(max {max_len}) - likely task description as name: '{path}'"
                 )
                 bad = True
                 break
