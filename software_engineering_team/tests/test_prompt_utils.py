@@ -60,6 +60,19 @@ def test_build_problem_solving_header_includes_issue_descriptions() -> None:
     assert "src/checkout.ts" in header
 
 
+def test_build_problem_solving_header_includes_test_failure_and_401_instructions() -> None:
+    """Default instructions include test-failure and 401/auth guidance."""
+    header = build_problem_solving_header(
+        {"code review issues": 1},
+        "Backend",
+    )
+    assert "For test failures" in header
+    assert "Failing tests" in header or "Interpretation" in header
+    assert "expected 200, got 401" in header
+    assert "auth" in header.lower()
+    assert "Do not change unrelated files or tests" in header or "unrelated files" in header
+
+
 def test_log_llm_prompt_emits_info_record(caplog: pytest.LogCaptureFixture) -> None:
     """log_llm_prompt emits an INFO log record with agent, mode, and prompt_len."""
     caplog.set_level(logging.INFO)

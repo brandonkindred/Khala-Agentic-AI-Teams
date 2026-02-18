@@ -53,6 +53,19 @@ def test_build_code_review_issues_generic_failure_returns_generic_suggestion() -
     assert "ImportError" in issues[0]["description"]
 
 
+def test_build_code_review_issues_extracts_failing_test_file_from_feedback() -> None:
+    """When build_errors contain 'Fix tests/...' from parsed feedback, file_path is set to that file."""
+    build_errors = (
+        "[pytest_assertion] test_toggle failed (expected 200, got 401)\n\n"
+        "Suggestion:\nFix tests/test_task_endpoints.py (test_toggle_completion_updates_status).\n\n"
+        "Failing tests:\n  - tests/test_task_endpoints.py::test_toggle_completion_updates_status"
+    )
+    issues = _build_code_review_issues_for_build_failure(build_errors)
+    assert len(issues) == 1
+    assert issues[0]["file_path"] == "tests/test_task_endpoints.py"
+    assert "Build/test failed" in issues[0]["description"]
+
+
 def test_test_routes_referenced_in_tests_finds_test_generic_error(tmp_path: Path) -> None:
     """_test_routes_referenced_in_tests finds /test-generic-error when tests reference it."""
     tests_dir = tmp_path / "tests"

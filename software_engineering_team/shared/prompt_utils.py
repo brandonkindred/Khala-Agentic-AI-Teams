@@ -44,7 +44,13 @@ def build_problem_solving_header(
         "2. Propose minimal, targeted code edits. Do not change unrelated code.\n"
         "3. Keep passing tests and working features intact.\n"
         "4. Avoid broad rewrites or refactoring.\n"
-        "5. Focus on resolving the provided issues before adding new features."
+        "5. Focus on resolving the provided issues before adding new features.\n"
+        "6. For test failures: use the **Failing tests** and **Interpretation** sections to identify "
+        "the exact tests and cause. If the failure shows **expected 200, got 401**, the request is "
+        "unauthenticated—fix by making the test send the required auth header or token; do not "
+        "disable auth in the app.\n"
+        "7. Fix the code or tests indicated by the error (file and assertion). Do not change "
+        "unrelated files or tests."
     )
     instr = instructions if instructions is not None else default_instructions
     description_block = ""

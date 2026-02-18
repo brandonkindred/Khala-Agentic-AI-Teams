@@ -200,6 +200,8 @@ def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[
     When failure matches exception-handler test patterns, returns a targeted
     suggestion (preserve /test-generic-error, return JSONResponse) and file_path
     app/main.py so the agent knows exactly what to fix.
+    Otherwise, extracts the failing test file from the feedback (e.g. "Fix tests/...")
+    when present, so the code review issue points at the correct file.
     """
     is_exception_handler_failure = any(
         p in build_errors for p in EXCEPTION_HANDLER_TEST_PATTERNS
@@ -215,6 +217,21 @@ def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[
     else:
         suggestion = "Fix the compilation/test errors"
         file_path = ""
+        # Extract failing test file from feedback (e.g. "Fix tests/test_task_endpoints.py" or "Failing tests:\n  - tests/test_foo.py::test_bar")
+        fix_tests_match = re.search(
+            r"Fix\s+(tests/test_[a-zA-Z0-9_]+\.py)",
+            build_errors,
+        )
+        if fix_tests_match:
+            file_path = fix_tests_match.group(1)
+        else:
+            failing_line_match = re.search(
+                r"Failing tests:.*?\n\s+-\s+(tests/test_[a-zA-Z0-9_]+\.py)(?:::|$)",
+                build_errors,
+                re.DOTALL,
+            )
+            if failing_line_match:
+                file_path = failing_line_match.group(1)
     return [
         {
             "severity": "critical",

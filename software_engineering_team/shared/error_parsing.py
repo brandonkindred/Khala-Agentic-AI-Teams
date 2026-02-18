@@ -12,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,8 @@ class ParsedFailure:
     raw_excerpt: str = ""
     suggestion: str = ""
     playbook_hint: str = ""
+    # When present, list of "file::test_name" or "file" for assertion failures (all failing tests).
+    failing_tests: Optional[List[str]] = None
 
 
 # Playbook hints for common failure types (fed to agents)
@@ -67,6 +69,24 @@ PLAYBOOK_PYTEST_ASSERTION = (
 PLAYBOOK_PYTEST_COLLECTION = (
     "Fix import or syntax errors that prevent pytest from collecting tests. "
     "Often caused by missing exports (e.g. Base from app.database) or circular imports."
+)
+PLAYBOOK_401_UNAUTHORIZED = (
+    "401 Unauthorized means the request was not authenticated. Fix by ensuring the test "
+    "client sends the required auth (e.g. Authorization header or token) for protected "
+    "endpoints. Do not disable or bypass auth in the application."
+)
+PLAYBOOK_403_FORBIDDEN = (
+    "403 Forbidden means the request was authenticated but not allowed. Check permissions "
+    "or scope for the authenticated principal; fix the test or the endpoint as appropriate."
+)
+PLAYBOOK_404_NOT_FOUND = (
+    "404 Not Found means the resource or route was not found. Ensure the URL and method "
+    "are correct; fix the test expectations or the route/resource as appropriate."
+)
+INTERPRETATION_401 = (
+    "The test expected a successful response (e.g. 200) but got 401. The endpoint requires "
+    "authentication; the test request is missing or has invalid auth. Fix the test to send "
+    "the required auth header or use an authenticated test client."
 )
 
 
@@ -123,22 +143,48 @@ def parse_pytest_failure(stdout: str, stderr: str) -> List[ParsedFailure]:
         )
         return failures
 
-    # Pytest assertion failure - extract test name, file, and assertion details
+    # Pytest assertion failure - extract all FAILED lines, traceback file, assertion details
     if "= FAILURES =" in text or "assert " in text:
         raw_excerpt = text[-2500:] if len(text) > 2500 else text
-        test_file: Optional[str] = None
-        test_name: Optional[str] = None
         assertion_line: Optional[str] = None
         expected_got: Optional[str] = None
+        got_status: Optional[int] = None  # detected response code (e.g. 401) when assertion is status_code
 
-        # FAILED tests/test_auth_middleware.py::test_invalid_auth_header
-        failed_match = re.search(
+        # Collect ALL FAILED path::test_name (dedupe by (file, test_name))
+        failed_matches = re.findall(
             r"FAILED\s+([a-zA-Z0-9_/.-]+test_[a-zA-Z0-9_]+\.py)(?:::(test_[a-zA-Z0-9_]+))?",
             text,
         )
-        if failed_match:
-            test_file = failed_match.group(1).strip()
-            test_name = failed_match.group(2) if failed_match.group(2) else None
+        seen: set = set()
+        failing_list: List[Tuple[str, Optional[str]]] = []
+        for m in failed_matches:
+            if isinstance(m, tuple):
+                file_path_part = (m[0] or "").strip()
+                test_name_part = (m[1] or "").strip() or None
+            else:
+                file_path_part = str(m).strip()
+                test_name_part = None
+            key = (file_path_part, test_name_part or "")
+            if key not in seen:
+                seen.add(key)
+                failing_list.append((file_path_part, test_name_part))
+        failing_tests_display: List[str] = [
+            f"{f}::{t}" if t else f for (f, t) in failing_list
+        ]
+        first_file = failing_list[0][0] if failing_list else None
+        first_test = failing_list[0][1] if failing_list and failing_list[0][1] else None
+
+        # Traceback file:line (e.g. tests/test_task_endpoints.py:277) in raw excerpt
+        traceback_file: Optional[str] = None
+        tb_match = re.search(r"(tests/test_[a-zA-Z0-9_]+\.py):\d+", raw_excerpt)
+        if tb_match:
+            traceback_file = tb_match.group(1)
+        # Prefer traceback file when it appears in our failing list
+        test_file: Optional[str] = None
+        if traceback_file and any(f == traceback_file for (f, _) in failing_list):
+            test_file = traceback_file
+        else:
+            test_file = first_file
 
         # AssertionError: assert 200 == 401  or  E       AssertionError: assert 200 == 401
         assert_err_match = re.search(
@@ -148,41 +194,83 @@ def parse_pytest_failure(stdout: str, stderr: str) -> List[ParsedFailure]:
         if assert_err_match:
             assertion_line = assert_err_match.group(1).strip()[:200]
 
-        # E         +200  /  E         -401  (actual vs expected)
+        # E         +200  /  E         -401  (actual vs expected) -> got 401
         expected_match = re.search(
             r"E\s+[+-]\s*(\d+)\s*\n\s*E\s+[+-]\s*(\d+)",
             text,
         )
         if expected_match:
             v1, v2 = expected_match.group(1), expected_match.group(2)
-            expected_got = f"expected {v2}, got {v1}" if v1 != v2 else f"values {v1} vs {v2}"
+            # Pytest: E +N is expected, E -N is actual (got). So "expected v1, got v2".
+            expected_got = f"expected {v1}, got {v2}" if v1 != v2 else f"values {v1} vs {v2}"
+            # When assertion is status_code, the actual response code is "got" (v2)
+            if assertion_line and "status_code" in assertion_line:
+                try:
+                    got_status = int(v2)
+                except ValueError:
+                    pass
 
-        # Build targeted message and suggestion
-        msg_parts = []
-        if test_name:
-            msg_parts.append(f"{test_name} failed")
-        if assertion_line:
-            msg_parts.append(assertion_line)
-        if expected_got:
-            msg_parts.append(f"({expected_got})")
-        message = (
-            " ".join(msg_parts)
-            if msg_parts
-            else "One or more tests failed (assertion or status code mismatch)"
-        )
+        # Status-code-specific playbook (401, 403, 404)
+        playbook_hint = PLAYBOOK_PYTEST_ASSERTION
+        if got_status == 401:
+            playbook_hint = playbook_hint + " " + PLAYBOOK_401_UNAUTHORIZED
+        elif got_status == 403:
+            playbook_hint = playbook_hint + " " + PLAYBOOK_403_FORBIDDEN
+        elif got_status == 404:
+            playbook_hint = playbook_hint + " " + PLAYBOOK_404_NOT_FOUND
+        elif assertion_line and "401" in assertion_line and ("status_code" in assertion_line or expected_got):
+            playbook_hint = playbook_hint + " " + PLAYBOOK_401_UNAUTHORIZED
+        elif assertion_line and "403" in assertion_line:
+            playbook_hint = playbook_hint + " " + PLAYBOOK_403_FORBIDDEN
+        elif assertion_line and "404" in assertion_line:
+            playbook_hint = playbook_hint + " " + PLAYBOOK_404_NOT_FOUND
 
-        suggestion_parts = []
-        if test_file:
-            suggestion_parts.append(f"Fix {test_file}")
-        if test_name:
-            suggestion_parts.append(f"({test_name})")
-        if assertion_line:
-            suggestion_parts.append(f"to satisfy: {assertion_line}")
-        suggestion = (
-            ". ".join(suggestion_parts) + "."
-            if suggestion_parts
-            else "Review the failing test(s) and fix the implementation to match expectations."
-        )
+        # Message: single vs multiple failures
+        if len(failing_list) > 1:
+            msg_parts = [f"{len(failing_list)} tests failed: {', '.join(failing_tests_display[:10])}"]
+            if len(failing_tests_display) > 10:
+                msg_parts[0] += f" (+{len(failing_tests_display) - 10} more)"
+            if assertion_line:
+                msg_parts.append(assertion_line)
+            if expected_got:
+                msg_parts.append(f"({expected_got})")
+            message = " ".join(msg_parts)
+        else:
+            msg_parts = []
+            if first_test:
+                msg_parts.append(f"{first_test} failed")
+            if assertion_line:
+                msg_parts.append(assertion_line)
+            if expected_got:
+                msg_parts.append(f"({expected_got})")
+            message = (
+                " ".join(msg_parts)
+                if msg_parts
+                else "One or more tests failed (assertion or status code mismatch)"
+            )
+
+        # Suggestion: single vs multiple
+        if len(failing_list) > 1:
+            suggestion = (
+                f"Fix the following failing tests: {', '.join(failing_tests_display[:15])}. "
+                "Ensure each test's requests satisfy the assertion (e.g. if assertion expects 200, "
+                "provide valid auth when the endpoint requires it)."
+            )
+            if len(failing_tests_display) > 15:
+                suggestion += f" ({len(failing_tests_display) - 15} more tests failed)"
+        else:
+            suggestion_parts = []
+            if test_file:
+                suggestion_parts.append(f"Fix {test_file}")
+            if first_test:
+                suggestion_parts.append(f"({first_test})")
+            if assertion_line:
+                suggestion_parts.append(f"to satisfy: {assertion_line}")
+            suggestion = (
+                ". ".join(suggestion_parts) + "."
+                if suggestion_parts
+                else "Review the failing test(s) and fix the implementation to match expectations."
+            )
 
         failures.append(
             ParsedFailure(
@@ -191,7 +279,8 @@ def parse_pytest_failure(stdout: str, stderr: str) -> List[ParsedFailure]:
                 message=message,
                 raw_excerpt=raw_excerpt,
                 suggestion=suggestion,
-                playbook_hint=PLAYBOOK_PYTEST_ASSERTION,
+                playbook_hint=playbook_hint,
+                failing_tests=failing_tests_display if failing_tests_display else None,
             )
         )
 
@@ -304,6 +393,8 @@ def build_agent_feedback(failures: List[ParsedFailure], max_chars: int = 2500) -
     Build a concise feedback string for agents from parsed failures.
 
     Includes the primary failure's suggestion and playbook hint, plus truncated raw excerpt.
+    For PYTEST_ASSERTION with failing_tests list, adds "Failing tests:" section.
+    When 401 playbook is present, adds "Interpretation:" before Playbook.
     """
     if not failures:
         return ""
@@ -314,6 +405,23 @@ def build_agent_feedback(failures: List[ParsedFailure], max_chars: int = 2500) -
         "Suggestion:",
         primary.suggestion or "Fix the error.",
     ]
+    # Failing tests: list each file::test_name when we have the list (assertion failures)
+    if (
+        primary.failure_class == FailureClass.PYTEST_ASSERTION
+        and primary.failing_tests
+    ):
+        parts.extend(["", "Failing tests:"])
+        for ft in primary.failing_tests[:20]:
+            parts.append(f"  - {ft}")
+        if len(primary.failing_tests) > 20:
+            parts.append(f"  ... and {len(primary.failing_tests) - 20} more")
+    # Interpretation: when 401 (or 403/404) playbook is present
+    if primary.playbook_hint and PLAYBOOK_401_UNAUTHORIZED in primary.playbook_hint:
+        parts.extend(["", "Interpretation:", INTERPRETATION_401])
+    elif primary.playbook_hint and PLAYBOOK_403_FORBIDDEN in primary.playbook_hint:
+        parts.extend(["", "Interpretation:", PLAYBOOK_403_FORBIDDEN])
+    elif primary.playbook_hint and PLAYBOOK_404_NOT_FOUND in primary.playbook_hint:
+        parts.extend(["", "Interpretation:", PLAYBOOK_404_NOT_FOUND])
     if primary.playbook_hint:
         parts.extend(["", "Playbook:", primary.playbook_hint])
     if primary.raw_excerpt:
