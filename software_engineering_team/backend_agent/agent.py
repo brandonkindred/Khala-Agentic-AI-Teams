@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from shared.context_sizing import compute_existing_code_chars
+from shared.context_sizing import compute_existing_code_chars, compute_spec_content_chars
 from shared.llm import LLMClient
 from shared.models import SystemArchitecture, Task, TaskUpdate
 from shared.prompt_utils import build_problem_solving_header, log_llm_prompt
