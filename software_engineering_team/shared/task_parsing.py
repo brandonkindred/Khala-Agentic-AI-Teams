@@ -60,10 +60,14 @@ def _interleave_execution_order(
     execution_order: List[str],
     tasks_by_id: Dict[str, Any],
 ) -> List[str]:
-    """Enforce interleaving of backend and frontend tasks."""
+    """
+    Interleave backend and frontend tasks while respecting dependencies.
+    Only adds a task when all its dependencies are already in the result.
+    Prefers alternating backend/frontend when multiple candidates are runnable.
+    """
     prefix: List[str] = []
-    backend_queue: List[str] = []
-    frontend_queue: List[str] = []
+    backend_list: List[str] = []
+    frontend_list: List[str] = []
 
     for tid in execution_order:
         task = tasks_by_id.get(tid)
@@ -72,20 +76,49 @@ def _interleave_execution_order(
             continue
         assignee = getattr(task, "assignee", None) or ""
         if assignee == "backend":
-            backend_queue.append(tid)
+            backend_list.append(tid)
         elif assignee == "frontend":
-            frontend_queue.append(tid)
+            frontend_list.append(tid)
         else:
             prefix.append(tid)
 
-    interleaved: List[str] = []
-    bi, fi = 0, 0
-    while bi < len(backend_queue) or fi < len(frontend_queue):
-        if bi < len(backend_queue):
-            interleaved.append(backend_queue[bi])
-            bi += 1
-        if fi < len(frontend_queue):
-            interleaved.append(frontend_queue[fi])
-            fi += 1
+    result: List[str] = list(prefix)
+    added: set = set(result)
 
-    return prefix + interleaved
+    def is_runnable(tid: str) -> bool:
+        task = tasks_by_id.get(tid)
+        if not task:
+            return True
+        deps = getattr(task, "dependencies", None) or []
+        return all(dep in added for dep in deps)
+
+    last_was_backend: bool | None = None
+    while True:
+        backend_ready = [t for t in backend_list if t not in added and is_runnable(t)]
+        frontend_ready = [t for t in frontend_list if t not in added and is_runnable(t)]
+
+        candidate: str | None = None
+        if last_was_backend is False and frontend_ready:
+            candidate = frontend_ready[0]
+        elif last_was_backend is True and backend_ready:
+            candidate = backend_ready[0]
+        elif backend_ready:
+            candidate = backend_ready[0]
+        elif frontend_ready:
+            candidate = frontend_ready[0]
+
+        if candidate is None:
+            break
+
+        result.append(candidate)
+        added.add(candidate)
+        task = tasks_by_id.get(candidate)
+        assignee = getattr(task, "assignee", None) or ""
+        last_was_backend = assignee == "backend"
+
+    # Fallback: add any remaining (e.g. circular deps, missing deps) in original order
+    for tid in backend_list + frontend_list:
+        if tid not in added:
+            result.append(tid)
+
+    return result

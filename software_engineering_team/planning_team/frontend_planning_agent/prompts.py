@@ -31,6 +31,7 @@ Edges have from_id, to_id, type: "blocks" | "relates_to" | "loads_from"
 - Every TASK and SUBTASK node must include a user_story in format "As a [role], I want [goal] so that [benefit]"
 - Include accessibility-focused tasks (keyboard nav, ARIA, color contrast) as subtasks
 - Align with backend API contracts when backend plan is provided; the API contract is available via an OpenAPI 3.0 spec (for type generation and consistency)
+- **Minimize cross-domain dependencies:** frontend-app-shell, routing, and layout tasks typically have NO backend dependency and can run in parallel with backend work. Only add a "blocks" edge from a backend task when the frontend task truly needs the live API (e.g. list component that fetches from API).
 - Use "blocks" edges for dependencies
 - Align with delivery_strategy (e.g. vertical slices, parallel with backend)
 

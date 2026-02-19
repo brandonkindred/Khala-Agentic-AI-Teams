@@ -22,10 +22,10 @@ PLAN_PATTERNS_LIBRARY = """
 """
 
 BACKEND_PATTERN_HINTS = """
-When the spec suggests a common pattern, adapt it:
-- CRUD entity → models → endpoints (GET list, GET by id, POST, PUT, DELETE) → validation
-- API with auth → auth endpoints + middleware + protected routes
-- Background job → queue + worker + handler
+When the spec suggests a common pattern, adapt it with GRANULAR tasks (one task per logical unit):
+- CRUD entity → backend-{entity}-models, backend-{entity}-crud-endpoints, backend-{entity}-validation (separate tasks)
+- API with auth → backend-auth-endpoints, backend-auth-middleware, backend-protected-routes (separate tasks)
+- Background job → backend-queue-config, backend-worker-process, backend-job-handlers (separate tasks)
 Emit nodes in fixed schema: id, domain, kind, summary, details, user_story, acceptance_criteria. Keep summaries under 80 chars.
 """
 

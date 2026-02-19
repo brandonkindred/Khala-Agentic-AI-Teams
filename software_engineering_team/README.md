@@ -190,6 +190,7 @@ By default, the script uses `DummyLLMClient` for testing without an LLM. To use 
 | `SW_LLM_BACKOFF_MAX_SECONDS` | Max backoff seconds | `60` |
 | `SW_LLM_MAX_CONCURRENCY` | Max concurrent LLM calls (default 4; set 4–6 for faster runs with parallel planning and backend+frontend workers; lower to 2 if GPU/memory limited) | `4` |
 | `SW_LLM_MAX_TOKENS` | Max tokens to generate; if unset, uses model's num_ctx from Ollama /api/show | (model num_ctx) |
+| `SW_ENABLE_PLANNING_CACHE` | Reuse cached TaskAssignment when spec and architecture unchanged; set to `0` or `false` to disable | `1` (enabled) |
 
 Example with Ollama:
 ```bash
@@ -213,6 +214,18 @@ Ensure Ollama is running with the model (e.g. `ollama run qwen2.5-coder`).
 | `SW_MAX_CLARIFICATION_REFINEMENTS` | Max clarification refinements (frontend) | `20` |
 
 **Faster runs:** Set `SW_SKIP_PLANNING_AGENTS=observability,performance_doc` to skip specific planning agents, or `SW_MINIMAL_PLANNING=1` to skip all domain planning (spec → Tech Lead ↔ Architecture → consolidation → execution).
+
+### Planning cache and stable spec
+
+When `SW_ENABLE_PLANNING_CACHE=1` (default), the first successful planning run stores the `TaskAssignment` under a cache key derived from spec, architecture, and project overview. Subsequent runs on the same repo with an unchanged spec reuse the cached plan and skip alignment/conformance loops, making planning much faster.
+
+**Stable spec per branch practice:**
+
+- When you branch for a feature, keep `initial_spec.md` mostly stable for that branch.
+- If you need a substantial spec change, make it once, then re-run the team to regenerate a new cached plan.
+- For small, non-structural edits (typos, wording clarifications), batch changes rather than repeatedly invoking the full team on slightly different specs.
+
+**Verifying the cache:** Run the team twice on the same repo/spec. The second run should log `Planning cache HIT (key=...)` and `Using cached planning result (skipping alignment/conformance)`. To force a fresh plan, change the spec enough that the cache key changes, or set `SW_ENABLE_PLANNING_CACHE=0`.
 
 ### Faster runs summary
 

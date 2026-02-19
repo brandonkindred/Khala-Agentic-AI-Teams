@@ -173,6 +173,11 @@ YOUR RESPONSIBILITIES
 2. devops (CI/CD, Docker – early)
 3. backend and frontend tasks – the orchestrator runs backend and frontend IN PARALLEL (one task at a time per agent type). You MUST still list tasks in execution_order in a sensible dependency order; the orchestrator will split by assignee and run backend and frontend streams concurrently.
 
+**PARALLEL INDEPENDENCE – minimize cross-domain dependencies:**
+- Prefer backend-data-models and frontend-app-shell as independent first tasks (no cross-domain dependency); both can run in parallel from the start.
+- Only add a frontend task dependency on a backend task when the frontend truly needs the live API (e.g. frontend-list depends on backend-crud-api). Frontend app shell, routing, and layout tasks typically have no backend dependency.
+- Split backend into granular tasks (models, CRUD endpoints, validation) so backend and frontend queues stay balanced.
+
 **CRITICAL – INTERLEAVE backend and frontend tasks in execution_order:**
 Backend and frontend tasks run simultaneously (one backend task and one frontend task at a time, in parallel). You MUST interleave backend and frontend tasks in execution_order so that dependencies are respected and work is distributed. Do NOT batch all backend tasks together followed by all frontend tasks. Instead, alternate: 1 backend task, then 1 frontend task, then 1 backend task, then 1 frontend task, etc.
 
@@ -189,7 +194,7 @@ The first backend task (data models) and first frontend task (app shell) may com
 **Task types (use exactly these – NO security or qa):**
 - git_setup (create development branch – first task only)
 - devops (CI/CD, IaC, Docker)
-- backend (Python/Java implementation – split into multiple tasks per feature)
+- backend (Python/Java implementation – split into multiple granular tasks per feature: e.g. backend-{entity}-models, backend-{entity}-crud-api, backend-{entity}-validation as separate tasks)
 - frontend (Angular implementation – split into multiple tasks per component/screen)
 
 **Assignees:** devops, backend, frontend only. QA, accessibility, and security are invoked by the orchestrator in response to coding work.

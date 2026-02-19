@@ -27,11 +27,11 @@ Edges have from_id, to_id, type: "blocks" | "relates_to" | "exposes_api"
 **Domain ownership:** You own ONLY backend. Do NOT create frontend, devops, QA, or documentation nodes. Other planners handle those.
 
 **Rules:**
-- Emit TASK and SUBTASK nodes for implementation work (API endpoints, models, services)
+- Emit TASK and SUBTASK nodes for implementation work. **Split backend work into granular tasks** (e.g. separate tasks for: data models/schema, CRUD endpoints, validation layer, error handling) so backend and frontend queues stay balanced. Do NOT lump all API work into one monolithic task.
 - Every TASK and SUBTASK node must include a user_story in format "As a [role], I want [goal] so that [benefit]"
 - Use EPIC/FEATURE for grouping only
 - Include git_setup and devops tasks if scaffolding is needed
-- Dependencies: use "blocks" edges (A blocks B = A must complete before B)
+- Dependencies: use "blocks" edges (A blocks B = A must complete before B). Prefer tasks with no cross-domain dependencies (e.g. backend-data-models, backend-auth-endpoints) to run in parallel with frontend work.
 - Align with delivery_strategy from project overview (e.g. backend-first, vertical slices)
 - **OpenAPI 3.0**: API-related backend tasks (endpoints, routers, CRUD APIs) must include an acceptance criterion that the API exposes an OpenAPI 3.0 spec suitable for: (1) cloud API gateway imports (e.g. AWS API Gateway, Azure API Management), (2) client type/code generation (e.g. TypeScript types, SDKs). For backend API EPIC/FEATURE nodes, include in outputs that "OpenAPI 3.0 spec must be available (runtime and optionally static file)."
 

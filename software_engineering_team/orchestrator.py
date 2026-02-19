@@ -67,6 +67,75 @@ from shared.repo_writer import write_agent_output
 
 logger = logging.getLogger(__name__)
 
+BANNER_WIDTH = 72
+
+
+def _log_task_completion_banner(
+    task_id: str,
+    task_title: str,
+    assignee: str,
+    elapsed_seconds: float,
+    log_prefix: str = "",
+) -> None:
+    """Log a big, flashy banner when a task is considered complete."""
+    title_display = (task_title[:50] + "...") if len(task_title) > 53 else task_title
+    header = "  ★★★  TASK COMPLETE  ★★★" + ("  [RETRY]" if log_prefix else "")
+    logger.info("")
+    logger.info("*" * BANNER_WIDTH)
+    logger.info(header)
+    logger.info("  Task:    %s", task_id)
+    logger.info("  Title:   %s", title_display)
+    logger.info("  Assignee: %s", assignee)
+    logger.info("  Elapsed:  %.1fs", elapsed_seconds)
+    logger.info("*" * BANNER_WIDTH)
+    logger.info("")
+
+
+def _log_task_breakdown(
+    completed: set,
+    all_tasks: dict,
+    total_tasks: int,
+    failed_count: int = 0,
+    job_id: str | None = None,
+) -> None:
+    """Log task count breakdown by assignee (backend, frontend, devops, git_setup, etc.)."""
+    breakdown: Dict[str, int] = {}
+    for tid in completed:
+        t = all_tasks.get(tid)
+        if t:
+            assignee = getattr(t, "assignee", None) or getattr(t, "type", None) or "unknown"
+            if isinstance(assignee, object) and hasattr(assignee, "value"):
+                assignee = assignee.value
+            breakdown[assignee] = breakdown.get(assignee, 0) + 1
+
+    # Normalize assignee labels for display
+    labels = {
+        "backend": "Backend",
+        "frontend": "Frontend",
+        "devops": "DevOps",
+        "git_setup": "Git Setup",
+        "documentation": "Documentation",
+        "security": "Security",
+        "qa": "QA",
+    }
+    logger.info("")
+    logger.info("=" * BANNER_WIDTH)
+    logger.info("  ★★★  TASK BREAKDOWN  ★★★")
+    if job_id:
+        logger.info("  Job: %s", job_id)
+    logger.info("  Total: %d completed | %d failed | %d total", len(completed), failed_count, total_tasks)
+    logger.info("-" * BANNER_WIDTH)
+    for key in ["backend", "frontend", "devops", "git_setup", "documentation", "security", "qa"]:
+        count = breakdown.get(key, 0)
+        if count > 0:
+            label = labels.get(key, key.replace("_", " ").title())
+            logger.info("  %-14s %d", label + ":", count)
+    for key, count in sorted(breakdown.items()):
+        if key not in labels:
+            logger.info("  %-14s %d", key.replace("_", " ").title() + ":", count)
+    logger.info("=" * BANNER_WIDTH)
+    logger.info("")
+
 
 def _get_agents(llm):
     """Lazy init agents including the code review, documentation, and DbC comments agents."""
@@ -698,6 +767,27 @@ def _run_build_verification(
     return True, ""
 
 
+def _pop_runnable_task(
+    queue: List[str],
+    all_tasks: Dict[str, Any],
+    completed: set,
+) -> Optional[str]:
+    """
+    Pop a task from the queue whose dependencies are all in completed.
+    If none are runnable, return None (caller should wait and retry).
+    Mutates queue by removing the task.
+    """
+    for i, task_id in enumerate(queue):
+        task = all_tasks.get(task_id)
+        if not task:
+            continue
+        deps = getattr(task, "dependencies", None) or []
+        if all(dep in completed for dep in deps):
+            queue.pop(i)
+            return task_id
+    return None
+
+
 def _run_backend_frontend_workers(
     *,
     job_id: str,
@@ -728,6 +818,8 @@ def _run_backend_frontend_workers(
         with state_lock:
             return list(backend_queue) + list(frontend_queue)
 
+    DEP_WAIT_SLEEP = 0.5  # seconds to wait when no runnable task (dependencies pending)
+
     def _backend_worker() -> None:
         while True:
             with state_lock:
@@ -735,8 +827,12 @@ def _run_backend_frontend_workers(
                     break
                 if not backend_queue:
                     break
-                task_id = backend_queue.pop(0)
-                task = all_tasks.get(task_id)
+                task_id = _pop_runnable_task(backend_queue, all_tasks, completed)
+            if task_id is None:
+                # No runnable task; wait for dependencies (e.g. from frontend) then retry
+                time.sleep(DEP_WAIT_SLEEP)
+                continue
+            task = all_tasks.get(task_id)
             if not task:
                 continue
             update_job(job_id, current_task=task_id)
@@ -789,7 +885,13 @@ def _run_backend_frontend_workers(
                     if workflow_result.success:
                         completed.add(task_id)
                         completed_code_task_ids.append(task_id)
-                        logger.info("%s[%s] Backend COMPLETED in %.1fs", log_prefix, task_id, elapsed)
+                        _log_task_completion_banner(
+                            task_id=task_id,
+                            task_title=getattr(task, "title", "") or task_id,
+                            assignee="backend",
+                            elapsed_seconds=elapsed,
+                            log_prefix=log_prefix,
+                        )
                     else:
                         failed[task_id] = workflow_result.failure_reason or "Backend workflow failed"
                         logger.warning("%s[%s] Backend FAILED after %.1fs: %s", log_prefix, task_id, elapsed, failed[task_id])
@@ -831,8 +933,12 @@ def _run_backend_frontend_workers(
                     break
                 if not frontend_queue:
                     break
-                task_id = frontend_queue.pop(0)
-                task = all_tasks.get(task_id)
+                task_id = _pop_runnable_task(frontend_queue, all_tasks, completed)
+            if task_id is None:
+                # No runnable task; wait for dependencies (e.g. from backend) then retry
+                time.sleep(DEP_WAIT_SLEEP)
+                continue
+            task = all_tasks.get(task_id)
             if not task:
                 continue
             update_job(job_id, current_task=task_id)
@@ -894,7 +1000,13 @@ def _run_backend_frontend_workers(
                     if workflow_result.success:
                         completed.add(task_id)
                         completed_code_task_ids.append(task_id)
-                        logger.info("%s[%s] Frontend COMPLETED in %.1fs", log_prefix, task_id, elapsed)
+                        _log_task_completion_banner(
+                            task_id=task_id,
+                            task_title=getattr(task, "title", "") or task_id,
+                            assignee="frontend",
+                            elapsed_seconds=elapsed,
+                            log_prefix=log_prefix,
+                        )
                     else:
                         failed[task_id] = workflow_result.failure_reason or "Frontend workflow failed"
                         logger.warning("%s[%s] Frontend FAILED after %.1fs: %s", log_prefix, task_id, elapsed, failed[task_id])
@@ -1134,7 +1246,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
         conformance_retries = 0
         conformance_issues_from_last: List[str] = []
         tech_lead_output = None
-        enable_planning_cache = (os.environ.get("SW_ENABLE_PLANNING_CACHE") or "").strip().lower() in ("1", "true", "yes")
+        enable_planning_cache = (os.environ.get("SW_ENABLE_PLANNING_CACHE", "1") or "1").strip().lower() in ("1", "true", "yes")
 
         while True:
             # Step 2: Detailed tasks from spec + features doc (and architecture if we have it from a previous iteration)
@@ -1475,12 +1587,22 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             update_job(job_id, current_task=task_id)
             if task.type.value == "git_setup":
                 completed.add(task_id)
-                logger.info("[%s] Git setup task auto-completed", task_id)
+                _log_task_completion_banner(
+                    task_id=task_id,
+                    task_title=getattr(task, "title", "") or task_id,
+                    assignee="git_setup",
+                    elapsed_seconds=0.0,
+                )
                 continue
             if task.assignee == "devops":
                 # Defer containerization to after backend and frontend complete; skip early devops run.
                 completed.add(task_id)
-                logger.info("[%s] DevOps task deferred; will run after backend and frontend complete", task_id)
+                _log_task_completion_banner(
+                    task_id=task_id,
+                    task_title=getattr(task, "title", "") or task_id,
+                    assignee="devops",
+                    elapsed_seconds=0.0,
+                )
                 continue
 
         # Backend and frontend workers run in parallel (one task per agent type at a time)
@@ -1505,10 +1627,17 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
 
         llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed.values())
         remaining_in_queues = len(backend_queue) + len(frontend_queue)
-        # Log final execution summary
+        # Log final execution summary with task breakdown
         logger.info(
             "=== Task execution finished: %s completed, %s failed, %s remaining (of %s total) ===",
             len(completed), len(failed), remaining_in_queues, total_tasks,
+        )
+        _log_task_breakdown(
+            completed=completed,
+            all_tasks=all_tasks,
+            total_tasks=total_tasks,
+            failed_count=len(failed),
+            job_id=job_id,
         )
         if failed:
             logger.warning("=== Failed task report ===")
@@ -1671,11 +1800,17 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             )
         else:
             logger.info("")
-            logger.info("=" * 72)
-            logger.info("  SOFTWARE ENGINEERING TEAM: DELIVERY COMPLETE")
+            logger.info("=" * BANNER_WIDTH)
+            logger.info("  ★★★  SOFTWARE ENGINEERING TEAM: DELIVERY COMPLETE  ★★★")
             logger.info("  Job %s finished. All tasks executed. Artifacts in work path.", job_id)
-            logger.info("=" * 72)
-            logger.info("")
+            logger.info("=" * BANNER_WIDTH)
+            _log_task_breakdown(
+                completed=completed,
+                all_tasks=all_tasks,
+                total_tasks=total_tasks,
+                failed_count=len(failed),
+                job_id=job_id,
+            )
             update_job(job_id, status=JOB_STATUS_COMPLETED, progress=100, current_task=None)
 
     except Exception as e:
@@ -1768,10 +1903,16 @@ def run_failed_tasks(job_id: str) -> None:
             update_job(job_id, current_task=task_id)
             if task.type.value == "git_setup":
                 completed.add(task_id)
-                logger.info("[%s] Git setup task auto-completed (retry)", task_id)
+                _log_task_completion_banner(
+                    task_id=task_id,
+                    task_title=getattr(task, "title", "") or task_id,
+                    assignee="git_setup",
+                    elapsed_seconds=0.0,
+                )
                 continue
             if task.assignee == "devops":
                 try:
+                    devops_start = time.monotonic()
                     existing_pipeline = _read_repo_code(path, [".yml", ".yaml"])
                     workflow_result = agents["devops"].run_workflow(
                         repo_path=path,
@@ -1784,8 +1925,15 @@ def run_failed_tasks(job_id: str) -> None:
                         task_id=task_id,
                         subdir="devops",
                     )
+                    devops_elapsed = time.monotonic() - devops_start
                     if workflow_result.success:
                         completed.add(task_id)
+                        _log_task_completion_banner(
+                            task_id=task_id,
+                            task_title=getattr(task, "title", "") or task_id,
+                            assignee="devops",
+                            elapsed_seconds=devops_elapsed,
+                        )
                     else:
                         failed_retry[task_id] = workflow_result.failure_reason or "DevOps workflow failed"
                 except Exception as e:
@@ -1818,10 +1966,17 @@ def run_failed_tasks(job_id: str) -> None:
 
         llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed_retry.values())
 
-        # Final summary
+        # Final summary with task breakdown
         logger.info(
             "=== Retry finished: %s completed, %s still failed (of %s retried) ===",
             len(completed), len(failed_retry), total_tasks,
+        )
+        _log_task_breakdown(
+            completed=completed,
+            all_tasks=all_tasks,
+            total_tasks=total_tasks,
+            failed_count=len(failed_retry),
+            job_id=job_id,
         )
         if failed_retry:
             logger.warning("=== Still-failed task report ===")
@@ -1861,11 +2016,17 @@ def run_failed_tasks(job_id: str) -> None:
             )
         else:
             logger.info("")
-            logger.info("=" * 72)
-            logger.info("  SOFTWARE ENGINEERING TEAM: DELIVERY COMPLETE (retry run finished)")
+            logger.info("=" * BANNER_WIDTH)
+            logger.info("  ★★★  SOFTWARE ENGINEERING TEAM: DELIVERY COMPLETE (retry)  ★★★")
             logger.info("  Job %s finished. All retried tasks executed.", job_id)
-            logger.info("=" * 72)
-            logger.info("")
+            logger.info("=" * BANNER_WIDTH)
+            _log_task_breakdown(
+                completed=completed,
+                all_tasks=all_tasks,
+                total_tasks=total_tasks,
+                failed_count=len(failed_retry),
+                job_id=job_id,
+            )
             update_job(job_id, failed_tasks=failed_details, status=JOB_STATUS_COMPLETED, current_task=None)
 
     except Exception as e:
