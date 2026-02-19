@@ -19,6 +19,8 @@ JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"
 JOB_STATUS_COMPLETED = "completed"
 JOB_STATUS_FAILED = "failed"
+# Agent process crashed (NameError, ImportError, etc.) - distinct from build/LLM failure
+JOB_STATUS_AGENT_CRASH = "agent_crash"
 
 DEFAULT_CACHE_DIR: str | Path = ".agent_cache"
 _lock = threading.Lock()

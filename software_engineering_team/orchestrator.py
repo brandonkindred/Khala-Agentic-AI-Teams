@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -49,6 +50,7 @@ from shared.llm import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
 )
 from shared.job_store import (
+    JOB_STATUS_AGENT_CRASH,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_RUNNING,
@@ -68,6 +70,16 @@ from shared.repo_writer import write_agent_output
 logger = logging.getLogger(__name__)
 
 BANNER_WIDTH = 72
+
+# Exceptions that the repair agent can attempt to fix (code errors in agent framework)
+REPAIRABLE_EXCEPTIONS = (
+    NameError,
+    SyntaxError,
+    ImportError,
+    AttributeError,
+    IndentationError,
+    ModuleNotFoundError,
+)
 
 
 def _log_task_completion_banner(
@@ -89,6 +101,93 @@ def _log_task_completion_banner(
     logger.info("  Elapsed:  %.1fs", elapsed_seconds)
     logger.info("*" * BANNER_WIDTH)
     logger.info("")
+
+
+def _parse_traceback_for_crash(exception: BaseException) -> tuple[str | None, int | None, str | None]:
+    """
+    Extract file_path, line_number, and function_name from the exception traceback.
+    Returns the last frame (where the exception occurred) as (file_path, line_number, function_name).
+    """
+    tb = exception.__traceback__
+    if tb is None:
+        return None, None, None
+    frames = traceback.extract_tb(tb)
+    if not frames:
+        return None, None, None
+    last = frames[-1]
+    # Use relative path for display (e.g. backend_agent/agent.py)
+    filename = last.filename
+    if filename:
+        # Try to shorten to module-style path
+        for part in ("software_engineering_team", "agent_implementations"):
+            if part in filename:
+                idx = filename.find(part)
+                filename = filename[idx:]
+                break
+    return filename, last.lineno, last.name or None
+
+
+def _log_agent_crash_banner(
+    task_id: str,
+    agent_type: str,
+    exception: BaseException,
+    log_prefix: str = "",
+) -> None:
+    """Log a prominent banner when an agent process crashes with an unhandled exception."""
+    file_path, line_number, func_name = _parse_traceback_for_crash(exception)
+    exc_type = type(exception).__name__
+    exc_msg = str(exception)
+    location = ""
+    if file_path and line_number:
+        location = f"{file_path}:{line_number}"
+        if func_name:
+            location += f" in {func_name}"
+    sep = "!" * BANNER_WIDTH
+    logger.error("")
+    logger.error(sep)
+    logger.error("  *** AGENT CRASH (%s) ***%s", agent_type.capitalize(), "  [RETRY]" if log_prefix else "")
+    logger.error("  Task: %s", task_id)
+    logger.error("  Exception: %s: %s", exc_type, exc_msg)
+    if location:
+        logger.error("  Location: %s", location)
+    logger.error(sep)
+    logger.error("")
+
+
+def _apply_repair_fixes(agent_source_path: Path, suggested_fixes: list) -> bool:
+    """
+    Apply suggested fixes from the repair agent. Validates that all file paths
+    are under agent_source_path. Returns True if any fix was applied.
+    """
+    agent_root = Path(agent_source_path).resolve()
+    applied = False
+    for fix in suggested_fixes:
+        fp = fix.get("file_path")
+        if not fp:
+            continue
+        target = (agent_root / fp).resolve() if not Path(fp).is_absolute() else Path(fp).resolve()
+        try:
+            if not str(target).startswith(str(agent_root)):
+                logger.warning("Repair: rejecting path outside agent tree: %s", fp)
+                continue
+            if not target.exists():
+                logger.warning("Repair: file does not exist: %s", target)
+                continue
+            line_start = int(fix.get("line_start", 1))
+            line_end = int(fix.get("line_end", line_start))
+            replacement = fix.get("replacement_content", "")
+            lines = target.read_text(encoding="utf-8").splitlines(keepends=True)
+            if line_start < 1 or line_end > len(lines):
+                logger.warning("Repair: line range %d-%d out of bounds for %s", line_start, line_end, target)
+                continue
+            # 1-based to 0-based
+            new_content = "".join(lines[: line_start - 1]) + replacement + "".join(lines[line_end:])
+            target.write_text(new_content, encoding="utf-8")
+            logger.info("Repair: applied fix to %s lines %d-%d", target, line_start, line_end)
+            applied = True
+        except Exception as e:
+            logger.warning("Repair: failed to apply fix to %s: %s", fp, e)
+    return applied
 
 
 def _log_task_breakdown(
@@ -165,6 +264,7 @@ def _get_agents(llm):
     from tech_lead_agent import TechLeadAgent, TechLeadInput
     from planning_team.ui_ux_design_agent import UiUxDesignAgent
     from acceptance_verifier_agent import AcceptanceVerifierAgent
+    from repair_agent import RepairExpertAgent, RepairInput
 
     return {
         "spec_intake": SpecIntakeAgent(llm),
@@ -192,6 +292,7 @@ def _get_agents(llm):
         "dbc_comments": DbcCommentsAgent(llm),
         "documentation": DocumentationAgent(llm),
         "git_setup": GitSetupAgent(),
+        "repair": RepairExpertAgent(llm),
     }
 
 
@@ -813,6 +914,8 @@ def _run_backend_frontend_workers(
     """
     state_lock = threading.Lock()
     llm_limit_exceeded = [False]  # mutable ref for workers
+    repaired_tasks = set()  # max 1 repair per task
+    agent_source_path = Path(__file__).resolve().parent  # software_engineering_team/
 
     def _remaining_queue_ids() -> List[str]:
         with state_lock:
@@ -911,8 +1014,45 @@ def _run_backend_frontend_workers(
                 else:
                     logger.warning("%s[%s] Backend task LLM/HTTP error: %s", log_prefix, task_id, e)
             except Exception as e:
-                with state_lock:
-                    failed[task_id] = f"Unhandled exception: {e}"
+                _log_agent_crash_banner(task_id, "backend", e, log_prefix)
+                file_path, line_number, func_name = _parse_traceback_for_crash(e)
+                agent_crash_details = {
+                    "task_id": task_id,
+                    "agent_type": "backend",
+                    "exception_type": type(e).__name__,
+                    "exception_message": str(e),
+                    "traceback": traceback.format_exc(),
+                    "file_path": file_path,
+                    "line_number": line_number,
+                    "function_name": func_name,
+                }
+                update_job(job_id, status=JOB_STATUS_AGENT_CRASH, error=str(e), agent_crash_details=agent_crash_details)
+                repair_applied = False
+                if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
+                    repair_agent = agents.get("repair")
+                    if repair_agent:
+                        try:
+                            from repair_agent.models import RepairInput
+                            result = repair_agent.run(RepairInput(
+                                traceback=traceback.format_exc(),
+                                exception_type=type(e).__name__,
+                                exception_message=str(e),
+                                task_id=task_id,
+                                agent_type="backend",
+                                agent_source_path=agent_source_path,
+                            ))
+                            if result.suggested_fixes and _apply_repair_fixes(agent_source_path, result.suggested_fixes):
+                                repair_applied = True
+                                with state_lock:
+                                    repaired_tasks.add(task_id)
+                                    backend_queue.append(task_id)
+                                update_job(job_id, status=JOB_STATUS_RUNNING, error=None, agent_crash_details=None)
+                                logger.info("%s[%s] Repair applied, re-queued task", log_prefix, task_id)
+                        except Exception as repair_err:
+                            logger.warning("Repair agent failed for %s: %s", task_id, repair_err)
+                if not repair_applied:
+                    with state_lock:
+                        failed[task_id] = f"Unhandled exception: {e}"
                 logger.exception("%s[%s] Backend task exception", log_prefix, task_id)
             logger.info("%s[%s] <<< Backend worker done", log_prefix, task_id)
 
@@ -1028,8 +1168,45 @@ def _run_backend_frontend_workers(
                     logger.warning("%s[%s] Frontend task LLM/HTTP error: %s", log_prefix, task_id, e)
                 checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
             except Exception as e:
-                with state_lock:
-                    failed[task_id] = f"Unhandled exception: {e}"
+                _log_agent_crash_banner(task_id, "frontend", e, log_prefix)
+                file_path, line_number, func_name = _parse_traceback_for_crash(e)
+                agent_crash_details = {
+                    "task_id": task_id,
+                    "agent_type": "frontend",
+                    "exception_type": type(e).__name__,
+                    "exception_message": str(e),
+                    "traceback": traceback.format_exc(),
+                    "file_path": file_path,
+                    "line_number": line_number,
+                    "function_name": func_name,
+                }
+                update_job(job_id, status=JOB_STATUS_AGENT_CRASH, error=str(e), agent_crash_details=agent_crash_details)
+                repair_applied = False
+                if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
+                    repair_agent = agents.get("repair")
+                    if repair_agent:
+                        try:
+                            from repair_agent.models import RepairInput
+                            result = repair_agent.run(RepairInput(
+                                traceback=traceback.format_exc(),
+                                exception_type=type(e).__name__,
+                                exception_message=str(e),
+                                task_id=task_id,
+                                agent_type="frontend",
+                                agent_source_path=agent_source_path,
+                            ))
+                            if result.suggested_fixes and _apply_repair_fixes(agent_source_path, result.suggested_fixes):
+                                repair_applied = True
+                                with state_lock:
+                                    repaired_tasks.add(task_id)
+                                    frontend_queue.append(task_id)
+                                update_job(job_id, status=JOB_STATUS_RUNNING, error=None, agent_crash_details=None)
+                                logger.info("%s[%s] Repair applied, re-queued task", log_prefix, task_id)
+                        except Exception as repair_err:
+                            logger.warning("Repair agent failed for %s: %s", task_id, repair_err)
+                if not repair_applied:
+                    with state_lock:
+                        failed[task_id] = f"Unhandled exception: {e}"
                 logger.exception("%s[%s] Frontend task exception", log_prefix, task_id)
                 checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
 
