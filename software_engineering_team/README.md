@@ -204,10 +204,10 @@ Ensure Ollama is running with the model (e.g. `ollama run qwen2.5-coder`).
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SW_MAX_ALIGNMENT_ITERATIONS` | Max Tech Lead ↔ Architecture alignment loops | `6` |
-| `SW_MAX_CONFORMANCE_RETRIES` | Max spec conformance retries | `4` |
-| `SW_MAX_REVIEW_ITERATIONS` | Max code review → fix rounds (backend) | `40` |
-| `SW_MAX_CLARIFICATION_ROUNDS` | Max clarification rounds (backend) | `10` |
+| `SW_MAX_ALIGNMENT_ITERATIONS` | Max Tech Lead ↔ Architecture alignment loops | `20` |
+| `SW_MAX_CONFORMANCE_RETRIES` | Max spec conformance retries | `20` |
+| `SW_MAX_REVIEW_ITERATIONS` | Max code review → fix rounds (backend) | `20` |
+| `SW_MAX_CLARIFICATION_ROUNDS` | Max clarification rounds (backend) | `20` |
 | `SW_MAX_SAME_BUILD_FAILURES` | Stop if build fails identically N times (backend) | `6` |
 | `SW_MAX_CODE_REVIEW_ITERATIONS` | Max code review rounds (frontend) | `20` |
 | `SW_MAX_CLARIFICATION_REFINEMENTS` | Max clarification refinements (frontend) | `20` |

@@ -1079,8 +1079,8 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
         arch_agent = agents["architecture"]
         tech_lead = agents["tech_lead"]
         existing_code = _truncate_for_context(_read_repo_code(path), MAX_EXISTING_CODE_CHARS)
-        MAX_ALIGNMENT_ITERATIONS = int(os.environ.get("SW_MAX_ALIGNMENT_ITERATIONS") or "6")
-        MAX_CONFORMANCE_RETRIES = int(os.environ.get("SW_MAX_CONFORMANCE_RETRIES") or "4")
+        MAX_ALIGNMENT_ITERATIONS = int(os.environ.get("SW_MAX_ALIGNMENT_ITERATIONS") or "20")
+        MAX_CONFORMANCE_RETRIES = int(os.environ.get("SW_MAX_CONFORMANCE_RETRIES") or "20")
 
         assignment = None
         architecture = None

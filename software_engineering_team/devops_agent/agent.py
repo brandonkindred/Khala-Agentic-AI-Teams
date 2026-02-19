@@ -15,7 +15,7 @@ from .prompts import DEVOPS_PLANNING_PROMPT, DEVOPS_PROMPT
 
 logger = logging.getLogger(__name__)
 
-MAX_WORKFLOW_ITERATIONS = 10
+MAX_WORKFLOW_ITERATIONS = 20
 
 
 class DevOpsExpertAgent:

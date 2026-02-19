@@ -112,9 +112,9 @@ def _int_env(name: str, default: int, min_val: int = 1) -> int:
         return default
 
 
-MAX_REVIEW_ITERATIONS = _int_env("SW_MAX_REVIEW_ITERATIONS", 40)
+MAX_REVIEW_ITERATIONS = _int_env("SW_MAX_REVIEW_ITERATIONS", 20)
 MAX_SAME_BUILD_FAILURES = _int_env("SW_MAX_SAME_BUILD_FAILURES", 6)  # Stop if build fails identically this many times
-MAX_CLARIFICATION_ROUNDS = _int_env("SW_MAX_CLARIFICATION_ROUNDS", 10)
+MAX_CLARIFICATION_ROUNDS = _int_env("SW_MAX_CLARIFICATION_ROUNDS", 20)
 MAX_EXISTING_CODE_CHARS = 40_000
 # Patterns that indicate pytest failed due to missing /test-generic-error route or
 # exception handler re-raising (test client gets exception instead of response).
@@ -465,7 +465,7 @@ class BackendExpertAgent:
             8. Delete the feature branch.
             9. Inform the Tech Lead that the task is complete.
 
-        Steps 4-6 repeat for up to ``MAX_REVIEW_ITERATIONS`` (40) rounds.
+        Steps 4-6 repeat for up to ``MAX_REVIEW_ITERATIONS`` (20) rounds.
         The loop exits early when no issues are reported.
 
         Preconditions:
