@@ -141,4 +141,4 @@ This repository is provided as an example implementation for building Strands-st
 ## Additional teams
 
 - `social_media_marketing_team/` – Multi-agent social marketing workflow with platform specialists (LinkedIn, Facebook, Instagram, X), proposal collaboration with orchestrator consensus, human approval gate, and 14-day cadence planning defaults.
-
+- `market_research_team/` – Multi-agent market research and business concept viability workflow with transcript-folder ingestion, UX + psychology synthesis, experiment scripts, and human approval gates.
