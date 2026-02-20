@@ -119,6 +119,9 @@ Interactive docs: http://localhost:8000/docs
 
 The blogging suite includes Research, Review, Draft, Copy Editor, and Publication agents. For full agent descriptions, project layout, and pipeline (research → review → draft → copy-editor loop → publication), see [blogging/README.md](blogging/README.md).
 
+- `social_media_marketing_team/` – Multi-agent social marketing workflow with platform specialists (LinkedIn, Facebook, Instagram, X), proposal collaboration with orchestrator consensus, human approval gate, and 14-day cadence planning defaults.
+- `market_research_team/` – Multi-agent market research and business concept viability workflow with transcript-folder ingestion, UX + psychology synthesis, experiment scripts, and human approval gates.
+
 ## License
 
 This repository is provided as an example implementation for building Strands-style research agents.
