@@ -405,4 +405,4 @@ See [CONTRIBUTORS.md](CONTRIBUTORS.md) for contribution guidelines, code standar
 
 ## License
 
-This repository is provided as an example implementation for building Strands-style research agents.
+This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
