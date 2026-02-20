@@ -6,6 +6,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
+        # Path to spec file (relative to project root); copied to /app/initial_spec.md
         SPEC_FILE: ${SPEC_FILE:-docker/default_initial_spec.md}
     container_name: strands-agents
     privileged: true

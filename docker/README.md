@@ -68,33 +68,27 @@ curl -X POST http://localhost:18005/research-and-review \
   -d '{"topic": "Docker best practices", "audience": {"skill_level": "intermediate"}}'
 ```
 
-## Development Folder and Spec
+## Spec File
 
-The image includes a persistent `~/Dev` development directory (`/root/Dev`). A spec file is copied into the image at build time as `~/Dev/initial_spec.md`, so the Software Engineering Team API can run without mounting a spec from the host.
+A spec file is copied into the image at build time as `/app/initial_spec.md`, so the Software Engineering Team API can run without mounting a spec from the host.
 
 - **Default spec:** When no custom spec is provided, `docker/default_initial_spec.md` is used (Task Manager API example).
-- **Custom spec at build time:** Pass `SPEC_FILE` as a build arg. The path must be relative to the build context (project root).
+- **Custom spec at build time:** Pass `SPEC_FILE` as a build arg or env var. The path must be relative to the build context (project root).
 
 ```bash
 # Build with custom spec (spec must be in build context)
 docker build --build-arg SPEC_FILE=./my-project/initial_spec.md -t strands-agents .
 
-# Or with docker-compose
+# Or with docker-compose (SPEC_FILE is passed as build arg)
 SPEC_FILE=./my-spec.md docker-compose build
 ```
 
-**Using the baked-in spec:** When calling `/run-team`, use `repo_path: "/root/Dev"`:
+**Using the baked-in spec:** When calling `/run-team`, use `repo_path: "/app"`:
 
 ```bash
 curl -X POST http://localhost:18000/run-team \
   -H "Content-Type: application/json" \
-  -d '{"repo_path": "/root/Dev"}'
-```
-
-**Persist orchestrator output:** Mount a volume to `/root/Dev` to save backend/, frontend/, plan/ and other generated artifacts:
-
-```bash
-docker run -v $(pwd)/dev-output:/root/Dev strands-agents ...
+  -d '{"repo_path": "/app"}'
 ```
 
 **Note:** The spec path in `SPEC_FILE` must be relative to the build context. To use a spec outside the project, copy it in first: `cp /path/to/spec.md ./my-spec.md` then `SPEC_FILE=./my-spec.md`.
@@ -107,7 +101,7 @@ docker run -v $(pwd)/dev-output:/root/Dev strands-agents ...
 
 **Docker-in-Docker:** The container runs its own Docker daemon (no host socket mount). The container must run with `privileged: true` for the daemon to function.
 
-The Software Engineering team expects `repo_path` to point to a directory containing `initial_spec.md`. You can use the baked-in spec at `/root/Dev` (see above), or mount your project into `/workspace`:
+The Software Engineering team expects `repo_path` to point to a directory containing `initial_spec.md`. You can use the baked-in spec at `/app` (see above), or mount your project into `/workspace`:
 ```bash
 docker-compose run -v $(pwd)/my-project:/workspace/my-project strands-agents
 ```

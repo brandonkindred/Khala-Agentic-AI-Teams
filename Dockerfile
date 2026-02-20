@@ -93,10 +93,9 @@ RUN chmod +x /app/entrypoint.sh
 # Create log directory and workspace
 RUN mkdir -p /var/log/supervisor /workspace
 
-# Development folder at ~/Dev (root's home = /root)
+# Copy spec file into /app (path via build arg, default: docker/default_initial_spec.md)
 ARG SPEC_FILE=docker/default_initial_spec.md
-RUN mkdir -p /root/Dev
-COPY ${SPEC_FILE} /root/Dev/initial_spec.md
+COPY ${SPEC_FILE} /app/initial_spec.md
 
 EXPOSE 8000 8001 8002 8003 8004 8005
 
