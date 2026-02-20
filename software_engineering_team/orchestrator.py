@@ -58,6 +58,7 @@ from shared.job_store import (
     update_job,
 )
 from shared.command_runner import run_command_with_nvm
+from shared.execution_tracker import execution_tracker
 from planning_team.plan_dir import ensure_plan_dir
 from shared.development_plan_writer import (
     write_architecture_plan,
@@ -941,6 +942,7 @@ def _run_backend_frontend_workers(
             if not task:
                 continue
             update_job(job_id, current_task=task_id)
+            execution_tracker.start_task(task_id)
             log_prefix = "[RETRY] " if is_retry else ""
             logger.info("%s[%s] >>> Backend worker starting task %s", log_prefix, task_id, task_id)
             task_start_time = time.monotonic()
@@ -990,6 +992,8 @@ def _run_backend_frontend_workers(
                     if workflow_result.success:
                         completed.add(task_id)
                         completed_code_task_ids.append(task_id)
+                        execution_tracker.observe_loop(task_id, 1)
+                        execution_tracker.finish_task(task_id)
                         _log_task_completion_banner(
                             task_id=task_id,
                             task_title=getattr(task, "title", "") or task_id,
@@ -999,6 +1003,8 @@ def _run_backend_frontend_workers(
                         )
                     else:
                         failed[task_id] = workflow_result.failure_reason or "Backend workflow failed"
+                        execution_tracker.observe_loop(task_id, 1)
+                        execution_tracker.finish_task(task_id, blocked=True)
                         logger.warning("%s[%s] Backend FAILED after %.1fs: %s", log_prefix, task_id, elapsed, failed[task_id])
             except (LLMError, httpx.HTTPError) as e:
                 with state_lock:
@@ -1084,6 +1090,7 @@ def _run_backend_frontend_workers(
             if not task:
                 continue
             update_job(job_id, current_task=task_id)
+            execution_tracker.start_task(task_id)
             log_prefix = "[RETRY] " if is_retry else ""
             logger.info("%s[%s] >>> Frontend worker starting task %s", log_prefix, task_id, task_id)
             task_start_time = time.monotonic()
@@ -1142,6 +1149,8 @@ def _run_backend_frontend_workers(
                     if workflow_result.success:
                         completed.add(task_id)
                         completed_code_task_ids.append(task_id)
+                        execution_tracker.observe_loop(task_id, 1)
+                        execution_tracker.finish_task(task_id)
                         _log_task_completion_banner(
                             task_id=task_id,
                             task_title=getattr(task, "title", "") or task_id,
@@ -1151,6 +1160,8 @@ def _run_backend_frontend_workers(
                         )
                     else:
                         failed[task_id] = workflow_result.failure_reason or "Frontend workflow failed"
+                        execution_tracker.observe_loop(task_id, 1)
+                        execution_tracker.finish_task(task_id, blocked=True)
                         logger.warning("%s[%s] Frontend FAILED after %.1fs: %s", log_prefix, task_id, elapsed, failed[task_id])
                 logger.info("%s[%s] <<< Frontend worker done (completed=%s)", log_prefix, task_id, workflow_result.success)
             except (LLMError, httpx.HTTPError) as e:
@@ -1737,6 +1748,13 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
 
         # Store execution order in job state for API polling
         update_job(job_id, execution_order=assignment.execution_order)
+        for t in assignment.tasks:
+            execution_tracker.upsert_task(
+                task_id=t.id,
+                title=getattr(t, "title", "") or t.id,
+                assigned_agent=getattr(t, "assignee", "unknown"),
+                dependencies=getattr(t, "dependencies", []) or [],
+            )
 
         # 6. Execute tasks: partition into prefix (devops/git_setup), backend, frontend
         completed = set()
@@ -1762,8 +1780,10 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             if not task:
                 continue
             update_job(job_id, current_task=task_id)
+            execution_tracker.start_task(task_id)
             if task.type.value == "git_setup":
                 completed.add(task_id)
+                execution_tracker.finish_task(task_id)
                 _log_task_completion_banner(
                     task_id=task_id,
                     task_title=getattr(task, "title", "") or task_id,
@@ -1774,6 +1794,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
             if task.assignee == "devops":
                 # Defer containerization to after backend and frontend complete; skip early devops run.
                 completed.add(task_id)
+                execution_tracker.finish_task(task_id)
                 _log_task_completion_banner(
                     task_id=task_id,
                     task_title=getattr(task, "title", "") or task_id,
@@ -2207,5 +2228,3 @@ def run_failed_tasks(job_id: str) -> None:
     except Exception as e:
         logger.exception("Retry orchestrator failed")
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
-
-
