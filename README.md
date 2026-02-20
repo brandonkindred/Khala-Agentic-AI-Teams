@@ -6,6 +6,7 @@ This repository provides **multiple Strands-style agent systems** in a monorepo:
 - **Software engineering team** – Full dev team simulation from spec: architecture, Tech Lead, backend/frontend workers, DevOps, security, QA, code review, accessibility, and more. Reads `initial_spec.md` from a git repo and produces working code.
 - **Social media marketing team** – Campaign planning with collaboration agents, human approval gate, and platform specialists (LinkedIn, Facebook, Instagram, X). Produces execution-ready content plans.
 - **SOC2 compliance team** – Multi-agent SOC2 audit for a code repository: Security, Availability, Processing Integrity, Confidentiality, and Privacy TSC agents review the repo and produce a compliance report or a next-steps-for-certification document.
+- **Investment team** – Multi-asset investment organization with IPS hard constraints, strategy validation, promotion gates (`reject/revise/paper/live`), separation-of-duties, risk veto, and monitor-only safety degradation.
 
 ## Project structure
 
@@ -16,6 +17,7 @@ strands-agents/
 ├── software_engineering_team/   # Full software dev team simulation
 ├── social_media_marketing_team/ # Campaign planning with platform specialists
 ├── soc2_compliance_team/        # SOC2 compliance audit and certification team
+├── investment_team/              # Multi-asset investment organization (IPS-first)
 └── requirements.txt        # Shared dependencies
 ```
 
@@ -25,6 +27,7 @@ strands-agents/
 | [software_engineering_team/](software_engineering_team/README.md) | Multi-agent dev team: architecture, Tech Lead, backend/frontend, DevOps, security, QA, code review, accessibility, documentation. |
 | [social_media_marketing_team/](social_media_marketing_team/README.md) | Cross-platform campaign planning with human approval, collaboration agents, and LinkedIn/Facebook/Instagram/X specialists. |
 | [soc2_compliance_team/](soc2_compliance_team/README.md) | SOC2 compliance audit: Security, Availability, Processing Integrity, Confidentiality, Privacy TSC agents; produces compliance report or next-steps document. |
+| [investment_team/](investment_team/README.md) | Multi-asset investment organization with IPS constraints, validation/promotion gates, and safety-first orchestration. |
 
 ```mermaid
 flowchart LR
@@ -118,6 +121,9 @@ Interactive docs: http://localhost:8000/docs
 ## Blogging agents
 
 The blogging suite includes Research, Review, Draft, Copy Editor, and Publication agents. For full agent descriptions, project layout, and pipeline (research → review → draft → copy-editor loop → publication), see [blogging/README.md](blogging/README.md).
+
+- `social_media_marketing_team/` – Multi-agent social marketing workflow with platform specialists (LinkedIn, Facebook, Instagram, X), proposal collaboration with orchestrator consensus, human approval gate, and 14-day cadence planning defaults.
+- `market_research_team/` – Multi-agent market research and business concept viability workflow with transcript-folder ingestion, UX + psychology synthesis, experiment scripts, and human approval gates.
 
 ## License
 

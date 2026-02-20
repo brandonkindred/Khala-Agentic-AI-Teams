@@ -7,13 +7,16 @@ Tech Lead orchestrator runs in background.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 # Path setup for imports when run as uvicorn from project root
@@ -23,6 +26,8 @@ if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
 
 from spec_parser import validate_work_path
+from shared.clarification_store import clarification_store
+from shared.execution_tracker import execution_tracker
 from shared.job_store import JOB_STATUS_FAILED, JOB_STATUS_PENDING, create_job, get_job, update_job
 
 from shared.logging_config import setup_logging
@@ -34,7 +39,7 @@ app = FastAPI(
     title="Software Engineering Team API",
     description="Async API: POST /run-team with work folder path returns job_id. "
     "GET /run-team/{job_id} polls status. Tech Lead orchestrates the full pipeline.",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 
@@ -85,6 +90,46 @@ class JobStatusResponse(BaseModel):
     )
 
 
+class RetryResponse(BaseModel):
+    """Response from POST /run-team/{job_id}/retry-failed."""
+
+    job_id: str = Field(..., description="Job ID.")
+    status: str = Field(default="running", description="Status after retry start.")
+    retrying_tasks: List[str] = Field(default_factory=list, description="Task IDs being retried.")
+    message: str = Field(default="")
+
+
+class ClarificationCreateRequest(BaseModel):
+    spec_text: str = Field(..., description="Initial product/engineering specification text.")
+
+
+class ClarificationMessageRequest(BaseModel):
+    message: str = Field(..., description="User clarification response message.")
+
+
+class ClarificationResponse(BaseModel):
+    session_id: str
+    assistant_message: str
+    open_questions: List[str] = Field(default_factory=list)
+    assumptions: List[str] = Field(default_factory=list)
+    done_clarifying: bool = False
+    refined_spec: Optional[str] = None
+
+
+class ClarificationSessionResponse(BaseModel):
+    session_id: str
+    spec_text: str
+    status: str
+    created_at: str
+    clarification_round: int
+    max_rounds: int
+    confidence_score: float
+    open_questions: List[str] = Field(default_factory=list)
+    assumptions: List[str] = Field(default_factory=list)
+    refined_spec: Optional[str] = None
+    turns: List[Dict[str, str]] = Field(default_factory=list)
+
+
 def _run_orchestrator_background(job_id: str, repo_path: str) -> None:
     """Run orchestrator in background thread."""
     try:
@@ -92,6 +137,16 @@ def _run_orchestrator_background(job_id: str, repo_path: str) -> None:
         run_orchestrator(job_id, repo_path)
     except Exception as e:
         logger.exception("Orchestrator failed")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+
+
+def _run_retry_background(job_id: str) -> None:
+    """Run retry in background thread."""
+    try:
+        from orchestrator import run_failed_tasks
+        run_failed_tasks(job_id)
+    except Exception as e:
+        logger.exception("Retry orchestrator failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
 
 
@@ -103,14 +158,7 @@ def _run_orchestrator_background(job_id: str, repo_path: str) -> None:
     "Returns job_id immediately. Poll GET /run-team/{job_id} for status.",
 )
 def run_team(request: RunTeamRequest) -> RunTeamResponse:
-    """
-    Start the software engineering team on a work folder.
-
-    The path must:
-    - Exist and be a valid directory
-    - Contain initial_spec.md at the root with the full project specification
-    - Does not need to be a git repository
-    """
+    """Start the software engineering team on a work folder."""
     try:
         repo_path = validate_work_path(request.repo_path)
     except ValueError as e:
@@ -126,7 +174,7 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
     return RunTeamResponse(
         job_id=job_id,
         status="running",
-        message=f"Orchestrator started. Poll GET /run-team/{job_id} for status.",
+        message="Orchestrator started. Poll GET /run-team/{job_id} for status.",
     )
 
 
@@ -167,25 +215,6 @@ def get_job_status(job_id: str) -> JobStatusResponse:
     )
 
 
-class RetryResponse(BaseModel):
-    """Response from POST /run-team/{job_id}/retry-failed."""
-
-    job_id: str = Field(..., description="Job ID.")
-    status: str = Field(default="running", description="Status after retry start.")
-    retrying_tasks: List[str] = Field(default_factory=list, description="Task IDs being retried.")
-    message: str = Field(default="")
-
-
-def _run_retry_background(job_id: str) -> None:
-    """Run retry in background thread."""
-    try:
-        from orchestrator import run_failed_tasks
-        run_failed_tasks(job_id)
-    except Exception as e:
-        logger.exception("Retry orchestrator failed")
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
-
-
 @app.post(
     "/run-team/{job_id}/retry-failed",
     response_model=RetryResponse,
@@ -195,12 +224,7 @@ def _run_retry_background(job_id: str) -> None:
     "When paused_llm_limit (Ollama weekly usage limit exceeded), call after the weekly limit resets to resume.",
 )
 def retry_failed_tasks(job_id: str) -> RetryResponse:
-    """
-    Retry the failed tasks from a previous job run.
-
-    Works when the job has completed, failed, or is paused_llm_limit (Ollama weekly
-    usage limit exceeded). For paused_llm_limit, call after the weekly limit resets.
-    """
+    """Retry the failed tasks from a previous job run."""
     data = get_job(job_id)
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
@@ -225,6 +249,81 @@ def retry_failed_tasks(job_id: str) -> RetryResponse:
         retrying_tasks=failed_ids,
         message=f"Retrying {len(failed_ids)} failed tasks. Poll GET /run-team/{job_id} for status.",
     )
+
+
+@app.post("/clarification/sessions", response_model=ClarificationResponse)
+def create_clarification_session(request: ClarificationCreateRequest) -> ClarificationResponse:
+    """Create a clarification session from initial spec text."""
+    session = clarification_store.create_session(request.spec_text)
+    return ClarificationResponse(
+        session_id=session.session_id,
+        assistant_message=session.turns[-1].message,
+        open_questions=session.open_questions,
+        assumptions=session.assumptions,
+        done_clarifying=False,
+    )
+
+
+@app.post("/clarification/sessions/{session_id}/messages", response_model=ClarificationResponse)
+def send_clarification_message(session_id: str, request: ClarificationMessageRequest) -> ClarificationResponse:
+    """Append a user message and return next question or completion."""
+    session = clarification_store.add_user_message(session_id, request.message)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    return ClarificationResponse(
+        session_id=session.session_id,
+        assistant_message=session.turns[-1].message,
+        open_questions=session.open_questions,
+        assumptions=session.assumptions,
+        done_clarifying=session.status == "completed",
+        refined_spec=session.refined_spec,
+    )
+
+
+@app.get("/clarification/sessions/{session_id}", response_model=ClarificationSessionResponse)
+def get_clarification_session(session_id: str) -> ClarificationSessionResponse:
+    """Get full clarification session transcript and state."""
+    session = clarification_store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    return ClarificationSessionResponse(
+        session_id=session.session_id,
+        spec_text=session.spec_text,
+        status=session.status,
+        created_at=session.created_at,
+        clarification_round=session.clarification_round,
+        max_rounds=session.max_rounds,
+        confidence_score=session.confidence_score,
+        open_questions=session.open_questions,
+        assumptions=session.assumptions,
+        refined_spec=session.refined_spec,
+        turns=[{"role": t.role, "message": t.message, "timestamp": t.timestamp} for t in session.turns],
+    )
+
+
+@app.get("/execution/tasks")
+def get_execution_tasks() -> Dict[str, Any]:
+    """Get task status, plan progress, loop metrics, and timing metrics."""
+    return execution_tracker.snapshot()
+
+
+@app.get("/execution/stream")
+def stream_execution_events() -> StreamingResponse:
+    """SSE endpoint for execution updates."""
+
+    def event_generator():
+        index = 0
+        for _ in range(300):
+            events = execution_tracker.events_since(index)
+            if events:
+                for event in events:
+                    yield f"data: {json.dumps(event)}\n\n"
+                index += len(events)
+            else:
+                yield ": keepalive\n\n"
+            time.sleep(0.5)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/health")

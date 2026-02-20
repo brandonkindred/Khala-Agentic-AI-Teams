@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/investment_profile.schema.json",
+  "title": "InvestmentProfile",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "user_id",
+    "created_at",
+    "risk_tolerance",
+    "max_drawdown_tolerance_pct",
+    "time_horizon_years",
+    "liquidity_needs",
+    "income",
+    "net_worth",
+    "savings_rate",
+    "tax_profile",
+    "preferences",
+    "goals",
+    "constraints"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "user_id": { "type": "string" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "risk_tolerance": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "very_high"]
+    },
+    "max_drawdown_tolerance_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+    "time_horizon_years": { "type": "integer", "minimum": 1 },
+    "liquidity_needs": {
+      "type": "object",
+      "required": ["emergency_fund_months", "planned_large_expenses"],
+      "properties": {
+        "emergency_fund_months": { "type": "integer", "minimum": 0 },
+        "planned_large_expenses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "amount", "date"],
+            "properties": {
+              "name": { "type": "string" },
+              "amount": { "type": "number", "minimum": 0 },
+              "date": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    },
+    "income": {
+      "type": "object",
+      "required": ["annual_gross", "stability"],
+      "properties": {
+        "annual_gross": { "type": "number", "minimum": 0 },
+        "stability": { "type": "string", "enum": ["stable", "variable", "uncertain"] }
+      }
+    },
+    "net_worth": {
+      "type": "object",
+      "required": ["total", "investable_assets"],
+      "properties": {
+        "total": { "type": "number" },
+        "investable_assets": { "type": "number" }
+      }
+    },
+    "savings_rate": {
+      "type": "object",
+      "required": ["monthly", "annual"],
+      "properties": {
+        "monthly": { "type": "number" },
+        "annual": { "type": "number" }
+      }
+    },
+    "tax_profile": {
+      "type": "object",
+      "required": ["country", "state", "account_types"],
+      "properties": {
+        "country": { "type": "string" },
+        "state": { "type": "string" },
+        "account_types": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["taxable", "ira", "roth", "401k", "other"]
+          }
+        }
+      }
+    },
+    "preferences": {
+      "type": "object",
+      "required": [
+        "excluded_asset_classes",
+        "excluded_industries",
+        "esg_preference",
+        "crypto_allowed",
+        "options_allowed",
+        "leverage_allowed"
+      ],
+      "properties": {
+        "excluded_asset_classes": { "type": "array", "items": { "type": "string" } },
+        "excluded_industries": { "type": "array", "items": { "type": "string" } },
+        "esg_preference": { "type": "string", "enum": ["none", "light", "strict"] },
+        "crypto_allowed": { "type": "boolean" },
+        "options_allowed": { "type": "boolean" },
+        "leverage_allowed": { "type": "boolean" }
+      }
+    },
+    "goals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "target_amount", "target_date", "priority"],
+        "properties": {
+          "name": { "type": "string" },
+          "target_amount": { "type": "number", "minimum": 0 },
+          "target_date": { "type": "string", "format": "date-time" },
+          "priority": { "type": "string", "enum": ["high", "medium", "low"] }
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "required": ["max_single_position_pct", "max_asset_class_pct"],
+      "properties": {
+        "max_single_position_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "max_asset_class_pct": {
+          "type": "object",
+          "properties": {
+            "equities": { "type": "number", "minimum": 0, "maximum": 100 },
+            "bonds": { "type": "number", "minimum": 0, "maximum": 100 },
+            "options": { "type": "number", "minimum": 0, "maximum": 100 },
+            "crypto": { "type": "number", "minimum": 0, "maximum": 100 },
+            "fx": { "type": "number", "minimum": 0, "maximum": 100 },
+            "real_estate": { "type": "number", "minimum": 0, "maximum": 100 },
+            "commodities": { "type": "number", "minimum": 0, "maximum": 100 }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+}
