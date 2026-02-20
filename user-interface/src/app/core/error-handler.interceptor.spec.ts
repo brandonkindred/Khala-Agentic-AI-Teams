@@ -1,11 +1,10 @@
 import { TestBed } from '@angular/core/testing';
+import { provideHttpClient, withInterceptors } from '@angular/common/http';
 import {
-  HttpClientTestingModule,
   HttpTestingController,
-  provideHttpClient,
-  withInterceptors,
+  provideHttpClientTesting,
 } from '@angular/common/http/testing';
-import { HttpClient, HttpErrorResponse } from '@angular/common/http';
+import { HttpClient } from '@angular/common/http';
 import { errorHandlerInterceptor } from './error-handler.interceptor';
 import { MatSnackBarModule } from '@angular/material/snack-bar';
 import { provideAnimations } from '@angular/platform-browser/animations';
@@ -16,9 +15,10 @@ describe('errorHandlerInterceptor', () => {
 
   beforeEach(() => {
     TestBed.configureTestingModule({
-      imports: [HttpClientTestingModule, MatSnackBarModule],
+      imports: [MatSnackBarModule],
       providers: [
         provideHttpClient(withInterceptors([errorHandlerInterceptor])),
+        provideHttpClientTesting(),
         provideAnimations(),
       ],
     });

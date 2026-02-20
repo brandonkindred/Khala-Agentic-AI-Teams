@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import List, Optional
+
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
@@ -16,8 +18,8 @@ class RunMarketResearchRequest(BaseModel):
     target_users: str = Field(..., min_length=3)
     business_goal: str = Field(..., min_length=3)
     topology: TeamTopology = TeamTopology.UNIFIED
-    transcript_folder_path: str | None = None
-    transcripts: list[str] = Field(default_factory=list)
+    transcript_folder_path: Optional[str] = None
+    transcripts: List[str] = Field(default_factory=list)
     human_approved: bool = False
     human_feedback: str = ""
 

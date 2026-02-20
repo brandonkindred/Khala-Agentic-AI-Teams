@@ -342,20 +342,26 @@ See [agents/docker/README.md](agents/docker/README.md) for environment variables
 
 ### Python (Agents)
 
-```bash
-# From repo root
-pytest
+Run tests **per team** (each team has its own `PYTHONPATH` and imports):
 
-# Specific teams
+```bash
+# From repo root - run each team's tests
 pytest agents/software_engineering_team/tests/ -v
 pytest agents/blogging/tests/ -v
 pytest agents/market_research_team/tests/ -v
 pytest agents/soc2_compliance_team/tests/ -v
 pytest agents/social_media_marketing_team/tests/ -v
 
+# Or from each team directory
+cd agents/software_engineering_team && pytest
+cd agents/blogging && pytest
+# ... etc
+
 # With logs
-pytest -v --log-cli-level=INFO
+pytest agents/<team>/tests/ -v --log-cli-level=INFO
 ```
+
+**Note:** Running `pytest` without a path from repo root may fail due to import path differences between teams.
 
 ### Angular (UI)
 
