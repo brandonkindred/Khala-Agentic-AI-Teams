@@ -12,7 +12,13 @@ Then POST to http://127.0.0.1:8000/run-team with:
   {"repo_path": "/path/to/your/git/repo"}
 """
 
-import _path_setup  # noqa: F401
+import sys
+from pathlib import Path
+
+# Ensure software_engineering_team is on sys.path (works when run as module or script)
+_team_dir = Path(__file__).resolve().parent.parent
+if str(_team_dir) not in sys.path:
+    sys.path.insert(0, str(_team_dir))
 
 import logging
 import uvicorn
