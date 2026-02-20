@@ -23,6 +23,17 @@ def extract_task_assignment_from_content(content: str) -> Optional[Dict[str, Any
         return None
     stripped = content.strip()
 
+    # Strip thinking/reasoning blocks that some models emit
+    stripped = re.sub(r"<think>.*?</think>", "", stripped, flags=re.DOTALL)
+    stripped = re.sub(r"<thinking>.*?</thinking>", "", stripped, flags=re.DOTALL)
+    stripped = re.sub(r"<reasoning>.*?</reasoning>", "", stripped, flags=re.DOTALL)
+    stripped = stripped.strip()
+
+    # Extract JSON from XML-style tags if present
+    json_tag_match = re.search(r"<json>\s*([\s\S]*?)\s*</json>", stripped)
+    if json_tag_match:
+        stripped = json_tag_match.group(1).strip()
+
     # Find first { and match braces to get a complete JSON object
     start = stripped.find("{")
     if start == -1:

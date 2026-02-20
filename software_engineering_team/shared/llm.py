@@ -828,6 +828,10 @@ class OllamaLLMClient(LLMClient):
 
         # Final fallback: raw content wrapper. Callers should defensively use .get().
         # Models that frequently ignore JSON-only instructions may need a different model or pre-processing.
+        logger.debug(
+            "Raw LLM response that failed all JSON extraction strategies (first 2000 chars):\n%s",
+            text[:2000],
+        )
         logger.warning(
             "Could not parse structured JSON from LLM response; returning raw content wrapper | failure_class=json_parse_failure",
         )
@@ -856,6 +860,7 @@ class OllamaLLMClient(LLMClient):
             "model": self.model,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},  # OpenAI-compatible JSON mode
             "messages": [
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt},

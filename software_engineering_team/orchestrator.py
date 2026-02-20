@@ -1605,7 +1605,7 @@ def run_orchestrator(job_id: str, repo_path: str | Path) -> None:
                     pass
 
             # Step 5: Conformance review (tasks + architecture vs initial_spec)
-            conformant, conformance_issues_from_last = check_spec_conformance(spec_content_for_planning, assignment, architecture, llm)
+            conformant, conformance_issues_from_last = check_spec_conformance(spec_content_for_planning, assignment, architecture, tech_lead.llm)
             if conformant:
                 logger.info("Tasks and architecture conform to initial spec; proceeding to execution")
                 if enable_planning_cache and architecture:
