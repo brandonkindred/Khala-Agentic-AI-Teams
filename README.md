@@ -33,6 +33,7 @@ This repository provides **multiple Strands-style agent systems** in a unified m
 | **SOC2 Compliance** | Multi-agent SOC2 audit: Security, Availability, Processing Integrity, Confidentiality, Privacy TSC agents review a repo and produce a compliance report or next-steps document. |
 | **Market Research** | Human-AI collaborative workflow for user discovery and product concept viability; transcript ingestion, UX synthesis, experiment scripts, human approval gates. |
 | **Investment Team** | Multi-asset investment organization with IPS hard constraints, strategy validation, promotion gates, separation-of-duties, risk veto, and monitor-only safety degradation. |
+| **Branding Team** | Brand strategy, codification, moodboard concepts, design/writing standards, and interactive async open-question workflow. |
 
 The **User Interface** is an Angular 19 application that provides interactive dashboards for all agent APIs.
 
@@ -92,6 +93,9 @@ cd agents && python -m uvicorn soc2_compliance_team.api.main:app --host 0.0.0.0 
 
 # Social Marketing (port 8010)
 cd agents && python -m uvicorn social_media_marketing_team.api.main:app --host 0.0.0.0 --port 8010
+
+# Branding (port 8012)
+cd agents && python -m uvicorn branding_team.api.main:app --host 0.0.0.0 --port 8012
 ```
 
 **3. Start the User Interface**
@@ -117,6 +121,7 @@ strands-agents/
 │   ├── soc2_compliance_team/        # SOC2 compliance audit
 │   ├── investment_team/             # Multi-asset investment (IPS-first)
 │   ├── market_research_team/        # Market research and concept viability
+│   ├── branding_team/               # Branding strategy + interactive clarification API
 │   ├── docker/                      # Docker config, default spec
 │   ├── Dockerfile                   # Multi-stage image (all 6 teams)
 │   ├── docker-compose.yml           # Run all APIs in one container

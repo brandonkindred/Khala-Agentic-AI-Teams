@@ -14,4 +14,6 @@ export const environment = {
   soc2ComplianceApiUrl: 'http://localhost:8020',
   /** Social Media Marketing Team API - default port 8010 */
   socialMarketingApiUrl: 'http://localhost:8010',
+  /** Branding Team API - default port 8012 */
+  brandingApiUrl: 'http://localhost:8012',
 };

@@ -9,7 +9,7 @@ import { ApiStatusWidgetComponent } from '../api-status-widget/api-status-widget
 
 /**
  * Application shell with sidebar navigation and main content area.
- * Provides links to all five agent API features.
+ * Provides links to all available agent API features.
  */
 @Component({
   selector: 'app-app-shell',

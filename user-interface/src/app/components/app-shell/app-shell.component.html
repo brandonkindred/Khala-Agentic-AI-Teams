@@ -32,6 +32,10 @@
         <mat-icon matListItemIcon>campaign</mat-icon>
         <span matListItemTitle>Social Marketing</span>
       </a>
+      <a mat-list-item routerLink="/branding" routerLinkActive="active" [attr.aria-current]="isActive('/branding') ? 'page' : null">
+        <mat-icon matListItemIcon>style</mat-icon>
+        <span matListItemTitle>Branding</span>
+      </a>
     </nav>
   </mat-sidenav>
   <mat-sidenav-content>
