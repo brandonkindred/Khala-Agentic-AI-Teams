@@ -74,6 +74,10 @@ class BackendOutput(BaseModel):
         default_factory=list,
         description="Patterns to add to repo .gitignore (e.g. __pycache__/, .env)",
     )
+    used_stub_fallback: bool = Field(
+        default=False,
+        description="True when LLM produced no files and stub was injected; workflow should notify Tech Lead.",
+    )
 
 
 class ReviewIterationRecord(BaseModel):

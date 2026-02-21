@@ -156,6 +156,10 @@ class TaskUpdate(BaseModel):
         default=False,
         description="Whether the agent flagged follow-up work is needed",
     )
+    failure_reason: Optional[str] = Field(
+        default=None,
+        description="When status is failed, the build/test error or reason. Used by Tech Lead to create targeted fix tasks.",
+    )
 
 
 class TaskAssignment(BaseModel):

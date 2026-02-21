@@ -258,3 +258,19 @@ def heuristic_extract_files_from_content(content: str, extensions: tuple = (".py
             continue
         i += 1
     return files
+
+
+def extract_single_python_block(content: str) -> Optional[str]:
+    """
+    Last-resort extraction: find a single ```python or ```py block and return its body.
+    Used when extract_files_from_content and heuristic_extract return nothing.
+    Returns None if no Python block found.
+    """
+    if not content or not content.strip():
+        return None
+    match = re.search(r"```(?:python|py)\s*\n([\s\S]*?)```", content, re.IGNORECASE)
+    if match:
+        body = match.group(1).strip()
+        if body and len(body) > 20:
+            return body
+    return None

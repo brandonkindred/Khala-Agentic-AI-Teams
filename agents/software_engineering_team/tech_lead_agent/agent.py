@@ -671,6 +671,14 @@ class TechLeadAgent:
             "---",
         ]
 
+        failure_reason = getattr(task_update, "failure_reason", None)
+        if failure_reason:
+            context_parts.extend([
+                "",
+                "**FAILURE REASON (create tasks to fix these specific errors):**",
+                failure_reason[:4000] + ("..." if len(failure_reason) > 4000 else ""),
+            ])
+
         if architecture:
             context_parts.extend([
                 "",

@@ -943,6 +943,27 @@ class BackendExpertAgent:
                 failure_reason=failure_reason,
             )
         ok, write_msg = write_agent_output(repo_path, result, subdir="")
+        if not ok and write_msg == NO_FILES_TO_WRITE_MSG:
+            # Fallback: inject stub and retry so we always commit something
+            stub_content = (
+                '"""Stub - write failed (no files). Tech Lead should create follow-up task.\n"""\n'
+                "from fastapi import FastAPI\n\n"
+                "app = FastAPI()\n\n"
+                '@app.get("/health")\n'
+                "def health():\n"
+                '    return {"status": "ok"}\n'
+            )
+            result_dict = result.model_dump() if hasattr(result, "model_dump") else result.dict()
+            result_dict["files"] = {"app/main.py": stub_content}
+            result_dict["used_stub_fallback"] = True
+            stub_result = BackendOutput(**result_dict)
+            ok, write_msg = write_agent_output(repo_path, stub_result, subdir="")
+            if ok:
+                result = stub_result
+                logger.warning(
+                    "[%s] WORKFLOW Step 3: Initial write had no files; stub injected and committed",
+                    task_id,
+                )
         if not ok:
             failure_reason = (
                 "Backend agent did not propose any file changes for this task"
@@ -1898,6 +1919,7 @@ class BackendExpertAgent:
                         summary=result.summary if result else "",
                         files_changed=list((result.files or {}).keys()) if result else [],
                         needs_followup=True,
+                        failure_reason=failure_reason,
                     )
                     codebase_summary = _truncate_for_context(
                         _read_repo_code(repo_path), compute_existing_code_chars(self.llm)
@@ -1980,13 +2002,23 @@ class BackendExpertAgent:
         # ── Step 9: Inform Tech Lead ────────────────────────────────────────
         logger.info("[%s] WORKFLOW Step 9/9: Notifying Tech Lead", task_id)
         final_files = dict(result.files) if result else {}
+        used_stub = getattr(result, "used_stub_fallback", False)
         task_update = TaskUpdate(
             task_id=task_id,
             agent_type="backend",
-            status="completed",
-            summary=result.summary if result else "",
+            status="partial" if used_stub else "completed",
+            summary=(
+                "LLM produced no files after 4 attempts. Stub was injected. Create task to implement actual functionality."
+                if used_stub
+                else (result.summary if result else "")
+            ),
             files_changed=list(final_files.keys()),
-            needs_followup=False,
+            needs_followup=used_stub,
+            failure_reason=(
+                "Empty completion: LLM returned no valid code. Implement the task from spec."
+                if used_stub
+                else None
+            ),
         )
 
         try:
@@ -2514,6 +2546,7 @@ class BackendExpertAgent:
         validated_files = {}
         code = ""
         tests = ""
+        used_stub_fallback = False
         for attempt in range(4):
             data = self.llm.complete_json(prompt, temperature=0.2)
 
@@ -2535,12 +2568,22 @@ class BackendExpertAgent:
 
             # Content fallback: when LLM returns raw content wrapper, try to extract files from code blocks
             if not raw_files and data.get("content"):
-                from shared.llm_response_utils import extract_files_from_content, heuristic_extract_files_from_content
+                from shared.llm_response_utils import (
+                    extract_files_from_content,
+                    heuristic_extract_files_from_content,
+                    extract_single_python_block,
+                )
                 extracted = extract_files_from_content(str(data["content"]))
                 if not extracted:
                     extracted = heuristic_extract_files_from_content(str(data["content"]), (".py",))
                     if extracted:
                         logger.warning("Backend: using heuristic file extraction from raw content")
+                if not extracted:
+                    # Last-resort: single ```python block as app/main.py
+                    py_block = extract_single_python_block(str(data["content"]))
+                    if py_block:
+                        extracted = {"app/main.py": py_block}
+                        logger.warning("Backend: using last-resort single Python block extraction")
                 if extracted:
                     raw_files = extracted
                     for fpath, fcontent in list(raw_files.items()):
@@ -2581,25 +2624,27 @@ class BackendExpertAgent:
                     prompt = prompt + empty_retry_prompt
                 continue
 
-            # If all files were rejected but we have code, use code as fallback
+            # If no validated files, use code as fallback or inject stub (always produce something)
             if not validated_files and not data.get("needs_clarification", False):
-                if raw_files:
-                    logger.error(
-                        "Backend: ALL %d files were rejected by validation. Raw filenames: %s. Validation warnings: %s",
-                        len(raw_files),
-                        list(raw_files.keys()),
-                        validation_warnings,
-                    )
-                elif code:
+                if code:
                     logger.warning(
                         "Backend: returned 'code' but no 'files' dict. Using code as app/main.py fallback."
                     )
                     validated_files = {"app/main.py": code}
                 else:
-                    logger.error(
-                        "Backend: produced no files and no code after 4 attempts (failure_class=empty_completion). "
-                        "Injecting minimal stub to allow workflow to progress; Tech Lead should create follow-up task.",
-                    )
+                    if raw_files:
+                        logger.error(
+                            "Backend: ALL %d files were rejected by validation. Raw filenames: %s. "
+                            "Validation warnings: %s. Using stub fallback.",
+                            len(raw_files),
+                            list(raw_files.keys()),
+                            validation_warnings,
+                        )
+                    else:
+                        logger.error(
+                            "Backend: produced no files and no code after 4 attempts (failure_class=empty_completion). "
+                            "Injecting minimal stub to allow workflow to progress; Tech Lead should create follow-up task.",
+                        )
                     # Stub fallback: minimal file so write_agent_output doesn't fail
                     validated_files = {
                         "app/main.py": (
@@ -2613,6 +2658,7 @@ class BackendExpertAgent:
                             '    return {"status": "ok"}\n'
                         ),
                     }
+                    used_stub_fallback = True
             break
 
         summary = data.get("summary", "")
@@ -2623,9 +2669,9 @@ class BackendExpertAgent:
 
         logger.info(
             "Backend: done, code=%s chars, files=%s (validated from %s), tests=%s chars, "
-            "summary=%s chars, needs_clarification=%s",
+            "summary=%s chars, needs_clarification=%s, used_stub_fallback=%s",
             len(code), len(validated_files), len(raw_files), len(tests),
-            len(summary), needs_clarification,
+            len(summary), needs_clarification, used_stub_fallback,
         )
         return BackendOutput(
             code=code,
@@ -2635,6 +2681,7 @@ class BackendExpertAgent:
             tests=tests,
             suggested_commit_message=data.get("suggested_commit_message", ""),
             needs_clarification=needs_clarification,
-        clarification_requests=clarification_requests,
-        gitignore_entries=[str(e).strip() for e in (data.get("gitignore_entries") or []) if str(e).strip()],
-    )
+            clarification_requests=clarification_requests,
+            gitignore_entries=[str(e).strip() for e in (data.get("gitignore_entries") or []) if str(e).strip()],
+            used_stub_fallback=used_stub_fallback,
+        )

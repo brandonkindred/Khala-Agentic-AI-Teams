@@ -500,6 +500,11 @@ Create new tasks when:
 - Error handling, edge cases, or validation mentioned in the spec are not covered
 - Non-functional requirements (performance, accessibility, responsive design) from the spec are not addressed
 
+When status is "failed" and FAILURE REASON is provided:
+- The failure reason contains build errors, test failures, or runtime errors.
+- Create one or more tasks that directly address these errors (e.g. "Fix test_api_token_repr - add session cleanup between tests to avoid UNIQUE constraint").
+- Each fix task should be specific to the error, not generic.
+
 Do NOT create new tasks when:
 - All spec requirements are already covered by completed + remaining tasks
 - The gap is trivial and will naturally be covered by an existing remaining task
