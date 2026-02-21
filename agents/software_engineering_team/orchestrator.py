@@ -289,7 +289,7 @@ def _get_agents():
     from documentation_agent import DocumentationAgent, DocumentationInput
     from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
     from git_setup_agent import GitSetupAgent
-    from integration_agent import IntegrationAgent, IntegrationInput
+    from integration_team import IntegrationAgent, IntegrationInput
     from qa_agent import QAExpertAgent, QAInput
     from security_agent import CybersecurityExpertAgent, SecurityInput
     from planning_team.api_contract_planning_agent import ApiContractPlanningAgent
@@ -1960,7 +1960,7 @@ def run_orchestrator(
         has_frontend = frontend_dir.is_dir() and any(frontend_dir.rglob("*.ts"))
         if integration_agent and has_backend and has_frontend and completed_code_task_ids:
             try:
-                from integration_agent.models import IntegrationInput
+                from integration_team import IntegrationInput
                 code_backend = _read_repo_code(backend_dir, [".py"])
                 code_frontend = _read_repo_code(frontend_dir, [".ts", ".tsx", ".html", ".scss"])
                 if code_backend != "# No code files found" and code_frontend != "# No code files found":

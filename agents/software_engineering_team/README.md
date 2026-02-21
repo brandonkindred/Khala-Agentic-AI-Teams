@@ -360,7 +360,7 @@ software_engineering_team/
 ├── security_agent/
 ├── backend_agent/
 ├── quality_gates/        # Cross-cutting review agents (Code Review, QA, Security, Acceptance Verifier, DbC)
-├── integration_team/      # Post-execution agents (Integration, DevOps, Documentation)
+├── integration_team/      # Post-execution agents (Integration, DevOps, Documentation); includes Integration agent
 ├── frontend_team/         # All frontend engineering agents
 │   ├── feature_agent/    # FrontendExpertAgent (implementation)
 │   ├── accessibility_agent/
@@ -373,7 +373,6 @@ software_engineering_team/
 │   ├── build_release/
 │   └── orchestrator.py   # FrontendOrchestratorAgent
 ├── qa_agent/
-├── integration_agent/   # Full-stack API contract validation
 ├── acceptance_verifier_agent/
 ├── code_review_agent/     # Chunk Reviewer + Coordinator for large code; single-call for small
 ├── dbc_comments_agent/

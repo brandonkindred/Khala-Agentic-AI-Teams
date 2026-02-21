@@ -95,7 +95,7 @@ def test_orchestrator_has_integration_phase() -> None:
 
 def test_integration_agent_exists_and_runs() -> None:
     """Integration agent can be instantiated and run with DummyLLM."""
-    from integration_agent import IntegrationAgent, IntegrationInput
+    from integration_team import IntegrationAgent, IntegrationInput
 
     llm = DummyLLMClient()
     agent = IntegrationAgent(llm)
