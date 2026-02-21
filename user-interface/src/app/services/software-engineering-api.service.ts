@@ -12,6 +12,8 @@ import type {
   ClarificationResponse,
   ClarificationMessageRequest,
   ClarificationSessionResponse,
+  ArchitectDesignRequest,
+  ArchitectDesignResponse,
   HealthResponse,
 } from '../models';
 
@@ -138,6 +140,18 @@ export class SoftwareEngineeringApiService {
         eventSource.close();
       };
     });
+  }
+
+  /**
+   * POST /architect/design
+   */
+  architectDesign(
+    request: ArchitectDesignRequest
+  ): Observable<ArchitectDesignResponse> {
+    return this.http.post<ArchitectDesignResponse>(
+      `${this.baseUrl}/architect/design`,
+      request
+    );
   }
 
   /**

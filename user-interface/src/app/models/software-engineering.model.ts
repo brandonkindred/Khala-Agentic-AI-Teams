@@ -80,3 +80,31 @@ export interface ClarificationSessionResponse {
   refined_spec?: string;
   turns: Array<{ role: string; message: string; timestamp?: string }>;
 }
+
+/** Request for POST /architect/design. */
+export interface ArchitectDesignRequest {
+  spec: string;
+  use_llm?: boolean;
+}
+
+/** Architecture component from architect/design response. */
+export interface ArchitectComponent {
+  name: string;
+  type: string;
+  description?: string;
+  technology?: string;
+  dependencies?: string[];
+  interfaces?: string[];
+}
+
+/** Response from POST /architect/design. */
+export interface ArchitectDesignResponse {
+  overview: string;
+  architecture_document: string;
+  components: ArchitectComponent[];
+  diagrams: Record<string, string>;
+  decisions: Array<Record<string, unknown>>;
+  tenancy_model: string;
+  reliability_model: string;
+  summary: string;
+}

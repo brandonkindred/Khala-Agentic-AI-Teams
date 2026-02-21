@@ -73,6 +73,26 @@ def test_health(client: TestClient) -> None:
     assert r.json()["status"] == "ok"
 
 
+def test_architect_design_empty_spec(client: TestClient) -> None:
+    """architect/design returns 400 when spec is empty."""
+    r = client.post("/architect/design", json={"spec": ""})
+    assert r.status_code == 400
+
+
+def test_architect_design_success(client: TestClient) -> None:
+    """architect/design returns architecture documents and diagrams."""
+    spec = "# Task Manager API\n\nREST API for managing tasks with CRUD operations."
+    r = client.post("/architect/design", json={"spec": spec})
+    assert r.status_code == 200
+    data = r.json()
+    assert "overview" in data
+    assert "architecture_document" in data
+    assert "components" in data
+    assert "diagrams" in data
+    assert "decisions" in data
+    assert isinstance(data["diagrams"], dict)
+
+
 def test_run_team_requires_repo_path(client: TestClient) -> None:
     """run-team returns 422 when repo_path missing."""
     r = client.post("/run-team", json={})

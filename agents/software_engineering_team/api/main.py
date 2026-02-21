@@ -24,6 +24,9 @@ import sys
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
+_arch_dir = _team_dir / "architect-agents"
+if _arch_dir.exists() and str(_arch_dir) not in sys.path:
+    sys.path.insert(0, str(_arch_dir))
 
 from spec_parser import validate_work_path
 from shared.clarification_store import clarification_store
@@ -141,6 +144,38 @@ class ClarificationSessionResponse(BaseModel):
     assumptions: List[str] = Field(default_factory=list)
     refined_spec: Optional[str] = None
     turns: List[Dict[str, str]] = Field(default_factory=list)
+
+
+class ArchitectDesignRequest(BaseModel):
+    """Request body for the architect/design endpoint."""
+
+    spec: str = Field(..., description="Product/engineering specification text")
+    use_llm: bool = Field(
+        default=False,
+        description="Use LLM for spec parsing (slower but higher quality); default uses heuristic",
+    )
+
+
+class ArchitectDesignResponse(BaseModel):
+    """Response from POST /architect/design."""
+
+    overview: str = Field(..., description="High-level architecture overview")
+    architecture_document: str = Field(default="", description="Full markdown architecture document")
+    components: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Architecture components (name, type, description, technology, etc.)",
+    )
+    diagrams: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Mermaid diagram code keyed by diagram name",
+    )
+    decisions: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Architecture decision records",
+    )
+    tenancy_model: str = Field(default="", description="Tenancy model")
+    reliability_model: str = Field(default="", description="Reliability model")
+    summary: str = Field(default="", description="Architecture summary")
 
 
 def _run_orchestrator_background(
@@ -435,6 +470,59 @@ def stream_execution_events() -> StreamingResponse:
             time.sleep(0.5)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post(
+    "/architect/design",
+    response_model=ArchitectDesignResponse,
+    summary="Generate architecture from spec",
+    description="Parse spec, run Architecture Expert agent, return architecture documents and diagrams. "
+    "Uses heuristic spec parsing by default; set use_llm=true for LLM-based parsing.",
+)
+def architect_design(request: ArchitectDesignRequest) -> ArchitectDesignResponse:
+    """Generate software architecture from a product specification."""
+    try:
+        from architecture_expert import ArchitectureExpertAgent
+        from architecture_expert.models import ArchitectureInput
+        from spec_parser import parse_spec_heuristic, parse_spec_with_llm
+        from shared.llm import get_llm_for_agent
+    except ImportError as e:
+        logger.exception("Failed to import architect dependencies")
+        raise HTTPException(status_code=500, detail=f"Architect agent unavailable: {e}") from e
+
+    if not request.spec or not request.spec.strip():
+        raise HTTPException(status_code=400, detail="Spec text is required")
+
+    try:
+        if request.use_llm:
+            llm = get_llm_for_agent("architecture")
+            requirements = parse_spec_with_llm(request.spec.strip(), llm)
+        else:
+            requirements = parse_spec_heuristic(request.spec.strip())
+
+        arch_agent = ArchitectureExpertAgent(get_llm_for_agent("architecture"))
+        arch_input = ArchitectureInput(requirements=requirements)
+        arch_output = arch_agent.run(arch_input)
+        architecture = arch_output.architecture
+
+        components = [
+            c.model_dump() if hasattr(c, "model_dump") else c.dict()
+            for c in architecture.components
+        ]
+
+        return ArchitectDesignResponse(
+            overview=architecture.overview,
+            architecture_document=architecture.architecture_document or "",
+            components=components,
+            diagrams=architecture.diagrams or {},
+            decisions=architecture.decisions or [],
+            tenancy_model=getattr(architecture, "tenancy_model", "") or "",
+            reliability_model=getattr(architecture, "reliability_model", "") or "",
+            summary=arch_output.summary or "",
+        )
+    except Exception as e:
+        logger.exception("Architect design failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/health")

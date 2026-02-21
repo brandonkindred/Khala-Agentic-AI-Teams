@@ -47,4 +47,38 @@
       <app-execution-stream />
     </div>
   </mat-tab>
+  <mat-tab label="Architecture">
+    <div class="tab-content">
+      <mat-card>
+        <mat-card-header>
+          <mat-card-title>Architecture Design</mat-card-title>
+          <mat-card-subtitle>Generate architecture documents and diagrams from a specification</mat-card-subtitle>
+        </mat-card-header>
+        <mat-card-content>
+          <mat-form-field appearance="outline" class="spec-field">
+            <mat-label>Specification</mat-label>
+            <textarea
+              matInput
+              [(ngModel)]="architectSpec"
+              placeholder="Paste or type your product/engineering specification here..."
+              rows="8"
+            ></textarea>
+          </mat-form-field>
+          <div class="architect-actions">
+            <button
+              mat-raised-button
+              color="primary"
+              (click)="onArchitectDesignSubmit()"
+              [disabled]="loading || !architectSpec?.trim()"
+            >
+              Generate Architecture
+            </button>
+          </div>
+        </mat-card-content>
+      </mat-card>
+      @if (architectResults) {
+        <app-architecture-results [data]="architectResults" />
+      }
+    </div>
+  </mat-tab>
 </mat-tab-group>
