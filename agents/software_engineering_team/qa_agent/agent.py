@@ -58,11 +58,16 @@ class QAExpertAgent:
         bugs = []
         for b in data.get("bugs_found") or []:
             if isinstance(b, dict) and b.get("description"):
+                # Prefer file_path + line_or_section for fix_build mode (more actionable)
+                loc = b.get("location", "")
+                if b.get("file_path"):
+                    line_part = b.get("line_or_section", "")
+                    loc = f"{b['file_path']}:{line_part}" if line_part else b["file_path"]
                 bugs.append(
                     BugReport(
                         severity=b.get("severity", "medium"),
                         description=b["description"],
-                        location=b.get("location", ""),
+                        location=loc,
                         steps_to_reproduce=b.get("steps_to_reproduce", ""),
                         expected_vs_actual=b.get("expected_vs_actual", ""),
                         recommendation=b.get("recommendation", ""),

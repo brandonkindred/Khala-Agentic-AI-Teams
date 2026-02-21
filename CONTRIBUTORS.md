@@ -78,9 +78,11 @@ pip install -e agents/blogging
 
 ```bash
 cd user-interface
-nvm use
+nvm use          # or: nvm install (if Node 22.12 not installed)
 npm ci
 ```
+
+Node 22.12 is recommended (see `.nvmrc`). Angular 19 requires Node >=18.19.1.
 
 ### 3. Environment Variables
 

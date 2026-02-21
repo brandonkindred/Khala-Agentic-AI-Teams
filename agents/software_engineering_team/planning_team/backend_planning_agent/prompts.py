@@ -28,12 +28,26 @@ Edges have from_id, to_id, type: "blocks" | "relates_to" | "exposes_api"
 
 **Rules:**
 - Emit TASK and SUBTASK nodes for implementation work. **Split backend work into granular tasks** (e.g. separate tasks for: data models/schema, CRUD endpoints, validation layer, error handling) so backend and frontend queues stay balanced. Do NOT lump all API work into one monolithic task.
+- **Task granularity (CRITICAL):** Each TASK node must cover at most: (a) 1 resource (e.g. tasks OR users, not both), (b) 3 endpoints max, OR (c) 1 service module. If the spec describes CRUD for an entity, emit at least 3 tasks: backend-{entity}-models, backend-{entity}-crud-endpoints, backend-{entity}-validation. Never combine models + endpoints + validation + error handling in a single task.
 - Every TASK and SUBTASK node must include a user_story in format "As a [role], I want [goal] so that [benefit]"
 - Use EPIC/FEATURE for grouping only
 - Include git_setup and devops tasks if scaffolding is needed
 - Dependencies: use "blocks" edges (A blocks B = A must complete before B). Prefer tasks with no cross-domain dependencies (e.g. backend-data-models, backend-auth-endpoints) to run in parallel with frontend work.
 - Align with delivery_strategy from project overview (e.g. backend-first, vertical slices)
 - **OpenAPI 3.0**: API-related backend tasks (endpoints, routers, CRUD APIs) must include an acceptance criterion that the API exposes an OpenAPI 3.0 spec suitable for: (1) cloud API gateway imports (e.g. AWS API Gateway, Azure API Management), (2) client type/code generation (e.g. TypeScript types, SDKs). For backend API EPIC/FEATURE nodes, include in outputs that "OpenAPI 3.0 spec must be available (runtime and optionally static file)."
+
+**Considerations (address in nodes/acceptance_criteria where applicable):**
+1. Authentication and authorization: Auth endpoints, middleware, RBAC, token validation.
+2. Data management: Models, validation, serialization, and data lifecycle.
+3. State/session management: Session storage, stateless design, and session handling.
+4. Database requirements: Schema, migrations, indexing, and query patterns.
+5. Performance: Caching, query optimization, pagination, and latency targets.
+6. Cost: Resource usage, scaling, and cost-efficient design.
+7. Security: Input validation, secrets, encryption, and secure defaults.
+8. Accessibility (API): Semantic responses, error formats, and API design that supports accessible clients.
+9. API design best practices: REST/OpenAPI conventions, versioning, and consistent error handling.
+10. Service design best practices: Separation of concerns, idempotency, and resilience.
+11. Testing: Unit, integration, and contract test tasks.
 
 **Output format:**
 Return a single JSON object with:

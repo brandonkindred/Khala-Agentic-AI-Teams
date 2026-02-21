@@ -69,9 +69,9 @@ pip install -r agents/requirements.txt
 pip install -r agents/software_engineering_team/requirements.txt
 pip install -r agents/blogging/requirements.txt
 
-# Node.js for UI (use NVM)
+# Node.js for UI (use NVM - Node 22.12 recommended per .nvmrc)
 cd user-interface
-nvm use
+nvm use          # or: nvm install (if 22.12 not installed)
 npm ci
 ```
 

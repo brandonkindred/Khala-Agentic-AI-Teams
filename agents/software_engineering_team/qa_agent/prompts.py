@@ -45,9 +45,16 @@ Respond with valid JSON only. Escape newlines in code strings as \\n. No explana
 QA_PROMPT_FIX_BUILD = """
 **MODE: fix_build** – The code below FAILED to build. Build/compiler output is provided.
 Your task: Analyze the build errors and produce bug reports with clear "recommendation" for the coding agent.
+
+**Required fields for each bug:**
+- "file_path": exact file path (e.g. app/main.py, tests/test_foo.py)
+- "line_or_section": optional line number or function name (e.g. "42", "def health")
+- "recommendation": MUST start with a verb (Add, Remove, Change, Fix) and be ONE concrete sentence.
+  Example: "Add @app.get('/test-generic-error') route that raises an exception, and ensure the exception handler returns JSONResponse(status_code=500, content={...}) without re-raising."
+  Example: "Fix the missing import: add 'from fastapi.responses import JSONResponse' at the top of app/main.py."
+
 - Identify the root cause (e.g. missing import, wrong path, type error, syntax error).
-- For each error, provide: severity (critical for build failures), description, location (file:line), recommendation.
-- The recommendation must be concrete: what exact change to make (import, fix path, add type, etc.).
+- For each error: severity (critical for build failures), description, location, file_path, recommendation.
 - If multiple errors, list each with its fix. The coding agent will implement them.
 """
 

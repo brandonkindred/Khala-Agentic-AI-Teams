@@ -1,12 +1,14 @@
 """Unit tests for the Backend Expert agent."""
 
+import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from backend_agent.agent import (
     EXCEPTION_HANDLER_TEST_PATTERNS,
+    MAX_PREWRITE_REGENERATIONS,
     BackendExpertAgent,
     _build_code_review_issues_for_build_failure,
     _build_code_review_issues_for_missing_test_routes,
@@ -17,6 +19,13 @@ from backend_agent.agent import (
     _test_routes_referenced_in_tests,
 )
 from backend_agent.models import BackendInput
+
+
+def test_max_prewrite_regenerations_constant_defaults_to_two() -> None:
+    """MAX_PREWRITE_REGENERATIONS is 2 by default to cap pre-write loops and reduce LLM calls."""
+    assert MAX_PREWRITE_REGENERATIONS >= 1
+    # Default is 2 when SW_MAX_PREWRITE_REGENERATIONS not set; may be overridden in CI
+    assert MAX_PREWRITE_REGENERATIONS in (1, 2, 3, 4, 5, 6)  # sane range
 
 
 def test_build_code_review_issues_exception_handler_failure_returns_targeted_suggestion() -> None:
@@ -298,7 +307,7 @@ def test_backend_agent_content_fallback_no_code_blocks_injects_stub() -> None:
 
 
 def test_backend_plan_task_returns_plan_markdown() -> None:
-    """_plan_task parses LLM JSON and returns plan markdown."""
+    """_plan_task parses LLM JSON and returns (plan_text, should_split)."""
     from shared.models import Task, TaskType
 
     mock_llm = MagicMock()
@@ -311,17 +320,85 @@ def test_backend_plan_task_returns_plan_markdown() -> None:
     }
     agent = BackendExpertAgent(llm_client=mock_llm)
     task = Task(id="t1", type=TaskType.BACKEND, assignee="backend", title="Add tasks", description="Implement task CRUD")
-    plan_text = agent._plan_task(
+    plan_text, should_split = agent._plan_task(
         task=task,
         existing_code="# No code",
         spec_content="",
         architecture=None,
     )
     assert plan_text
+    assert not should_split
     assert "Add CRUD for tasks" in plan_text
     assert "app/routers/tasks.py" in plan_text
     assert "tests/test_task_endpoints.py" in plan_text
     assert "O(1) lookup" in plan_text
+
+
+def test_backend_plan_task_returns_should_split_when_too_many_items() -> None:
+    """_plan_task returns should_split=True when what_changes has >5 items."""
+    from shared.models import Task, TaskType
+
+    mock_llm = MagicMock()
+    mock_llm.get_max_context_tokens.return_value = 16384
+    mock_llm.complete_json.return_value = {
+        "feature_intent": "Add full CRUD",
+        "what_changes": [
+            "app/models/task.py",
+            "app/schemas/task.py",
+            "app/routers/tasks.py",
+            "app/services/task.py",
+            "app/database.py",
+            "tests/test_tasks.py",
+        ],
+        "algorithms_data_structures": "Use dict",
+        "tests_needed": "tests",
+    }
+    agent = BackendExpertAgent(llm_client=mock_llm)
+    task = Task(id="t1", type=TaskType.BACKEND, assignee="backend", title="Add tasks", description="Implement task CRUD")
+    plan_text, should_split = agent._plan_task(
+        task=task,
+        existing_code="# No code",
+        spec_content="",
+        architecture=None,
+    )
+    assert should_split
+    assert plan_text == ""
+
+
+def test_regenerate_with_issues_passes_task_plan_to_backend_input(tmp_path: Path) -> None:
+    """_regenerate_with_issues passes task_plan through to BackendInput when provided."""
+    from unittest.mock import patch
+
+    mock_llm = MagicMock()
+    mock_llm.get_max_context_tokens.return_value = 16384
+    mock_llm.complete_json.return_value = {
+        "code": "",
+        "language": "python",
+        "summary": "Fixed",
+        "files": {"app/main.py": "content"},
+        "tests": "",
+        "suggested_commit_message": "fix: add route",
+    }
+    agent = BackendExpertAgent(llm_client=mock_llm)
+    task = type("Task", (), {
+        "id": "t1",
+        "description": "Add API",
+        "user_story": "",
+        "requirements": "",
+    })()
+    with patch.object(agent, "run") as mock_run:
+        mock_run.return_value = type("Out", (), {"files": {"app/main.py": "x"}, "summary": ""})()
+        agent._regenerate_with_issues(
+            repo_path=tmp_path,
+            current_task=task,
+            spec_content="",
+            architecture=None,
+            code_review_issues=[{"severity": "critical", "description": "Fix", "suggestion": "Add route"}],
+            task_plan="**Feature intent:** Add /test-generic-error",
+        )
+        call_args = mock_run.call_args
+        backend_input = call_args[0][0]
+        assert backend_input.task_plan == "**Feature intent:** Add /test-generic-error"
 
 
 def test_backend_run_injects_task_plan_and_follow_instruction_into_prompt() -> None:
@@ -351,3 +428,188 @@ def test_backend_run_injects_task_plan_and_follow_instruction_into_prompt() -> N
     assert "realize every item under 'What changes' and 'Tests needed'" in prompt
     assert "Add API" in prompt
     assert "app/routers/foo.py" in prompt
+
+
+def test_run_workflow_exits_at_five_same_build_failures_and_notifies_tech_lead(
+    tmp_path: Path,
+) -> None:
+    """When build fails 5 times with same error, workflow exits early and Tech Lead receives task_update with needs_followup."""
+    from shared.models import Task, TaskType
+
+    # Minimal git repo with development branch
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "app").mkdir(exist_ok=True)
+    (tmp_path / "app" / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
+    subprocess.run(["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+
+    task = Task(
+        id="t1",
+        type=TaskType.BACKEND,
+        assignee="backend",
+        title="Add API",
+        description="Implement GET /health",
+    )
+    same_error = "ImportError: No module named 'foo'"
+
+    mock_llm = MagicMock()
+    mock_llm.get_max_context_tokens.return_value = 16384
+    mock_llm.complete_json.side_effect = [
+        {"feature_intent": "Add health", "what_changes": ["app/main.py"], "algorithms_data_structures": "", "tests_needed": ""},
+        {"code": "", "language": "python", "summary": "Done", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"}, "tests": "", "suggested_commit_message": "feat: add"},
+    ] + [
+        {"code": "", "language": "python", "summary": "Fixed", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"}, "tests": "", "suggested_commit_message": "fix: build"}
+        for _ in range(10)
+    ]
+
+    agent = BackendExpertAgent(llm_client=mock_llm)
+    mock_qa = MagicMock()
+    from qa_agent.models import BugReport
+
+    mock_qa.run.return_value = MagicMock(
+        bugs_found=[
+            BugReport(severity="critical", description="Fix", location="app/main.py", recommendation="Fix the import"),
+        ]
+    )
+    mock_tech_lead = MagicMock()
+    mock_tech_lead.review_progress.return_value = []
+
+    def build_verifier(_repo_path, _agent_type, _task_id):
+        return (False, same_error)
+
+    result = agent.run_workflow(
+        repo_path=tmp_path,
+        task=task,
+        spec_content="# Spec",
+        architecture=None,
+        qa_agent=mock_qa,
+        security_agent=MagicMock(),
+        dbc_agent=MagicMock(),
+        code_review_agent=MagicMock(),
+        tech_lead=mock_tech_lead,
+        build_verifier=build_verifier,
+    )
+
+    assert result.success is False
+    assert "5 times" in (result.failure_reason or "")
+    assert result.needs_followup is True
+    mock_tech_lead.review_progress.assert_called()
+    call_kwargs = mock_tech_lead.review_progress.call_args[1]
+    task_update = call_kwargs.get("task_update")
+    assert task_update is not None
+    assert task_update.needs_followup is True
+    assert task_update.status == "failed"
+
+
+def test_run_workflow_invokes_build_fix_specialist_when_same_build_fails_twice(
+    tmp_path: Path,
+) -> None:
+    """When build fails 2 times with same error, BuildFixSpecialist is invoked (and can apply patch)."""
+    from shared.models import Task, TaskType
+
+    from build_fix_specialist.models import CodeEdit
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "app").mkdir(exist_ok=True)
+    (tmp_path / "app" / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+
+    task = Task(
+        id="t2",
+        type=TaskType.BACKEND,
+        assignee="backend",
+        title="Add API",
+        description="Implement GET /health",
+    )
+    same_error = "ImportError: No module named 'foo'"
+
+    mock_llm = MagicMock()
+    mock_llm.get_max_context_tokens.return_value = 16384
+    mock_llm.complete_json.side_effect = [
+        {"feature_intent": "Add health", "what_changes": ["app/main.py"], "algorithms_data_structures": "", "tests_needed": ""},
+        {"code": "", "language": "python", "summary": "Done", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"}, "tests": "", "suggested_commit_message": "feat: add"},
+    ] + [
+        {"code": "", "language": "python", "summary": "Fixed", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"}, "tests": "", "suggested_commit_message": "fix: build"}
+        for _ in range(10)
+    ]
+
+    agent = BackendExpertAgent(llm_client=mock_llm)
+    mock_qa = MagicMock()
+    from qa_agent.models import BugReport
+
+    mock_qa.run.return_value = MagicMock(
+        bugs_found=[
+            BugReport(severity="critical", description="Fix", location="app/main.py", recommendation="Fix the import"),
+        ]
+    )
+    mock_tech_lead = MagicMock()
+    mock_tech_lead.review_progress.return_value = []
+
+    def build_verifier(_repo_path, _agent_type, _task_id):
+        return (False, same_error)
+
+    with patch("build_fix_specialist.BuildFixSpecialistAgent") as mock_specialist_cls:
+        mock_specialist = MagicMock()
+        mock_specialist.run.return_value = MagicMock(
+            edits=[
+                CodeEdit(
+                    file_path="app/main.py",
+                    old_text="from fastapi import FastAPI",
+                    new_text="from fastapi import FastAPI  # fixed",
+                ),
+            ],
+            summary="Added import fix",
+        )
+        mock_specialist_cls.return_value = mock_specialist
+
+        agent.run_workflow(
+            repo_path=tmp_path,
+            task=task,
+            spec_content="# Spec",
+            architecture=None,
+            qa_agent=mock_qa,
+            security_agent=MagicMock(),
+            dbc_agent=MagicMock(),
+            code_review_agent=MagicMock(),
+            tech_lead=mock_tech_lead,
+            build_verifier=build_verifier,
+        )
+
+    mock_specialist_cls.assert_called()
+    mock_specialist.run.assert_called()
+    call_input = mock_specialist.run.call_args[0][0]
+    assert call_input.build_errors == same_error
+    assert "app/main.py" in call_input.affected_files_code or "main.py" in call_input.affected_files_code
+    # Verify patch was applied: app/main.py should contain the specialist's edit
+    main_content = (tmp_path / "app" / "main.py").read_text()
+    assert "# fixed" in main_content

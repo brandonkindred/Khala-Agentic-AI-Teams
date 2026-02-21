@@ -12,6 +12,7 @@ from planning_team.planning_graph import (
     PlanningNodeKind,
     EdgeType,
     Phase,
+    _is_overly_broad_task,
     compile_planning_graph_to_task_assignment,
     ensure_dict,
     ensure_str_list,
@@ -101,6 +102,44 @@ def test_compile_qa_tasks_skipped():
     g.add_node(PlanningNode(id="qa-e2e", domain=PlanningDomain.QA, kind=PlanningNodeKind.TASK, summary="E2E tests"))
     assignment = compile_planning_graph_to_task_assignment(g)
     assert len(assignment.tasks) == 0
+
+
+def test_is_overly_broad_task_detects_monolithic_scope():
+    """_is_overly_broad_task returns True when details has 4+ and-separated items."""
+    assert _is_overly_broad_task(
+        "Implement models and endpoints and validation and error handling",
+        "Full CRUD API",
+    )
+    assert _is_overly_broad_task(
+        "Add schema, routes, services, and tests",
+        "",
+    )
+    assert not _is_overly_broad_task("Implement task CRUD endpoints", "Task API")
+    assert not _is_overly_broad_task("", "")
+
+
+def test_compile_skips_overly_broad_tasks():
+    """Overly broad tasks (4+ and-separated items in details) are skipped."""
+    g = PlanningGraph()
+    g.add_node(PlanningNode(
+        id="backend-monolithic",
+        domain=PlanningDomain.BACKEND,
+        kind=PlanningNodeKind.TASK,
+        summary="Full API",
+        details="Implement models and schemas and endpoints and validation and error handling",
+        acceptance_criteria=["Done"],
+    ))
+    g.add_node(PlanningNode(
+        id="backend-granular",
+        domain=PlanningDomain.BACKEND,
+        kind=PlanningNodeKind.TASK,
+        summary="Task models",
+        details="Add SQLAlchemy models for tasks.",
+        acceptance_criteria=["Models exist", "Schema correct"],
+    ))
+    assignment = compile_planning_graph_to_task_assignment(g)
+    assert len(assignment.tasks) == 1
+    assert assignment.tasks[0].id == "backend-granular"
 
 
 def test_compile_backfills_user_story_for_backend_frontend_when_missing():

@@ -116,6 +116,7 @@ def _int_env(name: str, default: int, min_val: int = 1) -> int:
 
 MAX_REVIEW_ITERATIONS = _int_env("SW_MAX_REVIEW_ITERATIONS", 20)
 MAX_SAME_BUILD_FAILURES = _int_env("SW_MAX_SAME_BUILD_FAILURES", 6)  # Stop if build fails identically this many times
+MAX_PREWRITE_REGENERATIONS = _int_env("SW_MAX_PREWRITE_REGENERATIONS", 2)  # Max regenerations for pre-write test-route checks
 MAX_CLARIFICATION_ROUNDS = _int_env("SW_MAX_CLARIFICATION_ROUNDS", 20)
 
 # Patterns that indicate pytest failed due to missing /test-generic-error route or
@@ -278,6 +279,85 @@ def _extract_failing_test_file_from_build_errors(build_errors: str) -> Optional[
     return match.group(0) if match else None
 
 
+def _extract_affected_file_paths_from_build_errors(build_errors: str, repo_path: Path) -> List[str]:
+    """Extract file paths mentioned in build_errors that exist in repo (for BuildFixSpecialist context)."""
+    seen: set = set()
+    paths: List[str] = []
+    # Traceback: File "app/main.py", line 10 or app/main.py:42:
+    for m in re.finditer(
+        r'(?:File\s+["\']([^"\']+\.py)["\']|([a-zA-Z0-9_/]+\.py):\d+)',
+        build_errors,
+    ):
+        p = (m.group(1) or m.group(2) or "").strip()
+        if p and p not in seen and (repo_path / p).exists():
+            seen.add(p)
+            paths.append(p)
+    # tests/test_*.py
+    for m in re.finditer(r"tests/test_[a-zA-Z0-9_]+\.py", build_errors):
+        p = m.group(0)
+        if p not in seen and (repo_path / p).exists():
+            seen.add(p)
+            paths.append(p)
+    # Always include app/main.py if it exists (common fix target)
+    if "app/main.py" not in seen and (repo_path / "app" / "main.py").exists():
+        paths.insert(0, "app/main.py")
+    return paths[:10]  # Cap to avoid huge context
+
+
+def _read_affected_files_code(repo_path: Path, file_paths: List[str]) -> str:
+    """Read content of affected files for BuildFixSpecialist context."""
+    parts: List[str] = []
+    for p in file_paths:
+        f = repo_path / p
+        if f.is_file():
+            try:
+                parts.append(f"### {p} ###\n{f.read_text(encoding='utf-8', errors='replace')}")
+            except Exception:
+                pass
+    return "\n\n".join(parts) if parts else "# No affected files found"
+
+
+def _apply_build_fix_edits(
+    repo_path: Path, edits: List[Any], max_code_chars: int
+) -> Tuple[bool, str, Dict[str, str]]:
+    """Apply BuildFixSpecialist edits. Returns (success, message, files_dict for commit)."""
+    from build_fix_specialist.models import CodeEdit
+
+    # Group edits by file, apply in order
+    file_edits: Dict[str, List[CodeEdit]] = {}
+    for edit in edits:
+        if not isinstance(edit, CodeEdit):
+            continue
+        file_edits.setdefault(edit.file_path, []).append(edit)
+
+    files_to_write: Dict[str, str] = {}
+    for file_path, edit_list in file_edits.items():
+        fp = repo_path / file_path
+        if not fp.exists():
+            logger.warning("BuildFixSpecialist edit target not found: %s", file_path)
+            continue
+        try:
+            content = fp.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            logger.warning("BuildFixSpecialist could not read %s: %s", file_path, e)
+            continue
+        for edit in edit_list:
+            if edit.old_text not in content:
+                logger.warning(
+                    "BuildFixSpecialist old_text not found in %s (exact match required)",
+                    file_path,
+                )
+                return False, f"old_text not found in {file_path}", {}
+            content = content.replace(edit.old_text, edit.new_text, 1)
+        if len(content) > max_code_chars * 2:  # Sanity check
+            logger.warning("BuildFixSpecialist edit would produce oversized file")
+            continue
+        files_to_write[file_path] = content
+    if not files_to_write:
+        return False, "No edits could be applied", {}
+    return True, f"Applied {len(files_to_write)} edit(s)", files_to_write
+
+
 def _is_pytest_assertion_failure(build_errors: str) -> bool:
     """Return True if build_errors indicates a pytest assertion failure."""
     return "[pytest_assertion]" in build_errors or "failure_class=pytest_assertion" in build_errors
@@ -317,6 +397,7 @@ def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[
     else:
         suggestion = "Fix the compilation/test errors"
         file_path = ""
+        line_num = ""
         # Extract failing test file from feedback (e.g. "Fix tests/test_task_endpoints.py" or "Failing tests:\n  - tests/test_foo.py::test_bar")
         fix_tests_match = re.search(
             r"Fix\s+(tests/test_[a-zA-Z0-9_]+\.py)",
@@ -324,6 +405,7 @@ def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[
         )
         if fix_tests_match:
             file_path = fix_tests_match.group(1)
+            suggestion = f"Fix the errors in {file_path}. Read the traceback and apply the minimal change (e.g. add missing import, fix type, correct assertion)."
         else:
             failing_line_match = re.search(
                 r"Failing tests:.*?\n\s+-\s+(tests/test_[a-zA-Z0-9_]+\.py)(?:::|$)",
@@ -332,6 +414,19 @@ def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[
             )
             if failing_line_match:
                 file_path = failing_line_match.group(1)
+                suggestion = f"Fix the failing test in {file_path}. Ensure the implementation satisfies the test assertions."
+            else:
+                # Try to extract file:line from traceback (e.g. "app/main.py:42:" or 'File "app/main.py", line 42')
+                file_line_match = re.search(
+                    r'(?:File\s+["\']([^"\']+\.py)["\'].*?line\s+(\d+)|'
+                    r'([a-zA-Z0-9_/]+\.py):(\d+):)',
+                    build_errors,
+                )
+                if file_line_match:
+                    file_path = file_line_match.group(1) or file_line_match.group(3) or ""
+                    line_num = file_line_match.group(2) or file_line_match.group(4) or ""
+                    if file_path:
+                        suggestion = f"Fix the error at {file_path}" + (f" line {line_num}" if line_num else "") + ". Apply the minimal change indicated by the traceback."
     return [
         {
             "severity": "critical",
@@ -495,8 +590,12 @@ class BackendExpertAgent:
         existing_code: str,
         spec_content: str,
         architecture: Optional[SystemArchitecture],
-    ) -> str:
-        """Produce an implementation plan for the task. Returns plan markdown or empty string on failure."""
+    ) -> Tuple[str, bool]:
+        """Produce an implementation plan for the task.
+
+        Returns (plan_text, should_split). If should_split is True, the task is too broad
+        (>5 items in what_changes) and the workflow should ask Tech Lead to split it.
+        """
         context_parts: List[str] = [
             f"**Task:** {task.description}",
             f"**Requirements:** {_task_requirements(task)}",
@@ -527,10 +626,34 @@ class BackendExpertAgent:
         try:
             data = self.llm.complete_json(prompt, temperature=0.2)
             plan = TaskPlan.from_llm_json(data)
-            return plan.to_markdown()
+            # Count items in what_changes to detect overly broad tasks
+            what = plan.what_changes
+            if isinstance(what, list):
+                item_count = len([x for x in what if x and str(x).strip()])
+            else:
+                # Split string by newlines, bullets, or " - " to count items
+                text = str(what or "").strip()
+                if not text:
+                    item_count = 0
+                else:
+                    lines = [
+                        ln.strip()
+                        for ln in text.replace("- ", "\n").replace("• ", "\n").split("\n")
+                        if ln.strip() and not ln.strip().startswith("#")
+                    ]
+                    item_count = len(lines)
+            if item_count > 5:
+                logger.warning(
+                    "[%s] Task too broad: plan has %d items in what_changes. "
+                    "Asking Tech Lead to split task.",
+                    task.id,
+                    item_count,
+                )
+                return ("", True)
+            return (plan.to_markdown(), False)
         except Exception as e:
             logger.warning("[%s] Planning step failed, proceeding without plan: %s", task.id, e)
-            return ""
+            return ("", False)
 
     # ── Autonomous workflow ─────────────────────────────────────────────────
 
@@ -666,6 +789,7 @@ class BackendExpertAgent:
         logger.info("[%s] WORKFLOW Step 2/9: Generating backend code", task_id)
         current_task = task
         result: Optional[BackendOutput] = None
+        plan_text_for_fix_loop: str = ""  # Persists for review loop; passed to _regenerate_with_issues for first 2-3 fix attempts
 
         # Handle clarification sub-loop (separate from the review loop)
         from shared.context_sizing import compute_existing_code_chars
@@ -676,13 +800,43 @@ class BackendExpertAgent:
                 _read_repo_code(repo_path), max_code_chars
             )
             # Per-task planning: produce implementation plan before first code gen
-            plan_text = self._plan_task(
+            plan_text, should_split = self._plan_task(
                 task=current_task,
                 existing_code=existing_code,
                 spec_content=spec_content,
                 architecture=architecture,
             )
+            if should_split:
+                if clar_round < MAX_CLARIFICATION_ROUNDS:
+                    logger.info(
+                        "[%s] WORKFLOW   Task too broad (plan has >5 items); refining via Tech Lead to split",
+                        task_id,
+                    )
+                    current_task = tech_lead.refine_task(
+                        current_task,
+                        ["Task too broad - split into smaller tasks. The implementation plan has more than 5 items in what_changes. Break this into 2-3 focused subtasks."],
+                        spec_content,
+                        architecture,
+                    )
+                    continue
+                else:
+                    logger.warning(
+                        "[%s] WORKFLOW FAILED at Step 2: Task still too broad after %d refinement rounds",
+                        task_id,
+                        MAX_CLARIFICATION_ROUNDS,
+                    )
+                    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+                    return BackendWorkflowResult(
+                        task_id=task_id,
+                        success=False,
+                        branch_name=branch_name,
+                        failure_reason=(
+                            "Task too broad after "
+                            f"{MAX_CLARIFICATION_ROUNDS} refinement rounds (plan had >5 items)"
+                        ),
+                    )
             if plan_text:
+                plan_text_for_fix_loop = plan_text
                 logger.info("[%s] WORKFLOW   Planning complete, plan length=%d chars", task_id, len(plan_text))
                 plan_dir = repo_path.parent / "plan"
                 if not plan_dir.exists():
@@ -757,7 +911,7 @@ class BackendExpertAgent:
         # ── Step 3: Write files and commit ──────────────────────────────────
         logger.info("[%s] WORKFLOW Step 3/9: Writing files and committing", task_id)
         # Pre-write check: if tests reference /test-generic-error but main.py doesn't include it, regenerate
-        for _ in range(MAX_SAME_BUILD_FAILURES):
+        for _ in range(MAX_PREWRITE_REGENERATIONS):
             missing = _test_routes_missing_from_main_py(repo_path, result.files)
             if not missing:
                 break
@@ -772,6 +926,21 @@ class BackendExpertAgent:
                 spec_content=spec_content,
                 architecture=architecture,
                 code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+                task_plan=plan_text_for_fix_loop or None,
+            )
+        missing_after = _test_routes_missing_from_main_py(repo_path, result.files)
+        if missing_after:
+            failure_reason = (
+                f"Could not generate main.py with required test routes after {MAX_PREWRITE_REGENERATIONS} attempts. "
+                f"Tests reference {missing_after} but main.py does not include them."
+            )
+            logger.error("[%s] WORKFLOW FAILED at Step 3: %s", task_id, failure_reason)
+            checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+            return BackendWorkflowResult(
+                task_id=task_id,
+                success=False,
+                branch_name=branch_name,
+                failure_reason=failure_reason,
             )
         ok, write_msg = write_agent_output(repo_path, result, subdir="")
         if not ok:
@@ -806,6 +975,7 @@ class BackendExpertAgent:
         consecutive_same_build_failures = 0
         repeated_build_failure_reason: Optional[str] = None
         write_tests_requested = False
+        fix_attempt_count = 0  # Track regenerations; pass task_plan for first 3 to reduce drift
 
         for iteration in range(1, MAX_REVIEW_ITERATIONS + 1):
             iter_start = time.monotonic()
@@ -826,6 +996,7 @@ class BackendExpertAgent:
                     iteration,
                     missing_routes,
                 )
+                task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                 result = self._regenerate_with_issues(
                     repo_path=repo_path,
                     current_task=current_task,
@@ -834,8 +1005,10 @@ class BackendExpertAgent:
                     code_review_issues=_build_code_review_issues_for_missing_test_routes(
                         missing_routes
                     ),
+                    task_plan=task_plan_arg,
                 )
-                for _ in range(MAX_SAME_BUILD_FAILURES):
+                fix_attempt_count += 1
+                for _ in range(MAX_PREWRITE_REGENERATIONS - 1):  # -1 since we already regenerated once above
                     main_from_files = (
                         result.files.get("app/main.py", "")
                         or result.files.get("main.py", "")
@@ -845,6 +1018,7 @@ class BackendExpertAgent:
                     )
                     if not still_missing:
                         break
+                    task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                     result = self._regenerate_with_issues(
                         repo_path=repo_path,
                         current_task=current_task,
@@ -853,6 +1027,29 @@ class BackendExpertAgent:
                         code_review_issues=_build_code_review_issues_for_missing_test_routes(
                             still_missing
                         ),
+                        task_plan=task_plan_arg,
+                    )
+                    fix_attempt_count += 1
+                main_after = result.files.get("app/main.py", "") or result.files.get("main.py", "")
+                still_missing_after = _check_test_endpoint_compatibility(
+                    repo_path, main_content=main_after
+                )
+                if still_missing_after:
+                    failure_reason = (
+                        f"Could not generate main.py with required test routes after {MAX_PREWRITE_REGENERATIONS} attempts. "
+                        f"Tests reference {still_missing_after} but main.py does not include them."
+                    )
+                    logger.error("[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason)
+                    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+                    return BackendWorkflowResult(
+                        task_id=task_id,
+                        success=False,
+                        branch_name=branch_name,
+                        iterations_used=len(review_history),
+                        review_history=review_history,
+                        summary=result.summary if result else "",
+                        failure_reason=failure_reason,
+                        needs_followup=True,
                     )
                 ok, write_msg = write_agent_output(repo_path, result, subdir="")
                 if not ok:
@@ -891,10 +1088,12 @@ class BackendExpertAgent:
                 else:
                     last_build_error_sig = build_error_sig
                     consecutive_same_build_failures = 1
-                if consecutive_same_build_failures >= MAX_SAME_BUILD_FAILURES:
+                # Exit at 5 (not 6) so Tech Lead can create follow-up task early
+                if consecutive_same_build_failures >= 5:
                     repeated_build_failure_reason = (
-                        f"Build failed {MAX_SAME_BUILD_FAILURES} times with the same error; "
-                        "stopping to avoid loop. Last error: " + build_errors[:800]
+                        "Build failed 5 times with the same error; "
+                        "stopping early so Tech Lead can create follow-up fix task. Last error: "
+                        + build_errors[:800]
                     )
                     logger.error(
                         "[%s] WORKFLOW   [%d] %s",
@@ -903,6 +1102,63 @@ class BackendExpertAgent:
                         repeated_build_failure_reason[:800],
                     )
                     break
+
+                # When same error repeats 2+ times, try BuildFixSpecialist for minimal targeted fix
+                specialist_success = False
+                if consecutive_same_build_failures >= 2:
+                    try:
+                        from build_fix_specialist import BuildFixSpecialistAgent, BuildFixInput
+
+                        affected_paths = _extract_affected_file_paths_from_build_errors(build_errors, repo_path)
+                        affected_code = _read_affected_files_code(repo_path, affected_paths)
+                        failing_test_file = (
+                            _extract_failing_test_file_from_build_errors(build_errors)
+                            if _is_pytest_assertion_failure(build_errors)
+                            else None
+                        )
+                        failing_test_content = None
+                        if failing_test_file:
+                            test_path = repo_path / failing_test_file
+                            if test_path.exists():
+                                try:
+                                    failing_test_content = test_path.read_text(encoding="utf-8", errors="replace")[:3000]
+                                except Exception:
+                                    pass
+                        specialist = BuildFixSpecialistAgent(llm_client=self.llm)
+                        bf_result = specialist.run(BuildFixInput(
+                            build_errors=build_errors[:4000],
+                            failing_test_content=failing_test_content,
+                            affected_files_code=affected_code,
+                            task_description=current_task.description,
+                        ))
+                        if bf_result.edits:
+                            max_chars = compute_existing_code_chars(self.llm)
+                            ok_apply, msg_apply, files_dict = _apply_build_fix_edits(
+                                repo_path, bf_result.edits, max_chars
+                            )
+                            if ok_apply and files_dict:
+                                ok_write, write_msg = write_agent_output(repo_path, type("R", (), {"files": files_dict, "summary": bf_result.summary})(), subdir="")
+                                if ok_write:
+                                    specialist_success = True
+                                    logger.info(
+                                        "[%s] WORKFLOW   [%d] BuildFixSpecialist applied %d edit(s), re-running build",
+                                        task_id,
+                                        iteration,
+                                        len(files_dict),
+                                    )
+                                    continue  # Re-run build verification
+                                else:
+                                    logger.warning("[%s] WORKFLOW   BuildFixSpecialist write failed: %s", task_id, write_msg)
+                            else:
+                                logger.warning("[%s] WORKFLOW   BuildFixSpecialist apply failed: %s", task_id, msg_apply)
+                        else:
+                            logger.info("[%s] WORKFLOW   BuildFixSpecialist returned no edits, falling back to full regeneration", task_id)
+                    except Exception as spec_err:
+                        logger.warning(
+                            "[%s] WORKFLOW   BuildFixSpecialist failed (non-blocking): %s",
+                            task_id,
+                            spec_err,
+                        )
 
                 # Invoke testing sub-agent to analyze build errors and produce fix recommendations
                 code_on_branch = _read_repo_code(repo_path)
@@ -971,16 +1227,35 @@ class BackendExpertAgent:
                         "location": failing_test_file or "",
                         "recommendation": escalation_suggestion,
                     })
+                    if consecutive_same_build_failures == 4:
+                        # Suggest that test expectations might be wrong
+                        qa_issues.insert(0, {
+                            "severity": "critical",
+                            "description": (
+                                "ESCALATION (4th same failure): Consider whether the failing test expectations are wrong. "
+                                "If the test asserts behavior that conflicts with the spec, you may need to update the test "
+                                "rather than the implementation. Explain your reasoning. Either fix the implementation to "
+                                "satisfy the test, or update the test if it incorrectly asserts behavior."
+                            ),
+                            "location": "",
+                            "recommendation": (
+                                "Re-read the failing test and the spec. If the test is wrong, Change the test to match the spec. "
+                                "If the implementation is wrong, Fix the implementation to satisfy the test."
+                            ),
+                        })
+                task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                 result = self._regenerate_with_issues(
                     repo_path=repo_path,
                     current_task=current_task,
                     spec_content=spec_content,
                     architecture=architecture,
                     qa_issues=qa_issues,
+                    task_plan=task_plan_arg,
                 )
+                fix_attempt_count += 1
                 # Pre-write check: if tests reference /test-generic-error but result's
                 # main.py doesn't include it, regenerate with targeted issue before writing.
-                for _ in range(MAX_SAME_BUILD_FAILURES):
+                for _ in range(MAX_PREWRITE_REGENERATIONS):
                     missing = _test_routes_missing_from_main_py(repo_path, result.files)
                     if not missing:
                         break
@@ -990,12 +1265,33 @@ class BackendExpertAgent:
                         iteration,
                         missing,
                     )
+                    task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                     result = self._regenerate_with_issues(
                         repo_path=repo_path,
                         current_task=current_task,
                         spec_content=spec_content,
                         architecture=architecture,
                         code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+                        task_plan=task_plan_arg,
+                    )
+                    fix_attempt_count += 1
+                missing_after_build = _test_routes_missing_from_main_py(repo_path, result.files)
+                if missing_after_build:
+                    failure_reason = (
+                        f"Could not generate main.py with required test routes after {MAX_PREWRITE_REGENERATIONS} attempts. "
+                        f"Tests reference {missing_after_build} but main.py does not include them."
+                    )
+                    logger.error("[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason)
+                    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+                    return BackendWorkflowResult(
+                        task_id=task_id,
+                        success=False,
+                        branch_name=branch_name,
+                        iterations_used=len(review_history),
+                        review_history=review_history,
+                        summary=result.summary if result else "",
+                        failure_reason=failure_reason,
+                        needs_followup=True,
                     )
                 ok, write_msg = write_agent_output(repo_path, result, subdir="")
                 if not ok:
@@ -1095,15 +1391,18 @@ class BackendExpertAgent:
                     i.model_dump() if hasattr(i, "model_dump") else i.dict()
                     for i in review_result.issues
                 ]
+                task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                 result = self._regenerate_with_issues(
                     repo_path=repo_path,
                     current_task=current_task,
                     spec_content=spec_content,
                     architecture=architecture,
                     code_review_issues=cr_issues,
+                    task_plan=task_plan_arg,
                 )
+                fix_attempt_count += 1
                 # Pre-write check: preserve test-only routes in main.py
-                for _ in range(MAX_SAME_BUILD_FAILURES):
+                for _ in range(MAX_PREWRITE_REGENERATIONS):
                     missing = _test_routes_missing_from_main_py(repo_path, result.files)
                     if not missing:
                         break
@@ -1113,12 +1412,33 @@ class BackendExpertAgent:
                         iteration,
                         missing,
                     )
+                    task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                     result = self._regenerate_with_issues(
                         repo_path=repo_path,
                         current_task=current_task,
                         spec_content=spec_content,
                         architecture=architecture,
                         code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+                        task_plan=task_plan_arg,
+                    )
+                    fix_attempt_count += 1
+                missing_after_cr = _test_routes_missing_from_main_py(repo_path, result.files)
+                if missing_after_cr:
+                    failure_reason = (
+                        f"Could not generate main.py with required test routes after {MAX_PREWRITE_REGENERATIONS} attempts. "
+                        f"Tests reference {missing_after_cr} but main.py does not include them."
+                    )
+                    logger.error("[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason)
+                    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+                    return BackendWorkflowResult(
+                        task_id=task_id,
+                        success=False,
+                        branch_name=branch_name,
+                        iterations_used=len(review_history),
+                        review_history=review_history,
+                        summary=result.summary if result else "",
+                        failure_reason=failure_reason,
+                        needs_followup=True,
                     )
                 ok, write_msg = write_agent_output(repo_path, result, subdir="")
                 if not ok:
@@ -1168,23 +1488,47 @@ class BackendExpertAgent:
                             }
                             for c in unsatisfied
                         ]
+                        task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                         result = self._regenerate_with_issues(
                             repo_path=repo_path,
                             current_task=current_task,
                             spec_content=spec_content,
                             architecture=architecture,
                             code_review_issues=code_review_issues,
+                            task_plan=task_plan_arg,
                         )
-                        for _ in range(MAX_SAME_BUILD_FAILURES):
+                        fix_attempt_count += 1
+                        for _ in range(MAX_PREWRITE_REGENERATIONS):
                             missing = _test_routes_missing_from_main_py(repo_path, result.files)
                             if not missing:
                                 break
+                            task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                             result = self._regenerate_with_issues(
                                 repo_path=repo_path,
                                 current_task=current_task,
                                 spec_content=spec_content,
                                 architecture=architecture,
                                 code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+                                task_plan=task_plan_arg,
+                            )
+                            fix_attempt_count += 1
+                        missing_after_av = _test_routes_missing_from_main_py(repo_path, result.files)
+                        if missing_after_av:
+                            failure_reason = (
+                                f"Could not generate main.py with required test routes after {MAX_PREWRITE_REGENERATIONS} attempts. "
+                                f"Tests reference {missing_after_av} but main.py does not include them."
+                            )
+                            logger.error("[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason)
+                            checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+                            return BackendWorkflowResult(
+                                task_id=task_id,
+                                success=False,
+                                branch_name=branch_name,
+                                iterations_used=len(review_history),
+                                review_history=review_history,
+                                summary=result.summary if result else "",
+                                failure_reason=failure_reason,
+                                needs_followup=True,
                             )
                         ok, write_msg = write_agent_output(repo_path, result, subdir="")
                         if not ok:
@@ -1229,23 +1573,47 @@ class BackendExpertAgent:
                 record.action_taken = "fixed_security_issues"
                 review_history.append(record)
 
+                task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                 result = self._regenerate_with_issues(
                     repo_path=repo_path,
                     current_task=current_task,
                     spec_content=spec_content,
                     architecture=architecture,
                     security_issues=security_issues,
+                    task_plan=task_plan_arg,
                 )
-                for _ in range(MAX_SAME_BUILD_FAILURES):
+                fix_attempt_count += 1
+                for _ in range(MAX_PREWRITE_REGENERATIONS):
                     missing = _test_routes_missing_from_main_py(repo_path, result.files)
                     if not missing:
                         break
+                    task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                     result = self._regenerate_with_issues(
                         repo_path=repo_path,
                         current_task=current_task,
                         spec_content=spec_content,
                         architecture=architecture,
                         code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+                        task_plan=task_plan_arg,
+                    )
+                    fix_attempt_count += 1
+                missing_after_sec = _test_routes_missing_from_main_py(repo_path, result.files)
+                if missing_after_sec:
+                    failure_reason = (
+                        f"Could not generate main.py with required test routes after {MAX_PREWRITE_REGENERATIONS} attempts. "
+                        f"Tests reference {missing_after_sec} but main.py does not include them."
+                    )
+                    logger.error("[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason)
+                    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+                    return BackendWorkflowResult(
+                        task_id=task_id,
+                        success=False,
+                        branch_name=branch_name,
+                        iterations_used=len(review_history),
+                        review_history=review_history,
+                        summary=result.summary if result else "",
+                        failure_reason=failure_reason,
+                        needs_followup=True,
                     )
                 ok, write_msg = write_agent_output(repo_path, result, subdir="")
                 if not ok:
@@ -1377,13 +1745,16 @@ class BackendExpertAgent:
                                 }
                                 for i in cr_issues
                             ]
+                        task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                         result = self._regenerate_with_issues(
                             repo_path=repo_path,
                             current_task=current_task,
                             spec_content=spec_content,
                             architecture=architecture,
                             qa_issues=qa_issues_artifact,
+                            task_plan=task_plan_arg,
                         )
+                        fix_attempt_count += 1
                         ok, write_msg = write_agent_output(repo_path, result, subdir="")
                         if not ok:
                             logger.error(
@@ -1412,15 +1783,18 @@ class BackendExpertAgent:
                 record.action_taken = "fixed_qa_issues"
                 review_history.append(record)
 
+                task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                 result = self._regenerate_with_issues(
                     repo_path=repo_path,
                     current_task=current_task,
                     spec_content=spec_content,
                     architecture=architecture,
                     qa_issues=qa_issues,
+                    task_plan=task_plan_arg,
                 )
+                fix_attempt_count += 1
                 # Pre-write check: preserve test-only routes in main.py
-                for _ in range(MAX_SAME_BUILD_FAILURES):
+                for _ in range(MAX_PREWRITE_REGENERATIONS):
                     missing = _test_routes_missing_from_main_py(repo_path, result.files)
                     if not missing:
                         break
@@ -1430,12 +1804,33 @@ class BackendExpertAgent:
                         iteration,
                         missing,
                     )
+                    task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                     result = self._regenerate_with_issues(
                         repo_path=repo_path,
                         current_task=current_task,
                         spec_content=spec_content,
                         architecture=architecture,
                         code_review_issues=_build_code_review_issues_for_missing_test_routes(),
+                        task_plan=task_plan_arg,
+                    )
+                    fix_attempt_count += 1
+                missing_after_qa = _test_routes_missing_from_main_py(repo_path, result.files)
+                if missing_after_qa:
+                    failure_reason = (
+                        f"Could not generate main.py with required test routes after {MAX_PREWRITE_REGENERATIONS} attempts. "
+                        f"Tests reference {missing_after_qa} but main.py does not include them."
+                    )
+                    logger.error("[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason)
+                    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+                    return BackendWorkflowResult(
+                        task_id=task_id,
+                        success=False,
+                        branch_name=branch_name,
+                        iterations_used=len(review_history),
+                        review_history=review_history,
+                        summary=result.summary if result else "",
+                        failure_reason=failure_reason,
+                        needs_followup=True,
                     )
                 ok, write_msg = write_agent_output(repo_path, result, subdir="")
                 if not ok:
@@ -1678,6 +2073,7 @@ class BackendExpertAgent:
         security_issues: List[Dict[str, Any]] | None = None,
         code_review_issues: List[Dict[str, Any]] | None = None,
         suggested_tests_from_qa: Optional[Dict[str, str]] = None,
+        task_plan: Optional[str] = None,
     ) -> BackendOutput:
         """
         Re-invoke the code generator with issues to fix.
@@ -1712,6 +2108,7 @@ class BackendExpertAgent:
                 security_issues=security_issues or [],
                 code_review_issues=code_review_issues or [],
                 suggested_tests_from_qa=suggested_tests_from_qa,
+                task_plan=task_plan,
             )
         )
 
@@ -2024,6 +2421,12 @@ class BackendExpertAgent:
                     for i in input_data.code_review_issues
                 )
                 problem_block_parts.extend(["", "**Code review issues to resolve:**", cr_text])
+            if input_data.task_plan:
+                problem_block_parts.extend([
+                    "",
+                    "**CRITICAL - Implementation plan:** When fixing issues, you must still satisfy the Implementation plan below. "
+                    "Do not remove or change code that fulfills the plan unless the issue explicitly requires it.",
+                ])
             problem_block_parts.extend(["", "---"])
             context_parts.append("\n".join(problem_block_parts))
             logger.info(

@@ -35,6 +35,18 @@ Edges have from_id, to_id, type: "blocks" | "relates_to" | "loads_from"
 - Use "blocks" edges for dependencies
 - Align with delivery_strategy (e.g. vertical slices, parallel with backend)
 
+**Considerations (address in nodes/acceptance_criteria where applicable):**
+1. Authentication and authorization: Include auth-related tasks (login, guards, token handling) and acceptance criteria for role-based access.
+2. Data management: Plan for data fetching, caching, and lifecycle (loading, error, empty states).
+3. State management: Tasks for global vs local state, persistence, and state sync with backend.
+4. Database requirements: Frontend implications of data models (forms, validation, display).
+5. Performance: Lazy loading, code splitting, bundle size, and performance budgets.
+6. Cost: Client-side resource usage, API call efficiency, caching to reduce load.
+7. Security: XSS, CSRF, secure storage, and safe handling of sensitive data.
+8. Accessibility: Keyboard nav, ARIA, contrast, focus management, screen reader support.
+9. API integration: Contract alignment, error handling, retries, and type safety.
+10. Testing: Unit, integration, and E2E test tasks and acceptance criteria.
+
 **Output format:**
 Return a single JSON object with:
 - "nodes": list of {"id", "domain", "kind", "summary", "details", "user_story", "acceptance_criteria", "inputs", "outputs", "parent_id", "metadata"}
