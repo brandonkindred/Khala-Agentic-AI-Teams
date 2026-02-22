@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from shared.llm import LLMClient
+from shared.llm import LLMClient, LLMPermanentError
 from shared.models import ArchitectureComponent, ProductRequirements, SystemArchitecture
 
 from .models import ArchitectureInput, ArchitectureOutput
@@ -164,7 +164,13 @@ class ArchitectureExpertAgent:
 
         prompt = ARCHITECTURE_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
 
-        data: Dict[str, Any] = self.llm.complete_json(prompt, temperature=0.2) or {}
+        try:
+            data: Dict[str, Any] = self.llm.complete_json(prompt, temperature=0.2) or {}
+        except LLMPermanentError:
+            logger.warning(
+                "Architecture Expert: LLM returned non-JSON response, falling back to synthetic architecture"
+            )
+            data = {}
 
         # Detect raw wrapper from JSON parse failure (only "content" key, or no "overview")
         is_parse_failure = (

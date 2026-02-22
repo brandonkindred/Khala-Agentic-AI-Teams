@@ -21,7 +21,7 @@ A multi-agent system that simulates a real software engineering team with a mix 
 | **Linting Tool Agent** | Quality | Linting specialist | Detects project linters, runs them, produces code fixes to pass lint |
 | **DbC Comments Agent** | Quality | Design by Contract | Adds pre/postconditions and invariants to code |
 | **Integration Agent** | Integration/release | Full-stack validator | Validates backend-frontend API contract alignment after workers complete |
-| **DevOps Expert** | Integration/release | Infrastructure specialist | CI/CD pipelines, IaC (Terraform, etc.), Docker, networking |
+| **DevOps Team** (via DevOps Engineering Team) | Integration/release | DevOps sub-orchestration | Team Lead, Task Clarifier, IaC, CI/CD, Deployment Strategy, DevSecOps Review, Test Validation, Change Review, Documentation & Runbook – contract-first pipeline with hard gates |
 | **Documentation Agent** | Integration/release | Technical writer | Updates README and project docs |
 
 ## Coding Standards
@@ -52,7 +52,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 | **Implementation** | backend | Backend Expert |
 | **Implementation** | frontend_team | UX Designer, UI Designer, Design System, Frontend Architect, Feature Agent, UX Engineer, Performance Engineer, Build/Release |
 | **Quality** | quality gates (cross-cutting) | Code Review, QA Expert, Cybersecurity Expert, Accessibility Expert, Acceptance Verifier, DbC Comments |
-| **Integration / release** | top-level | Integration Agent, DevOps Expert, Documentation Agent |
+| **Integration / release** | top-level | Integration Agent, DevOps Team (sub-orchestrator), Documentation Agent |
 
 **Planning team sub-groups:** Within `planning_team/`, **Discovery** (intake) = Spec Intake, Project Planning. **Design** = Architecture, Tech Lead, and all domain planning agents. The Tech Lead uses planning graph agents (backend, frontend, data, test, performance, documentation, quality-gate planning) internally when creating task details and aligning with Architecture.
 
@@ -357,7 +357,19 @@ software_engineering_team/
 ├── git_setup_agent/
 ├── architect-agents/      # ArchitectureExpertAgent + Enterprise Orchestrator
 ├── tech_lead_agent/
-├── devops_agent/
+├── devops_agent/          # Legacy (retained, no longer routed to)
+├── devops_team/           # DevOps Engineering Team (MVP: 9 core agents, 5 tool agents)
+│   ├── orchestrator.py    # DevOpsTeamLeadAgent
+│   ├── models.py          # Shared contracts (DevOpsTaskSpec, DevOpsCompletionPackage, etc.)
+│   ├── task_clarifier/    # Validates task spec completeness
+│   ├── iac_agent/         # Infrastructure as Code
+│   ├── cicd_pipeline_agent/  # CI/CD workflows
+│   ├── deployment_strategy_agent/  # Rollout and rollback
+│   ├── devsecops_review_agent/     # Security review
+│   ├── test_validation_agent/      # Gate aggregation
+│   ├── change_review_agent/        # Senior DevOps review
+│   ├── doc_runbook_agent/          # Runbooks and handoff
+│   └── tool_agents/       # Stateless subprocess wrappers (repo nav, IaC validate, policy, CI/CD lint, dry-run)
 ├── security_agent/
 ├── backend_agent/
 ├── quality_gates/        # Cross-cutting review agents (Code Review, QA, Security, Acceptance Verifier, DbC)
@@ -423,3 +435,125 @@ Each agent has:
 - `agent.py` – Core logic
 - `models.py` – Input/output Pydantic models
 - `prompts.py` – LLM prompt templates
+
+## DevOps Engineering Team (`devops_team/`)
+
+The `devops_team/` package replaces the legacy monolithic `devops_agent/` with a contract-first, multi-agent DevOps engineering team modeled after `frontend_team/`. It implements the **MVP fleet** (9 core agents + 5 tool agents) with hard gates, environment-aware safety, and structured completion packages.
+
+### Design Principles
+
+- **Contract-first**: All work starts with a validated `DevOpsTaskSpec` and produces a `DevOpsCompletionPackage`.
+- **Role separation**: The agent that writes IaC does not self-approve; independent review agents gate progression.
+- **Environment-aware safety**: Distinct policies for dev, staging, and production (approval gates, rollback requirements, policy strictness).
+- **Hard gates**: No merge without passing IaC validation, policy checks, security review, change review, and dry-run validation.
+- **Idempotent, reversible, observable**: All changes must be repeatable, rollbackable, and monitorable.
+
+### Team Structure
+
+| Agent | Role |
+|-------|------|
+| **DevOpsTeamLeadAgent** (orchestrator) | Coordinates all agents, enforces gates, compiles completion package |
+| **DevOpsTaskClarifierAgent** | Validates task spec completeness (environments, rollback, approvals, secrets) |
+| **InfrastructureAsCodeAgent** | Generates IaC artifacts (Terraform, CDK, etc.) with blast-radius awareness |
+| **CICDPipelineAgent** | Creates CI/CD workflows with required gates and OIDC auth preference |
+| **DeploymentStrategyAgent** | Defines rollout strategy, rollback plan, health checks, and timeouts |
+| **DevSecOpsReviewAgent** | Reviews IAM, secrets, network exposure, artifact integrity; blocks on high-risk findings |
+| **DevOpsTestValidationAgent** | Aggregates tool results and maps evidence to acceptance criteria |
+| **ChangeReviewAgent** | Independent senior DevOps review for maintainability and architecture fit |
+| **DocumentationRunbookAgent** | Produces runbooks, rollback docs, and operational handoff artifacts |
+
+### Tool Agents (stateless, no LLM)
+
+| Tool Agent | Purpose |
+|------------|---------|
+| **RepoNavigatorToolAgent** | Discovers IaC, pipeline, and deploy paths in the repository |
+| **IaCValidationToolAgent** | Runs `terraform fmt/validate` and reports structured findings |
+| **PolicyAsCodeToolAgent** | Runs `checkov`/`tfsec` policy scanners (skips if not installed) |
+| **CICDLintPipelineValidationToolAgent** | Validates workflow YAML syntax and required gate presence |
+| **DeploymentDryRunPlanToolAgent** | Runs `helm lint/template` for Kubernetes manifests |
+| **GitOperationsToolAgent** | Reused from existing codebase; DevOpsTeamLeadAgent has merge authority |
+
+### Workflow Phases
+
+1. **Intake & Clarification** — Environment policy check, then task clarifier validates spec completeness
+2. **Change Design** — IaC, CI/CD, and Deployment Strategy agents generate artifacts in parallel
+3. **Branch & Implementation** — Artifacts written to repo via `write_agent_output`
+4. **Validation & Review** — Tool agents validate, then DevSecOps + Change Review + Test Validation approve
+5. **Commit, Merge, Release Readiness** — Completion package assembled with acceptance trace, quality gates, and git metadata
+
+### Environment Policy Matrix
+
+| Environment | Auto-deploy | Approval | Rollback Test | Policy Strictness |
+|-------------|-------------|----------|---------------|-------------------|
+| dev | Yes | No | No | Low |
+| staging | Yes | No | Yes | Medium |
+| production | No | Yes | Yes | High |
+
+### Contracts
+
+**Input**: `DevOpsTaskSpec` — task_id, title, platform_scope (cloud, runtime, environments), repo_context, goal, scope, constraints (IaC, CI/CD, deployment, secrets, compliance), acceptance_criteria, rollback_requirements, security_constraints, risk_level, environment.
+
+**Output**: `DevOpsCompletionPackage` — task_id, status, files_changed, acceptance_criteria_trace, quality_gates, release_readiness (strategy, rollback, alerting, approvals), git_operations (branch, commits, merge), handoff (prod_approval_required, runbook_updated), notes, risks_remaining.
+
+### Completion Package Example
+
+```yaml
+task_id: DO-2207
+status: completed
+files_changed:
+  - .github/workflows/ci-cd.yml
+  - deploy/helm/billing-service/values-staging.yaml
+  - deploy/helm/billing-service/values-production.yaml
+  - infra/iam/github-oidc-billing-deploy.tf
+  - docs/runbooks/billing-service-deploy-and-rollback.md
+acceptance_criteria_trace:
+  - criterion: "Production deploy requires explicit approval"
+    implementation_refs:
+      - .github/workflows/ci-cd.yml
+    tests:
+      - pipeline_validation: manual_gate_present
+quality_gates:
+  iac_validate: pass
+  iac_validate_fmt: pass
+  policy_checks: pass
+  pipeline_lint: pass
+  pipeline_gate_check: pass
+  deployment_dry_run: pass
+  security_review: pass
+  change_review: pass
+release_readiness:
+  deployment_strategy: rolling
+  rollback_available: true
+  alerting_configured: true
+  required_approvals:
+    - manual_prod_approval
+  runtime_verification_checklist:
+    - deployment_rollout_status
+    - service_health
+    - alert_health
+git_operations:
+  branch_created: feature/do-2207
+  commits:
+    - hash: 91ac44e
+      message: "feat(devops): add billing-service ci/cd workflow [DO-2207]"
+  merge:
+    target_branch: development
+    strategy: squash
+    merge_commit_hash: 7f4d932
+    status: success
+handoff:
+  prod_approval_required: true
+  runbook_updated: true
+risks_remaining:
+  - "Image signing marked preferred but not enforced yet"
+notes:
+  - "OIDC used for GitHub Actions to AWS, no long-lived deploy keys"
+```
+
+### Backward Compatibility
+
+The `DevOpsTeamLeadAgent` provides a `run_workflow()` method that accepts the same parameters as the legacy `DevOpsExpertAgent.run_workflow()`. When called by the Tech Lead's `trigger_devops_for_backend/frontend`, it constructs a `DevOpsTaskSpec` internally (adding defaults for rollback, security, approval gates) and runs the full pipeline. The legacy `devops_agent/` and `devops_review_agent/` packages remain in the codebase but are no longer routed to by the main orchestrator.
+
+### Expanded Team (Phase 2, not yet implemented)
+
+The MVP can be extended with: ContainerizationBuildAgent, EnvironmentConfigSecretsIntegrationAgent, ObservabilityAlertingAgent, ReliabilitySREReviewAgent, and corresponding tool agents (ContainerBuildScanToolAgent, RuntimeVerificationToolAgent, SecretsConfigIntegrityToolAgent, ObservabilityConfigValidationToolAgent, ChangeExecutionToolAgent).

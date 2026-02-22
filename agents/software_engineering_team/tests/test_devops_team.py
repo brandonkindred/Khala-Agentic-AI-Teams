@@ -754,6 +754,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         mock_llm = _mock_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init"], cwd=tmp, capture_output=True, check=False)
             result = agent.run_workflow(
                 repo_path=Path(tmp),
                 task_description="Deploy",
@@ -775,6 +776,7 @@ class TestBackwardCompatibility:
         mock_llm = _mock_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init"], cwd=tmp, capture_output=True, check=False)
             result = agent.run_workflow(
                 repo_path=Path(tmp),
                 task_description="Add CI/CD",
