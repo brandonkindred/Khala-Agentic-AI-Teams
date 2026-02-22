@@ -9,6 +9,7 @@ import pytest
 from backend_agent.agent import (
     EXCEPTION_HANDLER_TEST_PATTERNS,
     MAX_PREWRITE_REGENERATIONS,
+    MAX_PROBLEM_SOLVER_CYCLES,
     BackendExpertAgent,
     _build_code_review_issues_for_build_failure,
     _build_code_review_issues_for_missing_test_routes,
@@ -17,9 +18,17 @@ from backend_agent.agent import (
     _is_pytest_assertion_failure,
     _test_routes_missing_from_main_py,
     _test_routes_referenced_in_tests,
+    _validate_task_contract,
+    _build_completion_package,
 )
 from backend_agent.models import BackendInput
 
+
+
+
+def test_problem_solver_cycle_constant_defaults_to_twenty() -> None:
+    """Problem solver cycle budget is bounded and defaults to a sane range around 20."""
+    assert 1 <= MAX_PROBLEM_SOLVER_CYCLES <= 20
 
 def test_max_prewrite_regenerations_constant_defaults_to_two() -> None:
     """MAX_PREWRITE_REGENERATIONS is 2 by default to cap pre-write loops and reduce LLM calls."""
@@ -462,6 +471,8 @@ def test_run_workflow_exits_at_five_same_build_failures_and_notifies_tech_lead(
         assignee="backend",
         title="Add API",
         description="Implement GET /health",
+        acceptance_criteria=["returns 200"],
+        metadata={"goal": {"summary": "x"}, "scope": {"included": ["x"]}, "constraints": {"framework": "fastapi"}, "non_functional_requirements": {"latency_p95_ms": 300}, "inputs_outputs": {"input": "x", "output": "y"}},
     )
     same_error = "ImportError: No module named 'foo'"
 
@@ -496,9 +507,9 @@ def test_run_workflow_exits_at_five_same_build_failures_and_notifies_tech_lead(
         spec_content="# Spec",
         architecture=None,
         qa_agent=mock_qa,
-        security_agent=MagicMock(),
-        dbc_agent=MagicMock(),
-        code_review_agent=MagicMock(),
+        security_agent=MagicMock(run=MagicMock(return_value=MagicMock(approved=True, issues=[]))),
+        dbc_agent=MagicMock(run=MagicMock(return_value=MagicMock(already_compliant=True, comments_added=0, comments_updated=0))),
+        code_review_agent=MagicMock(run=MagicMock(return_value=MagicMock(approved=True, issues=[]))),
         tech_lead=mock_tech_lead,
         build_verifier=build_verifier,
     )
@@ -550,6 +561,8 @@ def test_run_workflow_invokes_build_fix_specialist_when_same_build_fails_twice(
         assignee="backend",
         title="Add API",
         description="Implement GET /health",
+        acceptance_criteria=["returns 200"],
+        metadata={"goal": {"summary": "x"}, "scope": {"included": ["x"]}, "constraints": {"framework": "fastapi"}, "non_functional_requirements": {"latency_p95_ms": 300}, "inputs_outputs": {"input": "x", "output": "y"}},
     )
     same_error = "ImportError: No module named 'foo'"
 
@@ -613,3 +626,182 @@ def test_run_workflow_invokes_build_fix_specialist_when_same_build_fails_twice(
     # Verify patch was applied: app/main.py should contain the specialist's edit
     main_content = (tmp_path / "app" / "main.py").read_text()
     assert "# fixed" in main_content
+
+
+def test_backend_agent_includes_specialist_tooling_plan_in_prompt() -> None:
+    """When specialist_tooling_plan is provided, prompt includes Backend Agent V2 specialist coordination block."""
+    mock_llm = MagicMock()
+    mock_llm.complete_json.return_value = {
+        "code": "",
+        "language": "python",
+        "summary": "Implemented",
+        "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()"},
+        "tests": "",
+        "suggested_commit_message": "feat: add",
+    }
+    agent = BackendExpertAgent(llm_client=mock_llm)
+    agent.run(
+        BackendInput(
+            task_description="Implement auth-protected task endpoint",
+            requirements="",
+            specialist_tooling_plan={
+                "api": {"directive": "update openapi"},
+                "auth_security": {"directive": "enforce RBAC"},
+            },
+        )
+    )
+    prompt = mock_llm.complete_json.call_args[0][0]
+    assert "BACKEND AGENT V2 SPECIALIST TOOLING PLAN" in prompt
+    assert "devops, api, quality_review, qa, data_engineering, auth_security" in prompt
+    assert "enforce RBAC" in prompt
+
+
+def test_backend_agent_includes_specialist_findings_in_prompt() -> None:
+    """When specialist_findings are provided, prompt includes specialist constraints block."""
+    mock_llm = MagicMock()
+    mock_llm.complete_json.return_value = {
+        "code": "",
+        "language": "python",
+        "summary": "Implemented",
+        "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()"},
+        "tests": "",
+        "suggested_commit_message": "feat: add",
+    }
+    agent = BackendExpertAgent(llm_client=mock_llm)
+    agent.run(
+        BackendInput(
+            task_description="Implement task service",
+            requirements="",
+            specialist_findings={
+                "qa": {"failing_tests": ["tests/test_tasks.py::test_create_task"]},
+                "data_engineering": {"migration": "add tasks.owner_id index"},
+            },
+        )
+    )
+    prompt = mock_llm.complete_json.call_args[0][0]
+    assert "SPECIALIST FINDINGS / CONSTRAINTS" in prompt
+    assert "add tasks.owner_id index" in prompt
+    assert "preserve security and correctness first" in prompt
+
+
+def test_run_workflow_uses_problem_solver_agent_on_build_failure(tmp_path: Path) -> None:
+    """When provided, problem solver agent is invoked during build-failure bug fixing."""
+    from shared.models import Task, TaskType
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "app").mkdir(exist_ok=True)
+    (tmp_path / "app" / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
+    subprocess.run(["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+
+    task = Task(id="tps", type=TaskType.BACKEND, assignee="backend", title="Fix build", description="Fix failing tests", acceptance_criteria=["build passes"], metadata={"goal": {"summary": "x"}, "scope": {"included": ["x"]}, "constraints": {"framework": "fastapi"}, "non_functional_requirements": {"latency_p95_ms": 300}, "inputs_outputs": {"input": "x", "output": "y"}})
+
+    mock_llm = MagicMock()
+    mock_llm.get_max_context_tokens.return_value = 16384
+    mock_llm.complete_json.side_effect = [
+        {"feature_intent": "Fix build", "what_changes": ["app/main.py"], "algorithms_data_structures": "", "tests_needed": ""},
+        {"code": "", "language": "python", "summary": "Init", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n"}, "tests": "", "suggested_commit_message": "feat: init"},
+        {"code": "", "language": "python", "summary": "Patched", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef health():\n    return {'ok': True}\n"}, "tests": "", "suggested_commit_message": "fix: patch"},
+    ]
+    agent = BackendExpertAgent(llm_client=mock_llm)
+
+    mock_problem_solver = MagicMock()
+    mock_problem_solver.run.return_value = type("PS", (), {
+        "plan": "Investigate failing assertion",
+        "execution_steps": "Patch route",
+        "review_checks": "Check response schema",
+        "testing_strategy": "Run pytest",
+        "fix_recommendation": "Add /health route",
+    })()
+
+    mock_qa = MagicMock()
+    mock_qa.run.return_value = MagicMock(bugs_found=[], unit_tests="", integration_tests="")
+
+    build_results = iter([
+        (False, "FAILED tests/test_health.py::test_health"),
+        (True, ""),
+        (True, ""),
+    ])
+
+    def build_verifier(_repo_path, _agent_type, _task_id):
+        return next(build_results)
+
+    with patch.object(agent, "_run_dbc_review", return_value=(0, 0, True)):
+        result = agent.run_workflow(
+            repo_path=tmp_path,
+            task=task,
+            spec_content="# Spec",
+            architecture=None,
+            qa_agent=mock_qa,
+            security_agent=MagicMock(run=MagicMock(return_value=MagicMock(approved=True, issues=[]))),
+            dbc_agent=MagicMock(),
+            code_review_agent=MagicMock(run=MagicMock(return_value=MagicMock(approved=True, issues=[]))),
+            tech_lead=MagicMock(),
+            build_verifier=build_verifier,
+            problem_solver_agent=mock_problem_solver,
+        )
+
+    assert result.success is True
+    mock_problem_solver.run.assert_called()
+
+
+
+def test_validate_task_contract_flags_missing_contract_fields() -> None:
+    """Contract-first validation flags missing machine-readable contract fields."""
+    from shared.models import Task, TaskType
+
+    task = Task(
+        id="t1",
+        type=TaskType.BACKEND,
+        assignee="backend",
+        title="Add endpoint",
+        description="Add endpoint",
+        requirements="",
+        acceptance_criteria=[],
+        metadata={},
+    )
+    ok, missing = _validate_task_contract(task)
+    assert not ok
+    assert "goal" in missing
+    assert "scope" in missing
+    assert "acceptance_criteria" in missing
+
+
+def test_build_completion_package_contains_trace_and_gates() -> None:
+    """Completion package includes traceability and quality gate matrix."""
+    from shared.models import Task, TaskType
+    from backend_agent.models import BackendOutput, ReviewIterationRecord
+
+    task = Task(
+        id="BE-1",
+        type=TaskType.BACKEND,
+        assignee="backend",
+        description="Implement invoice draft",
+        acceptance_criteria=["Endpoint returns 201"],
+        metadata={
+            "goal": {"summary": "Create invoice draft"},
+            "scope": {"included": ["POST /v1/invoices/drafts"]},
+            "constraints": {"framework": "fastapi"},
+            "non_functional_requirements": {"latency_p95_ms": 300},
+            "inputs_outputs": {"input": "invoice request", "output": "invoice id"},
+        },
+    )
+    output = BackendOutput(
+        summary="Implemented endpoint",
+        files={
+            "src/api/invoice_routes.py": "code",
+            "tests/integration/test_invoice.py": "test",
+        },
+    )
+    pkg = _build_completion_package(
+        task=task,
+        result=output,
+        review_history=[ReviewIterationRecord(iteration=1, build_passed=True)],
+        language_used="python",
+    )
+    assert pkg["task_id"] == "BE-1"
+    assert pkg["quality_gates"]["acceptance_trace"] == "pass"
+    assert pkg["acceptance_criteria_trace"][0]["criterion"] == "Endpoint returns 201"

@@ -48,6 +48,28 @@ class BackendInput(BaseModel):
         description="Implementation plan from _plan_task(). When present, the model must implement "
         "the task according to this plan (realize what_changes and tests_needed).",
     )
+    specialist_tooling_plan: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Optional Backend Agent V2 specialist orchestration plan prepared by Tech Lead/Planning. "
+            "Expected keys may include devops, api, quality_review, qa, data_engineering, auth_security, "
+            "and general_problem_solver with directives for how each specialist should contribute to implementation "
+            "across planning, execution, review, and testing in its specialty."
+        ),
+    )
+    specialist_findings: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Optional findings returned by specialist agents. Use these results as additional "
+            "constraints and implementation guidance when generating backend code and tests."
+        ),
+    )
+    problem_solver_max_cycles: int = Field(
+        default=20,
+        ge=1,
+        le=20,
+        description="Maximum collaboration cycles with the general problem-solving specialist when bugs are identified.",
+    )
 
 
 class BackendOutput(BaseModel):

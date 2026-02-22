@@ -4,6 +4,7 @@ import { BloggingDashboardComponent } from './components/blogging-dashboard/blog
 import { MarketResearchDashboardComponent } from './components/market-research-dashboard/market-research-dashboard.component';
 import { Soc2ComplianceDashboardComponent } from './components/soc2-compliance-dashboard/soc2-compliance-dashboard.component';
 import { SocialMarketingDashboardComponent } from './components/social-marketing-dashboard/social-marketing-dashboard.component';
+import { BrandingDashboardComponent } from './components/branding-dashboard/branding-dashboard.component';
 import { SoftwareEngineeringDashboardComponent } from './components/software-engineering-dashboard/software-engineering-dashboard.component';
 
 export const routes: Routes = [
@@ -17,6 +18,7 @@ export const routes: Routes = [
       { path: 'market-research', component: MarketResearchDashboardComponent },
       { path: 'soc2-compliance', component: Soc2ComplianceDashboardComponent },
       { path: 'social-marketing', component: SocialMarketingDashboardComponent },
+      { path: 'branding', component: BrandingDashboardComponent },
     ],
   },
   { path: '**', redirectTo: '/blogging' },

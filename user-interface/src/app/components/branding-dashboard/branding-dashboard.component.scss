@@ -1,0 +1,23 @@
+.session-form {
+  display: grid;
+  gap: 12px;
+}
+
+mat-form-field {
+  width: 100%;
+}
+
+mat-card {
+  margin-bottom: 16px;
+}
+
+.question-item {
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.answer-field {
+  width: 100%;
+}

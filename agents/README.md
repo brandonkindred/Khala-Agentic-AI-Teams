@@ -8,6 +8,7 @@ This repository provides **multiple Strands-style agent systems** in a monorepo:
 - **SOC2 compliance team** – Multi-agent SOC2 audit for a code repository: Security, Availability, Processing Integrity, Confidentiality, and Privacy TSC agents review the repo and produce a compliance report or a next-steps-for-certification document.
 - **Investment team** – Multi-asset investment organization with IPS hard constraints, strategy validation, promotion gates (`reject/revise/paper/live`), separation-of-duties, risk veto, and monitor-only safety degradation.
 - **Market research team** – Human-AI collaborative workflow for user discovery and product concept viability; transcript ingestion, UX synthesis, experiment scripts, and human approval gates.
+- **Branding team** – Brand strategy codification, moodboard ideation, design and writing standards, plus an asynchronous open-question feed and answer workflow.
 
 ## Project structure
 
@@ -20,6 +21,7 @@ strands-agents/
 ├── soc2_compliance_team/       # SOC2 compliance audit and certification team
 ├── investment_team/            # Multi-asset investment organization (IPS-first)
 ├── market_research_team/       # Market research and concept viability
+├── branding_team/              # Branding strategy + interactive clarification API
 └── requirements.txt            # Shared dependencies
 ```
 
@@ -87,6 +89,7 @@ The `blogging/` and `software_engineering_team/` directories have their own `req
 | **Social media marketing** | package | `uvicorn social_media_marketing_team.api.main:app --host 0.0.0.0 --port 8010` | 8010 |
 | **Market research** | package | `uvicorn market_research_team.api.main:app --host 0.0.0.0 --port 8011` | 8011 |
 | **SOC2 compliance audit** | package | `uvicorn soc2_compliance_team.api.main:app --host 0.0.0.0 --port 8020` | 8020 |
+| **Branding strategy** | package | `uvicorn branding_team.api.main:app --host 0.0.0.0 --port 8012` | 8012 |
 
 ## Prerequisites
 
@@ -136,7 +139,7 @@ APIs are exposed on host ports 18000–18005 (mapped from container 8000–8005)
 
 ## Deployment
 
-- **Port allocation:** Default ports are 8000 (blog/SW), 8010 (social media), 8011 (market research), 8020 (SOC2). Override with `--port` when running multiple services.
+- **Port allocation:** Default ports are 8000 (blog/SW), 8010 (social media), 8011 (market research), 8012 (branding), 8020 (SOC2). Override with `--port` when running multiple services.
 - **Environment:** Set all required environment variables (e.g. `TAVILY_API_KEY`, `SW_LLM_*`) before starting services.
 - **Production:** Use a process manager (e.g. systemd, supervisord) or container orchestration. Run `uvicorn` without `--reload` in production.
 

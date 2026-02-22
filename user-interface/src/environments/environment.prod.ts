@@ -9,4 +9,5 @@ export const environment = {
   marketResearchApiUrl: '/api/market-research',
   soc2ComplianceApiUrl: '/api/soc2-compliance',
   socialMarketingApiUrl: '/api/social-marketing',
+  brandingApiUrl: '/api/branding',
 };

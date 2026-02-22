@@ -1,6 +1,6 @@
 # Strands Agents User Interface
 
-Angular application providing an interactive UI for all Strands agent APIs: Blogging, Software Engineering Team, Market Research, SOC2 Compliance, and Social Media Marketing.
+Angular application providing an interactive UI for all Strands agent APIs: Blogging, Software Engineering Team, Market Research, SOC2 Compliance, Social Media Marketing, and Branding.
 
 ## Prerequisites
 
@@ -32,6 +32,7 @@ API base URLs are configured in `src/environments/environment.ts` (development) 
 | Market Research | `http://localhost:8011` | 8011 |
 | SOC2 Compliance | `http://localhost:8020` | 8020 |
 | Social Media Marketing | `http://localhost:8010` | 8010 |
+| Branding | `http://localhost:8012` | 8012 |
 
 To override, edit `src/environments/environment.ts` before building.
 

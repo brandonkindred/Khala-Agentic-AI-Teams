@@ -9,6 +9,7 @@ import { SoftwareEngineeringApiService } from '../../services/software-engineeri
 import { MarketResearchApiService } from '../../services/market-research-api.service';
 import { Soc2ComplianceApiService } from '../../services/soc2-compliance-api.service';
 import { SocialMarketingApiService } from '../../services/social-marketing-api.service';
+import { BrandingApiService } from '../../services/branding-api.service';
 
 interface ApiStatus {
   name: string;
@@ -16,7 +17,7 @@ interface ApiStatus {
 }
 
 /**
- * Widget showing health status of all 5 agent APIs.
+ * Widget showing health status of all agent APIs.
  */
 @Component({
   selector: 'app-api-status-widget',
@@ -34,7 +35,8 @@ export class ApiStatusWidgetComponent implements OnInit {
     private readonly softwareEngineering: SoftwareEngineeringApiService,
     private readonly marketResearch: MarketResearchApiService,
     private readonly soc2: Soc2ComplianceApiService,
-    private readonly socialMarketing: SocialMarketingApiService
+    private readonly socialMarketing: SocialMarketingApiService,
+    private readonly branding: BrandingApiService
   ) {}
 
   ngOnInit(): void {
@@ -59,6 +61,10 @@ export class ApiStatusWidgetComponent implements OnInit {
         map((r) => r?.status === 'ok'),
         catchError(() => of(false))
       ),
+      branding: this.branding.health().pipe(
+        map((r) => r?.status === 'ok'),
+        catchError(() => of(false))
+      ),
     }).subscribe((res) => {
       this.statuses = [
         { name: 'Blogging', ok: res.blogging },
@@ -66,6 +72,7 @@ export class ApiStatusWidgetComponent implements OnInit {
         { name: 'Market Research', ok: res.marketResearch },
         { name: 'SOC2 Compliance', ok: res.soc2 },
         { name: 'Social Marketing', ok: res.socialMarketing },
+        { name: 'Branding', ok: res.branding },
       ];
       this.loading = false;
     });

@@ -1,0 +1,95 @@
+<h1>Branding Team API</h1>
+<p>Interactive async branding workflow with a live open-question feed.</p>
+
+<div class="header-row">
+  <app-health-indicator [healthCheck]="healthCheck" label="Branding API" />
+</div>
+
+@if (loading) {
+  <app-loading-spinner message="Processing branding workflow..." />
+}
+
+@if (error) {
+  <app-error-message [message]="error" />
+}
+
+<mat-card>
+  <mat-card-header>
+    <mat-card-title>Start Branding Session</mat-card-title>
+  </mat-card-header>
+  <mat-card-content>
+    <form [formGroup]="form" (ngSubmit)="startSession()" class="session-form">
+      <mat-form-field appearance="outline">
+        <mat-label>Company name</mat-label>
+        <input matInput formControlName="company_name" />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Company description</mat-label>
+        <textarea matInput rows="3" formControlName="company_description"></textarea>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Target audience</mat-label>
+        <input matInput formControlName="target_audience" />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Desired voice</mat-label>
+        <input matInput formControlName="desired_voice" />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Values (comma-separated)</mat-label>
+        <input matInput formControlName="values_csv" />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline">
+        <mat-label>Differentiators (comma-separated)</mat-label>
+        <input matInput formControlName="differentiators_csv" />
+      </mat-form-field>
+
+      <button mat-raised-button color="primary" type="submit">Start Session</button>
+    </form>
+  </mat-card-content>
+</mat-card>
+
+@if (session) {
+  <mat-card>
+    <mat-card-header>
+      <mat-card-title>Open Questions Feed</mat-card-title>
+      <mat-card-subtitle>Status: {{ session.status }}</mat-card-subtitle>
+    </mat-card-header>
+    <mat-card-content>
+      @if (session.open_questions.length === 0) {
+        <p>All open questions answered. Branding output is refreshed and ready.</p>
+      } @else {
+        @for (question of session.open_questions; track question.id) {
+          <div class="question-item">
+            <h3>{{ question.question }}</h3>
+            <p>{{ question.context }}</p>
+            <mat-form-field appearance="outline" class="answer-field">
+              <mat-label>Your answer</mat-label>
+              <textarea matInput rows="2" [(ngModel)]="answers[question.id]" [ngModelOptions]="{standalone: true}"></textarea>
+            </mat-form-field>
+            <button mat-stroked-button color="primary" (click)="submitAnswer(question)">Submit Answer</button>
+          </div>
+        }
+      }
+    </mat-card-content>
+  </mat-card>
+
+  <mat-card>
+    <mat-card-header>
+      <mat-card-title>Updated Branding Guidelines</mat-card-title>
+    </mat-card-header>
+    <mat-card-content>
+      <p>{{ session.latest_output.mission_summary }}</p>
+      <ul>
+        @for (item of session.latest_output.brand_guidelines; track item) {
+          <li>{{ item }}</li>
+        }
+      </ul>
+    </mat-card-content>
+  </mat-card>
+}
