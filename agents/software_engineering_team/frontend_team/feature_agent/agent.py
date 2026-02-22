@@ -1,4 +1,4 @@
-"""Frontend Expert agent: Angular implementation."""
+"""Frontend Expert agent: framework-native frontend implementation (React/Angular)."""
 
 from __future__ import annotations
 
@@ -186,7 +186,7 @@ _ANGULAR_PROBLEM_SOLVING_INSTRUCTIONS = (
 
 class FrontendExpertAgent:
     """
-    Frontend expert that implements solutions using Angular.
+    Frontend expert that implements framework-native solutions for React or Angular.
     Validates output to ensure proper naming conventions and project structure.
     """
 
@@ -246,7 +246,7 @@ class FrontendExpertAgent:
             return ""
 
     def run(self, input_data: FrontendInput) -> FrontendOutput:
-        """Implement frontend functionality in Angular."""
+        """Implement frontend functionality in the requested framework target."""
         logger.info(
             "Frontend: received task - description=%s | requirements=%s | user_story=%s | "
             "has_architecture=%s | has_existing_code=%s | has_api_endpoints=%s | has_spec=%s | "
@@ -269,7 +269,10 @@ class FrontendExpertAgent:
         code_review_count = len(input_data.code_review_issues) if input_data.code_review_issues else 0
         has_issues = qa_count > 0 or security_count > 0 or accessibility_count > 0 or code_review_count > 0
 
-        context_parts: List[str] = []
+        framework_target = (input_data.framework_target or "angular").lower().strip()
+        framework_label = "Frontend / React" if framework_target == "react" else "Frontend / Angular"
+
+        context_parts: List[str] = [f"**Framework target:** {framework_target}"]
         if has_issues:
             issue_summaries: Dict[str, int] = {}
             if qa_count:
@@ -298,7 +301,7 @@ class FrontendExpertAgent:
                 )
             header = build_problem_solving_header(
                 issue_summaries,
-                "Frontend / Angular",
+                framework_label,
                 instructions=_ANGULAR_PROBLEM_SOLVING_INSTRUCTIONS,
                 issue_descriptions=issue_descriptions,
             )
@@ -516,6 +519,7 @@ class FrontendExpertAgent:
         npm_packages = [str(p).strip() for p in npm_packages if str(p).strip()]
 
         return FrontendOutput(
+            framework_used=(data.get("framework_used") or framework_target),
             code=code,
             summary=summary,
             files=validated_files,
@@ -654,6 +658,7 @@ class FrontendExpertAgent:
                             logger.warning("[%s] Failed to persist plan (non-blocking): %s", task_id, e)
 
             result = self.run(FrontendInput(
+                framework_target=str((current_task.metadata or {}).get("framework_target", "angular")),
                 task_description=current_task.description,
                 requirements=_task_requirements_with_route_expectations(current_task, repo_path),
                 user_story=getattr(current_task, "user_story", "") or "",

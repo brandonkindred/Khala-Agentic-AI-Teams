@@ -10,6 +10,10 @@ from shared.models import SystemArchitecture
 class FrontendInput(BaseModel):
     """Input for the Frontend Expert agent."""
 
+    framework_target: str = Field(
+        default="angular",
+        description="Target frontend framework for implementation: react | angular | either",
+    )
     task_description: str
     requirements: str = ""
     user_story: str = Field(
@@ -49,6 +53,10 @@ class FrontendInput(BaseModel):
         description="Implementation plan from _plan_task(). When present, the model must implement "
         "the task according to this plan (realize what_changes and tests_needed).",
     )
+    task_contract: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Normalized contract-first frontend task payload (goal/scope/constraints/ACs/NFRs).",
+    )
     convergence_hint: Optional[str] = Field(
         default=None,
         description="Optional hint when code review issue count has not decreased over several rounds. "
@@ -59,6 +67,7 @@ class FrontendInput(BaseModel):
 class FrontendOutput(BaseModel):
     """Output from the Frontend Expert agent."""
 
+    framework_used: str = Field(default="", description="Framework path used for implementation")
     code: str = ""
     summary: str = ""
     files: Dict[str, str] = Field(default_factory=dict)
