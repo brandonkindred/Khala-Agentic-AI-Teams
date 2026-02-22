@@ -1320,7 +1320,7 @@ def run_orchestrator(
         agents = _get_agents()
 
         # 1. Read spec from work path or use override (no git required at root)
-        from spec_parser import load_spec_from_repo, parse_spec_heuristic, parse_spec_with_llm
+        from spec_parser import load_spec_from_repo, parse_spec_with_llm
         spec_content = spec_content_override if spec_content_override is not None else load_spec_from_repo(path)
         try:
             requirements = parse_spec_with_llm(spec_content, get_llm_for_agent("spec_intake"))
@@ -1328,8 +1328,10 @@ def run_orchestrator(
             logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
             update_job(job_id, status="paused_llm_limit", error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
             return
-        except Exception:
-            requirements = parse_spec_heuristic(spec_content)
+        except Exception as e:
+            logger.error("Spec parsing failed (LLM unavailable or returned invalid output): %s", e)
+            update_job(job_id, status=JOB_STATUS_FAILED, error=f"Spec parsing failed: {e}")
+            return
         update_job(job_id, requirements_title=requirements.title)
 
         # Create plan folder after spec is ingested successfully (all planning artifacts go here)
@@ -1386,80 +1388,45 @@ def run_orchestrator(
                 logger.warning("Spec Intake failed (using parsed requirements): %s", e)
         update_job(job_id, requirements_title=requirements.title)
 
-        # 2. Project Overview (before architecture) - never skip; use fallback if LLM fails
+        # 2. Project Overview (before architecture) - fail fast if LLM unavailable
         project_overview: Optional[Dict[str, Any]] = None
         project_planning_agent = agents.get("project_planning")
-        if project_planning_agent:
+        if not project_planning_agent:
+            logger.error("Project planning agent not configured")
+            update_job(job_id, status=JOB_STATUS_FAILED, error="Project planning agent not configured")
+            return
+        try:
+            from shared.context_sizing import compute_repo_summary_chars
+            from planning_team.project_planning_agent.models import ProjectPlanningInput
+            max_repo_chars = compute_repo_summary_chars(project_planning_agent.llm)
+            repo_summary = _truncate_for_context(_read_repo_code(path), max_repo_chars)
+            pp_input = ProjectPlanningInput(
+                requirements=requirements,
+                spec_content=spec_content_for_planning,
+                repo_state_summary=repo_summary if repo_summary != "# No code files found" else None,
+                plan_dir=plan_dir,
+            )
+            pp_output = project_planning_agent.run(pp_input)
+            project_overview = model_to_dict(pp_output.overview)
+            logger.info("Project Planning: success")
             try:
-                from shared.context_sizing import compute_repo_summary_chars
-                from planning_team.project_planning_agent.models import ProjectPlanningInput, build_fallback_overview_from_requirements
-                max_repo_chars = compute_repo_summary_chars(project_planning_agent.llm)
-                repo_summary = _truncate_for_context(_read_repo_code(path), max_repo_chars)
-                pp_input = ProjectPlanningInput(
-                    requirements=requirements,
-                    spec_content=spec_content_for_planning,
-                    repo_state_summary=repo_summary if repo_summary != "# No code files found" else None,
-                    plan_dir=plan_dir,
-                )
-                pp_output = project_planning_agent.run(pp_input)
-                project_overview = model_to_dict(pp_output.overview)
-                logger.info("Project Planning: success (LLM-based)")
-                try:
-                    write_project_overview_plan(path, pp_output.overview, plan_dir=plan_dir)
-                except Exception as e:
-                    logger.warning("Failed to write plan/project_overview.md: %s", e)
-                try:
-                    features_doc = getattr(pp_output, "features_and_functionality_doc", None) or (project_overview.get("features_and_functionality_doc") or "")
-                    if features_doc:
-                        write_features_and_functionality_plan(path, features_doc, plan_dir=plan_dir)
-                except Exception as e:
-                    logger.warning("Failed to write plan/features_and_functionality.md: %s", e)
-            except LLMRateLimitError:
-                logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
-                update_job(job_id, status="paused_llm_limit", error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
-                return
+                write_project_overview_plan(path, pp_output.overview, plan_dir=plan_dir)
             except Exception as e:
-                logger.warning("Project planning failed (attempting fallback overview): %s", e)
-                try:
-                    fallback = build_fallback_overview_from_requirements(requirements)
-                    project_overview = model_to_dict(fallback)
-                    logger.info("Project Planning: success via fallback overview (LLM failed: %s)", e)
-                    try:
-                        write_project_overview_plan(path, fallback, plan_dir=plan_dir)
-                    except Exception as we:
-                        logger.warning("Failed to write plan/project_overview.md: %s", we)
-                    try:
-                        if getattr(fallback, "features_and_functionality_doc", ""):
-                            write_features_and_functionality_plan(path, fallback.features_and_functionality_doc, plan_dir=plan_dir)
-                    except Exception as we2:
-                        logger.warning("Failed to write plan/features_and_functionality.md: %s", we2)
-                except Exception as fallback_err:
-                    logger.error(
-                        "Project planning hard failure (no overview available): LLM=%s, fallback=%s",
-                        e, fallback_err,
-                    )
-                    update_job(
-                        job_id,
-                        status=JOB_STATUS_FAILED,
-                        error=f"Project planning failed and fallback unavailable: {fallback_err}",
-                    )
-                    return
-        else:
-            # No project planning agent; build fallback so downstream agents always get an overview
+                logger.warning("Failed to write plan/project_overview.md: %s", e)
             try:
-                from planning_team.project_planning_agent.models import build_fallback_overview_from_requirements
-                fallback = build_fallback_overview_from_requirements(requirements)
-                project_overview = model_to_dict(fallback)
-                logger.info("Project Planning: no agent configured, using fallback overview")
-                try:
-                    if getattr(fallback, "features_and_functionality_doc", ""):
-                        write_features_and_functionality_plan(path, fallback.features_and_functionality_doc, plan_dir=plan_dir)
-                except Exception as e2:
-                    logger.warning("Failed to write plan/features_and_functionality.md: %s", e2)
+                features_doc = getattr(pp_output, "features_and_functionality_doc", None) or (project_overview.get("features_and_functionality_doc") or "")
+                if features_doc:
+                    write_features_and_functionality_plan(path, features_doc, plan_dir=plan_dir)
             except Exception as e:
-                logger.error("Project planning fallback failed (no agent): %s", e)
-                update_job(job_id, status=JOB_STATUS_FAILED, error=f"Project planning fallback failed: {e}")
-                return
+                logger.warning("Failed to write plan/features_and_functionality.md: %s", e)
+        except LLMRateLimitError:
+            logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
+            update_job(job_id, status="paused_llm_limit", error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
+            return
+        except Exception as e:
+            logger.error("Project planning failed: %s", e)
+            update_job(job_id, status=JOB_STATUS_FAILED, error=f"Project planning failed: {e}")
+            return
 
         if project_overview is None:
             logger.error("Project planning produced no overview; failing job")

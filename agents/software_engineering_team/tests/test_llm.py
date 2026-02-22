@@ -149,12 +149,12 @@ def test_extract_json_object_extraction_fallback() -> None:
     assert result.get("approved") is True
 
 
-def test_extract_json_unparseable_returns_raw_content_wrapper() -> None:
-    """When no JSON can be recovered, _extract_json returns {"content": text} so callers do not crash."""
+def test_extract_json_unparseable_raises_llm_permanent_error() -> None:
+    """When no JSON can be recovered, _extract_json raises LLMPermanentError (fail fast)."""
     client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
     text = "no code blocks or json here at all"
-    result = client._extract_json(text)
-    assert result == {"content": text}
+    with pytest.raises(LLMPermanentError, match="Could not parse structured JSON"):
+        client._extract_json(text)
 
 
 def test_qwen3_coder_next_uses_known_context_size() -> None:

@@ -432,22 +432,6 @@ class FrontendExpertAgent:
             else:
                 raw_files = {}
 
-            # Content fallback: when LLM returns raw content wrapper, try to extract files from code blocks
-            if not raw_files and data.get("content"):
-                from shared.llm_response_utils import extract_files_from_content, heuristic_extract_files_from_content
-                extracted = extract_files_from_content(str(data["content"]))
-                if not extracted:
-                    extracted = heuristic_extract_files_from_content(
-                        str(data["content"]), (".ts", ".tsx", ".html", ".scss")
-                    )
-                    if extracted:
-                        logger.warning("Frontend: using heuristic file extraction from raw content")
-                if extracted:
-                    raw_files = extracted
-                    for fpath, fcontent in list(raw_files.items()):
-                        if isinstance(fcontent, str) and "\\n" in fcontent:
-                            raw_files[fpath] = fcontent.replace("\\n", "\n")
-
             # Validate file paths - reject bad names/empty files
             validated_files, validation_warnings = _validate_file_paths(raw_files)
             for warn in validation_warnings:
@@ -490,18 +474,22 @@ class FrontendExpertAgent:
 
             break
 
-        # If all files were rejected but we have code, that's a problem - log it
-        if not validated_files and not data.get("needs_clarification", False):  # pragma: no cover
+        # Fail fast when LLM produces no valid output
+        if not validated_files and not data.get("needs_clarification", False):
+            from shared.llm import LLMPermanentError
             if raw_files:
-                logger.error(
-                    "Frontend: ALL %d files were rejected by validation. Raw filenames: %s",
-                    len(raw_files),
-                    list(raw_files.keys()),
+                raise LLMPermanentError(
+                    f"Frontend: LLM returned {len(raw_files)} files but all were rejected by validation. "
+                    f"Raw filenames: {list(raw_files.keys())}"
                 )
-            elif code:
-                logger.warning("Frontend: returned 'code' but no 'files' dict. Code will be written as fallback.")
-            else:
-                logger.error("Frontend: produced no files and no code. Task may have failed.")
+            if code:
+                raise LLMPermanentError(
+                    "Frontend: LLM returned 'code' but no 'files' dict. "
+                    "Model must return structured JSON with a 'files' key."
+                )
+            raise LLMPermanentError(
+                "Frontend: LLM produced no files and no code. Model unavailable or returned invalid output."
+            )
 
         summary = data.get("summary", "")
         needs_clarification = bool(data.get("needs_clarification", False))

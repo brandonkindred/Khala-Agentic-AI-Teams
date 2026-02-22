@@ -795,48 +795,16 @@ class OllamaLLMClient(LLMClient):
                 except Exception:
                     continue
 
-        # If still no JSON, try extracting files from raw content so backend/frontend get usable output
-        try:
-            from shared.llm_response_utils import extract_files_from_content, heuristic_extract_files_from_content
-            extracted = extract_files_from_content(text)
-            if not extracted:
-                # Try heuristic with broad extensions (backend + frontend + config)
-                extracted = heuristic_extract_files_from_content(
-                    text,
-                    (".py", ".ts", ".html", ".scss", ".css", ".json", ".yaml", ".yml", ".java"),
-                )
-            if isinstance(extracted, dict) and extracted:
-                logger.info(
-                    "Recovered %d files from raw content via heuristic extraction",
-                    len(extracted),
-                )
-                return {"files": extracted}
-        except Exception as e:
-            logger.debug("Heuristic file extraction failed: %s", e)
-
-        # Try extracting task assignment (Tech Lead / Task Generator) from raw content
-        try:
-            from shared.llm_response_utils import extract_task_assignment_from_content
-            task_data = extract_task_assignment_from_content(text)
-            if task_data:
-                logger.info(
-                    "Recovered task assignment from raw content (%d tasks)",
-                    len(task_data.get("tasks") or []),
-                )
-                return task_data
-        except Exception as e:
-            logger.debug("Task assignment extraction from content failed: %s", e)
-
-        # Final fallback: raw content wrapper. Callers should defensively use .get().
-        # Models that frequently ignore JSON-only instructions may need a different model or pre-processing.
+        # Fail fast: no valid JSON could be extracted from LLM response
         logger.debug(
             "Raw LLM response that failed all JSON extraction strategies (first 2000 chars):\n%s",
             text[:2000],
         )
-        logger.warning(
-            "Could not parse structured JSON from LLM response; returning raw content wrapper | failure_class=json_parse_failure",
+        raise LLMPermanentError(
+            "Could not parse structured JSON from LLM response. "
+            "Model returned invalid or non-JSON output. "
+            f"Response preview: {text[:500]!r}..."
         )
-        return {"content": text.strip()}
 
     def complete_json(self, prompt: str, *, temperature: float = 0.0) -> Dict[str, Any]:
         max_retries, backoff_base, backoff_max = _parse_retry_config()

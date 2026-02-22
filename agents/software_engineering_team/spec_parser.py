@@ -39,11 +39,14 @@ Specification:
     prompt += "\n---\n\nRespond with valid JSON only. No explanatory text."
 
     data = llm_client.complete_json(prompt, temperature=0.1)
-    # Fallback if LLM returns invalid structure (e.g. DummyLLMClient)
     if not isinstance(data.get("acceptance_criteria"), list):
-        data["acceptance_criteria"] = []
+        raise ValueError(
+            f"LLM returned invalid spec structure: 'acceptance_criteria' must be a list, got {type(data.get('acceptance_criteria'))}"
+        )
     if not isinstance(data.get("constraints"), list):
-        data["constraints"] = []
+        raise ValueError(
+            f"LLM returned invalid spec structure: 'constraints' must be a list, got {type(data.get('constraints'))}"
+        )
     reqs = ProductRequirements(
         title=data.get("title") or "Software Project",
         description=data.get("description") or spec_content[:2000],

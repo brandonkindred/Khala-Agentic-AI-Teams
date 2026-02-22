@@ -291,28 +291,28 @@ def test_backend_agent_no_problem_solving_logs_when_no_issues(caplog: pytest.Log
     assert not any("Backend problem-solving header for LLM" in rec.message for rec in caplog.records)
 
 
-def test_backend_agent_content_fallback_extracts_file_from_code_block() -> None:
-    """When LLM returns only content with a markdown code block, backend extracts at least one file."""
+def test_backend_agent_content_only_with_code_block_raises_llm_permanent_error() -> None:
+    """When LLM returns only content (no files dict), backend raises LLMPermanentError (fail fast)."""
+    from shared.llm import LLMPermanentError
+
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {
         "content": "```\napp/main.py\nprint(1)\n```",
     }
     agent = BackendExpertAgent(llm_client=mock_llm)
-    result = agent.run(BackendInput(task_description="Add", requirements=""))
-    assert len(result.files) >= 1
-    assert any("main" in path or "app" in path for path in result.files)
+    with pytest.raises(LLMPermanentError, match="no files"):
+        agent.run(BackendInput(task_description="Add", requirements=""))
 
 
-def test_backend_agent_content_fallback_no_code_blocks_injects_stub() -> None:
-    """When LLM returns only content with no code blocks, agent injects minimal stub (empty_completion path)."""
+def test_backend_agent_content_only_raises_llm_permanent_error() -> None:
+    """When LLM returns only content with no files/code, agent raises LLMPermanentError (fail fast)."""
+    from shared.llm import LLMPermanentError
+
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {"content": "no code blocks here at all"}
     agent = BackendExpertAgent(llm_client=mock_llm)
-    result = agent.run(BackendInput(task_description="Add", requirements=""))
-    # Stub fallback: minimal app/main.py so workflow can progress
-    assert "app/main.py" in result.files
-    assert "FastAPI" in result.files["app/main.py"]
-    assert "/health" in result.files["app/main.py"]
+    with pytest.raises(LLMPermanentError, match="no files"):
+        agent.run(BackendInput(task_description="Add", requirements=""))
 
 
 def test_backend_plan_task_returns_plan_markdown() -> None:

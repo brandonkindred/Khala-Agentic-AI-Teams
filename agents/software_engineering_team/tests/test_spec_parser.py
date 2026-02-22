@@ -38,6 +38,32 @@ def test_parse_spec_with_llm_uses_dummy() -> None:
     assert reqs.priority == "medium"
 
 
+def test_parse_spec_with_llm_raises_on_invalid_structure() -> None:
+    """When LLM returns acceptance_criteria or constraints as non-list, raises ValueError."""
+    from unittest.mock import MagicMock
+
+    mock_llm = MagicMock()
+    mock_llm.complete_json.return_value = {
+        "title": "Test",
+        "description": "Desc",
+        "acceptance_criteria": "not a list",  # invalid
+        "constraints": [],
+        "priority": "medium",
+    }
+    with pytest.raises(ValueError, match="acceptance_criteria"):
+        parse_spec_with_llm("spec", mock_llm)
+
+    mock_llm.complete_json.return_value = {
+        "title": "Test",
+        "description": "Desc",
+        "acceptance_criteria": [],
+        "constraints": "not a list",  # invalid
+        "priority": "medium",
+    }
+    with pytest.raises(ValueError, match="constraints"):
+        parse_spec_with_llm("spec", mock_llm)
+
+
 def test_load_spec_from_repo(tmp_path) -> None:
     """load_spec_from_repo reads initial_spec.md from repo root."""
     spec_content = "# Test Project\n\nDescription."

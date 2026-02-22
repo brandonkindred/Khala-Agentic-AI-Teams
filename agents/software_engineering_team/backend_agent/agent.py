@@ -1990,6 +1990,7 @@ class BackendExpertAgent:
         # ── Step 9: Inform Tech Lead ────────────────────────────────────────
         logger.info("[%s] WORKFLOW Step 9/9: Notifying Tech Lead", task_id)
         final_files = dict(result.files) if result else {}
+        used_stub = getattr(result, "used_stub_fallback", False) if result else False
         completion_package = _build_completion_package(
             task=task,
             result=result,
@@ -2602,7 +2603,6 @@ class BackendExpertAgent:
         validated_files = {}
         code = ""
         tests = ""
-        used_stub_fallback = False
         for attempt in range(4):
             data = self.llm.complete_json(prompt, temperature=0.2)
             code = data.get("code", "")
@@ -2619,29 +2619,6 @@ class BackendExpertAgent:
                         raw_files[fpath] = fcontent.replace("\\n", "\n")
             else:
                 raw_files = {}
-            # Content fallback: when LLM returns raw content wrapper, try to extract files from code blocks
-            if not raw_files and data.get("content"):
-                from shared.llm_response_utils import (
-                    extract_files_from_content,
-                    heuristic_extract_files_from_content,
-                    extract_single_python_block,
-                )
-                extracted = extract_files_from_content(str(data["content"]))
-                if not extracted:
-                    extracted = heuristic_extract_files_from_content(str(data["content"]), (".py",))
-                    if extracted:
-                        logger.warning("Backend: using heuristic file extraction from raw content")
-                if not extracted:
-                    # Last-resort: single ```python block as app/main.py
-                    py_block = extract_single_python_block(str(data["content"]))
-                    if py_block:
-                        extracted = {"app/main.py": py_block}
-                        logger.warning("Backend: using last-resort single Python block extraction")
-                if extracted:
-                    raw_files = extracted
-                    for fpath, fcontent in list(raw_files.items()):
-                        if isinstance(fcontent, str) and "\\n" in fcontent:
-                            raw_files[fpath] = fcontent.replace("\\n", "\n")
             # Validate file paths
             validated_files, validation_warnings = _validate_file_paths(raw_files)
             for warn in validation_warnings:
@@ -2674,41 +2651,23 @@ class BackendExpertAgent:
                 else:
                     prompt = prompt + empty_retry_prompt
                 continue
-            # If all files were rejected but we have code, use code as fallback
+            # Fail fast when LLM produces no valid output
             if not validated_files and not data.get("needs_clarification", False):
-                if code:
-                    logger.warning(
-                        "Backend: returned 'code' but no 'files' dict. Using code as app/main.py fallback."
+                from shared.llm import LLMPermanentError
+                if raw_files:
+                    raise LLMPermanentError(
+                        f"Backend: LLM returned {len(raw_files)} files but all were rejected by validation. "
+                        f"Raw filenames: {list(raw_files.keys())}. Validation warnings: {validation_warnings}"
                     )
-                    validated_files = {"app/main.py": code}
-                else:
-                    if raw_files:
-                        logger.error(
-                            "Backend: ALL %d files were rejected by validation. Raw filenames: %s. "
-                            "Validation warnings: %s. Using stub fallback.",
-                            len(raw_files),
-                            list(raw_files.keys()),
-                            validation_warnings,
-                        )
-                    else:
-                        logger.error(
-                            "Backend: produced no files and no code after 4 attempts (failure_class=empty_completion). "
-                            "Injecting minimal stub to allow workflow to progress; Tech Lead should create follow-up task.",
-                        )
-                    # Stub fallback: minimal file so write_agent_output doesn't fail
-                    validated_files = {
-                        "app/main.py": (
-                            '"""Stub - LLM produced no files after 4 attempts. '
-                            "Tech Lead should create follow-up task.\n"
-                            '"""\n'
-                            "from fastapi import FastAPI\n\n"
-                            "app = FastAPI()\n\n"
-                            '@app.get("/health")\n'
-                            "def health():\n"
-                            '    return {"status": "ok"}\n'
-                        ),
-                    }
-                    used_stub_fallback = True
+                if code:
+                    raise LLMPermanentError(
+                        "Backend: LLM returned 'code' but no 'files' dict. "
+                        "Model must return structured JSON with a 'files' key."
+                    )
+                raise LLMPermanentError(
+                    f"Backend: LLM produced no files and no code after {attempt + 1} attempts. "
+                    "Model unavailable or returned invalid output."
+                )
             break
         summary = data.get("summary", "")
         needs_clarification = bool(data.get("needs_clarification", False))
@@ -2717,9 +2676,9 @@ class BackendExpertAgent:
             clarification_requests = [str(clarification_requests)] if clarification_requests else []
         logger.info(
             "Backend: done, code=%s chars, files=%s (validated from %s), tests=%s chars, "
-            "summary=%s chars, needs_clarification=%s, used_stub_fallback=%s",
+            "summary=%s chars, needs_clarification=%s",
             len(code), len(validated_files), len(raw_files), len(tests),
-            len(summary), needs_clarification, used_stub_fallback,
+            len(summary), needs_clarification,
         )
         return BackendOutput(
             code=code,
@@ -2729,9 +2688,9 @@ class BackendExpertAgent:
             tests=tests,
             suggested_commit_message=data.get("suggested_commit_message", ""),
             needs_clarification=needs_clarification,
-        clarification_requests=clarification_requests,
-        gitignore_entries=[str(e).strip() for e in (data.get("gitignore_entries") or []) if str(e).strip()],
-    )
+            clarification_requests=clarification_requests,
+            gitignore_entries=[str(e).strip() for e in (data.get("gitignore_entries") or []) if str(e).strip()],
+        )
 def _validate_task_contract(task: Task) -> tuple[bool, list[str]]:
     """Validate contract-first task requirements before implementation begins."""
     missing: List[str] = []

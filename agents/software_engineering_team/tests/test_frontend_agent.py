@@ -509,8 +509,10 @@ def test_frontend_agent_needs_clarification() -> None:
     assert "What API format?" in result.clarification_requests
 
 
-def test_frontend_agent_all_files_rejected_fallback_to_code() -> None:
-    """When all files rejected but code exists, agent still returns code."""
+def test_frontend_agent_all_files_rejected_raises_llm_permanent_error() -> None:
+    """When all files rejected by validation, agent raises LLMPermanentError (fail fast)."""
+    from shared.llm import LLMPermanentError
+
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {
         "code": "import { Component } from '@angular/core';\n@Component({selector: 'app-x', template: 'x'}) export class X {}",
@@ -520,9 +522,8 @@ def test_frontend_agent_all_files_rejected_fallback_to_code() -> None:
         "suggested_commit_message": "feat: add",
     }
     agent = FrontendExpertAgent(llm_client=mock_llm)
-    result = agent.run(FrontendInput(task_description="Add", requirements=""))
-    assert not result.files
-    assert result.code
+    with pytest.raises(LLMPermanentError, match="all were rejected"):
+        agent.run(FrontendInput(task_description="Add", requirements=""))
 
 
 def test_frontend_agent_unescapes_newlines_in_files() -> None:

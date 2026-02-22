@@ -135,9 +135,16 @@ def test_run_failed_tasks_pauses_on_llm_rate_limit(tmp_path: Path) -> None:
         "accessibility": MagicMock(),
     }
 
+    mock_init_result = MagicMock()
+    mock_init_result.success = True
+
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch("orchestrator._get_agents", return_value=mock_agents):
-            orchestrator.run_failed_tasks(job_id)
+            with patch(
+                "shared.command_runner.ensure_backend_project_initialized",
+                return_value=mock_init_result,
+            ):
+                orchestrator.run_failed_tasks(job_id)
 
     paused_calls = [
         (jid, kw) for jid, kw in update_job_calls
@@ -147,20 +154,25 @@ def test_run_failed_tasks_pauses_on_llm_rate_limit(tmp_path: Path) -> None:
     assert paused_calls[-1][1]["error"] == OLLAMA_WEEKLY_LIMIT_MESSAGE
 
 
-def test_run_orchestrator_uses_fallback_overview_when_planning_raises(tmp_path: Path) -> None:
-    """When project planning raises, fallback overview is used and architecture receives non-null project_overview."""
+def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: Path) -> None:
+    """When project planning raises, job fails (no fallback overview)."""
     (tmp_path / "initial_spec.md").write_text("# Test App\n\nBuild a todo app.", encoding="utf-8")
-    job_id = "test-planning-fallback"
+    job_id = "test-planning-fail"
+    update_job_calls = []
+
+    def capture_update_job(jid, **kwargs):
+        update_job_calls.append((jid, kwargs))
+
+    mock_project_planning = MagicMock()
+    mock_project_planning.run.side_effect = Exception("LLM failed")
+
+    mock_arch = MagicMock()
     arch_inputs_received = []
 
     def capture_arch_run(input_data):
         arch_inputs_received.append(input_data)
         return MagicMock(architecture=SystemArchitecture(overview="Mock architecture"))
 
-    mock_project_planning = MagicMock()
-    mock_project_planning.run.side_effect = Exception("LLM failed")
-
-    mock_arch = MagicMock()
     mock_arch.run.side_effect = capture_arch_run
 
     one_task = Task(
@@ -196,7 +208,7 @@ def test_run_orchestrator_uses_fallback_overview_when_planning_raises(tmp_path: 
         "documentation": MagicMock(),
     }
 
-    with patch("orchestrator.update_job"):
+    with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch("orchestrator._get_agents", return_value=mock_agents):
             with patch(
                 "planning_team.planning_review.check_tasks_architecture_alignment",
@@ -215,23 +227,16 @@ def test_run_orchestrator_uses_fallback_overview_when_planning_raises(tmp_path: 
                             constraints=[],
                         ),
                     ):
-                        with patch("spec_parser.parse_spec_heuristic", return_value=ProductRequirements(
-                            title="Test App",
-                            description="Build a todo app",
-                            acceptance_criteria=[],
-                            constraints=[],
-                        )):
-                            orchestrator.run_orchestrator(job_id, str(tmp_path))
+                        orchestrator.run_orchestrator(job_id, str(tmp_path))
 
-    assert len(arch_inputs_received) == 1
-    assert arch_inputs_received[0].project_overview is not None
-    assert isinstance(arch_inputs_received[0].project_overview, dict)
-    assert "primary_goal" in arch_inputs_received[0].project_overview
-    assert "delivery_strategy" in arch_inputs_received[0].project_overview
+    failed_calls = [(jid, kw) for jid, kw in update_job_calls if kw.get("status") == "failed"]
+    assert len(failed_calls) >= 1
+    assert "planning" in failed_calls[0][1].get("error", "").lower()
+    assert len(arch_inputs_received) == 0
 
 
-def test_run_orchestrator_fails_job_when_planning_and_fallback_both_fail(tmp_path: Path) -> None:
-    """When both project planning and fallback raise, job is marked failed."""
+def test_run_orchestrator_fails_job_when_project_planning_raises(tmp_path: Path) -> None:
+    """When project planning raises, job is marked failed (fail fast, no fallback)."""
     (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
     job_id = "test-planning-total-fail"
     update_job_calls = []
@@ -271,11 +276,7 @@ def test_run_orchestrator_fails_job_when_planning_and_fallback_both_fail(tmp_pat
                     constraints=[],
                 ),
             ):
-                with patch(
-                    "planning_team.project_planning_agent.models.build_fallback_overview_from_requirements",
-                    side_effect=Exception("Fallback failed"),
-                ):
-                    orchestrator.run_orchestrator(job_id, str(tmp_path))
+                orchestrator.run_orchestrator(job_id, str(tmp_path))
 
     failed_calls = [
         (jid, kw) for jid, kw in update_job_calls
@@ -395,19 +396,25 @@ def test_minimal_planning_skips_domain_agents(tmp_path: Path) -> None:
                         "planning_team.planning_review.check_spec_conformance",
                         return_value=(True, []),
                     ):
-                        with patch(
-                            "planning_team.project_planning_agent.models.build_fallback_overview_from_requirements",
-                            return_value=MagicMock(
+                        from planning_team.project_planning_agent.models import (
+                            ProjectOverview,
+                            ProjectPlanningOutput,
+                        )
+                        mock_pp_output = ProjectPlanningOutput(
+                            overview=ProjectOverview(
                                 primary_goal="",
                                 delivery_strategy="",
                                 features_and_functionality_doc="",
                             ),
-                        ):
-                            try:
-                                os.environ["SW_MINIMAL_PLANNING"] = "1"
-                                orchestrator.run_orchestrator(job_id, str(tmp_path))
-                            finally:
-                                os.environ.pop("SW_MINIMAL_PLANNING", None)
+                            summary="",
+                            features_and_functionality_doc="",
+                        )
+                        mock_agents["project_planning"].run.return_value = mock_pp_output
+                        try:
+                            os.environ["SW_MINIMAL_PLANNING"] = "1"
+                            orchestrator.run_orchestrator(job_id, str(tmp_path))
+                        finally:
+                            os.environ.pop("SW_MINIMAL_PLANNING", None)
 
     # api_contract should not have been called (minimal planning skips all domain agents)
     assert mock_api_contract.run.call_count == 0
