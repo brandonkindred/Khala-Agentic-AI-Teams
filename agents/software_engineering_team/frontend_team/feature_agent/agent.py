@@ -541,6 +541,7 @@ class FrontendExpertAgent:
         all_tasks: Dict[str, Task] | None = None,
         append_backend_task_fn: Optional[Callable[[Task], None]] = None,
         append_frontend_task_fn: Optional[Callable[[str], None]] = None,
+        linting_tool_agent: Any | None = None,
     ) -> FrontendWorkflowResult:
         """
         Execute the full frontend task lifecycle: branch, generate, review, merge, Tech Lead.
@@ -698,6 +699,68 @@ class FrontendExpertAgent:
                     logger.warning(
                         "[%s] npm install for packages %s failed: %s",
                         task_id, result.npm_packages_to_install, install_res.stderr[:500],
+                    )
+
+            # ─── Lint verification (before build) ──────────────────────
+            if linting_tool_agent is not None:
+                try:
+                    from linting_tool_agent.models import LintToolInput as _LintInput
+                    lint_result = linting_tool_agent.run(_LintInput(
+                        repo_path=str(repo_path),
+                        agent_type="frontend",
+                        task_id=task_id,
+                        task_description=current_task.description,
+                    ))
+                    if not lint_result.execution_result.success:
+                        logger.info(
+                            "[%s] WORKFLOW   [%d] Lint found %d issue(s), %d edit(s)",
+                            task_id, iteration_round,
+                            lint_result.execution_result.issue_count,
+                            len(lint_result.edits),
+                        )
+                        if lint_result.edits:
+                            from shared.repo_writer import write_agent_output as _write_lint
+                            lint_files: Dict[str, str] = {}
+                            repo_root = repo_path.resolve()
+                            for e in lint_result.edits:
+                                file_abs = (repo_path / e.file_path).resolve()
+                                try:
+                                    rel_path = str(file_abs.relative_to(repo_root))
+                                except ValueError:
+                                    continue
+                                if not file_abs.is_file():
+                                    continue
+                                current_content = lint_files.get(rel_path)
+                                if current_content is None:
+                                    current_content = file_abs.read_text(
+                                        encoding="utf-8", errors="replace"
+                                    )
+                                if e.old_text not in current_content:
+                                    continue
+                                lint_files[rel_path] = current_content.replace(
+                                    e.old_text, e.new_text, 1
+                                )
+                            if lint_files:
+                                _write_lint(
+                                    repo_path,
+                                    type("_LR", (), {"files": lint_files, "summary": lint_result.summary})(),
+                                    subdir="",
+                                )
+                        elif lint_result.linter_issues:
+                            code_review_issues = [
+                                {
+                                    "severity": li.severity,
+                                    "description": f"[{li.rule}] {li.message}",
+                                    "file_path": li.file_path,
+                                    "suggestion": f"Fix lint violation {li.rule} at line {li.line}",
+                                }
+                                for li in lint_result.linter_issues[:20]
+                            ]
+                            continue
+                except Exception as lint_err:
+                    logger.warning(
+                        "[%s] WORKFLOW   Lint step failed (non-blocking): %s",
+                        task_id, lint_err,
                     )
 
             build_ok, build_errors = build_verifier(repo_path, "frontend", task_id)

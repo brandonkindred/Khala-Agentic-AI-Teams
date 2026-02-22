@@ -18,6 +18,7 @@ A multi-agent system that simulates a real software engineering team with a mix 
 | **Cybersecurity Expert** | Quality | Security specialist | Reviews code for security flaws per task (backend and frontend); remediates vulnerabilities |
 | **Accessibility Expert** | Quality | A11y specialist | Reviews frontend for WCAG 2.2 compliance |
 | **Acceptance Verifier** | Quality | Criteria checker | Verifies each task acceptance criterion is satisfied with evidence |
+| **Linting Tool Agent** | Quality | Linting specialist | Detects project linters, runs them, produces code fixes to pass lint |
 | **DbC Comments Agent** | Quality | Design by Contract | Adds pre/postconditions and invariants to code |
 | **Integration Agent** | Integration/release | Full-stack validator | Validates backend-frontend API contract alignment after workers complete |
 | **DevOps Expert** | Integration/release | Infrastructure specialist | CI/CD pipelines, IaC (Terraform, etc.), Docker, networking |

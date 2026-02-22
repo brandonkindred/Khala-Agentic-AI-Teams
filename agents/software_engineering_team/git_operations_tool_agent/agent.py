@@ -166,9 +166,9 @@ class GitOperationsToolAgent:
                 out.status = "blocked"
                 out.policy_findings.append("Missing merge approval token")
                 return out
-            if token.requested_by != "BackendTeamLeadAgent":
+            if token.requested_by not in {"BackendTeamLeadAgent", "DevOpsTeamLeadAgent"}:
                 out.status = "blocked"
-                out.policy_findings.append("Only BackendTeamLeadAgent may merge to development")
+                out.policy_findings.append("Only BackendTeamLeadAgent or DevOpsTeamLeadAgent may merge to development")
                 return out
             if token.branch_name != out.branch_name:
                 out.status = "blocked"

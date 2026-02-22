@@ -585,6 +585,7 @@ class BackendExpertAgent:
         append_task_fn: Optional[Callable[[Task], None]] = None,
         problem_solver_agent: Any | None = None,
         git_operations_tool_agent: Any | None = None,
+        linting_tool_agent: Any | None = None,
     ) -> BackendWorkflowResult:
         """
         Execute the full backend task lifecycle autonomously.
@@ -625,6 +626,7 @@ class BackendExpertAgent:
             remaining_tasks: Tasks still in the queue (for Tech Lead context).
             all_tasks: Full task registry dict (for adding QA fix tasks).
             execution_queue: Mutable execution queue list (for adding QA fix tasks).
+            linting_tool_agent: Optional Linting Tool Agent for lint verification.
         Returns:
             BackendWorkflowResult with success status, review history, and final files.
         """
@@ -1006,6 +1008,52 @@ class BackendExpertAgent:
                         write_msg,
                     )
                 continue  # Re-run from build verification
+            # ─── 4a-lint. Lint verification (before build) ──────────────
+            if linting_tool_agent is not None:
+                try:
+                    from linting_tool_agent.models import LintToolInput as _LintInput
+                    lint_result = linting_tool_agent.run(_LintInput(
+                        repo_path=str(repo_path),
+                        agent_type="backend",
+                        task_id=task_id,
+                        task_description=current_task.description,
+                    ))
+                    if not lint_result.execution_result.success:
+                        logger.info(
+                            "[%s] WORKFLOW   [%d] Lint found %d issue(s), %d edit(s)",
+                            task_id, iteration,
+                            lint_result.execution_result.issue_count,
+                            len(lint_result.edits),
+                        )
+                        if lint_result.edits:
+                            ok_lint, msg_lint, lint_files = _apply_build_fix_edits(
+                                repo_path, lint_result.edits,
+                                compute_existing_code_chars(self.llm),
+                            )
+                            if ok_lint and lint_files:
+                                write_agent_output(
+                                    repo_path,
+                                    type("_LR", (), {"files": lint_files, "summary": lint_result.summary})(),
+                                    subdir="",
+                                )
+                        elif lint_result.linter_issues:
+                            code_review_issues = [
+                                {
+                                    "severity": li.severity,
+                                    "description": f"[{li.rule}] {li.message}",
+                                    "file_path": li.file_path,
+                                    "suggestion": f"Fix lint violation {li.rule} at line {li.line}",
+                                }
+                                for li in lint_result.linter_issues[:20]
+                            ]
+                            record.action_taken = "fixed_lint"
+                            review_history.append(record)
+                            continue
+                except Exception as lint_err:
+                    logger.warning(
+                        "[%s] WORKFLOW   Lint step failed (non-blocking): %s",
+                        task_id, lint_err,
+                    )
             # ─── 4b. Build verification ─────────────────────────────────
             logger.info(
                 "[%s] WORKFLOW   [%d] Build verification...",

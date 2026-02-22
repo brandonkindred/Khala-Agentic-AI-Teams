@@ -285,7 +285,7 @@ def _get_agents():
     from planning_team.project_planning_agent import ProjectPlanningAgent, ProjectPlanningInput
     from code_review_agent import CodeReviewAgent, CodeReviewInput
     from technical_writers.dbc_comments_agent import DbcCommentsAgent, DbcCommentsInput
-    from devops_agent import DevOpsExpertAgent, DevOpsInput
+    from devops_team import DevOpsTeamLeadAgent
     from technical_writers.documentation_agent import DocumentationAgent, DocumentationInput
     from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
     from git_setup_agent import GitSetupAgent
@@ -306,6 +306,7 @@ def _get_agents():
     from planning_team.ui_ux_design_agent import UiUxDesignAgent
     from acceptance_verifier_agent import AcceptanceVerifierAgent
     from agent_repair_team import RepairExpertAgent, RepairInput
+    from linting_tool_agent import LintingToolAgent
 
     return {
         "spec_intake": SpecIntakeAgent(get_llm_for_agent("spec_intake")),
@@ -323,7 +324,7 @@ def _get_agents():
         "integration": IntegrationAgent(get_llm_for_agent("integration")),
         "acceptance_verifier": AcceptanceVerifierAgent(get_llm_for_agent("acceptance_verifier")),
         "tech_lead": TechLeadAgent(get_llm_for_agent("tech_lead")),
-        "devops": DevOpsExpertAgent(get_llm_for_agent("devops")),
+        "devops": DevOpsTeamLeadAgent(get_llm_for_agent("devops")),
         "backend": BackendExpertAgent(get_llm_for_agent("backend")),
         "frontend": FrontendExpertAgent(get_llm_for_agent("frontend")),
         "security": CybersecurityExpertAgent(get_llm_for_agent("security")),
@@ -334,6 +335,7 @@ def _get_agents():
         "documentation": DocumentationAgent(get_llm_for_agent("documentation")),
         "git_setup": GitSetupAgent(),
         "repair": RepairExpertAgent(get_llm_for_agent("repair")),
+        "linting_tool_agent": LintingToolAgent(get_llm_for_agent("linting_tool_agent")),
     }
 
 
@@ -1033,6 +1035,7 @@ def _run_backend_frontend_workers(
                     all_tasks=all_tasks,
                     execution_queue=backend_queue,
                     append_task_fn=_append_backend_task,
+                    linting_tool_agent=agents.get("linting_tool_agent"),
                 )
                 elapsed = time.monotonic() - task_start_time
                 with state_lock:
@@ -1190,6 +1193,7 @@ def _run_backend_frontend_workers(
                     all_tasks=all_tasks,
                     append_backend_task_fn=_append_backend_task,
                     append_frontend_task_fn=_append_frontend_task_id,
+                    linting_tool_agent=agents.get("linting_tool_agent"),
                 )
 
                 elapsed = time.monotonic() - task_start_time

@@ -876,6 +876,55 @@ def run_python_syntax_check(project_path: str | Path) -> CommandResult:  # pragm
     )
 
 
+def run_linter(project_path: str | Path, agent_type: str) -> CommandResult:  # pragma: no cover
+    """Run the project linter and return the result.
+
+    For backend (Python): runs ``ruff check .`` (fast, zero-config default).
+    For frontend: runs ``npx ng lint`` (Angular) or ``npx eslint .``.
+    Returns a ``CommandResult`` whose ``success`` is True when there are zero violations.
+    """
+    cwd = Path(project_path).resolve()
+
+    if agent_type == "backend":
+        linter = "ruff"
+        ruff_toml = cwd / "ruff.toml"
+        pyproject = cwd / "pyproject.toml"
+        flake8_cfg = cwd / ".flake8"
+        setup_cfg = cwd / "setup.cfg"
+        if ruff_toml.exists():
+            linter = "ruff"
+        elif pyproject.exists():
+            try:
+                text = pyproject.read_text(encoding="utf-8", errors="replace")
+                if "[tool.ruff]" in text:
+                    linter = "ruff"
+                elif flake8_cfg.exists():
+                    linter = "flake8"
+                elif setup_cfg.exists():
+                    setup_text = setup_cfg.read_text(encoding="utf-8", errors="replace")
+                    if "[flake8]" in setup_text:
+                        linter = "flake8"
+            except Exception:
+                pass
+        elif flake8_cfg.exists():
+            linter = "flake8"
+        elif setup_cfg.exists():
+            try:
+                setup_text = setup_cfg.read_text(encoding="utf-8", errors="replace")
+                if "[flake8]" in setup_text:
+                    linter = "flake8"
+            except Exception:
+                pass
+        cmd = [linter, "check", "."] if linter == "ruff" else [linter, "."]
+        return run_command(cmd, cwd=cwd, timeout=120)
+
+    # Frontend
+    angular_json = cwd / "angular.json"
+    if angular_json.exists():
+        return run_command_with_nvm(["npx", "ng", "lint"], cwd=cwd)
+    return run_command_with_nvm(["npx", "eslint", "."], cwd=cwd)
+
+
 # ---------------------------------------------------------------------------
 # Angular / npm project initialization
 # ---------------------------------------------------------------------------
