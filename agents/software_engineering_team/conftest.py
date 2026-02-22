@@ -8,10 +8,15 @@ Run from software_engineering_team directory:
 import sys
 from pathlib import Path
 
-# Add software_engineering_team to path so imports resolve
+# Add software_engineering_team and agents to path so imports resolve.
+# software_engineering_team must come first so its modules take precedence over agents/.
 _team_dir = Path(__file__).resolve().parent
-if str(_team_dir) not in sys.path:
-    sys.path.insert(0, str(_team_dir))
+_agents_dir = _team_dir.parent
+for _d in (_team_dir, _agents_dir):
+    while str(_d) in sys.path:
+        sys.path.remove(str(_d))
+sys.path.insert(0, str(_agents_dir))
+sys.path.insert(0, str(_team_dir))
 
 
 def pytest_configure(config):

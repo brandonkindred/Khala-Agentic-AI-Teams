@@ -12,7 +12,6 @@ from planning_team.planning_graph import (
     PlanningNodeKind,
     EdgeType,
     Phase,
-    _is_overly_broad_task,
     compile_planning_graph_to_task_assignment,
     ensure_dict,
     ensure_str_list,
@@ -104,22 +103,8 @@ def test_compile_qa_tasks_skipped():
     assert len(assignment.tasks) == 0
 
 
-def test_is_overly_broad_task_detects_monolithic_scope():
-    """_is_overly_broad_task returns True when details has 4+ and-separated items."""
-    assert _is_overly_broad_task(
-        "Implement models and endpoints and validation and error handling",
-        "Full CRUD API",
-    )
-    assert _is_overly_broad_task(
-        "Add schema, routes, services, and tests",
-        "",
-    )
-    assert not _is_overly_broad_task("Implement task CRUD endpoints", "Task API")
-    assert not _is_overly_broad_task("", "")
-
-
-def test_compile_skips_overly_broad_tasks():
-    """Overly broad tasks (4+ and-separated items in details) are skipped."""
+def test_compile_includes_all_tasks():
+    """All TASK nodes are compiled into tasks (no overly-broad filtering)."""
     g = PlanningGraph()
     g.add_node(PlanningNode(
         id="backend-monolithic",
@@ -138,8 +123,10 @@ def test_compile_skips_overly_broad_tasks():
         acceptance_criteria=["Models exist", "Schema correct"],
     ))
     assignment = compile_planning_graph_to_task_assignment(g)
-    assert len(assignment.tasks) == 1
-    assert assignment.tasks[0].id == "backend-granular"
+    assert len(assignment.tasks) == 2
+    ids = {t.id for t in assignment.tasks}
+    assert "backend-monolithic" in ids
+    assert "backend-granular" in ids
 
 
 def test_compile_backfills_user_story_for_backend_frontend_when_missing():

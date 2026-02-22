@@ -3,10 +3,8 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from repair_agent.agent import RepairExpertAgent
-from repair_agent.models import RepairInput, RepairOutput
+from agent_repair_team.agent import RepairExpertAgent
+from agent_repair_team.models import RepairInput, RepairOutput
 
 
 def test_repair_agent_suggests_import_fix_for_name_error() -> None:

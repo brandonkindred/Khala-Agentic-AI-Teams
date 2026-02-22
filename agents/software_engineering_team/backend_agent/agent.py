@@ -526,8 +526,7 @@ class BackendExpertAgent:
         architecture: Optional[SystemArchitecture],
     ) -> Tuple[str, bool]:
         """Produce an implementation plan for the task.
-        Returns (plan_text, should_split). If should_split is True, the task is too broad
-        (>5 items in what_changes) and the workflow should ask Tech Lead to split it.
+        Returns (plan_text, False). The second value is unused (legacy).
         """
         context_parts: List[str] = [
             f"**Task:** {task.description}",
@@ -559,30 +558,6 @@ class BackendExpertAgent:
         try:
             data = self.llm.complete_json(prompt, temperature=0.2)
             plan = TaskPlan.from_llm_json(data)
-            # Count items in what_changes to detect overly broad tasks
-            what = plan.what_changes
-            if isinstance(what, list):
-                item_count = len([x for x in what if x and str(x).strip()])
-            else:
-                # Split string by newlines, bullets, or " - " to count items
-                text = str(what or "").strip()
-                if not text:
-                    item_count = 0
-                else:
-                    lines = [
-                        ln.strip()
-                        for ln in text.replace("- ", "\n").replace("• ", "\n").split("\n")
-                        if ln.strip() and not ln.strip().startswith("#")
-                    ]
-                    item_count = len(lines)
-            if item_count > 5:
-                logger.warning(
-                    "[%s] Task too broad: plan has %d items in what_changes. "
-                    "Asking Tech Lead to split task.",
-                    task.id,
-                    item_count,
-                )
-                return ("", True)
             return (plan.to_markdown(), False)
         except Exception as e:
             logger.warning("[%s] Planning step failed, proceeding without plan: %s", task.id, e)
@@ -786,41 +761,12 @@ class BackendExpertAgent:
                 _read_repo_code(repo_path), max_code_chars
             )
             # Per-task planning: produce implementation plan before first code gen
-            plan_text, should_split = self._plan_task(
+            plan_text, _ = self._plan_task(
                 task=current_task,
                 existing_code=existing_code,
                 spec_content=spec_content,
                 architecture=architecture,
             )
-            if should_split:
-                if clar_round < MAX_CLARIFICATION_ROUNDS:
-                    logger.info(
-                        "[%s] WORKFLOW   Task too broad (plan has >5 items); refining via Tech Lead to split",
-                        task_id,
-                    )
-                    current_task = tech_lead.refine_task(
-                        current_task,
-                        ["Task too broad - split into smaller tasks. The implementation plan has more than 5 items in what_changes. Break this into 2-3 focused subtasks."],
-                        spec_content,
-                        architecture,
-                    )
-                    continue
-                else:
-                    logger.warning(
-                        "[%s] WORKFLOW FAILED at Step 2: Task still too broad after %d refinement rounds",
-                        task_id,
-                        MAX_CLARIFICATION_ROUNDS,
-                    )
-                    checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-                    return BackendWorkflowResult(
-                        task_id=task_id,
-                        success=False,
-                        branch_name=branch_name,
-                        failure_reason=(
-                            "Task too broad after "
-                            f"{MAX_CLARIFICATION_ROUNDS} refinement rounds (plan had >5 items)"
-                        ),
-                    )
             if plan_text:
                 plan_text_for_fix_loop = plan_text
                 logger.info("[%s] WORKFLOW   Planning complete, plan length=%d chars", task_id, len(plan_text))
@@ -2445,7 +2391,7 @@ class BackendExpertAgent:
         Returns:
             Tuple of (comments_added, comments_updated, already_compliant).
         """
-        from dbc_comments_agent.models import DbcCommentsInput
+        from technical_writers.dbc_comments_agent.models import DbcCommentsInput
         from shared.git_utils import write_files_and_commit
         try:
             dbc_code = _read_repo_code(repo_path)

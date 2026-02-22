@@ -13,7 +13,7 @@ The following changes were implemented to reduce max cycles exceeded and erroneo
 | **Pre-write cap** | Nested pre-write loops (pre-flight, build fix, code review fix, etc.) now use `MAX_PREWRITE_REGENERATIONS=2` instead of 6. After 2 failed attempts to add missing test routes, the task fails with a clear message instead of burning through more LLM calls. |
 | **Task plan in fix loop** | `_regenerate_with_issues` now accepts optional `task_plan`. For the first 2–3 fix attempts, the plan is passed so the agent stays anchored to the original implementation intent and does not remove plan-fulfilling code. |
 | **Escalation path** | At 4 same build failures: prompt suggests considering if test expectations are wrong (update test vs implementation). At 5 same failures: workflow exits early, Tech Lead receives `task_update` with `needs_followup=True`, and a follow-up fix task can be created—instead of waiting for 6. |
-| **Task granularity** | Backend planning prompt enforces max 1 resource, 3 endpoints, or 1 service module per TASK. CRUD entities require 3+ tasks. Overly broad tasks (4+ "and"-separated items in details) are rejected at compile time. |
+| **Task granularity** | Backend planning prompt enforces max 1 resource, 3 endpoints, or 1 service module per TASK. CRUD entities require 3+ tasks. |
 | **QA fix_build output** | QA fix_build mode now requires `file_path`, `line_or_section`, and `recommendation` starting with Add/Remove/Change/Fix. Backend fallback extracts file:line from build output for more specific suggestions. |
 
 **Constants (backend_agent/agent.py):**

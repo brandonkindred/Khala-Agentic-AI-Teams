@@ -284,9 +284,9 @@ def _get_agents():
     from backend_agent import BackendExpertAgent, BackendInput
     from planning_team.project_planning_agent import ProjectPlanningAgent, ProjectPlanningInput
     from code_review_agent import CodeReviewAgent, CodeReviewInput
-    from dbc_comments_agent import DbcCommentsAgent, DbcCommentsInput
+    from technical_writers.dbc_comments_agent import DbcCommentsAgent, DbcCommentsInput
     from devops_agent import DevOpsExpertAgent, DevOpsInput
-    from documentation_agent import DocumentationAgent, DocumentationInput
+    from technical_writers.documentation_agent import DocumentationAgent, DocumentationInput
     from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
     from git_setup_agent import GitSetupAgent
     from integration_team import IntegrationAgent, IntegrationInput
@@ -305,7 +305,7 @@ def _get_agents():
     from tech_lead_agent import TechLeadAgent, TechLeadInput
     from planning_team.ui_ux_design_agent import UiUxDesignAgent
     from acceptance_verifier_agent import AcceptanceVerifierAgent
-    from repair_agent import RepairExpertAgent, RepairInput
+    from agent_repair_team import RepairExpertAgent, RepairInput
 
     return {
         "spec_intake": SpecIntakeAgent(get_llm_for_agent("spec_intake")),
@@ -590,7 +590,7 @@ def _run_dbc_comments_review(
         - If code was already compliant, a praise message is logged
         - Any failures are logged but do not block the pipeline
     """
-    from dbc_comments_agent.models import DbcCommentsInput
+    from technical_writers.dbc_comments_agent.models import DbcCommentsInput
     from shared.git_utils import write_files_and_commit
 
     try:
@@ -1088,7 +1088,7 @@ def _run_backend_frontend_workers(
                     repair_agent = agents.get("repair")
                     if repair_agent:
                         try:
-                            from repair_agent.models import RepairInput
+                            from agent_repair_team.models import RepairInput
                             result = repair_agent.run(RepairInput(
                                 traceback=traceback.format_exc(),
                                 exception_type=type(e).__name__,
@@ -1248,7 +1248,7 @@ def _run_backend_frontend_workers(
                     repair_agent = agents.get("repair")
                     if repair_agent:
                         try:
-                            from repair_agent.models import RepairInput
+                            from agent_repair_team.models import RepairInput
                             result = repair_agent.run(RepairInput(
                                 traceback=traceback.format_exc(),
                                 exception_type=type(e).__name__,

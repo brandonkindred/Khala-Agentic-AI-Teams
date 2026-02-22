@@ -298,20 +298,6 @@ def _topological_order(
     return result
 
 
-def _is_overly_broad_task(details: str, summary: str) -> bool:
-    """Return True if task details/summary suggest a monolithic scope (4+ and-separated items).
-
-    E.g. 'models and endpoints and validation and error handling' indicates the task
-    should be split. Used to reject/flag tasks that would cause backend agent to exceed cycles.
-    """
-    text = (details or "") + " " + (summary or "")
-    if not text.strip():
-        return False
-    # Split on " and " (with optional commas) to count distinct scope items
-    parts = [p.strip() for p in text.replace(",", " and ").split(" and ") if p.strip()]
-    return len(parts) >= 4
-
-
 def compile_planning_graph_to_task_assignment(
     graph: PlanningGraph,
     rationale: str = "",
@@ -322,7 +308,6 @@ def compile_planning_graph_to_task_assignment(
     - EPIC/FEATURE nodes are collapsed into metadata/tags.
     - TASK/SUBTASK nodes become Task objects.
     - Execution order is topologically sorted with backend/frontend interleaving.
-    - Overly broad tasks (4+ and-separated items in details) are skipped and logged.
     """
     tasks: List[Task] = []
     task_ids_seen: set = set()
@@ -333,15 +318,6 @@ def compile_planning_graph_to_task_assignment(
         if nid in task_ids_seen:
             continue
         task_ids_seen.add(nid)
-
-        # Skip overly broad tasks that would cause backend agent to exceed cycles
-        if _is_overly_broad_task(node.details or "", node.summary or ""):
-            logger.warning(
-                "PlanningGraph: skipping overly broad task %s (details suggests 4+ scope items). "
-                "Ask planner to split into granular tasks.",
-                nid,
-            )
-            continue
 
         # Reclassify domain if node ID clearly indicates wrong domain (safeguard)
         domain = node.domain

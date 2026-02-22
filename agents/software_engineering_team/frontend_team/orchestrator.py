@@ -708,7 +708,7 @@ class FrontendOrchestratorAgent:
         architecture: Optional[SystemArchitecture],
     ) -> None:
         """Run DBC comments agent on frontend code."""
-        from dbc_comments_agent.models import DbcCommentsInput
+        from technical_writers.dbc_comments_agent.models import DbcCommentsInput
         from shared.git_utils import write_files_and_commit
 
         try:

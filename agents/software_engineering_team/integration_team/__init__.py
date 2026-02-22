@@ -12,7 +12,7 @@ from .models import IntegrationInput, IntegrationIssue, IntegrationOutput
 
 # Re-exports for discoverability
 from devops_agent import DevOpsExpertAgent, DevOpsInput
-from documentation_agent import DocumentationAgent, DocumentationInput
+from technical_writers.documentation_agent import DocumentationAgent, DocumentationInput
 
 __all__ = [
     "IntegrationAgent",

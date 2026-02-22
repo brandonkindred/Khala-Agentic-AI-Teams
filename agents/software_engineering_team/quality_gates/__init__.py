@@ -14,7 +14,7 @@ from code_review_agent import CodeReviewAgent, CodeReviewInput
 from qa_agent import QAExpertAgent, QAInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
 from acceptance_verifier_agent import AcceptanceVerifierAgent
-from dbc_comments_agent import DbcCommentsAgent, DbcCommentsInput
+from technical_writers.dbc_comments_agent import DbcCommentsAgent, DbcCommentsInput
 
 from . import protocols
 

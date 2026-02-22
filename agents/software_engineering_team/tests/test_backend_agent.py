@@ -316,7 +316,7 @@ def test_backend_agent_content_fallback_no_code_blocks_injects_stub() -> None:
 
 
 def test_backend_plan_task_returns_plan_markdown() -> None:
-    """_plan_task parses LLM JSON and returns (plan_text, should_split)."""
+    """_plan_task parses LLM JSON and returns (plan_text, False)."""
     from shared.models import Task, TaskType
 
     mock_llm = MagicMock()
@@ -341,37 +341,6 @@ def test_backend_plan_task_returns_plan_markdown() -> None:
     assert "app/routers/tasks.py" in plan_text
     assert "tests/test_task_endpoints.py" in plan_text
     assert "O(1) lookup" in plan_text
-
-
-def test_backend_plan_task_returns_should_split_when_too_many_items() -> None:
-    """_plan_task returns should_split=True when what_changes has >5 items."""
-    from shared.models import Task, TaskType
-
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.return_value = {
-        "feature_intent": "Add full CRUD",
-        "what_changes": [
-            "app/models/task.py",
-            "app/schemas/task.py",
-            "app/routers/tasks.py",
-            "app/services/task.py",
-            "app/database.py",
-            "tests/test_tasks.py",
-        ],
-        "algorithms_data_structures": "Use dict",
-        "tests_needed": "tests",
-    }
-    agent = BackendExpertAgent(llm_client=mock_llm)
-    task = Task(id="t1", type=TaskType.BACKEND, assignee="backend", title="Add tasks", description="Implement task CRUD")
-    plan_text, should_split = agent._plan_task(
-        task=task,
-        existing_code="# No code",
-        spec_content="",
-        architecture=None,
-    )
-    assert should_split
-    assert plan_text == ""
 
 
 def test_regenerate_with_issues_passes_task_plan_to_backend_input(tmp_path: Path) -> None:
