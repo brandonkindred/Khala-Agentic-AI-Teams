@@ -108,8 +108,10 @@ def get_job(
 def list_jobs(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     running_only: bool = False,
+    job_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """List jobs from cache. If running_only is True, only include pending or running."""
+    """List jobs from cache. If running_only is True, only include pending or running.
+    If job_type is set, only include jobs with that job_type."""
     running_statuses = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING)
     result: List[Dict[str, Any]] = []
     jobs_path = _jobs_dir(cache_dir)
@@ -123,6 +125,8 @@ def list_jobs(
                 continue
             status = data.get("status", JOB_STATUS_PENDING)
             if running_only and status not in running_statuses:
+                continue
+            if job_type is not None and data.get("job_type") != job_type:
                 continue
             result.append({
                 "job_id": job_id,

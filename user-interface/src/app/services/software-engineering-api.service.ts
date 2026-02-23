@@ -22,6 +22,7 @@ import type {
   PlanningV2RunRequest,
   PlanningV2RunResponse,
   PlanningV2StatusResponse,
+  PlanningV2ResultResponse,
 } from '../models';
 
 /**
@@ -221,6 +222,24 @@ export class SoftwareEngineeringApiService {
   ): Observable<PlanningV2StatusResponse> {
     return this.http.get<PlanningV2StatusResponse>(
       `${this.baseUrl}/planning-v2/status/${jobId}`
+    );
+  }
+
+  /**
+   * GET /planning-v2/jobs - list running and pending planning-v2 jobs.
+   */
+  getPlanningV2Jobs(): Observable<RunningJobsResponse> {
+    return this.http.get<RunningJobsResponse>(
+      `${this.baseUrl}/planning-v2/jobs`
+    );
+  }
+
+  /**
+   * GET /planning-v2/result/{job_id}
+   */
+  getPlanningV2Result(jobId: string): Observable<PlanningV2ResultResponse> {
+    return this.http.get<PlanningV2ResultResponse>(
+      `${this.baseUrl}/planning-v2/result/${jobId}`
     );
   }
 

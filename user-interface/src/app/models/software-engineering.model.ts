@@ -219,3 +219,12 @@ export interface PlanningV2StatusResponse {
   error?: string;
   summary?: string;
 }
+
+/** Response from GET /planning-v2/result/{job_id}. */
+export interface PlanningV2ResultResponse {
+  job_id: string;
+  status: string;
+  phase_results: Record<string, unknown>;
+  summary?: string;
+  error?: string;
+}

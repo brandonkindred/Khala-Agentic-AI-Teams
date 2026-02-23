@@ -15,6 +15,7 @@ UI actions mapped to HTTP endpoints.
 | UI Action | Method | Path | Request | Response |
 |-----------|--------|------|---------|----------|
 | Start team | POST | `/run-team` | `RunTeamRequest` | `RunTeamResponse` |
+| List running/pending jobs | GET | `/run-team/jobs` | - | `RunningJobsResponse` |
 | Poll job status | GET | `/run-team/{job_id}` | - | `JobStatusResponse` |
 | Retry failed tasks | POST | `/run-team/{job_id}/retry-failed` | - | `RetryResponse` |
 | Re-plan with clarifications | POST | `/run-team/{job_id}/re-plan-with-clarifications` | `RePlanWithClarificationsRequest` | `RunTeamResponse` |
@@ -23,6 +24,12 @@ UI actions mapped to HTTP endpoints.
 | Get clarification session | GET | `/clarification/sessions/{id}` | - | `ClarificationSessionResponse` |
 | Get execution tasks | GET | `/execution/tasks` | - | `Record<string, unknown>` |
 | Execution stream (SSE) | GET | `/execution/stream` | - | Event stream |
+| **Backend-Code-V2:** Run backend-code-v2 team | POST | `/backend-code-v2/run` | `BackendCodeV2RunRequest` | `BackendCodeV2RunResponse` |
+| **Backend-Code-V2:** Poll job status | GET | `/backend-code-v2/status/{job_id}` | - | `BackendCodeV2StatusResponse` |
+| **Planning-V2:** Run planning-v2 workflow | POST | `/planning-v2/run` | `PlanningV2RunRequest` | `PlanningV2RunResponse` |
+| **Planning-V2:** Poll job status | GET | `/planning-v2/status/{job_id}` | - | `PlanningV2StatusResponse` |
+| **Planning-V2:** List planning-v2 jobs | GET | `/planning-v2/jobs` | - | `RunningJobsResponse` |
+| **Planning-V2:** Get job result (phase results) | GET | `/planning-v2/result/{job_id}` | - | `PlanningV2ResultResponse` |
 | Health check | GET | `/health` | - | `{ status: "ok" }` |
 
 ## Market Research API (port 8011)

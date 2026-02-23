@@ -802,6 +802,19 @@ class PlanningV2StatusResponse(BaseModel):
     summary: Optional[str] = None
 
 
+class PlanningV2ResultResponse(BaseModel):
+    """Response from GET /planning-v2/result/{job_id}. Phase results when job has completed (or failed after some phases)."""
+
+    job_id: str = Field(..., description="Job ID")
+    status: str = Field(..., description="completed or failed")
+    phase_results: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Phase outputs: spec_review_result, planning_result, implementation_result, review_result, problem_solving_result, deliver_result",
+    )
+    summary: Optional[str] = None
+    error: Optional[str] = None
+
+
 def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict, spec_content: str, architecture_overview: str) -> None:
     """Run backend-code-v2 workflow in a background thread."""
     try:
@@ -897,6 +910,20 @@ def _run_planning_v2_background(
         )
 
         final_status = "completed" if result.success else "failed"
+        phase_results: Dict[str, Any] = {}
+        if result.spec_review_result is not None:
+            phase_results["spec_review_result"] = result.spec_review_result.model_dump()
+        if result.planning_result is not None:
+            phase_results["planning_result"] = result.planning_result.model_dump()
+        if result.implementation_result is not None:
+            phase_results["implementation_result"] = result.implementation_result.model_dump()
+        if result.review_result is not None:
+            phase_results["review_result"] = result.review_result.model_dump()
+        if result.problem_solving_result is not None:
+            phase_results["problem_solving_result"] = result.problem_solving_result.model_dump()
+        if result.deliver_result is not None:
+            phase_results["deliver_result"] = result.deliver_result.model_dump()
+
         update_job(
             job_id,
             status=final_status,
@@ -904,6 +931,7 @@ def _run_planning_v2_background(
             summary=result.summary,
             error=result.failure_reason if not result.success else None,
             current_phase=Phase.DELIVER.value,
+            phase_results=phase_results if phase_results else None,
         )
     except Exception as e:
         logger.exception("Planning-v2 workflow failed")
@@ -1034,6 +1062,53 @@ def get_planning_v2_status(job_id: str) -> PlanningV2StatusResponse:
         error=data.get("error"),
         summary=data.get("summary"),
     )
+
+
+@app.get(
+    "/planning-v2/result/{job_id}",
+    response_model=PlanningV2ResultResponse,
+    summary="Get planning-v2 job result",
+    description="Returns phase results (spec_review, planning, implementation, review, problem_solving, deliver) when the job has finished. Returns 404 if job not found or result not yet available.",
+)
+def get_planning_v2_result(job_id: str) -> PlanningV2ResultResponse:
+    """Get the phase results of a completed planning-v2 job."""
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    status = data.get("status", JOB_STATUS_PENDING)
+    if status in ("pending", "running"):
+        raise HTTPException(status_code=404, detail="Result not yet available; job still in progress")
+    phase_results = data.get("phase_results")
+    if phase_results is None:
+        phase_results = {}
+    return PlanningV2ResultResponse(
+        job_id=job_id,
+        status=status,
+        phase_results=phase_results,
+        summary=data.get("summary"),
+        error=data.get("error"),
+    )
+
+
+@app.get(
+    "/planning-v2/jobs",
+    response_model=RunningJobsResponse,
+    summary="List planning-v2 jobs",
+    description="Returns all planning-v2 jobs with status pending or running.",
+)
+def get_planning_v2_jobs() -> RunningJobsResponse:
+    """List running and pending planning-v2 jobs."""
+    raw = list_jobs(running_only=True, job_type="planning_v2")
+    jobs = [
+        RunningJobSummary(
+            job_id=item["job_id"],
+            status=item["status"],
+            repo_path=item.get("repo_path"),
+            job_type=item.get("job_type") or "planning_v2",
+        )
+        for item in raw
+    ]
+    return RunningJobsResponse(jobs=jobs)
 
 
 @app.get("/health")

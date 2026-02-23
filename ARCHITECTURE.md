@@ -59,25 +59,22 @@ The API also exposes `GET /run-team/{job_id}` for polling job status, `POST /run
 
 ## 2. End-to-End Pipeline
 
-A single run goes through four major phases: Discovery, Design, Execution, and Integration. The orchestrator (`orchestrator.py`) drives this pipeline sequentially. Tiers within domain planning run sequentially, but agents within each tier run in parallel.
+A single run goes through four major phases: Discovery, Design, Execution, and Integration. The orchestrator (`orchestrator.py`) drives this pipeline sequentially. Planning is handled by **planning_v2_team** (6-phase workflow); its output is adapted by **planning_v2_adapter** for Tech Lead and Architecture Expert.
 
 ```mermaid
 flowchart TB
     subgraph discovery ["1 - Discovery"]
         LoadSpec["Load Spec\n(initial_spec.md or override)"]
         ParseSpec["Parse Spec with LLM\n(ProductRequirements)"]
-        SpecIntake["Spec Intake\n(optional: REQ-IDs, glossary)"]
-        ProjectPlanning["Project Planning\n(features doc, project overview)"]
-        LoadSpec --> ParseSpec --> SpecIntake --> ProjectPlanning
+        PlanningV2["Planning (v2)\n6-phase workflow"]
+        Adapter["planning_v2_adapter\n(ProductRequirements, project_overview)"]
+        LoadSpec --> ParseSpec --> PlanningV2 --> Adapter
     end
 
     subgraph design ["2 - Design"]
-        PlanLoop["Tech Lead + Architecture Expert\n(alignment + conformance loop)"]
-        Tier1["Tier 1: API Contract, Data Arch,\nUI/UX, Infrastructure"]
-        Tier2["Tier 2: Frontend Arch, DevOps,\nQA Strategy, Security"]
-        Tier3["Tier 3: Observability,\nPerformance"]
+        PlanLoop["Tech Lead + Architecture Expert"]
         MasterPlan["Planning Consolidation\n(master_plan.md)"]
-        PlanLoop --> Tier1 --> Tier2 --> Tier3 --> MasterPlan
+        PlanLoop --> MasterPlan
     end
 
     subgraph execution ["3 - Execution"]
@@ -105,30 +102,17 @@ Each phase produces artifacts that feed the next. Planning artifacts are written
 
 ## 3. Agent Registry and Roles
 
-The orchestrator instantiates all agents via `_get_agents()`. Agents are grouped by function: planning, domain planning, setup, execution, quality gates, integration, and recovery support.
+The orchestrator instantiates agents via `_get_agents()`. The main pipeline uses **planning_v2_team** (PlanningV2TeamLead) for discovery/planning, with **planning_v2_adapter** mapping its result to ProductRequirements and project_overview for Tech Lead and Architecture. Legacy planning_team agents (Spec Intake, Project Planning, domain planning) are not in the main flow; clarification sessions still use Spec Intake.
 
 ```mermaid
 flowchart TB
     Orch["Orchestrator"]
 
-    subgraph planning [Planning]
-        specIntake["Spec Intake"]
-        projPlan["Project Planning"]
+    subgraph planning [Planning - main pipeline]
+        planningV2["Planning (v2)\n6-phase workflow"]
+        adapter["planning_v2_adapter"]
         archExpert["Architecture Expert"]
         techLead["Tech Lead"]
-    end
-
-    subgraph domain [Domain Planning]
-        apiContract["API Contract"]
-        dataArch["Data Architecture"]
-        uiUx["UI/UX Design"]
-        feArch["Frontend Architecture"]
-        infraPlan["Infrastructure"]
-        devopsPlan["DevOps Planning"]
-        qaStrat["QA Test Strategy"]
-        secPlan["Security Planning"]
-        obsPlan["Observability"]
-        perfPlan["Performance"]
     end
 
     subgraph setupGroup [Setup]
@@ -462,18 +446,18 @@ Hard gates that must pass: `iac_validate`, `iac_validate_fmt`, `policy_checks`, 
 
 ## 9. Planning Loop
 
-The Tech Lead and Architecture Expert iterate until tasks and architecture converge. An optional planning cache short-circuits the loop when the spec, architecture, and project overview are unchanged from a previous run.
+The Tech Lead and Architecture Expert run after **Planning (v2)** and **planning_v2_adapter** produce ProductRequirements and project_overview. An optional planning cache short-circuits when the spec, architecture, and project overview are unchanged from a previous run.
 
 ```mermaid
 flowchart TB
-    StartPlan["Start Planning\n(after Project Planning)"]
+    StartPlan["Start Planning\n(after Planning v2 + adapter)"]
     TechLeadRun["Tech Lead\nGenerate task assignment"]
     ArchRun["Architecture Expert\nDesign architecture"]
     CacheHit{"Planning\ncache hit?"}
     AlignCheck{"Tasks and architecture\naligned?"}
     ConformCheck{"Conforms to\ninitial_spec?"}
     SaveCache["Save to\nplanning cache"]
-    ProceedExec["Proceed to\nDomain Planning"]
+    ProceedExec["Proceed to\nExecution"]
 
     StartPlan --> TechLeadRun --> ArchRun --> CacheHit
     CacheHit -->|"yes"| ProceedExec
@@ -490,26 +474,23 @@ The alignment inner loop runs up to `SW_MAX_ALIGNMENT_ITERATIONS` (default 20) a
 
 ## 10. Plan Folder and Artifacts
 
-All planning outputs are written to a `plan/` directory at the work path root. Each agent writes specific artifacts grouped by SDLC phase.
+Planning (v2) writes to `planning_v2/` under the repo path. The rest of planning outputs are written to `plan/` at the work path root.
 
 ```mermaid
 flowchart LR
     PlanDir["plan/"]
+    P2Dir["planning_v2/"]
 
-    PlanDir --> DiscoveryArt["Discovery\nspec_lint_report.md\nglossary.md\nassumptions_and_questions.md\nacceptance_criteria_index.md"]
-
-    PlanDir --> ProjPlanArt["Project Planning\nproject_overview.md\nfeatures_and_functionality.md"]
+    P2Dir --> P2Art["Planning (v2)\nplanning_artifacts.md"]
 
     PlanDir --> ArchArt["Architecture\narchitecture.md"]
-
-    PlanDir --> DomainArt["Domain Planning\nopenapi.yaml, data_schema.md,\nui_ux.md, frontend_architecture.md,\ninfrastructure.md, devops_pipeline.md,\ntest_strategy.md, security_and_compliance.md,\nobservability.md, performance.md"]
 
     PlanDir --> ConsolArt["Consolidation\ntech_lead.md\nmaster_plan.md"]
 
     PlanDir --> PerTaskArt["Per-Task Plans\nbackend_task_ID.md\nfrontend_task_ID.md"]
 ```
 
-Additional API contract artifacts (`api_error_model.md`, `api_versioning.md`, `contract_tests_plan.md`) and the backend `openapi.yaml` are also produced during domain planning. The `master_plan.md` consolidation includes a risk register and ship checklist.
+The `master_plan.md` consolidation includes a risk register and ship checklist.
 
 ---
 
@@ -527,7 +508,8 @@ flowchart TB
     SWTeam --> swOrch["orchestrator.py"]
     SWTeam --> swAPI["api/"]
     SWTeam --> swCLI["agent_implementations/"]
-    SWTeam --> swPlanning["planning_team/\n(20+ planning agents)"]
+    SWTeam --> swPlanningV2["planning_v2_team/\n(6-phase workflow)\nplanning_v2_adapter"]
+    SWTeam --> swPlanning["planning_team/\n(legacy; clarification)"]
     SWTeam --> swBackend["backend_agent/"]
     SWTeam --> swBackendV2["backend_code_v2_team/\n(standalone 5-phase team,\n3 tool agents)"]
     SWTeam --> swFrontend["frontend_team/\n(12 agents)"]

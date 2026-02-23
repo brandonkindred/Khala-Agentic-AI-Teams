@@ -6,8 +6,7 @@ A multi-agent system that simulates a real software engineering team with a mix 
 
 | Agent | Phase | Role | Expertise |
 |-------|-------|------|------------|
-| **Spec Intake** | Discovery | Spec validator | Validates spec, REQ-IDs, glossary, assumptions |
-| **Project Planning Agent** | Discovery | Spec reviewer | Reviews `initial_spec.md`, produces features/functionality overview; used by Tech Lead and Architecture |
+| **Planning (v2)** | Discovery/Design | Product planning | 6-phase workflow: Spec Review/Gap → Planning → Implementation → Review → Problem-solving → Deliver; output adapted for Tech Lead and Architecture |
 | **Architecture Expert** | Design | System designer | Designs system architecture from requirements; output used by all other agents |
 | **Tech Lead** | Design | Staff-level orchestrator | Uses initial_spec to generate full build plan; distributes work by dependency; tracks progress; triggers documentation (uses Spec Chunk Analyzer, Spec Analysis Merger, Task Generator for large specs) |
 | **Git Setup Agent** | Setup | Repo setup | Creates `work_path/backend` and `work_path/frontend` clones/branches; ensures `development` branch |
@@ -46,15 +45,15 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 
 | Phase | Sub-team | Agents |
 |-------|----------|--------|
-| **Discovery** | planning_team (intake) | Spec Intake, Project Planning |
-| **Design** | planning_team | Architecture Expert, Tech Lead, domain planning agents (API Contract, Data Architecture, UI/UX, Frontend Architecture, Infrastructure, DevOps Planning, QA Test Strategy, Security Planning, Observability, Performance Doc), planning consolidation |
+| **Discovery / Design (planning)** | planning_v2_team | Planning (v2) 6-phase workflow; planning_v2_adapter maps result to ProductRequirements and project_overview for Tech Lead and Architecture |
+| **Design (post-planning)** | top-level | Architecture Expert, Tech Lead, planning consolidation |
 | **Setup** | top-level | Git Setup |
 | **Implementation** | backend | Backend Expert |
 | **Implementation** | frontend_team | UX Designer, UI Designer, Design System, Frontend Architect, Feature Agent, UX Engineer, Performance Engineer, Build/Release |
 | **Quality** | quality gates (cross-cutting) | Code Review, QA Expert, Cybersecurity Expert, Accessibility Expert, Acceptance Verifier, DbC Comments |
 | **Integration / release** | top-level | Integration Agent, DevOps Team (sub-orchestrator), Documentation Agent |
 
-**Planning team sub-groups:** Within `planning_team/`, **Discovery** (intake) = Spec Intake, Project Planning. **Design** = Architecture, Tech Lead, and all domain planning agents. The Tech Lead uses planning graph agents (backend, frontend, data, test, performance, documentation, quality-gate planning) internally when creating task details and aligning with Architecture.
+**Planning:** The main pipeline uses `planning_v2_team` (PlanningV2TeamLead) for discovery and planning; its output is adapted by `planning_v2_adapter` into ProductRequirements and project_overview for Tech Lead and Architecture Expert. The legacy `planning_team` (Spec Intake, Project Planning, domain planning agents) is no longer used in the main flow; clarification sessions still use `planning_team.spec_intake_agent` and `spec_clarification_agent` for open questions and assumptions.
 
 **Accessibility:** Lives under `frontend_team/` but is conceptually part of the **Quality** phase—it reviews frontend code for WCAG 2.2 compliance and is invoked per frontend task.
 
@@ -62,15 +61,14 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 
 ```mermaid
 flowchart LR
-  subgraph discovery [Discovery]
-    SpecIntake
-    ProjectPlanning
+  subgraph discovery [Discovery and planning]
+    PlanningV2[Planning v2\n6-phase workflow]
+    Adapter[planning_v2_adapter]
   end
 
   subgraph design [Design and planning]
     Architecture
     TechLead
-    DomainPlanning[API Contract, Data Arch, UI/UX, etc.]
   end
 
   subgraph setup [Setup]
@@ -97,7 +95,7 @@ flowchart LR
     Documentation
   end
 
-  discovery --> design
+  discovery --> Adapter --> design
   design --> setup
   setup --> implementation
   implementation --> quality
@@ -114,21 +112,10 @@ flowchart LR
 
 ## Plan folder
 
-All planning artifacts are written to a `plan/` folder at the project root (work path). The folder is created when the spec is first ingested successfully. Artifacts include:
+All planning artifacts are written to a `plan/` folder at the project root (work path). The folder is created when the spec is first ingested successfully. Planning (v2) also writes to `planning_v2/` under the repo path. Artifacts include:
 
-- `plan/spec_lint_report.md`, `plan/glossary.md`, `plan/assumptions_and_questions.md`, `plan/acceptance_criteria_index.md` (Spec Intake)
-- `plan/project_overview.md`, `plan/features_and_functionality.md` (Project Planning)
-- `plan/architecture.md` (Architecture)
-- `backend/openapi.yaml`, `plan/api_error_model.md`, `plan/api_versioning.md`, `plan/contract_tests_plan.md` (API Contract)
-- `plan/data_schema.md`, `plan/data_architecture.md` (Data Architecture)
-- `plan/ui_ux.md` (UI/UX Design)
-- `plan/frontend_architecture.md` (Frontend Architecture)
-- `plan/infrastructure.md` (Infrastructure)
-- `plan/devops_pipeline.md` (DevOps)
-- `plan/test_strategy.md` (QA Test Strategy)
-- `plan/security_and_compliance.md` (Security)
-- `plan/observability.md` (Observability)
-- `plan/performance.md` (Performance)
+- `planning_v2/planning_artifacts.md` (Planning v2 Implementation phase)
+- `plan/architecture.md` (Architecture Expert)
 - `plan/tech_lead.md` (Tech Lead task plan)
 - `plan/master_plan.md` (Consolidated master plan, risk register, ship checklist)
 - `plan/backend_task_<task_id>.md`, `plan/frontend_task_<task_id>.md` (Per-task implementation plans from coding agents)

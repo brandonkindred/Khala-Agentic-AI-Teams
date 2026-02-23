@@ -64,6 +64,7 @@ from shared.job_store import (
 )
 from shared.command_runner import run_command_with_nvm
 from shared.execution_tracker import execution_tracker
+# Plan dir: kept in planning_team (also used by planning_consolidation; shared/plan_dir would require moving consolidation)
 from planning_team.plan_dir import ensure_plan_dir
 from shared.development_plan_writer import (
     write_architecture_plan,
@@ -287,10 +288,11 @@ def _log_task_breakdown(
 
 def _get_agents() -> Dict[str, Any]:
     """Lazy init agents including the code review, documentation, and DbC comments agents.
-    Each agent uses get_llm_for_agent(key) for per-agent model configuration."""
+    Each agent uses get_llm_for_agent(key) for per-agent model configuration.
+    Main pipeline uses planning_v2_team for planning; spec_intake/project_planning/domain planning agents
+    are not used in the main flow (clarification_store may still use Spec Intake elsewhere)."""
     from frontend_team.accessibility_agent import AccessibilityExpertAgent, AccessibilityInput
     from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
-    from planning_team.project_planning_agent import ProjectPlanningAgent, ProjectPlanningInput
     from code_review_agent import CodeReviewAgent, CodeReviewInput
     from technical_writers.dbc_comments_agent import DbcCommentsAgent, DbcCommentsInput
     from devops_team import DevOpsTeamLeadAgent
@@ -300,36 +302,14 @@ def _get_agents() -> Dict[str, Any]:
     from integration_team import IntegrationAgent, IntegrationInput
     from qa_agent import QAExpertAgent, QAInput
     from security_agent import CybersecurityExpertAgent, SecurityInput
-    from planning_team.api_contract_planning_agent import ApiContractPlanningAgent
-    from planning_team.data_architecture_agent import DataArchitectureAgent
-    from planning_team.devops_planning_agent import DevOpsPlanningAgent
-    from planning_team.frontend_architecture_agent import FrontendArchitectureAgent
-    from planning_team.infrastructure_planning_agent import InfrastructurePlanningAgent
-    from planning_team.observability_planning_agent import ObservabilityPlanningAgent
-    from planning_team.performance_planning_doc_agent import PerformancePlanningDocAgent
-    from planning_team.qa_test_strategy_agent import QaTestStrategyAgent
-    from planning_team.security_planning_agent import SecurityPlanningAgent
-    from planning_team.spec_intake_agent import SpecIntakeAgent, SpecIntakeInput, validated_spec_to_requirements
     from tech_lead_agent import TechLeadAgent, TechLeadInput
-    from planning_team.ui_ux_design_agent import UiUxDesignAgent
     from acceptance_verifier_agent import AcceptanceVerifierAgent
     from agent_repair_team import RepairExpertAgent, RepairInput
     from linting_tool_agent import LintingToolAgent
     from build_fix_specialist import BuildFixSpecialistAgent
 
     return {
-        "spec_intake": SpecIntakeAgent(get_llm_for_agent("spec_intake")),
-        "project_planning": ProjectPlanningAgent(get_llm_for_agent("project_planning")),
         "architecture": ArchitectureExpertAgent(get_llm_for_agent("architecture")),
-        "api_contract": ApiContractPlanningAgent(get_llm_for_agent("api_contract")),
-        "data_architecture": DataArchitectureAgent(get_llm_for_agent("data_architecture")),
-        "ui_ux": UiUxDesignAgent(get_llm_for_agent("ui_ux")),
-        "frontend_architecture": FrontendArchitectureAgent(get_llm_for_agent("frontend_architecture")),
-        "infrastructure": InfrastructurePlanningAgent(get_llm_for_agent("infrastructure")),
-        "devops_planning": DevOpsPlanningAgent(get_llm_for_agent("devops_planning")),
-        "qa_test_strategy": QaTestStrategyAgent(get_llm_for_agent("qa_test_strategy")),
-        "security_planning": SecurityPlanningAgent(get_llm_for_agent("security_planning")),
-        "observability": ObservabilityPlanningAgent(get_llm_for_agent("observability")),
         "integration": IntegrationAgent(get_llm_for_agent("integration")),
         "acceptance_verifier": AcceptanceVerifierAgent(get_llm_for_agent("acceptance_verifier")),
         "tech_lead": TechLeadAgent(get_llm_for_agent("tech_lead")),
@@ -389,163 +369,6 @@ def _build_task_update(task_id: str, agent_type: str, result: Any, status: str =
         files_changed=files_changed,
         needs_followup=needs_followup,
     )
-
-
-def _run_tier1_agent(
-    agent_key: str,
-    agents: dict,
-    spec_content: str,
-    arch_overview: str,
-    plan_dir: Path,
-    requirements: Any,
-    features_and_functionality_doc: str,
-    tenancy: str,
-) -> Tuple[str, Optional[Any]]:
-    """
-    Run a single Tier 1 planning agent. Returns (agent_key, output_or_exc).
-    Output is a dict with keys like infra_doc, data_lifecycle, ui_ux_doc, or None for agents that don't produce downstream inputs.
-    """
-    try:
-        if agent_key == "api_contract" and agents.get("api_contract"):
-            from planning_team.api_contract_planning_agent.models import ApiContractPlanningInput
-            agents["api_contract"].run(ApiContractPlanningInput(
-                spec_content=spec_content,
-                architecture_overview=arch_overview,
-                requirements_title=requirements.title,
-                acceptance_criteria=requirements.acceptance_criteria or [],
-                plan_dir=plan_dir,
-            ))
-            return (agent_key, None)
-        if agent_key == "data_architecture" and agents.get("data_architecture"):
-            from planning_team.data_architecture_agent.models import DataArchitectureInput
-            data_out = agents["data_architecture"].run(DataArchitectureInput(
-                spec_content=spec_content,
-                architecture_overview=arch_overview,
-                requirements_title=requirements.title,
-                plan_dir=plan_dir,
-            ))
-            return (agent_key, {"data_lifecycle": data_out.data_lifecycle_policy or ""})
-        if agent_key == "ui_ux" and agents.get("ui_ux"):
-            from ui_ux_design_agent.models import UiUxDesignInput
-            ui_out = agents["ui_ux"].run(UiUxDesignInput(
-                spec_content=spec_content,
-                requirements_title=requirements.title,
-                features_doc=features_and_functionality_doc or "",
-                plan_dir=plan_dir,
-            ))
-            ui_ux_doc = (ui_out.user_journeys or "") + "\n" + (ui_out.wireframes or "")
-            return (agent_key, {"ui_ux_doc": ui_ux_doc})
-        if agent_key == "infrastructure" and agents.get("infrastructure"):
-            from planning_team.infrastructure_planning_agent.models import InfrastructurePlanningInput
-            infra_out = agents["infrastructure"].run(InfrastructurePlanningInput(
-                architecture_overview=arch_overview,
-                tenancy_model=tenancy,
-                requirements_title=requirements.title,
-                plan_dir=plan_dir,
-            ))
-            infra_doc = (infra_out.cloud_diagram or "") + "\n" + (infra_out.environment_strategy or "")
-            return (agent_key, {"infra_doc": infra_doc})
-    except Exception as e:
-        logger.debug("%s planning skipped: %s", agent_key.replace("_", " ").title(), e)
-        return (agent_key, None)
-    return (agent_key, None)
-
-
-def _run_tier2_agent(
-    agent_key: str,
-    agents: dict,
-    spec_content: str,
-    arch_overview: str,
-    plan_dir: Path,
-    requirements: Any,
-    req_ids: List[str],
-    ui_ux_doc: str,
-    infra_doc: str,
-    data_lifecycle: str,
-) -> Tuple[str, Optional[Any]]:
-    """Run a single Tier 2 planning agent. Returns (agent_key, output_dict or None)."""
-    try:
-        if agent_key == "frontend_architecture" and agents.get("frontend_architecture"):
-            from planning_team.frontend_architecture_agent.models import FrontendArchitectureInput
-            agents["frontend_architecture"].run(FrontendArchitectureInput(
-                spec_content=spec_content,
-                architecture_overview=arch_overview,
-                ui_ux_doc=ui_ux_doc,
-                requirements_title=requirements.title,
-                plan_dir=plan_dir,
-            ))
-            return (agent_key, None)
-        if agent_key == "devops_planning" and agents.get("devops_planning"):
-            from planning_team.devops_planning_agent.models import DevOpsPlanningInput
-            dev_out = agents["devops_planning"].run(DevOpsPlanningInput(
-                architecture_overview=arch_overview,
-                infrastructure_doc=infra_doc,
-                requirements_title=requirements.title,
-                plan_dir=plan_dir,
-            ))
-            devops_doc = (dev_out.ci_pipeline or "") + "\n" + (dev_out.cd_pipeline or "")
-            return (agent_key, {"devops_doc": devops_doc})
-        if agent_key == "qa_test_strategy" and agents.get("qa_test_strategy"):
-            from planning_team.qa_test_strategy_agent.models import QaTestStrategyInput
-            agents["qa_test_strategy"].run(QaTestStrategyInput(
-                spec_content=spec_content,
-                architecture_overview=arch_overview,
-                acceptance_criteria=requirements.acceptance_criteria or [],
-                requirement_ids=req_ids,
-                requirements_title=requirements.title,
-                plan_dir=plan_dir,
-            ))
-            return (agent_key, None)
-        if agent_key == "security_planning" and agents.get("security_planning"):
-            from planning_team.security_planning_agent import SecurityPlanningInput
-            agents["security_planning"].run(SecurityPlanningInput(
-                spec_content=spec_content,
-                architecture_overview=arch_overview,
-                data_lifecycle=data_lifecycle,
-                requirements_title=requirements.title,
-                plan_dir=plan_dir,
-            ))
-            return (agent_key, None)
-    except Exception as e:
-        logger.debug("%s planning skipped: %s", agent_key.replace("_", " ").title(), e)
-        return (agent_key, None)
-    return (agent_key, None)
-
-
-def _run_tier3_observability(
-    agents: dict,
-    arch_overview: str,
-    infra_doc: str,
-    devops_doc: str,
-    requirements: Any,
-    plan_dir: Path,
-) -> None:
-    """Run observability planning agent."""
-    from planning_team.observability_planning_agent.models import ObservabilityPlanningInput
-    agents["observability"].run(ObservabilityPlanningInput(
-        architecture_overview=arch_overview,
-        infrastructure_doc=infra_doc,
-        devops_doc=devops_doc,
-        requirements_title=requirements.title,
-        plan_dir=plan_dir,
-    ))
-
-
-def _run_tier3_performance_doc(
-    agents: dict,
-    spec_content: str,
-    arch_overview: str,
-    requirements: Any,
-    plan_dir: Path,
-) -> None:
-    """Run performance doc planning agent."""
-    from planning_team.performance_planning_doc_agent.models import PerformancePlanningDocInput
-    agents["performance_doc"].run(PerformancePlanningDocInput(
-        spec_content=spec_content,
-        architecture_overview=arch_overview,
-        requirements_title=requirements.title,
-        plan_dir=plan_dir,
-    ))
 
 
 def _run_dbc_comments_review(
@@ -1444,103 +1267,45 @@ def run_orchestrator(
         plan_dir = ensure_plan_dir(path)
         logger.info("Plan folder ensured at %s", plan_dir)
 
-        # 1b. Spec Intake and Validation: normalize spec into structured form for faster planning
-        # When SW_ENFORCE_STRUCTURED_SPEC=1, fail if spec is too long or intake fails
-        MAX_SPEC_CHARS_STRUCTURED = 60000
-        enforce_structured_spec = (os.environ.get("SW_ENFORCE_STRUCTURED_SPEC") or "").strip().lower() in ("1", "true", "yes")
-        spec_content_for_planning = spec_content  # fallback to full spec if no intake
-        spec_intake_open_questions: List[str] = []
-        spec_intake_assumptions: List[str] = []
-        spec_intake_agent = agents.get("spec_intake")
-        if spec_intake_agent:
-            if enforce_structured_spec and len(spec_content) > MAX_SPEC_CHARS_STRUCTURED:
-                msg = (
-                    f"SW_ENFORCE_STRUCTURED_SPEC: spec too long ({len(spec_content)} chars, max {MAX_SPEC_CHARS_STRUCTURED}). "
-                    "Shorten the spec or increase MAX_SPEC_CHARS_STRUCTURED."
-                )
-                logger.error(msg)
-                update_job(job_id, status=JOB_STATUS_FAILED, error=msg, phase="completed")
-                return
+        # Run planning-v2 workflow (replaces Spec Intake + Project Planning + domain agents)
+        from planning_v2_team import PlanningV2TeamLead
+        from planning_v2_adapter import adapt_planning_v2_result, PlanningV2AdapterResult
+
+        def _planning_v2_job_updater(**kwargs: Any) -> None:
             try:
-                from planning_team.spec_intake_agent import (
-                    SpecIntakeInput,
-                    build_compact_spec_for_planning,
-                    validated_spec_to_requirements,
-                )
-                spec_intake_output = spec_intake_agent.run(SpecIntakeInput(
-                    spec_content=spec_content,
-                    plan_dir=plan_dir,
-                ))
-                requirements = validated_spec_to_requirements(spec_intake_output)
-                spec_content_for_planning = build_compact_spec_for_planning(spec_intake_output)
-                spec_intake_open_questions = spec_intake_output.open_questions or []
-                spec_intake_assumptions = spec_intake_output.assumptions or []
-                logger.info(
-                    "Spec Intake: success, %s REQ-IDs, %s open questions, compact spec %s chars (was %s)",
-                    len(spec_intake_output.acceptance_criteria_index),
-                    len(spec_intake_open_questions),
-                    len(spec_content_for_planning),
-                    len(spec_content),
-                )
-            except LLMRateLimitError:
-                if enforce_structured_spec:
-                    update_job(job_id, status="paused_llm_limit", error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
-                    return
-                logger.warning("Spec Intake skipped (LLM rate limit); using parsed requirements")
-            except Exception as e:
-                if enforce_structured_spec:
-                    update_job(job_id, status=JOB_STATUS_FAILED, error=f"Spec Intake required but failed: {e}", phase="completed")
-                    return
-                logger.warning("Spec Intake failed (using parsed requirements): %s", e)
+                update_job(job_id, **kwargs)
+            except Exception:
+                pass
+
+        planning_v2_lead = PlanningV2TeamLead(get_llm_for_agent("project_planning"))
+        p2_result = planning_v2_lead.run_workflow(
+            spec_content=spec_content,
+            repo_path=path,
+            inspiration_content=None,
+            job_updater=_planning_v2_job_updater,
+        )
+        if not p2_result.success:
+            err = p2_result.failure_reason or "Planning-v2 workflow did not complete successfully."
+            logger.error("Planning-v2 failed: %s", err)
+            update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
+            return
+
+        try:
+            adapter_result: PlanningV2AdapterResult = adapt_planning_v2_result(p2_result, spec_title=requirements.title)
+        except ValueError as e:
+            logger.error("Planning-v2 adapter failed: %s", e)
+            update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
+            return
+
+        requirements = adapter_result.requirements
+        project_overview = adapter_result.project_overview
+        spec_intake_open_questions = adapter_result.open_questions
+        spec_intake_assumptions = adapter_result.assumptions
+        spec_content_for_planning = spec_content
         update_job(job_id, requirements_title=requirements.title)
 
-        # 2. Project Overview (before architecture) - fail fast if LLM unavailable
-        project_overview: Optional[Dict[str, Any]] = None
-        project_planning_agent = agents.get("project_planning")
-        if not project_planning_agent:
-            logger.error("Project planning agent not configured")
-            update_job(job_id, status=JOB_STATUS_FAILED, error="Project planning agent not configured", phase="completed")
-            return
-        try:
-            from shared.context_sizing import compute_repo_summary_chars
-            from planning_team.project_planning_agent.models import ProjectPlanningInput
-            max_repo_chars = compute_repo_summary_chars(project_planning_agent.llm)
-            repo_summary = _truncate_for_context(_read_repo_code(path), max_repo_chars)
-            pp_input = ProjectPlanningInput(
-                requirements=requirements,
-                spec_content=spec_content_for_planning,
-                repo_state_summary=repo_summary if repo_summary != "# No code files found" else None,
-                plan_dir=plan_dir,
-            )
-            pp_output = project_planning_agent.run(pp_input)
-            project_overview = model_to_dict(pp_output.overview)
-            logger.info("Project Planning: success")
-            try:
-                write_project_overview_plan(path, pp_output.overview, plan_dir=plan_dir)
-            except Exception as e:
-                logger.warning("Failed to write plan/project_overview.md: %s", e)
-            try:
-                features_doc = getattr(pp_output, "features_and_functionality_doc", None) or (project_overview.get("features_and_functionality_doc") or "")
-                if features_doc:
-                    write_features_and_functionality_plan(path, features_doc, plan_dir=plan_dir)
-            except Exception as e:
-                logger.warning("Failed to write plan/features_and_functionality.md: %s", e)
-        except LLMRateLimitError:
-            logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
-            update_job(job_id, status="paused_llm_limit", error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
-            return
-        except Exception as e:
-            logger.error("Project planning failed: %s", e)
-            update_job(job_id, status=JOB_STATUS_FAILED, error=f"Project planning failed: {e}", phase="completed")
-            return
-
-        if project_overview is None:
-            logger.error("Project planning produced no overview; failing job")
-            update_job(job_id, status=JOB_STATUS_FAILED, error="Project planning produced no overview", phase="completed")
-            return
-
-        # Planning process: (1) features doc done above; (2) tasks from spec + features; (3) architecture from spec + features;
-        # (4) loop until tasks and architecture align; (5) conformance to spec; if non-compliant, re-run from (2) with feedback.
+        # Planning process: (1) features doc from planning-v2 adapter; (2) tasks from Tech Lead; (3) architecture from Architecture Expert;
+        # (4) consolidation; (5) execution.
         features_and_functionality_doc = (project_overview.get("features_and_functionality_doc") or "").strip()
 
         # Optional: Run Enterprise Architect for richer architecture context (SW_USE_ENTERPRISE_ARCHITECT=true)
@@ -1629,90 +1394,6 @@ def run_orchestrator(
             write_architecture_plan(path, architecture, plan_dir=plan_dir)
         except Exception as e:
             logger.warning("Failed to write plan/architecture.md: %s", e)
-
-        # Run additional planning agents in dependency tiers (parallel within each tier)
-        arch_overview = architecture.overview if architecture else ""
-        tenancy = getattr(architecture, "tenancy_model", "") or "" if architecture else ""
-        req_ids = (requirements.metadata or {}).get("requirement_ids", []) if requirements else []
-        infra_doc = ""
-        data_lifecycle = ""
-        ui_ux_doc = ""
-        devops_doc = ""
-
-        skip_planning_agents: set = set()
-        skip_env = (os.environ.get("SW_SKIP_PLANNING_AGENTS") or "").strip()
-        if skip_env:
-            skip_planning_agents = {k.strip() for k in skip_env.split(",") if k.strip()}
-
-        # Run additional planning agents in dependency tiers (parallel within each tier)
-        tier1_keys = [k for k in ("api_contract", "data_architecture", "ui_ux", "infrastructure") if k not in skip_planning_agents]
-        if tier1_keys:
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {
-                    executor.submit(
-                        _run_tier1_agent,
-                        key,
-                        agents,
-                        spec_content,
-                        arch_overview,
-                        plan_dir,
-                        requirements,
-                        features_and_functionality_doc or "",
-                        tenancy,
-                    ): key
-                    for key in tier1_keys
-                }
-                for future in as_completed(futures):
-                    agent_key, result = future.result()
-                    if result:
-                        if "infra_doc" in result:
-                            infra_doc = result["infra_doc"]
-                        if "data_lifecycle" in result:
-                            data_lifecycle = result["data_lifecycle"]
-                        if "ui_ux_doc" in result:
-                            ui_ux_doc = result["ui_ux_doc"]
-
-        tier2_keys = [k for k in ("frontend_architecture", "devops_planning", "qa_test_strategy", "security_planning") if k not in skip_planning_agents]
-        if tier2_keys:
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {
-                    executor.submit(
-                        _run_tier2_agent,
-                        key,
-                        agents,
-                        spec_content_for_planning,
-                        arch_overview,
-                        plan_dir,
-                        requirements,
-                        req_ids,
-                        ui_ux_doc,
-                        infra_doc,
-                        data_lifecycle,
-                    ): key
-                    for key in tier2_keys
-                }
-                for future in as_completed(futures):
-                    agent_key, result = future.result()
-                    if result and "devops_doc" in result:
-                        devops_doc = result["devops_doc"]
-
-        tier3_keys = [k for k in ("observability", "performance_doc") if k not in skip_planning_agents]
-        if tier3_keys:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = []
-                if "observability" in tier3_keys and agents.get("observability"):
-                    futures.append(executor.submit(
-                        lambda: _run_tier3_observability(agents, arch_overview, infra_doc, devops_doc, requirements, plan_dir)
-                    ))
-                if "performance_doc" in tier3_keys and agents.get("performance_doc"):
-                    futures.append(executor.submit(
-                        lambda: _run_tier3_performance_doc(agents, spec_content_for_planning, arch_overview, requirements, plan_dir)
-                    ))
-                for f in as_completed(futures):
-                    try:
-                        f.result()
-                    except Exception as e:
-                        logger.debug("Tier 3 planning skipped: %s", e)
 
         # Planning consolidation: master plan, risk register, ship checklist
         try:

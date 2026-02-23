@@ -16,9 +16,13 @@
         <mat-icon matListItemIcon>article</mat-icon>
         <span matListItemTitle>Blogging</span>
       </a>
-      <a mat-list-item routerLink="/software-engineering" routerLinkActive="active" [attr.aria-current]="isActive('/software-engineering') ? 'page' : null">
+      <a mat-list-item routerLink="/software-engineering" routerLinkActive="active" [attr.aria-current]="isActive('/software-engineering') && !isActive('/software-engineering/planning-v2') ? 'page' : null">
         <mat-icon matListItemIcon>code</mat-icon>
         <span matListItemTitle>Software Engineering</span>
+      </a>
+      <a mat-list-item routerLink="/software-engineering/planning-v2" routerLinkActive="active" [attr.aria-current]="isActive('/software-engineering/planning-v2') ? 'page' : null">
+        <mat-icon matListItemIcon>assignment</mat-icon>
+        <span matListItemTitle>Planning V2</span>
       </a>
       <a mat-list-item routerLink="/market-research" routerLinkActive="active" [attr.aria-current]="isActive('/market-research') ? 'page' : null">
         <mat-icon matListItemIcon>analytics</mat-icon>

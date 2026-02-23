@@ -1,4 +1,7 @@
-"""In-memory clarification session store with LLM-based Spec Intake and Clarification Agent."""
+"""In-memory clarification session store with LLM-based Spec Intake and Clarification Agent.
+
+Clarification sessions still use planning_team.spec_intake_agent and spec_clarification_agent
+(Option A). The main software engineering pipeline uses planning_v2_team for planning."""
 
 from __future__ import annotations
 

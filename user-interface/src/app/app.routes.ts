@@ -6,6 +6,7 @@ import { Soc2ComplianceDashboardComponent } from './components/soc2-compliance-d
 import { SocialMarketingDashboardComponent } from './components/social-marketing-dashboard/social-marketing-dashboard.component';
 import { BrandingDashboardComponent } from './components/branding-dashboard/branding-dashboard.component';
 import { SoftwareEngineeringDashboardComponent } from './components/software-engineering-dashboard/software-engineering-dashboard.component';
+import { PlanningV2PageComponent } from './components/planning-v2-page/planning-v2-page.component';
 
 export const routes: Routes = [
   {
@@ -15,6 +16,7 @@ export const routes: Routes = [
       { path: '', redirectTo: '/blogging', pathMatch: 'full' },
       { path: 'blogging', component: BloggingDashboardComponent },
       { path: 'software-engineering', component: SoftwareEngineeringDashboardComponent },
+      { path: 'software-engineering/planning-v2', component: PlanningV2PageComponent },
       { path: 'market-research', component: MarketResearchDashboardComponent },
       { path: 'soc2-compliance', component: Soc2ComplianceDashboardComponent },
       { path: 'social-marketing', component: SocialMarketingDashboardComponent },

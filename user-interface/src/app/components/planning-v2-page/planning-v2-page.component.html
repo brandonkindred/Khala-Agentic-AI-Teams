@@ -1,0 +1,53 @@
+<h1>Planning (v2)</h1>
+<p>Run the 6-phase product planning workflow and track progress.</p>
+
+<div class="header-row">
+  <app-health-indicator [healthCheck]="healthCheck" label="Software Engineering API" />
+</div>
+
+@if (loading) {
+  <app-loading-spinner message="Starting..." />
+}
+
+@if (error) {
+  <app-error-message [message]="error" />
+}
+
+<div class="page-layout">
+  <div class="main-content">
+    <app-planning-v2-run-form (submitRequest)="onPlanningV2Submit($event)" />
+
+    @if (jobId) {
+      <app-planning-v2-job-status [jobId]="jobId" />
+    }
+  </div>
+
+  @if (planningV2Jobs.length > 0) {
+    <aside class="jobs-panel">
+      <mat-card>
+        <mat-card-header>
+          <mat-card-title>Planning V2 jobs</mat-card-title>
+          <mat-card-subtitle>{{ planningV2Jobs.length }} job(s)</mat-card-subtitle>
+        </mat-card-header>
+        <mat-card-content>
+          <div class="jobs-list">
+            @for (job of planningV2Jobs; track job.job_id) {
+              <button
+                type="button"
+                class="job-item"
+                [class.selected]="selectedJob?.job_id === job.job_id"
+                (click)="selectJob(job)"
+              >
+                <span class="job-status">{{ job.status }}</span>
+                <span class="job-id">{{ job.job_id | slice:0:8 }}...</span>
+                @if (job.repo_path) {
+                  <span class="job-repo">{{ job.repo_path }}</span>
+                }
+              </button>
+            }
+          </div>
+        </mat-card-content>
+      </mat-card>
+    </aside>
+  }
+</div>
