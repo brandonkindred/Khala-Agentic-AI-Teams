@@ -110,7 +110,10 @@ def _validate_paths(files: Dict[str, str], subdir: str = "") -> Tuple[Dict[str, 
                     )
                     bad = True
                     break
-            if _VERB_PREFIX_RE.match(name_part):
+            # Allow migration/version script names (e.g. add_task_indexes.py under alembic/versions or migrations/)
+            if _VERB_PREFIX_RE.match(name_part) and not (
+                seg.endswith(".py") and ("versions" in segments or "migrations" in segments)
+            ):
                 warnings.append(
                     f"REJECTED: path segment '{seg}' starts with a verb "
                     f"(task description as name): '{path}'"

@@ -115,6 +115,38 @@ def update_job(
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def update_task_state(
+    job_id: str,
+    task_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+    **kwargs: Any,
+) -> None:
+    """Update state for a single task. Merges kwargs into job["task_states"][task_id]."""
+    with _lock:
+        path = _job_file(job_id, cache_dir)
+        data = _read_job_file(path) or {}
+        task_states = data.setdefault("task_states", {})
+        existing = task_states.get(task_id, {})
+        task_states[task_id] = {**existing, **kwargs}
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def update_job_team_progress(
+    job_id: str,
+    team_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+    **kwargs: Any,
+) -> None:
+    """Update progress for a single team. Merges kwargs into job["team_progress"][team_id]."""
+    with _lock:
+        path = _job_file(job_id, cache_dir)
+        data = _read_job_file(path) or {}
+        team_progress = data.setdefault("team_progress", {})
+        existing = team_progress.get(team_id, {})
+        team_progress[team_id] = {**existing, **kwargs}
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def add_task_result(
     job_id: str,
     result: Dict[str, Any],

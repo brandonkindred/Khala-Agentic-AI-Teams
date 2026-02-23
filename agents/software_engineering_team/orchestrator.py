@@ -20,6 +20,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -58,6 +59,8 @@ from shared.job_store import (
     JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
     LLM_UNREACHABLE_AFTER_RETRIES,
     update_job,
+    update_task_state,
+    update_job_team_progress,
 )
 from shared.command_runner import run_command_with_nvm
 from shared.execution_tracker import execution_tracker
@@ -74,6 +77,12 @@ from shared.repo_utils import read_repo_code, truncate_for_context
 from shared.task_utils import task_requirements
 
 logger = logging.getLogger(__name__)
+
+
+def _iso_now() -> str:
+    """Return current UTC time as ISO 8601 string."""
+    return datetime.now(timezone.utc).isoformat()
+
 
 BANNER_WIDTH = 72
 # Exceptions that the repair agent can attempt to fix (code errors in agent framework)
@@ -942,8 +951,13 @@ def _backend_code_v2_worker(
             continue
 
         update_job(job_id, current_task=task_id)
+        update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
+        update_job_team_progress(job_id, "backend-code-v2", current_task_id=task_id)
         logger.info("[%s] >>> backend worker starting task", task_id)
         task_start = time.monotonic()
+
+        def _job_updater(**kwargs: Any) -> None:
+            update_job_team_progress(job_id, "backend-code-v2", **kwargs)
 
         try:
             arch = architecture if isinstance(architecture, SystemArchitecture) else (
@@ -962,11 +976,13 @@ def _backend_code_v2_worker(
                 linting_tool_agent=agents.get("linting_tool_agent"),
                 tech_lead=agents.get("tech_lead"),
                 build_fix_specialist=agents.get("build_fix_specialist"),
+                job_updater=_job_updater,
             )
             elapsed = time.monotonic() - task_start
             if result.success:
                 completed.add(task_id)
                 completed_code_task_ids.append(task_id)
+                update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
                 _log_task_completion_banner(
                     task_id=task_id,
                     task_title=getattr(task, "title", "") or task_id,
@@ -977,9 +993,11 @@ def _backend_code_v2_worker(
             else:
                 reason = result.failure_reason or "backend workflow did not succeed"
                 failed[task_id] = reason
+                update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=reason)
                 logger.warning("[%s] backend task failed: %s", task_id, reason)
         except Exception as exc:
             failed[task_id] = f"backend exception: {exc}"
+            update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc))
             logger.exception("[%s] backend worker exception", task_id)
 
 
@@ -1034,6 +1052,8 @@ def _run_backend_frontend_workers(
             if not task:
                 continue
             update_job(job_id, current_task=task_id)
+            update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
+            update_job_team_progress(job_id, "backend", current_task_id=task_id)
             execution_tracker.start_task(task_id)
             log_prefix = "[RETRY] " if is_retry else ""
             logger.info("%s[%s] >>> Backend worker starting task %s", log_prefix, task_id, task_id)
@@ -1042,12 +1062,14 @@ def _run_backend_frontend_workers(
                 from shared.command_runner import ensure_backend_project_initialized
                 init_result = ensure_backend_project_initialized(backend_dir)
                 if not init_result.success:
+                    update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=init_result.error_summary)
                     with state_lock:
                         failed[task_id] = f"Backend init failed: {init_result.error_summary}"
                     continue
                 if not (backend_dir / ".git").exists():
                     gs_result = agents["git_setup"].run(backend_dir)
                     if not gs_result.success:
+                        update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=gs_result.message)
                         with state_lock:
                             failed[task_id] = f"Git setup failed: {gs_result.message}"
                         continue
@@ -1087,6 +1109,7 @@ def _run_backend_frontend_workers(
                     if workflow_result.success:
                         completed.add(task_id)
                         completed_code_task_ids.append(task_id)
+                        update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
                         execution_tracker.observe_loop(task_id, 1)
                         execution_tracker.finish_task(task_id)
                         _log_task_completion_banner(
@@ -1099,10 +1122,18 @@ def _run_backend_frontend_workers(
                         )
                     else:
                         failed[task_id] = failure_reason
+                        update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=failure_reason)
                         execution_tracker.observe_loop(task_id, 1)
                         execution_tracker.finish_task(task_id, blocked=True)
                         logger.warning("%s[%s] Backend FAILED after %.1fs: %s", log_prefix, task_id, elapsed, failed[task_id])
             except (LLMError, httpx.HTTPError) as e:
+                err_msg = (
+                    OLLAMA_WEEKLY_LIMIT_MESSAGE if isinstance(e, LLMRateLimitError)
+                    else "LLM rate limited or temporarily unavailable – please retry later" if isinstance(e, LLMTemporaryError)
+                    else str(e) if isinstance(e, LLMPermanentError)
+                    else f"LLM error: {e}"
+                )
+                update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=err_msg)
                 with state_lock:
                     if isinstance(e, LLMRateLimitError):
                         llm_limit_exceeded[0] = True
@@ -1155,6 +1186,7 @@ def _run_backend_frontend_workers(
                         except Exception as repair_err:
                             logger.warning("Repair agent failed for %s: %s", task_id, repair_err)
                 if not repair_applied:
+                    update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=str(e))
                     with state_lock:
                         failed[task_id] = f"Unhandled exception: {e}"
                 logger.exception("%s[%s] Backend task exception", log_prefix, task_id)
@@ -1186,6 +1218,8 @@ def _run_backend_frontend_workers(
             if not task:
                 continue
             update_job(job_id, current_task=task_id)
+            update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
+            update_job_team_progress(job_id, "frontend", current_task_id=task_id)
             execution_tracker.start_task(task_id)
             log_prefix = "[RETRY] " if is_retry else ""
             logger.info("%s[%s] >>> Frontend worker starting task %s", log_prefix, task_id, task_id)
@@ -1194,12 +1228,14 @@ def _run_backend_frontend_workers(
                 from shared.command_runner import ensure_frontend_project_initialized
                 init_result = ensure_frontend_project_initialized(frontend_dir)
                 if not init_result.success:
+                    update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=init_result.error_summary)
                     with state_lock:
                         failed[task_id] = f"Frontend init failed: {init_result.error_summary}"
                     continue
                 if not (frontend_dir / ".git").exists():
                     gs_result = agents["git_setup"].run(frontend_dir)
                     if not gs_result.success:
+                        update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=gs_result.message)
                         with state_lock:
                             failed[task_id] = f"Git setup failed: {gs_result.message}"
                         continue
@@ -1248,6 +1284,7 @@ def _run_backend_frontend_workers(
                     if workflow_result.success:
                         completed.add(task_id)
                         completed_code_task_ids.append(task_id)
+                        update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
                         execution_tracker.observe_loop(task_id, 1)
                         execution_tracker.finish_task(task_id)
                         _log_task_completion_banner(
@@ -1260,17 +1297,26 @@ def _run_backend_frontend_workers(
                         )
                     else:
                         failed[task_id] = failure_reason
+                        update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=failure_reason)
                         execution_tracker.observe_loop(task_id, 1)
                         execution_tracker.finish_task(task_id, blocked=True)
                         logger.warning("%s[%s] Frontend FAILED after %.1fs: %s", log_prefix, task_id, elapsed, failed[task_id])
                 logger.info("%s[%s] <<< Frontend worker done (completed=%s)", log_prefix, task_id, workflow_result.success)
                 if getattr(workflow_result, "llm_unreachable", False):
+                    update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=LLM_UNREACHABLE_AFTER_RETRIES)
                     with state_lock:
                         llm_connectivity_failed[0] = True
                         failed[task_id] = LLM_UNREACHABLE_AFTER_RETRIES
                     logger.warning("Frontend reported LLM unreachable; pausing job %s", job_id)
                     break
             except (LLMError, httpx.HTTPError) as e:
+                err_msg = (
+                    OLLAMA_WEEKLY_LIMIT_MESSAGE if isinstance(e, LLMRateLimitError)
+                    else "LLM rate limited or temporarily unavailable – please retry later" if isinstance(e, LLMTemporaryError)
+                    else str(e) if isinstance(e, LLMPermanentError)
+                    else f"LLM error: {e}"
+                )
+                update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=err_msg)
                 with state_lock:
                     if isinstance(e, LLMRateLimitError):
                         llm_limit_exceeded[0] = True
@@ -1326,6 +1372,7 @@ def _run_backend_frontend_workers(
                         except Exception as repair_err:
                             logger.warning("Repair agent failed for %s: %s", task_id, repair_err)
                 if not repair_applied:
+                    update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=str(e))
                     with state_lock:
                         failed[task_id] = f"Unhandled exception: {e}"
                 logger.exception("%s[%s] Frontend task exception", log_prefix, task_id)
@@ -1374,7 +1421,7 @@ def run_orchestrator(
     backend_dir = path / "backend"
     frontend_dir = path / "frontend"
     try:
-        update_job(job_id, status=JOB_STATUS_RUNNING)
+        update_job(job_id, status=JOB_STATUS_RUNNING, phase="planning")
 
         agents = _get_agents()
 
@@ -1389,7 +1436,7 @@ def run_orchestrator(
             return
         except Exception as e:
             logger.error("Spec parsing failed (LLM unavailable or returned invalid output): %s", e)
-            update_job(job_id, status=JOB_STATUS_FAILED, error=f"Spec parsing failed: {e}")
+            update_job(job_id, status=JOB_STATUS_FAILED, error=f"Spec parsing failed: {e}", phase="completed")
             return
         update_job(job_id, requirements_title=requirements.title)
 
@@ -1412,7 +1459,7 @@ def run_orchestrator(
                     "Shorten the spec or increase MAX_SPEC_CHARS_STRUCTURED."
                 )
                 logger.error(msg)
-                update_job(job_id, status=JOB_STATUS_FAILED, error=msg)
+                update_job(job_id, status=JOB_STATUS_FAILED, error=msg, phase="completed")
                 return
             try:
                 from planning_team.spec_intake_agent import (
@@ -1442,7 +1489,7 @@ def run_orchestrator(
                 logger.warning("Spec Intake skipped (LLM rate limit); using parsed requirements")
             except Exception as e:
                 if enforce_structured_spec:
-                    update_job(job_id, status=JOB_STATUS_FAILED, error=f"Spec Intake required but failed: {e}")
+                    update_job(job_id, status=JOB_STATUS_FAILED, error=f"Spec Intake required but failed: {e}", phase="completed")
                     return
                 logger.warning("Spec Intake failed (using parsed requirements): %s", e)
         update_job(job_id, requirements_title=requirements.title)
@@ -1452,7 +1499,7 @@ def run_orchestrator(
         project_planning_agent = agents.get("project_planning")
         if not project_planning_agent:
             logger.error("Project planning agent not configured")
-            update_job(job_id, status=JOB_STATUS_FAILED, error="Project planning agent not configured")
+            update_job(job_id, status=JOB_STATUS_FAILED, error="Project planning agent not configured", phase="completed")
             return
         try:
             from shared.context_sizing import compute_repo_summary_chars
@@ -1484,12 +1531,12 @@ def run_orchestrator(
             return
         except Exception as e:
             logger.error("Project planning failed: %s", e)
-            update_job(job_id, status=JOB_STATUS_FAILED, error=f"Project planning failed: {e}")
+            update_job(job_id, status=JOB_STATUS_FAILED, error=f"Project planning failed: {e}", phase="completed")
             return
 
         if project_overview is None:
             logger.error("Project planning produced no overview; failing job")
-            update_job(job_id, status=JOB_STATUS_FAILED, error="Project planning produced no overview")
+            update_job(job_id, status=JOB_STATUS_FAILED, error="Project planning produced no overview", phase="completed")
             return
 
         # Planning process: (1) features doc done above; (2) tasks from spec + features; (3) architecture from spec + features;
@@ -1552,13 +1599,13 @@ def run_orchestrator(
             if len(questions) > 5:
                 error_msg += f" (+{len(questions) - 5} more)"
             logger.warning(error_msg)
-            update_job(job_id, status=JOB_STATUS_FAILED, error=error_msg)
+            update_job(job_id, status=JOB_STATUS_FAILED, error=error_msg, phase="completed")
             return
 
         assignment = tech_lead_output.assignment
         if not assignment or not assignment.tasks:
             logger.error("Tech Lead produced no tasks; failing job")
-            update_job(job_id, status=JOB_STATUS_FAILED, error="Tech Lead produced no tasks")
+            update_job(job_id, status=JOB_STATUS_FAILED, error="Tech Lead produced no tasks", phase="completed")
             return
 
         # Architecture (single pass, no iteration)
@@ -1687,11 +1734,26 @@ def run_orchestrator(
         except Exception as e:
             logger.warning("Failed to write plan/tech_lead.md: %s", e)
 
-        # Store execution order in job state for API polling
-        update_job(job_id, execution_order=assignment.execution_order)
+        # Store execution order and per-task state for API tracking panel; set phase to execution
+        _task_map = {t.id: t for t in assignment.tasks}
+        task_states = {
+            tid: {
+                "status": "pending",
+                "assignee": getattr(_task_map.get(tid), "assignee", "unknown") or "unknown",
+                "title": getattr(_task_map.get(tid), "title", tid) or tid,
+                "dependencies": getattr(_task_map.get(tid), "dependencies", []) or [],
+            }
+            for tid in assignment.execution_order
+        }
+        update_job(
+            job_id,
+            execution_order=assignment.execution_order,
+            task_states=task_states,
+            phase="execution",
+        )
         if planning_only:
             logger.info("Planning-only run: stopping before execution (re-plan-with-clarifications)")
-            update_job(job_id, status="completed")
+            update_job(job_id, status="completed", phase="completed")
             return
 
         for t in assignment.tasks:
@@ -1729,10 +1791,14 @@ def run_orchestrator(
             task = all_tasks.get(task_id)
             if not task:
                 continue
+            assignee = getattr(task, "assignee", "unknown") or "unknown"
             update_job(job_id, current_task=task_id)
+            update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
+            update_job_team_progress(job_id, assignee, current_task_id=task_id)
             execution_tracker.start_task(task_id)
             if task.type.value == "git_setup":
                 completed.add(task_id)
+                update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
                 execution_tracker.finish_task(task_id)
                 _log_task_completion_banner(
                     task_id=task_id,
@@ -1745,6 +1811,7 @@ def run_orchestrator(
             if task.assignee == "devops":
                 # Defer containerization to after backend and frontend complete; skip early devops run.
                 completed.add(task_id)
+                update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
                 execution_tracker.finish_task(task_id)
                 _log_task_completion_banner(
                     task_id=task_id,
@@ -2007,11 +2074,11 @@ def run_orchestrator(
                 failed_count=len(failed),
                 job_id=job_id,
             )
-            update_job(job_id, status=JOB_STATUS_COMPLETED, progress=100, current_task=None)
+            update_job(job_id, status=JOB_STATUS_COMPLETED, progress=100, current_task=None, phase="completed")
 
     except Exception as e:
         logger.exception("Orchestrator failed")
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
 
 
 def run_failed_tasks(job_id: str) -> None:

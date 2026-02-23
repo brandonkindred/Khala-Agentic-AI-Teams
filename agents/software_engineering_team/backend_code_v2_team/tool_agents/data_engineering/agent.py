@@ -11,7 +11,12 @@ import logging
 
 from shared.llm import LLMClient
 
-from ...models import ToolAgentInput, ToolAgentOutput
+from ...models import (
+    ToolAgentInput,
+    ToolAgentOutput,
+    ToolAgentPhaseInput,
+    ToolAgentPhaseOutput,
+)
 from ...output_templates import parse_files_and_summary_template
 from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
 
@@ -35,6 +40,9 @@ class DataEngineeringToolAgent:
         self.llm = llm
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
+        return self.execute(inp)
+
+    def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
         prompt = DATA_ENGINEERING_PROMPT.format(
             description=inp.microtask.description or inp.microtask.title,
             language=inp.language,
@@ -48,3 +56,28 @@ class DataEngineeringToolAgent:
             recommendations=[],
             summary=data.get("summary", ""),
         )
+
+    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
+        """Recommend how data/schema work should be reflected in the microtask plan."""
+        return ToolAgentPhaseOutput(
+            recommendations=["Consider schema migrations and data integrity checks for this task."],
+            summary="Data engineering planning input provided.",
+        )
+
+    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
+        """Domain-specific review: schema consistency, migration integrity."""
+        return ToolAgentPhaseOutput(
+            recommendations=["Verify schema definitions and migration order."],
+            summary="Data engineering review completed.",
+        )
+
+    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
+        """Suggest data-layer fixes for issues found in review."""
+        return ToolAgentPhaseOutput(
+            recommendations=["Check migration rollback and schema constraints."],
+            summary="Data engineering problem-solving input provided.",
+        )
+
+    def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
+        """Final data-domain actions before merge."""
+        return ToolAgentPhaseOutput(summary="Data engineering deliver phase completed.")

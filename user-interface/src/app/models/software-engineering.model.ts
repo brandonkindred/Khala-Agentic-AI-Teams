@@ -18,6 +18,24 @@ export interface FailedTaskDetail {
   reason?: string;
 }
 
+/** Per-task execution state for tracking panel / graph. */
+export interface TaskStateEntry {
+  status: string;
+  assignee: string;
+  title?: string;
+  dependencies?: string[];
+  started_at?: string;
+  finished_at?: string;
+  error?: string;
+}
+
+/** Per-team progress when multiple teams run in parallel. */
+export interface TeamProgressEntry {
+  current_phase?: string;
+  progress?: number;
+  current_task_id?: string;
+}
+
 /** Response from GET /run-team/{job_id}. */
 export interface JobStatusResponse {
   job_id: string;
@@ -31,6 +49,12 @@ export interface JobStatusResponse {
   progress?: number;
   error?: string;
   failed_tasks: FailedTaskDetail[];
+  /** Job-level phase: planning, execution, or completed. */
+  phase?: string;
+  /** Per-task state for execution tracking graph. */
+  task_states?: Record<string, TaskStateEntry>;
+  /** Per-team progress when multiple teams run in parallel. */
+  team_progress?: Record<string, TeamProgressEntry>;
 }
 
 /** Response from POST /run-team/{job_id}/retry-failed. */
@@ -148,6 +172,37 @@ export interface BackendCodeV2StatusResponse {
   microtasks_completed: number;
   microtasks_total: number;
   completed_phases: string[];
+  error?: string;
+  summary?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Planning-V2
+// ---------------------------------------------------------------------------
+
+/** Request for POST /planning-v2/run. */
+export interface PlanningV2RunRequest {
+  spec_content: string;
+  repo_path: string;
+  inspiration_content?: string;
+}
+
+/** Response from POST /planning-v2/run. */
+export interface PlanningV2RunResponse {
+  job_id: string;
+  status: string;
+  message: string;
+}
+
+/** Response from GET /planning-v2/status/{job_id}. */
+export interface PlanningV2StatusResponse {
+  job_id: string;
+  status: string;
+  repo_path?: string;
+  current_phase?: string;
+  progress: number;
+  completed_phases: string[];
+  active_roles?: string[];
   error?: string;
   summary?: string;
 }

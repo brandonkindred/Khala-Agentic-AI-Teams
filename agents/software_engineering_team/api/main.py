@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -52,6 +53,14 @@ app = FastAPI(
     version="0.3.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class RunTeamRequest(BaseModel):
     """Request body for the run-team endpoint."""
@@ -84,6 +93,26 @@ class FailedTaskDetail(BaseModel):
     reason: str = Field(default="", description="Why the task failed.")
 
 
+class TaskStateEntry(BaseModel):
+    """Per-task execution state for tracking panel / graph."""
+
+    status: str = Field(..., description="pending, in_progress, done, failed")
+    assignee: str = Field(..., description="Team: backend-code-v2, backend, frontend, git_setup, devops")
+    title: Optional[str] = Field(None, description="Task title.")
+    dependencies: List[str] = Field(default_factory=list, description="Task IDs this task depends on.")
+    started_at: Optional[str] = Field(None, description="ISO timestamp when task started.")
+    finished_at: Optional[str] = Field(None, description="ISO timestamp when task finished.")
+    error: Optional[str] = Field(None, description="Error message if failed.")
+
+
+class TeamProgressEntry(BaseModel):
+    """Per-team progress when multiple teams run in parallel."""
+
+    current_phase: Optional[str] = Field(None, description="e.g. planning, execution, review (backend-code-v2).")
+    progress: Optional[int] = Field(None, description="0-100 completion for this team.")
+    current_task_id: Optional[str] = Field(None, description="Task ID currently being executed by this team.")
+
+
 class JobStatusResponse(BaseModel):
     """Response from GET /run-team/{job_id}."""
 
@@ -103,6 +132,18 @@ class JobStatusResponse(BaseModel):
     failed_tasks: List[FailedTaskDetail] = Field(
         default_factory=list,
         description="Details about tasks that failed, including the reason for failure.",
+    )
+    phase: Optional[str] = Field(
+        None,
+        description="Job-level phase: planning, execution, or completed.",
+    )
+    task_states: Optional[Dict[str, TaskStateEntry]] = Field(
+        None,
+        description="Per-task state (status, assignee, etc.) for execution tracking graph.",
+    )
+    team_progress: Optional[Dict[str, TeamProgressEntry]] = Field(
+        None,
+        description="Per-team progress when multiple teams run in parallel.",
     )
 
 
@@ -267,6 +308,58 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
     )
 
 
+def _parse_task_states(raw: Any) -> Optional[Dict[str, TaskStateEntry]]:
+    """Convert raw task_states dict from job store to TaskStateEntry map."""
+    if not raw or not isinstance(raw, dict):
+        return None
+    result: Dict[str, TaskStateEntry] = {}
+    for task_id, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            result[task_id] = TaskStateEntry(
+                status=entry.get("status", "pending"),
+                assignee=entry.get("assignee", "unknown"),
+                title=entry.get("title"),
+                dependencies=entry.get("dependencies") or [],
+                started_at=entry.get("started_at"),
+                finished_at=entry.get("finished_at"),
+                error=entry.get("error"),
+            )
+        except Exception:
+            continue
+    return result if result else None
+
+
+def _parse_team_progress(raw: Any) -> Optional[Dict[str, TeamProgressEntry]]:
+    """Convert raw team_progress dict from job store to TeamProgressEntry map."""
+    if not raw or not isinstance(raw, dict):
+        return None
+    result: Dict[str, TeamProgressEntry] = {}
+    for team_id, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            result[team_id] = TeamProgressEntry(
+                current_phase=entry.get("current_phase"),
+                progress=entry.get("progress"),
+                current_task_id=entry.get("current_task_id"),
+            )
+        except Exception:
+            continue
+    return result if result else None
+
+
+def _coerce_progress(value: Any) -> Optional[int]:
+    """Coerce progress to int or None for JobStatusResponse (JSON may give float)."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @app.get(
     "/run-team/{job_id}",
     response_model=JobStatusResponse,
@@ -282,26 +375,37 @@ def get_job_status(job_id: str) -> JobStatusResponse:
     raw_failed = data.get("failed_tasks") or []
     failed_tasks = [
         FailedTaskDetail(
-            task_id=ft.get("task_id", ""),
-            title=ft.get("title", ""),
-            reason=ft.get("reason", ""),
+            task_id=str(ft.get("task_id", "")),
+            title=str(ft.get("title", "")) if ft.get("title") is not None else "",
+            reason=str(ft.get("reason", "")) if ft.get("reason") is not None else "",
         )
         for ft in raw_failed
+        if isinstance(ft, dict)
     ]
 
-    return JobStatusResponse(
-        job_id=job_id,
-        status=data.get("status", JOB_STATUS_PENDING),
-        repo_path=data.get("repo_path"),
-        requirements_title=data.get("requirements_title"),
-        architecture_overview=data.get("architecture_overview"),
-        current_task=data.get("current_task"),
-        task_results=data.get("task_results", []),
-        task_ids=data.get("execution_order", []),
-        progress=data.get("progress"),
-        error=data.get("error"),
-        failed_tasks=failed_tasks,
-    )
+    execution_order = data.get("execution_order")
+    task_ids = list(execution_order) if isinstance(execution_order, list) else []
+
+    task_states_parsed = _parse_task_states(data.get("task_states"))
+    team_progress_parsed = _parse_team_progress(data.get("team_progress"))
+
+    payload: Dict[str, Any] = {
+        "job_id": str(job_id),
+        "status": str(data.get("status", JOB_STATUS_PENDING)),
+        "repo_path": data.get("repo_path"),
+        "requirements_title": data.get("requirements_title"),
+        "architecture_overview": data.get("architecture_overview"),
+        "current_task": data.get("current_task"),
+        "task_results": data.get("task_results") if isinstance(data.get("task_results"), list) else [],
+        "task_ids": task_ids,
+        "progress": _coerce_progress(data.get("progress")),
+        "error": data.get("error"),
+        "failed_tasks": [ft.model_dump() for ft in failed_tasks],
+        "phase": data.get("phase"),
+        "task_states": {k: v.model_dump() for k, v in task_states_parsed.items()} if task_states_parsed else None,
+        "team_progress": {k: v.model_dump() for k, v in team_progress_parsed.items()} if team_progress_parsed else None,
+    }
+    return JobStatusResponse.model_validate(payload)
 
 
 @app.post(
@@ -624,6 +728,40 @@ class BackendCodeV2StatusResponse(BaseModel):
     summary: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Planning-V2
+# ---------------------------------------------------------------------------
+
+class PlanningV2RunRequest(BaseModel):
+    """Request body for POST /planning-v2/run."""
+
+    spec_content: str = Field(..., description="Product/specification content")
+    repo_path: str = Field(..., description="Local path where planning artifacts will be written")
+    inspiration_content: Optional[str] = Field(None, description="Optional inspiration/moodboard content")
+
+
+class PlanningV2RunResponse(BaseModel):
+    """Response from POST /planning-v2/run."""
+
+    job_id: str = Field(..., description="Job ID for polling status")
+    status: str = Field(default="running")
+    message: str = Field(default="")
+
+
+class PlanningV2StatusResponse(BaseModel):
+    """Response from GET /planning-v2/status/{job_id}."""
+
+    job_id: str = Field(...)
+    status: str = Field(default="pending", description="pending, running, completed, failed")
+    repo_path: Optional[str] = None
+    current_phase: Optional[str] = None
+    progress: int = Field(default=0, description="0-100 completion percentage")
+    completed_phases: List[str] = Field(default_factory=list)
+    active_roles: List[str] = Field(default_factory=list, description="Roles active in current phase")
+    error: Optional[str] = None
+    summary: Optional[str] = None
+
+
 def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict, spec_content: str, architecture_overview: str) -> None:
     """Run backend-code-v2 workflow in a background thread."""
     try:
@@ -651,7 +789,7 @@ def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict
 
         team_lead = BackendCodeV2TeamLead(get_llm_for_agent("backend"))
 
-        phase_order = ["planning", "execution", "review", "problem_solving", "deliver"]
+        phase_order = ["setup", "planning", "execution", "review", "problem_solving", "deliver"]
 
         def _job_updater(**kwargs):
             completed_phases = []
@@ -681,6 +819,54 @@ def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict
         )
     except Exception as e:
         logger.exception("Backend-code-v2 workflow failed")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+
+
+def _run_planning_v2_background(
+    job_id: str,
+    repo_path: str,
+    spec_content: str,
+    inspiration_content: str,
+) -> None:
+    """Run planning-v2 workflow in a background thread."""
+    try:
+        from pathlib import Path as _Path
+        from planning_v2_team import PlanningV2TeamLead
+        from planning_v2_team.models import Phase
+        from shared.llm import get_llm_for_agent
+
+        update_job(job_id, status="running")
+
+        phase_order = [p.value for p in Phase]
+
+        def _job_updater(**kwargs: Any) -> None:
+            completed_phases = []
+            current = kwargs.get("current_phase", "")
+            for p in phase_order:
+                if p == current:
+                    break
+                completed_phases.append(p)
+            update_job(job_id, completed_phases=completed_phases, **kwargs)
+
+        team_lead = PlanningV2TeamLead(get_llm_for_agent("backend"))
+        result = team_lead.run_workflow(
+            spec_content=spec_content,
+            repo_path=_Path(repo_path),
+            inspiration_content=inspiration_content or None,
+            job_updater=_job_updater,
+        )
+
+        final_status = "completed" if result.success else "failed"
+        update_job(
+            job_id,
+            status=final_status,
+            progress=100 if result.success else 90,
+            summary=result.summary,
+            error=result.failure_reason if not result.success else None,
+            current_phase=Phase.DELIVER.value,
+        )
+    except Exception as e:
+        logger.exception("Planning-v2 workflow failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
 
 
@@ -742,6 +928,69 @@ def get_backend_code_v2_status(job_id: str) -> BackendCodeV2StatusResponse:
         microtasks_completed=data.get("microtasks_completed", 0),
         microtasks_total=data.get("microtasks_total", 0),
         completed_phases=data.get("completed_phases", []),
+        error=data.get("error"),
+        summary=data.get("summary"),
+    )
+
+
+@app.post(
+    "/planning-v2/run",
+    response_model=PlanningV2RunResponse,
+    summary="Run planning-v2 agent",
+    description="Submit spec and repo path. Starts the planning-v2 6-phase workflow in the background. "
+    "Returns job_id. Poll GET /planning-v2/status/{job_id} for progress.",
+)
+def run_planning_v2(request: PlanningV2RunRequest) -> PlanningV2RunResponse:
+    """Start the planning-v2 team."""
+    repo = Path(request.repo_path)
+    if not repo.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"repo_path does not exist or is not a directory: {request.repo_path}",
+        )
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, request.repo_path)
+
+    thread = threading.Thread(
+        target=_run_planning_v2_background,
+        args=(
+            job_id,
+            request.repo_path,
+            request.spec_content,
+            request.inspiration_content or "",
+        ),
+    )
+    thread.daemon = True
+    thread.start()
+
+    return PlanningV2RunResponse(
+        job_id=job_id,
+        status="running",
+        message="Planning-v2 workflow started. Poll GET /planning-v2/status/{job_id} for progress.",
+    )
+
+
+@app.get(
+    "/planning-v2/status/{job_id}",
+    response_model=PlanningV2StatusResponse,
+    summary="Get planning-v2 job status",
+    description="Returns current phase, progress, completed phases, and active roles.",
+)
+def get_planning_v2_status(job_id: str) -> PlanningV2StatusResponse:
+    """Get the status of a planning-v2 job."""
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    return PlanningV2StatusResponse(
+        job_id=job_id,
+        status=data.get("status", JOB_STATUS_PENDING),
+        repo_path=data.get("repo_path"),
+        current_phase=data.get("current_phase"),
+        progress=data.get("progress", 0),
+        completed_phases=data.get("completed_phases", []),
+        active_roles=data.get("active_roles", []),
         error=data.get("error"),
         summary=data.get("summary"),
     )

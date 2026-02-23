@@ -109,7 +109,7 @@ export class BrandingDashboardComponent implements OnDestroy {
     if (!this.session?.session_id) {
       return;
     }
-    this.pollSub = interval(3000)
+    this.pollSub = interval(60000)
       .pipe(switchMap(() => this.api.getSession(this.session!.session_id)))
       .subscribe({
         next: (res) => {

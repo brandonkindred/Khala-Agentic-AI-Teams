@@ -13,7 +13,14 @@ from typing import Any, Dict, List, Optional
 from shared.llm import LLMClient
 from shared.models import Task
 
-from ..models import ProblemSolvingResult, ReviewIssue, ReviewResult
+from ..models import (
+    Phase,
+    ProblemSolvingResult,
+    ReviewIssue,
+    ReviewResult,
+    ToolAgentKind,
+    ToolAgentPhaseInput,
+)
 from ..output_templates import parse_problem_solving_template
 from ..prompts import PROBLEM_SOLVING_PROMPT, PYTHON_CONVENTIONS, JAVA_CONVENTIONS
 
@@ -27,6 +34,8 @@ def run_problem_solving(
     review_result: ReviewResult,
     current_files: Dict[str, str],
     language: str = "python",
+    repo_path: str = "",
+    tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
 ) -> ProblemSolvingResult:
     """
     Analyse review issues and produce fixes.
@@ -61,8 +70,34 @@ def run_problem_solving(
     merged.update(fixed_files)
 
     fixes_applied = parsed.get("fixes_applied") or []
+    summary_parts: List[str] = [parsed.get("summary", f"Applied {len(fixes_applied)} fixes.")]
+
+    if tool_agents:
+        phase_inp = ToolAgentPhaseInput(
+            phase=Phase.PROBLEM_SOLVING,
+            repo_path=repo_path,
+            spec_context=task.description or "",
+            language=language,
+            current_files=current_files,
+            review_issues=review_result.issues,
+            task_title=task.title or "",
+            task_description=task.description or "",
+        )
+        for kind, agent in tool_agents.items():
+            if not hasattr(agent, "problem_solve"):
+                continue
+            try:
+                out = agent.problem_solve(phase_inp)
+                if out.files:
+                    merged.update(out.files)
+                if out.recommendations:
+                    fixes_applied.extend([{"source": kind.value, "recommendation": r} for r in out.recommendations])
+                    summary_parts.append(f"Tool {kind.value}: {out.summary or 'suggestions applied.'}")
+            except Exception as exc:
+                logger.warning("[%s] Tool agent %s problem_solve() failed: %s", task_id, kind.value, exc)
+
     resolved = parsed.get("resolved", bool(fixed_files))
-    summary = parsed.get("summary", f"Applied {len(fixes_applied)} fixes.")
+    summary = " ".join(summary_parts)
 
     logger.info("[%s] Problem-solving: %s — %s", task_id, "resolved" if resolved else "partial", summary[:120])
 

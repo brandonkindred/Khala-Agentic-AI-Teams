@@ -19,6 +19,7 @@
       <app-run-team-form (submitRequest)="onRunTeamSubmit($event)" />
       @if (jobId) {
         <app-job-status [jobId]="jobId" (statusChange)="jobStatus = $event" />
+        <app-run-team-tracking [jobId]="jobId" [status]="jobStatus" />
         <app-retry-failed
           [jobId]="jobId"
           [hasFailedTasks]="(jobStatus?.failed_tasks?.length ?? 0) > 0"
@@ -55,6 +56,14 @@
       }
     </div>
   </mat-tab>
+  <mat-tab label="Planning (v2)">
+    <div class="tab-content">
+      <app-planning-v2-run-form (submitRequest)="onPlanningV2Submit($event)" />
+      @if (planningV2JobId) {
+        <app-planning-v2-job-status [jobId]="planningV2JobId" />
+      }
+    </div>
+  </mat-tab>
   <mat-tab label="Architecture">
     <div class="tab-content">
       <mat-card>
@@ -77,7 +86,7 @@
               mat-raised-button
               color="primary"
               (click)="onArchitectDesignSubmit()"
-              [disabled]="loading || !architectSpec?.trim()"
+              [disabled]="loading || !architectSpec.trim()"
             >
               Generate Architecture
             </button>

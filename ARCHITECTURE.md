@@ -254,39 +254,53 @@ On agent crash, the Repair Agent analyzes the traceback and applies fixes. If th
 
 ## 5b. Backend-Code-V2 Team Workflow
 
-The **backend-code-v2** agent team is a standalone, experimental backend development team that operates independently from `BackendExpertAgent`. It is assigned tasks with `assignee = "backend-code-v2"` and runs its own 5-phase lifecycle. No code from `backend_agent/` is imported or reused.
+The **backend-code-v2** agent team is a standalone, experimental backend development team that operates independently from `BackendExpertAgent`. It uses a **three-layer architecture**: a Backend Tech Lead Agent runs Setup then delegates to a Backend Development Agent, which runs the 5-phase cycle and consults **tool agents in every phase**. No code from `backend_agent/` is imported or reused.
 
 ```mermaid
 flowchart TB
-    subgraph team ["Backend-Code-V2 Team (standalone)"]
-        Planning["1. Planning\n(decompose into microtasks,\nassign to tool agents)"]
-        Execution["2. Execution\n(run microtasks via tool agents\nor LLM code gen)"]
-        Review["3. Review\n(build, lint, code review,\nQA, security)"]
-        ProblemSolving["4. Problem-Solving\n(root-cause analysis,\napply fixes)"]
-        Deliver["5. Deliver\n(feature branch, commit,\nmerge to development)"]
-
-        Planning --> Execution --> Review
-        Review -->|"issues found"| ProblemSolving
-        ProblemSolving --> Execution
-        Review -->|"passed"| Deliver
+    subgraph techLead ["Backend Tech Lead Agent"]
+        Setup["Setup\n(git init, README, dev branch)"]
+        TLPlanning["Planning"]
+        TLExecution["Execution"]
+        TLReview["Review"]
+        TLProblemSolving["Problem-solving"]
+        TLDeliver["Deliver"]
+        Setup --> TLPlanning --> TLExecution --> TLReview --> TLProblemSolving --> TLDeliver
     end
 
-    subgraph toolAgents ["Team-Owned Tool Agents"]
-        DataEng["Data Engineering\n(schema, migrations)"]
-        ApiOA["API / OpenAPI\n(contracts, routes)"]
-        Auth["Auth\n(login, RBAC)"]
-        CICD["CI/CD (stub)"]
-        Container["Containerization (stub)"]
+    subgraph devAgent ["Backend Development Agent"]
+        DAPlanning["Planning\n(microtask decomposition)"]
+        DAExecution["Execution\n(delegate to tool agents)"]
+        DAReview["Review\n(build, lint, coverage, UAT)"]
+        DAProblemSolving["Problem-solving\n(root-cause, fix loop)"]
+        DADeliver["Deliver\n(commit to branch)"]
+        DAPlanning --> DAExecution --> DAReview --> DAProblemSolving --> DADeliver
     end
 
-    team -.->|"delegate microtasks"| toolAgents
+    subgraph toolGrid ["Tool Agents (participate in all phases)"]
+        direction LR
+        DataEng["DataEng"]
+        Auth["Auth"]
+        ApiOA["API/OpenAPI"]
+        CICD["CI/CD"]
+        Container["Container"]
+        GitBranch["Git branch mgmt"]
+        BuildSpec["Build Specialist"]
+    end
+
+    techLead -->|"delegates"| devAgent
+    devAgent -->|"each phase consults"| toolGrid
 ```
 
-The team supports both Python and Java projects (auto-detected from the repository). Quality gate agents (QA, Security, Code Review) are passed in as dependencies by the main orchestrator; the team invokes them during its Review phase. The review/fix loop iterates up to 5 times before proceeding to Deliver.
+- **Layer 1 — Backend Tech Lead Agent**: Runs the **Setup** phase (git init if needed, README with project title, rename master→main, create `development` branch), then delegates the 5-phase development cycle to the Backend Development Agent.
+- **Layer 2 — Backend Development Agent**: Owns Planning (microtask decomposition, language detection), Execution (tool agents + LLM fallback), Review (build, lint, QA, security, code review), Problem-solving (fix loop), and Deliver (feature branch, commit, merge to `development`). The review/fix loop runs up to 5 iterations.
+- **Layer 3 — Tool agents**: Data Engineering, API/OpenAPI, Auth, CI/CD, Containerization, **Git branch management**, and **Build Specialist** agents each implement `plan()`, `execute()`, `review()`, `problem_solve()`, and `deliver()`, so they participate in every phase. The **Git branch management** agent creates a feature branch off `development` at the start of Execution, commits changes after each iteration ("commit along the way"), and in Deliver merges the feature branch back into `development`. The **Build Specialist** (stub) is intended to assist when the project doesn't build; it can be wired to the existing build verifier or a dedicated build-fix flow.
+
+The team supports both Python and Java (auto-detected). Quality gate agents (QA, Security, Code Review) are passed in by the main orchestrator and invoked during Review.
 
 **API endpoints:**
-- `POST /backend-code-v2/run` — Submit a task and repo path; starts the 5-phase workflow in a background thread.
-- `GET /backend-code-v2/status/{job_id}` — Returns current phase, completed phases, progress percentage, and microtask status.
+- `POST /backend-code-v2/run` — Submit a task and repo path; starts Setup then the 5-phase workflow in a background thread.
+- `GET /backend-code-v2/status/{job_id}` — Returns current phase (including `setup`), completed phases, progress percentage, and microtask status.
 
 ---
 

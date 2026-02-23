@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 class Phase(str, Enum):
     """Lifecycle phases of the backend-code-v2 workflow."""
 
+    SETUP = "setup"
     PLANNING = "planning"
     EXECUTION = "execution"
     REVIEW = "review"
@@ -45,6 +46,8 @@ class ToolAgentKind(str, Enum):
     DOCUMENTATION = "documentation"
     TESTING_QA = "testing_qa"
     SECURITY = "security"
+    GIT_BRANCH_MANAGEMENT = "git_branch_management"
+    BUILD_SPECIALIST = "build_specialist"
     GENERAL = "general"
 
 
@@ -74,6 +77,16 @@ class Microtask(BaseModel):
 # ---------------------------------------------------------------------------
 # Phase results
 # ---------------------------------------------------------------------------
+
+class SetupResult(BaseModel):
+    """Output of the Setup phase (Backend Tech Lead)."""
+
+    repo_initialized: bool = Field(default=False)
+    readme_created: bool = Field(default=False)
+    branch_created: bool = Field(default=False)
+    master_renamed_to_main: bool = Field(default=False)
+    summary: str = Field(default="")
+
 
 class PlanningResult(BaseModel):
     """Output of the Planning phase."""
@@ -143,8 +156,9 @@ class BackendCodeV2WorkflowResult(BaseModel):
 
     task_id: str = Field(default="", description="ID of the task that was executed")
     success: bool = Field(default=False)
-    current_phase: Phase = Field(default=Phase.PLANNING)
+    current_phase: Phase = Field(default=Phase.SETUP)
     iterations_used: int = Field(default=0, description="Number of review/fix iterations")
+    setup_result: Optional[SetupResult] = None
     planning_result: Optional[PlanningResult] = None
     execution_result: Optional[ExecutionResult] = None
     review_result: Optional[ReviewResult] = None
@@ -161,7 +175,7 @@ class BackendCodeV2WorkflowResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ToolAgentInput(BaseModel):
-    """Base input for all team-owned tool agents."""
+    """Base input for all team-owned tool agents (Execution phase)."""
 
     microtask: Microtask
     repo_path: str = Field(default="")
@@ -170,8 +184,35 @@ class ToolAgentInput(BaseModel):
     language: str = Field(default="python")
 
 
+class ToolAgentPhaseInput(BaseModel):
+    """Input for tool agent phase methods (plan, review, problem_solve, deliver)."""
+
+    phase: Phase = Field(default=Phase.PLANNING)
+    microtask: Optional[Microtask] = None
+    repo_path: str = Field(default="")
+    existing_code: str = Field(default="")
+    spec_context: str = Field(default="")
+    language: str = Field(default="python")
+    current_files: Dict[str, str] = Field(default_factory=dict)
+    review_issues: List[ReviewIssue] = Field(default_factory=list)
+    task_title: str = Field(default="")
+    task_description: str = Field(default="")
+    task_id: str = Field(default="")
+    feature_branch_name: Optional[str] = Field(default=None)
+
+
+class ToolAgentPhaseOutput(BaseModel):
+    """Output from tool agent phase methods (plan, review, problem_solve, deliver)."""
+
+    recommendations: List[str] = Field(default_factory=list)
+    issues: List[ReviewIssue] = Field(default_factory=list)
+    files: Dict[str, str] = Field(default_factory=dict)
+    summary: str = Field(default="")
+    success: bool = Field(default=True)
+
+
 class ToolAgentOutput(BaseModel):
-    """Base output for all team-owned tool agents."""
+    """Base output for all team-owned tool agents (Execution phase)."""
 
     files: Dict[str, str] = Field(default_factory=dict)
     recommendations: List[str] = Field(default_factory=list)

@@ -22,7 +22,7 @@
       </mat-expansion-panel>
     }
 
-    @if (data.components?.length) {
+    @if (data.components.length) {
       <mat-expansion-panel>
         <mat-expansion-panel-header>
           <mat-panel-title>Components ({{ data.components.length }})</mat-panel-title>
@@ -57,7 +57,7 @@
       </mat-expansion-panel>
     }
 
-    @if (data.decisions?.length) {
+    @if (data.decisions.length) {
       <mat-expansion-panel>
         <mat-expansion-panel-header>
           <mat-panel-title>Architecture Decisions ({{ data.decisions.length }})</mat-panel-title>

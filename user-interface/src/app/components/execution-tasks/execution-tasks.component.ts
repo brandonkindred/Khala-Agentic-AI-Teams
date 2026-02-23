@@ -18,7 +18,7 @@ export class ExecutionTasksComponent implements OnInit {
   constructor(private readonly api: SoftwareEngineeringApiService) {}
 
   ngOnInit(): void {
-    timer(0, 3000)
+    timer(0, 60000)
       .pipe(switchMap(() => this.api.getExecutionTasks()))
       .subscribe((res) => (this.data = res));
   }

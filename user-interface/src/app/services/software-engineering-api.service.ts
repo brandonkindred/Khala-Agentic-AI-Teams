@@ -18,6 +18,9 @@ import type {
   BackendCodeV2RunRequest,
   BackendCodeV2RunResponse,
   BackendCodeV2StatusResponse,
+  PlanningV2RunRequest,
+  PlanningV2RunResponse,
+  PlanningV2StatusResponse,
 } from '../models';
 
 /**
@@ -181,6 +184,33 @@ export class SoftwareEngineeringApiService {
   ): Observable<BackendCodeV2StatusResponse> {
     return this.http.get<BackendCodeV2StatusResponse>(
       `${this.baseUrl}/backend-code-v2/status/${jobId}`
+    );
+  }
+
+  // -----------------------------------------------------------------------
+  // Planning-V2
+  // -----------------------------------------------------------------------
+
+  /**
+   * POST /planning-v2/run
+   */
+  runPlanningV2(
+    request: PlanningV2RunRequest
+  ): Observable<PlanningV2RunResponse> {
+    return this.http.post<PlanningV2RunResponse>(
+      `${this.baseUrl}/planning-v2/run`,
+      request
+    );
+  }
+
+  /**
+   * GET /planning-v2/status/{job_id}
+   */
+  getPlanningV2Status(
+    jobId: string
+  ): Observable<PlanningV2StatusResponse> {
+    return this.http.get<PlanningV2StatusResponse>(
+      `${this.baseUrl}/planning-v2/status/${jobId}`
     );
   }
 

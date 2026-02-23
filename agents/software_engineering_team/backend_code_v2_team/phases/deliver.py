@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from shared.git_utils import (
     DEVELOPMENT_BRANCH,
@@ -22,7 +22,7 @@ from shared.git_utils import (
 )
 from shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
 
-from ..models import DeliverResult
+from ..models import DeliverResult, Phase, ToolAgentKind, ToolAgentPhaseInput
 from ..prompts import DELIVER_COMMIT_MSG_TEMPLATE
 
 logger = logging.getLogger(__name__)
@@ -45,19 +45,70 @@ def run_deliver(
     files: Dict[str, str],
     summary: str,
     task_title: str = "",
+    tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
+    task_description: str = "",
+    feature_branch_name: Optional[str] = None,
 ) -> DeliverResult:
     """
     Create feature branch, write files, commit, merge to development.
 
-    If the feature branch already exists it is recreated from development.
+    If the Git branch management agent is present, delegate all git operations to it
+    (merge to development when feature_branch_name is set, or create/write/commit/merge
+    when not). Otherwise call other tool agents' deliver() for domain actions, then
+    perform inline git create/write/commit/merge.
     """
     result = DeliverResult()
+    deliver_files = dict(files)
 
-    if not files:
+    if tool_agents:
+        phase_inp = ToolAgentPhaseInput(
+            phase=Phase.DELIVER,
+            repo_path=str(repo_path),
+            current_files=deliver_files,
+            task_title=task_title,
+            task_description=task_description,
+            task_id=task_id,
+        )
+        for kind, agent in tool_agents.items():
+            if kind == ToolAgentKind.GIT_BRANCH_MANAGEMENT:
+                continue
+            if not hasattr(agent, "deliver"):
+                continue
+            try:
+                out = agent.deliver(phase_inp)
+                if out.files:
+                    deliver_files.update(out.files)
+            except Exception as exc:
+                logger.warning("[%s] Tool agent %s deliver() failed: %s", task_id, kind.value, exc)
+
+        git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
+        if git_agent is not None and hasattr(git_agent, "deliver"):
+            phase_inp = ToolAgentPhaseInput(
+                phase=Phase.DELIVER,
+                repo_path=str(repo_path),
+                current_files=deliver_files,
+                task_title=task_title,
+                task_description=task_description,
+                task_id=task_id,
+                feature_branch_name=feature_branch_name,
+            )
+            try:
+                out = git_agent.deliver(phase_inp)
+                result.merged = out.success
+                result.summary = out.summary or result.summary
+                result.branch_name = feature_branch_name or ""
+                if out.success:
+                    result.commit_messages.append(out.summary or "Merged to development")
+                logger.info("[%s] Deliver (Git agent): %s", task_id, result.summary)
+                return result
+            except Exception as exc:
+                logger.warning("[%s] Git agent deliver() failed, falling back to inline: %s", task_id, exc)
+
+    if not deliver_files:
         result.summary = "No files to deliver."
         return result
 
-    # 1. Create feature branch
+    # Fallback: inline git (no Git agent or Git agent failed)
     slug = re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
     ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}")
     if not ok:
@@ -70,7 +121,7 @@ def run_deliver(
     # 2. Write files and commit
     scope = slug[:20]
     commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(scope=scope, summary=summary[:72])
-    payload = _FilesPayload(files, summary, commit_msg)
+    payload = _FilesPayload(deliver_files, summary, commit_msg)
     write_ok, write_msg = write_agent_output(repo_path, payload, subdir="")
     if not write_ok:
         result.summary = f"Write failed: {write_msg}"

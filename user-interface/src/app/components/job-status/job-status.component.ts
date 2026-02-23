@@ -26,7 +26,7 @@ export class JobStatusComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     if (this.jobId) {
-      this.sub = timer(0, 2000)
+      this.sub = timer(0, 60000)
         .pipe(switchMap(() => this.api.getJobStatus(this.jobId!)))
         .subscribe({
           next: (res) => {

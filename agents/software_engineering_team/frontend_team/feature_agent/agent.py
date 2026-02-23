@@ -285,7 +285,22 @@ def _validate_file_paths(
     allowed_root_paths: set[str] = set()  # filled by LLM when processing root_paths_pending
     # First pass: accept allowed exts + .env*; collect (path, content, ext) for unknown exts
     unknown_ext_files: list[tuple[str, str, str]] = []
-    for path, content in files.items():
+
+    def _normalize_path(raw: str) -> str:
+        """Strip leading slashes and a leading 'frontend/' so paths are relative to frontend root."""
+        p = raw.strip()
+        if p.startswith("\ufeff"):
+            p = p[1:]
+        p = p.lstrip("/")
+        while p.lower().startswith("frontend/"):
+            p = p[9:]
+        return p
+
+    for raw_path, content in files.items():
+        path = _normalize_path(raw_path)
+        if not path:
+            warnings.append(f"Path normalizes to empty (invalid): '{raw_path}'")
+            continue
         is_src_file = bool(ANGULAR_PATH_PATTERN.match(path))
         is_root_level = "/" not in path
         if not is_src_file:

@@ -23,7 +23,7 @@ export class SocialMarketingStatusComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     if (this.jobId) {
-      this.sub = timer(0, 2000)
+      this.sub = timer(0, 60000)
         .pipe(switchMap(() => this.api.getStatus(this.jobId!)))
         .subscribe({
           next: (res) => {

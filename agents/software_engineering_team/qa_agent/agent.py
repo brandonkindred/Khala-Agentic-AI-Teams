@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from shared.llm import LLMClient
+from shared.llm import LLMClient, LLMJsonParseError
 
 from .models import BugReport, QAInput, QAOutput
 from .prompts import QA_PROMPT, QA_PROMPT_FIX_BUILD, QA_PROMPT_WRITE_TESTS
@@ -53,7 +53,21 @@ class QAExpertAgent:
             context_parts.append(f"**Build/compiler errors:**\n```\n{input_data.build_errors}\n```")
 
         prompt = base_prompt + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1)
+        try:
+            data = self.llm.complete_json(prompt, temperature=0.1)
+        except LLMJsonParseError as e:
+            logger.warning("QA: LLM returned non-JSON output, returning fallback: %s", e.response_preview[:200] if getattr(e, "response_preview", None) else str(e))
+            return QAOutput(
+                bugs_found=[],
+                approved=False,
+                summary="QA could not parse model response; model returned non-JSON output.",
+                integration_tests="",
+                unit_tests="",
+                test_plan="",
+                live_test_notes="",
+                readme_content="",
+                suggested_commit_message="",
+            )
 
         bugs = []
         for b in data.get("bugs_found") or []:

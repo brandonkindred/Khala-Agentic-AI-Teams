@@ -20,6 +20,9 @@ import { ExecutionStreamComponent } from '../execution-stream/execution-stream.c
 import { ArchitectureResultsComponent } from '../architecture-results/architecture-results.component';
 import { BackendCodeV2RunFormComponent } from '../backend-code-v2-run-form/backend-code-v2-run-form.component';
 import { BackendCodeV2JobStatusComponent } from '../backend-code-v2-job-status/backend-code-v2-job-status.component';
+import { PlanningV2RunFormComponent } from '../planning-v2-run-form/planning-v2-run-form.component';
+import { PlanningV2JobStatusComponent } from '../planning-v2-job-status/planning-v2-job-status.component';
+import { RunTeamTrackingComponent } from '../run-team-tracking/run-team-tracking.component';
 import type {
   RunTeamRequest,
   JobStatusResponse,
@@ -27,6 +30,7 @@ import type {
   ClarificationCreateRequest,
   ArchitectDesignResponse,
   BackendCodeV2RunRequest,
+  PlanningV2RunRequest,
 } from '../../models';
 
 @Component({
@@ -53,6 +57,9 @@ import type {
     ArchitectureResultsComponent,
     BackendCodeV2RunFormComponent,
     BackendCodeV2JobStatusComponent,
+    PlanningV2RunFormComponent,
+    PlanningV2JobStatusComponent,
+    RunTeamTrackingComponent,
   ],
   templateUrl: './software-engineering-dashboard.component.html',
   styleUrl: './software-engineering-dashboard.component.scss',
@@ -63,11 +70,12 @@ export class SoftwareEngineeringDashboardComponent {
   loading = false;
   error: string | null = null;
   jobId: string | null = null;
-  jobStatus: { failed_tasks?: unknown[] } | null = null;
+  jobStatus: JobStatusResponse | null = null;
   clarificationSessionId: string | null = null;
   architectSpec = '';
   architectResults: ArchitectDesignResponse | null = null;
   backendCodeV2JobId: string | null = null;
+  planningV2JobId: string | null = null;
 
   healthCheck = (): ReturnType<SoftwareEngineeringApiService['health']> =>
     this.api.health();
@@ -141,6 +149,22 @@ export class SoftwareEngineeringDashboardComponent {
       },
       error: (err) => {
         this.error = err?.error?.detail ?? err?.message ?? 'Backend-Code-V2 request failed';
+        this.loading = false;
+      },
+    });
+  }
+
+  onPlanningV2Submit(request: PlanningV2RunRequest): void {
+    this.loading = true;
+    this.error = null;
+    this.planningV2JobId = null;
+    this.api.runPlanningV2(request).subscribe({
+      next: (res) => {
+        this.planningV2JobId = res.job_id;
+        this.loading = false;
+      },
+      error: (err) => {
+        this.error = err?.error?.detail ?? err?.message ?? 'Planning-V2 request failed';
         this.loading = false;
       },
     });

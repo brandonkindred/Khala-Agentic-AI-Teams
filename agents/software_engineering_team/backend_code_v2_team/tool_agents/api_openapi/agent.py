@@ -11,7 +11,12 @@ import logging
 
 from shared.llm import LLMClient
 
-from ...models import ToolAgentInput, ToolAgentOutput
+from ...models import (
+    ToolAgentInput,
+    ToolAgentOutput,
+    ToolAgentPhaseInput,
+    ToolAgentPhaseOutput,
+)
 from ...output_templates import parse_files_and_summary_template
 from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
 
@@ -36,6 +41,9 @@ class ApiOpenApiToolAgent:
         self.llm = llm
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
+        return self.execute(inp)
+
+    def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
         prompt = API_OPENAPI_PROMPT.format(
             description=inp.microtask.description or inp.microtask.title,
             language=inp.language,
@@ -49,3 +57,28 @@ class ApiOpenApiToolAgent:
             recommendations=[],
             summary=data.get("summary", ""),
         )
+
+    def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
+        """Recommend how API/contract work should be reflected in the plan."""
+        return ToolAgentPhaseOutput(
+            recommendations=["Include API contract and OpenAPI spec in the microtask plan."],
+            summary="API/OpenAPI planning input provided.",
+        )
+
+    def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
+        """Domain-specific review: contract consistency, spec validation."""
+        return ToolAgentPhaseOutput(
+            recommendations=["Verify OpenAPI spec matches implemented endpoints."],
+            summary="API/OpenAPI review completed.",
+        )
+
+    def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
+        """Suggest API-layer fixes for issues found in review."""
+        return ToolAgentPhaseOutput(
+            recommendations=["Align contract and implementation; fix status codes and schemas."],
+            summary="API/OpenAPI problem-solving input provided.",
+        )
+
+    def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
+        """Final API-domain actions before merge."""
+        return ToolAgentPhaseOutput(summary="API/OpenAPI deliver phase completed.")

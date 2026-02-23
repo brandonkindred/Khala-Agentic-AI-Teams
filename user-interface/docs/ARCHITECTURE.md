@@ -83,7 +83,7 @@ Each feature follows the same pattern:
 
 ## Polling
 
-Job-based APIs (SOC2, Social Marketing, Software Engineering) use `timer(0, 2000).pipe(switchMap(...))` to poll status every 2 seconds until completed or failed.
+Job-based APIs (SOC2, Social Marketing, Software Engineering) use `timer(0, 60000).pipe(switchMap(...))` to poll status every 60 seconds until completed or failed.
 
 ## SSE
 

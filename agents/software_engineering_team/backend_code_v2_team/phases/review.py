@@ -15,7 +15,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from shared.llm import LLMClient
 from shared.models import Task
 
-from ..models import ExecutionResult, ReviewIssue, ReviewResult
+from ..models import (
+    ExecutionResult,
+    Phase,
+    ReviewIssue,
+    ReviewResult,
+    ToolAgentKind,
+    ToolAgentPhaseInput,
+)
 from ..output_templates import parse_review_template
 from ..prompts import REVIEW_PROMPT
 
@@ -76,6 +83,7 @@ def run_review(
     security_agent: Any = None,
     code_review_agent: Any = None,
     linting_tool_agent: Any = None,
+    tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
 ) -> ReviewResult:
     """
     Execute the Review phase.
@@ -103,26 +111,43 @@ def run_review(
             from linting_tool_agent.models import LintToolInput as _LintInput
             lint_result = linting_tool_agent.run(_LintInput(
                 repo_path=str(repo_path),
+                agent_type="backend",
                 task_id=task_id,
-                language="python",
+                task_description=task.description or "",
             ))
-            if lint_result and not getattr(lint_result, "passed", True):
+            if lint_result and not getattr(
+                lint_result.execution_result, "success", getattr(lint_result, "passed", True)
+            ):
                 lint_ok = False
-                for li in getattr(lint_result, "issues", []):
+                _lint_severity_map = {"error": "high", "warning": "medium", "info": "low"}
+                for li in getattr(lint_result, "linter_issues", getattr(lint_result, "issues", [])):
+                    sev = getattr(li, "severity", "medium")
                     issues.append(ReviewIssue(
                         source="lint",
-                        severity="medium",
+                        severity=_lint_severity_map.get(sev, "medium"),
                         description=getattr(li, "message", str(li)),
                         file_path=getattr(li, "file_path", ""),
-                        recommendation=getattr(li, "fix", ""),
+                        recommendation="",
                     ))
         except Exception as exc:
             logger.warning("[%s] Linting tool agent failed: %s", task_id, exc)
 
     # 3. Code review agent (external) or LLM fallback
+    code_text = "\n\n".join(
+        f"--- {p} ---\n{c}" for p, c in list(execution_result.files.items())[:20]
+    )
+    code_text_12k = code_text[:12000]
     if code_review_agent is not None:
         try:
-            cr_result = code_review_agent.run(execution_result.files, task)
+            from code_review_agent.models import CodeReviewInput as _CRInput
+            cr_input = _CRInput(
+                code=code_text_12k,
+                task_description=task.description or "",
+                task_requirements=task.requirements or "",
+                acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
+                language="python",
+            )
+            cr_result = code_review_agent.run(cr_input)
             for item in getattr(cr_result, "issues", []):
                 issues.append(ReviewIssue(
                     source="code_review",
@@ -140,12 +165,19 @@ def run_review(
     # 4. QA agent
     if qa_agent is not None:
         try:
-            qa_result = qa_agent.run(execution_result.files, task)
-            for item in getattr(qa_result, "issues", []):
+            from qa_agent.models import QAInput as _QAInput
+            qa_input = _QAInput(
+                code=code_text_12k,
+                language="python",
+                task_description=task.description or "",
+            )
+            qa_result = qa_agent.run(qa_input)
+            for item in getattr(qa_result, "bugs_found", getattr(qa_result, "issues", [])):
                 issues.append(ReviewIssue(
                     source="qa",
                     severity=getattr(item, "severity", "medium"),
                     description=getattr(item, "description", str(item)),
+                    file_path=getattr(item, "location", getattr(item, "file_path", "")),
                     recommendation=getattr(item, "recommendation", ""),
                 ))
         except Exception as exc:
@@ -154,16 +186,54 @@ def run_review(
     # 5. Security agent
     if security_agent is not None:
         try:
-            sec_result = security_agent.run(execution_result.files, task)
-            for item in getattr(sec_result, "issues", []):
+            from security_agent.models import SecurityInput as _SecInput
+            sec_input = _SecInput(
+                code=code_text_12k,
+                language="python",
+                task_description=task.description or "",
+            )
+            sec_result = security_agent.run(sec_input)
+            for item in getattr(sec_result, "vulnerabilities", getattr(sec_result, "issues", [])):
                 issues.append(ReviewIssue(
                     source="security",
                     severity=getattr(item, "severity", "high"),
                     description=getattr(item, "description", str(item)),
+                    file_path=getattr(item, "location", getattr(item, "file_path", "")),
                     recommendation=getattr(item, "recommendation", ""),
                 ))
         except Exception as exc:
             logger.warning("[%s] Security agent failed: %s", task_id, exc)
+
+    # 6. Domain-specific review from tool agents
+    if tool_agents:
+        phase_inp = ToolAgentPhaseInput(
+            phase=Phase.REVIEW,
+            repo_path=str(repo_path),
+            existing_code="",
+            spec_context=task.description or "",
+            language="python",
+            current_files=execution_result.files,
+            review_issues=issues,
+            task_title=task.title or "",
+            task_description=task.description or "",
+        )
+        for kind, agent in tool_agents.items():
+            if not hasattr(agent, "review"):
+                continue
+            try:
+                out = agent.review(phase_inp)
+                if out.issues:
+                    issues.extend(out.issues)
+                if out.recommendations:
+                    for rec in out.recommendations:
+                        issues.append(ReviewIssue(
+                            source=f"tool_{kind.value}",
+                            severity="info",
+                            description=rec,
+                            recommendation=rec,
+                        ))
+            except Exception as exc:
+                logger.warning("[%s] Tool agent %s review() failed: %s", task_id, kind.value, exc)
 
     critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
     passed = build_ok and len(critical_or_high) == 0

@@ -1,0 +1,70 @@
+@if (jobId && status) {
+  <mat-card class="tracking-card">
+    <mat-card-header>
+      <mat-card-title>Execution progress</mat-card-title>
+      <mat-card-subtitle>
+        @if (status.phase) {
+          Phase: <strong>{{ phaseLabel(status.phase) }}</strong>
+        }
+        @if (status.repo_path) {
+          &nbsp;|&nbsp; {{ status.repo_path }}
+        }
+      </mat-card-subtitle>
+    </mat-card-header>
+    <mat-card-content>
+      @if (status.progress != null) {
+        <div class="progress-section">
+          <mat-progress-bar
+            mode="determinate"
+            [value]="status.progress"
+            [color]="status.status === 'failed' ? 'warn' : 'primary'"
+          ></mat-progress-bar>
+          <span class="progress-label">{{ status.progress }}%</span>
+        </div>
+      }
+
+      @if (getTeamProgressKeys().length) {
+        <div class="team-progress-row">
+          @for (teamId of getTeamProgressKeys(); track teamId) {
+            <div class="team-progress-item">
+              <span class="team-name">{{ teamLabel(teamId) }}</span>
+              @if (status.team_progress?.[teamId]?.current_phase) {
+                <span class="team-phase">{{ phaseLabel(status.team_progress?.[teamId]?.current_phase ?? '') }}</span>
+              }
+              @if (status.team_progress?.[teamId]?.progress != null) {
+                <span class="team-pct">{{ status.team_progress?.[teamId]?.progress }}%</span>
+              }
+            </div>
+          }
+        </div>
+      }
+
+      @if (getTeamsWithTasks().length) {
+        <div class="graph-section">
+          <h3 class="graph-title">Tasks by team</h3>
+          @for (lane of getTeamsWithTasks(); track lane.teamId) {
+            <div class="swim-lane">
+              <div class="lane-header">{{ lane.label }}</div>
+              <div class="lane-tasks">
+                @for (item of lane.tasks; track item.task_id) {
+                  <div
+                    class="task-node"
+                    [ngClass]="taskStatusClass(item.state.status)"
+                    [class.task-current]="isCurrentTask(lane.teamId, item.task_id)"
+                    [title]="item.state.error || item.state.title || item.task_id"
+                  >
+                    <mat-icon class="task-icon">{{ taskStatusIcon(item.state.status) }}</mat-icon>
+                    <span class="task-title">{{ item.state.title || item.task_id }}</span>
+                    @if (item.state.error) {
+                      <mat-icon class="task-error-icon">error</mat-icon>
+                    }
+                  </div>
+                }
+              </div>
+            </div>
+          }
+        </div>
+      }
+    </mat-card-content>
+  </mat-card>
+}

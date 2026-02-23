@@ -17,8 +17,10 @@ from shared.models import SystemArchitecture, Task
 from ..models import (
     Microtask,
     MicrotaskStatus,
+    Phase,
     PlanningResult,
     ToolAgentKind,
+    ToolAgentPhaseInput,
 )
 from ..output_templates import parse_planning_template
 from ..prompts import PLANNING_PROMPT
@@ -104,8 +106,14 @@ def run_planning(
     spec_content: str = "",
     architecture: Optional[SystemArchitecture] = None,
     existing_code: str = "",
+    tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
 ) -> PlanningResult:
-    """Execute the Planning phase and return a PlanningResult."""
+    """
+    Execute the Planning phase and return a PlanningResult.
+
+    If tool_agents is provided, each tool agent's plan() is called after LLM planning
+    to enrich microtask recommendations (appended to result summary).
+    """
     language = _detect_language(repo_path, task)
     prompt = _build_context(task, spec_content, architecture, existing_code, language)
 
@@ -115,8 +123,27 @@ def run_planning(
     result = _parse_planning_output(raw_parsed, language)
     logger.info(
         "[%s] Planning phase: produced %d microtasks — %s",
-        task.id, len(result.microtasks), result.summary[:120],
+        task.id, len(result.microtasks), result.summary[:120] if result.summary else "",
     )
+
+    if tool_agents:
+        phase_inp = ToolAgentPhaseInput(
+            phase=Phase.PLANNING,
+            repo_path=str(repo_path),
+            spec_context=spec_content[:4000] if spec_content else "",
+            language=language,
+            task_title=task.title or "",
+            task_description=task.description or "",
+        )
+        for kind, agent in tool_agents.items():
+            if not hasattr(agent, "plan"):
+                continue
+            try:
+                out = agent.plan(phase_inp)
+                if out.recommendations:
+                    result.summary = (result.summary or "").rstrip() + "\n" + " ".join(out.recommendations)
+            except Exception as e:
+                logger.warning("[%s] Tool agent %s plan() failed: %s", task.id, kind.value, e)
 
     if not result.microtasks:
         result.microtasks = [

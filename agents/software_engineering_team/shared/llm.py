@@ -811,23 +811,101 @@ class OllamaLLMClient(LLMClient):
         s = re.sub(r",\s*([}\]])", r"\1", s)
         return s
 
+    def _try_repair_truncated_json(self, s: str) -> str:
+        """Attempt to close truncated JSON (e.g. response cut off by max_tokens)."""
+        in_string = False
+        escape = False
+        quote_char = None
+        depth_brace = 0
+        depth_bracket = 0
+        i = 0
+        n = len(s)
+        while i < n:
+            c = s[i]
+            if escape:
+                escape = False
+                i += 1
+                continue
+            if c == "\\" and in_string:
+                escape = True
+                i += 1
+                continue
+            if in_string:
+                if c == quote_char:
+                    in_string = False
+                i += 1
+                continue
+            if c == '"':
+                in_string = True
+                quote_char = c
+                i += 1
+                continue
+            if c == "{":
+                depth_brace += 1
+            elif c == "}":
+                depth_brace -= 1
+            elif c == "[":
+                depth_bracket += 1
+            elif c == "]":
+                depth_bracket -= 1
+            i += 1
+        suffix = ""
+        if in_string:
+            suffix += quote_char or '"'
+        suffix += "]" * max(0, depth_bracket) + "}" * max(0, depth_brace)
+        return s + suffix if suffix else s
+
     def _extract_json(self, text: str) -> Dict[str, Any]:
+        # #region agent log
+        _log_path = "/home/deepthought/Dev/strands-agents/.cursor/debug-c656da.log"
+        try:
+            _log = {"sessionId": "c656da", "timestamp": int(time.time() * 1000), "location": "llm.py:_extract_json", "message": "extract_json_input", "data": {"text_len": len(text), "text_tail_100": (text[-100:] if len(text) > 100 else text)}, "hypothesisId": "D"}
+            os.makedirs(os.path.dirname(_log_path), exist_ok=True)
+            with open(_log_path, "a") as _f:
+                _f.write(json.dumps(_log) + "\n")
+        except Exception:
+            pass
+        # #endregion
         if "---DRAFT---" in text:
             parts = text.split("---DRAFT---", 1)
             if len(parts) == 2 and parts[1].strip():
                 return {"content": parts[1].strip()}
-        fenced_match = re.search(r"```(?:json)?(.*)```", text, flags=re.DOTALL | re.IGNORECASE)
-        if fenced_match:
-            text = fenced_match.group(1).strip()
+        # Prefer a ```json block so we don't use a non-JSON block (e.g. ```bash) as the content
+        json_block_match = re.search(r"```json\s*([\s\S]*?)```", text, re.IGNORECASE)
+        if json_block_match:
+            text = json_block_match.group(1).strip()
+        else:
+            fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+            if fenced_match:
+                block_content = fenced_match.group(1).strip()
+                # Only use first block if it looks like JSON (starts with { or [)
+                if block_content.lstrip().startswith(("{", "[")):
+                    text = block_content
+                # else: keep full response so object extraction / try-every-block can find JSON
         try:
             return json.loads(text)
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError) as e:
+            # #region agent log
+            try:
+                _err = {"sessionId": "c656da", "timestamp": int(time.time() * 1000), "location": "llm.py:_extract_json_parse_err", "message": "primary_loads_failed", "data": {"error_type": type(e).__name__, "error_msg": str(e)[:300]}, "hypothesisId": "D"}
+                with open(_log_path, "a") as _f2:
+                    _f2.write(json.dumps(_err) + "\n")
+            except Exception:
+                pass
+            # #endregion
             logger.debug("Primary JSON parse failed; attempting repair")
         repaired = self._repair_json(text)
         try:
             return json.loads(repaired)
         except (json.JSONDecodeError, ValueError):
-            logger.debug("Repaired JSON parse failed; attempting object extraction fallback")
+            logger.debug("Repaired JSON parse failed; attempting truncation repair")
+        truncated_repaired = self._try_repair_truncated_json(text)
+        try:
+            parsed = json.loads(truncated_repaired)
+            if isinstance(parsed, dict) and parsed:
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            logger.debug("Truncation repair parse failed; attempting object extraction fallback")
         obj_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
         if obj_match:
             raw = obj_match.group(0)
@@ -837,7 +915,10 @@ class OllamaLLMClient(LLMClient):
                 try:
                     return json.loads(self._repair_json(raw))
                 except (json.JSONDecodeError, ValueError):
-                    logger.debug("Object extraction JSON parse failed; trying noise-stripped retry")
+                    try:
+                        return json.loads(self._try_repair_truncated_json(raw))
+                    except (json.JSONDecodeError, ValueError):
+                        logger.debug("Object extraction JSON parse failed; trying noise-stripped retry")
         # Retry once after stripping common leading/trailing noise
         stripped = text.strip()
         for pattern in (
@@ -861,6 +942,7 @@ class OllamaLLMClient(LLMClient):
             "files", "summary", "code", "overview", "issues", "approved", "components",
             "architecture_document", "diagrams", "decisions",
             "tasks", "execution_order",  # Task Generator / Tech Lead output
+            "bugs_found", "integration_tests", "unit_tests", "readme_content",  # QA agent output
         })
         for block_match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE):
             block = block_match.group(1).strip()
@@ -952,6 +1034,18 @@ class OllamaLLMClient(LLMClient):
     ) -> str:
         """POST to chat completions; return raw content string. Raises on non-200 or malformed response."""
         url = f"{self.base_url}/v1/chat/completions"
+        # #region agent log
+        _log_path = "/home/deepthought/Dev/strands-agents/.cursor/debug-c656da.log"
+        try:
+            _msgs = payload.get("messages") or []
+            _total = sum(len(m.get("content") or "") for m in _msgs if isinstance(m, dict))
+            _log = {"sessionId": "c656da", "timestamp": int(time.time() * 1000), "location": "llm.py:_ollama_post", "message": "ollama_request", "data": {"url": url, "model": payload.get("model"), "messages_count": len(_msgs), "content_chars": _total}, "hypothesisId": "A"}
+            os.makedirs(os.path.dirname(_log_path), exist_ok=True)
+            with open(_log_path, "a") as _f:
+                _f.write(json.dumps(_log) + "\n")
+        except Exception:
+            pass
+        # #endregion
         last_error: Exception | None = None
         for attempt in range(max_retries + 1):
             try:
@@ -959,6 +1053,17 @@ class OllamaLLMClient(LLMClient):
                     with httpx.Client(timeout=self.timeout) as client:
                         response = client.post(url, json=payload)
                         status = response.status_code
+                        # #region agent log
+                        if status >= 500:
+                            try:
+                                _body = (response.text or "")[:500]
+                                _log2 = {"sessionId": "c656da", "timestamp": int(time.time() * 1000), "location": "llm.py:_ollama_post_5xx", "message": "ollama_5xx_response", "data": {"status": status, "response_body": _body}, "hypothesisId": "C"}
+                                os.makedirs(os.path.dirname(_log_path), exist_ok=True)
+                                with open(_log_path, "a") as _f2:
+                                    _f2.write(json.dumps(_log2) + "\n")
+                            except Exception:
+                                pass
+                        # #endregion
                         if status == 200:
                             try:
                                 data = response.json()

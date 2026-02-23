@@ -149,6 +149,31 @@ def write_files_and_commit(
     return True, "Committed"
 
 
+def commit_working_tree(repo_path: str | Path, message: str) -> Tuple[bool, str]:
+    """
+    Commit the current working tree (git add -A, git commit -m message).
+    Does not write new files; use write_files_and_commit for that.
+    Returns (success, message). Treats "nothing to commit" as success.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+    code, out = _run_git(path, ["git", "add", "-A"])
+    if code != 0:
+        return False, f"git add failed: {out}"
+    code, out = _run_git(path, ["git", "status", "--porcelain"])
+    if code != 0:
+        return False, f"git status failed: {out}"
+    if not out.strip():
+        logger.info("No changes to commit (working tree clean)")
+        return True, "No changes to commit"
+    code, out = _run_git(path, ["git", "commit", "-m", message])
+    if code != 0:
+        return False, f"git commit failed: {out}"
+    logger.info("Committed: %s", message[:50])
+    return True, "Committed"
+
+
 def branch_has_commits_ahead_of(
     repo_path: str | Path, branch: str, base: str
 ) -> bool:
