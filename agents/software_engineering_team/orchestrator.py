@@ -1264,6 +1264,12 @@ def _run_backend_frontend_workers(
                         execution_tracker.finish_task(task_id, blocked=True)
                         logger.warning("%s[%s] Frontend FAILED after %.1fs: %s", log_prefix, task_id, elapsed, failed[task_id])
                 logger.info("%s[%s] <<< Frontend worker done (completed=%s)", log_prefix, task_id, workflow_result.success)
+                if getattr(workflow_result, "llm_unreachable", False):
+                    with state_lock:
+                        llm_connectivity_failed[0] = True
+                        failed[task_id] = LLM_UNREACHABLE_AFTER_RETRIES
+                    logger.warning("Frontend reported LLM unreachable; pausing job %s", job_id)
+                    break
             except (LLMError, httpx.HTTPError) as e:
                 with state_lock:
                     if isinstance(e, LLMRateLimitError):
@@ -1794,6 +1800,7 @@ def run_orchestrator(
             backend_code_v2_thread.join()
 
         llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed.values())
+        llm_connectivity_failed = any(v == LLM_UNREACHABLE_AFTER_RETRIES for v in failed.values())
         remaining_in_queues = len(backend_code_v2_queue) + len(frontend_queue)
         # Log final execution summary with task breakdown
         logger.info(
@@ -1971,7 +1978,15 @@ def run_orchestrator(
                         doc_err,
                     )
 
-        if llm_limit_exceeded:
+        if llm_connectivity_failed:
+            update_job(
+                job_id,
+                status=JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
+                error=LLM_UNREACHABLE_AFTER_RETRIES,
+                progress=100,
+                current_task=None,
+            )
+        elif llm_limit_exceeded:
             update_job(
                 job_id,
                 status="paused_llm_limit",
@@ -2171,6 +2186,7 @@ def run_failed_tasks(job_id: str) -> None:
             retry_bv2_thread.join()
 
         llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed_retry.values())
+        llm_connectivity_failed = any(v == LLM_UNREACHABLE_AFTER_RETRIES for v in failed_retry.values())
 
         # Final summary with task breakdown
         logger.info(
@@ -2212,7 +2228,14 @@ def run_failed_tasks(job_id: str) -> None:
             {"task_id": tid, "reason": reason, "title": (all_tasks.get(tid).title if all_tasks.get(tid) else tid)}
             for tid, reason in failed_retry.items()
         ]
-        if llm_limit_exceeded:
+        if llm_connectivity_failed:
+            update_job(
+                job_id,
+                failed_tasks=failed_details,
+                status=JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
+                error=LLM_UNREACHABLE_AFTER_RETRIES,
+            )
+        elif llm_limit_exceeded:
             update_job(
                 job_id,
                 failed_tasks=failed_details,

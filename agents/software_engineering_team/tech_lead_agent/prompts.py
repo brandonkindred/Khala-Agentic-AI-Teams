@@ -33,6 +33,7 @@ Before generating the plan:
 1. Read the ENTIRE spec. Extract every feature, screen, API endpoint, data entity, user flow, integration, and non-functional requirement.
 2. If an existing codebase analysis is provided, identify what can be reused vs. what must be built.
 3. Group related requirements into Epics. Group Epics under one or more Initiatives.
+4. If "Existing tasks" are provided, extend or reprioritize them: keep existing task IDs where still relevant, add new stories for gaps, and set execution_order so dependencies and priorities are respected.
 
 ============================================================
 STORY QUALITY GUIDELINES

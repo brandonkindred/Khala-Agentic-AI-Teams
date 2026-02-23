@@ -31,7 +31,14 @@ if _arch_dir.exists() and str(_arch_dir) not in sys.path:
 from spec_parser import validate_work_path
 from shared.clarification_store import clarification_store
 from shared.execution_tracker import execution_tracker
-from shared.job_store import JOB_STATUS_FAILED, JOB_STATUS_PENDING, create_job, get_job, update_job
+from shared.job_store import (
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
+    create_job,
+    get_job,
+    update_job,
+)
 
 from shared.logging_config import setup_logging
 
@@ -83,7 +90,7 @@ class JobStatusResponse(BaseModel):
     job_id: str = Field(..., description="Job ID.")
     status: str = Field(
         ...,
-        description="pending, running, completed, failed, or paused_llm_limit (Ollama weekly usage limit exceeded; call retry-failed after limit resets).",
+        description="pending, running, completed, failed, paused_llm_limit (Ollama weekly limit; call retry-failed after reset), or paused_llm_connectivity (LLM unreachable; call resume-after-llm-check when connectivity is restored).",
     )
     repo_path: Optional[str] = Field(None, description="Path to the repo.")
     requirements_title: Optional[str] = Field(None, description="Parsed project title.")
@@ -330,6 +337,44 @@ def retry_failed_tasks(job_id: str) -> RetryResponse:
         status="running",
         retrying_tasks=failed_ids,
         message=f"Retrying {len(failed_ids)} failed tasks. Poll GET /run-team/{job_id} for status.",
+    )
+
+
+@app.post(
+    "/run-team/{job_id}/resume-after-llm-check",
+    response_model=RetryResponse,
+    summary="Resume after LLM connectivity check",
+    description="Use when the job status is paused_llm_connectivity (frontend could not reach the LLM after retries). "
+    "After the user has verified LLM connectivity, call this endpoint to set status to running and retry the failed task(s). "
+    "Same retry flow as retry-failed; poll GET /run-team/{job_id} for status.",
+)
+def resume_after_llm_check(job_id: str) -> RetryResponse:
+    """Resume a job paused due to LLM connectivity by retrying the failed tasks."""
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    status = data.get("status")
+    if status != JOB_STATUS_PAUSED_LLM_CONNECTIVITY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is not paused for LLM connectivity (status={status}). Use this endpoint only when status is {JOB_STATUS_PAUSED_LLM_CONNECTIVITY}.",
+        )
+
+    failed_tasks = data.get("failed_tasks") or []
+    failed_ids = [ft.get("task_id", "") for ft in failed_tasks]
+
+    update_job(job_id, status="running", error=None)
+
+    thread = threading.Thread(target=_run_retry_background, args=(job_id,))
+    thread.daemon = True
+    thread.start()
+
+    return RetryResponse(
+        job_id=job_id,
+        status="running",
+        retrying_tasks=failed_ids,
+        message="Resumed after LLM connectivity check. Poll GET /run-team/{job_id} for status.",
     )
 
 

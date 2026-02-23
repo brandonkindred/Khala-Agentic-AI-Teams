@@ -49,17 +49,12 @@ class TechLeadAgent:
 
     def run(self, input_data: TechLeadInput) -> TechLeadOutput:
         """
-        Produce an Initiative -> Epic -> Story hierarchy.
+        Produce an Initiative -> Epic -> Story hierarchy based on the requirements, existing codebase, and system architecture, existing tasks, and the spec.
 
         Single-path LLM call: build context, call LLM, parse hierarchy, flatten
         to TaskAssignment for execution.
         """
         logger.info("Tech Lead: planning for %s", input_data.requirements.title)
-        reqs = input_data.requirements
-        arch = input_data.architecture
-
-        spec_content = input_data.spec_content or ""
-        arch_doc = (arch.architecture_document or "") if arch else ""
         existing_codebase = input_data.existing_codebase or ""
 
         codebase_analysis = ""
@@ -181,6 +176,25 @@ class TechLeadAgent:
                 codebase_analysis[:10000],
                 "---",
             ])
+
+        if input_data.existing_tasks:
+            task_lines = [
+                "",
+                "**Existing tasks (extend or reprioritize):**",
+                "---",
+            ]
+            for t in input_data.existing_tasks:
+                task_lines.append(f"- **id:** {t.id} | **type:** {t.type} | **title:** {t.title} | **status:** {t.status} | **assignee:** {t.assignee}")
+                task_lines.append(f"  **description:** {t.description[:500]}{'...' if len(t.description) > 500 else ''}")
+                if t.requirements:
+                    task_lines.append(f"  **requirements:** {t.requirements[:300]}{'...' if len(t.requirements) > 300 else ''}")
+                if t.acceptance_criteria:
+                    task_lines.append("  **acceptance_criteria:** " + "; ".join(t.acceptance_criteria[:5]))
+                if t.dependencies:
+                    task_lines.append(f"  **dependencies:** {t.dependencies}")
+                task_lines.append("")
+            context_parts.extend(task_lines)
+            context_parts.append("---")
 
         if input_data.architecture:
             arch = input_data.architecture
@@ -361,6 +375,13 @@ class TechLeadAgent:
         Identifies gaps in spec coverage and creates new tasks to fill them.
         Returns a list of new Task objects (may be empty).
         """
+        if getattr(task_update, "failure_class", None) == "llm_connectivity":
+            logger.info(
+                "Tech Lead: task %s failed due to LLM connectivity; not creating fix tasks (orchestrator will pause job).",
+                task_update.task_id,
+            )
+            return []
+
         logger.info(
             "Tech Lead: reviewing progress after task %s (%s) - %s completed, %s remaining",
             task_update.task_id,

@@ -665,7 +665,7 @@ def call_llm_with_retries(
     for attempt in range(max_attempts):
         try:
             return fn()
-        except (LLMPermanentError, LLMRateLimitError):
+        except (LLMPermanentError, LLMRateLimitError, LLMUnreachableAfterRetriesError):
             raise
         except (LLMTemporaryError, httpx.ConnectError, httpx.TimeoutException, httpx.ReadTimeout, LLMError) as e:
             last_error = e
