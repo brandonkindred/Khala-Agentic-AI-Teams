@@ -48,6 +48,7 @@ def parse_hierarchy_from_data(data: Dict[str, Any]) -> PlanningHierarchy:
                     requirements=story_data.get("requirements") or "",
                     dependencies=story_data.get("dependencies") or [],
                     acceptance_criteria=acc,
+                    metadata=story_data.get("metadata") or {},
                 ))
             acc = epic_data.get("acceptance_criteria") or []
             if not isinstance(acc, list):
@@ -103,6 +104,7 @@ def flatten_hierarchy_to_assignment(hierarchy: PlanningHierarchy) -> TaskAssignm
                     metadata={
                         "epic_id": epic.id,
                         "initiative_id": initiative.id,
+                        **(story.metadata or {}),
                     },
                 ))
 
@@ -158,6 +160,7 @@ def parse_assignment_from_data(data: Dict[str, Any]) -> TaskAssignment:
                     dependencies=t.get("dependencies", []),
                     acceptance_criteria=acc,
                     status=TaskStatus.PENDING,
+                    metadata=t.get("metadata") or {},
                 )
             )
 

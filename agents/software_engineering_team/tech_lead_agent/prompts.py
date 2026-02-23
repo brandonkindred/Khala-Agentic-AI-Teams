@@ -57,7 +57,7 @@ YOUR TEAM
 ============================================================
 - devops: CI/CD, IaC, Docker, networking
 - backend: Python or Java implementation
-- frontend: Angular implementation
+- frontend: Angular by default. If the spec explicitly requires React or Vue, set for each frontend story "metadata": {"framework_target": "react"} or "metadata": {"framework_target": "vue"}. Otherwise omit metadata (Angular is used).
 
 Security, QA, and accessibility reviews are invoked by the orchestrator after code exists – do NOT create stories for them.
 
@@ -106,6 +106,7 @@ Return a single JSON object. Choose ONE of two modes:
       - "requirements": string (detailed)
       - "acceptance_criteria": list of strings (specific, testable)
       - "dependencies": list of story IDs
+      - "metadata": optional object. For frontend stories only: if the spec explicitly requires React or Vue, include {"framework_target": "react"} or {"framework_target": "vue"}; otherwise omit.
 - "execution_order": list of story IDs in dependency order (ALL stories from ALL epics)
 - "rationale": string (why this plan delivers the full spec)
 - "summary": string (total story count, confirmation of spec coverage)

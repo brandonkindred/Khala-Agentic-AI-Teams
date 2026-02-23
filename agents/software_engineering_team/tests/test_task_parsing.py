@@ -101,6 +101,61 @@ def test_parse_hierarchical_assignment() -> None:
     assert assignment.tasks[1].type == TaskType.FRONTEND
 
 
+def test_hierarchy_story_metadata_flows_to_task() -> None:
+    """Story metadata (e.g. framework_target) is merged into Task.metadata."""
+    data = {
+        "initiatives": [
+            {
+                "id": "init-1",
+                "title": "App",
+                "epics": [
+                    {
+                        "id": "epic-1",
+                        "title": "UI",
+                        "stories": [
+                            {
+                                "id": "frontend-dashboard",
+                                "title": "Dashboard",
+                                "assignee": "frontend",
+                                "description": "React dashboard",
+                                "metadata": {"framework_target": "react"},
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+        "execution_order": ["frontend-dashboard"],
+        "rationale": "",
+    }
+    assignment = parse_assignment_from_data(data)
+    assert len(assignment.tasks) == 1
+    t = assignment.tasks[0]
+    assert t.metadata.get("framework_target") == "react"
+    assert t.metadata.get("epic_id") == "epic-1"
+    assert t.metadata.get("initiative_id") == "init-1"
+
+
+def test_flat_task_metadata_preserved() -> None:
+    """Flat format tasks with metadata preserve it."""
+    data = {
+        "tasks": [
+            {
+                "id": "frontend-login",
+                "title": "Login",
+                "assignee": "frontend",
+                "description": "Login page",
+                "metadata": {"framework_target": "vue"},
+            },
+        ],
+        "execution_order": ["frontend-login"],
+        "rationale": "",
+    }
+    assignment = parse_assignment_from_data(data)
+    assert len(assignment.tasks) == 1
+    assert assignment.tasks[0].metadata.get("framework_target") == "vue"
+
+
 def test_parse_hierarchy_from_data() -> None:
     """parse_hierarchy_from_data produces a PlanningHierarchy."""
     data = {

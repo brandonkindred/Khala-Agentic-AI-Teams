@@ -187,6 +187,10 @@ class StoryPlan(BaseModel):
     requirements: str = ""
     dependencies: List[str] = Field(default_factory=list)
     acceptance_criteria: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional metadata (e.g. framework_target for frontend stories).",
+    )
 
 
 class Epic(BaseModel):

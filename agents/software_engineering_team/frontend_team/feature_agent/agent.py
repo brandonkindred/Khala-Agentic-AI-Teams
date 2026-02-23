@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.llm import LLMClient
 from shared.models import SystemArchitecture, Task, TaskUpdate
+from shared.frontend_framework import resolve_frontend_framework
 from shared.prompt_utils import build_problem_solving_header, log_llm_prompt
 from shared.repo_utils import (
     int_env as _int_env,
@@ -34,6 +35,23 @@ MAX_CLARIFICATION_REFINEMENTS = _int_env("SW_MAX_CLARIFICATION_REFINEMENTS", 20)
 MAX_SAME_BUILD_FAILURES = _int_env("SW_MAX_SAME_BUILD_FAILURES", 3)
 
 _task_requirements = task_requirements
+
+
+def _resolved_framework_for_implementation(
+    task_metadata: Optional[dict],
+    spec_content: Optional[str],
+) -> str:
+    """
+    Resolve framework (task metadata -> spec -> default Angular).
+    Vue is not yet implemented; treat as Angular and log.
+    """
+    resolved = resolve_frontend_framework(task_metadata, spec_content)
+    if resolved == "vue":
+        logger.info(
+            "Frontend: Vue requested but not yet implemented; using Angular"
+        )
+        return "angular"
+    return resolved
 
 
 def _task_requirements_with_route_expectations(task: Task, repo_path: Path) -> str:
@@ -719,7 +737,9 @@ class FrontendExpertAgent:
                             logger.warning("[%s] Failed to persist plan (non-blocking): %s", task_id, e)
 
             result = self.run(FrontendInput(
-                framework_target=str((current_task.metadata or {}).get("framework_target", "angular")),
+                framework_target=_resolved_framework_for_implementation(
+                    current_task.metadata, spec_content
+                ),
                 task_description=current_task.description,
                 requirements=_task_requirements_with_route_expectations(current_task, repo_path),
                 user_story=getattr(current_task, "user_story", "") or "",

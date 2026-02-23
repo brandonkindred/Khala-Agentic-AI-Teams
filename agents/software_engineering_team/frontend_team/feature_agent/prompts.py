@@ -53,7 +53,7 @@ The base Angular project is automatically initialized before your first task run
 Do NOT recreate these files unless you need to modify them (e.g. adding new routes to `app.routes.ts`). Build on top of the existing scaffolding. When calling APIs, use `environment.apiUrl` (or `environment.production`) instead of hardcoding URLs.
 
 **Input:**
-- framework_target: react | angular | either (use framework-native implementation and tests)
+- framework_target: Angular is the default. Use React only when the spec or plan explicitly requests it. Value is react | angular | either (use framework-native implementation and tests).
 - Task description and requirements
 - Project specification (the full spec for the application being built)
 - Optional: Implementation plan – when present, you MUST implement the task according to that plan. Your "files" output must realize every item under "What changes" and "Tests needed", and use the algorithms/data structures described. The plan is the authoritative guide; do not deviate unless the task description explicitly contradicts it.
@@ -157,7 +157,7 @@ If a task covers more than 2-3 components or multiple pages/features, it is TOO 
 If a task is for a single component, page, or service, implement it fully.
 
 **Your task:**
-Implement the requested frontend functionality using the provided framework_target (React or Angular). When qa_issues, security_issues, or accessibility_issues are provided, implement the fixes described in each issue's "recommendation" field. Modify the existing code accordingly. When code_review_issues are provided, resolve each issue. Follow the architecture when provided. Produce production-quality code that STRICTLY adheres to the coding standards above:
+Implement the requested frontend functionality using the provided framework_target (Angular by default; React when specified in the spec or plan). When qa_issues, security_issues, or accessibility_issues are provided, implement the fixes described in each issue's "recommendation" field. Modify the existing code accordingly. When code_review_issues are provided, resolve each issue. Follow the architecture when provided. Produce production-quality code that STRICTLY adheres to the coding standards above:
 - Design by Contract on all public methods and services
 - SOLID principles (especially SRP, DIP in component/service design)
 - JSDoc on every class, component, and method (how used, why it exists, constraints)
