@@ -108,15 +108,17 @@ class TestNoBackendAgentImports:
 
 
 class TestOrchestratorRegistration:
-    """Verify that the orchestrator registers the backend_code_v2 team."""
+    """Verify that the orchestrator uses backend_code_v2_team as the backend team."""
 
     def test_get_agents_includes_backend_code_v2(self):
         from orchestrator import _get_agents
 
         agents = _get_agents()
-        assert "backend_code_v2" in agents
+        assert "backend" in agents
         from backend_code_v2_team import BackendCodeV2TeamLead
-        assert isinstance(agents["backend_code_v2"], BackendCodeV2TeamLead)
+        assert isinstance(agents["backend"], BackendCodeV2TeamLead)
+        # Replaced standalone backend_code_v2 key with backend
+        assert "backend_code_v2" not in agents
 
     def test_backend_code_v2_worker_exists(self):
         import orchestrator

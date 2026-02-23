@@ -604,7 +604,7 @@ def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict
 
         arch = SystemArchitecture(overview=architecture_overview) if architecture_overview else None
 
-        team_lead = BackendCodeV2TeamLead(get_llm_for_agent("backend_code_v2"))
+        team_lead = BackendCodeV2TeamLead(get_llm_for_agent("backend"))
 
         phase_order = ["planning", "execution", "review", "problem_solving", "deliver"]
 

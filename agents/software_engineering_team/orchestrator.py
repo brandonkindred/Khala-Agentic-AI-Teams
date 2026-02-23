@@ -279,7 +279,6 @@ def _get_agents() -> Dict[str, Any]:
     Each agent uses get_llm_for_agent(key) for per-agent model configuration."""
     from frontend_team.accessibility_agent import AccessibilityExpertAgent, AccessibilityInput
     from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
-    from backend_agent import BackendExpertAgent, BackendInput
     from planning_team.project_planning_agent import ProjectPlanningAgent, ProjectPlanningInput
     from code_review_agent import CodeReviewAgent, CodeReviewInput
     from technical_writers.dbc_comments_agent import DbcCommentsAgent, DbcCommentsInput
@@ -324,7 +323,7 @@ def _get_agents() -> Dict[str, Any]:
         "acceptance_verifier": AcceptanceVerifierAgent(get_llm_for_agent("acceptance_verifier")),
         "tech_lead": TechLeadAgent(get_llm_for_agent("tech_lead")),
         "devops": DevOpsTeamLeadAgent(get_llm_for_agent("devops")),
-        "backend": BackendExpertAgent(get_llm_for_agent("backend")),
+        "backend": _lazy_init_backend_code_v2_team(),
         "frontend": FrontendExpertAgent(get_llm_for_agent("frontend")),
         "security": CybersecurityExpertAgent(get_llm_for_agent("security")),
         "qa": QAExpertAgent(get_llm_for_agent("qa")),
@@ -336,14 +335,13 @@ def _get_agents() -> Dict[str, Any]:
         "repair": RepairExpertAgent(get_llm_for_agent("repair")),
         "linting_tool_agent": LintingToolAgent(get_llm_for_agent("linting_tool_agent")),
         "build_fix_specialist": BuildFixSpecialistAgent(get_llm_for_agent("build_fix_specialist")),
-        "backend_code_v2": _lazy_init_backend_code_v2_team(),
     }
 
 
 def _lazy_init_backend_code_v2_team():
-    """Instantiate the backend-code-v2 team lead (lazy import)."""
+    """Instantiate the backend team lead (backend_code_v2_team; lazy import)."""
     from backend_code_v2_team import BackendCodeV2TeamLead
-    return BackendCodeV2TeamLead(get_llm_for_agent("backend_code_v2"))
+    return BackendCodeV2TeamLead(get_llm_for_agent("backend"))
 
 
 _task_requirements = task_requirements
@@ -917,6 +915,7 @@ def _backend_code_v2_worker(
     all_tasks: Dict[str, Any],
     completed: set,
     failed: Dict[str, str],
+    completed_code_task_ids: List[str],
     spec_content: str,
     architecture: Any,
     agents: Dict[str, Any],
@@ -924,14 +923,14 @@ def _backend_code_v2_worker(
 ) -> None:
     """
     Worker that drains ``backend_code_v2_queue`` by calling the
-    backend-code-v2 team's ``run_workflow`` (no backend_agent code).
-    Designed to run in its own thread, parallel with backend/frontend workers.
+    backend team's (backend_code_v2_team) ``run_workflow``.
+    Designed to run in its own thread, parallel with frontend worker.
     """
     from shared.models import SystemArchitecture
-    team_lead = agents.get("backend_code_v2")
+    team_lead = agents.get("backend")
     if team_lead is None:
         for tid in backend_code_v2_queue:
-            failed[tid] = "backend_code_v2 team not registered"
+            failed[tid] = "backend team not registered"
         return
 
     while backend_code_v2_queue:
@@ -941,7 +940,7 @@ def _backend_code_v2_worker(
             continue
 
         update_job(job_id, current_task=task_id)
-        logger.info("[%s] >>> backend-code-v2 worker starting task", task_id)
+        logger.info("[%s] >>> backend worker starting task", task_id)
         task_start = time.monotonic()
 
         try:
@@ -965,20 +964,21 @@ def _backend_code_v2_worker(
             elapsed = time.monotonic() - task_start
             if result.success:
                 completed.add(task_id)
+                completed_code_task_ids.append(task_id)
                 _log_task_completion_banner(
                     task_id=task_id,
                     task_title=getattr(task, "title", "") or task_id,
-                    assignee="backend-code-v2",
+                    assignee=getattr(task, "assignee", "backend"),
                     elapsed_seconds=elapsed,
                     description=getattr(task, "description", "") or "",
                 )
             else:
-                reason = result.failure_reason or "backend-code-v2 workflow did not succeed"
+                reason = result.failure_reason or "backend workflow did not succeed"
                 failed[task_id] = reason
-                logger.warning("[%s] backend-code-v2 task failed: %s", task_id, reason)
+                logger.warning("[%s] backend task failed: %s", task_id, reason)
         except Exception as exc:
-            failed[task_id] = f"backend-code-v2 exception: {exc}"
-            logger.exception("[%s] backend-code-v2 worker exception", task_id)
+            failed[task_id] = f"backend exception: {exc}"
+            logger.exception("[%s] backend worker exception", task_id)
 
 
 def _run_backend_frontend_workers(
@@ -1702,14 +1702,17 @@ def run_orchestrator(
         prefix_queue = [tid for tid in full_order if all_tasks.get(tid) and (
             all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops"
         )]
-        backend_queue: List[str] = [tid for tid in full_order if all_tasks.get(tid) and all_tasks[tid].assignee == "backend"]
-        backend_code_v2_queue: List[str] = [tid for tid in full_order if all_tasks.get(tid) and all_tasks[tid].assignee == "backend-code-v2"]
+        backend_queue: List[str] = []  # All backend work routed to backend_code_v2_team via backend_code_v2_queue
+        backend_code_v2_queue: List[str] = [
+            tid for tid in full_order
+            if all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
+        ]
         frontend_queue: List[str] = [tid for tid in full_order if all_tasks.get(tid) and all_tasks[tid].assignee == "frontend"]
         total_tasks = len(prefix_queue) + len(backend_queue) + len(backend_code_v2_queue) + len(frontend_queue)
 
         logger.info(
-            "=== Starting task execution: prefix=%s, backend=%s, backend_code_v2=%s, frontend=%s ===",
-            len(prefix_queue), len(backend_queue), len(backend_code_v2_queue), len(frontend_queue),
+            "=== Starting task execution: prefix=%s, backend=%s, frontend=%s ===",
+            len(prefix_queue), len(backend_code_v2_queue), len(frontend_queue),
         )
 
         # Run prefix tasks sequentially (work path; devops writes to path/devops, no git)
@@ -1754,6 +1757,7 @@ def run_orchestrator(
                     all_tasks=all_tasks,
                     completed=completed,
                     failed=failed,
+                    completed_code_task_ids=completed_code_task_ids,
                     spec_content=spec_content,
                     architecture=architecture,
                     agents=agents,
@@ -1787,7 +1791,7 @@ def run_orchestrator(
             backend_code_v2_thread.join()
 
         llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed.values())
-        remaining_in_queues = len(backend_queue) + len(backend_code_v2_queue) + len(frontend_queue)
+        remaining_in_queues = len(backend_code_v2_queue) + len(frontend_queue)
         # Log final execution summary with task breakdown
         logger.info(
             "=== Task execution finished: %s completed, %s failed, %s remaining (of %s total) ===",
@@ -1808,8 +1812,8 @@ def run_orchestrator(
                 logger.warning("  [%s] %s — Reason: %s", tid, title, reason)
         if remaining_in_queues:
             logger.warning(
-                "Unprocessed tasks still in queues: backend=%s, backend_code_v2=%s, frontend=%s",
-                len(backend_queue), len(backend_code_v2_queue), len(frontend_queue),
+                "Unprocessed tasks still in queues: backend=%s, frontend=%s",
+                len(backend_code_v2_queue), len(frontend_queue),
             )
 
         # Integration phase: validate backend-frontend API contract alignment
@@ -1885,7 +1889,10 @@ def run_orchestrator(
             completed_code_task_ids, spec_content, tech_lead_output.requirement_task_mapping
         ):
             from security_agent.models import SecurityInput
-            has_backend = any(all_tasks.get(tid) and all_tasks[tid].assignee == "backend" for tid in completed_code_task_ids)
+            has_backend = any(
+                all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
+                for tid in completed_code_task_ids
+            )
             has_frontend = any(all_tasks.get(tid) and all_tasks[tid].assignee == "frontend" for tid in completed_code_task_ids)
             if has_backend:
                 logger.info("Tech Lead requested security review - running Security agent on backend repo")
@@ -2054,13 +2061,10 @@ def run_failed_tasks(job_id: str) -> None:
                 all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops"
             )
         ]
-        retry_backend_queue = [
-            tid for tid in failed_ids
-            if all_tasks.get(tid) and all_tasks[tid].assignee == "backend"
-        ]
+        retry_backend_queue: List[str] = []  # All backend retries go through backend_code_v2_team
         retry_backend_code_v2_queue = [
             tid for tid in failed_ids
-            if all_tasks.get(tid) and all_tasks[tid].assignee == "backend-code-v2"
+            if all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
         ]
         retry_frontend_queue = [
             tid for tid in failed_ids
@@ -2125,6 +2129,7 @@ def run_failed_tasks(job_id: str) -> None:
                     all_tasks=all_tasks,
                     completed=completed,
                     failed=failed_retry,
+                    completed_code_task_ids=completed_code_task_ids,
                     spec_content=spec_content,
                     architecture=architecture,
                     agents=agents,
