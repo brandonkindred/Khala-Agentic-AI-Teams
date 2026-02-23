@@ -1,0 +1,484 @@
+# Architecture
+
+This document describes the architecture of the Software Engineering Team — a multi-agent system that takes a product specification and produces a fully implemented, tested, and documented codebase. The diagrams below cover system entry points, the end-to-end pipeline, every agent and its role, execution mechanics, and sub-team orchestration.
+
+## Table of Contents
+
+- [1. System Context and Entry Points](#1-system-context-and-entry-points)
+- [2. End-to-End Pipeline](#2-end-to-end-pipeline)
+- [3. Agent Registry and Roles](#3-agent-registry-and-roles)
+- [4. Task Execution Model](#4-task-execution-model)
+- [5. Backend Worker Workflow](#5-backend-worker-workflow)
+- [6. Frontend Worker Workflow](#6-frontend-worker-workflow)
+- [7. Frontend Team Full Pipeline](#7-frontend-team-full-pipeline)
+- [8. DevOps Team Pipeline](#8-devops-team-pipeline)
+- [9. Planning Loop](#9-planning-loop)
+- [10. Plan Folder and Artifacts](#10-plan-folder-and-artifacts)
+- [11. Repo Layout](#11-repo-layout)
+
+---
+
+## 1. System Context and Entry Points
+
+Users invoke the system through either a FastAPI HTTP API or a CLI script. Both ultimately call `run_orchestrator` in a background thread. The orchestrator reads `initial_spec.md` from the provided work path and writes planning artifacts to `plan/`, backend code to `backend/`, and frontend code to `frontend/`.
+
+```mermaid
+flowchart LR
+    User["User / Client"]
+
+    subgraph entry [Entry Points]
+        API["FastAPI Server\napi/main.py"]
+        CLI["CLI Script\nrun_team.py"]
+    end
+
+    Orch["run_orchestrator\n(background thread)"]
+    JobStore["Job Store\n(status, progress, results)"]
+
+    subgraph workPath ["Work Path (repo_path/)"]
+        Spec["initial_spec.md\n(input)"]
+        PlanDir["plan/\n(planning artifacts)"]
+        BackendDir["backend/\n(git repo)"]
+        FrontendDir["frontend/\n(git repo)"]
+    end
+
+    User -->|"HTTP"| API
+    User -->|"CLI"| CLI
+    API -->|"POST /run-team"| Orch
+    CLI --> Orch
+    Orch -->|"reads"| Spec
+    Orch -->|"updates"| JobStore
+    Orch -->|"writes"| PlanDir
+    Orch -->|"writes"| BackendDir
+    Orch -->|"writes"| FrontendDir
+```
+
+The API also exposes `GET /run-team/{job_id}` for polling job status, `POST /run-team/{job_id}/retry-failed` for retrying failed tasks, and clarification endpoints for interactive spec refinement.
+
+---
+
+## 2. End-to-End Pipeline
+
+A single run goes through four major phases: Discovery, Design, Execution, and Integration. The orchestrator (`orchestrator.py`) drives this pipeline sequentially. Tiers within domain planning run sequentially, but agents within each tier run in parallel.
+
+```mermaid
+flowchart TB
+    subgraph discovery ["1 - Discovery"]
+        LoadSpec["Load Spec\n(initial_spec.md or override)"]
+        ParseSpec["Parse Spec with LLM\n(ProductRequirements)"]
+        SpecIntake["Spec Intake\n(optional: REQ-IDs, glossary)"]
+        ProjectPlanning["Project Planning\n(features doc, project overview)"]
+        LoadSpec --> ParseSpec --> SpecIntake --> ProjectPlanning
+    end
+
+    subgraph design ["2 - Design"]
+        PlanLoop["Tech Lead + Architecture Expert\n(alignment + conformance loop)"]
+        Tier1["Tier 1: API Contract, Data Arch,\nUI/UX, Infrastructure"]
+        Tier2["Tier 2: Frontend Arch, DevOps,\nQA Strategy, Security"]
+        Tier3["Tier 3: Observability,\nPerformance"]
+        MasterPlan["Planning Consolidation\n(master_plan.md)"]
+        PlanLoop --> Tier1 --> Tier2 --> Tier3 --> MasterPlan
+    end
+
+    subgraph execution ["3 - Execution"]
+        PrefixTasks["Prefix Tasks\n(git_setup, devops)\nsequential"]
+        BackendWorker["Backend Worker Thread"]
+        FrontendWorker["Frontend Worker Thread"]
+        PrefixTasks --> BackendWorker
+        PrefixTasks --> FrontendWorker
+    end
+
+    subgraph integrationPhase ["4 - Integration and Release"]
+        IntAgent["Integration Agent\n(backend-frontend contract check)"]
+        DevOpsTrigger["DevOps Trigger\n(containerize repos)"]
+        FinalSecurity["Final Security Pass\n(full codebase)"]
+        DocUpdate["Documentation Update"]
+        IntAgent --> DevOpsTrigger --> FinalSecurity --> DocUpdate
+    end
+
+    discovery --> design --> execution --> integrationPhase
+```
+
+Each phase produces artifacts that feed the next. Planning artifacts are written to `plan/`. Backend and frontend workers operate on separate git repositories under the work path.
+
+---
+
+## 3. Agent Registry and Roles
+
+The orchestrator instantiates all agents via `_get_agents()`. Agents are grouped by function: planning, domain planning, setup, execution, quality gates, integration, and recovery support.
+
+```mermaid
+flowchart TB
+    Orch["Orchestrator"]
+
+    subgraph planning [Planning]
+        specIntake["Spec Intake"]
+        projPlan["Project Planning"]
+        archExpert["Architecture Expert"]
+        techLead["Tech Lead"]
+    end
+
+    subgraph domain [Domain Planning]
+        apiContract["API Contract"]
+        dataArch["Data Architecture"]
+        uiUx["UI/UX Design"]
+        feArch["Frontend Architecture"]
+        infraPlan["Infrastructure"]
+        devopsPlan["DevOps Planning"]
+        qaStrat["QA Test Strategy"]
+        secPlan["Security Planning"]
+        obsPlan["Observability"]
+        perfPlan["Performance"]
+    end
+
+    subgraph setupGroup [Setup]
+        gitSetup["Git Setup"]
+    end
+
+    subgraph execGroup [Execution]
+        backendAgent["Backend Expert"]
+        frontendAgent["Frontend Expert"]
+        devopsTeam["DevOps Team Lead"]
+    end
+
+    subgraph qualityGroup [Quality Gates]
+        codeReview["Code Review"]
+        qaAgent["QA Expert"]
+        secAgent["Cybersecurity Expert"]
+        a11yAgent["Accessibility Expert"]
+        acceptV["Acceptance Verifier"]
+        dbcAgent["DbC Comments"]
+        lintAgent["Linting Tool"]
+    end
+
+    subgraph postGroup ["Integration / Release"]
+        intAgent["Integration Agent"]
+        docAgent["Documentation Agent"]
+    end
+
+    subgraph supportGroup [Recovery]
+        repairAgent["Repair Agent"]
+        buildFixAgent["Build Fix Specialist"]
+    end
+
+    Orch --> planning
+    Orch --> domain
+    Orch --> setupGroup
+    Orch --> execGroup
+    execGroup -.->|"per-task gates"| qualityGroup
+    Orch --> postGroup
+    execGroup -.->|"on crash"| supportGroup
+```
+
+Quality gate agents (code review, QA, security, accessibility, acceptance verifier, DbC, linting) are not task assignees — they are invoked inside backend and frontend workflows for every task. The repair agent and build fix specialist handle agent crashes and persistent build failures respectively.
+
+---
+
+## 4. Task Execution Model
+
+After planning, the Tech Lead produces a `TaskAssignment` with an ordered list of tasks. The orchestrator partitions tasks by assignee into three queues, then runs them in the sequence shown below. Tasks with dependency edges (`blocks`/`blocked_by`) are scheduled so blocked tasks wait until their prerequisites complete.
+
+```mermaid
+flowchart TB
+    ExecOrder["TaskAssignment.execution_order"]
+
+    subgraph partition [Partition by Assignee]
+        PrefixQ["Prefix Queue\n(git_setup + devops tasks)"]
+        BackendQ["Backend Queue"]
+        FrontendQ["Frontend Queue"]
+    end
+
+    ExecOrder -->|"split by type/assignee"| partition
+
+    PrefixQ -->|"sequential, one at a time"| PrefixRun["Run Prefix Tasks\n(Git Setup Agent, DevOps Team)"]
+
+    PrefixRun --> parallelBlock
+
+    subgraph parallelBlock ["Parallel Worker Threads"]
+        BThread["Backend Worker\npops from Backend Queue\n1 task at a time"]
+        FThread["Frontend Worker\npops from Frontend Queue\n1 task at a time"]
+    end
+
+    BThread --> BWorkflow["BackendExpertAgent\n.run_workflow()"]
+    FThread --> FWorkflow["FrontendExpertAgent\n.run_workflow()"]
+
+    BWorkflow --> TaskDone["Task Completed / Failed"]
+    FWorkflow --> TaskDone
+```
+
+Backend and frontend workers run as concurrent threads (`threading.Thread`). Each worker processes one task at a time from its queue. On task failure, the orchestrator may attempt repair (agent crash) or contract repair (incomplete task metadata) before re-queuing.
+
+---
+
+## 5. Backend Worker Workflow
+
+Each backend task follows this pipeline inside `BackendExpertAgent.run_workflow`. The orchestrator creates a feature branch, runs the workflow, and merges to `development` on success.
+
+```mermaid
+flowchart TB
+    Branch["Create Feature Branch\n(feature/{task_id})"]
+    TaskPlan["Per-Task Planning\n(review codebase, produce plan)"]
+    CodeGen["Generate Code\n(LLM, with clarification loop)"]
+    WriteCode["Write Files to Repo"]
+    Lint["Lint Verification\n(Linting Tool Agent)"]
+    Build["Build Verification\n(pytest)"]
+    CR["Code Review"]
+    AV["Acceptance Verifier"]
+    Sec["Security Review"]
+    QA["QA Review\n(bugs + tests + README)"]
+    Dbc["DbC Comments\n(pre/postconditions)"]
+    TLReview["Tech Lead Review"]
+    Doc["Documentation Update"]
+    Merge["Merge to development"]
+
+    Branch --> TaskPlan --> CodeGen --> WriteCode --> Lint --> Build
+    Build --> CR --> AV --> Sec --> QA
+    QA --> Dbc --> TLReview --> Doc --> Merge
+
+    Build -->|"failure"| BuildFix["Build Fix Specialist\n(targeted fix)"]
+    BuildFix -->|"retry"| Build
+
+    CR -->|"issues found"| CodeGen
+    Sec -->|"issues found"| CodeGen
+    QA -->|"issues found"| CodeGen
+```
+
+On agent crash, the Repair Agent analyzes the traceback and applies fixes. If the task contract is incomplete (missing required fields like goal, scope, constraints), the orchestrator invokes contract repair via the planning agents and `tech_lead.refine_task`, then re-queues the task.
+
+---
+
+## 6. Frontend Worker Workflow
+
+The frontend per-task workflow is structurally similar to backend, with the addition of an accessibility gate and `ng build` for build verification.
+
+```mermaid
+flowchart TB
+    Branch["Create Feature Branch"]
+    InstallDeps["Install Frontend Dependencies\n(npm install)"]
+    TaskPlan["Per-Task Planning"]
+    CodeGen["Generate Code\n(FrontendExpertAgent)"]
+    WriteCode["Write Files to Repo"]
+    NpmPkgs["Install npm Packages\n(if agent requested)"]
+    Lint["Lint Verification"]
+    Build["Build Verification\n(ng build)"]
+    CR["Code Review"]
+    AV["Acceptance Verifier"]
+    Sec["Security Review"]
+    QA["QA Review"]
+    A11y["Accessibility Review\n(WCAG 2.2)"]
+    Dbc["DbC Comments"]
+    TLReview["Tech Lead Review"]
+    Doc["Documentation Update"]
+    Merge["Merge to development"]
+
+    Branch --> InstallDeps --> TaskPlan --> CodeGen --> WriteCode --> NpmPkgs
+    NpmPkgs --> Lint --> Build
+    Build --> CR --> AV --> Sec --> QA
+    QA --> A11y --> Dbc --> TLReview --> Doc --> Merge
+
+    Build -->|"failure"| BuildFix["Build Fix Specialist"]
+    BuildFix -->|"retry"| Build
+
+    CR -->|"issues found"| CodeGen
+    Sec -->|"issues found"| CodeGen
+    QA -->|"issues found"| CodeGen
+    A11y -->|"issues found"| CodeGen
+```
+
+The same crash recovery (Repair Agent) and contract repair mechanisms apply as in the backend workflow.
+
+---
+
+## 7. Frontend Team Full Pipeline
+
+The `FrontendOrchestratorAgent` provides an extended pipeline that wraps `FrontendExpertAgent` with a full design phase. This pipeline runs UX, UI, and design system agents before implementation. The main orchestrator currently uses `FrontendExpertAgent` directly; this diagram documents the alternative full-team pipeline available via `FrontendOrchestratorAgent`.
+
+```mermaid
+flowchart TB
+    subgraph designPhase ["Design Phase (skipped for lightweight tasks)"]
+        UXDesigner["UX Designer"]
+        UIDesigner["UI Designer"]
+        DesignSys["Design System Agent"]
+        UXDesigner --> UIDesigner --> DesignSys
+    end
+
+    subgraph archPhase [Architecture Phase]
+        FEArchitect["Frontend Architect"]
+    end
+
+    subgraph implPhase [Implementation Phase]
+        FeatureAgent["Feature Agent\n(FrontendExpertAgent)"]
+        QualityLoop["Quality Gate Loop\n(lint, build, code review, QA,\naccessibility, security,\nacceptance verifier, DbC)"]
+        FeatureAgent --> QualityLoop
+    end
+
+    subgraph polishPhase [Polish Phase]
+        UXEngineer["UX Engineer"]
+        PerfEngineer["Performance Engineer"]
+        UXEngineer --> PerfEngineer
+    end
+
+    subgraph releasePhase [Release Phase]
+        BuildRelease["Build / Release Agent"]
+        MergeBranch["Merge to development"]
+        BuildRelease --> MergeBranch
+    end
+
+    designPhase --> archPhase --> implPhase --> polishPhase --> releasePhase
+```
+
+The design phase produces UX wireframes, UI specifications, and design system tokens that feed into the Frontend Architect's component structure, which in turn enriches the implementation context for the Feature Agent. Lightweight tasks (fixes, patches, small updates) skip the design phase entirely.
+
+---
+
+## 8. DevOps Team Pipeline
+
+The `DevOpsTeamLeadAgent` orchestrates a contract-first, multi-agent DevOps pipeline with hard gates. It replaces the legacy monolithic `devops_agent/` with role-separated agents and independent review gates.
+
+```mermaid
+flowchart TB
+    subgraph phase1 ["Phase 1: Intake"]
+        EnvPolicy["Environment Policy Check\n(dev / staging / production)"]
+        TaskClarifier["Task Clarifier\n(validate spec completeness)"]
+        EnvPolicy --> TaskClarifier
+    end
+
+    subgraph phase2 ["Phase 2: Change Design"]
+        RepoNav["Repo Navigator\n(discover IaC/pipeline paths)"]
+        IaCAgent["Infrastructure as Code Agent"]
+        CICDAgent["CI/CD Pipeline Agent"]
+        DeployAgent["Deployment Strategy Agent"]
+        RepoNav --> IaCAgent
+        RepoNav --> CICDAgent
+        RepoNav --> DeployAgent
+    end
+
+    subgraph phase3 ["Phase 3: Write Artifacts"]
+        WriteArtifacts["Write aggregated artifacts\nto repository"]
+    end
+
+    subgraph phase4 ["Phase 4: Validation and Review"]
+        subgraph toolVal [Tool Validation]
+            IaCVal["IaC Validation"]
+            PolicyCheck["Policy as Code\n(checkov / tfsec)"]
+            CICDLint["CI/CD Lint"]
+            DryRun["Deployment Dry Run\n(helm lint / template)"]
+        end
+
+        subgraph execVerify [Execution Verification]
+            TfExec["Terraform\n(if .tf files)"]
+            CdkExec["CDK\n(if cdk.json)"]
+            ComposeExec["Docker Compose\n(if compose.yml)"]
+            HelmExec["Helm\n(if Chart.yaml)"]
+        end
+
+        subgraph debugLoop [Debug-Patch Loop]
+            InfraDebug["Infra Debug Agent\n(analyze failure)"]
+            InfraPatch["Infra Patch Agent\n(apply fix)"]
+            InfraDebug -->|"fixable"| InfraPatch
+            InfraPatch -->|"re-validate"| execVerify
+        end
+
+        subgraph reviewGates [Independent Reviews]
+            DevSecOps["DevSecOps Review"]
+            ChangeReview["Change Review"]
+            TestVal["Test Validation\n(gate aggregation)"]
+        end
+
+        toolVal --> execVerify --> debugLoop --> reviewGates
+    end
+
+    subgraph phase5 ["Phase 5: Completion"]
+        DocRunbook["Documentation and Runbook Agent"]
+        CompletionPkg["Completion Package\n(acceptance trace, quality gates,\nrelease readiness, git ops, handoff)"]
+        DocRunbook --> CompletionPkg
+    end
+
+    phase1 -->|"approved"| phase2 --> phase3 --> phase4
+    phase4 -->|"all gates pass"| phase5
+    phase4 -->|"gate failure"| Blocked["Return: blocked"]
+```
+
+Hard gates that must pass: `iac_validate`, `iac_validate_fmt`, `policy_checks`, `pipeline_lint`, `pipeline_gate_check`, `deployment_dry_run`, `security_review`, `change_review`. The environment policy matrix enforces stricter requirements for production (approval required, rollback test required, high policy strictness) versus dev (auto-deploy allowed, no approval, low strictness).
+
+---
+
+## 9. Planning Loop
+
+The Tech Lead and Architecture Expert iterate until tasks and architecture converge. An optional planning cache short-circuits the loop when the spec, architecture, and project overview are unchanged from a previous run.
+
+```mermaid
+flowchart TB
+    StartPlan["Start Planning\n(after Project Planning)"]
+    TechLeadRun["Tech Lead\nGenerate task assignment"]
+    ArchRun["Architecture Expert\nDesign architecture"]
+    CacheHit{"Planning\ncache hit?"}
+    AlignCheck{"Tasks and architecture\naligned?"}
+    ConformCheck{"Conforms to\ninitial_spec?"}
+    SaveCache["Save to\nplanning cache"]
+    ProceedExec["Proceed to\nDomain Planning"]
+
+    StartPlan --> TechLeadRun --> ArchRun --> CacheHit
+    CacheHit -->|"yes"| ProceedExec
+    CacheHit -->|"no"| AlignCheck
+    AlignCheck -->|"no: alignment_feedback"| TechLeadRun
+    AlignCheck -->|"yes"| ConformCheck
+    ConformCheck -->|"no: conformance_issues"| TechLeadRun
+    ConformCheck -->|"yes"| SaveCache --> ProceedExec
+```
+
+The alignment inner loop runs up to `SW_MAX_ALIGNMENT_ITERATIONS` (default 20) and the conformance outer loop runs up to `SW_MAX_CONFORMANCE_RETRIES` (default 20). Early exit thresholds allow proceeding when only minor non-critical issues remain. During alignment re-runs, both the Tech Lead and Architecture Expert are re-invoked with the feedback from the previous iteration.
+
+---
+
+## 10. Plan Folder and Artifacts
+
+All planning outputs are written to a `plan/` directory at the work path root. Each agent writes specific artifacts grouped by SDLC phase.
+
+```mermaid
+flowchart LR
+    PlanDir["plan/"]
+
+    PlanDir --> DiscoveryArt["Discovery\nspec_lint_report.md\nglossary.md\nassumptions_and_questions.md\nacceptance_criteria_index.md"]
+
+    PlanDir --> ProjPlanArt["Project Planning\nproject_overview.md\nfeatures_and_functionality.md"]
+
+    PlanDir --> ArchArt["Architecture\narchitecture.md"]
+
+    PlanDir --> DomainArt["Domain Planning\nopenapi.yaml, data_schema.md,\nui_ux.md, frontend_architecture.md,\ninfrastructure.md, devops_pipeline.md,\ntest_strategy.md, security_and_compliance.md,\nobservability.md, performance.md"]
+
+    PlanDir --> ConsolArt["Consolidation\ntech_lead.md\nmaster_plan.md"]
+
+    PlanDir --> PerTaskArt["Per-Task Plans\nbackend_task_ID.md\nfrontend_task_ID.md"]
+```
+
+Additional API contract artifacts (`api_error_model.md`, `api_versioning.md`, `contract_tests_plan.md`) and the backend `openapi.yaml` are also produced during domain planning. The `master_plan.md` consolidation includes a risk register and ship checklist.
+
+---
+
+## 11. Repo Layout
+
+The repository contains two independent agent systems. The software engineering team is the primary system documented above; a separate blogging agent system exists under `agents/blogging/`.
+
+```mermaid
+flowchart TB
+    Root["strands-agents/"]
+
+    Root --> SWTeam["agents/software_engineering_team/"]
+    Root --> BlogTeam["agents/blogging/"]
+
+    SWTeam --> swOrch["orchestrator.py"]
+    SWTeam --> swAPI["api/"]
+    SWTeam --> swCLI["agent_implementations/"]
+    SWTeam --> swPlanning["planning_team/\n(20+ planning agents)"]
+    SWTeam --> swBackend["backend_agent/"]
+    SWTeam --> swFrontend["frontend_team/\n(12 agents)"]
+    SWTeam --> swDevops["devops_team/\n(9 agents + 5 tool agents)"]
+    SWTeam --> swQuality["quality_gates/"]
+    SWTeam --> swIntegration["integration_team/"]
+    SWTeam --> swShared["shared/\n(LLM, models, git, utils)"]
+    SWTeam --> swTests["tests/"]
+
+    BlogTeam --> blogAgents["research, draft, review,\ncopy_editor, publication"]
+```
+
+Each agent directory follows a consistent structure: `agent.py` (core logic), `models.py` (Pydantic input/output contracts), and `prompts.py` (LLM prompt templates). Shared utilities (LLM client, git operations, repo I/O, logging) live in `shared/`.
