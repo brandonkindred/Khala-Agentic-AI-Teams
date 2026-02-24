@@ -7,12 +7,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from shared.command_runner import CommandResult
-from shared.llm import LLMRateLimitError, OLLAMA_WEEKLY_LIMIT_MESSAGE
+from shared.llm import LLMJsonParseError, LLMRateLimitError, OLLAMA_WEEKLY_LIMIT_MESSAGE
 from shared.models import (
     ProductRequirements,
     SystemArchitecture,
     Task,
     TaskAssignment,
+    TaskUpdate,
     TaskType,
 )
 import orchestrator
@@ -284,3 +285,109 @@ def test_run_orchestrator_fails_job_when_project_planning_raises(tmp_path: Path)
     ]
     assert len(failed_calls) >= 1
     assert "planning" in failed_calls[0][1].get("error", "").lower()
+
+
+def test_frontend_json_parse_failure_triggers_tech_lead_review_for_task_breakdown(
+    tmp_path: Path,
+) -> None:
+    """When frontend run_workflow raises LLMJsonParseError, _run_tech_lead_review is called to break task."""
+    from shared.job_store import create_job, update_job
+
+    (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
+    frontend_dir = tmp_path / "frontend"
+    frontend_dir.mkdir()
+    (frontend_dir / ".git").mkdir()
+    (frontend_dir / "package.json").write_text("{}", encoding="utf-8")
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir()
+
+    job_id = "test-json-parse-fail"
+    create_job(job_id, str(tmp_path))
+    update_job(job_id, status="running")
+
+    frontend_task_id = "frontend-task-1"
+    task = Task(
+        id=frontend_task_id,
+        type=TaskType.FRONTEND,
+        title="Frontend task",
+        description="Implement UI",
+        assignee="frontend",
+    )
+    all_tasks = {frontend_task_id: task}
+    frontend_queue = [frontend_task_id]
+    backend_queue = []
+    completed = set()
+    failed = {}
+    completed_code_task_ids = []
+
+    mock_frontend = MagicMock()
+    mock_frontend.run_workflow.side_effect = LLMJsonParseError(
+        "Could not parse structured JSON from LLM response.",
+        error_kind="json_parse",
+        response_preview="truncated...",
+    )
+    mock_init = MagicMock()
+    mock_init.success = True
+    mock_git_setup = MagicMock()
+    mock_git_setup.run.return_value = MagicMock(success=True)
+    mock_tech_lead = MagicMock()
+    mock_tech_lead.review_progress.return_value = []
+    mock_agents = {
+        "frontend": mock_frontend,
+        "backend": MagicMock(),
+        "git_setup": mock_git_setup,
+        "tech_lead": mock_tech_lead,
+        "qa": MagicMock(),
+        "security": MagicMock(),
+        "accessibility": MagicMock(),
+        "code_review": MagicMock(),
+        "dbc_comments": MagicMock(),
+        "acceptance_verifier": MagicMock(),
+        "documentation": MagicMock(),
+        "linting_tool_agent": None,
+        "build_fix_specialist": None,
+    }
+
+    review_calls = []
+
+    def capture_review(*args, **kwargs):
+        review_calls.append(kwargs)
+        if kwargs.get("task_update"):
+            for nt in mock_tech_lead.review_progress.return_value:
+                if kwargs.get("append_task_id_fn") and nt.id not in all_tasks:
+                    all_tasks[nt.id] = nt
+                    kwargs["append_task_id_fn"](nt.id)
+
+    with patch(
+        "shared.command_runner.ensure_frontend_project_initialized",
+        return_value=mock_init,
+    ):
+        with patch("orchestrator._run_tech_lead_review", side_effect=capture_review):
+            orchestrator._run_backend_frontend_workers(
+                job_id=job_id,
+                path=tmp_path,
+                backend_dir=backend_dir,
+                frontend_dir=frontend_dir,
+                backend_queue=backend_queue,
+                frontend_queue=frontend_queue,
+                all_tasks=all_tasks,
+                completed=completed,
+                failed=failed,
+                completed_code_task_ids=completed_code_task_ids,
+                spec_content="# Test\n\nSpec.",
+                architecture=MagicMock(overview="Mock arch"),
+                agents=mock_agents,
+                tech_lead=mock_tech_lead,
+                total_tasks=1,
+                is_retry=False,
+            )
+
+    assert frontend_task_id in failed
+    assert len(review_calls) == 1
+    task_update = review_calls[0]["task_update"]
+    assert isinstance(task_update, TaskUpdate)
+    assert task_update.task_id == frontend_task_id
+    assert task_update.agent_type == "frontend"
+    assert task_update.status == "failed"
+    assert task_update.failure_class == "json_parse"
+    assert "parse" in (task_update.failure_reason or "").lower() or "json" in (task_update.failure_reason or "").lower()

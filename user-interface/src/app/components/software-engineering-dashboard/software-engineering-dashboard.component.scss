@@ -34,19 +34,19 @@
     align-items: flex-start;
     text-align: left;
     padding: 0.5rem 0.75rem;
-    border: 1px solid rgba(0, 0, 0, 0.12);
+    border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
     border-radius: 4px;
     background: transparent;
     cursor: pointer;
     width: 100%;
 
     &:hover {
-      background: rgba(0, 0, 0, 0.04);
+      background: var(--mat-sys-surface-container-highest, rgba(0, 0, 0, 0.04));
     }
 
     &.selected {
-      border-color: var(--mat-sidenav-container-background-color, #1976d2);
-      background: rgba(25, 118, 210, 0.08);
+      border-color: var(--mat-sys-primary);
+      background: var(--mat-sys-surface-container-high, rgba(25, 118, 210, 0.08));
     }
 
     .job-type {
@@ -56,13 +56,13 @@
 
     .job-id {
       font-size: 0.75rem;
-      color: rgba(0, 0, 0, 0.6);
+      color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
       word-break: break-all;
     }
 
     .job-repo {
       font-size: 0.7rem;
-      color: rgba(0, 0, 0, 0.5);
+      color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.5));
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -71,7 +71,7 @@
   }
 
   .panel-status {
-    border-top: 1px solid rgba(0, 0, 0, 0.12);
+    border-top: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
     padding-top: 1rem;
     display: flex;
     flex-direction: column;

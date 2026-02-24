@@ -176,7 +176,40 @@ def test_extract_json_truncated_json_not_repaired() -> None:
         client._extract_json(truncated)
 
 
-def test_llm_json_parse_error_is_permanent_error() -> None:
+def test_complete_json_continue_on_parse_error_returns_merged() -> None:
+    """When first response fails to parse, complete_json tries one 'continue' request and merges."""
+    client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+    # First response: no valid JSON (so all repair strategies fail, LLMJsonParseError raised).
+    # Second: continuation that contains valid JSON; merged string still has that object.
+    first_content = "no valid json here"
+    second_content = '{"n": 1}'
+    with patch.object(client, "_ollama_post") as mock_post:
+        mock_post.side_effect = [first_content, second_content]
+        result = client.complete_json("test prompt")
+    assert result == {"n": 1}
+    assert mock_post.call_count == 2
+    # Second call should be multi-turn (system, user, assistant, user).
+    second_payload = mock_post.call_args_list[1][0][0]
+    messages = second_payload.get("messages", [])
+    assert len(messages) == 4
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    assert messages[2]["role"] == "assistant"
+    assert messages[2]["content"] == first_content
+    assert messages[3]["role"] == "user"
+    assert "Continue" in messages[3]["content"]
+
+
+def test_complete_json_continue_still_invalid_raises() -> None:
+    """When continue response still does not parse, LLMJsonParseError is re-raised."""
+    client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+    with patch.object(client, "_ollama_post") as mock_post:
+        mock_post.side_effect = ["{", "not valid json"]
+        with pytest.raises(LLMJsonParseError):
+            client.complete_json("test prompt")
+    assert mock_post.call_count == 2
+
+
     """LLMJsonParseError is a subclass of LLMPermanentError for backward compat."""
     assert issubclass(LLMJsonParseError, LLMPermanentError)
     err = LLMJsonParseError("test", error_kind="json_parse", response_preview="abc")

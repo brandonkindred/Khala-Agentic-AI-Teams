@@ -40,7 +40,7 @@
         <p class="roles-label">Active roles (current phase):</p>
         <mat-chip-set>
           @for (role of activeRoles; track role) {
-            <mat-chip>{{ role.replace(/_/g, ' ') }}</mat-chip>
+            <mat-chip>{{ formatRole(role) }}</mat-chip>
           }
         </mat-chip-set>
       }

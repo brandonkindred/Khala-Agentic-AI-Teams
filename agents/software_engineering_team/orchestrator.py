@@ -45,6 +45,7 @@ from shared.git_utils import (
 )
 from shared.llm import (
     LLMError,
+    LLMJsonParseError,
     LLMPermanentError,
     LLMRateLimitError,
     LLMTemporaryError,
@@ -1156,6 +1157,52 @@ def _run_backend_frontend_workers(
                     logger.warning("%s[%s] Frontend task generation failed validation: %s", log_prefix, task_id, e)
                 else:
                     logger.warning("%s[%s] Frontend task LLM/HTTP error: %s", log_prefix, task_id, e)
+                # On JSON parse failure, ask Tech Lead to break task into smaller subtasks (plan update).
+                _is_json_parse_failure = isinstance(e, LLMJsonParseError) or (
+                    isinstance(e, LLMPermanentError)
+                    and "json" in str(e).lower()
+                    and ("parse" in str(e).lower() or "invalid" in str(e).lower())
+                )
+                if _is_json_parse_failure:
+                    failure_class = "json_parse" if isinstance(e, LLMJsonParseError) else None
+                    task_update = TaskUpdate(
+                        task_id=task_id,
+                        agent_type="frontend",
+                        status="failed",
+                        summary="",
+                        files_changed=[],
+                        failure_reason=err_msg,
+                        failure_class=failure_class,
+                    )
+                    remaining_ids = _remaining_queue_ids()
+                    def _append_task_by_assignee(tid: str) -> None:
+                        with state_lock:
+                            t = all_tasks.get(tid)
+                            assignee = getattr(t, "assignee", "") or "backend"
+                            if assignee == "frontend":
+                                frontend_queue.append(tid)
+                            else:
+                                backend_queue.append(tid)
+                    try:
+                        _run_tech_lead_review(
+                            tech_lead=tech_lead,
+                            task_update=task_update,
+                            spec_content=spec_content,
+                            architecture=architecture,
+                            all_tasks=all_tasks,
+                            completed=completed,
+                            execution_queue=remaining_ids,
+                            repo_path=frontend_dir,
+                            doc_agent=None,
+                            append_task_id_fn=_append_task_by_assignee,
+                        )
+                    except Exception as review_err:
+                        logger.warning(
+                            "%s[%s] Tech Lead review after JSON parse failure failed (non-blocking): %s",
+                            log_prefix,
+                            task_id,
+                            review_err,
+                        )
                 checkout_branch(frontend_dir, DEVELOPMENT_BRANCH)
             except Exception as e:
                 _log_agent_crash_banner(task_id, "frontend", e, log_prefix)

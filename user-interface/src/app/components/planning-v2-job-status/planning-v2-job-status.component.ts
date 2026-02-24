@@ -96,4 +96,9 @@ export class PlanningV2JobStatusComponent implements OnInit, OnDestroy {
   get activeRoles(): string[] {
     return this.status?.active_roles ?? [];
   }
+
+  /** Format role for display (underscores to spaces). */
+  formatRole(role: string): string {
+    return role.replace(/_/g, ' ');
+  }
 }

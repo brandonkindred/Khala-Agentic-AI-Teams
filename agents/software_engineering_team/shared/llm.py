@@ -1002,7 +1002,34 @@ class OllamaLLMClient(LLMClient):
             ],
         }
         content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
-        return self._extract_json(content)
+        try:
+            return self._extract_json(content)
+        except LLMJsonParseError:
+            # One "continue" attempt: response may be truncated; ask for remainder and re-parse.
+            logger.debug("JSON parse failed; requesting continuation from model")
+            continue_payload = {
+                "model": self.model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": content},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Continue. Output only the remainder of the JSON so that when appended "
+                            "to the previous output it completes the object. No explanation."
+                        ),
+                    },
+                ],
+            }
+            content2 = self._ollama_post(
+                continue_payload, max_retries, backoff_base, backoff_max, sem
+            )
+            merged = content.rstrip() + "\n" + content2.lstrip()
+            return self._extract_json(merged)
 
     def complete_text(self, prompt: str, *, temperature: float = 0.0) -> str:
         """Return raw text from the model (no JSON mode). Use for template-based output."""
