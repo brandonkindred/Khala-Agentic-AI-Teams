@@ -651,11 +651,11 @@ class TechLeadAgent:
         try:
             workflow_result = devops_agent.run_workflow(
                 repo_path=path,
-                task_description="Add containerization and deployment for the frontend application. Produce a Dockerfile and CI/CD so this repo can be built and deployed. Frontend is Angular/Node.",
-                requirements="Dockerfile: multi-stage build (npm ci, ng build; serve with nginx or Node). CI/CD: install deps, run tests, build image. Make repo self-contained for build and deploy.",
+                task_description="Add containerization and deployment for the frontend application. Produce a Dockerfile and CI/CD so this repo can be built and deployed. Frontend is a JavaScript/TypeScript application (React, Angular, or Vue).",
+                requirements="Dockerfile: multi-stage build (npm ci, npm run build; serve with nginx or Node). CI/CD: install deps, run tests, build image. Make repo self-contained for build and deploy.",
                 architecture=architecture,
                 existing_pipeline=existing_pipeline if existing_pipeline and existing_pipeline != "# No code files found" else None,
-                tech_stack=["Angular", "Node", "Docker"],
+                tech_stack=["JavaScript", "TypeScript", "Node", "Docker"],
                 target_repo="frontend",
                 build_verifier=build_verifier,
                 task_id="devops-frontend",

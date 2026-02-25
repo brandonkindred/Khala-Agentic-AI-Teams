@@ -1,4 +1,4 @@
-"""Accessibility tool agent for frontend-code-v2: WCAG 2.2 compliance review and fixes."""
+"""Performance tool agent for frontend-code-v2: bundle size, code splitting, caching, runtime cost."""
 
 from __future__ import annotations
 
@@ -15,51 +15,53 @@ from ...models import (
 )
 from ...output_templates import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
-from shared.coding_standards import CODING_STANDARDS
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
-MAX_ACCESSIBILITY_CODE_CHARS = 12_000
+MAX_PERFORMANCE_CODE_CHARS = 25_000
 MAX_RELEVANT_CODE_CHARS = 8_000
 
-ACCESSIBILITY_REVIEW_PROMPT = """You are an expert Accessibility Engineer specializing in WCAG 2.2 compliance. Your job is to review frontend code and produce a list of well-defined accessibility issues for the coding agent to fix. You do NOT write fixes yourself – the coding agent implements them.
-
-""" + CODING_STANDARDS + """
+PERFORMANCE_REVIEW_PROMPT = """You are a Performance Engineer Agent. Your job is to protect the app from shipping a 14 MB JavaScript novella. You own speed, responsiveness, bundle size, and runtime cost.
 
 **Your expertise:**
-- WCAG 2.2 (Web Content Accessibility Guidelines) – Perceivable, Operable, Understandable, Robust
-- Semantic HTML, ARIA attributes, keyboard navigation, focus management
-- Screen reader compatibility, color contrast, text alternatives
-- Form labels, error identification, responsive and touch targets
-- Component library accessibility patterns (Material UI, Angular Material, Vuetify, etc.)
+- Performance budgets (bundle size, route chunk size, LCP/INP targets)
+- Code splitting and lazy loading
+- Caching strategy (HTTP caching, service worker if needed)
+- Profiling and performance regression tests
+- Framework-specific: lazy routes, code splitting (React.lazy, Vue async components, Angular standalone)
 
 **Input:**
-- Code to review (JSX/TSX, HTML templates, TypeScript/JavaScript components, CSS/SCSS)
-- Language (typescript, javascript, react, vue, angular)
-- Optional: task description, architecture
+- Code to review
+- Task description
+- Optional: build output (npm run build, bundle analysis)
 
 **Your task:**
-1. Review the code for WCAG 2.2 compliance. Check for: missing alt text, poor color contrast, missing labels, keyboard traps, insufficient focus indicators, non-semantic markup, missing ARIA where needed, form accessibility, etc.
-2. For each issue found, produce a well-defined report with a clear "recommendation" – what the coding agent should implement to fix it.
-3. Reference the specific WCAG 2.2 criterion (e.g. 1.1.1 Non-text Content, 2.1.1 Keyboard, 2.4.3 Focus Order, 4.1.2 Name, Role, Value).
-4. Do NOT produce fixed_code. Return issues only. The coding agent will implement fixes and commit to the feature branch.
+Review the code for performance. Identify issues and produce recommendations:
+
+1. **Performance Budgets** – Recommend or enforce: main bundle size limit, route-level chunk limits, LCP/INP targets. Flag if code suggests large bundles.
+2. **Code Splitting** – Are routes lazy-loaded? Are heavy components dynamically imported? Recommend lazy loading where appropriate.
+3. **Caching** – HTTP caching headers, service worker for PWA? Recommend caching strategy.
+4. **Rerender Storms** – Flag obvious causes: missing keys in lists, unnecessary re-renders, missing memoization (React.memo, useMemo), large component trees.
+5. **Issues** – For each problem, produce a code_review-style issue with severity, description, and suggestion.
 
 **Output format:**
 Return a single JSON object with:
 - "issues": list of objects, each with:
-  - "severity": string (critical, high, medium, low) – critical/high block merge
-  - "wcag_criterion": string (e.g. "1.1.1", "2.2.1", "4.1.2")
-  - "description": string (what the accessibility problem is)
-  - "file_path": string (file path or component name)
-  - "recommendation": string (REQUIRED – concrete instruction for the coding agent: what code to add/change to fix this)
-- "summary": string (overall WCAG 2.2 compliance assessment)
+  - "severity": string (critical, major, medium, minor)
+  - "category": string (bundle, chunking, caching, rerender, etc.)
+  - "file_path": string
+  - "description": string
+  - "recommendation": string (concrete fix for coding agent)
+- "approved": boolean (true when no critical performance issues)
+- "performance_budgets": string (recommended budgets)
+- "code_splitting_plan": string (lazy load recommendations)
+- "caching_strategy": string (caching recommendations)
+- "summary": string
 
-**Approval rule:** Code is approved when there are no critical or high severity issues. Medium/low issues may be acceptable for merge but should still be listed.
-
-If no issues are found, return empty issues list. Be thorough. Each recommendation must be actionable – the coding agent should know exactly what to implement.
+If no critical issues, return approved=true. Be practical – focus on issues that materially affect load time or runtime performance.
 
 Respond with valid JSON only. No explanatory text outside JSON.
 
@@ -94,8 +96,8 @@ def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) 
     return "\n".join(parts) if parts else "(no code)"
 
 
-class AccessibilityToolAgent:
-    """Accessibility tool agent: WCAG 2.2 compliance review and fixes one at a time."""
+class PerformanceToolAgent:
+    """Performance tool agent: bundle size, code splitting, caching, runtime cost review and fixes."""
 
     def __init__(self, llm: Optional["LLMClient"] = None) -> None:
         self.llm = llm
@@ -104,37 +106,38 @@ class AccessibilityToolAgent:
         return self.execute(inp)
 
     def execute(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        logger.info("Accessibility: microtask %s (execute stub)", inp.microtask.id)
-        return ToolAgentOutput(summary="Accessibility execute — no changes applied.")
+        logger.info("Performance: microtask %s (execute stub)", inp.microtask.id)
+        return ToolAgentOutput(summary="Performance execute — no changes applied.")
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(
             recommendations=[
-                "Consider WCAG 2.2 compliance: alt text, labels, keyboard navigation, focus indicators.",
-                "Use semantic HTML elements (button, nav, main, header, footer).",
-                "Add ARIA attributes where native semantics are insufficient.",
+                "Set performance budgets: main bundle < 250KB, route chunks < 100KB.",
+                "Use lazy loading for routes and heavy components.",
+                "Add trackBy to *ngFor directives to prevent rerender storms.",
+                "Consider HTTP caching headers and service worker for PWA.",
             ],
-            summary="Accessibility planning: WCAG and semantic markup recommendations.",
+            summary="Performance planning: bundle size, lazy loading, caching recommendations.",
         )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Find accessibility issues in current code. Returns issues with source=accessibility."""
+        """Find performance issues in current code. Returns issues with source=performance."""
         if not self.llm:
-            return ToolAgentPhaseOutput(summary="Accessibility review skipped (no LLM).")
+            return ToolAgentPhaseOutput(summary="Performance review skipped (no LLM).")
         code_text = "\n\n".join(
             f"--- {p} ---\n{c}" for p, c in list(inp.current_files.items())[:20]
-        )[:MAX_ACCESSIBILITY_CODE_CHARS]
+        )[:MAX_PERFORMANCE_CODE_CHARS]
         if not code_text.strip():
-            return ToolAgentPhaseOutput(summary="Accessibility review skipped (no code).")
-        prompt = ACCESSIBILITY_REVIEW_PROMPT.format(
+            return ToolAgentPhaseOutput(summary="Performance review skipped (no code).")
+        prompt = PERFORMANCE_REVIEW_PROMPT.format(
             task_description=inp.task_description or "N/A",
             code=code_text,
         )
         try:
             raw = self.llm.complete_text(prompt)
         except Exception as e:
-            logger.warning("Accessibility review LLM call failed: %s", e)
-            return ToolAgentPhaseOutput(summary="Accessibility review failed (LLM error).")
+            logger.warning("Performance review LLM call failed: %s", e)
+            return ToolAgentPhaseOutput(summary="Performance review failed (LLM error).")
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
@@ -152,7 +155,7 @@ class AccessibilityToolAgent:
             if isinstance(item, dict):
                 issues.append(
                     ReviewIssue(
-                        source="accessibility",
+                        source="performance",
                         severity=item.get("severity", "medium"),
                         description=item.get("description", ""),
                         file_path=item.get("file_path", ""),
@@ -161,37 +164,37 @@ class AccessibilityToolAgent:
                 )
         return ToolAgentPhaseOutput(
             issues=issues,
-            summary=f"Accessibility review: {len(issues)} issue(s) found.",
+            summary=f"Performance review: {len(issues)} issue(s) found.",
         )
 
     def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Fix accessibility-owned issues one at a time."""
+        """Fix performance-owned issues one at a time."""
         if not self.llm:
-            return ToolAgentPhaseOutput(summary="Accessibility problem_solve skipped (no LLM).")
-        a11y_issues = [
+            return ToolAgentPhaseOutput(summary="Performance problem_solve skipped (no LLM).")
+        perf_issues = [
             i
             for i in inp.review_issues
-            if (i.source or "").strip() in ("accessibility", "tool_accessibility")
+            if (i.source or "").strip() in ("performance", "tool_performance")
         ]
-        if not a11y_issues:
-            return ToolAgentPhaseOutput(summary="No accessibility issues to fix.")
+        if not perf_issues:
+            return ToolAgentPhaseOutput(summary="No performance issues to fix.")
         merged = dict(inp.current_files)
         fixed_count = 0
-        for issue in a11y_issues:
+        for issue in perf_issues:
             relevant_code = _relevant_code_for_issue(issue, merged)
             prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT.format(
-                source=issue.source or "accessibility",
+                source=issue.source or "performance",
                 severity=issue.severity or "medium",
                 description=issue.description or "",
                 file_path=issue.file_path or "N/A",
-                recommendation=issue.recommendation or "Fix the accessibility issue.",
+                recommendation=issue.recommendation or "Fix the performance issue.",
                 current_code=relevant_code,
             )
             try:
                 raw = self.llm.complete_text(prompt)
             except Exception as e:
                 logger.warning(
-                    "Accessibility fix for issue %s failed: %s",
+                    "Performance fix for issue %s failed: %s",
                     (issue.description or "")[:50],
                     e,
                 )
@@ -203,8 +206,8 @@ class AccessibilityToolAgent:
                 fixed_count += 1
         return ToolAgentPhaseOutput(
             files=merged,
-            summary=f"Accessibility: fixed {fixed_count} of {len(a11y_issues)} issue(s) (one at a time).",
+            summary=f"Performance: fixed {fixed_count} of {len(perf_issues)} issue(s) (one at a time).",
         )
 
     def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(summary="Accessibility deliver.")
+        return ToolAgentPhaseOutput(summary="Performance deliver.")

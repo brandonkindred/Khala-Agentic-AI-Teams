@@ -1,9 +1,9 @@
 """
 Command runner utility for executing build/test/serve commands.
 
-Provides a safe way for the orchestrator to run commands like `ng build`,
-`ng serve`, `python -m pytest`, etc. and capture their output for feedback
-to coding agents.
+Provides a safe way for the orchestrator to run frontend build commands
+(npm run build, ng build, etc.), `python -m pytest`, and capture their
+output for feedback to coding agents.
 """
 
 from __future__ import annotations
@@ -22,14 +22,18 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Default timeouts (seconds)
-BUILD_TIMEOUT = 120  # ng build, python -m pytest
-SERVE_TIMEOUT = 30   # ng serve (just wait for it to start, then kill)
+BUILD_TIMEOUT = 120  # frontend build, python -m pytest
+SERVE_TIMEOUT = 30   # dev server (just wait for it to start, then kill)
 TEST_TIMEOUT = 120   # pytest
 
-# Node version required by Angular CLI (v20.19+ or v22.12+). NVM installs and uses this for frontend commands.
-ANGULAR_NODE_VERSION = "22.12"
-# Fallback Node version if ANGULAR_NODE_VERSION install fails (e.g. 22 = latest v22).
+# Node version for modern frontend frameworks. NVM installs and uses this for frontend commands.
+# Angular CLI v19+ requires Node v20.19+ or v22.12+; React/Vue work with v18+.
+FRONTEND_NODE_VERSION = "22.12"
+# Fallback Node version if FRONTEND_NODE_VERSION install fails (e.g. 22 = latest v22).
 NVM_NODE_FALLBACK_VERSION = "22"
+
+# Legacy alias for backwards compatibility
+ANGULAR_NODE_VERSION = FRONTEND_NODE_VERSION
 
 
 @dataclass
@@ -180,6 +184,47 @@ def run_command(
         )
 
 
+def detect_frontend_framework(project_path: str | Path) -> str:
+    """
+    Detect the frontend framework from project files.
+    
+    Returns: "angular", "react", "vue", or "unknown"
+    """
+    import json
+    cwd = Path(project_path).resolve()
+    
+    # Check for Angular-specific config
+    if (cwd / "angular.json").exists():
+        return "angular"
+    
+    # Check package.json for framework dependencies
+    pkg_path = cwd / "package.json"
+    if pkg_path.exists():
+        try:
+            data = json.loads(pkg_path.read_text(encoding="utf-8"))
+            all_deps = {
+                **data.get("dependencies", {}),
+                **data.get("devDependencies", {}),
+            }
+            
+            if "@angular/core" in all_deps or "@angular/common" in all_deps:
+                return "angular"
+            if "react" in all_deps or "react-dom" in all_deps:
+                return "react"
+            if "vue" in all_deps:
+                return "vue"
+        except (json.JSONDecodeError, Exception):
+            pass
+    
+    # Check for Vue-specific files
+    if (cwd / "vue.config.js").exists():
+        return "vue"
+    if any(cwd.rglob("*.vue")):
+        return "vue"
+    
+    return "unknown"
+
+
 def run_ng_build(project_path: str | Path) -> CommandResult:  # pragma: no cover
     """
     Run `ng build` in the given Angular project directory.
@@ -285,13 +330,13 @@ def ensure_nvm_installed() -> NvmInstallResult:  # pragma: no cover
 def run_command_with_nvm(  # pragma: no cover
     cmd: list[str],
     cwd: str | Path,
-    node_version: str = ANGULAR_NODE_VERSION,
+    node_version: str = FRONTEND_NODE_VERSION,
     timeout: int = BUILD_TIMEOUT,
 ) -> CommandResult:
     """
     Run a command in a bash shell with NVM loaded and the given Node version active.
-    NVM will install the version if not present, then use it. For frontend (Angular)
-    commands, pass ANGULAR_NODE_VERSION so Angular CLI runs in a supported environment.
+    NVM will install the version if not present, then use it. For frontend commands,
+    pass FRONTEND_NODE_VERSION so modern frameworks run in a supported environment.
     """
     cwd = Path(cwd).resolve()
     nvm_prefix = _get_nvm_script_prefix()
@@ -303,14 +348,12 @@ def run_command_with_nvm(  # pragma: no cover
             stdout="",
             stderr="NVM not found; cannot switch Node version",
         )
-    # Version check: fail fast if Node is below Angular CLI minimum (v20.19 or v22.12)
+    # Version check: fail fast if Node is below modern frontend minimum (v18+)
     version_check = (
         "node -e 'var v=process.versions.node.split(\".\").map(Number);"
-        "var maj=v[0],min=v[1];"
-        "if(maj>22)process.exit(0);"
-        "if(maj===22&&min>=12)process.exit(0);"
-        "if(maj===20&&min>=19)process.exit(0);"
-        "console.error(\"Node \"+process.version+\" is below Angular CLI minimum v20.19/v22.12\");"
+        "var maj=v[0];"
+        "if(maj>=18)process.exit(0);"
+        "console.error(\"Node \"+process.version+\" is below minimum v18 for modern frontend frameworks\");"
         "process.exit(1);'"
     )
     script = (
@@ -370,12 +413,54 @@ def run_command_with_nvm(  # pragma: no cover
         )
 
 
+def run_frontend_build(project_path: str | Path, framework: str = "") -> CommandResult:  # pragma: no cover
+    """
+    Run the appropriate build command for the detected or specified frontend framework.
+    
+    Args:
+        project_path: Path to the frontend project
+        framework: Optional framework hint ("angular", "react", "vue"). If not provided,
+                   will be auto-detected from project files.
+    
+    Returns CommandResult with build status and any errors.
+    """
+    cwd = Path(project_path).resolve()
+    detected_framework = framework or detect_frontend_framework(cwd)
+    
+    if detected_framework == "angular":
+        return run_ng_build_with_nvm_fallback(cwd)
+    elif detected_framework in ("react", "vue", "unknown"):
+        return run_npm_build_with_nvm(cwd)
+    else:
+        return run_npm_build_with_nvm(cwd)
+
+
+def run_npm_build_with_nvm(project_path: str | Path) -> CommandResult:  # pragma: no cover
+    """
+    Run `npm run build` for React/Vue/generic frontend projects.
+    Uses NVM when available for consistent Node version.
+    """
+    cwd = Path(project_path).resolve()
+    
+    if _get_nvm_script_prefix() is not None:
+        logger.info("Running npm run build with NVM (node %s)", FRONTEND_NODE_VERSION)
+        return run_command_with_nvm(
+            ["npm", "run", "build"],
+            cwd=cwd,
+            node_version=FRONTEND_NODE_VERSION,
+            timeout=BUILD_TIMEOUT,
+        )
+    
+    # Try without NVM
+    return run_command(["npm", "run", "build"], cwd=cwd, timeout=BUILD_TIMEOUT)
+
+
 def run_ng_build_with_nvm_fallback(project_path: str | Path) -> CommandResult:  # pragma: no cover
     """
     Run ng build with Node version Angular CLI needs. When NVM is available, use
-    NVM to install and use ANGULAR_NODE_VERSION (22.12) first. When NVM is not
+    NVM to install and use FRONTEND_NODE_VERSION first. When NVM is not
     found, return an explicit failure instead of using system Node (which is
-    often too old).
+    often too old for Angular CLI).
     """
     cwd = Path(project_path).resolve()
     _ensure_angular_common_in_package_json(cwd)
@@ -387,16 +472,16 @@ def run_ng_build_with_nvm_fallback(project_path: str | Path) -> CommandResult:  
     _ensure_reactive_forms_module_in_components(cwd)
     _normalize_double_at_angular(cwd)
     if _get_nvm_script_prefix() is not None:
-        logger.info("Running ng build with NVM (node %s)", ANGULAR_NODE_VERSION)
+        logger.info("Running ng build with NVM (node %s)", FRONTEND_NODE_VERSION)
         return run_command_with_nvm(
             ["npx", "ng", "build", "--configuration=development"],
             cwd=cwd,
-            node_version=ANGULAR_NODE_VERSION,
+            node_version=FRONTEND_NODE_VERSION,
             timeout=BUILD_TIMEOUT,
         )
     msg = (
         "NVM not found. Angular CLI requires Node v20.19+ or v22.12+. "
-        "Install NVM (https://github.com/nvm-sh/nvm) and run: nvm install 22.12"
+        "Install NVM (https://github.com/nvm-sh/nvm) and run: nvm install 22"
     )
     try:
         r = subprocess.run(
@@ -674,39 +759,146 @@ def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
             logger.warning("Could not repair %s for ReactiveFormsModule: %s", html_path.name, e)
 
 
-def ensure_frontend_dependencies_installed(project_path: str | Path) -> CommandResult:
+def ensure_frontend_dependencies_installed(project_path: str | Path, framework: str = "") -> CommandResult:
     """
     Run npm install so dependencies are installed before the frontend agent runs.
     Uses NVM when available for consistent Node version. If package.json does not
     exist, returns success (no-op) so callers do not block.
-    Ensures @angular/common is present (provides @angular/common/http for HttpClient).
+    
+    For Angular projects, also applies Angular-specific fixes (ensuring @angular/common, etc.).
     """
     cwd = Path(project_path).resolve()
     if not (cwd / "package.json").exists():
         return CommandResult(success=True, exit_code=0, stdout="", stderr="")
-    _ensure_angular_common_in_package_json(cwd)
-    _ensure_angular_material_in_package_json(cwd)
-    _ensure_tsconfig_module_resolution(cwd)
-    _ensure_material_theme_in_styles(cwd)
-    _ensure_provide_animations_in_config(cwd)
-    _ensure_app_config_di_token_imports(cwd)
-    _ensure_reactive_forms_module_in_components(cwd)
-    _normalize_double_at_angular(cwd)
+    
+    detected_framework = framework or detect_frontend_framework(cwd)
+    
+    # Apply Angular-specific fixes only for Angular projects
+    if detected_framework == "angular":
+        _ensure_angular_common_in_package_json(cwd)
+        _ensure_angular_material_in_package_json(cwd)
+        _ensure_tsconfig_module_resolution(cwd)
+        _ensure_material_theme_in_styles(cwd)
+        _ensure_provide_animations_in_config(cwd)
+        _ensure_app_config_di_token_imports(cwd)
+        _ensure_reactive_forms_module_in_components(cwd)
+        _normalize_double_at_angular(cwd)
+    
     if _get_nvm_script_prefix() is not None:  # pragma: no cover
         return run_command_with_nvm(
             ["npm", "install"],
             cwd=cwd,
-            node_version=ANGULAR_NODE_VERSION,
+            node_version=FRONTEND_NODE_VERSION,
             timeout=BUILD_TIMEOUT,
         )
     return run_command(["npm", "install"], cwd=cwd, timeout=BUILD_TIMEOUT)
+
+
+def run_frontend_serve_smoke_test(project_path: str | Path, port: int = 4299, framework: str = "") -> CommandResult:
+    """
+    Start a frontend dev server briefly to confirm the app compiles and starts.
+    Runs for SERVE_TIMEOUT seconds, then kills the process.
+    
+    This is a smoke test - it just confirms the app starts without errors.
+    Returns CommandResult where success=True means the server started.
+    """
+    cwd = Path(project_path).resolve()
+    detected_framework = framework or detect_frontend_framework(cwd)
+    
+    if detected_framework == "angular":
+        return run_ng_serve_smoke_test(cwd, port)
+    else:
+        return run_npm_start_smoke_test(cwd, port)
+
+
+def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> CommandResult:
+    """
+    Start `npm start` or `npm run dev` briefly to confirm the app starts.
+    For React/Vue projects using Vite, CRA, or similar.
+    """
+    cwd = Path(project_path).resolve()
+    logger.info("Starting npm start smoke test on port %s in %s", port, cwd)
+    
+    # Try to determine the right start command from package.json
+    import json
+    start_cmd = "start"
+    try:
+        pkg_data = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
+        scripts = pkg_data.get("scripts", {})
+        if "dev" in scripts:
+            start_cmd = "dev"
+        elif "start" in scripts:
+            start_cmd = "start"
+    except Exception:
+        pass
+    
+    nvm_prefix = _get_nvm_script_prefix()
+    if nvm_prefix is not None:
+        script = (
+            f"{nvm_prefix} && "
+            f"{{ nvm install {FRONTEND_NODE_VERSION} --no-progress && nvm use {FRONTEND_NODE_VERSION}; }} || "
+            f"{{ nvm install {NVM_NODE_FALLBACK_VERSION} --no-progress && nvm use {NVM_NODE_FALLBACK_VERSION}; }} && "
+            f"npm run {start_cmd}"
+        )
+        run_cmd: list[str] = ["bash", "-c", script]
+        logger.info("Using NVM (node %s) for npm %s smoke test", FRONTEND_NODE_VERSION, start_cmd)
+    else:
+        run_cmd = ["npm", "run", start_cmd]
+    
+    try:
+        proc = subprocess.Popen(
+            run_cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            preexec_fn=os.setsid,
+        )
+        
+        try:
+            stdout, stderr = proc.communicate(timeout=SERVE_TIMEOUT)
+            return CommandResult(
+                success=proc.returncode == 0,
+                exit_code=proc.returncode,
+                stdout=stdout or "",
+                stderr=stderr or "",
+            )
+        except subprocess.TimeoutExpired:
+            logger.info("Dev server is running (good) - killing smoke test process")
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.wait(timeout=5)
+            return CommandResult(
+                success=True,
+                exit_code=0,
+                stdout="Frontend dev server started successfully (smoke test passed)",
+                stderr="",
+            )
+    except FileNotFoundError:
+        return CommandResult(
+            success=False,
+            exit_code=-1,
+            stdout="",
+            stderr="npm not found",
+        )
+    except Exception as e:
+        logger.exception("npm start smoke test failed")
+        return CommandResult(
+            success=False,
+            exit_code=-1,
+            stdout="",
+            stderr=str(e),
+        )
 
 
 def run_ng_serve_smoke_test(project_path: str | Path, port: int = 4299) -> CommandResult:
     """
     Start `ng serve` briefly to confirm the app compiles and starts.
     Runs for SERVE_TIMEOUT seconds, then kills the process.
-    When NVM is available, uses ANGULAR_NODE_VERSION so Angular CLI runs in a supported environment.
+    When NVM is available, uses FRONTEND_NODE_VERSION so Angular CLI runs in a supported environment.
 
     This is a smoke test - it just confirms the app starts without errors.
     Returns CommandResult where success=True means the server started.
@@ -718,12 +910,12 @@ def run_ng_serve_smoke_test(project_path: str | Path, port: int = 4299) -> Comma
     if nvm_prefix is not None:
         script = (
             f"{nvm_prefix} && "
-            f"{{ nvm install {ANGULAR_NODE_VERSION} --no-progress && nvm use {ANGULAR_NODE_VERSION}; }} || "
+            f"{{ nvm install {FRONTEND_NODE_VERSION} --no-progress && nvm use {FRONTEND_NODE_VERSION}; }} || "
             f"{{ nvm install {NVM_NODE_FALLBACK_VERSION} --no-progress && nvm use {NVM_NODE_FALLBACK_VERSION}; }} && "
             f"npx ng serve --port {port} --no-open"
         )
         run_cmd: list[str] = ["bash", "-c", script]
-        logger.info("Using NVM (node %s, fallback %s) for ng serve smoke test", ANGULAR_NODE_VERSION, NVM_NODE_FALLBACK_VERSION)
+        logger.info("Using NVM (node %s, fallback %s) for ng serve smoke test", FRONTEND_NODE_VERSION, NVM_NODE_FALLBACK_VERSION)
     else:
         run_cmd = ["npx", "ng", "serve", "--port", str(port), "--no-open"]
 
@@ -1128,18 +1320,180 @@ _ANGULAR_DEV_DEPS = [
     "typescript",
 ]
 
+# ---------------------------------------------------------------------------
+# React project scaffolding
+# ---------------------------------------------------------------------------
 
-def ensure_frontend_project_initialized(project_dir: str | Path) -> CommandResult:
-    """Ensure a minimal Angular project exists at *project_dir*.
+_REACT_DEPS = [
+    "react",
+    "react-dom",
+    "react-router-dom",
+    "@tanstack/react-query",
+    "react-hook-form",
+    "zod",
+    "@hookform/resolvers",
+]
+
+_REACT_DEV_DEPS = [
+    "typescript",
+    "@types/react",
+    "@types/react-dom",
+    "vite",
+    "@vitejs/plugin-react",
+    "vitest",
+    "@testing-library/react",
+    "@testing-library/jest-dom",
+    "jsdom",
+]
+
+_MINIMAL_REACT_INDEX_HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>App</title>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>
+"""
+
+_MINIMAL_REACT_MAIN_TSX = """\
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import App from './App';
+import './index.css';
+
+const queryClient = new QueryClient();
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </QueryClientProvider>
+  </React.StrictMode>
+);
+"""
+
+_MINIMAL_REACT_APP_TSX = """\
+import { Routes, Route } from 'react-router-dom';
+
+function App() {
+  return (
+    <div className="app">
+      <Routes>
+        <Route path="/" element={<div>Welcome</div>} />
+      </Routes>
+    </div>
+  );
+}
+
+export default App;
+"""
+
+_MINIMAL_REACT_INDEX_CSS = """\
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  line-height: 1.5;
+}
+
+.app {
+  min-height: 100vh;
+}
+"""
+
+_MINIMAL_REACT_VITE_CONFIG = """\
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 3000,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
+  },
+});
+"""
+
+_MINIMAL_REACT_TSCONFIG = """\
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}
+"""
+
+_MINIMAL_REACT_TSCONFIG_NODE = """\
+{
+  "compilerOptions": {
+    "composite": true,
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true
+  },
+  "include": ["vite.config.ts"]
+}
+"""
+
+_MINIMAL_REACT_CONFIG_TS = """\
+export const config = {
+  apiUrl: import.meta.env.VITE_API_URL || 'http://localhost:8000',
+  production: import.meta.env.PROD,
+};
+"""
+
+
+def ensure_frontend_project_initialized(
+    project_dir: str | Path,
+    framework: Optional[str] = None,
+) -> CommandResult:
+    """Ensure a minimal frontend project exists at *project_dir*.
 
     If ``package.json`` already exists the function is a no-op.
     Otherwise it:
     1. Creates the directory (if needed)
     2. Runs ``npm init -y``
-    3. Installs Angular runtime and dev dependencies
-    4. Writes minimal ``angular.json``, ``tsconfig.json``, and scaffold files
-       (``src/index.html``, ``src/main.ts``, ``src/styles.scss``, and the
-       root ``AppComponent`` + config + routes).
+    3. Installs framework-specific runtime and dev dependencies
+    4. Writes minimal config and scaffold files
+
+    Args:
+        project_dir: Path to the frontend project directory
+        framework: "angular", "react", or None (defaults to "react" for new projects)
 
     Returns a :class:`CommandResult` indicating success or the first failure.
     """
@@ -1150,7 +1504,9 @@ def ensure_frontend_project_initialized(project_dir: str | Path) -> CommandResul
         logger.info("Frontend project already initialized at %s", cwd)
         return CommandResult(success=True, exit_code=0, stdout="Already initialized", stderr="")
 
-    logger.info("Initializing new Angular project at %s", cwd)
+    # Default to React for new projects (more commonly requested)
+    target_framework = framework or "react"
+    logger.info("Initializing new %s project at %s", target_framework, cwd)
     cwd.mkdir(parents=True, exist_ok=True)
 
     nvm_result = ensure_nvm_installed()
@@ -1161,23 +1517,31 @@ def ensure_frontend_project_initialized(project_dir: str | Path) -> CommandResul
         )
     use_nvm = _get_nvm_script_prefix() is not None
     if use_nvm:  # pragma: no cover
-        logger.info("Using NVM (node %s) for frontend project init", ANGULAR_NODE_VERSION)
+        logger.info("Using NVM (node %s) for frontend project init", FRONTEND_NODE_VERSION)
 
     # Step 1: npm init
     if use_nvm:  # pragma: no cover
         result = run_command_with_nvm(
-            ["npm", "init", "-y"], cwd=cwd, node_version=ANGULAR_NODE_VERSION, timeout=30
+            ["npm", "init", "-y"], cwd=cwd, node_version=FRONTEND_NODE_VERSION, timeout=30
         )
     else:
         result = run_command(["npm", "init", "-y"], cwd=cwd, timeout=30)
     if not result.success:
         return result
 
+    # Select dependencies based on framework
+    if target_framework == "angular":
+        runtime_deps = _ANGULAR_DEPS
+        dev_deps = _ANGULAR_DEV_DEPS
+    else:
+        runtime_deps = _REACT_DEPS
+        dev_deps = _REACT_DEV_DEPS
+
     # Step 2: Install runtime dependencies
-    install_cmd = ["npm", "install", "--save"] + _ANGULAR_DEPS
+    install_cmd = ["npm", "install", "--save"] + runtime_deps
     if use_nvm:  # pragma: no cover
         result = run_command_with_nvm(
-            install_cmd, cwd=cwd, node_version=ANGULAR_NODE_VERSION, timeout=BUILD_TIMEOUT
+            install_cmd, cwd=cwd, node_version=FRONTEND_NODE_VERSION, timeout=BUILD_TIMEOUT
         )
     else:
         result = run_command(install_cmd, cwd=cwd, timeout=BUILD_TIMEOUT)
@@ -1185,21 +1549,30 @@ def ensure_frontend_project_initialized(project_dir: str | Path) -> CommandResul
         return result
 
     # Step 3: Install dev dependencies
-    dev_install_cmd = ["npm", "install", "--save-dev"] + _ANGULAR_DEV_DEPS
+    dev_install_cmd = ["npm", "install", "--save-dev"] + dev_deps
     if use_nvm:  # pragma: no cover
         result = run_command_with_nvm(
-            dev_install_cmd, cwd=cwd, node_version=ANGULAR_NODE_VERSION, timeout=BUILD_TIMEOUT
+            dev_install_cmd, cwd=cwd, node_version=FRONTEND_NODE_VERSION, timeout=BUILD_TIMEOUT
         )
     else:
         result = run_command(dev_install_cmd, cwd=cwd, timeout=BUILD_TIMEOUT)
     if not result.success:
         return result
 
-    # Step 4: Write config files (only if they don't already exist)
+    # Framework-specific scaffolding
+    if target_framework == "angular":
+        return _scaffold_angular_project(cwd)
+    else:
+        return _scaffold_react_project(cwd)
+
+
+def _scaffold_angular_project(cwd: Path) -> CommandResult:
+    """Write Angular-specific config and scaffold files."""
+    # Write config files (only if they don't already exist)
     _write_if_missing(cwd / "angular.json", _MINIMAL_ANGULAR_JSON)
     _write_if_missing(cwd / "tsconfig.json", _MINIMAL_TSCONFIG)
 
-    # Step 5: Write minimal scaffold files
+    # Write minimal scaffold files
     src = cwd / "src"
     src.mkdir(parents=True, exist_ok=True)
     app = src / "app"
@@ -1220,20 +1593,73 @@ body { margin: 0; font-family: Roboto, "Helvetica Neue", sans-serif; }
     _write_if_missing(app / "app.config.ts", _MINIMAL_APP_CONFIG_TS)
     _write_if_missing(app / "app.routes.ts", _MINIMAL_APP_ROUTES_TS)
 
-    # Step 5b: Environment files for API base URL
+    # Environment files for API base URL
     env_dir = src / "environments"
     env_dir.mkdir(parents=True, exist_ok=True)
     _write_if_missing(env_dir / "environment.ts", _MINIMAL_ENVIRONMENT_TS)
     _write_if_missing(env_dir / "environment.prod.ts", _MINIMAL_ENVIRONMENT_PROD_TS)
 
-    # Step 6: Pin Node version for nvm use
-    _write_if_missing(cwd / ".nvmrc", ANGULAR_NODE_VERSION + "\n")
+    # Pin Node version for nvm use
+    _write_if_missing(cwd / ".nvmrc", FRONTEND_NODE_VERSION + "\n")
 
-    logger.info("Frontend project initialized successfully at %s", cwd)
+    logger.info("Angular project initialized successfully at %s", cwd)
     return CommandResult(
         success=True,
         exit_code=0,
         stdout=f"Angular project initialized at {cwd}",
+        stderr="",
+    )
+
+
+def _scaffold_react_project(cwd: Path) -> CommandResult:
+    """Write React-specific config and scaffold files."""
+    # Write config files (only if they don't already exist)
+    _write_if_missing(cwd / "vite.config.ts", _MINIMAL_REACT_VITE_CONFIG)
+    _write_if_missing(cwd / "tsconfig.json", _MINIMAL_REACT_TSCONFIG)
+    _write_if_missing(cwd / "tsconfig.node.json", _MINIMAL_REACT_TSCONFIG_NODE)
+    _write_if_missing(cwd / "index.html", _MINIMAL_REACT_INDEX_HTML)
+
+    # Write minimal scaffold files
+    src = cwd / "src"
+    src.mkdir(parents=True, exist_ok=True)
+
+    _write_if_missing(src / "main.tsx", _MINIMAL_REACT_MAIN_TSX)
+    _write_if_missing(src / "App.tsx", _MINIMAL_REACT_APP_TSX)
+    _write_if_missing(src / "index.css", _MINIMAL_REACT_INDEX_CSS)
+    _write_if_missing(src / "config.ts", _MINIMAL_REACT_CONFIG_TS)
+    _write_if_missing(src / "vite-env.d.ts", '/// <reference types="vite/client" />\n')
+
+    # Components and hooks directories
+    (src / "components").mkdir(parents=True, exist_ok=True)
+    (src / "hooks").mkdir(parents=True, exist_ok=True)
+    (src / "services").mkdir(parents=True, exist_ok=True)
+    (src / "types").mkdir(parents=True, exist_ok=True)
+
+    # Pin Node version for nvm use
+    _write_if_missing(cwd / ".nvmrc", FRONTEND_NODE_VERSION + "\n")
+
+    # Update package.json with scripts
+    pkg_path = cwd / "package.json"
+    if pkg_path.exists():
+        try:
+            import json
+            pkg_data = json.loads(pkg_path.read_text(encoding="utf-8"))
+            pkg_data["scripts"] = {
+                "dev": "vite",
+                "build": "tsc && vite build",
+                "preview": "vite preview",
+                "test": "vitest",
+                "lint": "eslint src --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+            }
+            pkg_path.write_text(json.dumps(pkg_data, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning("Could not update package.json scripts: %s", e)
+
+    logger.info("React project initialized successfully at %s", cwd)
+    return CommandResult(
+        success=True,
+        exit_code=0,
+        stdout=f"React project initialized at {cwd}",
         stderr="",
     )
 

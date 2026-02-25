@@ -11,8 +11,8 @@ class FrontendInput(BaseModel):
     """Input for the Frontend Expert agent."""
 
     framework_target: str = Field(
-        default="angular",
-        description="Target frontend framework for implementation: react | angular | either",
+        default="",
+        description="Target frontend framework for implementation: react | angular | vue. If empty, will be detected from project files.",
     )
     task_description: str
     requirements: str = ""

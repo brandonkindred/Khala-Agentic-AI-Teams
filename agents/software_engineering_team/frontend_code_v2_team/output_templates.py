@@ -116,7 +116,7 @@ def parse_planning_template(text: str) -> Dict[str, Any]:
     lang_section = _section(text, MARKER_LANGUAGE, MARKER_END_LANGUAGE)
     if lang_section:
         raw = lang_section.strip().split("\n")[0].strip().lower()
-        if raw in ("angular", "react", "typescript", "javascript"):
+        if raw in ("angular", "react", "vue", "typescript", "javascript"):
             language = raw
     summary_section = _section(text, MARKER_PLAN_SUMMARY, MARKER_END_PLAN_SUMMARY)
     if summary_section:

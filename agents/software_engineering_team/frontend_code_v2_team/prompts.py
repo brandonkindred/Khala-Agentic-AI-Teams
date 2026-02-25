@@ -40,6 +40,8 @@ PLANNING_PROMPT = """You are the Planning Agent for a frontend development team.
 - branding_theme — themes, design tokens, brand compliance
 - ux_usability — flows, interactions, usability improvements
 - accessibility — a11y checks, WCAG, screen reader support
+- performance — bundle size, code splitting, lazy loading, caching
+- architecture — folder structure, routing, state management patterns, API client patterns
 - linter — lint rules, format fixes
 - general — anything else (default code generation)
 
@@ -60,7 +62,7 @@ depends_on: mt-other-id|mt-another-id
 ---
 ## END MICROTASKS ##
 ## LANGUAGE ##
-angular
+{detected_language}
 ## END LANGUAGE ##
 ## SUMMARY ##
 1-2 sentence overview of the plan
@@ -70,7 +72,7 @@ Rules:
 - Emit 2-10 microtasks. Prefer smaller, focused microtasks.
 - Include at least one testing_qa microtask unless the task is pure docs/config.
 - Dependency order matters: list prerequisites in depends_on (pipe-separated IDs).
-- For LANGUAGE use one of: angular, react, typescript, javascript.
+- For LANGUAGE use one of: angular, react, vue, typescript, javascript. Use the stack specified in the input or detected from the project.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
 
@@ -157,7 +159,7 @@ Review the code below for:
 3. Accessibility — semantic markup, ARIA, keyboard nav, contrast.
 4. Security — XSS, unsafe innerHTML, sensitive data in client code.
 5. Testing — are tests present and do they cover the main paths?
-6. Build/lint — would this code pass ng build / npm run build and lint?
+6. Build/lint — would this code pass the framework build (npm run build) and lint?
 
 **Requirements:**
 {requirements}

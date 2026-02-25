@@ -4,7 +4,7 @@ INTEGRATION_PROMPT = """You are an Integration Expert. Your job is to validate t
 
 **Input:**
 - Backend code (Python FastAPI routes, models, etc.)
-- Frontend code (Angular services, HTTP calls, components)
+- Frontend code (React/Angular/Vue components, services, HTTP calls)
 - Project specification
 - Optional: architecture
 

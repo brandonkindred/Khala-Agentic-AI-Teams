@@ -479,8 +479,8 @@ class FrontendOrchestratorAgent:
                 if not qa_issues:
                     qa_issues = [{
                         "severity": "critical",
-                        "description": f"ng build failed: {build_errors[:2000]}",
-                        "recommendation": "Fix the Angular compilation errors",
+                        "description": f"Build failed: {build_errors[:2000]}",
+                        "recommendation": "Fix the compilation errors",
                     }]
                 if consecutive_same_build_failures >= 2:
                     qa_issues.insert(0, {
@@ -731,7 +731,7 @@ class FrontendOrchestratorAgent:
                     spec_content=spec_truncated,
                     architecture=architecture,
                     existing_pipeline=_read_repo_code(repo_path, [".yml", ".yaml"]),
-                    repo_code_summary=f"Angular frontend, {len(code_for_br)} chars of code",
+                    repo_code_summary=f"Frontend application, {len(code_for_br)} chars of code",
                 ))
                 try:
                     plan_dir = repo_path / "plan"

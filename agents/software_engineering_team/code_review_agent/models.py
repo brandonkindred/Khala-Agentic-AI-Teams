@@ -88,7 +88,7 @@ class CodeReviewInput(BaseModel):
     )
     language: str = Field(
         default="typescript",
-        description="Primary language: typescript (Angular) or python (FastAPI)",
+        description="Primary language: typescript (React/Angular/Vue) or python (FastAPI)",
     )
     architecture: Optional[SystemArchitecture] = None
     existing_codebase: Optional[str] = Field(

@@ -69,7 +69,7 @@ YOUR TEAM
 ============================================================
 - devops: CI/CD, IaC, Docker, networking
 - backend: Python or Java implementation
-- frontend: Angular by default. For frontend tasks only, if the spec explicitly requires React or Vue, set "metadata": {"framework_target": "react"} or {"framework_target": "vue"}; otherwise omit.
+- frontend: TypeScript/JavaScript frontend (Angular, React, or Vue). For frontend tasks, if the spec specifies a framework, set "metadata": {"framework_target": "angular"}, {"framework_target": "react"}, or {"framework_target": "vue"}. If no framework is specified in the spec, omit metadata and the system will detect from existing project files or use a sensible default.
 
 Security, QA, and accessibility reviews are invoked by the orchestrator after code exists – do NOT create tasks for them.
 
@@ -127,7 +127,7 @@ Return a single JSON object. Choose ONE of two modes:
         - "acceptance_criteria": list of strings (3–7 specific, testable)
         - "dependencies": list of TASK IDs (not story IDs)
         - "example": optional string (e.g. sample request/response, UI state)
-        - "metadata": optional. For frontend tasks only: {"framework_target": "react"} or {"framework_target": "vue"} if spec requires it; otherwise omit.
+        - "metadata": optional. For frontend tasks: {"framework_target": "angular"}, {"framework_target": "react"}, or {"framework_target": "vue"} if spec specifies a framework; otherwise omit.
 - "execution_order": list of TASK IDs in dependency order (ALL tasks from ALL stories across ALL epics)
 - "rationale": string (why this plan delivers the full spec)
 - "summary": string (total task count, confirmation of spec coverage)

@@ -51,6 +51,8 @@ class ToolAgentKind(str, Enum):
     BRANDING_THEME = "branding_theme"
     UX_USABILITY = "ux_usability"
     ACCESSIBILITY = "accessibility"
+    PERFORMANCE = "performance"
+    ARCHITECTURE = "architecture"
     BUILD_SPECIALIST = "build_specialist"
     LINTER = "linter"
     GENERAL = "general"

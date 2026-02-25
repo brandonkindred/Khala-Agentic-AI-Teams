@@ -81,7 +81,7 @@ def _build_synthetic_architecture_data(reqs: ProductRequirements) -> Dict[str, A
     )
     components = [
         {"name": "Backend API", "type": "backend", "description": "API layer", "technology": "fastapi"},
-        {"name": "Frontend App", "type": "frontend", "description": "UI layer", "technology": "angular"},
+        {"name": "Frontend App", "type": "frontend", "description": "UI layer", "technology": "react"},
         {"name": "Database", "type": "database", "description": "Primary data store", "technology": "postgresql"},
     ]
     bullets = ["- Components: Backend API, Frontend App, Database"]

@@ -35,7 +35,7 @@ MAX_REVIEW_ITERATIONS = 5
 
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
-    """Build team-owned tool agent instances (stubs and Git/Build when implemented)."""
+    """Build team-owned tool agent instances with LLM support where applicable."""
     from .tool_agents.state_management import StateManagementToolAgent
     from .tool_agents.auth import AuthToolAgent
     from .tool_agents.api_openapi import ApiOpenApiToolAgent
@@ -49,6 +49,8 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     from .tool_agents.branding_theme import BrandingThemeToolAgent
     from .tool_agents.ux_usability import UxUsabilityToolAgent
     from .tool_agents.accessibility import AccessibilityToolAgent
+    from .tool_agents.performance import PerformanceToolAgent
+    from .tool_agents.architecture import ArchitectureToolAgent
     from .tool_agents.build_specialist import BuildSpecialistAdapterAgent
     from .tool_agents.linter import LinterToolAgent
 
@@ -56,16 +58,18 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
         ToolAgentKind.STATE_MANAGEMENT: StateManagementToolAgent(),
         ToolAgentKind.AUTH: AuthToolAgent(),
         ToolAgentKind.API_OPENAPI: ApiOpenApiToolAgent(),
-        ToolAgentKind.CICD: CicdAdapterAgent(),
+        ToolAgentKind.CICD: CicdAdapterAgent(llm),
         ToolAgentKind.CONTAINERIZATION: ContainerizationAdapterAgent(),
         ToolAgentKind.DOCUMENTATION: DocumentationToolAgent(),
         ToolAgentKind.TESTING_QA: TestingQAToolAgent(llm),
         ToolAgentKind.SECURITY: SecurityToolAgent(llm),
         ToolAgentKind.GIT_BRANCH_MANAGEMENT: GitBranchManagementToolAgent(),
-        ToolAgentKind.UI_DESIGN: UiDesignToolAgent(),
-        ToolAgentKind.BRANDING_THEME: BrandingThemeToolAgent(),
-        ToolAgentKind.UX_USABILITY: UxUsabilityToolAgent(),
-        ToolAgentKind.ACCESSIBILITY: AccessibilityToolAgent(),
+        ToolAgentKind.UI_DESIGN: UiDesignToolAgent(llm),
+        ToolAgentKind.BRANDING_THEME: BrandingThemeToolAgent(llm),
+        ToolAgentKind.UX_USABILITY: UxUsabilityToolAgent(llm),
+        ToolAgentKind.ACCESSIBILITY: AccessibilityToolAgent(llm),
+        ToolAgentKind.PERFORMANCE: PerformanceToolAgent(llm),
+        ToolAgentKind.ARCHITECTURE: ArchitectureToolAgent(llm),
         ToolAgentKind.BUILD_SPECIALIST: BuildSpecialistAdapterAgent(llm),
         ToolAgentKind.LINTER: LinterToolAgent(),
     }

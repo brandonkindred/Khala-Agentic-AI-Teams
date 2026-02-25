@@ -594,7 +594,7 @@ def _run_build_verification(
         # repo_path may be frontend repo root (package.json here) or work path (frontend/ subdir)
         frontend_dir = repo_path if (repo_path / "package.json").exists() else (repo_path / "frontend")
         if not (frontend_dir / "package.json").exists():
-            logger.info("Build verification: no Angular project found, skipping ng build")
+            logger.info("Build verification: no frontend project found, skipping frontend build")
             return True, ""
         from shared.command_runner import is_ng_build_environment_failure
         result = run_ng_build_with_nvm_fallback(frontend_dir)
@@ -761,7 +761,7 @@ def _try_build_fix_one_at_a_time(
     if agent_type == "frontend":
         project_dir = repo_path if (repo_path / "package.json").exists() else repo_path / "frontend"
         if not (project_dir / "package.json").exists():
-            return False, "No Angular project found"
+            return False, "No frontend project found"
         try:
             from shared.command_runner import is_ng_build_environment_failure
             result = run_ng_build_with_nvm_fallback(project_dir)
@@ -1395,7 +1395,11 @@ def _run_backend_frontend_workers(
             task_start_time = time.monotonic()
             try:
                 from shared.command_runner import ensure_frontend_project_initialized
-                init_result = ensure_frontend_project_initialized(frontend_dir)
+                from shared.frontend_framework import resolve_frontend_framework
+                # Detect framework from task metadata, project files, or spec
+                task_meta = getattr(task, "metadata", None) or {}
+                detected_framework = resolve_frontend_framework(task_meta, spec_content, frontend_dir)
+                init_result = ensure_frontend_project_initialized(frontend_dir, framework=detected_framework)
                 if not init_result.success:
                     update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=init_result.error_summary)
                     with state_lock:
@@ -1769,7 +1773,7 @@ def run_orchestrator(
         architecture = None
         arch_input = ArchitectureInput(
             requirements=requirements,
-            technology_preferences=["Python", "FastAPI", "Angular", "PostgreSQL", "Docker"],
+            technology_preferences=["Python", "FastAPI", "PostgreSQL", "Docker"],
             project_overview=project_overview,
             features_and_functionality_doc=features_and_functionality_doc or None,
             existing_architecture=enterprise_arch_context,
@@ -2284,7 +2288,7 @@ def run_failed_tasks(job_id: str) -> None:
                         requirements=_task_requirements(task),
                         architecture=architecture,
                         existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
-                        tech_stack=["Python", "FastAPI", "Angular", "PostgreSQL", "Docker"],
+                        tech_stack=["Python", "FastAPI", "PostgreSQL", "Docker"],
                         build_verifier=_run_build_verification,
                         task_id=task_id,
                         subdir="devops",

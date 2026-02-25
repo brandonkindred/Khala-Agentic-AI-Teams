@@ -7,7 +7,7 @@ PERFORMANCE_ENGINEER_PROMPT = """You are a Performance Engineer Agent. Your job 
 - Code splitting and lazy loading
 - Caching strategy (HTTP caching, service worker if needed)
 - Profiling and performance regression tests
-- Angular-specific: lazy routes, standalone components, tree-shaking
+- Framework-specific: lazy routes, code splitting (React.lazy, Vue async components, Angular standalone)
 
 **Input:**
 - Code to review

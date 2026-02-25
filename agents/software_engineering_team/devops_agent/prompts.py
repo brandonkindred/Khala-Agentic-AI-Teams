@@ -40,7 +40,7 @@ DEVOPS_PROMPT = """You are an expert DevOps engineer specializing in networking,
 - docker_compose may be a single-service snippet or empty; focus on making the backend repo self-contained for build and deploy.
 
 **When target_repo is "frontend":**
-- Produce a Dockerfile that builds the Angular/Node app (npm ci, ng build) and serves the static assets (e.g. nginx or Node serve). Use multi-stage build: build stage then serve stage.
+- Produce a Dockerfile that builds the frontend app (npm ci, npm run build) and serves the static assets (e.g. nginx or Node serve). Use multi-stage build: build stage then serve stage. Detect the framework from package.json (React uses react-scripts or vite, Angular uses @angular/cli, Vue uses vue-cli or vite).
 - CI/CD pipeline should install dependencies, run tests, and build the Docker image for this frontend only.
 - docker_compose may be a single-service snippet or empty; focus on making the frontend repo self-contained for build and deploy.
 

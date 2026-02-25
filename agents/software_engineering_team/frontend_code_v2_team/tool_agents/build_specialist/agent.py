@@ -47,20 +47,24 @@ def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) 
 
 
 def _run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
-    """Run frontend build (ng build) and return one ReviewIssue per parsed failure."""
+    """Run frontend build and return one ReviewIssue per parsed failure."""
     try:
-        from shared.command_runner import run_ng_build_with_nvm_fallback
+        from shared.command_runner import run_frontend_build, detect_frontend_framework
     except ImportError:
         logger.warning("Build Specialist: shared.command_runner not available")
         return []
     frontend_dir = repo_path if (repo_path / "package.json").exists() else repo_path / "frontend"
     if not (frontend_dir / "package.json").exists():
-        logger.info("Build Specialist: no Angular project at %s", repo_path)
+        logger.info("Build Specialist: no frontend project at %s", repo_path)
         return []
-    result = run_ng_build_with_nvm_fallback(frontend_dir)
+    result = run_frontend_build(frontend_dir)
     if result.success:
         return []
-    failures = result.parsed_failures("ng_build")
+    # Detect framework and use appropriate error parsing
+    detected_framework = detect_frontend_framework(frontend_dir)
+    # ng_build parser works for Angular; for React/Vue, use the generic fallback
+    parse_kind = "ng_build" if detected_framework == "angular" else "ng_build"
+    failures = result.parsed_failures(parse_kind)
     issues: List[ReviewIssue] = []
     for f in failures:
         rec = (f.suggestion or f.playbook_hint or "Fix the build error.").strip()

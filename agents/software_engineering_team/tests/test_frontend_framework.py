@@ -1,10 +1,12 @@
 """Tests for frontend framework resolution from spec and task metadata."""
 
 import pytest
+from pathlib import Path
 
 from shared.frontend_framework import (
     get_frontend_framework_from_spec,
     resolve_frontend_framework,
+    detect_framework_from_project,
 )
 
 
@@ -29,8 +31,13 @@ def test_get_frontend_framework_from_spec_vue() -> None:
     assert get_frontend_framework_from_spec("Use Vue for the SPA.") == "vue"
 
 
-def test_get_frontend_framework_from_spec_react_before_vue() -> None:
-    """When both appear, React is checked first and wins."""
+def test_get_frontend_framework_from_spec_priority() -> None:
+    """Angular is checked first, then React, then Vue."""
+    # Angular takes priority
+    assert get_frontend_framework_from_spec(
+        "Use Angular for the dashboard. React is also mentioned later."
+    ) == "angular"
+    # React takes priority over Vue
     assert get_frontend_framework_from_spec(
         "Use React for the dashboard. Vue is also mentioned later."
     ) == "react"
@@ -42,11 +49,11 @@ def test_get_frontend_framework_from_spec_no_false_positives() -> None:
     assert get_frontend_framework_from_spec("We need a revue of the process.") is None
 
 
-def test_get_frontend_framework_from_spec_angular_unchanged() -> None:
-    """Angular in spec does not return a value (we only detect React/Vue override)."""
-    # We only return react or vue; angular is the default so we don't need to detect it
-    result = get_frontend_framework_from_spec("Use Angular for the frontend.")
-    assert result is None
+def test_get_frontend_framework_from_spec_angular() -> None:
+    """Spec mentioning Angular returns 'angular'."""
+    assert get_frontend_framework_from_spec("Use Angular for the frontend.") == "angular"
+    assert get_frontend_framework_from_spec("Build an Angular app.") == "angular"
+    assert get_frontend_framework_from_spec("ANGULAR application") == "angular"
 
 
 def test_resolve_frontend_framework_task_metadata_first() -> None:
@@ -71,11 +78,39 @@ def test_resolve_frontend_framework_spec_fallback() -> None:
     assert resolve_frontend_framework(None, "Use Vue.js.") == "vue"
 
 
-def test_resolve_frontend_framework_default_angular() -> None:
-    """When neither metadata nor spec specify, default is Angular."""
-    assert resolve_frontend_framework({}, "") == "angular"
-    assert resolve_frontend_framework(None, "Generic frontend requirements.") == "angular"
-    assert resolve_frontend_framework({}, "Use TypeScript and REST APIs.") == "angular"
+def test_resolve_frontend_framework_returns_none_when_no_framework() -> None:
+    """When neither metadata, project files, nor spec specify a framework, returns None."""
+    assert resolve_frontend_framework({}, "") is None
+    assert resolve_frontend_framework(None, "Generic frontend requirements.") is None
+    assert resolve_frontend_framework({}, "Use TypeScript and REST APIs.") is None
+
+
+def test_detect_framework_from_project_angular(tmp_path: Path) -> None:
+    """Detect Angular from angular.json or package.json."""
+    (tmp_path / "angular.json").write_text("{}")
+    assert detect_framework_from_project(tmp_path) == "angular"
+
+
+def test_detect_framework_from_project_react(tmp_path: Path) -> None:
+    """Detect React from package.json."""
+    import json
+    pkg = tmp_path / "package.json"
+    pkg.write_text(json.dumps({"dependencies": {"react": "^18.0.0"}}))
+    assert detect_framework_from_project(tmp_path) == "react"
+
+
+def test_detect_framework_from_project_vue(tmp_path: Path) -> None:
+    """Detect Vue from package.json."""
+    import json
+    pkg = tmp_path / "package.json"
+    pkg.write_text(json.dumps({"dependencies": {"vue": "^3.0.0"}}))
+    assert detect_framework_from_project(tmp_path) == "vue"
+
+
+def test_detect_framework_from_project_none(tmp_path: Path) -> None:
+    """No framework detected when no indicators present."""
+    assert detect_framework_from_project(tmp_path) is None
+    assert detect_framework_from_project(None) is None
 
 
 def test_resolve_frontend_framework_normalizes_value() -> None:

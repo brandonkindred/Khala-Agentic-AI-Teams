@@ -43,15 +43,12 @@ def _resolved_framework_for_implementation(
     spec_content: Optional[str],
 ) -> str:
     """
-    Resolve framework (task metadata -> spec -> default Angular).
-    Vue is not yet implemented; treat as Angular and log.
+    Resolve framework from task metadata, spec content, or project files.
+    Returns "react", "angular", "vue", or "react" as default if none detected.
     """
     resolved = resolve_frontend_framework(task_metadata, spec_content)
-    if resolved == "vue":
-        logger.info(
-            "Frontend: Vue requested but not yet implemented; using Angular"
-        )
-        return "angular"
+    if resolved is None:
+        return "react"
     return resolved
 
 
@@ -532,8 +529,9 @@ class FrontendExpertAgent:
         code_review_count = len(input_data.code_review_issues) if input_data.code_review_issues else 0
         has_issues = qa_count > 0 or security_count > 0 or accessibility_count > 0 or code_review_count > 0
 
-        framework_target = (input_data.framework_target or "angular").lower().strip()
-        framework_label = "Frontend / React" if framework_target == "react" else "Frontend / Angular"
+        framework_target = (input_data.framework_target or "react").lower().strip()
+        framework_labels = {"react": "Frontend / React", "angular": "Frontend / Angular", "vue": "Frontend / Vue"}
+        framework_label = framework_labels.get(framework_target, f"Frontend / {framework_target.title()}")
 
         context_parts: List[str] = [f"**Framework target:** {framework_target}"]
         if has_issues:
@@ -671,8 +669,8 @@ class FrontendExpertAgent:
         empty_retry_prompt = (
             "\n\n**CRITICAL - Your previous response was REJECTED:** "
             "You produced 0 files and 0 code characters. You MUST return a valid JSON object with a 'files' key "
-            "containing at least one complete Angular component file (path -> content). Without files, the task cannot be completed. "
-            "Try again with concrete, complete file contents under src/app/."
+            "containing at least one complete component file (path -> content). Without files, the task cannot be completed. "
+            "Try again with concrete, complete file contents under src/."
         )
 
         data = None
@@ -1115,8 +1113,8 @@ class FrontendExpertAgent:
                         # Fallback to generic code_review_issues if QA returns nothing
                         qa_issues = [{
                             "severity": "critical",
-                            "description": f"ng build failed: {build_errors[:2000]}",
-                            "recommendation": "Fix the Angular compilation errors",
+                            "description": f"Build failed: {build_errors[:2000]}",
+                            "recommendation": "Fix the compilation errors",
                         }]
                     if consecutive_same_build_failures >= 2:
                         qa_issues.insert(0, {

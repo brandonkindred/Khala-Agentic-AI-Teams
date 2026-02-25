@@ -25,7 +25,7 @@ class DevOpsInput(BaseModel):
     tech_stack: Optional[List[str]] = None  # e.g. ["python", "docker", "kubernetes"]
     target_repo: Optional[TargetRepo] = Field(
         default=None,
-        description="Which application repo to containerize: backend (Python/FastAPI) or frontend (Node/Angular). When set, produce a Dockerfile and CI appropriate for that repo only.",
+        description="Which application repo to containerize: backend (Python/FastAPI) or frontend (Node/React/Angular/Vue). When set, produce a Dockerfile and CI appropriate for that repo only.",
     )
     task_plan: Optional[str] = Field(
         default=None,

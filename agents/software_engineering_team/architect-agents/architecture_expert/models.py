@@ -17,7 +17,7 @@ class ArchitectureInput(BaseModel):
     )
     technology_preferences: Optional[List[str]] = Field(
         None,
-        description="Preferred technologies (e.g. Python, Angular, Kubernetes)",
+        description="Preferred technologies (e.g. Python, React, Angular, Vue, Kubernetes)",
     )
     project_overview: Optional[Dict[str, Any]] = Field(
         None,

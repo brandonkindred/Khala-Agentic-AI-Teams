@@ -87,13 +87,14 @@ CODING_STANDARDS = """
    - GOOD: `user_service.py`, `task_router.py`, `auth.py`, `models.py`
    - BAD: `implement_user_registration_with_email.py`, `create_the_authentication_service.py`
 
-   **TypeScript / Angular:**
+   **TypeScript / Frontend (React, Angular, Vue):**
    - Files/folders: `kebab-case` (e.g. `user-list/`, `task-detail.component.ts`, `auth.service.ts`)
-   - Component selectors: `kebab-case` with `app-` prefix (e.g. `app-user-list`, `app-nav-bar`)
+   - Angular component selectors: `kebab-case` with `app-` prefix (e.g. `app-user-list`, `app-nav-bar`)
+   - React components: `PascalCase` files (e.g. `UserList.tsx`, `TaskDetail.tsx`)
    - Classes/components: `PascalCase` (e.g. `UserListComponent`, `AuthService`, `TaskDetailComponent`)
    - Variables/methods: `camelCase` (e.g. `getUserById`, `isLoading`, `taskList`)
    - GOOD: `user-list/`, `task-form/`, `app-shell/`, `nav-bar/`, `auth.service.ts`
-   - BAD: `implement-the-userlistcomponent-that/`, `create-the-angular-application-shell/`
+   - BAD: `implement-the-userlistcomponent-that/`, `create-the-application-shell/`
 
    **Java:**
    - Classes: `PascalCase` (e.g. `UserController`, `TaskService`, `AuthFilter`)

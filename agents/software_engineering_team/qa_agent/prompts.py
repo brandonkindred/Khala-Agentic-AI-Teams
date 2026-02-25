@@ -60,7 +60,9 @@ Your task: Analyze the build errors and produce bug reports with clear "recommen
 
 QA_PROMPT_WRITE_TESTS = """
 **MODE: write_tests** – Focus on producing unit_tests and integration_tests for the code below.
-- For Angular/TypeScript: use Jasmine/Karma for unit tests (*.spec.ts), Cypress or Angular integration for e2e.
+- For React/TypeScript: use Jest/React Testing Library for unit tests (*.test.tsx), Cypress or Playwright for e2e.
+- For Angular/TypeScript: use Jasmine/Karma for unit tests (*.spec.ts), Cypress for e2e.
+- For Vue/TypeScript: use Vitest/Vue Test Utils for unit tests, Cypress or Playwright for e2e.
 - For Python: use pytest for unit and integration tests.
 - Return complete, runnable test code in the "unit_tests" and "integration_tests" fields.
 - Map unit tests to the component/service/file being tested. Integration tests should cover key user flows.

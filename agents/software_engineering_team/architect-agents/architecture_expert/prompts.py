@@ -21,7 +21,7 @@ Produce a complete system architecture design that includes:
    - name
    - type (backend, frontend, database, cache, queue, api_gateway, etc.)
    - description
-   - technology (e.g. Python/FastAPI, Angular, PostgreSQL, Redis)
+   - technology (e.g. Python/FastAPI, React/Angular/Vue, PostgreSQL, Redis)
    - dependencies (other component names)
    - interfaces (APIs, contracts, or integration points)
 

@@ -17,7 +17,7 @@ FRONTEND_ARCHITECT_PROMPT = """You are a Frontend Architect Agent. Your job is t
 **Your task:**
 Produce architecture artifacts that the Feature Implementation agent will use:
 
-1. **Folder Structure** – Directory layout: src/app structure, where components go, where services go, shared vs feature-specific. Naming conventions. Angular project structure (standalone components, lazy loading).
+1. **Folder Structure** – Directory layout: src structure, where components go, where services/hooks go, shared vs feature-specific. Naming conventions. Framework-native project structure (React hooks/components, Angular standalone, Vue composition API).
 2. **Routing Strategy** – Route structure, lazy-loaded routes, guards, route params. How navigation works.
 3. **State Management** – Server state (API data, caching) vs UI state (form state, modals, filters). When to use services, signals, or NgRx. Data flow.
 4. **Error Handling** – Global error boundary, HTTP interceptor for errors, how to surface errors to users. Retry strategies.

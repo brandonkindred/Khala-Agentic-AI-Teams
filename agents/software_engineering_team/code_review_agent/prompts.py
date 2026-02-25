@@ -17,13 +17,17 @@ You review code that has been written by a coding agent (Frontend or Backend) fo
    - Are there missing features or incomplete implementations?
 
 2. **Naming Conventions** - Are names appropriate and follow conventions?
-   - Angular: kebab-case for components (e.g., `task-list`, NOT `create-the-angular-application-shell-tha`)
+   - React: PascalCase for components (e.g., `TaskList.tsx`, `UserProfile.tsx`)
+   - Angular: kebab-case for components (e.g., `task-list/`, `user-profile/`)
+   - Vue: PascalCase or kebab-case for components
    - Python: snake_case for modules/functions, PascalCase for classes
    - Names must be short (1-3 words), descriptive, and NOT derived from task descriptions
    - CRITICAL: Reject any component/file name that looks like a task description or sentence
 
 3. **File Structure** - Does the code follow proper project structure?
+   - React: `src/components/`, `src/hooks/`, `src/services/`, `src/types/`, etc.
    - Angular: `src/app/components/`, `src/app/services/`, `src/app/models/`, etc.
+   - Vue: `src/components/`, `src/composables/`, `src/stores/`, etc.
    - Python/FastAPI: `app/routers/`, `app/models/`, `app/services/`, `tests/`, etc.
    - Are all necessary files included (templates, styles, tests, etc.)?
 
