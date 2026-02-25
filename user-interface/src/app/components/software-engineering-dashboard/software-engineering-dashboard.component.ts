@@ -76,12 +76,19 @@ import type {
   styleUrl: './software-engineering-dashboard.component.scss',
 })
 export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy {
+  private static readonly JOB_TYPE_TAB_MAP: Record<string, number> = {
+    run_team: 0,
+    backend_code_v2: 3,
+    frontend_code_v2: 4,
+    planning_v2: 5,
+  };
   private readonly api = inject(SoftwareEngineeringApiService);
   private runningJobsSub: Subscription | null = null;
 
   loading = false;
   error: string | null = null;
   jobId: string | null = null;
+  selectedTabIndex = 0;
   jobStatus: JobStatusResponse | null = null;
   clarificationSessionId: string | null = null;
   architectSpec = '';
@@ -132,6 +139,26 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     this.selectedRunningJob = job;
     if (job.job_type !== 'run_team') {
       this.panelRunTeamStatus = null;
+    }
+
+    const tabIndex = SoftwareEngineeringDashboardComponent.JOB_TYPE_TAB_MAP[job.job_type];
+    if (tabIndex !== undefined) {
+      this.selectedTabIndex = tabIndex;
+    }
+
+    switch (job.job_type) {
+      case 'run_team':
+        this.jobId = job.job_id;
+        break;
+      case 'backend_code_v2':
+        this.backendCodeV2JobId = job.job_id;
+        break;
+      case 'frontend_code_v2':
+        this.frontendCodeV2JobId = job.job_id;
+        break;
+      case 'planning_v2':
+        this.planningV2JobId = job.job_id;
+        break;
     }
   }
 

@@ -15,7 +15,7 @@
 
 <div class="dashboard-layout">
   <div class="main-content">
-<mat-tab-group>
+<mat-tab-group [(selectedIndex)]="selectedTabIndex">
   <mat-tab label="Run Team">
     <div class="tab-content">
       <app-run-team-form (submitRequest)="onRunTeamSubmit($event)" />

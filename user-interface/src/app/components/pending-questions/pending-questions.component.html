@@ -79,8 +79,10 @@
           <mat-spinner diameter="20" class="button-spinner"></mat-spinner>
           Submitting...
         } @else {
-          <mat-icon>send</mat-icon>
-          Submit All Answers
+          <ng-container>
+            <mat-icon>send</mat-icon>
+            Submit All Answers
+          </ng-container>
         }
       </button>
     </mat-card-actions>
