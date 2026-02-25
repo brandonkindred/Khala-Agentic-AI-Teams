@@ -1729,8 +1729,21 @@ def run_orchestrator(
         from planning_v2_team import PlanningV2TeamLead
         from planning_v2_adapter import adapt_planning_v2_result, PlanningV2AdapterResult
 
+        PLANNING_V2_PHASE_ORDER = [
+            "intake", "spec_review_gap", "planning", "implementation", "review", "problem_solving", "deliver"
+        ]
+
         def _planning_v2_job_updater(**kwargs: Any) -> None:
             try:
+                planning_phase = kwargs.pop("current_phase", None)
+                if planning_phase:
+                    kwargs["planning_subprocess"] = planning_phase
+                    completed_phases = []
+                    for p in PLANNING_V2_PHASE_ORDER:
+                        if p == planning_phase:
+                            break
+                        completed_phases.append(p)
+                    kwargs["planning_completed_phases"] = completed_phases
                 update_job(job_id, **kwargs)
             except Exception:
                 pass

@@ -8,46 +8,72 @@
     [mode]="'side'"
     [opened]="true"
   >
-    <mat-toolbar color="primary">
-      <span>Agents UI</span>
-    </mat-toolbar>
-    <nav mat-nav-list [attr.aria-label]="'Agent features'">
-      <a mat-list-item routerLink="/blogging" routerLinkActive="active" [attr.aria-current]="isActive('/blogging') ? 'page' : null">
-        <mat-icon matListItemIcon>article</mat-icon>
-        <span matListItemTitle>Blogging</span>
-      </a>
-      <a mat-list-item routerLink="/software-engineering" routerLinkActive="active" [attr.aria-current]="isActive('/software-engineering') && !isActive('/software-engineering/planning-v2') ? 'page' : null">
-        <mat-icon matListItemIcon>code</mat-icon>
-        <span matListItemTitle>Software Engineering</span>
-      </a>
-      <a mat-list-item routerLink="/software-engineering/planning-v2" routerLinkActive="active" [attr.aria-current]="isActive('/software-engineering/planning-v2') ? 'page' : null">
-        <mat-icon matListItemIcon>assignment</mat-icon>
-        <span matListItemTitle>Planning V2</span>
-      </a>
-      <a mat-list-item routerLink="/market-research" routerLinkActive="active" [attr.aria-current]="isActive('/market-research') ? 'page' : null">
-        <mat-icon matListItemIcon>analytics</mat-icon>
-        <span matListItemTitle>Market Research</span>
-      </a>
-      <a mat-list-item routerLink="/soc2-compliance" routerLinkActive="active" [attr.aria-current]="isActive('/soc2-compliance') ? 'page' : null">
-        <mat-icon matListItemIcon>security</mat-icon>
-        <span matListItemTitle>SOC2 Compliance</span>
-      </a>
-      <a mat-list-item routerLink="/social-marketing" routerLinkActive="active" [attr.aria-current]="isActive('/social-marketing') ? 'page' : null">
-        <mat-icon matListItemIcon>campaign</mat-icon>
-        <span matListItemTitle>Social Marketing</span>
-      </a>
-      <a mat-list-item routerLink="/branding" routerLinkActive="active" [attr.aria-current]="isActive('/branding') ? 'page' : null">
-        <mat-icon matListItemIcon>style</mat-icon>
-        <span matListItemTitle>Branding</span>
-      </a>
+    <div class="sidenav-header">
+      <div class="brand-logo">
+        <mat-icon class="brand-icon">hub</mat-icon>
+      </div>
+      <div class="brand-text">
+        <span class="brand-title">Strands</span>
+        <span class="brand-subtitle">AI Agent Platform</span>
+      </div>
+    </div>
+
+    <nav class="nav-section" [attr.aria-label]="'Agent features'">
+      <div class="nav-group">
+        <div class="nav-group-label">Content</div>
+        <a routerLink="/blogging" routerLinkActive="active" class="nav-link">
+          <mat-icon>article</mat-icon>
+          <span>Blogging</span>
+        </a>
+        <a routerLink="/branding" routerLinkActive="active" class="nav-link">
+          <mat-icon>palette</mat-icon>
+          <span>Branding</span>
+        </a>
+        <a routerLink="/social-marketing" routerLinkActive="active" class="nav-link">
+          <mat-icon>campaign</mat-icon>
+          <span>Social Marketing</span>
+        </a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-label">Development</div>
+        <a routerLink="/software-engineering" routerLinkActive="active" [routerLinkActiveOptions]="{exact: true}" class="nav-link">
+          <mat-icon>terminal</mat-icon>
+          <span>Software Engineering</span>
+        </a>
+        <a routerLink="/software-engineering/planning-v2" routerLinkActive="active" class="nav-link nav-link-nested">
+          <mat-icon>architecture</mat-icon>
+          <span>Planning V2</span>
+        </a>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-group-label">Research & Compliance</div>
+        <a routerLink="/market-research" routerLinkActive="active" class="nav-link">
+          <mat-icon>insights</mat-icon>
+          <span>Market Research</span>
+        </a>
+        <a routerLink="/soc2-compliance" routerLinkActive="active" class="nav-link">
+          <mat-icon>verified_user</mat-icon>
+          <span>SOC2 Compliance</span>
+        </a>
+      </div>
     </nav>
+
+    <div class="sidenav-footer">
+      <div class="footer-content">
+        <mat-icon>auto_awesome</mat-icon>
+        <span>Powered by AI</span>
+      </div>
+    </div>
   </mat-sidenav>
+
   <mat-sidenav-content>
-    <mat-toolbar color="primary">
-      <button mat-icon-button (click)="drawer.toggle()" [attr.aria-label]="'Toggle navigation menu'">
+    <mat-toolbar class="main-toolbar">
+      <button mat-icon-button (click)="drawer.toggle()" [attr.aria-label]="'Toggle navigation menu'" class="menu-button">
         <mat-icon>menu</mat-icon>
       </button>
-      <span>Strands Agents</span>
+      <span class="toolbar-title">Strands Agents</span>
       <span class="spacer"></span>
       <app-api-status-widget />
     </mat-toolbar>

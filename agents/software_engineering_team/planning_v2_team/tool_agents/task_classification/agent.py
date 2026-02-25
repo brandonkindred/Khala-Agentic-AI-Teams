@@ -65,7 +65,7 @@ def _extract_tasks_from_hierarchy(hierarchy: Optional[PlanningHierarchy]) -> Lis
                         "id": task.id,
                         "title": task.title,
                         "description": task.description,
-                        "current_team": task.assigned_team or "",
+                        "current_team": task.assignee or "",
                     })
     return tasks
 

@@ -218,7 +218,7 @@ def _hierarchy_to_markdown(hierarchy: PlanningHierarchy) -> str:
                         parts.append(f"##### Task: {task.title}\n")
                         parts.append(f"- **ID:** {task.id}\n")
                         parts.append(f"- **Description:** {task.description}\n")
-                        parts.append(f"- **Assigned Team:** {task.assigned_team}\n")
+                        parts.append(f"- **Assigned Team:** {task.assignee}\n")
                         if task.acceptance_criteria:
                             parts.append("- **Acceptance Criteria:**\n")
                             for ac in task.acceptance_criteria:

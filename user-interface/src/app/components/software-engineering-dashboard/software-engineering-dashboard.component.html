@@ -20,15 +20,12 @@
     <div class="tab-content">
       <app-run-team-form (submitRequest)="onRunTeamSubmit($event)" />
       @if (jobId) {
-        <app-job-status [jobId]="jobId" (statusChange)="jobStatus = $event" />
-        @if (jobStatus?.waiting_for_answers && jobStatus?.pending_questions?.length) {
-          <app-pending-questions
-            [jobId]="jobId"
-            [questions]="jobStatus!.pending_questions ?? []"
-            (answersSubmitted)="onAnswersSubmitted($event)"
-          />
-        }
-        <app-run-team-tracking [jobId]="jobId" [status]="jobStatus" />
+        <app-run-team-tracking [jobId]="jobId" (statusChange)="jobStatus = $event" />
+        <app-pending-questions
+          [jobId]="jobId"
+          [questions]="jobStatus?.pending_questions ?? []"
+          (answersSubmitted)="onAnswersSubmitted($event)"
+        />
         <app-retry-failed
           [jobId]="jobId"
           [hasFailedTasks]="(jobStatus?.failed_tasks?.length ?? 0) > 0"
@@ -81,14 +78,12 @@
           [jobId]="planningV2JobId"
           (statusChange)="onPlanningV2StatusChange($event)"
         />
-        @if (planningV2Status?.waiting_for_answers && planningV2Status?.pending_questions?.length) {
-          <app-pending-questions
-            [jobId]="planningV2JobId"
-            [questions]="planningV2Status!.pending_questions ?? []"
-            submitEndpoint="planning-v2"
-            (answersSubmitted)="onPlanningV2AnswersSubmitted($event)"
-          />
-        }
+        <app-pending-questions
+          [jobId]="planningV2JobId"
+          [questions]="planningV2Status?.pending_questions ?? []"
+          submitEndpoint="planning-v2"
+          (answersSubmitted)="onPlanningV2AnswersSubmitted($event)"
+        />
       }
     </div>
   </mat-tab>
@@ -154,57 +149,6 @@
             }
           </div>
 
-          @if (selectedRunningJob) {
-            <div class="panel-status">
-              @switch (selectedRunningJob.job_type) {
-                @case ('run_team') {
-                  <app-job-status
-                    [jobId]="selectedRunningJob.job_id"
-                    (statusChange)="panelRunTeamStatus = $event"
-                  />
-                  @if (panelRunTeamStatus?.waiting_for_answers && panelRunTeamStatus?.pending_questions?.length) {
-                    <app-pending-questions
-                      [jobId]="selectedRunningJob.job_id"
-                      [questions]="panelRunTeamStatus!.pending_questions ?? []"
-                      (answersSubmitted)="onPanelRunTeamAnswersSubmitted($event)"
-                    />
-                  }
-                  @if (panelRunTeamStatus) {
-                    <app-run-team-tracking
-                      [jobId]="selectedRunningJob.job_id"
-                      [status]="panelRunTeamStatus"
-                    />
-                  }
-                }
-                @case ('backend_code_v2') {
-                  <app-backend-code-v2-job-status [jobId]="selectedRunningJob.job_id" />
-                }
-                @case ('frontend_code_v2') {
-                  <app-frontend-code-v2-job-status [jobId]="selectedRunningJob.job_id" />
-                }
-                @case ('planning_v2') {
-                  <app-planning-v2-job-status
-                    [jobId]="selectedRunningJob.job_id"
-                    (statusChange)="onPanelPlanningV2StatusChange($event)"
-                  />
-                  @if (panelPlanningV2Status?.waiting_for_answers && panelPlanningV2Status?.pending_questions?.length) {
-                    <app-pending-questions
-                      [jobId]="selectedRunningJob.job_id"
-                      [questions]="panelPlanningV2Status!.pending_questions ?? []"
-                      submitEndpoint="planning-v2"
-                      (answersSubmitted)="onPanelPlanningV2AnswersSubmitted($event)"
-                    />
-                  }
-                }
-                @default {
-                  <app-job-status [jobId]="selectedRunningJob.job_id" (statusChange)="panelRunTeamStatus = $event" />
-                  @if (panelRunTeamStatus) {
-                    <app-run-team-tracking [jobId]="selectedRunningJob.job_id" [status]="panelRunTeamStatus" />
-                  }
-                }
-              }
-            </div>
-          }
         </mat-card-content>
       </mat-card>
     </aside>

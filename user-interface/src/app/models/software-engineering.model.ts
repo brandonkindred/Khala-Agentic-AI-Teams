@@ -47,7 +47,41 @@ export interface TeamProgressEntry {
   current_phase?: string;
   progress?: number;
   current_task_id?: string;
+  current_microtask?: string;
+  microtasks_completed?: number;
+  microtasks_total?: number;
 }
+
+// ---------------------------------------------------------------------------
+// Phase Definitions for Subprocess Tracking
+// ---------------------------------------------------------------------------
+
+/** Phase definition for subprocess steppers. */
+export interface PhaseDefinition {
+  id: string;
+  label: string;
+  icon: string;
+}
+
+/** Planning-v2 subprocesses (spec review, planning, implementation, etc.). */
+export const PLANNING_V2_PHASES: PhaseDefinition[] = [
+  { id: 'intake', label: 'Intake', icon: 'input' },
+  { id: 'spec_review_gap', label: 'Spec Review & Gap Analysis', icon: 'description' },
+  { id: 'planning', label: 'Planning', icon: 'event_note' },
+  { id: 'implementation', label: 'Implementation', icon: 'build' },
+  { id: 'review', label: 'Review', icon: 'rate_review' },
+  { id: 'problem_solving', label: 'Problem Solving', icon: 'psychology' },
+  { id: 'deliver', label: 'Deliver', icon: 'local_shipping' },
+];
+
+/** Code team phases (backend-code-v2, frontend-code-v2). */
+export const CODE_TEAM_PHASES: PhaseDefinition[] = [
+  { id: 'setup', label: 'Setup', icon: 'settings' },
+  { id: 'planning', label: 'Planning', icon: 'event_note' },
+  { id: 'execution', label: 'Execution', icon: 'code' },
+  { id: 'documentation', label: 'Documentation', icon: 'article' },
+  { id: 'deliver', label: 'Deliver', icon: 'local_shipping' },
+];
 
 /** Response from GET /run-team/{job_id}. */
 export interface JobStatusResponse {
@@ -72,6 +106,10 @@ export interface JobStatusResponse {
   pending_questions?: PendingQuestion[];
   /** True when job is blocked waiting for user to answer pending questions. */
   waiting_for_answers?: boolean;
+  /** Current subprocess within planning phase (spec_review_gap, planning, etc.). */
+  planning_subprocess?: string;
+  /** Completed subprocesses within the planning phase. */
+  planning_completed_phases?: string[];
 }
 
 /** Response from POST /run-team/{job_id}/retry-failed. */

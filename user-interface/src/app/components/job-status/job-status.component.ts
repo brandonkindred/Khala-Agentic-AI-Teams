@@ -27,27 +27,37 @@ export class JobStatusComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     if (this.jobId) {
-      this.sub = timer(0, 60000)
-        .pipe(switchMap(() => this.api.getJobStatus(this.jobId!)))
-        .subscribe({
-          next: (res) => {
-            this.status = res;
-            this.statusChange.emit(res);
-            this.loading = false;
-            if (res.status === 'completed' || res.status === 'failed') {
-              this.sub?.unsubscribe();
-              this.sub = null;
-            }
-          },
-          error: () => {
-            this.loading = false;
-            this.sub?.unsubscribe();
-            this.sub = null;
-          },
-        });
+      this.startPolling();
     } else {
       this.loading = false;
     }
+  }
+
+  private startPolling(): void {
+    this.sub?.unsubscribe();
+    const pollInterval = this.status?.waiting_for_answers ? 5000 : 15000;
+    this.sub = timer(0, pollInterval)
+      .pipe(switchMap(() => this.api.getJobStatus(this.jobId!)))
+      .subscribe({
+        next: (res) => {
+          const wasWaiting = this.status?.waiting_for_answers;
+          const isWaiting = res.waiting_for_answers;
+          this.status = res;
+          this.statusChange.emit(res);
+          this.loading = false;
+          if (res.status === 'completed' || res.status === 'failed') {
+            this.sub?.unsubscribe();
+            this.sub = null;
+          } else if (wasWaiting !== isWaiting) {
+            this.startPolling();
+          }
+        },
+        error: () => {
+          this.loading = false;
+          this.sub?.unsubscribe();
+          this.sub = null;
+        },
+      });
   }
 
   ngOnDestroy(): void {

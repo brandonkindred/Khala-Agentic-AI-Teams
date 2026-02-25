@@ -1,17 +1,135 @@
 @if (jobId && status) {
-  <mat-card class="tracking-card">
+  <mat-card class="tracking-card" [class.waiting-for-answers]="status.waiting_for_answers">
     <mat-card-header>
-      <mat-card-title>Execution progress</mat-card-title>
+      <mat-card-title>Job Progress</mat-card-title>
       <mat-card-subtitle>
-        @if (status.phase) {
-          Phase: <strong>{{ phaseLabel(status.phase) }}</strong>
-        }
+        <span class="status-badge" [ngClass]="getStatusBadgeClass()">{{ getStatusBadge() }}</span>
         @if (status.repo_path) {
-          &nbsp;|&nbsp; {{ status.repo_path }}
+          <span class="repo-path">{{ status.repo_path }}</span>
         }
       </mat-card-subtitle>
     </mat-card-header>
     <mat-card-content>
+      <!-- Phase Stepper -->
+      <div class="phase-stepper">
+        @for (phase of ALL_PHASES; track phase.id; let i = $index) {
+          <div class="phase-step"
+               [class.completed]="isPhaseCompleted(phase.id)"
+               [class.current]="isCurrentPhase(phase.id)"
+               [class.pending]="isPhasePending(phase.id)">
+            <div class="phase-node">
+              <mat-icon>{{ phase.icon }}</mat-icon>
+            </div>
+            <span class="phase-label">{{ phase.label }}</span>
+          </div>
+          @if (i < ALL_PHASES.length - 1) {
+            <div class="phase-connector"
+                 [class.completed]="isPhaseCompleted(ALL_PHASES[i + 1].id)">
+            </div>
+          }
+        }
+      </div>
+
+      <!-- Planning Subprocess Details -->
+      @if (showPlanningSubprocess()) {
+        <div class="subprocess-section">
+          <h4 class="subprocess-title">
+            <mat-icon>architecture</mat-icon>
+            Planning Progress
+          </h4>
+          <div class="subprocess-stepper">
+            @for (phase of getPlanningSubprocessPhases(); track phase.id; let i = $index) {
+              <div class="subprocess-step"
+                   [class.completed]="isPlanningSubprocessCompleted(phase.id)"
+                   [class.current]="isPlanningSubprocessCurrent(phase.id)"
+                   [class.pending]="isPlanningSubprocessPending(phase.id)">
+                <div class="subprocess-node">
+                  <mat-icon>{{ phase.icon }}</mat-icon>
+                </div>
+                <span class="subprocess-label">{{ phase.label }}</span>
+              </div>
+              @if (i < getPlanningSubprocessPhases().length - 1) {
+                <div class="subprocess-connector"
+                     [class.completed]="isPlanningSubprocessCompleted(getPlanningSubprocessPhases()[i + 1].id)">
+                </div>
+              }
+            }
+          </div>
+        </div>
+      }
+
+      <!-- Execution Subprocess Details (per-team progress) -->
+      @if (showExecutionSubprocess()) {
+        <div class="subprocess-section">
+          <h4 class="subprocess-title">
+            <mat-icon>play_arrow</mat-icon>
+            Execution Progress by Team
+          </h4>
+          <div class="execution-teams">
+            @for (team of getExecutionTeams(); track team.teamId) {
+              <div class="team-subprocess-card">
+                <div class="team-subprocess-header">
+                  <span class="team-subprocess-name">{{ team.label }}</span>
+                  @if (team.progress.progress != null) {
+                    <span class="team-subprocess-pct">{{ team.progress.progress }}%</span>
+                  }
+                </div>
+                @if (team.progress.current_microtask) {
+                  <div class="team-microtask">
+                    <mat-icon>code</mat-icon>
+                    <span>{{ team.progress.current_microtask }}</span>
+                    @if (team.progress.microtasks_completed != null && team.progress.microtasks_total != null) {
+                      <span class="microtask-count">
+                        ({{ team.progress.microtasks_completed }}/{{ team.progress.microtasks_total }})
+                      </span>
+                    }
+                  </div>
+                }
+                <div class="subprocess-stepper subprocess-stepper-small">
+                  @for (phase of getCodeTeamPhases(); track phase.id; let i = $index) {
+                    <div class="subprocess-step"
+                         [class.completed]="isCodeTeamPhaseCompleted(team.teamId, phase.id)"
+                         [class.current]="isCodeTeamPhaseCurrent(team.teamId, phase.id)"
+                         [class.pending]="isCodeTeamPhasePending(team.teamId, phase.id)">
+                      <div class="subprocess-node subprocess-node-small">
+                        <mat-icon>{{ phase.icon }}</mat-icon>
+                      </div>
+                      <span class="subprocess-label">{{ phase.label }}</span>
+                    </div>
+                    @if (i < getCodeTeamPhases().length - 1) {
+                      <div class="subprocess-connector subprocess-connector-small"
+                           [class.completed]="isCodeTeamPhaseCompleted(team.teamId, getCodeTeamPhases()[i + 1].id)">
+                      </div>
+                    }
+                  }
+                </div>
+              </div>
+            }
+          </div>
+        </div>
+      }
+
+      <!-- Waiting for answers notice -->
+      @if (status.waiting_for_answers && status.pending_questions?.length) {
+        <div class="waiting-notice">
+          <mat-icon>help_outline</mat-icon>
+          <span>
+            {{ status.pending_questions?.length ?? 0 }} question(s) require your response before the job can continue.
+          </span>
+        </div>
+      }
+
+      <!-- Error message -->
+      @if (status.error) {
+        <p class="error-message">{{ status.error }}</p>
+      }
+
+      <!-- Current task -->
+      @if (status.current_task) {
+        <p class="current-task"><strong>Current task:</strong> {{ status.current_task }}</p>
+      }
+
+      <!-- Progress bar -->
       @if (status.progress != null) {
         <div class="progress-section">
           <mat-progress-bar
@@ -21,27 +139,51 @@
           ></mat-progress-bar>
           <span class="progress-label">{{ status.progress }}%</span>
         </div>
-      }
-
-      @if (getTeamProgressKeys().length) {
-        <div class="team-progress-row">
-          @for (teamId of getTeamProgressKeys(); track teamId) {
-            <div class="team-progress-item">
-              <span class="team-name">{{ teamLabel(teamId) }}</span>
-              @if (status.team_progress?.[teamId]?.current_phase) {
-                <span class="team-phase">{{ phaseLabel(status.team_progress?.[teamId]?.current_phase ?? '') }}</span>
-              }
-              @if (status.team_progress?.[teamId]?.progress != null) {
-                <span class="team-pct">{{ status.team_progress?.[teamId]?.progress }}%</span>
-              }
-            </div>
-          }
+      } @else if ((status.status === 'running' || status.status === 'pending') && !status.waiting_for_answers) {
+        <div class="progress-section">
+          <mat-progress-bar mode="indeterminate"></mat-progress-bar>
         </div>
       }
 
+      <!-- Failed tasks expansion panel -->
+      @if (status.failed_tasks && status.failed_tasks.length) {
+        <mat-expansion-panel class="failed-tasks-panel">
+          <mat-expansion-panel-header>
+            <mat-panel-title>
+              <mat-icon class="failed-icon">error</mat-icon>
+              Failed tasks ({{ status.failed_tasks.length }})
+            </mat-panel-title>
+          </mat-expansion-panel-header>
+          @for (ft of status.failed_tasks; track ft.task_id) {
+            <p class="failed-task-item"><strong>{{ ft.title || ft.task_id }}</strong>: {{ ft.reason }}</p>
+          }
+        </mat-expansion-panel>
+      }
+
+      <!-- Team progress -->
+      @if (getTeamProgressKeys().length) {
+        <div class="team-progress-section">
+          <h3 class="section-title">Team Progress</h3>
+          <div class="team-progress-row">
+            @for (teamId of getTeamProgressKeys(); track teamId) {
+              <div class="team-progress-item">
+                <span class="team-name">{{ teamLabel(teamId) }}</span>
+                @if (status.team_progress?.[teamId]?.current_phase) {
+                  <span class="team-phase">{{ phaseLabel(status.team_progress?.[teamId]?.current_phase ?? '') }}</span>
+                }
+                @if (status.team_progress?.[teamId]?.progress != null) {
+                  <span class="team-pct">{{ status.team_progress?.[teamId]?.progress }}%</span>
+                }
+              </div>
+            }
+          </div>
+        </div>
+      }
+
+      <!-- Tasks by team swim lanes -->
       @if (getTeamsWithTasks().length) {
         <div class="graph-section">
-          <h3 class="graph-title">Tasks by team</h3>
+          <h3 class="section-title">Tasks by Team</h3>
           @for (lane of getTeamsWithTasks(); track lane.teamId) {
             <div class="swim-lane">
               <div class="lane-header">{{ lane.label }}</div>

@@ -1,14 +1,18 @@
-@if (questions.length > 0) {
-  <mat-card class="pending-questions-card">
-    <mat-card-header>
-      <mat-icon mat-card-avatar class="header-icon">help_outline</mat-icon>
-      <mat-card-title>Clarification Required</mat-card-title>
-      <mat-card-subtitle>
+<mat-card class="pending-questions-card">
+  <mat-card-header>
+    <mat-icon mat-card-avatar class="header-icon">help_outline</mat-icon>
+    <mat-card-title>Open Questions</mat-card-title>
+    <mat-card-subtitle>
+      @if (questions.length > 0) {
         Please answer the following questions to continue ({{ answeredCount }}/{{ questions.length }} answered)
-      </mat-card-subtitle>
-    </mat-card-header>
+      } @else {
+        Questions will appear here when the workflow needs your input
+      }
+    </mat-card-subtitle>
+  </mat-card-header>
 
-    <mat-card-content>
+  <mat-card-content>
+    @if (questions.length > 0) {
       @if (error) {
         <div class="error-message">
           <mat-icon>error</mat-icon>
@@ -66,8 +70,15 @@
           </div>
         }
       </div>
-    </mat-card-content>
+    } @else {
+      <div class="empty-state">
+        <mat-icon class="empty-state-icon">check_circle</mat-icon>
+        <p class="empty-state-text">No open questions</p>
+      </div>
+    }
+  </mat-card-content>
 
+  @if (questions.length > 0) {
     <mat-card-actions align="end">
       <button
         mat-raised-button
@@ -76,8 +87,10 @@
         (click)="submitAnswers()"
       >
         @if (submitting) {
-          <mat-spinner diameter="20" class="button-spinner"></mat-spinner>
-          Submitting...
+          <ng-container>
+            <mat-spinner diameter="20" class="button-spinner"></mat-spinner>
+            Submitting...
+          </ng-container>
         } @else {
           <ng-container>
             <mat-icon>send</mat-icon>
@@ -86,5 +99,5 @@
         }
       </button>
     </mat-card-actions>
-  </mat-card>
-}
+  }
+</mat-card>

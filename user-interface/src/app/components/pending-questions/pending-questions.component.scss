@@ -145,3 +145,26 @@ mat-card-actions {
     stroke: white;
   }
 }
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  text-align: center;
+
+  .empty-state-icon {
+    font-size: 48px;
+    width: 48px;
+    height: 48px;
+    color: #4caf50;
+    margin-bottom: 0.75rem;
+  }
+
+  .empty-state-text {
+    margin: 0;
+    font-size: 1rem;
+    color: #666;
+  }
+}

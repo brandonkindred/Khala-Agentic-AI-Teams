@@ -106,7 +106,8 @@ class UXDesignToolAgent:
                     name = journey.get("name", "Journey")
                     stages = journey.get("stages", [])
                     content_parts.append(f"### {name}\n")
-                    content_parts.append(f"Stages: {' → '.join(stages)}\n\n")
+                    stages_str = [str(s) if not isinstance(s, str) else s for s in stages]
+                    content_parts.append(f"Stages: {' → '.join(stages_str)}\n\n")
         
         if user_flows:
             content_parts.append("## User Flows\n")

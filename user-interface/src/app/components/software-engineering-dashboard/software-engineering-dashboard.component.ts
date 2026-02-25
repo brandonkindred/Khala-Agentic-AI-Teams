@@ -12,7 +12,6 @@ import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-sp
 import { ErrorMessageComponent } from '../../shared/error-message/error-message.component';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { RunTeamFormComponent } from '../run-team-form/run-team-form.component';
-import { JobStatusComponent } from '../job-status/job-status.component';
 import { RetryFailedComponent } from '../retry-failed/retry-failed.component';
 import { RePlanWithClarificationsComponent } from '../re-plan-with-clarifications/re-plan-with-clarifications.component';
 import { ClarificationSessionsComponent } from '../clarification-sessions/clarification-sessions.component';
@@ -55,7 +54,6 @@ import type {
     ErrorMessageComponent,
     HealthIndicatorComponent,
     RunTeamFormComponent,
-    JobStatusComponent,
     RetryFailedComponent,
     RePlanWithClarificationsComponent,
     ClarificationSessionsComponent,

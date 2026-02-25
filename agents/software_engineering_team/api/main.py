@@ -131,6 +131,9 @@ class TeamProgressEntry(BaseModel):
     current_phase: Optional[str] = Field(None, description="e.g. planning, execution, review (backend-code-v2).")
     progress: Optional[int] = Field(None, description="0-100 completion for this team.")
     current_task_id: Optional[str] = Field(None, description="Task ID currently being executed by this team.")
+    current_microtask: Optional[str] = Field(None, description="Title of the currently executing microtask.")
+    microtasks_completed: Optional[int] = Field(None, description="Number of microtasks completed.")
+    microtasks_total: Optional[int] = Field(None, description="Total number of microtasks.")
 
 
 class QuestionOption(BaseModel):
@@ -196,6 +199,14 @@ class JobStatusResponse(BaseModel):
     waiting_for_answers: bool = Field(
         default=False,
         description="True when job is blocked waiting for user to answer pending questions.",
+    )
+    planning_subprocess: Optional[str] = Field(
+        None,
+        description="Current subprocess within planning phase (spec_review_gap, planning, implementation, review, problem_solving, deliver).",
+    )
+    planning_completed_phases: List[str] = Field(
+        default_factory=list,
+        description="Completed subprocesses within the planning phase.",
     )
 
 
@@ -419,6 +430,9 @@ def _parse_team_progress(raw: Any) -> Optional[Dict[str, TeamProgressEntry]]:
                 current_phase=entry.get("current_phase"),
                 progress=entry.get("progress"),
                 current_task_id=entry.get("current_task_id"),
+                current_microtask=entry.get("current_microtask"),
+                microtasks_completed=entry.get("microtasks_completed"),
+                microtasks_total=entry.get("microtasks_total"),
             )
         except Exception:
             continue
@@ -521,6 +535,8 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         "team_progress": {k: v.model_dump() for k, v in team_progress_parsed.items()} if team_progress_parsed else None,
         "pending_questions": [pq.model_dump() for pq in pending_questions_parsed],
         "waiting_for_answers": bool(data.get("waiting_for_answers", False)),
+        "planning_subprocess": data.get("planning_subprocess"),
+        "planning_completed_phases": data.get("planning_completed_phases") or [],
     }
     return JobStatusResponse.model_validate(payload)
 
