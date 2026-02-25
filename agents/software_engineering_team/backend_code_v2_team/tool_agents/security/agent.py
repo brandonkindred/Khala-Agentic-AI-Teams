@@ -1,4 +1,4 @@
-"""Security tool agent for frontend-code-v2: finds security issues in review and fixes them one at a time."""
+"""Security tool agent for backend-code-v2: finds security issues in review and fixes them one at a time."""
 
 from __future__ import annotations
 
@@ -13,7 +13,12 @@ from ...models import (
     ToolAgentPhaseOutput,
 )
 from ...output_templates import parse_problem_solving_single_issue_template, parse_review_template
-from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT, SECURITY_TOOL_AGENT_REVIEW_PROMPT
+from ...prompts import (
+    JAVA_CONVENTIONS,
+    PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT,
+    PYTHON_CONVENTIONS,
+    SECURITY_TOOL_AGENT_REVIEW_PROMPT,
+)
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
@@ -61,7 +66,7 @@ class SecurityToolAgent:
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(
-            recommendations=["Consider XSS prevention, secure forms, and sensitive data handling."],
+            recommendations=["Consider injection prevention, auth checks, and secure defaults."],
             summary="Security planning.",
         )
 
@@ -112,11 +117,14 @@ class SecurityToolAgent:
         ]
         if not security_issues:
             return ToolAgentPhaseOutput(summary="No security issues to fix.")
+        lang = (inp.language or "python").strip().lower()
+        language_conventions = JAVA_CONVENTIONS if lang == "java" else PYTHON_CONVENTIONS
         merged = dict(inp.current_files)
         fixed_count = 0
         for issue in security_issues:
             relevant_code = _relevant_code_for_issue(issue, merged)
             prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT.format(
+                language_conventions=language_conventions,
                 source=issue.source or "security",
                 severity=issue.severity or "medium",
                 description=issue.description or "",

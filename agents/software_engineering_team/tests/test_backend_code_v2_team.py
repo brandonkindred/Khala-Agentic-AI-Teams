@@ -421,7 +421,8 @@ class TestToolAgents:
         assert out.summary
         phase_inp = ToolAgentPhaseInput(phase=Phase.REVIEW)
         assert agent.plan(phase_inp).summary
-        assert agent.review(phase_inp).recommendations
+        # review() returns issues when build is run; when repo_path is missing it returns a skip summary
+        assert agent.review(phase_inp).summary
         assert agent.problem_solve(phase_inp).summary
         assert agent.deliver(phase_inp).summary
 

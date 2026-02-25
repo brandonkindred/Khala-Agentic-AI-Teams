@@ -43,6 +43,8 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     from .tool_agents.containerization import ContainerizationAdapterAgent
     from .tool_agents.git_branch_management import GitBranchManagementToolAgent
     from .tool_agents.build_specialist import BuildSpecialistAdapterAgent
+    from .tool_agents.testing_qa import TestingQAToolAgent
+    from .tool_agents.security import SecurityToolAgent
 
     return {
         ToolAgentKind.DATA_ENGINEERING: DataEngineeringToolAgent(llm),
@@ -51,7 +53,9 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
         ToolAgentKind.CICD: CicdAdapterAgent(),
         ToolAgentKind.CONTAINERIZATION: ContainerizationAdapterAgent(),
         ToolAgentKind.GIT_BRANCH_MANAGEMENT: GitBranchManagementToolAgent(),
-        ToolAgentKind.BUILD_SPECIALIST: BuildSpecialistAdapterAgent(),
+        ToolAgentKind.BUILD_SPECIALIST: BuildSpecialistAdapterAgent(llm),
+        ToolAgentKind.TESTING_QA: TestingQAToolAgent(llm),
+        ToolAgentKind.SECURITY: SecurityToolAgent(llm),
     }
 
 

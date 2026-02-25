@@ -9,7 +9,7 @@ isProject: false
 
 ## Problem
 
-The qwen3.5:397b model (and qwen3.5:cloud) does not expose `num_ctx` or `context_length` in Ollama's `/api/show` response when used as a remote model (e.g. `https://ollama.com:443`). The current resolution order in `[shared/llm.py](software_engineering_team/shared/llm.py)` is:
+The qwen3.5:397b model (and qwen3.5:cloud) does not expose `num_ctx` or `context_length` in Ollama's `/api/show` response when used as a remote model. The current resolution order in `[shared/llm.py](software_engineering_team/shared/llm.py)` is:
 
 1. `SW_LLM_CONTEXT_SIZE` env var
 2. `KNOWN_MODEL_CONTEXT` table

@@ -86,10 +86,10 @@ class TechLeadAgent:
 
         mapping = data.get("requirement_task_mapping") or []
         logger.info(
-            "Tech Lead: produced %s stories across %s epics, execution order: %s",
+            "Tech Lead: produced %s tasks across %s stories (execution order: %s)",
             len(assignment.tasks),
             sum(len(e.stories) for i in hierarchy.initiatives for e in i.epics),
-            assignment.execution_order,
+            assignment.execution_order[:10] if len(assignment.execution_order) > 10 else assignment.execution_order,
         )
         return TechLeadOutput(
             assignment=assignment,

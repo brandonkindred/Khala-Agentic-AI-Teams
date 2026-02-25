@@ -177,12 +177,18 @@ class TaskAssignment(BaseModel):
     rationale: str = ""
 
 
-class StoryPlan(BaseModel):
-    """An individual user story that is part of an epic, assigned to an engineer."""
+class TaskPlan(BaseModel):
+    """
+    A single task under a story. This is the unit distributed to backend, frontend, or devops.
+    When flattened, becomes a shared Task in TaskAssignment.
+    """
 
     id: str
-    title: str
-    description: str = ""
+    title: str = ""
+    description: str = Field(
+        default="",
+        description="Detailed description of what to build; expected behavior; done criteria.",
+    )
     user_story: str = ""
     assignee: str = Field(
         ...,
@@ -190,10 +196,58 @@ class StoryPlan(BaseModel):
     )
     requirements: str = ""
     dependencies: List[str] = Field(default_factory=list)
-    acceptance_criteria: List[str] = Field(default_factory=list)
+    acceptance_criteria: List[str] = Field(
+        default_factory=list,
+        description="Specific, testable acceptance criteria for this task.",
+    )
+    example: Optional[str] = Field(
+        default=None,
+        description="Optional example (e.g. sample request/response, UI mockup description).",
+    )
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Optional metadata (e.g. framework_target for frontend stories).",
+        description="Optional metadata (e.g. framework_target for frontend).",
+    )
+
+
+class StoryPlan(BaseModel):
+    """
+    A user story that is part of an epic. Contains one or more tasks (TaskPlan).
+    Stories and tasks are both highly detailed (acceptance criteria, description, example).
+    The tasks under a story are what get distributed to teams.
+    """
+
+    id: str
+    title: str
+    description: str = Field(
+        default="",
+        description="Detailed description of the story; what done looks like.",
+    )
+    user_story: str = ""
+    requirements: str = ""
+    acceptance_criteria: List[str] = Field(
+        default_factory=list,
+        description="Acceptance criteria for the story as a whole.",
+    )
+    example: Optional[str] = Field(
+        default=None,
+        description="Optional example (e.g. user flow, sample scenario).",
+    )
+    tasks: List[TaskPlan] = Field(
+        default_factory=list,
+        description="Tasks under this story; these are distributed to backend/frontend/devops.",
+    )
+    assignee: Optional[str] = Field(
+        default=None,
+        description="Used only when tasks is empty (backward compat): assignee for the single task derived from this story.",
+    )
+    dependencies: List[str] = Field(
+        default_factory=list,
+        description="Used only when tasks is empty (backward compat): dependencies for the single task derived from this story.",
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional metadata.",
     )
 
 
@@ -223,7 +277,7 @@ class PlanningHierarchy(BaseModel):
     initiatives: List[Initiative] = Field(default_factory=list)
     execution_order: List[str] = Field(
         default_factory=list,
-        description="Story IDs in execution order",
+        description="Task IDs in execution order (tasks are the assignable units under stories)",
     )
     rationale: str = ""
 

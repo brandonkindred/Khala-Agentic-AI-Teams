@@ -252,3 +252,68 @@ def test_execution_order_preserves_llm_order() -> None:
     }
     assignment = parse_assignment_from_data(data)
     assert assignment.execution_order == ["a", "b", "c"]
+
+
+def test_initiative_epic_story_tasks_four_levels() -> None:
+    """When stories contain a 'tasks' array, each task becomes an assignable unit; execution_order uses task IDs."""
+    data = {
+        "initiatives": [
+            {
+                "id": "init-1",
+                "title": "Build App",
+                "description": "Main initiative",
+                "epics": [
+                    {
+                        "id": "epic-auth",
+                        "title": "Authentication",
+                        "description": "User auth feature",
+                        "user_stories_summary": ["User can log in"],
+                        "acceptance_criteria": ["Login works"],
+                        "stories": [
+                            {
+                                "id": "story-login",
+                                "title": "Login flow",
+                                "description": "End-to-end login: UI and API.",
+                                "acceptance_criteria": ["User can log in with email/password"],
+                                "example": "User enters email and password; POST /auth/login returns token.",
+                                "tasks": [
+                                    {
+                                        "id": "backend-auth-login-api",
+                                        "title": "Login API",
+                                        "description": "POST /auth/login with email/password; return JWT.",
+                                        "user_story": "As a client, I want a login endpoint",
+                                        "assignee": "backend",
+                                        "requirements": "FastAPI, JWT",
+                                        "acceptance_criteria": ["POST returns 200 with token", "Invalid credentials return 401"],
+                                        "dependencies": [],
+                                        "example": '{"email":"u@e.com","password":"p"} -> {"token":"..."}',
+                                    },
+                                    {
+                                        "id": "frontend-login-form",
+                                        "title": "Login form",
+                                        "description": "Form that calls login API and stores token.",
+                                        "user_story": "As a user, I want to log in",
+                                        "assignee": "frontend",
+                                        "requirements": "Angular form",
+                                        "acceptance_criteria": ["Form submits to API", "Token stored"],
+                                        "dependencies": ["backend-auth-login-api"],
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+        "execution_order": ["backend-auth-login-api", "frontend-login-form"],
+        "rationale": "Backend first, then frontend.",
+    }
+    assignment = parse_assignment_from_data(data)
+    assert len(assignment.tasks) == 2
+    assert assignment.tasks[0].id == "backend-auth-login-api"
+    assert assignment.tasks[0].assignee == "backend"
+    assert assignment.tasks[0].metadata.get("story_id") == "story-login"
+    assert assignment.tasks[1].id == "frontend-login-form"
+    assert assignment.tasks[1].assignee == "frontend"
+    assert assignment.tasks[1].dependencies == ["backend-auth-login-api"]
+    assert assignment.execution_order == ["backend-auth-login-api", "frontend-login-form"]

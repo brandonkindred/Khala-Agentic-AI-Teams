@@ -602,6 +602,11 @@ def _run_build_verification(
             if is_ng_build_environment_failure(result):
                 # Environment (e.g. Node version) - caller should fail task, not retry
                 return False, "ENV:" + result.error_summary
+            # Try tool-agent build fix (review all issues, fix one at a time)
+            fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, agent_type, task_id)
+            if fixed:
+                logger.info("Build verification passed for frontend task %s after tool-agent fix", task_id)
+                return True, ""
             failures = result.parsed_failures("ng_build")
             if failures:
                 from shared.error_parsing import build_agent_feedback, get_failure_class_tag
@@ -626,6 +631,10 @@ def _run_build_verification(
         result = run_python_syntax_check(backend_dir)
         if not result.success:
             logger.warning("Syntax check failed for task %s: %s", task_id, result.error_summary[:200])
+            fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, agent_type, task_id)
+            if fixed:
+                logger.info("Build verification passed for backend task %s after tool-agent fix", task_id)
+                return True, ""
             return False, result.error_summary
         # Also try pytest if tests directory exists
         tests_dir = backend_dir / "tests"
@@ -666,6 +675,10 @@ def _run_build_verification(
                         "\n\nFIX: Preserve the /test-generic-error route in app/main.py and "
                         "ensure the exception handler returns JSONResponse; do not re-raise."
                     )
+                fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, agent_type, task_id)
+                if fixed:
+                    logger.info("Build verification passed for backend task %s after tool-agent fix", task_id)
+                    return True, ""
                 return False, summary
         logger.info("Build verification passed for backend task %s", task_id)
         return True, ""
@@ -727,6 +740,255 @@ def _run_build_verification(
         return True, ""
 
     return True, ""
+
+
+def _try_build_fix_one_at_a_time(
+    repo_path: Path,
+    agent_type: str,
+    task_id: str,
+) -> tuple[bool, str]:
+    """
+    Use a tool-agent style flow to identify all build issues, then fix them one at a time.
+    Returns (True, "") if build passes after fixes; otherwise (False, error_summary).
+    """
+    from shared.command_runner import (
+        run_command,
+        run_ng_build_with_nvm_fallback,
+        run_python_syntax_check,
+        run_pytest,
+    )
+
+    if agent_type == "frontend":
+        project_dir = repo_path if (repo_path / "package.json").exists() else repo_path / "frontend"
+        if not (project_dir / "package.json").exists():
+            return False, "No Angular project found"
+        try:
+            from shared.command_runner import is_ng_build_environment_failure
+            result = run_ng_build_with_nvm_fallback(project_dir)
+        except Exception as e:
+            logger.warning("Build fix: ng build failed to run: %s", e)
+            return False, str(e)
+        if result.success:
+            return True, ""
+        if is_ng_build_environment_failure(result):
+            return False, result.error_summary
+        failures = result.parsed_failures("ng_build")
+        issues = []
+        for f in failures:
+            issues.append({
+                "description": (f.message or f.raw_excerpt or "")[:500],
+                "file_path": (f.file_path or "")[:300],
+                "recommendation": (f.suggestion or f.playbook_hint or "Fix the build error.")[:500],
+            })
+        if not issues:
+            issues.append({
+                "description": result.error_summary[:500],
+                "file_path": "",
+                "recommendation": "Fix the build error.",
+            })
+        language = "typescript"
+        prompt_module = "frontend_code_v2_team.prompts"
+    elif agent_type == "backend":
+        project_dir = repo_path if any(repo_path.rglob("*.py")) else repo_path / "backend"
+        if not project_dir.exists() or not any(project_dir.rglob("*.py")):
+            return False, "No Python project found"
+        result = run_python_syntax_check(project_dir)
+        test_result = None
+        issues = []
+        if not result.success:
+            stderr = (result.stderr or "").strip()
+            if stderr.startswith("Syntax errors found:"):
+                for line in stderr.split("\n")[1:]:
+                    line = line.strip()
+                    if not line or ":" not in line:
+                        continue
+                    path, _, msg = line.partition(":")
+                    path, msg = path.strip(), msg.strip()
+                    if path and msg:
+                        issues.append({
+                            "description": msg[:500],
+                            "file_path": path[:300],
+                            "recommendation": "Fix the syntax error in this file.",
+                        })
+            if not issues:
+                issues.append({
+                    "description": result.error_summary[:500],
+                    "file_path": "",
+                    "recommendation": "Fix the syntax errors.",
+                })
+        else:
+            tests_dir = project_dir / "tests"
+            if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
+                req_txt = project_dir / "requirements.txt"
+                if req_txt.exists():
+                    try:
+                        run_command(
+                            [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                            cwd=project_dir,
+                            timeout=120,
+                        )
+                    except Exception:
+                        pass
+                test_result = run_pytest(project_dir, python_exe=sys.executable)
+                if not test_result.success:
+                    for f in test_result.parsed_failures("pytest"):
+                        issues.append({
+                            "description": (f.message or f.raw_excerpt or "")[:500],
+                            "file_path": (f.file_path or "")[:300],
+                            "recommendation": (f.suggestion or f.playbook_hint or "Fix the test or implementation.")[:500],
+                        })
+                    if not issues:
+                        issues.append({
+                            "description": test_result.pytest_error_summary()[:500],
+                            "file_path": "",
+                            "recommendation": "Fix the failing tests.",
+                        })
+        if not issues:
+            return True, ""
+        if test_result is not None:
+            result = test_result
+        language = "python"
+        prompt_module = "backend_code_v2_team.prompts"
+    else:
+        return False, "Unsupported agent_type for build fix"
+
+    # Read current files from project_dir (relative paths)
+    current_files: Dict[str, str] = {}
+    ext_map = {"frontend": (".ts", ".tsx", ".html", ".scss", ".css", ".js", ".jsx"), "backend": (".py",)}
+    exts = ext_map.get(agent_type, (".py",))
+    max_chars = 30_000
+    total = 0
+    for ext in exts:
+        for f in project_dir.rglob(f"*{ext}"):
+            if not f.is_file() or any(p in f.parts for p in ("node_modules", ".git", "dist", "build", "__pycache__", ".angular")):
+                continue
+            try:
+                rel = str(f.relative_to(project_dir))
+                content = f.read_text(encoding="utf-8", errors="replace")
+                current_files[rel] = content
+                total += len(content) + len(rel)
+                if total > max_chars:
+                    break
+            except Exception:
+                continue
+        if total > max_chars:
+            break
+
+    try:
+        llm = get_llm_for_agent("build_fix_specialist")
+    except Exception as e:
+        logger.warning("Build fix: could not get LLM: %s", e)
+        return False, result.error_summary if agent_type == "frontend" else (result.error_summary if "result" in dir() else "Build failed")
+
+    from backend_code_v2_team.output_templates import parse_problem_solving_single_issue_template
+    if prompt_module == "frontend_code_v2_team.prompts":
+        from frontend_code_v2_team.prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT
+        language_conventions = ""
+    else:
+        from backend_code_v2_team.prompts import (
+            JAVA_CONVENTIONS,
+            PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT,
+            PYTHON_CONVENTIONS,
+        )
+        language_conventions = JAVA_CONVENTIONS if language == "java" else PYTHON_CONVENTIONS
+
+    max_fix_attempts = 15
+    for attempt in range(max_fix_attempts):
+        if not issues:
+            break
+        issue = issues.pop(0)
+        desc = issue["description"]
+        file_path = issue.get("file_path") or ""
+        rec = issue.get("recommendation") or "Fix the issue."
+        # Build relevant code snippet
+        if file_path and file_path in current_files:
+            relevant_code = f"--- {file_path} ---\n{current_files[file_path][:8000]}"
+        else:
+            parts = []
+            for p, c in list(current_files.items())[:10]:
+                parts.append(f"--- {p} ---\n{c[:2000]}")
+            relevant_code = "\n".join(parts) if parts else "(no code)"
+        if prompt_module == "frontend_code_v2_team.prompts":
+            prompt = FIX_PROMPT.format(
+                source="build",
+                severity="critical",
+                description=desc,
+                file_path=file_path or "N/A",
+                recommendation=rec,
+                current_code=relevant_code,
+            )
+        else:
+            prompt = FIX_PROMPT.format(
+                language_conventions=language_conventions,
+                source="build",
+                severity="critical",
+                description=desc,
+                file_path=file_path or "N/A",
+                recommendation=rec,
+                current_code=relevant_code,
+            )
+        try:
+            raw = llm.complete_text(prompt)
+        except Exception as e:
+            logger.warning("Build fix: LLM call failed (issue %s): %s", desc[:50], e)
+            continue
+        parsed = parse_problem_solving_single_issue_template(raw)
+        fixed_files = parsed.get("files") or {}
+        if not fixed_files:
+            continue
+        for rel_path, content in fixed_files.items():
+            out_path = project_dir / rel_path
+            try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(content, encoding="utf-8")
+                current_files[rel_path] = content
+            except Exception as e:
+                logger.warning("Build fix: could not write %s: %s", rel_path, e)
+        # Re-run build
+        if agent_type == "frontend":
+            result = run_ng_build_with_nvm_fallback(project_dir)
+        else:
+            result = run_python_syntax_check(project_dir)
+            if result.success:
+                tests_dir = project_dir / "tests"
+                if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
+                    result = run_pytest(project_dir, python_exe=sys.executable)
+        if result.success:
+            logger.info(
+                "Build fix (tool agent): task %s build passed after fixing one issue at a time",
+                task_id,
+            )
+            return True, ""
+        # Collect remaining issues for next iteration
+        if agent_type == "frontend":
+            failures = result.parsed_failures("ng_build")
+            issues = [{"description": (f.message or f.raw_excerpt or "")[:500], "file_path": (f.file_path or "")[:300], "recommendation": (f.suggestion or f.playbook_hint or "Fix.")[:500]} for f in failures]
+            if not issues:
+                issues.append({"description": result.error_summary[:500], "file_path": "", "recommendation": "Fix."})
+        else:
+            if not result.success:
+                stderr = (result.stderr or "").strip()
+                issues = []
+                if stderr.startswith("Syntax errors found:"):
+                    for line in stderr.split("\n")[1:]:
+                        line = line.strip()
+                        if ":" in line:
+                            path, _, msg = line.partition(":")
+                            path, msg = path.strip(), msg.strip()
+                            if path and msg:
+                                issues.append({"description": msg[:500], "file_path": path[:300], "recommendation": "Fix syntax."})
+                if not issues:
+                    issues.append({"description": result.error_summary[:500], "file_path": "", "recommendation": "Fix."})
+            else:
+                test_result = run_pytest(project_dir, python_exe=sys.executable)
+                result = test_result
+                if not result.success:
+                    issues = [{"description": (f.message or f.raw_excerpt or "")[:500], "file_path": (f.file_path or "")[:300], "recommendation": (f.suggestion or f.playbook_hint or "Fix.")[:500]} for f in result.parsed_failures("pytest")]
+                    if not issues:
+                        issues.append({"description": result.pytest_error_summary()[:500], "file_path": "", "recommendation": "Fix."})
+
+    error_summary = result.error_summary if hasattr(result, "error_summary") else "Build still failing after fix attempts"
+    return False, error_summary
 
 
 def _pop_runnable_task(
@@ -1262,7 +1524,7 @@ def _run_backend_frontend_workers(
                         with state_lock:
                             t = all_tasks.get(tid)
                             assignee = getattr(t, "assignee", "") or "backend"
-                            if assignee == "frontend":
+                            if assignee in ("frontend", "frontend-code-v2"):
                                 frontend_queue.append(tid)
                             else:
                                 backend_queue.append(tid)
@@ -1589,10 +1851,10 @@ def run_orchestrator(
             tid for tid in full_order
             if all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
         ]
-        frontend_queue: List[str] = [tid for tid in full_order if all_tasks.get(tid) and all_tasks[tid].assignee == "frontend"]
+        frontend_queue: List[str] = []  # All frontend work routed to frontend_code_v2_team via frontend_code_v2_queue
         frontend_code_v2_queue: List[str] = [
             tid for tid in full_order
-            if all_tasks.get(tid) and all_tasks[tid].assignee == "frontend-code-v2"
+            if all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
         ]
         total_tasks = len(prefix_queue) + len(backend_queue) + len(backend_code_v2_queue) + len(frontend_queue) + len(frontend_code_v2_queue)
 
@@ -1808,7 +2070,7 @@ def run_orchestrator(
                 all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
                 for tid in completed_code_task_ids
             )
-            has_frontend = any(all_tasks.get(tid) and all_tasks[tid].assignee == "frontend" for tid in completed_code_task_ids)
+            has_frontend = any(all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2") for tid in completed_code_task_ids)
             if has_backend:
                 logger.info("Tech Lead requested security review - running Security agent on backend repo")
                 code_backend = _read_repo_code(backend_dir)
@@ -1989,13 +2251,10 @@ def run_failed_tasks(job_id: str) -> None:
             tid for tid in failed_ids
             if all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
         ]
-        retry_frontend_queue = [
-            tid for tid in failed_ids
-            if all_tasks.get(tid) and all_tasks[tid].assignee == "frontend"
-        ]
+        retry_frontend_queue: List[str] = []  # All frontend retries go through frontend_code_v2_team
         retry_frontend_code_v2_queue = [
             tid for tid in failed_ids
-            if all_tasks.get(tid) and all_tasks[tid].assignee == "frontend-code-v2"
+            if all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
         ]
         total_tasks = len(retry_prefix) + len(retry_backend_queue) + len(retry_backend_code_v2_queue) + len(retry_frontend_queue) + len(retry_frontend_code_v2_queue)
 

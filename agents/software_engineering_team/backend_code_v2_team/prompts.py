@@ -44,9 +44,7 @@ JAVA_CONVENTIONS = """
 
 PLANNING_PROMPT = """You are the Planning Agent for a backend development team.
 
-Your job: break a task into a set of concrete microtasks that, when completed together,
-fully satisfy the task requirements. Each microtask should be small enough that a single
-specialist tool-agent (or a general code-generation step) can handle it.
+**Context:** You receive a single **task** (assigned to the backend team from the Tech Lead's plan). Your job is to produce **subtasks** (microtasks) that together implement this task. Each subtask should be small enough that a single specialist tool-agent (or a general code-generation step) can handle it. The task's acceptance criteria and detailed description define what "done" means; your subtasks must collectively satisfy them.
 
 **Available tool-agent domains you can assign microtasks to:**
 - data_engineering — schema design, migrations, data integrity, query optimisation
@@ -292,6 +290,88 @@ one sentence: what you changed
 ## END SUMMARY ##
 
 - Output only the file(s) you change. Use "## FILE <path> ##" for each.
+- Do not use JSON. Use only the template above. No explanatory text before or after.
+"""
+
+# ---------------------------------------------------------------------------
+# QA tool agent: review (find issues from testing/QA perspective)
+# ---------------------------------------------------------------------------
+
+QA_TOOL_AGENT_REVIEW_PROMPT = """You are a QA/Testing specialist. Review the code from a testing and quality perspective only.
+
+Focus on:
+1. Missing or weak unit tests, integration tests, or test coverage.
+2. Edge cases and error paths not covered.
+3. Flaky or brittle test patterns (e.g. non-determinism, poor isolation).
+4. Assertions that are too weak or missing.
+5. Test data or mocks that don't reflect real behaviour.
+
+**Task context:**
+{task_description}
+
+**Code to review:**
+{code}
+
+**Output format (template – use exactly these section headers):**
+
+## PASSED ##
+true
+## END PASSED ##
+## ISSUES ##
+---
+source: qa
+severity: critical|high|medium|low|info
+description: what is wrong from a QA/testing perspective
+file_path: which file
+recommendation: how to fix it
+---
+## END ISSUES ##
+## SUMMARY ##
+brief QA assessment
+## END SUMMARY ##
+
+- Use "---" to separate each issue block. Use source: qa for every issue. Omit ## ISSUES ## / ## END ISSUES ## if there are no issues.
+- Do not use JSON. Use only the template above. No explanatory text before or after.
+"""
+
+# ---------------------------------------------------------------------------
+# Security tool agent: review (find issues from security perspective)
+# ---------------------------------------------------------------------------
+
+SECURITY_TOOL_AGENT_REVIEW_PROMPT = """You are a Security specialist. Review the code from a security perspective only.
+
+Focus on:
+1. Injection — SQL, command, or template injection; unsanitized user input.
+2. Authentication/authorisation — bypass risks, weak or missing checks, privilege escalation.
+3. Secrets — hardcoded credentials, API keys, or tokens in code or config.
+4. Insecure defaults — weak crypto, missing HTTPS, or permissive CORS.
+5. Input validation and output encoding — missing or insufficient sanitisation.
+
+**Task context:**
+{task_description}
+
+**Code to review:**
+{code}
+
+**Output format (template – use exactly these section headers):**
+
+## PASSED ##
+true
+## END PASSED ##
+## ISSUES ##
+---
+source: security
+severity: critical|high|medium|low|info
+description: what is wrong from a security perspective
+file_path: which file
+recommendation: how to fix it
+---
+## END ISSUES ##
+## SUMMARY ##
+brief security assessment
+## END SUMMARY ##
+
+- Use "---" to separate each issue block. Use source: security for every issue. Omit ## ISSUES ## / ## END ISSUES ## if there are no issues.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
 

@@ -59,14 +59,14 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
         ToolAgentKind.CICD: CicdAdapterAgent(),
         ToolAgentKind.CONTAINERIZATION: ContainerizationAdapterAgent(),
         ToolAgentKind.DOCUMENTATION: DocumentationToolAgent(),
-        ToolAgentKind.TESTING_QA: TestingQAToolAgent(),
-        ToolAgentKind.SECURITY: SecurityToolAgent(),
+        ToolAgentKind.TESTING_QA: TestingQAToolAgent(llm),
+        ToolAgentKind.SECURITY: SecurityToolAgent(llm),
         ToolAgentKind.GIT_BRANCH_MANAGEMENT: GitBranchManagementToolAgent(),
         ToolAgentKind.UI_DESIGN: UiDesignToolAgent(),
         ToolAgentKind.BRANDING_THEME: BrandingThemeToolAgent(),
         ToolAgentKind.UX_USABILITY: UxUsabilityToolAgent(),
         ToolAgentKind.ACCESSIBILITY: AccessibilityToolAgent(),
-        ToolAgentKind.BUILD_SPECIALIST: BuildSpecialistAdapterAgent(),
+        ToolAgentKind.BUILD_SPECIALIST: BuildSpecialistAdapterAgent(llm),
         ToolAgentKind.LINTER: LinterToolAgent(),
     }
 
