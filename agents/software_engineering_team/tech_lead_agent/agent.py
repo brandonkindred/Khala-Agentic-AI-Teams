@@ -51,10 +51,37 @@ class TechLeadAgent:
         """
         Produce an Initiative -> Epic -> Story hierarchy based on the requirements, existing codebase, and system architecture, existing tasks, and the spec.
 
+        If a planning_hierarchy is provided (from Planning V2), use it directly
+        instead of generating new tasks. The Tech Lead still produces a development
+        plan summary but does not re-create the task breakdown.
+
         Single-path LLM call: build context, call LLM, parse hierarchy, flatten
         to TaskAssignment for execution.
         """
         logger.info("Tech Lead: planning for %s", input_data.requirements.title)
+
+        # If Planning V2 hierarchy is provided, use it directly
+        if input_data.planning_hierarchy:
+            hierarchy = input_data.planning_hierarchy
+            assignment = flatten_hierarchy_to_assignment(hierarchy)
+            task_count = len(assignment.tasks)
+            story_count = sum(len(e.stories) for i in hierarchy.initiatives for e in i.epics)
+            logger.info(
+                "Tech Lead: using Planning V2 hierarchy (%s tasks across %s stories)",
+                task_count,
+                story_count,
+            )
+            # Generate a summary without re-planning
+            summary = f"Using pre-existing Planning V2 hierarchy with {task_count} tasks across {story_count} stories."
+            return TechLeadOutput(
+                assignment=assignment,
+                planning_hierarchy=hierarchy,
+                summary=summary,
+                requirement_task_mapping=[],
+                spec_clarification_needed=False,
+                clarification_questions=[],
+            )
+
         existing_codebase = input_data.existing_codebase or ""
 
         codebase_analysis = ""

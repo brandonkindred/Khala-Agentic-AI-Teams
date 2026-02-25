@@ -21,6 +21,7 @@ from ..models import (
     ToolAgentKind,
     ToolAgentPhaseInput,
 )
+from ..tool_agents.user_story.agent import _hierarchy_to_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +134,21 @@ def run_implementation(
             parts.append(f"- {epic_count} Epic(s)\n")
             parts.append(f"- {story_count} Story(ies)\n")
             parts.append(f"- {task_count} Task(s)\n")
-            parts.append("\nSee `user_stories.md` for detailed hierarchy.\n")
+            parts.append("\nSee `planning_v2_hierarchy.md` in `/plan` for detailed hierarchy.\n")
+            
+            # Write full hierarchy to /plan/planning_v2_hierarchy.md
+            try:
+                main_plan_dir = repo_path / "plan"
+                main_plan_dir.mkdir(parents=True, exist_ok=True)
+                hierarchy_md = _hierarchy_to_markdown(effective_hierarchy)
+                hierarchy_file = main_plan_dir / "planning_v2_hierarchy.md"
+                hierarchy_file.write_text(hierarchy_md, encoding="utf-8")
+                hierarchy_rel_path = str(hierarchy_file.relative_to(repo_path))
+                if hierarchy_rel_path not in assets_created:
+                    assets_created.append(hierarchy_rel_path)
+                logger.info("Implementation: wrote full hierarchy to %s", hierarchy_file)
+            except Exception as e:
+                logger.warning("Implementation: failed to write hierarchy file: %s", e)
         
         out_file = plan_dir / "planning_artifacts.md"
         out_file.write_text("".join(parts), encoding="utf-8")

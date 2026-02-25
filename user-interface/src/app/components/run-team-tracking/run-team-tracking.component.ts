@@ -317,6 +317,13 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   // Task Title and Microtask Phase Tracking
   // ---------------------------------------------------------------------------
 
+  /** Get the title of the job-level current task from task_states. */
+  getCurrentTaskTitle(): string {
+    const taskId = this.status?.current_task;
+    if (!taskId) return '';
+    return this.status?.task_states?.[taskId]?.title ?? taskId;
+  }
+
   /** Get the title of the current task for a team from task_states. */
   getTaskTitle(teamId: string): string | null {
     const taskId = this.status?.team_progress?.[teamId]?.current_task_id;

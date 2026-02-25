@@ -8,10 +8,10 @@ to produce ProductRequirements, project_overview dict, and optional open_questio
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
-from shared.models import ProductRequirements
+from shared.models import PlanningHierarchy, ProductRequirements
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,7 @@ class PlanningV2AdapterResult:
     project_overview: Dict[str, Any]
     open_questions: List[str]
     assumptions: List[str]
+    hierarchy: Optional[PlanningHierarchy] = field(default=None)
 
 
 def adapt_planning_v2_result(
@@ -112,9 +113,16 @@ def adapt_planning_v2_result(
     if spec_review and spec_review.gaps:
         assumptions.append("Gaps identified in spec review will be addressed during implementation.")
 
+    # Extract the planning hierarchy from the result
+    hierarchy: Optional[PlanningHierarchy] = getattr(result, "hierarchy", None)
+    # Also check planning_result.hierarchy as fallback
+    if not hierarchy and planning:
+        hierarchy = getattr(planning, "hierarchy", None)
+
     return PlanningV2AdapterResult(
         requirements=requirements,
         project_overview=project_overview,
         open_questions=open_questions,
         assumptions=assumptions,
+        hierarchy=hierarchy,
     )

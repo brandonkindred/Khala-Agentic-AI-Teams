@@ -1811,6 +1811,8 @@ def run_orchestrator(
         existing_code = _truncate_for_context(_read_repo_code(path), max_code_chars)
 
         # Single-pass planning: Tech Lead produces Initiative/Epic/Story hierarchy
+        # If Planning V2 produced a hierarchy, pass it to Tech Lead to use directly
+        planning_v2_hierarchy = adapter_result.hierarchy
         tech_lead_output = None
         assignment = None
         try:
@@ -1823,6 +1825,7 @@ def run_orchestrator(
                 open_questions=spec_intake_open_questions if spec_intake_open_questions else None,
                 assumptions=spec_intake_assumptions if spec_intake_assumptions else None,
                 resolved_questions=resolved_questions_override,
+                planning_hierarchy=planning_v2_hierarchy,
             ))
         except LLMRateLimitError:
             logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)

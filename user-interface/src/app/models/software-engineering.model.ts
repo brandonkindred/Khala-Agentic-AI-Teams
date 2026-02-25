@@ -49,6 +49,7 @@ export interface TeamProgressEntry {
   current_task_id?: string;
   current_microtask?: string;
   current_microtask_phase?: string;
+  phase_detail?: string;
   microtasks_completed?: number;
   microtasks_total?: number;
 }

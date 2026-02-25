@@ -121,6 +121,14 @@
                       </div>
                     </div>
                   }
+
+                  <!-- Phase Detail Status -->
+                  @if (team.progress.phase_detail) {
+                    <div class="phase-detail-status">
+                      <mat-icon class="spinning">sync</mat-icon>
+                      <span>{{ team.progress.phase_detail }}</span>
+                    </div>
+                  }
                 }
 
                 <!-- Team Phase Stepper -->
@@ -165,7 +173,7 @@
 
       <!-- Current task -->
       @if (status.current_task) {
-        <p class="current-task"><strong>Current task:</strong> {{ status.current_task }}</p>
+        <p class="current-task"><strong>Current task:</strong> {{ getCurrentTaskTitle() }}</p>
       }
 
       <!-- Progress bar -->
