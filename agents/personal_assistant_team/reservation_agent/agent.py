@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from ..models import Reservation, ReservationType
-from ..shared.llm import LLMClient
+from ..shared.llm import LLMClient, JSONExtractionFailure
 from ..shared.user_profile_store import UserProfileStore
 from ..tools.web_search import WebSearchTool
 from .models import (
@@ -210,8 +210,17 @@ class ReservationAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.1)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.1,
+                expected_keys=[
+                    "reservation_type", "venue_name", "datetime", "party_size", "notes"
+                ],
+            )
             return data
+        except JSONExtractionFailure as e:
+            logger.error("Failed to parse reservation request (JSON extraction failed):\n%s", e)
+            return {}
         except Exception as e:
             logger.error("Failed to parse reservation request: %s", e)
             return {}

@@ -1,0 +1,22 @@
+# Core dependencies
+pydantic>=2.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+httpx>=0.24.0
+
+# Email support
+imapclient>=2.3.0
+
+# Google APIs (Gmail, Calendar)
+google-auth>=2.22.0
+google-auth-oauthlib>=1.0.0
+google-api-python-client>=2.95.0
+
+# Credential encryption
+cryptography>=41.0.0
+
+# Date/time parsing
+python-dateutil>=2.8.0
+
+# YAML support for profile storage
+PyYAML>=6.0

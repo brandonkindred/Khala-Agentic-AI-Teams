@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from ..shared.llm import LLMClient
+from ..shared.llm import LLMClient, JSONExtractionFailure
 from ..shared.user_profile_store import UserProfileStore
 from .models import (
     GenerateChecklistRequest,
@@ -114,7 +114,21 @@ class DocGeneratorAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.3)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.3,
+                expected_keys=["title", "content"],
+            )
+        except JSONExtractionFailure as e:
+            logger.error("Failed to generate process doc (JSON extraction failed):\n%s", e)
+            return GeneratedDocument(
+                doc_id=str(uuid4())[:8],
+                doc_type="process",
+                title=f"Guide: {request.topic}",
+                content=f"# {request.topic}\n\nFailed to generate documentation due to JSON extraction error.\nSee logs for recovery suggestions.",
+                format=request.format,
+                created_at=datetime.utcnow().isoformat(),
+            )
         except Exception as e:
             logger.error("Failed to generate process doc: %s", e)
             return GeneratedDocument(
@@ -159,7 +173,19 @@ class DocGeneratorAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.2,
+                expected_keys=["title", "items"],
+            )
+        except JSONExtractionFailure as e:
+            logger.error("Failed to generate checklist (JSON extraction failed):\n%s", e)
+            return GeneratedChecklist(
+                checklist_id=str(uuid4())[:8],
+                title=f"Checklist: {request.task}",
+                items=[{"item": "Failed to generate items - JSON extraction error", "priority": "required"}],
+                created_at=datetime.utcnow().isoformat(),
+            )
         except Exception as e:
             logger.error("Failed to generate checklist: %s", e)
             return GeneratedChecklist(
@@ -194,7 +220,20 @@ class DocGeneratorAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.3)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.3,
+                expected_keys=["title", "content", "fields"],
+            )
+        except JSONExtractionFailure as e:
+            logger.error("Failed to generate template (JSON extraction failed):\n%s", e)
+            return GeneratedTemplate(
+                template_id=str(uuid4())[:8],
+                template_type=request.template_type,
+                title=f"Template: {request.template_type}",
+                content="Failed to generate template - JSON extraction error. See logs for recovery suggestions.",
+                created_at=datetime.utcnow().isoformat(),
+            )
         except Exception as e:
             logger.error("Failed to generate template: %s", e)
             return GeneratedTemplate(
@@ -254,7 +293,21 @@ class DocGeneratorAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.2,
+                expected_keys=["title", "content"],
+            )
+        except JSONExtractionFailure as e:
+            logger.error("Failed to generate SOP (JSON extraction failed):\n%s", e)
+            return GeneratedDocument(
+                doc_id=str(uuid4())[:8],
+                doc_type="sop",
+                title=f"SOP: {request.process_name}",
+                content=f"# {request.process_name}\n\nFailed to generate SOP - JSON extraction error. See logs.",
+                format="markdown",
+                created_at=datetime.utcnow().isoformat(),
+            )
         except Exception as e:
             logger.error("Failed to generate SOP: %s", e)
             return GeneratedDocument(
@@ -307,7 +360,21 @@ class DocGeneratorAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.3)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.3,
+                expected_keys=["title", "content"],
+            )
+        except JSONExtractionFailure as e:
+            logger.error("Failed to generate meeting agenda (JSON extraction failed):\n%s", e)
+            return GeneratedDocument(
+                doc_id=str(uuid4())[:8],
+                doc_type="agenda",
+                title=f"Meeting: {purpose}",
+                content=f"# Meeting Agenda\n\nPurpose: {purpose}\n\nFailed to generate agenda - JSON extraction error. See logs.",
+                format="markdown",
+                created_at=datetime.utcnow().isoformat(),
+            )
         except Exception as e:
             logger.error("Failed to generate meeting agenda: %s", e)
             return GeneratedDocument(

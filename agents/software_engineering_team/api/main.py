@@ -181,6 +181,7 @@ class JobStatusResponse(BaseModel):
     requirements_title: Optional[str] = Field(None, description="Parsed project title.")
     architecture_overview: Optional[str] = Field(None, description="Architecture overview.")
     current_task: Optional[str] = Field(None, description="Current task being executed.")
+    status_text: Optional[str] = Field(None, description="Human-readable status message describing current activity.")
     task_results: list = Field(default_factory=list, description="Completed task results.")
     task_ids: list = Field(default_factory=list, description="Task IDs in execution order.")
     progress: Optional[int] = Field(None, description="Progress percentage.")
@@ -705,6 +706,7 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
         requirements_title=updated_data.get("requirements_title"),
         architecture_overview=updated_data.get("architecture_overview"),
         current_task=updated_data.get("current_task"),
+        status_text=updated_data.get("status_text"),
         task_results=updated_data.get("task_results", []),
         task_ids=updated_data.get("execution_order", []),
         progress=updated_data.get("progress"),
@@ -1852,6 +1854,7 @@ class ProductAnalysisStatusResponse(BaseModel):
     status: str = Field(..., description="pending, running, completed, or failed.")
     repo_path: Optional[str] = Field(None, description="Path to the repo.")
     current_phase: Optional[str] = Field(None, description="spec_review, communicate, spec_update, or spec_cleanup.")
+    status_text: Optional[str] = Field(None, description="Human-readable status message describing current activity.")
     progress: int = Field(default=0, description="Progress percentage 0-100.")
     iterations: int = Field(default=0, description="Number of spec review iterations completed.")
     pending_questions: List[PendingQuestion] = Field(
@@ -1986,6 +1989,7 @@ def get_product_analysis_status(job_id: str) -> ProductAnalysisStatusResponse:
         status=data.get("status", JOB_STATUS_PENDING),
         repo_path=data.get("repo_path"),
         current_phase=data.get("current_phase"),
+        status_text=data.get("status_text"),
         progress=data.get("progress", 0),
         iterations=data.get("iterations", 0),
         pending_questions=pending_questions,

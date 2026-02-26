@@ -161,7 +161,7 @@ class BackendDevelopmentAgent:
 
         # ── Phase 1: Planning ──────────────────────────────────────────
         result.current_phase = Phase.PLANNING
-        _update_job(current_phase="planning", progress=5)
+        _update_job(current_phase="planning", progress=5, status_text="Analyzing task and creating implementation plan")
 
         try:
             planning_result = run_planning(
@@ -184,6 +184,7 @@ class BackendDevelopmentAgent:
             progress=10,
             microtasks_total=total_microtasks,
             microtasks_completed=0,
+            status_text=f"Plan created with {total_microtasks} microtasks",
         )
 
         # ── Create feature branch (Git agent) before first execution ───
@@ -204,9 +205,12 @@ class BackendDevelopmentAgent:
 
         # ── Phase 2: Execution with per-microtask review gates ─────────
         result.current_phase = Phase.EXECUTION
-        _update_job(current_phase="execution", current_microtask="", progress=15)
+        _update_job(current_phase="execution", current_microtask="", progress=15, status_text="Starting code implementation")
 
         def _progress_cb(done: int, total: int, title: str, microtask_phase: str = "coding", phase_detail: str = "") -> None:
+            phase_labels = {"coding": "Writing code", "review": "Reviewing code", "problem_solving": "Fixing issues"}
+            phase_label = phase_labels.get(microtask_phase, microtask_phase)
+            status = f"{phase_label}: {title} ({done}/{total})"
             _update_job(
                 current_phase="execution",
                 current_microtask=title,
@@ -215,6 +219,7 @@ class BackendDevelopmentAgent:
                 microtasks_completed=done,
                 microtasks_total=total,
                 progress=min(15 + int(done / max(total, 1) * 60), 75),
+                status_text=status,
             )
 
         review_deps = ReviewDependencies(
@@ -270,7 +275,7 @@ class BackendDevelopmentAgent:
 
         # ── Phase: Documentation ────────────────────────────────────────
         result.current_phase = Phase.DOCUMENTATION
-        _update_job(current_phase="documentation", progress=80)
+        _update_job(current_phase="documentation", progress=80, status_text="Generating documentation and API specs")
 
         from .phases.documentation import run_documentation_phase
 
@@ -293,7 +298,7 @@ class BackendDevelopmentAgent:
 
         # ── Phase: Deliver ───────────────────────────────────────────
         result.current_phase = Phase.DELIVER
-        _update_job(current_phase="deliver", progress=90)
+        _update_job(current_phase="deliver", progress=90, status_text="Committing changes and preparing delivery")
 
         try:
             deliver_result = run_deliver(
@@ -318,7 +323,8 @@ class BackendDevelopmentAgent:
             return result
 
         elapsed = time.monotonic() - start_time
-        _update_job(current_phase="deliver", progress=100 if result.success else 95)
+        final_status = "Backend task complete" if result.success else "Backend task completed with issues"
+        _update_job(current_phase="deliver", progress=100 if result.success else 95, status_text=final_status)
         logger.info(
             "[%s] WORKFLOW %s in %.1fs (%d microtasks completed, %d failed review)",
             task_id,
@@ -381,7 +387,7 @@ class BackendCodeV2TeamLead:
 
         # ── Setup phase (Backend Tech Lead) ─────────────────────────────
         result.current_phase = Phase.SETUP
-        _update_job(current_phase="setup", progress=2)
+        _update_job(current_phase="setup", progress=2, status_text="Setting up repository and development environment")
         try:
             setup_result = run_setup(repo_path=repo_path, task_title=task.title or "")
             result.setup_result = setup_result
@@ -389,7 +395,7 @@ class BackendCodeV2TeamLead:
             result.failure_reason = f"Setup failed: {exc}"
             logger.error("[%s] %s", task_id, result.failure_reason)
             return result
-        _update_job(current_phase="setup", progress=5)
+        _update_job(current_phase="setup", progress=5, status_text="Repository setup complete")
 
         # ── Delegate to Backend Development Agent ──────────────────────
         dev_agent = BackendDevelopmentAgent(self.llm)

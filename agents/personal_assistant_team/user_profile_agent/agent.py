@@ -6,7 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from ..models import ProfileUpdateSignal, UserProfile
-from ..shared.llm import LLMClient
+from ..shared.llm import LLMClient, JSONExtractionFailure
 from ..shared.user_profile_store import UserProfileStore
 from .models import (
     ExtractedPreference,
@@ -111,7 +111,17 @@ class UserProfileAgent:
         prompt = PROFILE_EXTRACTION_PROMPT.format(text=text)
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.2,
+                expected_keys=["extracted_info", "reasoning"],
+            )
+        except JSONExtractionFailure as e:
+            logger.error("Failed to extract preferences (JSON extraction failed):\n%s", e)
+            return ProfileExtractionResult(
+                extracted_info=[],
+                reasoning=f"JSON extraction failed after multiple recovery attempts. Error: {e.args[0]}"
+            )
         except Exception as e:
             logger.error("Failed to extract preferences: %s", e)
             return ProfileExtractionResult(extracted_info=[], reasoning=str(e))

@@ -109,6 +109,8 @@ export interface JobStatusResponse {
   requirements_title?: string;
   architecture_overview?: string;
   current_task?: string;
+  /** Human-readable status message describing current activity. */
+  status_text?: string;
   task_results: unknown[];
   task_ids: string[];
   progress?: number;
@@ -422,6 +424,8 @@ export interface ProductAnalysisStatusResponse {
   status: string;
   repo_path?: string;
   current_phase?: string;
+  /** Human-readable status message describing current activity. */
+  status_text?: string;
   progress: number;
   iterations: number;
   pending_questions?: PendingQuestion[];

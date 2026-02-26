@@ -82,6 +82,7 @@ def create_job(
         "status": JOB_STATUS_PENDING,
         "progress": 0,
         "current_task": None,
+        "status_text": None,
         "task_results": [],
         "execution_order": [],
         "error": None,

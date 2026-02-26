@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from ..models import Priority, TaskItem, TaskList, TaskStatus
-from ..shared.llm import LLMClient
+from ..shared.llm import LLMClient, JSONExtractionFailure
 from ..shared.user_profile_store import UserProfileStore
 from .models import (
     AddItemRequest,
@@ -222,7 +222,14 @@ class TaskAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.2,
+                expected_keys=["items", "list_name"],
+            )
+        except JSONExtractionFailure as e:
+            logger.error("Failed to parse tasks (JSON extraction failed):\n%s", e)
+            return ParseTasksResult(items=[])
         except Exception as e:
             logger.error("Failed to parse tasks: %s", e)
             return ParseTasksResult(items=[])
@@ -406,8 +413,15 @@ class TaskAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.1)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.1,
+                expected_keys=["categorized_items"],
+            )
             return data.get("categorized_items", [])
+        except JSONExtractionFailure as e:
+            logger.error("Failed to categorize items (JSON extraction failed):\n%s", e)
+            return [{"description": item, "category": "other"} for item in items]
         except Exception as e:
             logger.error("Failed to categorize items: %s", e)
             return [{"description": item, "category": "other"} for item in items]
@@ -448,8 +462,15 @@ class TaskAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.4)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.4,
+                expected_keys=["suggestions"],
+            )
             return data.get("suggestions", [])
+        except JSONExtractionFailure as e:
+            logger.error("Failed to suggest items (JSON extraction failed):\n%s", e)
+            return []
         except Exception as e:
             logger.error("Failed to suggest items: %s", e)
             return []

@@ -9,7 +9,9 @@ for the Product Planning Agent.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -36,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 OPEN_QUESTIONS_POLL_INTERVAL = 5.0
 MAX_ITERATIONS = 5
+JSON_RECOVERY_MAX_RETRIES = 2
 
 
 class ProductRequirementsAnalysisAgent:
@@ -103,11 +106,17 @@ class ProductRequirementsAnalysisAgent:
                 current_phase=AnalysisPhase.SPEC_REVIEW.value,
                 progress=5 + (iteration - 1) * 15,
                 message=f"Spec review iteration {iteration}",
+                status_text=f"Analyzing specification for gaps and inconsistencies (iteration {iteration})",
             )
 
             try:
+                _update_job(status_text="Performing gap analysis on the specification")
                 spec_review_result = self._run_spec_review(current_spec, repo_path)
                 result.spec_review_result = spec_review_result
+                if spec_review_result.open_questions:
+                    _update_job(
+                        status_text=f"Found {len(spec_review_result.issues)} issues, {len(spec_review_result.gaps)} gaps, {len(spec_review_result.open_questions)} questions"
+                    )
             except Exception as exc:
                 result.failure_reason = f"Spec review failed: {exc}"
                 logger.error("Product Requirements Analysis: %s", result.failure_reason)
@@ -131,6 +140,7 @@ class ProductRequirementsAnalysisAgent:
                 current_phase=AnalysisPhase.COMMUNICATE.value,
                 progress=10 + (iteration - 1) * 15,
                 message=f"Waiting for answers to {len(spec_review_result.open_questions)} question(s)",
+                status_text=f"Waiting for your input on {len(spec_review_result.open_questions)} question(s)",
             )
 
             try:
@@ -160,15 +170,18 @@ class ProductRequirementsAnalysisAgent:
                 current_phase=AnalysisPhase.SPEC_UPDATE.value,
                 progress=15 + (iteration - 1) * 15,
                 message=f"Updating spec with {len(answered_questions)} answers",
+                status_text=f"Incorporating {len(answered_questions)} answer(s) into the specification",
             )
 
             try:
+                _update_job(status_text="Generating updated specification based on your answers")
                 current_spec = self._update_spec(
                     current_spec=current_spec,
                     answered_questions=answered_questions,
                     repo_path=repo_path,
                     iteration=iteration,
                 )
+                _update_job(status_text="Specification updated successfully")
             except Exception as exc:
                 result.failure_reason = f"Spec update failed: {exc}"
                 logger.error("Product Requirements Analysis: %s", result.failure_reason)
@@ -180,9 +193,11 @@ class ProductRequirementsAnalysisAgent:
             current_phase=AnalysisPhase.SPEC_CLEANUP.value,
             progress=90,
             message="Validating and cleaning specification",
+            status_text="Validating specification completeness and consistency",
         )
 
         try:
+            _update_job(status_text="Running final validation and cleanup on specification")
             cleanup_result = self._run_spec_cleanup(current_spec, repo_path)
             result.spec_cleanup_result = cleanup_result
             result.final_spec_content = cleanup_result.cleaned_spec
@@ -208,6 +223,7 @@ class ProductRequirementsAnalysisAgent:
             current_phase=AnalysisPhase.SPEC_CLEANUP.value,
             progress=100,
             message=result.summary,
+            status_text="Product analysis complete - specification validated",
         )
 
         elapsed = time.monotonic() - start_time
@@ -217,6 +233,93 @@ class ProductRequirementsAnalysisAgent:
 
         return result
 
+    def _parse_json_with_recovery(
+        self,
+        prompt: str,
+        phase_name: str = "LLM",
+        max_retries: int = JSON_RECOVERY_MAX_RETRIES,
+    ) -> Dict[str, Any]:
+        """Parse LLM JSON response with multi-stage recovery.
+
+        Recovery stages:
+        1. llm.complete_json() - uses LLMClient's built-in continuation retry
+        2. Regex extraction - find {...} in raw response (handles truncation)
+        3. Retry with simplified prompt (if max_retries > 0)
+
+        Returns empty dict only if all recovery attempts fail.
+        """
+        last_error: Optional[Exception] = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                return self.llm.complete_json(prompt)
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "PRA %s: JSON parse failed (attempt %d/%d): %s",
+                    phase_name,
+                    attempt + 1,
+                    max_retries + 1,
+                    str(e)[:200],
+                )
+
+                # Try regex extraction from the error message or raw response
+                raw_preview = getattr(e, "response_preview", "") or str(e)
+                extracted = self._extract_json_fallback(raw_preview)
+                if extracted:
+                    logger.info(
+                        "PRA %s: Recovered JSON via regex extraction", phase_name
+                    )
+                    return extracted
+
+        logger.error(
+            "PRA %s: All JSON recovery attempts failed: %s", phase_name, last_error
+        )
+        return {}
+
+    def _extract_json_fallback(self, raw: str) -> Dict[str, Any]:
+        """Extract JSON object from raw text using regex."""
+        # Find the outermost JSON object
+        match = re.search(r"\{[\s\S]*\}", raw)
+        if match:
+            json_str = match.group()
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError:
+                # Try cleaning trailing commas
+                cleaned = re.sub(r",\s*([}\]])", r"\1", json_str)
+                try:
+                    return json.loads(cleaned)
+                except json.JSONDecodeError:
+                    # Try truncating to last complete field
+                    truncated = self._truncate_to_valid_json(cleaned)
+                    if truncated:
+                        try:
+                            return json.loads(truncated)
+                        except json.JSONDecodeError:
+                            pass
+        return {}
+
+    def _truncate_to_valid_json(self, json_str: str) -> str:
+        """Try to truncate a malformed JSON string to make it valid.
+
+        Useful for responses that were cut off mid-stream.
+        """
+        # Find where arrays/objects might have been truncated
+        # Try progressively removing content from the end
+        for end_char in ["}]}", "]}", "}", "]"]:
+            idx = json_str.rfind(end_char[0])
+            if idx > 0:
+                candidate = json_str[: idx + 1]
+                # Count braces/brackets to see if we can close them
+                open_braces = candidate.count("{") - candidate.count("}")
+                open_brackets = candidate.count("[") - candidate.count("]")
+                if open_braces >= 0 and open_brackets >= 0:
+                    # Add missing closing characters
+                    candidate += "]" * open_brackets + "}" * open_braces
+                    return candidate
+        return ""
+
     def _run_spec_review(
         self,
         spec_content: str,
@@ -225,7 +328,7 @@ class ProductRequirementsAnalysisAgent:
         """Run the Spec Review phase to identify gaps and questions."""
         # Read previously answered questions to avoid asking duplicates
         qa_history = self._read_qa_history(repo_path)
-        
+
         if qa_history:
             prompt = SPEC_REVIEW_PROMPT.format(spec_content=spec_content[:12000])
             prompt += f"""
@@ -240,22 +343,29 @@ Previously Answered Questions:
         else:
             prompt = SPEC_REVIEW_PROMPT.format(spec_content=spec_content[:12000])
 
-        try:
-            raw = self.llm.complete_json(prompt)
-            result = self._parse_spec_review_response(raw)
-            
-            # Filter out any questions that are duplicates of previously answered ones
-            if qa_history and result.open_questions:
-                result.open_questions = self._filter_duplicate_questions(
-                    result.open_questions, qa_history
-                )
-            
-            return result
-        except Exception as e:
-            logger.warning("Spec review LLM call failed: %s", e)
-            return SpecReviewResult(
-                summary=f"Spec review failed: {e}",
+        raw = self._parse_json_with_recovery(prompt, "spec_review")
+
+        if not raw:
+            # All recovery failed - return a result indicating retry is needed
+            logger.warning(
+                "PRA spec_review: No JSON recovered, will retry in next iteration"
             )
+            return SpecReviewResult(
+                summary="Spec review JSON parsing failed - will retry",
+                issues=["JSON parsing failed - response may have been truncated"],
+                gaps=[],
+                open_questions=[],
+            )
+
+        result = self._parse_spec_review_response(raw)
+
+        # Filter out any questions that are duplicates of previously answered ones
+        if qa_history and result.open_questions:
+            result.open_questions = self._filter_duplicate_questions(
+                result.open_questions, qa_history
+            )
+
+        return result
 
     def _read_qa_history(self, repo_path: Path) -> str:
         """Read the QA history file if it exists."""
@@ -671,16 +781,20 @@ Previously Answered Questions:
         """Run the Spec Cleanup phase to validate and clean the spec."""
         prompt = SPEC_CLEANUP_PROMPT.format(spec_content=spec_content)
 
-        try:
-            raw = self.llm.complete_json(prompt)
-            return self._parse_spec_cleanup_response(raw, spec_content)
-        except Exception as e:
-            logger.warning("Spec cleanup LLM call failed: %s", e)
+        raw = self._parse_json_with_recovery(prompt, "spec_cleanup")
+
+        if not raw:
+            # All recovery failed - return the original spec as valid
+            logger.warning(
+                "PRA spec_cleanup: No JSON recovered, returning original spec"
+            )
             return SpecCleanupResult(
                 is_valid=True,
                 cleaned_spec=spec_content,
-                summary=f"Spec cleanup skipped due to error: {e}",
+                summary="Spec cleanup skipped - JSON parsing failed",
             )
+
+        return self._parse_spec_cleanup_response(raw, spec_content)
 
     def _parse_spec_cleanup_response(
         self,

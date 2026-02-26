@@ -240,6 +240,34 @@
   padding: 0;
 }
 
+// Status text section (human-readable activity description)
+.status-text-section {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin: 8px 0 16px 0;
+  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  border-radius: 8px;
+  border-left: 3px solid var(--mat-sys-primary, #2196f3);
+  font-size: 14px;
+  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+
+  mat-icon.spinning {
+    animation: spin 1.5s linear infinite;
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    color: var(--mat-sys-primary, #2196f3);
+    flex-shrink: 0;
+  }
+
+  .status-text {
+    flex: 1;
+    line-height: 1.4;
+  }
+}
+
 mat-progress-bar {
   flex: 1;
   border-radius: 4px;

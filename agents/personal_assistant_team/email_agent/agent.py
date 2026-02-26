@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from ..models import CalendarEvent, EmailDraft, EmailMessage
 from ..shared.credential_store import CredentialStore, IMAPCredentials, OAuthCredentials
-from ..shared.llm import LLMClient
+from ..shared.llm import LLMClient, JSONExtractionFailure
 from ..shared.user_profile_store import UserProfileStore
 from ..tools.email_tools import EmailToolAgent
 from .models import (
@@ -131,7 +131,19 @@ class EmailAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.2,
+                expected_keys=["summary", "key_points", "extracted_events", "action_items", "sentiment"],
+            )
+        except JSONExtractionFailure as e:
+            logger.error("Failed to summarize email (JSON extraction failed):\n%s", e)
+            return EmailSummary(
+                message_id=email.message_id,
+                subject=email.subject,
+                sender=email.sender,
+                summary="Failed to generate summary - JSON extraction error. See logs for details.",
+            )
         except Exception as e:
             logger.error("Failed to summarize email: %s", e)
             return EmailSummary(

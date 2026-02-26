@@ -193,6 +193,14 @@
         </div>
       }
 
+      <!-- Status text (human-readable activity description) -->
+      @if (status.status_text) {
+        <div class="status-text-section">
+          <mat-icon class="spinning">sync</mat-icon>
+          <span class="status-text">{{ status.status_text }}</span>
+        </div>
+      }
+
       <!-- Failed tasks expansion panel -->
       @if (status.failed_tasks && status.failed_tasks.length) {
         <mat-expansion-panel class="failed-tasks-panel">

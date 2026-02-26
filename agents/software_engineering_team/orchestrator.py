@@ -1698,7 +1698,7 @@ def run_orchestrator(
     backend_dir = path / "backend"
     frontend_dir = path / "frontend"
     try:
-        update_job(job_id, status=JOB_STATUS_RUNNING, phase="planning")
+        update_job(job_id, status=JOB_STATUS_RUNNING, phase="planning", status_text="Starting pipeline")
 
         agents = _get_agents()
 
@@ -1715,7 +1715,7 @@ def run_orchestrator(
             logger.error("Spec parsing failed (LLM unavailable or returned invalid output): %s", e)
             update_job(job_id, status=JOB_STATUS_FAILED, error=f"Spec parsing failed: {e}", phase="completed")
             return
-        update_job(job_id, requirements_title=requirements.title)
+        update_job(job_id, requirements_title=requirements.title, status_text="Specification parsed successfully")
 
         # Create plan folder after spec is ingested successfully (all planning artifacts go here)
         plan_dir = ensure_plan_dir(path)
@@ -1742,7 +1742,7 @@ def run_orchestrator(
             except Exception:
                 pass
 
-        update_job(job_id, phase="product_analysis", message="Starting product requirements analysis...")
+        update_job(job_id, phase="product_analysis", message="Starting product requirements analysis...", status_text="Starting product requirements analysis")
         pra_agent = ProductRequirementsAnalysisAgent(get_llm_for_agent("product_analysis"))
         pra_result = pra_agent.run_workflow(
             spec_content=spec_content,
@@ -1765,7 +1765,7 @@ def run_orchestrator(
 
         # ── Step 2: Planning V2 Team ──────────────────────────────────────────
         # Receives validated spec, performs planning (skips spec review)
-        update_job(job_id, phase="planning", message="Starting planning workflow...")
+        update_job(job_id, phase="planning", message="Starting planning workflow...", status_text="Starting planning workflow")
 
         from planning_v2_team import PlanningV2TeamLead
         from planning_v2_adapter import adapt_planning_v2_result, PlanningV2AdapterResult
@@ -1962,6 +1962,7 @@ def run_orchestrator(
             execution_order=assignment.execution_order,
             task_states=task_states,
             phase="execution",
+            status_text="Starting task execution",
         )
         if planning_only:
             logger.info("Planning-only run: stopping before execution (re-plan-with-clarifications)")
@@ -2311,7 +2312,7 @@ def run_orchestrator(
                 failed_count=len(failed),
                 job_id=job_id,
             )
-            update_job(job_id, status=JOB_STATUS_COMPLETED, progress=100, current_task=None, phase="completed")
+            update_job(job_id, status=JOB_STATUS_COMPLETED, progress=100, current_task=None, phase="completed", status_text="All tasks completed successfully")
 
     except Exception as e:
         logger.exception("Orchestrator failed")
@@ -2582,7 +2583,7 @@ def run_failed_tasks(job_id: str) -> None:
                 failed_count=len(failed_retry),
                 job_id=job_id,
             )
-            update_job(job_id, failed_tasks=failed_details, status=JOB_STATUS_COMPLETED, current_task=None)
+            update_job(job_id, failed_tasks=failed_details, status=JOB_STATUS_COMPLETED, current_task=None, status_text="Retry completed")
 
     except Exception as e:
         logger.exception("Retry orchestrator failed")

@@ -293,6 +293,7 @@ class PlanningV2PlanningAgent:
                 current_phase=Phase.SPEC_REVIEW_GAP.value,
                 progress=5,
                 active_roles=_active_roles_for_phase(Phase.SPEC_REVIEW_GAP),
+                status_text="Starting specification review and gap analysis",
             )
 
             try:
@@ -323,6 +324,7 @@ class PlanningV2PlanningAgent:
             current_phase=Phase.PLANNING.value,
             progress=20,
             active_roles=_active_roles_for_phase(Phase.PLANNING),
+            status_text="Generating system design and project architecture",
         )
         try:
             planning_result = run_planning(
@@ -350,6 +352,7 @@ class PlanningV2PlanningAgent:
                 current_phase=Phase.IMPLEMENTATION.value,
                 progress=40 + (iteration - 1) * 10,
                 active_roles=_active_roles_for_phase(Phase.IMPLEMENTATION),
+                status_text=f"Creating implementation plan and task breakdown (iteration {iteration})",
             )
             try:
                 implementation_result = run_implementation(
@@ -377,6 +380,7 @@ class PlanningV2PlanningAgent:
                 current_phase=Phase.REVIEW.value,
                 progress=55 + (iteration - 1) * 10,
                 active_roles=_active_roles_for_phase(Phase.REVIEW),
+                status_text="Reviewing plan for consistency and completeness",
             )
             try:
                 review_result = run_review(
@@ -404,6 +408,7 @@ class PlanningV2PlanningAgent:
                 current_phase=Phase.PROBLEM_SOLVING.value,
                 progress=70,
                 active_roles=_active_roles_for_phase(Phase.PROBLEM_SOLVING),
+                status_text="Resolving identified issues in the plan",
             )
             try:
                 problem_solving_result = run_problem_solving(
@@ -427,6 +432,7 @@ class PlanningV2PlanningAgent:
             current_phase=Phase.DELIVER.value,
             progress=90,
             active_roles=_active_roles_for_phase(Phase.DELIVER),
+            status_text="Finalizing plan deliverables and documentation",
         )
         try:
             deliver_result = run_deliver(
@@ -447,7 +453,11 @@ class PlanningV2PlanningAgent:
             return result
 
         elapsed = time.monotonic() - start_time
-        _update_job(current_phase=Phase.DELIVER.value, progress=100)
+        _update_job(
+            current_phase=Phase.DELIVER.value,
+            progress=100,
+            status_text="Planning complete - ready for execution",
+        )
         logger.info("Planning-v2 Planning Agent WORKFLOW completed in %.1fs", elapsed)
         return result
 
@@ -508,7 +518,7 @@ class PlanningV2ProductLead:
                 except Exception:
                     pass
         
-        _update_job(current_phase="intake", progress=2)
+        _update_job(current_phase="intake", progress=2, status_text="Ingesting specification")
         
         # Use validated spec if provided, or run Product Analysis if requested
         final_spec = spec_content

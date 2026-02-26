@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from ..models import Deal
-from ..shared.llm import LLMClient
+from ..shared.llm import LLMClient, JSONExtractionFailure
 from ..shared.user_profile_store import UserProfileStore
 from ..tools.web_search import SearchResult, WebSearchTool
 from ..tools.web_fetch import WebFetchTool
@@ -248,9 +248,16 @@ class DealFinderAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.2,
+                expected_keys=["relevance_score", "matching_preferences"],
+            )
             deal.relevance_score = float(data.get("relevance_score", 0.5))
             deal.matching_preferences = data.get("matching_preferences", [])
+        except JSONExtractionFailure as e:
+            logger.warning("Failed to score deal (JSON extraction failed):\n%s", e)
+            deal.relevance_score = 0.5
         except Exception as e:
             logger.warning("Failed to score deal: %s", e)
             deal.relevance_score = 0.5
@@ -337,8 +344,15 @@ class DealFinderAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.4)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.4,
+                expected_keys=["queries"],
+            )
             queries = data.get("queries", [])
+        except JSONExtractionFailure as e:
+            logger.error("Failed to generate queries (JSON extraction failed):\n%s", e)
+            queries = [{"query": "best deals today", "priority": "medium"}]
         except Exception as e:
             logger.error("Failed to generate queries: %s", e)
             queries = [{"query": "best deals today", "priority": "medium"}]

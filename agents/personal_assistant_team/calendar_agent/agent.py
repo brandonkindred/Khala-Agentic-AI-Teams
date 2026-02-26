@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from ..models import CalendarEvent
 from ..shared.credential_store import CredentialStore
-from ..shared.llm import LLMClient
+from ..shared.llm import LLMClient, JSONExtractionFailure
 from ..shared.user_profile_store import UserProfileStore
 from ..tools.calendar_tools import CalendarToolAgent
 from .models import (
@@ -157,7 +157,18 @@ class CalendarAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.1)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.1,
+                expected_keys=["events", "ambiguities"],
+            )
+        except JSONExtractionFailure as e:
+            logger.error("Failed to parse event from text (JSON extraction failed):\n%s", e)
+            return EventFromTextResult(
+                events=[],
+                needs_confirmation=True,
+                ambiguities=["JSON extraction failed - could not parse event details"],
+            )
         except Exception as e:
             logger.error("Failed to parse event from text: %s", e)
             return EventFromTextResult(events=[], needs_confirmation=True)
@@ -332,7 +343,22 @@ class CalendarAgent:
         )
         
         try:
-            data = self.llm.complete_json(prompt, temperature=0.3)
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.3,
+                expected_keys=["suggestions"],
+            )
+        except JSONExtractionFailure as e:
+            logger.error("Failed to generate schedule suggestions (JSON extraction failed):\n%s", e)
+            suggestions = []
+            for slot in available_slots[:3]:
+                suggestions.append(ScheduleSuggestion(
+                    start_time=slot["start"],
+                    end_time=slot["start"] + timedelta(minutes=request.duration_minutes),
+                    score=0.7,
+                    reason="Available slot (fallback due to JSON extraction failure)",
+                ))
+            return suggestions
         except Exception as e:
             logger.error("Failed to generate schedule suggestions: %s", e)
             suggestions = []
