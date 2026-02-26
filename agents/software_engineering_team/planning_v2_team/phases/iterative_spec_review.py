@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 OPEN_QUESTIONS_POLL_INTERVAL = 5.0
-OPEN_QUESTIONS_TIMEOUT = 3600.0
 
 
 def run_iterative_spec_review(
@@ -106,10 +105,10 @@ def run_iterative_spec_review(
 
         # Phase 2: Communicate with User
         if not job_id:
-            logger.warning(
-                "No job_id provided, cannot communicate with user. Applying defaults."
+            raise RuntimeError(
+                "No job_id provided - cannot communicate with user for answers. "
+                "A job_id is required to collect user input."
             )
-            answered_questions = _apply_all_defaults(review_result.open_questions)
         else:
             answered_questions = _communicate_with_user(
                 job_id=job_id,
@@ -176,11 +175,10 @@ def _communicate_with_user(
     )
 
     if not _wait_for_answers(job_id):
-        logger.warning("Timeout waiting for user answers, applying defaults")
-        answered = _apply_all_defaults(open_questions)
-    else:
-        submitted = get_submitted_answers(job_id)
-        answered = _apply_defaults_for_unanswered(open_questions, submitted)
+        raise RuntimeError("Job was cancelled or failed while waiting for user answers")
+
+    submitted = get_submitted_answers(job_id)
+    answered = _apply_defaults_for_unanswered(open_questions, submitted)
 
     update_job(job_id, waiting_for_answers=False)
 
@@ -191,25 +189,22 @@ def _communicate_with_user(
 
 def _wait_for_answers(job_id: str) -> bool:
     """
-    Wait for user to submit answers.
+    Wait indefinitely for user to submit answers.
 
     Returns:
-        True if answers were submitted, False on timeout.
+        True if answers were submitted, False if job was cancelled/failed.
     """
     from shared.job_store import get_job, is_waiting_for_answers
 
-    start = time.time()
-    while time.time() - start < OPEN_QUESTIONS_TIMEOUT:
+    while True:
         if not is_waiting_for_answers(job_id):
             return True
 
         job_data = get_job(job_id)
-        if job_data and job_data.get("status") in ("failed", "completed"):
+        if job_data and job_data.get("status") in ("failed", "completed", "cancelled"):
             return False
 
         time.sleep(OPEN_QUESTIONS_POLL_INTERVAL)
-
-    return False
 
 
 def _convert_to_pending_questions(

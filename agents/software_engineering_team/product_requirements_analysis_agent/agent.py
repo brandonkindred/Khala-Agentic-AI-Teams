@@ -35,7 +35,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 OPEN_QUESTIONS_POLL_INTERVAL = 5.0
-OPEN_QUESTIONS_TIMEOUT = 3600.0
 MAX_ITERATIONS = 5
 
 
@@ -147,9 +146,9 @@ class ProductRequirementsAnalysisAgent:
                 return result
 
             if not answered_questions:
-                logger.warning("No answers received, proceeding with defaults")
-                answered_questions = self._apply_all_defaults(
-                    spec_review_result.open_questions
+                raise RuntimeError(
+                    "No answers received from user communication phase. "
+                    "User input is required to proceed."
                 )
 
             all_answered_questions.extend(answered_questions)
@@ -327,8 +326,10 @@ class ProductRequirementsAnalysisAgent:
     ) -> List[AnsweredQuestion]:
         """Send questions to user and wait for response."""
         if not job_id:
-            logger.warning("No job_id provided, applying defaults")
-            return self._apply_all_defaults(open_questions)
+            raise RuntimeError(
+                "No job_id provided - cannot communicate with user for answers. "
+                "A job_id is required to collect user input."
+            )
 
         from shared.job_store import (
             add_pending_questions,
@@ -352,11 +353,10 @@ class ProductRequirementsAnalysisAgent:
         )
 
         if not self._wait_for_answers(job_id):
-            logger.warning("Timeout waiting for user answers, applying defaults")
-            answered = self._apply_all_defaults(open_questions)
-        else:
-            submitted = get_submitted_answers(job_id)
-            answered = self._apply_answers(open_questions, submitted)
+            raise RuntimeError("Job was cancelled or failed while waiting for user answers")
+
+        submitted = get_submitted_answers(job_id)
+        answered = self._apply_answers(open_questions, submitted)
 
         update_job(job_id, waiting_for_answers=False)
         self._record_answers(repo_path, answered, iteration)
@@ -364,11 +364,10 @@ class ProductRequirementsAnalysisAgent:
         return answered
 
     def _wait_for_answers(self, job_id: str) -> bool:
-        """Wait for user to submit answers."""
+        """Wait indefinitely for user to submit answers."""
         from shared.job_store import get_job, is_waiting_for_answers
 
-        start = time.time()
-        while time.time() - start < OPEN_QUESTIONS_TIMEOUT:
+        while True:
             if not is_waiting_for_answers(job_id):
                 return True
 
@@ -377,8 +376,6 @@ class ProductRequirementsAnalysisAgent:
                 return False
 
             time.sleep(OPEN_QUESTIONS_POLL_INTERVAL)
-
-        return False
 
     def _convert_to_pending_questions(
         self,
