@@ -284,11 +284,11 @@ def initialize_new_repo(
 ) -> Tuple[bool, str]:
     """
     Initialize a directory as a new git repo: init, .gitignore, README.md, CONTRIBUTORS.md,
-    initial commit, rename master to main, create and checkout development branch.
+    docs/ folder, initial commit, rename master to main, create and checkout development branch.
 
     If the path is already a git repo, ensures development branch exists and checks it out.
-    Writes .gitignore, README.md, CONTRIBUTORS.md only if they do not already exist
-    (so callers can pre-create them with desired content).
+    Writes .gitignore, README.md, CONTRIBUTORS.md and creates docs/ only if they do not
+    already exist (so callers can pre-create them with desired content).
 
     Args:
         repo_path: Path to the directory to initialize.
@@ -310,7 +310,7 @@ def initialize_new_repo(
     if code != 0:
         return False, f"git init failed: {out}"
 
-    # 2. .gitignore, README.md, CONTRIBUTORS.md (only if missing)
+    # 2. .gitignore, README.md, CONTRIBUTORS.md, docs/ (only if missing)
     gitignore_path = path / ".gitignore"
     if not gitignore_path.exists():
         content = gitignore_content if gitignore_content is not None else _DEFAULT_GITIGNORE
@@ -319,6 +319,12 @@ def initialize_new_repo(
         (path / "README.md").write_text("", encoding="utf-8")
     if not (path / "CONTRIBUTORS.md").exists():
         (path / "CONTRIBUTORS.md").write_text("", encoding="utf-8")
+    # Create docs folder for documentation
+    docs_dir = path / "docs"
+    if not docs_dir.exists():
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        # Add a placeholder file so the directory is tracked by git
+        (docs_dir / ".gitkeep").write_text("", encoding="utf-8")
 
     # 3. Initial commit
     code, out = _run_git(path, ["git", "add", "-A"])

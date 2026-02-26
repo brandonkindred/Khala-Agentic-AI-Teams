@@ -161,7 +161,8 @@ def run_execution(
 def _write_microtask_files(repo_path: Path, files: Dict[str, str]) -> None:
     """Write microtask output files to the repository."""
     for rel_path, content in files.items():
-        file_path = repo_path / rel_path
+        safe_rel_path = rel_path.lstrip("/")
+        file_path = repo_path / safe_rel_path
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content, encoding="utf-8")
 

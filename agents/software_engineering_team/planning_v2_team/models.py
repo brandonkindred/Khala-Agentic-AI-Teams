@@ -88,27 +88,94 @@ class ToolAgentPhaseOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Open Question Models (for iterative spec review)
+# ---------------------------------------------------------------------------
+
+
+class QuestionOption(BaseModel):
+    """A selectable option for an open question."""
+
+    id: str = Field(description="Unique option identifier")
+    label: str = Field(description="Display text for this option")
+    is_default: bool = Field(
+        default=False, description="Whether this is the recommended default"
+    )
+
+
+class OpenQuestion(BaseModel):
+    """An open question with selectable options."""
+
+    id: str = Field(description="Unique question identifier")
+    question_text: str = Field(description="The question text")
+    context: str = Field(
+        default="", description="Additional context explaining why this matters"
+    )
+    options: List[QuestionOption] = Field(
+        default_factory=list, description="2-3 selectable options"
+    )
+    source: str = Field(default="spec_review", description="Origin of this question")
+
+
+class AnsweredQuestion(BaseModel):
+    """A question that has been answered (by user or default)."""
+
+    question_id: str = Field(description="ID of the original question")
+    question_text: str = Field(description="The question text")
+    selected_option_id: str = Field(description="ID of the selected option")
+    selected_answer: str = Field(description="Text of the selected answer")
+    was_default: bool = Field(
+        default=False, description="Whether the default was applied"
+    )
+    other_text: str = Field(
+        default="", description="Custom text if 'other' was selected"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phase result types (optional, for passing data between phases)
 # ---------------------------------------------------------------------------
 
 
 class SpecReviewResult(BaseModel):
-    """Output of Spec Review and Gap analysis phase."""
+    """Output of Product Requirement Analysis phase."""
 
-    gaps: List[str] = Field(default_factory=list)
-    open_questions: List[str] = Field(default_factory=list)
-    system_design_notes: str = Field(default="")
-    architecture_notes: str = Field(default="")
-    summary: str = Field(default="")
+    issues: List[str] = Field(
+        default_factory=list, description="Issues identified in the spec"
+    )
+    product_gaps: List[str] = Field(
+        default_factory=list, description="Product gaps highlighted"
+    )
+    open_questions: List[OpenQuestion] = Field(
+        default_factory=list, description="Structured questions requiring clarification"
+    )
+    plan_summary: str = Field(default="", description="Brief plan output summary")
+    summary: str = Field(default="", description="Overall summary")
 
 
 class PlanningPhaseResult(BaseModel):
-    """Output of Planning phase (high-level plan, milestones, user stories, hierarchy)."""
+    """Output of Product Planning phase with structured sections."""
 
-    milestones: List[str] = Field(default_factory=list)
-    user_stories: List[str] = Field(default_factory=list)
-    high_level_plan: str = Field(default="")
-    summary: str = Field(default="")
+    goals_vision: str = Field(default="", description="Goals and vision statement")
+    constraints_limitations: str = Field(
+        default="", description="Constraints and limitations"
+    )
+    key_features: List[str] = Field(
+        default_factory=list, description="Key features list"
+    )
+    milestones: List[str] = Field(default_factory=list, description="Project milestones")
+    architecture: str = Field(default="", description="Architecture overview")
+    maintainability: str = Field(
+        default="", description="Maintainability considerations"
+    )
+    security: str = Field(default="", description="Security requirements")
+    file_system: str = Field(default="", description="File/folder structure plan")
+    styling: str = Field(default="", description="UI/UX styling guidelines")
+    dependencies: List[str] = Field(
+        default_factory=list, description="External dependencies"
+    )
+    microservices: str = Field(default="", description="Microservices breakdown")
+    others: str = Field(default="", description="Additional notes")
+    summary: str = Field(default="", description="Overall planning summary")
     hierarchy: Optional[PlanningHierarchy] = None
 
 

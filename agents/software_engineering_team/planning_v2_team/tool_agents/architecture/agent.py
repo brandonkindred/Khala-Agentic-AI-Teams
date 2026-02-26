@@ -98,8 +98,8 @@ class ArchitectureToolAgent:
         
         prior_analysis = ""
         if inp.spec_review_result:
-            prior_analysis = getattr(inp.spec_review_result, "architecture_notes", "") or ""
-        
+            prior_analysis = getattr(inp.spec_review_result, "plan_summary", "") or ""
+
         prompt = ARCHITECTURE_PLANNING_PROMPT.format(
             spec_content=(inp.spec_content or "")[:8000],
             prior_analysis=prior_analysis[:2000],

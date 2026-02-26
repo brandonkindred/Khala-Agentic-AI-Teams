@@ -38,7 +38,7 @@ from .models import (
     ToolAgentPhaseInput,
     ToolAgentPhaseOutput,
 )
-from .phases.spec_review_gap import run_spec_review_gap
+from .phases.iterative_spec_review import run_iterative_spec_review
 from .phases.planning import run_planning
 from .phases.implementation import run_implementation
 from .phases.review import run_review
@@ -125,22 +125,40 @@ OPEN_QUESTIONS_TIMEOUT = 3600  # 1 hour
 
 
 def _convert_open_questions_to_pending(
-    open_questions: List[str],
+    open_questions: List[Any],
     source: str = "spec_review",
 ) -> List[Dict[str, Any]]:
-    """Convert open questions from spec review to PendingQuestion format."""
+    """Convert OpenQuestion objects to PendingQuestion format for job store."""
+    from .models import OpenQuestion
+
     pending = []
     for i, question in enumerate(open_questions):
-        pending.append({
-            "id": f"oq-{source}-{i}",
-            "question_text": question,
-            "context": "This question was identified during the spec review phase.",
-            "options": [
-                {"id": "answer", "label": "Provide answer in 'Other' field"},
-            ],
-            "required": True,
-            "source": source,
-        })
+        if isinstance(question, OpenQuestion):
+            options = [
+                {"id": opt.id, "label": opt.label, "is_default": opt.is_default}
+                for opt in question.options
+            ]
+            if not options:
+                options = [{"id": "other", "label": "Provide answer in text field"}]
+            pending.append({
+                "id": question.id,
+                "question_text": question.question_text,
+                "context": question.context,
+                "options": options,
+                "required": True,
+                "source": question.source or source,
+            })
+        elif isinstance(question, str):
+            pending.append({
+                "id": f"oq-{source}-{i}",
+                "question_text": question,
+                "context": "This question was identified during the spec review phase.",
+                "options": [
+                    {"id": "answer", "label": "Provide answer in 'Other' field"},
+                ],
+                "required": True,
+                "source": source,
+            })
     return pending
 
 
@@ -247,64 +265,41 @@ class PlanningV2PlanningAgent:
         problem_solving_result: Optional[ProblemSolvingPhaseResult] = None
         deliver_result: Optional[DeliverPhaseResult] = None
 
-        # ── Phase 1: Spec Review and Gap analysis ───────────────────────
+        # ── Phase 1: Iterative Spec Review (3-phase cycle) ────────────────
+        # Repeats: Spec Review → Communicate with User → Spec Update
+        # Until no open questions remain
         result.current_phase = Phase.SPEC_REVIEW_GAP
         _update_job(
             current_phase=Phase.SPEC_REVIEW_GAP.value,
             progress=5,
             active_roles=_active_roles_for_phase(Phase.SPEC_REVIEW_GAP),
         )
+
+        current_spec = spec_content
+
         try:
-            spec_review_result = run_spec_review_gap(
+            spec_review_result, current_spec = run_iterative_spec_review(
                 llm=self.llm,
                 spec_content=spec_content,
                 repo_path=repo_path,
-                inspiration_content=inspiration_content,
+                job_id=job_id,
                 tool_agents=self.tool_agents,
+                max_iterations=5,
+                update_job_callback=lambda **kw: _update_job(**kw),
             )
             result.spec_review_result = spec_review_result
+            logger.info(
+                "Planning-v2: Iterative spec review complete - %d issues, %d gaps",
+                len(spec_review_result.issues),
+                len(spec_review_result.product_gaps),
+            )
         except Exception as exc:
-            result.failure_reason = f"Spec review failed: {exc}"
+            result.failure_reason = f"Iterative spec review failed: {exc}"
             logger.error("Planning-v2: %s", result.failure_reason)
             return result
-        _update_job(current_phase=Phase.SPEC_REVIEW_GAP.value, progress=15)
+        _update_job(current_phase=Phase.SPEC_REVIEW_GAP.value, progress=18)
 
-        # ── Open Questions Check: Wait for user answers if needed ────────────
-        if job_id and spec_review_result and spec_review_result.open_questions:
-            from shared.job_store import add_pending_questions, get_submitted_answers
-            
-            open_questions = spec_review_result.open_questions
-            logger.info(
-                "Planning-v2: Found %d open questions, waiting for user answers",
-                len(open_questions),
-            )
-            
-            pending_questions = _convert_open_questions_to_pending(open_questions)
-            add_pending_questions(job_id, pending_questions)
-            _update_job(
-                current_phase=Phase.SPEC_REVIEW_GAP.value,
-                progress=16,
-                waiting_for_answers=True,
-            )
-            
-            if not _wait_for_answers(job_id):
-                result.failure_reason = "Timeout waiting for user answers to open questions"
-                logger.error("Planning-v2: %s", result.failure_reason)
-                return result
-            
-            # Retrieve submitted answers and store them in the result for context
-            answers = get_submitted_answers(job_id)
-            if answers:
-                logger.info("Planning-v2: Received %d answers, continuing workflow", len(answers))
-                result.user_answers = answers
-            
-            _update_job(
-                current_phase=Phase.SPEC_REVIEW_GAP.value,
-                progress=18,
-                waiting_for_answers=False,
-            )
-
-        # ── Phase 2: Planning ────────────────────────────────────────────
+        # ── Phase 2: Planning (uses updated spec from iterative review) ──
         result.current_phase = Phase.PLANNING
         _update_job(
             current_phase=Phase.PLANNING.value,
@@ -314,7 +309,7 @@ class PlanningV2PlanningAgent:
         try:
             planning_result = run_planning(
                 llm=self.llm,
-                spec_content=spec_content,
+                spec_content=current_spec,
                 repo_path=repo_path,
                 spec_review_result=spec_review_result,
                 inspiration_content=inspiration_content,

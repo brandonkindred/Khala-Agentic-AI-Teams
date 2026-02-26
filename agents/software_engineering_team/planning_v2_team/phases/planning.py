@@ -23,12 +23,24 @@ def _parse_planning_response(raw: Any) -> PlanningPhaseResult:
     """Parse LLM JSON response into PlanningPhaseResult."""
     if not isinstance(raw, dict):
         return PlanningPhaseResult(summary="Planning complete (no structured output).")
+
+    key_features = raw.get("key_features")
     milestones = raw.get("milestones")
-    user_stories = raw.get("user_stories")
+    dependencies = raw.get("dependencies")
+
     return PlanningPhaseResult(
+        goals_vision=str(raw.get("goals_vision", "") or ""),
+        constraints_limitations=str(raw.get("constraints_limitations", "") or ""),
+        key_features=list(key_features) if isinstance(key_features, list) else [],
         milestones=list(milestones) if isinstance(milestones, list) else [],
-        user_stories=list(user_stories) if isinstance(user_stories, list) else [],
-        high_level_plan=str(raw.get("high_level_plan", "") or ""),
+        architecture=str(raw.get("architecture", "") or ""),
+        maintainability=str(raw.get("maintainability", "") or ""),
+        security=str(raw.get("security", "") or ""),
+        file_system=str(raw.get("file_system", "") or ""),
+        styling=str(raw.get("styling", "") or ""),
+        dependencies=list(dependencies) if isinstance(dependencies, list) else [],
+        microservices=str(raw.get("microservices", "") or ""),
+        others=str(raw.get("others", "") or ""),
         summary=str(raw.get("summary", "") or "Planning complete."),
     )
 
@@ -117,29 +129,45 @@ def run_planning(
     try:
         raw = llm.complete_json(prompt)
         result = _parse_planning_response(raw)
-        
+
         init_count = len(hierarchy.initiatives) if hierarchy else 0
-        epic_count = sum(len(i.epics) for i in hierarchy.initiatives) if hierarchy else 0
-        story_count = sum(len(e.stories) for i in hierarchy.initiatives for e in i.epics) if hierarchy else 0
-        
-        logger.info(
-            "Planning: %d milestones, %d user stories, %d initiatives, %d epics, %d stories",
-            len(result.milestones), len(result.user_stories), init_count, epic_count, story_count
+        epic_count = (
+            sum(len(i.epics) for i in hierarchy.initiatives) if hierarchy else 0
         )
-        
+        story_count = (
+            sum(len(e.stories) for i in hierarchy.initiatives for e in i.epics)
+            if hierarchy
+            else 0
+        )
+
+        logger.info(
+            "Planning: %d milestones, %d key_features, %d initiatives, %d epics, %d stories",
+            len(result.milestones),
+            len(result.key_features),
+            init_count,
+            epic_count,
+            story_count,
+        )
+
         return PlanningPhaseResult(
+            goals_vision=result.goals_vision,
+            constraints_limitations=result.constraints_limitations,
+            key_features=result.key_features,
             milestones=result.milestones,
-            user_stories=result.user_stories,
-            high_level_plan=result.high_level_plan,
+            architecture=result.architecture,
+            maintainability=result.maintainability,
+            security=result.security,
+            file_system=result.file_system,
+            styling=result.styling,
+            dependencies=result.dependencies,
+            microservices=result.microservices,
+            others=result.others,
             summary=result.summary,
             hierarchy=hierarchy,
         )
     except Exception as e:
         logger.warning("Planning LLM call failed, using tool agent results: %s", e)
         return PlanningPhaseResult(
-            milestones=[],
-            user_stories=[],
-            high_level_plan="",
             summary="Planning completed with tool agents.",
             hierarchy=hierarchy,
         )

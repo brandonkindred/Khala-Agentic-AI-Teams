@@ -25,7 +25,7 @@ Specification:
 {spec_content}
 ---
 
-Architecture notes: {architecture_notes}
+Plan summary from spec review: {plan_summary}
 
 Plan for:
 1. CI/CD pipeline stages
@@ -67,13 +67,13 @@ class DevOpsToolAgent:
                 recommendations=["Define CI/CD pipeline", "Plan infrastructure"],
             )
         
-        architecture_notes = ""
+        plan_summary = ""
         if inp.spec_review_result:
-            architecture_notes = getattr(inp.spec_review_result, "architecture_notes", "") or ""
-        
+            plan_summary = getattr(inp.spec_review_result, "plan_summary", "") or ""
+
         prompt = DEVOPS_PLANNING_PROMPT.format(
             spec_content=(inp.spec_content or "")[:6000],
-            architecture_notes=architecture_notes[:2000],
+            plan_summary=plan_summary[:2000],
         )
         data = parse_json_with_recovery(self.llm, prompt, agent_name="DevOps")
         

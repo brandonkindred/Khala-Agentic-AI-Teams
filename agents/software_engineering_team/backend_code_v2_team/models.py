@@ -215,6 +215,7 @@ class ToolAgentPhaseInput(BaseModel):
     task_description: str = Field(default="")
     task_id: str = Field(default="")
     feature_branch_name: Optional[str] = Field(default=None)
+    spec_context: str = Field(default="", description="Optional spec/context for LLM prompts")
 
 
 class ToolAgentPhaseOutput(BaseModel):

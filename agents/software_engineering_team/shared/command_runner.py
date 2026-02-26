@@ -159,11 +159,17 @@ def run_command(
         )
     except subprocess.TimeoutExpired as e:
         logger.warning("Command timed out after %ss: %s", timeout, " ".join(cmd))
+        stdout_val = ""
+        stderr_val = ""
+        if hasattr(e, "stdout") and e.stdout:
+            stdout_val = e.stdout.decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else e.stdout
+        if hasattr(e, "stderr") and e.stderr:
+            stderr_val = e.stderr.decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else e.stderr
         return CommandResult(
             success=False,
             exit_code=-1,
-            stdout=e.stdout or "" if hasattr(e, "stdout") and e.stdout else "",
-            stderr=e.stderr or "" if hasattr(e, "stderr") and e.stderr else "",
+            stdout=stdout_val,
+            stderr=stderr_val,
             timed_out=True,
         )
     except FileNotFoundError:
@@ -1602,6 +1608,12 @@ body { margin: 0; font-family: Roboto, "Helvetica Neue", sans-serif; }
     # Pin Node version for nvm use
     _write_if_missing(cwd / ".nvmrc", FRONTEND_NODE_VERSION + "\n")
 
+    # Create docs folder for documentation
+    docs_dir = cwd / "docs"
+    if not docs_dir.exists():
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        _write_if_missing(docs_dir / ".gitkeep", "")
+
     logger.info("Angular project initialized successfully at %s", cwd)
     return CommandResult(
         success=True,
@@ -1634,6 +1646,12 @@ def _scaffold_react_project(cwd: Path) -> CommandResult:
     (src / "hooks").mkdir(parents=True, exist_ok=True)
     (src / "services").mkdir(parents=True, exist_ok=True)
     (src / "types").mkdir(parents=True, exist_ok=True)
+
+    # Create docs folder for documentation
+    docs_dir = cwd / "docs"
+    if not docs_dir.exists():
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        _write_if_missing(docs_dir / ".gitkeep", "")
 
     # Pin Node version for nvm use
     _write_if_missing(cwd / ".nvmrc", FRONTEND_NODE_VERSION + "\n")
@@ -1797,6 +1815,11 @@ def ensure_backend_project_initialized(backend_dir: str | Path) -> CommandResult
     _write_if_missing(cwd / ".gitignore", _PYTHON_GITIGNORE)
     _write_if_missing(cwd / "README.md", "")
     _write_if_missing(cwd / "CONTRIBUTORS.md", "")
+    # Create docs folder for documentation
+    docs_dir = cwd / "docs"
+    if not docs_dir.exists():
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        _write_if_missing(docs_dir / ".gitkeep", "")
 
     # Git: init and initial commit if no repo, else ensure files committed on main
     if not (cwd / ".git").exists():

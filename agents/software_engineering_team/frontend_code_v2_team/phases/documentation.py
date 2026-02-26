@@ -32,7 +32,8 @@ MAX_DOCUMENTATION_ITERATIONS = 3
 def _write_files(repo_path: Path, files: Dict[str, str]) -> None:
     """Write files to disk."""
     for rel_path, content in files.items():
-        full_path = repo_path / rel_path
+        safe_rel_path = rel_path.lstrip("/")
+        full_path = repo_path / safe_rel_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_text(content, encoding="utf-8")
 

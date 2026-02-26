@@ -41,10 +41,10 @@ def mock_llm() -> MagicMock:
     llm = MagicMock()
     llm.complete_json.return_value = {
         "summary": "Test summary",
-        "gaps": [],
+        "issues": [],
+        "product_gaps": [],
         "open_questions": [],
-        "system_design_notes": "Test notes",
-        "architecture_notes": "Test notes",
+        "plan_summary": "Test plan summary",
     }
     llm.complete_text.return_value = "Test response"
     return llm
@@ -353,25 +353,35 @@ class TestWorkflowExecution:
         """Test workflow creates planning_v2 directory."""
         mock_llm.complete_json.return_value = {
             "summary": "Test",
-            "gaps": [],
-            "open_questions": [],
-            "milestones": ["M1"],
-            "user_stories": ["US1"],
-            "high_level_plan": "Plan",
-            "passed": True,
             "issues": [],
+            "product_gaps": [],
+            "open_questions": [],
+            "plan_summary": "Plan summary",
+            "goals_vision": "Goals",
+            "constraints_limitations": "",
+            "key_features": ["Feature 1"],
+            "milestones": ["M1"],
+            "architecture": "Arch",
+            "maintainability": "",
+            "security": "",
+            "file_system": "",
+            "styling": "",
+            "dependencies": [],
+            "microservices": "",
+            "others": "",
+            "passed": True,
             "initiatives": [],
         }
-        
+
         lead = PlanningV2ProductLead(mock_llm)
         result = lead.run_workflow(
             spec_content=sample_spec,
             repo_path=temp_repo,
         )
-        
+
         plan_dir = temp_repo / "planning_v2"
         assert plan_dir.exists()
-    
+
     def test_workflow_result_structure(
         self,
         mock_llm: MagicMock,
@@ -381,13 +391,23 @@ class TestWorkflowExecution:
         """Test workflow result has expected structure."""
         mock_llm.complete_json.return_value = {
             "summary": "Test",
-            "gaps": [],
-            "open_questions": [],
-            "milestones": ["M1"],
-            "user_stories": ["US1"],
-            "high_level_plan": "Plan",
-            "passed": True,
             "issues": [],
+            "product_gaps": [],
+            "open_questions": [],
+            "plan_summary": "Plan summary",
+            "goals_vision": "Goals",
+            "constraints_limitations": "",
+            "key_features": ["Feature 1"],
+            "milestones": ["M1"],
+            "architecture": "Arch",
+            "maintainability": "",
+            "security": "",
+            "file_system": "",
+            "styling": "",
+            "dependencies": [],
+            "microservices": "",
+            "others": "",
+            "passed": True,
             "initiatives": [],
         }
         
@@ -434,9 +454,18 @@ class TestPlanningPhase:
         from planning_v2_team.phases.planning import run_planning
         
         mock_llm.complete_json.return_value = {
+            "goals_vision": "Goals",
+            "constraints_limitations": "",
+            "key_features": ["Feature 1"],
             "milestones": ["M1"],
-            "user_stories": ["US1"],
-            "high_level_plan": "Plan",
+            "architecture": "Arch",
+            "maintainability": "",
+            "security": "",
+            "file_system": "",
+            "styling": "",
+            "dependencies": [],
+            "microservices": "",
+            "others": "",
             "summary": "Done",
             "initiatives": [],
         }

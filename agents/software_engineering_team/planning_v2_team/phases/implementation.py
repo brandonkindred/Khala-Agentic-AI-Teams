@@ -99,31 +99,85 @@ def run_implementation(
         
         parts = ["# Planning (v2) Artifacts\n\n"]
         if spec_review_result:
-            parts.append("## Spec Review Summary\n")
+            parts.append("## Product Requirement Analysis\n")
             parts.append(spec_review_result.summary or "")
             parts.append("\n\n")
-            if spec_review_result.gaps:
-                parts.append("### Gaps Identified\n")
-                for gap in spec_review_result.gaps:
+            if spec_review_result.issues:
+                parts.append("### Issues Identified\n")
+                for issue in spec_review_result.issues:
+                    parts.append(f"- {issue}\n")
+                parts.append("\n")
+            if spec_review_result.product_gaps:
+                parts.append("### Product Gaps\n")
+                for gap in spec_review_result.product_gaps:
                     parts.append(f"- {gap}\n")
                 parts.append("\n")
-        
+
         if planning_result:
-            parts.append("## High-Level Plan\n")
-            parts.append(planning_result.high_level_plan or planning_result.summary or "")
-            parts.append("\n\n")
-            
+            parts.append("## Product Planning\n\n")
+
+            if planning_result.goals_vision:
+                parts.append("### Goals / Vision\n")
+                parts.append(planning_result.goals_vision)
+                parts.append("\n\n")
+
+            if planning_result.constraints_limitations:
+                parts.append("### Constraints and Limitations\n")
+                parts.append(planning_result.constraints_limitations)
+                parts.append("\n\n")
+
+            if planning_result.key_features:
+                parts.append("### Key Features\n")
+                for feature in planning_result.key_features:
+                    parts.append(f"- {feature}\n")
+                parts.append("\n")
+
             if planning_result.milestones:
                 parts.append("### Milestones\n")
                 for m in planning_result.milestones:
                     parts.append(f"- {m}\n")
                 parts.append("\n")
-            
-            if planning_result.user_stories:
-                parts.append("### User Stories (Summary)\n")
-                for u in planning_result.user_stories:
-                    parts.append(f"- {u}\n")
+
+            if planning_result.architecture:
+                parts.append("### Architecture\n")
+                parts.append(planning_result.architecture)
+                parts.append("\n\n")
+
+            if planning_result.maintainability:
+                parts.append("### Maintainability\n")
+                parts.append(planning_result.maintainability)
+                parts.append("\n\n")
+
+            if planning_result.security:
+                parts.append("### Security\n")
+                parts.append(planning_result.security)
+                parts.append("\n\n")
+
+            if planning_result.file_system:
+                parts.append("### File System\n")
+                parts.append(planning_result.file_system)
+                parts.append("\n\n")
+
+            if planning_result.styling:
+                parts.append("### Styling\n")
+                parts.append(planning_result.styling)
+                parts.append("\n\n")
+
+            if planning_result.dependencies:
+                parts.append("### Dependencies\n")
+                for dep in planning_result.dependencies:
+                    parts.append(f"- {dep}\n")
                 parts.append("\n")
+
+            if planning_result.microservices:
+                parts.append("### Microservices\n")
+                parts.append(planning_result.microservices)
+                parts.append("\n\n")
+
+            if planning_result.others:
+                parts.append("### Others\n")
+                parts.append(planning_result.others)
+                parts.append("\n\n")
         
         if effective_hierarchy:
             parts.append("## Planning Hierarchy\n")

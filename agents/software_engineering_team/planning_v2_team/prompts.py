@@ -9,20 +9,27 @@ These prompts are used by the orchestrator and phase implementations.
 # Phase-level prompts (used by orchestrator phases)
 # ---------------------------------------------------------------------------
 
-SPEC_REVIEW_PROMPT = """You are a System Design and Architecture expert. Review the following product specification.
+SPEC_REVIEW_PROMPT = """You are a Product Requirement Analysis expert. Review the following product specification.
 
-Identify:
-1. Critical gaps (what is missing or unclear)
-2. Open questions (what needs to be clarified)
-3. High-level system design notes
-4. High-level architecture notes
+Perform a thorough analysis to identify:
+1. Issues - Problems or inconsistencies in the specification
+2. Product gaps - Missing features, requirements, or considerations
+3. Open questions - Items that need clarification from the product owner. For each question, provide 2-3 reasonable answer options based on industry standards and best practices. Mark one option as the recommended default (most conservative or most reasonable choice).
+4. Plan summary - A brief outline of how this product could be built
 
 Respond with a JSON object only, no markdown, with these exact keys:
-- "gaps": list of strings (critical gaps)
-- "open_questions": list of strings
-- "system_design_notes": string (brief)
-- "architecture_notes": string (brief)
-- "summary": string (one paragraph)
+- "issues": list of strings (problems or inconsistencies identified in the spec)
+- "product_gaps": list of strings (missing features or requirements)
+- "open_questions": list of objects, each with:
+  - "id": unique identifier (e.g., "q1", "q2", "q3")
+  - "question_text": the question requiring clarification
+  - "context": why this question matters for the project (1-2 sentences)
+  - "options": list of 2-3 objects, each with:
+    - "id": option identifier (e.g., "opt1", "opt2")
+    - "label": the answer option text
+    - "is_default": boolean (true for exactly one option - the recommended default)
+- "plan_summary": string (brief outline of the implementation approach)
+- "summary": string (one paragraph overview of the analysis)
 
 Specification:
 ---
@@ -30,13 +37,46 @@ Specification:
 ---
 """
 
-PLANNING_PROMPT = """You are a product planning expert. Using the spec and any prior review, produce a high-level plan.
+SPEC_UPDATE_PROMPT = """You are a Product Specification Writer. Your task is to update the product specification to incorporate the answers to open questions.
 
-Respond with a JSON object only:
-- "milestones": list of strings (high-level milestones)
-- "user_stories": list of strings (short user story titles)
-- "high_level_plan": string (narrative plan)
-- "summary": string
+For each answered question, integrate the answer naturally into the specification, adding more detail and clarity where the original spec was unclear or incomplete.
+
+IMPORTANT:
+- Preserve all existing content that is still valid
+- Add new sections or details based on the answers
+- Make the spec more specific and actionable
+- Write in clear, professional language
+
+Current Specification:
+---
+{spec_content}
+---
+
+Answered Questions:
+---
+{answered_questions}
+---
+
+Respond with the FULL updated specification as plain text (markdown format). Include all original content plus the new details from the answered questions.
+"""
+
+PLANNING_PROMPT = """You are a Product Planning expert. Using the spec and any prior review, produce a comprehensive product plan.
+
+Create a structured plan covering all aspects of the product. Respond with a JSON object only, with these exact keys:
+
+- "goals_vision": string (the product's goals and vision statement)
+- "constraints_limitations": string (technical and business constraints)
+- "key_features": list of strings (main features to be implemented)
+- "milestones": list of strings (project milestones with deliverables)
+- "architecture": string (high-level architecture overview)
+- "maintainability": string (code quality, testing, and maintenance considerations)
+- "security": string (security requirements and considerations)
+- "file_system": string (proposed file/folder structure)
+- "styling": string (UI/UX styling guidelines and design system)
+- "dependencies": list of strings (external libraries and dependencies)
+- "microservices": string (microservices breakdown if applicable, or "N/A" for monolithic)
+- "others": string (additional notes, edge cases, or considerations)
+- "summary": string (overall planning summary)
 
 Spec excerpt:
 ---

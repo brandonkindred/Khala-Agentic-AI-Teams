@@ -58,22 +58,22 @@ def adapt_planning_v2_result(
     if spec_review:
         if spec_review.summary:
             description_parts.append(spec_review.summary)
-        if spec_review.system_design_notes:
-            description_parts.append("System design: " + spec_review.system_design_notes)
-        if spec_review.architecture_notes:
-            description_parts.append("Architecture: " + spec_review.architecture_notes)
-        # Use gaps as constraints or acceptance criteria
-        for g in spec_review.gaps or []:
-            acceptance_criteria.append(f"Address gap: {g}")
+        if spec_review.plan_summary:
+            description_parts.append("Plan summary: " + spec_review.plan_summary)
+        for issue in spec_review.issues or []:
+            acceptance_criteria.append(f"Address issue: {issue}")
+        for gap in spec_review.product_gaps or []:
+            acceptance_criteria.append(f"Address gap: {gap}")
 
     if planning:
-        if planning.high_level_plan:
-            description_parts.append(planning.high_level_plan)
+        if planning.goals_vision:
+            description_parts.append("Goals/Vision: " + planning.goals_vision)
+        if planning.architecture:
+            description_parts.append("Architecture: " + planning.architecture)
         elif planning.summary:
             description_parts.append(planning.summary)
-        for u in planning.user_stories or []:
-            acceptance_criteria.append(u)
-        # If we still have no acceptance criteria, use milestones as high-level criteria
+        for feature in planning.key_features or []:
+            acceptance_criteria.append(feature)
         if not acceptance_criteria and planning.milestones:
             acceptance_criteria.extend(planning.milestones)
 
@@ -93,25 +93,34 @@ def adapt_planning_v2_result(
     # project_overview dict for TechLeadInput and ArchitectureInput
     features_doc_parts: List[str] = []
     if planning:
-        if planning.high_level_plan:
-            features_doc_parts.append(planning.high_level_plan)
+        if planning.goals_vision:
+            features_doc_parts.append("## Goals / Vision\n" + planning.goals_vision)
+        if planning.key_features:
+            features_doc_parts.append(
+                "\n## Key Features\n" + "\n".join(f"- {f}" for f in planning.key_features)
+            )
         if planning.milestones:
-            features_doc_parts.append("\n## Milestones\n" + "\n".join(f"- {m}" for m in planning.milestones))
-        if planning.user_stories:
-            features_doc_parts.append("\n## User stories\n" + "\n".join(f"- {u}" for u in planning.user_stories))
+            features_doc_parts.append(
+                "\n## Milestones\n" + "\n".join(f"- {m}" for m in planning.milestones)
+            )
+        if planning.architecture:
+            features_doc_parts.append("\n## Architecture\n" + planning.architecture)
 
     features_and_functionality_doc = "\n".join(features_doc_parts) if features_doc_parts else ""
 
     project_overview: Dict[str, Any] = {
         "features_and_functionality_doc": features_and_functionality_doc,
-        "goals": getattr(planning, "summary", "") if planning else "",
+        "goals": planning.goals_vision if planning else "",
     }
 
-    open_questions: List[str] = list(spec_review.open_questions) if spec_review and spec_review.open_questions else []
-    # Derive minimal assumptions if we have spec review gaps (assumptions we're making)
+    open_questions: List[str] = (
+        list(spec_review.open_questions) if spec_review and spec_review.open_questions else []
+    )
     assumptions: List[str] = []
-    if spec_review and spec_review.gaps:
-        assumptions.append("Gaps identified in spec review will be addressed during implementation.")
+    if spec_review and (spec_review.issues or spec_review.product_gaps):
+        assumptions.append(
+            "Issues and product gaps identified in spec review will be addressed during implementation."
+        )
 
     # Extract the planning hierarchy from the result
     hierarchy: Optional[PlanningHierarchy] = getattr(result, "hierarchy", None)

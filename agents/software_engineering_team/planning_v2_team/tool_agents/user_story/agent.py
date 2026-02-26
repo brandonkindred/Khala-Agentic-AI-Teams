@@ -39,8 +39,7 @@ Specification:
 {spec_content}
 ---
 
-System Design Notes: {system_design_notes}
-Architecture Notes: {architecture_notes}
+Plan Summary: {plan_summary}
 
 Respond with JSON:
 {{
@@ -248,16 +247,13 @@ class UserStoryToolAgent:
                 recommendations=["Create initiative/epic/story/task hierarchy"],
             )
         
-        system_design_notes = ""
-        architecture_notes = ""
+        plan_summary = ""
         if inp.spec_review_result:
-            system_design_notes = getattr(inp.spec_review_result, "system_design_notes", "") or ""
-            architecture_notes = getattr(inp.spec_review_result, "architecture_notes", "") or ""
-        
+            plan_summary = getattr(inp.spec_review_result, "plan_summary", "") or ""
+
         prompt = USER_STORY_PLANNING_PROMPT.format(
             spec_content=(inp.spec_content or "")[:10000],
-            system_design_notes=system_design_notes[:1500],
-            architecture_notes=architecture_notes[:1500],
+            plan_summary=plan_summary[:3000],
         )
         data = parse_json_with_recovery(self.llm, prompt, agent_name="UserStory")
         

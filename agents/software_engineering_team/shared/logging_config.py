@@ -97,5 +97,11 @@ def setup_logging(
         logger.setLevel(agent_level)
 
     # Apply filter to httpx logger to elevate 5xx errors to ERROR level
+    # Also set to WARNING to suppress routine request INFO logs
     httpx_logger = logging.getLogger("httpx")
     httpx_logger.addFilter(HttpxErrorLevelFilter())
+    httpx_logger.setLevel(logging.WARNING)
+
+    # Suppress verbose LLM request INFO logs (only show warnings/errors)
+    llm_logger = logging.getLogger("shared.llm")
+    llm_logger.setLevel(logging.WARNING)
