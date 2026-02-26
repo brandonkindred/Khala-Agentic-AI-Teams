@@ -3,6 +3,8 @@ Blog compliance agent: Brand and Style Enforcer with veto power.
 
 Evaluates drafts against brand_spec and produces compliance_report.json.
 FAIL status blocks publication and triggers the rewrite loop.
+
+All errors are raised explicitly - no silent failures.
 """
 
 from __future__ import annotations
@@ -24,6 +26,14 @@ except ImportError:
     write_artifact = None
     load_brand_spec = None
     BrandSpec = None
+
+try:
+    from shared.errors import ComplianceError, LLMError
+except ImportError:
+    class ComplianceError(Exception):
+        pass
+    class LLMError(Exception):
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -70,17 +80,14 @@ class BlogComplianceAgent:
 
         try:
             data = self.llm.complete_json(prompt, temperature=0.1)
+        except LLMError:
+            raise
         except Exception as e:
-            logger.warning("Compliance check failed: %s; returning FAIL", e)
-            report = ComplianceReport(
-                status="FAIL",
-                violations=[Violation(rule_id="compliance.error", description=str(e), evidence_quotes=[])],
-                required_fixes=["Re-run compliance check after fixing the error."],
-                notes="LLM call failed",
-            )
-            if work_dir and write_artifact:
-                write_artifact(work_dir, "compliance_report.json", report.to_dict())
-            return report
+            logger.error("Compliance check failed: %s", e)
+            raise ComplianceError(
+                f"Compliance check failed: {e}",
+                cause=e,
+            ) from e
 
         status = (data.get("status") or "FAIL").upper()
         if status not in ("PASS", "FAIL"):

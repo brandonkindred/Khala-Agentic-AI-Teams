@@ -2,6 +2,8 @@
 Fact-Checker and Risk Officer agent.
 
 Verifies claims are supported, flags hazards, and identifies required disclaimers.
+
+All errors are raised explicitly - no silent failures.
 """
 
 from __future__ import annotations
@@ -23,6 +25,14 @@ except ImportError:
     write_artifact = None
     load_brand_spec = None
     BrandSpec = None
+
+try:
+    from shared.errors import FactCheckError, LLMError
+except ImportError:
+    class FactCheckError(Exception):
+        pass
+    class LLMError(Exception):
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -71,18 +81,14 @@ class BlogFactCheckAgent:
 
         try:
             data = self.llm.complete_json(prompt, temperature=0.1)
+        except LLMError:
+            raise
         except Exception as e:
-            logger.warning("Fact-check failed: %s; returning FAIL", e)
-            report = FactCheckReport(
-                claims_status="FAIL",
-                risk_status="FAIL",
-                risk_flags=[f"Fact-check error: {e}"],
-                notes="LLM call failed",
-            )
-            if work_dir and write_artifact:
-                fc_data = report.dict() if hasattr(report, "dict") else report.model_dump()
-                write_artifact(work_dir, "fact_check_report.json", fc_data)
-            return report
+            logger.error("Fact-check failed: %s", e)
+            raise FactCheckError(
+                f"Fact-check failed: {e}",
+                cause=e,
+            ) from e
 
         claims_status = (data.get("claims_status") or "PASS").upper()
         if claims_status not in ("PASS", "FAIL"):

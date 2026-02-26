@@ -1,0 +1,1685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Personal Assistant</title>
+    <style>
+        :root {
+            --primary: #6366f1;
+            --primary-dark: #4f46e5;
+            --bg-dark: #0f172a;
+            --bg-card: #1e293b;
+            --bg-input: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --border: #475569;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --accent: #8b5cf6;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+        }
+
+        .sidebar {
+            width: 280px;
+            background: var(--bg-card);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            position: fixed;
+            left: 0;
+            top: 0;
+        }
+
+        .sidebar-header {
+            padding: 24px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .sidebar-header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .sidebar-header h1::before {
+            content: "🤖";
+            font-size: 1.5rem;
+        }
+
+        .user-section {
+            padding: 16px 24px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .user-input-group {
+            display: flex;
+            gap: 8px;
+        }
+
+        .user-input-group input {
+            flex: 1;
+            padding: 8px 12px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 0.875rem;
+        }
+
+        .user-input-group button {
+            padding: 8px 16px;
+            background: var(--primary);
+            border: none;
+            border-radius: 6px;
+            color: white;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+
+        .user-input-group button:hover {
+            background: var(--primary-dark);
+        }
+
+        .nav-section {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 0;
+        }
+
+        .nav-group {
+            padding: 0 12px;
+            margin-bottom: 16px;
+        }
+
+        .nav-group-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            padding: 8px 12px;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            color: var(--text-secondary);
+        }
+
+        .nav-item:hover {
+            background: var(--bg-input);
+            color: var(--text-primary);
+        }
+
+        .nav-item.active {
+            background: var(--primary);
+            color: white;
+        }
+
+        .nav-item-icon {
+            font-size: 1.1rem;
+            width: 24px;
+            text-align: center;
+        }
+
+        .main-content {
+            flex: 1;
+            margin-left: 280px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        .chat-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-card);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .chat-header h2 {
+            font-size: 1.125rem;
+            font-weight: 600;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+        }
+
+        .status-dot.loading {
+            background: var(--warning);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .message {
+            max-width: 80%;
+            padding: 14px 18px;
+            border-radius: 16px;
+            line-height: 1.5;
+            font-size: 0.9375rem;
+        }
+
+        .message.user {
+            background: var(--primary);
+            align-self: flex-end;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.assistant {
+            background: var(--bg-card);
+            align-self: flex-start;
+            border-bottom-left-radius: 4px;
+            border: 1px solid var(--border);
+        }
+
+        .message.assistant .message-content {
+            white-space: pre-wrap;
+        }
+
+        .message-time {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 6px;
+            opacity: 0.7;
+        }
+
+        .message.user .message-time {
+            color: rgba(255,255,255,0.7);
+        }
+
+        .typing-indicator {
+            display: flex;
+            gap: 4px;
+            padding: 14px 18px;
+            background: var(--bg-card);
+            border-radius: 16px;
+            border-bottom-left-radius: 4px;
+            border: 1px solid var(--border);
+            align-self: flex-start;
+        }
+
+        .typing-indicator span {
+            width: 8px;
+            height: 8px;
+            background: var(--text-secondary);
+            border-radius: 50%;
+            animation: bounce 1.4s infinite ease-in-out;
+        }
+
+        .typing-indicator span:nth-child(1) { animation-delay: 0s; }
+        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+        @keyframes bounce {
+            0%, 80%, 100% { transform: translateY(0); }
+            40% { transform: translateY(-6px); }
+        }
+
+        .input-container {
+            padding: 20px 24px;
+            background: var(--bg-card);
+            border-top: 1px solid var(--border);
+        }
+
+        .input-wrapper {
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+        }
+
+        .input-wrapper textarea {
+            flex: 1;
+            padding: 14px 18px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            color: var(--text-primary);
+            font-size: 0.9375rem;
+            resize: none;
+            min-height: 52px;
+            max-height: 200px;
+            font-family: inherit;
+            line-height: 1.5;
+        }
+
+        .input-wrapper textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+
+        .input-wrapper textarea::placeholder {
+            color: var(--text-secondary);
+        }
+
+        .send-button {
+            width: 52px;
+            height: 52px;
+            background: var(--primary);
+            border: none;
+            border-radius: 12px;
+            color: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            font-size: 1.25rem;
+        }
+
+        .send-button:hover:not(:disabled) {
+            background: var(--primary-dark);
+            transform: scale(1.05);
+        }
+
+        .send-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .quick-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+            flex-wrap: wrap;
+        }
+
+        .quick-action {
+            padding: 8px 14px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            color: var(--text-secondary);
+            font-size: 0.8125rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .quick-action:hover {
+            background: var(--border);
+            color: var(--text-primary);
+        }
+
+        .panel {
+            display: none;
+            flex-direction: column;
+            height: 100%;
+        }
+
+        .panel.active {
+            display: flex;
+        }
+
+        .panel-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+        }
+
+        .card h3 {
+            font-size: 1rem;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px;
+        }
+
+        .stat-card {
+            background: var(--bg-input);
+            border-radius: 8px;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 1.75rem;
+            font-weight: 600;
+            color: var(--primary);
+        }
+
+        .stat-label {
+            font-size: 0.8125rem;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        .profile-form {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .form-group.full-width {
+            grid-column: 1 / -1;
+        }
+
+        .form-group label {
+            font-size: 0.8125rem;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            padding: 10px 14px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            font-family: inherit;
+        }
+
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-dark);
+        }
+
+        .btn-secondary {
+            background: var(--bg-input);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            background: var(--border);
+        }
+
+        .task-list {
+            list-style: none;
+        }
+
+        .task-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .task-item:last-child {
+            border-bottom: none;
+        }
+
+        .task-checkbox {
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--border);
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        .task-checkbox.checked {
+            background: var(--success);
+            border-color: var(--success);
+        }
+
+        .task-checkbox.checked::after {
+            content: "✓";
+            color: white;
+            font-size: 12px;
+        }
+
+        .task-text {
+            flex: 1;
+        }
+
+        .task-text.completed {
+            text-decoration: line-through;
+            color: var(--text-secondary);
+        }
+
+        .task-priority {
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }
+
+        .task-priority.high {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--error);
+        }
+
+        .task-priority.medium {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--warning);
+        }
+
+        .task-priority.low {
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--success);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+
+        .empty-state-icon {
+            font-size: 3rem;
+            margin-bottom: 16px;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            padding: 14px 20px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s;
+            z-index: 1000;
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .toast.success {
+            border-color: var(--success);
+        }
+
+        .toast.error {
+            border-color: var(--error);
+        }
+
+        @media (max-width: 768px) {
+            .sidebar {
+                display: none;
+            }
+            .main-content {
+                margin-left: 0;
+            }
+            .profile-form {
+                grid-template-columns: 1fr;
+            }
+            .message {
+                max-width: 90%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <h1>Personal Assistant</h1>
+        </div>
+        
+        <div class="user-section">
+            <div class="user-input-group">
+                <input type="text" id="userId" placeholder="Enter User ID" value="default">
+                <button onclick="setUser()">Set</button>
+            </div>
+        </div>
+        
+        <nav class="nav-section">
+            <div class="nav-group">
+                <div class="nav-group-title">Main</div>
+                <div class="nav-item active" data-panel="chat">
+                    <span class="nav-item-icon">💬</span>
+                    <span>Chat</span>
+                </div>
+                <div class="nav-item" data-panel="profile">
+                    <span class="nav-item-icon">👤</span>
+                    <span>Profile</span>
+                </div>
+            </div>
+            
+            <div class="nav-group">
+                <div class="nav-group-title">Features</div>
+                <div class="nav-item" data-panel="tasks">
+                    <span class="nav-item-icon">✅</span>
+                    <span>Tasks</span>
+                </div>
+                <div class="nav-item" data-panel="calendar">
+                    <span class="nav-item-icon">📅</span>
+                    <span>Calendar</span>
+                </div>
+                <div class="nav-item" data-panel="deals">
+                    <span class="nav-item-icon">🏷️</span>
+                    <span>Deals</span>
+                </div>
+                <div class="nav-item" data-panel="reservations">
+                    <span class="nav-item-icon">🍽️</span>
+                    <span>Reservations</span>
+                </div>
+            </div>
+            
+            <div class="nav-group">
+                <div class="nav-group-title">Tools</div>
+                <div class="nav-item" data-panel="documents">
+                    <span class="nav-item-icon">📄</span>
+                    <span>Documents</span>
+                </div>
+            </div>
+        </nav>
+    </aside>
+
+    <main class="main-content">
+        <!-- Chat Panel -->
+        <div class="panel active" id="panel-chat">
+            <div class="chat-header">
+                <h2>Chat with Your Assistant</h2>
+                <div class="status-indicator">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span id="statusText">Ready</span>
+                </div>
+            </div>
+            
+            <div class="chat-container" id="chatContainer">
+                <div class="message assistant">
+                    <div class="message-content">Hello! I'm your personal assistant. I can help you with:
+
+• Managing your tasks and grocery lists
+• Scheduling calendar events
+• Finding deals on items you want
+• Making reservations
+• Generating documents and checklists
+• Learning your preferences to serve you better
+
+How can I help you today?</div>
+                    <div class="message-time">Just now</div>
+                </div>
+            </div>
+            
+            <div class="input-container">
+                <div class="input-wrapper">
+                    <textarea 
+                        id="messageInput" 
+                        placeholder="Ask me anything..."
+                        rows="1"
+                        onkeydown="handleKeyDown(event)"
+                    ></textarea>
+                    <button class="send-button" onclick="sendMessage()" id="sendButton">
+                        ➤
+                    </button>
+                </div>
+                <div class="quick-actions">
+                    <span class="quick-action" onclick="sendQuickAction('What\'s on my calendar today?')">📅 Today's events</span>
+                    <span class="quick-action" onclick="sendQuickAction('Show my tasks')">✅ My tasks</span>
+                    <span class="quick-action" onclick="sendQuickAction('Find deals for my wishlist')">🏷️ Find deals</span>
+                    <span class="quick-action" onclick="sendQuickAction('Create a grocery list')">🛒 Grocery list</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Profile Panel -->
+        <div class="panel" id="panel-profile">
+            <div class="chat-header">
+                <h2>Your Profile</h2>
+                <button class="btn btn-primary" onclick="saveProfile()">Save Changes</button>
+            </div>
+            
+            <div class="panel-content">
+                <div class="card">
+                    <h3>👤 Identity</h3>
+                    <div class="profile-form">
+                        <div class="form-group">
+                            <label>Full Name</label>
+                            <input type="text" id="profile-name" placeholder="Your name">
+                        </div>
+                        <div class="form-group">
+                            <label>Preferred Name</label>
+                            <input type="text" id="profile-preferred-name" placeholder="What should I call you?">
+                        </div>
+                        <div class="form-group">
+                            <label>Email</label>
+                            <input type="email" id="profile-email" placeholder="your@email.com">
+                        </div>
+                        <div class="form-group">
+                            <label>Timezone</label>
+                            <select id="profile-timezone">
+                                <option value="UTC">UTC</option>
+                                <option value="America/New_York">Eastern Time</option>
+                                <option value="America/Chicago">Central Time</option>
+                                <option value="America/Denver">Mountain Time</option>
+                                <option value="America/Los_Angeles">Pacific Time</option>
+                                <option value="Europe/London">London</option>
+                                <option value="Europe/Paris">Paris</option>
+                                <option value="Asia/Tokyo">Tokyo</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>🍽️ Food Preferences</h3>
+                    <div class="profile-form">
+                        <div class="form-group">
+                            <label>Foods You Like</label>
+                            <input type="text" id="profile-food-likes" placeholder="Pizza, Sushi, Tacos (comma-separated)">
+                        </div>
+                        <div class="form-group">
+                            <label>Foods You Dislike</label>
+                            <input type="text" id="profile-food-dislikes" placeholder="Olives, Mushrooms (comma-separated)">
+                        </div>
+                        <div class="form-group">
+                            <label>Favorite Cuisines</label>
+                            <input type="text" id="profile-cuisines" placeholder="Italian, Japanese, Mexican (comma-separated)">
+                        </div>
+                        <div class="form-group">
+                            <label>Dietary Restrictions</label>
+                            <input type="text" id="profile-dietary" placeholder="Vegetarian, Gluten-free (comma-separated)">
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>🎯 Goals</h3>
+                    <div class="profile-form">
+                        <div class="form-group full-width">
+                            <label>Short-term Goals</label>
+                            <textarea id="profile-short-goals" rows="3" placeholder="Goals for this month..."></textarea>
+                        </div>
+                        <div class="form-group full-width">
+                            <label>Long-term Goals</label>
+                            <textarea id="profile-long-goals" rows="3" placeholder="Goals for this year and beyond..."></textarea>
+                        </div>
+                        <div class="form-group full-width">
+                            <label>Dreams & Bucket List</label>
+                            <textarea id="profile-dreams" rows="3" placeholder="Things you want to experience..."></textarea>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>💼 Professional</h3>
+                    <div class="profile-form">
+                        <div class="form-group">
+                            <label>Job Title</label>
+                            <input type="text" id="profile-job-title" placeholder="Software Engineer">
+                        </div>
+                        <div class="form-group">
+                            <label>Company</label>
+                            <input type="text" id="profile-company" placeholder="Acme Inc.">
+                        </div>
+                        <div class="form-group">
+                            <label>Industry</label>
+                            <input type="text" id="profile-industry" placeholder="Technology">
+                        </div>
+                        <div class="form-group">
+                            <label>Work Schedule</label>
+                            <input type="text" id="profile-schedule" placeholder="9-5 Mon-Fri">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tasks Panel -->
+        <div class="panel" id="panel-tasks">
+            <div class="chat-header">
+                <h2>Tasks & Lists</h2>
+                <button class="btn btn-primary" onclick="showAddTaskModal()">+ Add Task</button>
+            </div>
+            
+            <div class="panel-content">
+                <div class="card">
+                    <h3>📝 Quick Add</h3>
+                    <div class="input-wrapper" style="margin-top: 12px;">
+                        <textarea 
+                            id="taskInput" 
+                            placeholder="Add tasks naturally... e.g., 'Buy milk, eggs, and bread for groceries'"
+                            rows="2"
+                            style="flex: 1; padding: 12px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; color: var(--text-primary); font-size: 0.875rem; resize: none;"
+                        ></textarea>
+                        <button class="btn btn-primary" onclick="addTasksFromText()">Add</button>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>✅ Your Tasks</h3>
+                    <ul class="task-list" id="taskList">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📋</div>
+                            <p>No tasks yet. Add some above!</p>
+                        </div>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Calendar Panel -->
+        <div class="panel" id="panel-calendar">
+            <div class="chat-header">
+                <h2>Calendar</h2>
+                <button class="btn btn-primary" onclick="showAddEventModal()">+ Add Event</button>
+            </div>
+            
+            <div class="panel-content">
+                <div class="card">
+                    <h3>📅 Quick Add Event</h3>
+                    <div class="input-wrapper" style="margin-top: 12px;">
+                        <textarea 
+                            id="eventInput" 
+                            placeholder="Describe the event... e.g., 'Meeting with John tomorrow at 2pm for 1 hour'"
+                            rows="2"
+                            style="flex: 1; padding: 12px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; color: var(--text-primary); font-size: 0.875rem; resize: none;"
+                        ></textarea>
+                        <button class="btn btn-primary" onclick="addEventFromText()">Add</button>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>📆 Upcoming Events</h3>
+                    <div id="eventList">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📅</div>
+                            <p>No upcoming events. Connect your calendar or add events above!</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Deals Panel -->
+        <div class="panel" id="panel-deals">
+            <div class="chat-header">
+                <h2>Deals & Wishlist</h2>
+                <button class="btn btn-primary" onclick="searchDeals()">🔍 Search Deals</button>
+            </div>
+            
+            <div class="panel-content">
+                <div class="card">
+                    <h3>🎁 Add to Wishlist</h3>
+                    <div class="profile-form" style="margin-top: 12px;">
+                        <div class="form-group">
+                            <label>Item Description</label>
+                            <input type="text" id="wishlistItem" placeholder="What are you looking for?">
+                        </div>
+                        <div class="form-group">
+                            <label>Target Price ($)</label>
+                            <input type="number" id="wishlistPrice" placeholder="50.00">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" style="margin-top: 16px;" onclick="addToWishlist()">Add to Wishlist</button>
+                </div>
+                
+                <div class="card">
+                    <h3>📋 Your Wishlist</h3>
+                    <div id="wishlistItems">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">🎁</div>
+                            <p>Your wishlist is empty. Add items above!</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>🏷️ Found Deals</h3>
+                    <div id="dealsList">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">🔍</div>
+                            <p>Click "Search Deals" to find deals matching your wishlist!</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Reservations Panel -->
+        <div class="panel" id="panel-reservations">
+            <div class="chat-header">
+                <h2>Reservations</h2>
+                <button class="btn btn-primary" onclick="showReservationModal()">+ New Reservation</button>
+            </div>
+            
+            <div class="panel-content">
+                <div class="card">
+                    <h3>🍽️ Quick Reservation</h3>
+                    <div class="input-wrapper" style="margin-top: 12px;">
+                        <textarea 
+                            id="reservationInput" 
+                            placeholder="Describe the reservation... e.g., 'Table for 4 at an Italian restaurant this Saturday at 7pm'"
+                            rows="2"
+                            style="flex: 1; padding: 12px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; color: var(--text-primary); font-size: 0.875rem; resize: none;"
+                        ></textarea>
+                        <button class="btn btn-primary" onclick="createReservationFromText()">Create</button>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>📋 Your Reservations</h3>
+                    <div id="reservationsList">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">🍽️</div>
+                            <p>No reservations yet.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Documents Panel -->
+        <div class="panel" id="panel-documents">
+            <div class="chat-header">
+                <h2>Documents</h2>
+            </div>
+            
+            <div class="panel-content">
+                <div class="card">
+                    <h3>📄 Generate Document</h3>
+                    <div class="profile-form" style="margin-top: 12px;">
+                        <div class="form-group">
+                            <label>Document Type</label>
+                            <select id="docType">
+                                <option value="process">Process Documentation</option>
+                                <option value="checklist">Checklist</option>
+                                <option value="template">Template</option>
+                                <option value="sop">Standard Operating Procedure</option>
+                                <option value="agenda">Meeting Agenda</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Topic</label>
+                            <input type="text" id="docTopic" placeholder="e.g., 'How to onboard new employees'">
+                        </div>
+                        <div class="form-group full-width">
+                            <label>Additional Context</label>
+                            <textarea id="docContext" rows="3" placeholder="Any additional details or requirements..."></textarea>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" style="margin-top: 16px;" onclick="generateDocument()">Generate</button>
+                </div>
+                
+                <div class="card">
+                    <h3>📁 Generated Documents</h3>
+                    <div id="documentsList">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📄</div>
+                            <p>No documents generated yet.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div class="toast" id="toast">
+        <span id="toastMessage"></span>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin;
+        let currentUserId = 'default';
+        let isLoading = false;
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            setupNavigation();
+            setupTextareaAutoResize();
+            loadUserData();
+        });
+
+        function setupNavigation() {
+            document.querySelectorAll('.nav-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const panel = item.dataset.panel;
+                    switchPanel(panel);
+                    
+                    document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+                    item.classList.add('active');
+                });
+            });
+        }
+
+        function switchPanel(panelId) {
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            document.getElementById(`panel-${panelId}`).classList.add('active');
+            
+            if (panelId === 'tasks') loadTasks();
+            if (panelId === 'profile') loadProfile();
+            if (panelId === 'deals') loadWishlist();
+            if (panelId === 'reservations') loadReservations();
+            if (panelId === 'documents') loadDocuments();
+        }
+
+        function setupTextareaAutoResize() {
+            const textarea = document.getElementById('messageInput');
+            textarea.addEventListener('input', () => {
+                textarea.style.height = 'auto';
+                textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+            });
+        }
+
+        function setUser() {
+            const input = document.getElementById('userId');
+            currentUserId = input.value.trim() || 'default';
+            showToast(`User set to: ${currentUserId}`, 'success');
+            loadUserData();
+        }
+
+        function loadUserData() {
+            loadProfile();
+            loadTasks();
+            loadWishlist();
+            loadReservations();
+            loadDocuments();
+        }
+
+        // Chat functions
+        function handleKeyDown(event) {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage();
+            }
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            
+            if (!message || isLoading) return;
+            
+            addMessage(message, 'user');
+            input.value = '';
+            input.style.height = 'auto';
+            
+            setLoading(true);
+            showTypingIndicator();
+            
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/assistant`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+                
+                const data = await response.json();
+                removeTypingIndicator();
+                
+                if (response.ok) {
+                    addMessage(data.response || data.message || 'I processed your request.', 'assistant');
+                } else {
+                    addMessage('Sorry, something went wrong. Please try again.', 'assistant');
+                }
+            } catch (error) {
+                removeTypingIndicator();
+                addMessage('Unable to connect to the assistant. Please check if the server is running.', 'assistant');
+            }
+            
+            setLoading(false);
+        }
+
+        function sendQuickAction(text) {
+            document.getElementById('messageInput').value = text;
+            sendMessage();
+        }
+
+        function addMessage(content, type) {
+            const container = document.getElementById('chatContainer');
+            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            messageDiv.innerHTML = `
+                <div class="message-content">${escapeHtml(content)}</div>
+                <div class="message-time">${time}</div>
+            `;
+            
+            container.appendChild(messageDiv);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function showTypingIndicator() {
+            const container = document.getElementById('chatContainer');
+            const indicator = document.createElement('div');
+            indicator.className = 'typing-indicator';
+            indicator.id = 'typingIndicator';
+            indicator.innerHTML = '<span></span><span></span><span></span>';
+            container.appendChild(indicator);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function removeTypingIndicator() {
+            const indicator = document.getElementById('typingIndicator');
+            if (indicator) indicator.remove();
+        }
+
+        function setLoading(loading) {
+            isLoading = loading;
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            const btn = document.getElementById('sendButton');
+            
+            if (loading) {
+                dot.classList.add('loading');
+                text.textContent = 'Thinking...';
+                btn.disabled = true;
+            } else {
+                dot.classList.remove('loading');
+                text.textContent = 'Ready';
+                btn.disabled = false;
+            }
+        }
+
+        // Profile functions
+        async function loadProfile() {
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/profile`);
+                if (response.ok) {
+                    const profile = await response.json();
+                    populateProfileForm(profile);
+                }
+            } catch (error) {
+                console.error('Failed to load profile:', error);
+            }
+        }
+
+        function populateProfileForm(profile) {
+            if (profile.identity) {
+                document.getElementById('profile-name').value = profile.identity.full_name || '';
+                document.getElementById('profile-preferred-name').value = profile.identity.preferred_name || '';
+                document.getElementById('profile-email').value = profile.identity.email || '';
+                document.getElementById('profile-timezone').value = profile.identity.timezone || 'UTC';
+            }
+            
+            if (profile.preferences) {
+                document.getElementById('profile-food-likes').value = (profile.preferences.food_likes || []).join(', ');
+                document.getElementById('profile-food-dislikes').value = (profile.preferences.food_dislikes || []).join(', ');
+                document.getElementById('profile-cuisines').value = (profile.preferences.cuisines_ranked || []).join(', ');
+                document.getElementById('profile-dietary').value = (profile.preferences.dietary_restrictions || []).join(', ');
+            }
+            
+            if (profile.goals) {
+                document.getElementById('profile-short-goals').value = (profile.goals.short_term_goals || []).join('\n');
+                document.getElementById('profile-long-goals').value = (profile.goals.long_term_goals || []).join('\n');
+                document.getElementById('profile-dreams').value = (profile.goals.dreams || []).join('\n');
+            }
+            
+            if (profile.professional) {
+                document.getElementById('profile-job-title').value = profile.professional.job_title || '';
+                document.getElementById('profile-company').value = profile.professional.company || '';
+                document.getElementById('profile-industry').value = profile.professional.industry || '';
+                document.getElementById('profile-schedule').value = profile.professional.work_schedule || '';
+            }
+        }
+
+        async function saveProfile() {
+            const updates = [
+                {
+                    category: 'identity',
+                    data: {
+                        full_name: document.getElementById('profile-name').value,
+                        preferred_name: document.getElementById('profile-preferred-name').value,
+                        email: document.getElementById('profile-email').value,
+                        timezone: document.getElementById('profile-timezone').value,
+                    }
+                },
+                {
+                    category: 'preferences',
+                    data: {
+                        food_likes: parseList(document.getElementById('profile-food-likes').value),
+                        food_dislikes: parseList(document.getElementById('profile-food-dislikes').value),
+                        cuisines_ranked: parseList(document.getElementById('profile-cuisines').value),
+                        dietary_restrictions: parseList(document.getElementById('profile-dietary').value),
+                    }
+                },
+                {
+                    category: 'goals',
+                    data: {
+                        short_term_goals: parseList(document.getElementById('profile-short-goals').value, '\n'),
+                        long_term_goals: parseList(document.getElementById('profile-long-goals').value, '\n'),
+                        dreams: parseList(document.getElementById('profile-dreams').value, '\n'),
+                    }
+                },
+                {
+                    category: 'professional',
+                    data: {
+                        job_title: document.getElementById('profile-job-title').value,
+                        company: document.getElementById('profile-company').value,
+                        industry: document.getElementById('profile-industry').value,
+                        work_schedule: document.getElementById('profile-schedule').value,
+                    }
+                }
+            ];
+            
+            try {
+                for (const update of updates) {
+                    await fetch(`${API_BASE}/users/${currentUserId}/profile`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(update)
+                    });
+                }
+                showToast('Profile saved successfully!', 'success');
+            } catch (error) {
+                showToast('Failed to save profile', 'error');
+            }
+        }
+
+        // Tasks functions
+        async function loadTasks() {
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/tasks`);
+                if (response.ok) {
+                    const lists = await response.json();
+                    renderTasks(lists);
+                }
+            } catch (error) {
+                console.error('Failed to load tasks:', error);
+            }
+        }
+
+        function renderTasks(lists) {
+            const container = document.getElementById('taskList');
+            
+            if (!lists || lists.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📋</div>
+                        <p>No tasks yet. Add some above!</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            let html = '';
+            for (const list of lists) {
+                if (list.items && list.items.length > 0) {
+                    html += `<h4 style="color: var(--text-secondary); margin: 16px 0 8px; font-size: 0.875rem;">${list.name}</h4>`;
+                    for (const item of list.items) {
+                        const isCompleted = item.status === 'completed';
+                        html += `
+                            <li class="task-item">
+                                <div class="task-checkbox ${isCompleted ? 'checked' : ''}" 
+                                     onclick="toggleTask('${list.list_id}', '${item.item_id}', ${!isCompleted})"></div>
+                                <span class="task-text ${isCompleted ? 'completed' : ''}">${escapeHtml(item.description)}</span>
+                                <span class="task-priority ${item.priority || 'medium'}">${item.priority || 'medium'}</span>
+                            </li>
+                        `;
+                    }
+                }
+            }
+            
+            container.innerHTML = html || `
+                <div class="empty-state">
+                    <div class="empty-state-icon">📋</div>
+                    <p>No tasks yet. Add some above!</p>
+                </div>
+            `;
+        }
+
+        async function addTasksFromText() {
+            const input = document.getElementById('taskInput');
+            const text = input.value.trim();
+            
+            if (!text) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/tasks/from-text`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text })
+                });
+                
+                if (response.ok) {
+                    input.value = '';
+                    loadTasks();
+                    showToast('Tasks added!', 'success');
+                } else {
+                    showToast('Failed to add tasks', 'error');
+                }
+            } catch (error) {
+                showToast('Failed to add tasks', 'error');
+            }
+        }
+
+        async function toggleTask(listId, itemId, complete) {
+            try {
+                await fetch(`${API_BASE}/users/${currentUserId}/tasks/${listId}/items/${itemId}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: complete ? 'completed' : 'pending' })
+                });
+                loadTasks();
+            } catch (error) {
+                console.error('Failed to toggle task:', error);
+            }
+        }
+
+        // Deals functions
+        async function loadWishlist() {
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/deals/wishlist`);
+                if (response.ok) {
+                    const items = await response.json();
+                    renderWishlist(items);
+                }
+            } catch (error) {
+                console.error('Failed to load wishlist:', error);
+            }
+        }
+
+        function renderWishlist(items) {
+            const container = document.getElementById('wishlistItems');
+            
+            if (!items || items.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🎁</div>
+                        <p>Your wishlist is empty. Add items above!</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            let html = '';
+            for (const item of items) {
+                html += `
+                    <div class="task-item">
+                        <span style="flex: 1;">${escapeHtml(item.description)}</span>
+                        ${item.target_price ? `<span style="color: var(--success);">$${item.target_price}</span>` : ''}
+                        <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 0.75rem;" 
+                                onclick="removeFromWishlist('${item.item_id}')">✕</button>
+                    </div>
+                `;
+            }
+            
+            container.innerHTML = html;
+        }
+
+        async function addToWishlist() {
+            const description = document.getElementById('wishlistItem').value.trim();
+            const targetPrice = parseFloat(document.getElementById('wishlistPrice').value) || null;
+            
+            if (!description) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/deals/wishlist`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ description, target_price: targetPrice })
+                });
+                
+                if (response.ok) {
+                    document.getElementById('wishlistItem').value = '';
+                    document.getElementById('wishlistPrice').value = '';
+                    loadWishlist();
+                    showToast('Added to wishlist!', 'success');
+                }
+            } catch (error) {
+                showToast('Failed to add to wishlist', 'error');
+            }
+        }
+
+        async function removeFromWishlist(itemId) {
+            try {
+                await fetch(`${API_BASE}/users/${currentUserId}/deals/wishlist/${itemId}`, {
+                    method: 'DELETE'
+                });
+                loadWishlist();
+            } catch (error) {
+                console.error('Failed to remove from wishlist:', error);
+            }
+        }
+
+        async function searchDeals() {
+            const container = document.getElementById('dealsList');
+            container.innerHTML = '<div style="text-align: center; padding: 20px; color: var(--text-secondary);">🔍 Searching for deals...</div>';
+            
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/deals/search`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ max_results: 10 })
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    renderDeals(data.deals || []);
+                }
+            } catch (error) {
+                container.innerHTML = '<div class="empty-state"><p>Failed to search for deals</p></div>';
+            }
+        }
+
+        function renderDeals(deals) {
+            const container = document.getElementById('dealsList');
+            
+            if (!deals || deals.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🔍</div>
+                        <p>No deals found. Try adding items to your wishlist first!</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            let html = '';
+            for (const deal of deals) {
+                html += `
+                    <div class="card" style="margin-bottom: 12px;">
+                        <h4 style="margin-bottom: 8px;">${escapeHtml(deal.title)}</h4>
+                        <p style="color: var(--text-secondary); font-size: 0.875rem; margin-bottom: 8px;">${escapeHtml(deal.description || '')}</p>
+                        <div style="display: flex; gap: 16px; align-items: center;">
+                            ${deal.sale_price ? `<span style="color: var(--success); font-weight: 600;">$${deal.sale_price}</span>` : ''}
+                            ${deal.original_price ? `<span style="text-decoration: line-through; color: var(--text-secondary);">$${deal.original_price}</span>` : ''}
+                            ${deal.url ? `<a href="${deal.url}" target="_blank" style="color: var(--primary);">View Deal →</a>` : ''}
+                        </div>
+                    </div>
+                `;
+            }
+            
+            container.innerHTML = html;
+        }
+
+        // Reservations functions
+        async function loadReservations() {
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/reservations`);
+                if (response.ok) {
+                    const reservations = await response.json();
+                    renderReservations(reservations);
+                }
+            } catch (error) {
+                console.error('Failed to load reservations:', error);
+            }
+        }
+
+        function renderReservations(reservations) {
+            const container = document.getElementById('reservationsList');
+            
+            if (!reservations || reservations.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🍽️</div>
+                        <p>No reservations yet.</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            let html = '';
+            for (const res of reservations) {
+                const typeIcon = res.reservation_type === 'restaurant' ? '🍽️' : 
+                                 res.reservation_type === 'appointment' ? '📅' : '📍';
+                html += `
+                    <div class="task-item">
+                        <span style="font-size: 1.25rem;">${typeIcon}</span>
+                        <div style="flex: 1;">
+                            <div style="font-weight: 500;">${escapeHtml(res.venue_name || 'TBD')}</div>
+                            <div style="font-size: 0.8125rem; color: var(--text-secondary);">
+                                ${new Date(res.datetime).toLocaleString()} • Party of ${res.party_size}
+                            </div>
+                        </div>
+                        <span class="task-priority ${res.status === 'confirmed' ? 'low' : 'medium'}">${res.status}</span>
+                    </div>
+                `;
+            }
+            
+            container.innerHTML = html;
+        }
+
+        async function createReservationFromText() {
+            const input = document.getElementById('reservationInput');
+            const text = input.value.trim();
+            
+            if (!text) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/reservations/from-text`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text })
+                });
+                
+                if (response.ok) {
+                    input.value = '';
+                    loadReservations();
+                    showToast('Reservation created!', 'success');
+                } else {
+                    showToast('Failed to create reservation', 'error');
+                }
+            } catch (error) {
+                showToast('Failed to create reservation', 'error');
+            }
+        }
+
+        // Documents functions
+        async function loadDocuments() {
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/documents`);
+                if (response.ok) {
+                    const docs = await response.json();
+                    renderDocuments(docs);
+                }
+            } catch (error) {
+                console.error('Failed to load documents:', error);
+            }
+        }
+
+        function renderDocuments(docs) {
+            const container = document.getElementById('documentsList');
+            
+            if (!docs || docs.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📄</div>
+                        <p>No documents generated yet.</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            let html = '';
+            for (const doc of docs) {
+                html += `
+                    <div class="task-item">
+                        <span style="font-size: 1.25rem;">📄</span>
+                        <div style="flex: 1;">
+                            <div style="font-weight: 500;">${escapeHtml(doc.title)}</div>
+                            <div style="font-size: 0.8125rem; color: var(--text-secondary);">
+                                ${doc.doc_type} • ${new Date(doc.created_at).toLocaleDateString()}
+                            </div>
+                        </div>
+                        <button class="btn btn-secondary" style="padding: 4px 12px;" 
+                                onclick="viewDocument('${doc.doc_id}')">View</button>
+                    </div>
+                `;
+            }
+            
+            container.innerHTML = html;
+        }
+
+        async function generateDocument() {
+            const docType = document.getElementById('docType').value;
+            const topic = document.getElementById('docTopic').value.trim();
+            const context = document.getElementById('docContext').value.trim();
+            
+            if (!topic) {
+                showToast('Please enter a topic', 'error');
+                return;
+            }
+            
+            showToast('Generating document...', 'success');
+            
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/documents`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ doc_type: docType, topic, context: { notes: context } })
+                });
+                
+                if (response.ok) {
+                    document.getElementById('docTopic').value = '';
+                    document.getElementById('docContext').value = '';
+                    loadDocuments();
+                    showToast('Document generated!', 'success');
+                } else {
+                    showToast('Failed to generate document', 'error');
+                }
+            } catch (error) {
+                showToast('Failed to generate document', 'error');
+            }
+        }
+
+        async function viewDocument(docId) {
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/documents/${docId}`);
+                if (response.ok) {
+                    const doc = await response.json();
+                    alert(doc.content);
+                }
+            } catch (error) {
+                console.error('Failed to view document:', error);
+            }
+        }
+
+        // Calendar functions
+        async function addEventFromText() {
+            const input = document.getElementById('eventInput');
+            const text = input.value.trim();
+            
+            if (!text) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/users/${currentUserId}/calendar/events/from-text`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text, auto_create: true })
+                });
+                
+                if (response.ok) {
+                    input.value = '';
+                    showToast('Event created!', 'success');
+                } else {
+                    showToast('Failed to create event', 'error');
+                }
+            } catch (error) {
+                showToast('Failed to create event', 'error');
+            }
+        }
+
+        // Utility functions
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function parseList(value, separator = ',') {
+            return value.split(separator).map(s => s.trim()).filter(s => s.length > 0);
+        }
+
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            const toastMessage = document.getElementById('toastMessage');
+            
+            toast.className = `toast ${type} show`;
+            toastMessage.textContent = message;
+            
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+    </script>
+</body>
+</html>

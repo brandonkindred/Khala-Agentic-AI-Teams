@@ -41,7 +41,7 @@ Implementing LLM observability is non-negotiable for any serious enterprise AI i
 
 
 def main() -> None:
-    llm_client = OllamaLLMClient(model="deepseek-r1", timeout=600.0)
+    llm_client = OllamaLLMClient()
 
     agent = BlogCopyEditorAgent(llm_client=llm_client, default_style_guide_path=STYLE_GUIDE_PATH)
 

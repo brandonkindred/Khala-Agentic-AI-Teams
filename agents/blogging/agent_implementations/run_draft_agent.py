@@ -21,7 +21,7 @@ STYLE_GUIDE_PATH = Path(__file__).resolve().parent.parent / "docs" / "brandon_ki
 
 
 def main() -> None:
-    llm_client = OllamaLLMClient(model="deepseek-r1", timeout=600.0)
+    llm_client = OllamaLLMClient()
     # Or: from blog_research_agent.llm import DummyLLMClient; llm_client = DummyLLMClient()
 
     agent = BlogDraftAgent(llm_client=llm_client, default_style_guide_path=STYLE_GUIDE_PATH)

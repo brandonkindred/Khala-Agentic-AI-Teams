@@ -29,10 +29,7 @@ STYLE_GUIDE_PATH = Path(__file__).resolve().parent.parent / "docs" / "brandon_ki
 # Number of draft-editor loop iterations (1 = draft only, no revisions; 3 = draft + 2 revision cycles)
 DRAFT_EDITOR_ITERATIONS = 3
 
-llm_client = OllamaLLMClient(
-    model="deepseek-r1",
-    timeout=1800.0,
-)
+llm_client = OllamaLLMClient()
 
 # 1. Research
 cache = AgentCache(cache_dir=".agent_cache")

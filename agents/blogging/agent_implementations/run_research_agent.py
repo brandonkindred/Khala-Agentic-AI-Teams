@@ -9,10 +9,7 @@ from blog_research_agent.llm import OllamaLLMClient  # or your own LLM client
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-llm_client = OllamaLLMClient(
-    model="deepseek-r1",  # change to your preferred Ollama model
-    timeout=600.0,  # per-request timeout; scoring/summarization can be slow (raise if ReadTimeout)
-)
+llm_client = OllamaLLMClient()
 
 # Enable caching for checkpoint/resume capability
 cache = AgentCache(cache_dir=".agent_cache")

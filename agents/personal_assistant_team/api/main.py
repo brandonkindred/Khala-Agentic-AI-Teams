@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..models import (
@@ -57,6 +61,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve static files
+STATIC_DIR = Path(__file__).parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_ui():
+    """Serve the Personal Assistant UI."""
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(index_path)
+    return HTMLResponse(
+        content="""
+        <html>
+            <head><title>Personal Assistant</title></head>
+            <body style="font-family: sans-serif; padding: 40px; text-align: center;">
+                <h1>Personal Assistant API</h1>
+                <p>The UI is not available. Please check that static/index.html exists.</p>
+                <p><a href="/docs">View API Documentation</a></p>
+            </body>
+        </html>
+        """,
+        status_code=200
+    )
+
 
 llm = get_llm_client("personal_assistant")
 credential_store = CredentialStore()

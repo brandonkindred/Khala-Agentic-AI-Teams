@@ -41,10 +41,7 @@ PLACEHOLDER_REF = ResearchReference(
 )
 
 if __name__ == "__main__":
-    llm_client = OllamaLLMClient(
-        model="deepseek-r1",
-        timeout=600.0,
-    )
+    llm_client = OllamaLLMClient()
     # Or use DummyLLMClient for a quick run without Ollama:
     # from blog_research_agent.llm import DummyLLMClient
     # llm_client = DummyLLMClient()
