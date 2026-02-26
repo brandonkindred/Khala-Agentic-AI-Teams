@@ -2,7 +2,40 @@
   margin-top: 16px;
 
   &.waiting-for-answers {
-    border: 2px solid #ff9800;
+    border: 2px solid var(--mat-sys-tertiary, #ff9800);
+  }
+}
+
+// Override mat-card-header to ensure full-width flex layout
+:host ::ng-deep mat-card-header.header-with-status {
+  display: flex !important;
+  flex-direction: row !important;
+  justify-content: space-between !important;
+  align-items: flex-start !important;
+  width: 100%;
+  padding: 16px;
+  
+  .mat-mdc-card-header-text {
+    display: none; // Hide the default header text container
+  }
+}
+
+.header-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  flex: 1;
+  
+  mat-card-title, .mat-mdc-card-title {
+    margin: 0;
+    padding: 0;
+    text-align: left;
+  }
+  
+  mat-card-subtitle, .mat-mdc-card-subtitle {
+    margin: 4px 0 0 0;
+    padding: 0;
+    text-align: left;
   }
 }
 
@@ -10,36 +43,37 @@
 .status-badge {
   display: inline-flex;
   align-items: center;
-  padding: 2px 10px;
-  border-radius: 4px;
-  font-size: 0.8rem;
+  padding: 4px 12px;
+  border-radius: 16px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: capitalize;
+  letter-spacing: 0.25px;
 }
 
 .status-running {
-  background-color: #e3f2fd;
-  color: #1976d2;
+  background-color: var(--mat-sys-primary-container, rgba(33, 150, 243, 0.15));
+  color: var(--mat-sys-on-primary-container, #1976d2);
 }
 
 .status-completed {
-  background-color: #e8f5e9;
-  color: #2e7d32;
+  background-color: var(--mat-sys-tertiary-container, rgba(76, 175, 80, 0.15));
+  color: var(--mat-sys-on-tertiary-container, #2e7d32);
 }
 
 .status-failed {
-  background-color: #ffebee;
-  color: #c62828;
+  background-color: var(--mat-sys-error-container, rgba(244, 67, 54, 0.15));
+  color: var(--mat-sys-on-error-container, #c62828);
 }
 
 .status-pending {
-  background-color: #f5f5f5;
-  color: #616161;
+  background-color: var(--mat-sys-surface-container-high, rgba(255, 255, 255, 0.08));
+  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.6));
 }
 
 .status-waiting {
-  background-color: #ff9800;
-  color: white;
+  background-color: var(--mat-sys-tertiary, #ff9800);
+  color: var(--mat-sys-on-tertiary, #fff);
 }
 
 .repo-path {
@@ -48,15 +82,15 @@
   font-size: 0.85rem;
 }
 
-// Phase stepper styles
+// Phase stepper styles - CSS Grid layout
 .phase-stepper {
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
   padding: 24px 16px;
-  margin-bottom: 16px;
-  background: var(--mat-sys-surface-container, #fafafa);
-  border-radius: 8px;
+  margin: 0 0 16px 0;
+  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  border-radius: 12px;
 }
 
 .phase-step {
@@ -64,7 +98,24 @@
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  min-width: 100px;
+  position: relative;
+  z-index: 1;
+
+  // Connector line using ::after pseudo-element
+  &.has-connector::after {
+    content: '';
+    position: absolute;
+    top: 24px;
+    left: calc(50% + 24px);
+    width: calc(100% - 48px);
+    height: 2px;
+    background: #e0e0e0;
+    z-index: 0;
+  }
+
+  &.has-connector.next-completed::after {
+    background: #4caf50;
+  }
 }
 
 .phase-node {
@@ -77,6 +128,7 @@
   border: 2px solid #e0e0e0;
   background: white;
   transition: all 0.2s ease;
+  z-index: 1;
 
   mat-icon {
     font-size: 24px;
@@ -87,10 +139,11 @@
 }
 
 .phase-label {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   color: #9e9e9e;
   text-align: center;
+  max-width: 80px;
 }
 
 .phase-step.completed {
@@ -140,52 +193,39 @@
   }
 }
 
-.phase-connector {
-  flex: 1;
-  height: 2px;
-  background: #e0e0e0;
-  margin-top: 24px;
-  min-width: 40px;
-  max-width: 80px;
-
-  &.completed {
-    background: #4caf50;
-  }
-}
-
 // Waiting notice
 .waiting-notice {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.75rem 1rem;
-  margin-bottom: 1rem;
-  background-color: #fff3e0;
-  color: #e65100;
-  border-radius: 4px;
-  border: 1px solid #ffcc80;
+  gap: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background-color: var(--mat-sys-tertiary-container, rgba(255, 152, 0, 0.15));
+  color: var(--mat-sys-on-tertiary-container, #e65100);
+  border-radius: 8px;
+  border: 1px solid var(--mat-sys-tertiary, rgba(255, 152, 0, 0.3));
 
   mat-icon {
-    color: #ff9800;
+    color: var(--mat-sys-tertiary, #ff9800);
     flex-shrink: 0;
   }
 }
 
 // Error message
 .error-message {
-  color: var(--mat-warn-500, #f44336);
-  padding: 8px 12px;
-  background: #ffebee;
-  border-radius: 4px;
-  margin-bottom: 12px;
+  color: var(--mat-sys-on-error-container, #f44336);
+  padding: 12px 16px;
+  background: var(--mat-sys-error-container, rgba(244, 67, 54, 0.15));
+  border-radius: 8px;
+  margin-bottom: 16px;
 }
 
 // Current task
 .current-task {
-  margin: 8px 0 16px 0;
-  padding: 8px 12px;
-  background: var(--mat-sys-surface-container-high, #f5f5f5);
-  border-radius: 4px;
+  margin: 16px 0;
+  padding: 12px 16px;
+  background: var(--mat-sys-surface-container-high, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
   font-size: 14px;
 }
 
@@ -193,18 +233,22 @@
 .progress-section {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin: 16px 0;
+  gap: 16px;
+  margin: 24px 0 16px 0;
+  padding: 0;
 }
 
 mat-progress-bar {
   flex: 1;
+  border-radius: 4px;
 }
 
 .progress-label {
+  font-size: 14px;
   font-weight: 500;
-  min-width: 40px;
+  min-width: 48px;
   text-align: right;
+  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
 }
 
 // Failed tasks panel
@@ -212,15 +256,15 @@ mat-progress-bar {
   margin: 16px 0;
 
   .failed-icon {
-    color: #c62828;
+    color: var(--mat-sys-error, #c62828);
     margin-right: 8px;
   }
 
   .failed-task-item {
     margin: 8px 0;
-    padding: 8px;
-    background: #ffebee;
-    border-radius: 4px;
+    padding: 12px;
+    background: var(--mat-sys-error-container, rgba(244, 67, 54, 0.15));
+    border-radius: 8px;
     font-size: 13px;
   }
 }
@@ -228,29 +272,31 @@ mat-progress-bar {
 // Section titles
 .section-title {
   font-size: 14px;
-  font-weight: 500;
-  margin: 20px 0 12px 0;
-  color: var(--mat-sys-on-surface-variant, #424242);
+  font-weight: 600;
+  margin: 24px 0 16px 0;
+  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 // Team progress section
 .team-progress-section {
-  margin-top: 16px;
+  margin-top: 24px;
 }
 
 .team-progress-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
+  gap: 12px;
 }
 
 .team-progress-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
-  background: var(--mat-sys-surface-container-high, #f5f5f5);
-  border-radius: 4px;
+  padding: 8px 16px;
+  background: var(--mat-sys-surface-container-high, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
   font-size: 13px;
 }
 
@@ -268,38 +314,38 @@ mat-progress-bar {
 
 // Graph section
 .graph-section {
-  margin-top: 20px;
+  margin-top: 24px;
 }
 
 .swim-lane {
   margin-bottom: 16px;
-  border: 1px solid var(--mat-sys-outline-variant, #e0e0e0);
-  border-radius: 8px;
+  border: 1px solid var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.12));
+  border-radius: 12px;
   overflow: hidden;
 }
 
 .lane-header {
-  padding: 8px 12px;
-  background: var(--mat-sys-surface-container, #fafafa);
-  font-weight: 500;
+  padding: 12px 16px;
+  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  font-weight: 600;
   font-size: 13px;
-  border-bottom: 1px solid var(--mat-sys-outline-variant, #e0e0e0);
+  border-bottom: 1px solid var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.12));
 }
 
 .lane-tasks {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 12px;
+  padding: 16px;
   align-items: center;
 }
 
 .task-node {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-radius: 6px;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
   font-size: 13px;
   border: 1px solid transparent;
   max-width: 280px;
@@ -357,28 +403,23 @@ mat-progress-bar {
 // ---------------------------------------------------------------------------
 
 .subprocess-section {
-  margin: 16px 0;
+  margin: 0 16px 16px 32px;
   padding: 16px;
-  background: var(--mat-sys-surface-container-low, #f8f9fa);
-  border-radius: 8px;
-  border: 1px solid var(--mat-sys-outline-variant, #e0e0e0);
+  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  border-radius: 12px;
+  border-left: 4px solid var(--mat-sys-primary, #2196f3);
 }
 
-.subprocess-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 16px 0;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--mat-sys-on-surface, #424242);
+.subprocess-product-analysis {
+  border-left-color: var(--mat-sys-primary, #2196f3);
+}
 
-  mat-icon {
-    font-size: 20px;
-    width: 20px;
-    height: 20px;
-    color: var(--mat-sys-primary, #2196f3);
-  }
+.subprocess-planning {
+  border-left-color: var(--mat-sys-secondary, #9c27b0);
+}
+
+.subprocess-execution {
+  border-left-color: var(--mat-sys-tertiary, #4caf50);
 }
 
 // Subprocess stepper (smaller version of main stepper)
@@ -386,19 +427,34 @@ mat-progress-bar {
   display: flex;
   align-items: flex-start;
   justify-content: flex-start;
-  flex-wrap: wrap;
-  gap: 4px 0;
-  padding: 12px 8px;
-  background: var(--mat-sys-surface, white);
-  border-radius: 6px;
+  gap: 0;
+  padding: 8px 0;
 }
 
 .subprocess-step {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  min-width: 80px;
+  gap: 6px;
+  min-width: 72px;
+  position: relative;
+  z-index: 1;
+
+  // Connector line using ::after pseudo-element
+  &.has-connector::after {
+    content: '';
+    position: absolute;
+    top: 18px;
+    left: calc(50% + 18px);
+    width: calc(100% - 36px);
+    height: 2px;
+    background: #e0e0e0;
+    z-index: 0;
+  }
+
+  &.has-connector.next-completed::after {
+    background: #4caf50;
+  }
 }
 
 .subprocess-node {
@@ -411,6 +467,7 @@ mat-progress-bar {
   border: 2px solid #e0e0e0;
   background: white;
   transition: all 0.2s ease;
+  z-index: 1;
 
   mat-icon {
     font-size: 18px;
@@ -436,7 +493,7 @@ mat-progress-bar {
   font-weight: 500;
   color: #9e9e9e;
   text-align: center;
-  max-width: 80px;
+  max-width: 72px;
 }
 
 .subprocess-step.completed {
@@ -486,33 +543,22 @@ mat-progress-bar {
   }
 }
 
-.subprocess-connector {
-  flex: 0 0 auto;
-  width: 20px;
-  height: 2px;
-  background: #e0e0e0;
-  margin-top: 17px;
-
-  &.completed {
-    background: #4caf50;
-  }
-}
-
-.subprocess-connector-small {
-  width: 12px;
-  margin-top: 13px;
-}
-
 .subprocess-stepper-small {
-  padding: 8px;
+  padding: 8px 0;
 
   .subprocess-step {
-    min-width: 60px;
+    min-width: 56px;
+
+    &.has-connector::after {
+      top: 14px;
+      left: calc(50% + 14px);
+      width: calc(100% - 28px);
+    }
   }
 
   .subprocess-label {
     font-size: 10px;
-    max-width: 60px;
+    max-width: 56px;
   }
 }
 
@@ -524,44 +570,44 @@ mat-progress-bar {
 }
 
 .team-subprocess-card {
-  padding: 12px 16px;
-  background: var(--mat-sys-surface, white);
-  border-radius: 8px;
-  border: 1px solid var(--mat-sys-outline-variant, #e0e0e0);
+  padding: 16px;
+  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  border-radius: 12px;
+  border: 1px solid var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.12));
 }
 
 .team-subprocess-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
 .team-subprocess-name {
   font-weight: 600;
   font-size: 14px;
-  color: var(--mat-sys-on-surface, #212121);
+  color: var(--mat-sys-on-surface, rgba(255, 255, 255, 0.87));
 }
 
 .team-subprocess-pct {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
-  color: var(--mat-sys-primary, #2196f3);
-  background: var(--mat-sys-surface-container, #e3f2fd);
-  padding: 2px 8px;
-  border-radius: 4px;
+  color: var(--mat-sys-on-primary-container, #2196f3);
+  background: var(--mat-sys-primary-container, rgba(33, 150, 243, 0.15));
+  padding: 4px 12px;
+  border-radius: 16px;
 }
 
 .team-microtask {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
+  gap: 8px;
+  padding: 8px 12px;
   margin-bottom: 12px;
-  background: var(--mat-sys-surface-container-high, #f5f5f5);
-  border-radius: 4px;
+  background: var(--mat-sys-surface-container-high, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
   font-size: 12px;
-  color: var(--mat-sys-on-surface-variant, #616161);
+  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
 
   mat-icon {
     font-size: 16px;
@@ -588,12 +634,12 @@ mat-progress-bar {
 .team-current-task {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  margin-bottom: 8px;
-  background: var(--mat-sys-surface-container, #e8f5e9);
-  border-radius: 6px;
-  border-left: 3px solid var(--mat-sys-tertiary, #4caf50);
+  gap: 8px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  background: var(--mat-sys-tertiary-container, rgba(76, 175, 80, 0.15));
+  border-radius: 8px;
+  border-left: 4px solid var(--mat-sys-tertiary, #4caf50);
   font-size: 13px;
 
   mat-icon {
@@ -606,12 +652,12 @@ mat-progress-bar {
 
   .task-title-label {
     font-weight: 600;
-    color: var(--mat-sys-on-surface, #424242);
+    color: var(--mat-sys-on-surface, rgba(255, 255, 255, 0.87));
     flex-shrink: 0;
   }
 
   .task-title-text {
-    color: var(--mat-sys-on-surface-variant, #616161);
+    color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -620,25 +666,25 @@ mat-progress-bar {
 
 .microtask-label {
   font-weight: 600;
-  color: var(--mat-sys-on-surface, #424242);
+  color: var(--mat-sys-on-surface, rgba(255, 255, 255, 0.87));
   flex-shrink: 0;
 }
 
 // Microtask phase section
 .microtask-phase-section {
-  margin: 8px 0 12px 0;
-  padding: 10px 12px;
-  background: var(--mat-sys-surface-container-low, #fafafa);
-  border-radius: 6px;
-  border: 1px dashed var(--mat-sys-outline-variant, #e0e0e0);
+  margin: 8px 0 16px 0;
+  padding: 12px 16px;
+  background: var(--mat-sys-surface-container-low, rgba(255, 255, 255, 0.03));
+  border-radius: 8px;
+  border: 1px dashed var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.12));
 }
 
 .microtask-phase-label {
   display: block;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 500;
-  color: var(--mat-sys-on-surface-variant, #757575);
-  margin-bottom: 8px;
+  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.6));
+  margin-bottom: 12px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -654,8 +700,26 @@ mat-progress-bar {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  min-width: 70px;
+  gap: 6px;
+  min-width: 64px;
+  position: relative;
+  z-index: 1;
+
+  // Connector line using ::after pseudo-element
+  &.has-connector::after {
+    content: '';
+    position: absolute;
+    top: 14px;
+    left: calc(50% + 14px);
+    width: calc(100% - 28px);
+    height: 2px;
+    background: #e0e0e0;
+    z-index: 0;
+  }
+
+  &.has-connector.next-completed::after {
+    background: #4caf50;
+  }
 }
 
 .microtask-phase-node {
@@ -668,6 +732,7 @@ mat-progress-bar {
   border: 2px solid #e0e0e0;
   background: white;
   transition: all 0.2s ease;
+  z-index: 1;
 
   mat-icon {
     font-size: 14px;
@@ -729,18 +794,6 @@ mat-progress-bar {
 
   .microtask-phase-name {
     color: #9e9e9e;
-  }
-}
-
-.microtask-phase-connector {
-  flex: 0 0 auto;
-  width: 16px;
-  height: 2px;
-  background: #e0e0e0;
-  margin-top: 13px;
-
-  &.completed {
-    background: #4caf50;
   }
 }
 

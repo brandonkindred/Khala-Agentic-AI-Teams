@@ -1,58 +1,48 @@
 @if (jobId && status) {
   <mat-card class="tracking-card" [class.waiting-for-answers]="status.waiting_for_answers">
-    <mat-card-header>
-      <mat-card-title>Job Progress</mat-card-title>
-      <mat-card-subtitle>
-        <span class="status-badge" [ngClass]="getStatusBadgeClass()">{{ getStatusBadge() }}</span>
+    <mat-card-header class="header-with-status">
+      <div class="header-left">
+        <mat-card-title>Job Progress</mat-card-title>
         @if (status.repo_path) {
-          <span class="repo-path">{{ status.repo_path }}</span>
+          <mat-card-subtitle>{{ status.repo_path }}</mat-card-subtitle>
         }
-      </mat-card-subtitle>
+      </div>
+      <span class="status-badge" [ngClass]="getStatusBadgeClass()">{{ getStatusBadge() }}</span>
     </mat-card-header>
     <mat-card-content>
       <!-- Phase Stepper -->
       <div class="phase-stepper">
-        @for (phase of ALL_PHASES; track phase.id; let i = $index) {
+        @for (phase of ALL_PHASES; track phase.id; let i = $index; let last = $last) {
           <div class="phase-step"
                [class.completed]="isPhaseCompleted(phase.id)"
                [class.current]="isCurrentPhase(phase.id)"
-               [class.pending]="isPhasePending(phase.id)">
+               [class.pending]="isPhasePending(phase.id)"
+               [class.has-connector]="!last"
+               [class.next-completed]="!last && isPhaseCompleted(ALL_PHASES[i + 1].id)">
             <div class="phase-node">
               <mat-icon>{{ phase.icon }}</mat-icon>
             </div>
             <span class="phase-label">{{ phase.label }}</span>
           </div>
-          @if (i < ALL_PHASES.length - 1) {
-            <div class="phase-connector"
-                 [class.completed]="isPhaseCompleted(ALL_PHASES[i + 1].id)">
-            </div>
-          }
         }
       </div>
 
       <!-- Product Analysis Subprocess Details -->
       @if (showProductAnalysisSubprocess()) {
-        <div class="subprocess-section">
-          <h4 class="subprocess-title">
-            <mat-icon>analytics</mat-icon>
-            Product Analysis Progress
-          </h4>
+        <div class="subprocess-section subprocess-product-analysis">
           <div class="subprocess-stepper">
-            @for (phase of getProductAnalysisPhases(); track phase.id; let i = $index) {
+            @for (phase of getProductAnalysisPhases(); track phase.id; let i = $index; let last = $last) {
               <div class="subprocess-step"
                    [class.completed]="isAnalysisSubprocessCompleted(phase.id)"
                    [class.current]="isAnalysisSubprocessCurrent(phase.id)"
-                   [class.pending]="isAnalysisSubprocessPending(phase.id)">
+                   [class.pending]="isAnalysisSubprocessPending(phase.id)"
+                   [class.has-connector]="!last"
+                   [class.next-completed]="!last && isAnalysisSubprocessCompleted(getProductAnalysisPhases()[i + 1].id)">
                 <div class="subprocess-node">
                   <mat-icon>{{ phase.icon }}</mat-icon>
                 </div>
                 <span class="subprocess-label">{{ phase.label }}</span>
               </div>
-              @if (i < getProductAnalysisPhases().length - 1) {
-                <div class="subprocess-connector"
-                     [class.completed]="isAnalysisSubprocessCompleted(getProductAnalysisPhases()[i + 1].id)">
-                </div>
-              }
             }
           </div>
         </div>
@@ -60,27 +50,20 @@
 
       <!-- Planning Subprocess Details -->
       @if (showPlanningSubprocess()) {
-        <div class="subprocess-section">
-          <h4 class="subprocess-title">
-            <mat-icon>architecture</mat-icon>
-            Planning Progress
-          </h4>
+        <div class="subprocess-section subprocess-planning">
           <div class="subprocess-stepper">
-            @for (phase of getPlanningSubprocessPhases(); track phase.id; let i = $index) {
+            @for (phase of getPlanningSubprocessPhases(); track phase.id; let i = $index; let last = $last) {
               <div class="subprocess-step"
                    [class.completed]="isPlanningSubprocessCompleted(phase.id)"
                    [class.current]="isPlanningSubprocessCurrent(phase.id)"
-                   [class.pending]="isPlanningSubprocessPending(phase.id)">
+                   [class.pending]="isPlanningSubprocessPending(phase.id)"
+                   [class.has-connector]="!last"
+                   [class.next-completed]="!last && isPlanningSubprocessCompleted(getPlanningSubprocessPhases()[i + 1].id)">
                 <div class="subprocess-node">
                   <mat-icon>{{ phase.icon }}</mat-icon>
                 </div>
                 <span class="subprocess-label">{{ phase.label }}</span>
               </div>
-              @if (i < getPlanningSubprocessPhases().length - 1) {
-                <div class="subprocess-connector"
-                     [class.completed]="isPlanningSubprocessCompleted(getPlanningSubprocessPhases()[i + 1].id)">
-                </div>
-              }
             }
           </div>
         </div>
@@ -88,11 +71,7 @@
 
       <!-- Execution Subprocess Details (per-team progress) -->
       @if (showExecutionSubprocess()) {
-        <div class="subprocess-section">
-          <h4 class="subprocess-title">
-            <mat-icon>play_arrow</mat-icon>
-            Execution Progress by Team
-          </h4>
+        <div class="subprocess-section subprocess-execution">
           <div class="execution-teams">
             @for (team of getExecutionTeams(); track team.teamId) {
               <div class="team-subprocess-card">
@@ -130,21 +109,18 @@
                     <div class="microtask-phase-section">
                       <span class="microtask-phase-label">Microtask Phase:</span>
                       <div class="microtask-phase-stepper">
-                        @for (phase of getMicrotaskPhases(); track phase.id; let i = $index) {
+                        @for (phase of getMicrotaskPhases(); track phase.id; let i = $index; let last = $last) {
                           <div class="microtask-phase-step"
                                [class.completed]="isMicrotaskPhaseCompleted(team.teamId, phase.id)"
                                [class.current]="isMicrotaskPhaseCurrent(team.teamId, phase.id)"
-                               [class.pending]="isMicrotaskPhasePending(team.teamId, phase.id)">
+                               [class.pending]="isMicrotaskPhasePending(team.teamId, phase.id)"
+                               [class.has-connector]="!last"
+                               [class.next-completed]="!last && isMicrotaskPhaseCompleted(team.teamId, getMicrotaskPhases()[i + 1].id)">
                             <div class="microtask-phase-node">
                               <mat-icon>{{ phase.icon }}</mat-icon>
                             </div>
                             <span class="microtask-phase-name">{{ phase.label }}</span>
                           </div>
-                          @if (i < getMicrotaskPhases().length - 1) {
-                            <div class="microtask-phase-connector"
-                                 [class.completed]="isMicrotaskPhaseCompleted(team.teamId, getMicrotaskPhases()[i + 1].id)">
-                            </div>
-                          }
                         }
                       </div>
                     </div>
@@ -161,21 +137,18 @@
 
                 <!-- Team Phase Stepper -->
                 <div class="subprocess-stepper subprocess-stepper-small">
-                  @for (phase of getCodeTeamPhases(); track phase.id; let i = $index) {
+                  @for (phase of getCodeTeamPhases(); track phase.id; let i = $index; let last = $last) {
                     <div class="subprocess-step"
                          [class.completed]="isCodeTeamPhaseCompleted(team.teamId, phase.id)"
                          [class.current]="isCodeTeamPhaseCurrent(team.teamId, phase.id)"
-                         [class.pending]="isCodeTeamPhasePending(team.teamId, phase.id)">
+                         [class.pending]="isCodeTeamPhasePending(team.teamId, phase.id)"
+                         [class.has-connector]="!last"
+                         [class.next-completed]="!last && isCodeTeamPhaseCompleted(team.teamId, getCodeTeamPhases()[i + 1].id)">
                       <div class="subprocess-node subprocess-node-small">
                         <mat-icon>{{ phase.icon }}</mat-icon>
                       </div>
                       <span class="subprocess-label">{{ phase.label }}</span>
                     </div>
-                    @if (i < getCodeTeamPhases().length - 1) {
-                      <div class="subprocess-connector subprocess-connector-small"
-                           [class.completed]="isCodeTeamPhaseCompleted(team.teamId, getCodeTeamPhases()[i + 1].id)">
-                      </div>
-                    }
                   }
                 </div>
               </div>

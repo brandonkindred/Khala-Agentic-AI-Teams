@@ -1765,6 +1765,8 @@ def run_orchestrator(
 
         # ── Step 2: Planning V2 Team ──────────────────────────────────────────
         # Receives validated spec, performs planning (skips spec review)
+        update_job(job_id, phase="planning", message="Starting planning workflow...")
+
         from planning_v2_team import PlanningV2TeamLead
         from planning_v2_adapter import adapt_planning_v2_result, PlanningV2AdapterResult
 
