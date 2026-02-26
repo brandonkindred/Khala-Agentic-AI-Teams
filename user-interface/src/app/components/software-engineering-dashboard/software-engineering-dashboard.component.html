@@ -20,12 +20,12 @@
     <div class="tab-content">
       <app-run-team-form (submitRequest)="onRunTeamSubmit($event)" />
       @if (jobId) {
-        <app-run-team-tracking [jobId]="jobId" (statusChange)="jobStatus = $event" />
         <app-pending-questions
           [jobId]="jobId"
           [questions]="jobStatus?.pending_questions ?? []"
           (answersSubmitted)="onAnswersSubmitted($event)"
         />
+        <app-run-team-tracking [jobId]="jobId" (statusChange)="jobStatus = $event" />
         <app-retry-failed
           [jobId]="jobId"
           [hasFailedTasks]="(jobStatus?.failed_tasks?.length ?? 0) > 0"

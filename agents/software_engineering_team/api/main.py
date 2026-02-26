@@ -926,7 +926,6 @@ class BackendCodeV2RunRequest(BaseModel):
 
     task: BackendCodeV2TaskInput = Field(..., description="Task to implement")
     repo_path: str = Field(..., description="Local path to the repository")
-    spec_content: Optional[str] = Field(None, description="Optional project spec context")
     architecture: Optional[str] = Field(None, description="Optional architecture overview")
 
 
@@ -981,7 +980,6 @@ class FrontendCodeV2RunRequest(BaseModel):
 
     task: FrontendCodeV2TaskInput = Field(..., description="Task to implement")
     repo_path: str = Field(..., description="Local path to the repository")
-    spec_content: Optional[str] = Field(None, description="Optional project spec context")
     architecture: Optional[str] = Field(None, description="Optional architecture overview")
 
 
@@ -1009,7 +1007,7 @@ class FrontendCodeV2StatusResponse(BaseModel):
     summary: Optional[str] = None
 
 
-def _run_frontend_code_v2_background(job_id: str, repo_path: str, task_dict: dict, spec_content: str, architecture_overview: str) -> None:
+def _run_frontend_code_v2_background(job_id: str, repo_path: str, task_dict: dict, architecture_overview: str) -> None:
     """Run frontend-code-v2 workflow in a background thread."""
     try:
         from pathlib import Path as _Path
@@ -1050,7 +1048,6 @@ def _run_frontend_code_v2_background(job_id: str, repo_path: str, task_dict: dic
         result = team_lead.run_workflow(
             repo_path=_Path(repo_path),
             task=task,
-            spec_content=spec_content or "",
             architecture=arch,
             job_updater=_job_updater,
         )
@@ -1091,7 +1088,6 @@ def run_frontend_code_v2(request: FrontendCodeV2RunRequest) -> FrontendCodeV2Run
             job_id,
             request.repo_path,
             request.task.model_dump(),
-            request.spec_content or "",
             request.architecture or "",
         ),
     )
@@ -1187,7 +1183,7 @@ class PlanningV2ResultResponse(BaseModel):
     error: Optional[str] = None
 
 
-def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict, spec_content: str, architecture_overview: str) -> None:
+def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict, architecture_overview: str) -> None:
     """Run backend-code-v2 workflow in a background thread."""
     try:
         from pathlib import Path as _Path
@@ -1228,7 +1224,6 @@ def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict
         result = team_lead.run_workflow(
             repo_path=_Path(repo_path),
             task=task,
-            spec_content=spec_content or "",
             architecture=arch,
             job_updater=_job_updater,
         )
@@ -1333,7 +1328,6 @@ def run_backend_code_v2(request: BackendCodeV2RunRequest) -> BackendCodeV2RunRes
             job_id,
             request.repo_path,
             request.task.model_dump(),
-            request.spec_content or "",
             request.architecture or "",
         ),
     )

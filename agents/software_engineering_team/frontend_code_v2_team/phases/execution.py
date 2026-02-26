@@ -85,7 +85,6 @@ def run_execution(
     task: Task,
     planning_result: PlanningResult,
     repo_path: Path,
-    spec_content: str = "",
     architecture: Optional[SystemArchitecture] = None,
     existing_code: str = "",
     tool_runners: Optional[Dict[ToolAgentKind, ToolAgentRunner]] = None,
@@ -128,7 +127,6 @@ def run_execution(
                     microtask=mt,
                     repo_path=str(repo_path),
                     existing_code=existing_code[:6000] if existing_code else "",
-                    spec_context=spec_content[:4000] if spec_content else "",
                     language=planning_result.language,
                 )
                 out = runner(inp)
@@ -174,7 +172,6 @@ def run_execution_with_review_gates(
     task: Task,
     planning_result: PlanningResult,
     repo_path: Path,
-    spec_content: str = "",
     architecture: Optional[SystemArchitecture] = None,
     existing_code: str = "",
     tool_runners: Optional[Dict[ToolAgentKind, ToolAgentRunner]] = None,
@@ -250,7 +247,6 @@ def run_execution_with_review_gates(
                     microtask=mt,
                     repo_path=str(repo_path),
                     existing_code=existing_code[:6000] if existing_code else "",
-                    spec_context=spec_content[:4000] if spec_content else "",
                     language=planning_result.language,
                 )
                 out = runner(inp)

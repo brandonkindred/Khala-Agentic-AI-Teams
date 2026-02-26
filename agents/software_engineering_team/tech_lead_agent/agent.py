@@ -72,6 +72,88 @@ class TechLeadAgent:
         
         return "\n\n".join(artifacts)
 
+    def _generate_detailed_summary(
+        self,
+        hierarchy: "PlanningHierarchy",
+        init_count: int,
+        epic_count: int,
+        story_count: int,
+        task_count: int,
+        team_counts: Dict[str, int],
+        plan_artifacts: str,
+        requirements: "ProductRequirements",
+    ) -> str:
+        """
+        Generate a detailed development plan summary from the Planning V2 hierarchy
+        and plan artifacts.
+        """
+        from shared.models import PlanningHierarchy, ProductRequirements
+        
+        parts: List[str] = []
+        
+        # Header with project info
+        parts.append(f"# Development Plan: {requirements.title}\n")
+        parts.append(f"\n## Overview\n")
+        parts.append(f"This development plan covers {requirements.description[:200]}{'...' if len(requirements.description) > 200 else ''}\n")
+        
+        # Hierarchy summary
+        parts.append(f"\n## Planning Hierarchy Summary\n")
+        parts.append(f"- **Initiatives:** {init_count}\n")
+        parts.append(f"- **Epics:** {epic_count}\n")
+        parts.append(f"- **Stories:** {story_count}\n")
+        parts.append(f"- **Tasks:** {task_count}\n")
+        
+        # Team breakdown
+        parts.append(f"\n## Task Distribution by Team\n")
+        for team, count in sorted(team_counts.items()):
+            parts.append(f"- **{team.title()}:** {count} tasks\n")
+        
+        # Initiative details
+        parts.append(f"\n## Initiatives\n")
+        for init in hierarchy.initiatives:
+            parts.append(f"\n### {init.title}\n")
+            parts.append(f"{init.description}\n")
+            parts.append(f"\n**Epics ({len(init.epics)}):**\n")
+            for epic in init.epics:
+                story_tasks = sum(len(s.tasks) for s in epic.stories)
+                parts.append(f"- **{epic.title}**: {len(epic.stories)} stories, {story_tasks} tasks\n")
+                if epic.description:
+                    parts.append(f"  {epic.description[:150]}{'...' if len(epic.description) > 150 else ''}\n")
+        
+        # Key acceptance criteria from requirements
+        if requirements.acceptance_criteria:
+            parts.append(f"\n## Key Acceptance Criteria\n")
+            for i, criterion in enumerate(requirements.acceptance_criteria[:10], 1):
+                parts.append(f"{i}. {criterion}\n")
+        
+        # Architecture and design context from artifacts
+        if plan_artifacts:
+            # Extract key sections from artifacts
+            parts.append(f"\n## Planning Context\n")
+            parts.append("Planning artifacts include: ")
+            
+            artifact_names = []
+            for line in plan_artifacts.split("\n"):
+                if line.startswith("--- ") and line.endswith(" ---"):
+                    artifact_names.append(line.strip("- ").strip())
+            
+            if artifact_names:
+                parts.append(", ".join(artifact_names))
+            parts.append("\n")
+        
+        # Execution order hint
+        if hierarchy.execution_order:
+            parts.append(f"\n## Execution Order\n")
+            parts.append(f"Tasks will be executed in dependency order. First tasks: ")
+            parts.append(", ".join(hierarchy.execution_order[:5]))
+            if len(hierarchy.execution_order) > 5:
+                parts.append(f" (and {len(hierarchy.execution_order) - 5} more)")
+            parts.append("\n")
+        
+        summary = "".join(parts)
+        logger.info("Tech Lead: generated detailed summary (%d chars)", len(summary))
+        return summary
+
     def run(self, input_data: TechLeadInput) -> TechLeadOutput:
         """
         Produce an Initiative -> Epic -> Story hierarchy based on the requirements, existing codebase, and system architecture, existing tasks, and the spec.
@@ -286,6 +368,20 @@ class TechLeadAgent:
 
         if input_data.repo_path:
             context_parts.extend(["", f"**Repo path:** {input_data.repo_path}"])
+        
+        # Include plan artifacts if available (from Planning V2 or explicit input)
+        plan_artifacts = input_data.plan_artifacts_content or ""
+        if not plan_artifacts and input_data.repo_path:
+            plan_artifacts = self._read_plan_artifacts(input_data.repo_path)
+        
+        if plan_artifacts:
+            context_parts.extend([
+                "",
+                "**Planning Artifacts (from /plan folder - use these for context):**",
+                "---",
+                plan_artifacts[:15000],
+                "---",
+            ])
 
         return TECH_LEAD_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
 

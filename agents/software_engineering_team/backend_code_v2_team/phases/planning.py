@@ -46,7 +46,6 @@ def _detect_language(repo_path: Path, task: Task) -> str:
 
 def _build_context(
     task: Task,
-    spec_content: str,
     architecture: Optional[SystemArchitecture],
     existing_code: str,
     language: str,
@@ -63,8 +62,6 @@ def _build_context(
         f"**Acceptance criteria:** {', '.join(task.acceptance_criteria) if task.acceptance_criteria else 'N/A'}",
         f"**Language:** {language}",
     ]
-    if spec_content:
-        parts.extend(["", "**Project specification (excerpt):**", spec_content[:6000]])
     if architecture:
         parts.extend(["", "**Architecture overview:**", architecture.overview[:3000]])
     if existing_code and existing_code != "# No code files found":
@@ -104,7 +101,6 @@ def run_planning(
     llm: LLMClient,
     task: Task,
     repo_path: Path,
-    spec_content: str = "",
     architecture: Optional[SystemArchitecture] = None,
     existing_code: str = "",
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
@@ -116,7 +112,7 @@ def run_planning(
     to enrich microtask recommendations (appended to result summary).
     """
     language = _detect_language(repo_path, task)
-    prompt = _build_context(task, spec_content, architecture, existing_code, language)
+    prompt = _build_context(task, architecture, existing_code, language)
 
     logger.info("[%s] Planning phase: generating microtasks (language=%s)", task.id, language)
     raw = llm.complete_text(prompt)
@@ -131,7 +127,6 @@ def run_planning(
         phase_inp = ToolAgentPhaseInput(
             phase=Phase.PLANNING,
             repo_path=str(repo_path),
-            spec_context=spec_content[:4000] if spec_content else "",
             language=language,
             task_title=task.title or "",
             task_description=task.description or "",

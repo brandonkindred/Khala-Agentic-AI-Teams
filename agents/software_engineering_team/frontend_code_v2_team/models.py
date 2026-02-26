@@ -208,7 +208,6 @@ class ToolAgentInput(BaseModel):
     microtask: Microtask
     repo_path: str = Field(default="")
     existing_code: str = Field(default="")
-    spec_context: str = Field(default="")
     language: str = Field(default="typescript")
 
 
@@ -219,7 +218,6 @@ class ToolAgentPhaseInput(BaseModel):
     microtask: Optional[Microtask] = None
     repo_path: str = Field(default="")
     existing_code: str = Field(default="")
-    spec_context: str = Field(default="")
     language: str = Field(default="typescript")
     current_files: Dict[str, str] = Field(default_factory=dict)
     review_issues: List[ReviewIssue] = Field(default_factory=list)

@@ -269,6 +269,41 @@ class PlanningV2PlanningAgent:
             return result
         _update_job(current_phase=Phase.SPEC_REVIEW_GAP.value, progress=15)
 
+        # ── Open Questions Check: Wait for user answers if needed ────────────
+        if job_id and spec_review_result and spec_review_result.open_questions:
+            from shared.job_store import add_pending_questions, get_submitted_answers
+            
+            open_questions = spec_review_result.open_questions
+            logger.info(
+                "Planning-v2: Found %d open questions, waiting for user answers",
+                len(open_questions),
+            )
+            
+            pending_questions = _convert_open_questions_to_pending(open_questions)
+            add_pending_questions(job_id, pending_questions)
+            _update_job(
+                current_phase=Phase.SPEC_REVIEW_GAP.value,
+                progress=16,
+                waiting_for_answers=True,
+            )
+            
+            if not _wait_for_answers(job_id):
+                result.failure_reason = "Timeout waiting for user answers to open questions"
+                logger.error("Planning-v2: %s", result.failure_reason)
+                return result
+            
+            # Retrieve submitted answers and store them in the result for context
+            answers = get_submitted_answers(job_id)
+            if answers:
+                logger.info("Planning-v2: Received %d answers, continuing workflow", len(answers))
+                result.user_answers = answers
+            
+            _update_job(
+                current_phase=Phase.SPEC_REVIEW_GAP.value,
+                progress=18,
+                waiting_for_answers=False,
+            )
+
         # ── Phase 2: Planning ────────────────────────────────────────────
         result.current_phase = Phase.PLANNING
         _update_job(
@@ -293,41 +328,6 @@ class PlanningV2PlanningAgent:
             logger.error("Planning-v2: %s", result.failure_reason)
             return result
         _update_job(current_phase=Phase.PLANNING.value, progress=35)
-
-        # ── Open Questions Check: Wait for user answers if needed ────────────
-        if job_id and spec_review_result and spec_review_result.open_questions:
-            from shared.job_store import add_pending_questions, get_submitted_answers
-            
-            open_questions = spec_review_result.open_questions
-            logger.info(
-                "Planning-v2: Found %d open questions, waiting for user answers",
-                len(open_questions),
-            )
-            
-            pending_questions = _convert_open_questions_to_pending(open_questions)
-            add_pending_questions(job_id, pending_questions)
-            _update_job(
-                current_phase=Phase.PLANNING.value,
-                progress=36,
-                waiting_for_answers=True,
-            )
-            
-            if not _wait_for_answers(job_id):
-                result.failure_reason = "Timeout waiting for user answers to open questions"
-                logger.error("Planning-v2: %s", result.failure_reason)
-                return result
-            
-            # Retrieve submitted answers and store them in the result for context
-            answers = get_submitted_answers(job_id)
-            if answers:
-                logger.info("Planning-v2: Received %d answers, continuing workflow", len(answers))
-                result.user_answers = answers
-            
-            _update_job(
-                current_phase=Phase.PLANNING.value,
-                progress=38,
-                waiting_for_answers=False,
-            )
 
         # ── Phases 3–4: Implementation → Review (with Problem-solving retry) ─
         for iteration in range(1, MAX_REVIEW_ITERATIONS + 1):
