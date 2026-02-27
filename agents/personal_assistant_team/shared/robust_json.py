@@ -80,14 +80,14 @@ class ExtractionResult:
 
 class RobustJSONExtractor:
     """
-    Robust JSON extractor with multi-strategy recovery.
+    Robust JSON extractor with immediate decomposition on errors.
     
-    Recovery strategies (in order):
-    1. Direct parsing with cleanup
-    2. Decompose task into smaller subtasks (up to 10 decompositions)
+    When JSON parsing fails or response is truncated, immediately decomposes
+    the task into smaller subtasks rather than retrying. Supports up to 20
+    levels of recursive decomposition.
     """
 
-    MAX_DECOMPOSITION_ATTEMPTS = 10
+    MAX_DECOMPOSITION_ATTEMPTS = 20
 
     def __init__(
         self,
@@ -110,17 +110,25 @@ class RobustJSONExtractor:
         *,
         expected_keys: Optional[List[str]] = None,
         decomposition_hints: Optional[List[str]] = None,
+        _depth: int = 0,
     ) -> ExtractionResult:
         """
-        Extract JSON from LLM response with robust recovery.
+        Extract JSON from LLM response with immediate decomposition on errors.
+        
+        When parsing fails or response is truncated, immediately decomposes
+        the task into smaller subtasks rather than retrying.
         
         Args:
             prompt: The prompt requesting JSON output
             expected_keys: Keys expected in the JSON (for validation)
             decomposition_hints: Hints for how to decompose the task
+            _depth: Current decomposition depth (internal)
             
         Returns:
             ExtractionResult with success status and data or error
+            
+        Raises:
+            RuntimeError: If max decomposition depth reached.
         """
         result = ExtractionResult()
         raw_responses: List[str] = []
@@ -149,11 +157,18 @@ class RobustJSONExtractor:
         attempt.error = error
         result.attempts.append(attempt)
         
-        if self._detect_incomplete_json(response):
-            logger.info("Detected truncated JSON, skipping to decomposition")
+        is_truncated = self._detect_incomplete_json(response)
+        error_type = "truncated" if is_truncated else "parse_error"
+        
+        logger.warning(
+            "JSON extraction failed (%s). Next step -> Decomposing task (depth %d/%d)",
+            error_type,
+            _depth + 1,
+            self.MAX_DECOMPOSITION_ATTEMPTS,
+        )
         
         decomposition_result = self._attempt_decomposition(
-            prompt, expected_keys, decomposition_hints, raw_responses, result
+            prompt, expected_keys, decomposition_hints, raw_responses, result, _depth
         )
         if decomposition_result is not None:
             result.success = True
@@ -161,7 +176,7 @@ class RobustJSONExtractor:
             return result
         
         result.error = JSONExtractionError(
-            message="Failed to extract valid JSON after all recovery attempts",
+            message=f"Failed to extract valid JSON ({error_type}) after decomposition exhausted",
             original_prompt=prompt,
             attempts_made=result.total_attempts,
             continuation_attempts=result.continuation_attempts,
@@ -234,8 +249,18 @@ class RobustJSONExtractor:
         decomposition_hints: Optional[List[str]],
         raw_responses: List[str],
         result: ExtractionResult,
+        depth: int = 0,
     ) -> Optional[Dict[str, Any]]:
-        """Attempt to decompose the task into smaller subtasks."""
+        """Attempt to decompose the task into smaller subtasks recursively.
+        
+        Raises:
+            RuntimeError: If max decomposition depth is reached.
+        """
+        if depth >= self.MAX_DECOMPOSITION_ATTEMPTS:
+            raise RuntimeError(
+                f"Maximum decomposition depth ({self.MAX_DECOMPOSITION_ATTEMPTS}) "
+                "reached without successful response"
+            )
         
         subtasks = self._decompose_prompt(original_prompt, expected_keys, decomposition_hints)
         
@@ -243,18 +268,16 @@ class RobustJSONExtractor:
             logger.warning("Could not decompose prompt into subtasks")
             return None
         
-        logger.info("Decomposed task into %d subtasks", len(subtasks))
+        logger.info(
+            "Decomposing into %d subtasks (depth %d/%d)",
+            len(subtasks),
+            depth + 1,
+            self.MAX_DECOMPOSITION_ATTEMPTS,
+        )
         
         combined_result: Dict[str, Any] = {}
         
         for subtask_idx, subtask in enumerate(subtasks):
-            if result.decomposition_attempts >= self.MAX_DECOMPOSITION_ATTEMPTS:
-                logger.error(
-                    "Reached maximum decomposition attempts (%d)",
-                    self.MAX_DECOMPOSITION_ATTEMPTS
-                )
-                return None
-            
             result.decomposition_attempts += 1
             result.total_attempts += 1
             
@@ -263,7 +286,7 @@ class RobustJSONExtractor:
             
             attempt = ExtractionAttempt(
                 attempt_number=result.total_attempts,
-                strategy=f"decomposition_{subtask_idx+1}_{subtask['key']}",
+                strategy=f"decomposition_{depth+1}_{subtask_idx+1}_{subtask['key']}",
                 prompt_used=subtask["prompt"][:500],
                 raw_response=response[:500],
                 success=False,
@@ -271,10 +294,33 @@ class RobustJSONExtractor:
             
             parsed, error = self._try_parse(response)
             
-            if parsed is None and self._detect_incomplete_json(response):
-                parsed = self._attempt_subtask_continuation(
-                    subtask["prompt"], response, raw_responses, result
+            if parsed is None:
+                is_truncated = self._detect_incomplete_json(response)
+                error_type = "truncated" if is_truncated else "parse_error"
+                
+                logger.warning(
+                    "Subtask %d (%s) failed (%s). Next step -> Recursive decomposition",
+                    subtask_idx + 1,
+                    subtask["key"],
+                    error_type,
                 )
+                
+                try:
+                    parsed = self._attempt_decomposition(
+                        subtask["prompt"],
+                        None,
+                        None,
+                        raw_responses,
+                        result,
+                        depth + 1,
+                    )
+                except RuntimeError as e:
+                    logger.warning(
+                        "Subtask %d (%s) decomposition failed: %s",
+                        subtask_idx + 1,
+                        subtask["key"],
+                        str(e)[:100],
+                    )
             
             if parsed is not None:
                 attempt.success = True
@@ -288,41 +334,9 @@ class RobustJSONExtractor:
             else:
                 attempt.error = error or "Failed to parse subtask result"
                 result.attempts.append(attempt)
-                logger.warning(
-                    "Subtask %d (%s) failed: %s",
-                    subtask_idx + 1, subtask["key"], attempt.error
-                )
         
         if combined_result:
             return combined_result
-        
-        return None
-
-    def _attempt_subtask_continuation(
-        self,
-        subtask_prompt: str,
-        partial_response: str,
-        raw_responses: List[str],
-        result: ExtractionResult,
-    ) -> Optional[Dict[str, Any]]:
-        """Attempt continuation for a subtask."""
-        accumulated = partial_response
-        
-        for i in range(2):
-            result.total_attempts += 1
-            
-            continuation_prompt = self._build_continuation_prompt(subtask_prompt, accumulated)
-            continuation = self._make_request(continuation_prompt, json_mode=False)
-            raw_responses.append(continuation)
-            
-            accumulated = self._merge_responses(accumulated, continuation)
-            
-            parsed, _ = self._try_parse(accumulated)
-            if parsed is not None:
-                return parsed
-            
-            if not self._detect_incomplete_json(accumulated):
-                break
         
         return None
 

@@ -93,13 +93,12 @@ class LLMClient:
     LLM client for making completions with robust JSON extraction.
     
     Features:
-    - Automatic continuation requests for truncated JSON
-    - Task decomposition for complex requests
-    - Up to 10 decomposition attempts before failing
+    - Immediate decomposition for truncated or unparseable JSON
+    - Recursive task decomposition up to 20 levels deep
     - Loud, informative failures with recovery suggestions
     """
 
-    MAX_DECOMPOSITION_ATTEMPTS = 10
+    MAX_DECOMPOSITION_ATTEMPTS = 20
 
     def __init__(
         self,
@@ -206,16 +205,32 @@ class LLMClient:
         system_prompt: Optional[str] = None,
         expected_keys: Optional[List[str]] = None,
         decomposition_hints: Optional[List[str]] = None,
+        _depth: int = 0,
     ) -> Dict[str, Any]:
         """
-        Robust JSON extraction with truncation-triggered decomposition.
+        Robust JSON extraction with immediate decomposition on errors.
 
-        When truncation is detected via LLMTruncatedError, immediately decomposes
-        the task into smaller pieces rather than attempting partial recovery.
+        When truncation or JSON parse errors are detected, immediately decomposes
+        the task into smaller pieces rather than retrying.
+
+        Args:
+            prompt: The prompt to send
+            temperature: Sampling temperature
+            system_prompt: Optional system prompt
+            expected_keys: Keys expected in JSON (helps with decomposition)
+            decomposition_hints: Hints for breaking down the task
+            _depth: Current decomposition depth (internal)
+
+        Returns:
+            Parsed JSON dict.
+
+        Raises:
+            RuntimeError: If max decomposition depth reached.
+            JSONExtractionFailure: If extraction fails after all decomposition.
         """
         raw_responses: List[str] = []
-        total_attempts = 0
-        decomposition_attempts = 0
+        should_decompose = False
+        error_type = "unknown"
 
         try:
             response = self._ollama_complete(
@@ -225,79 +240,89 @@ class LLMClient:
                 json_mode=True,
             )
             raw_responses.append(response)
-            total_attempts += 1
 
             parsed = self._try_parse_json(response)
             if parsed is not None:
                 return parsed
 
-            logger.info("JSON parse failed, attempting task decomposition...")
+            logger.warning(
+                "JSON parse failed. Next step -> Decomposing task (depth %d/%d)",
+                _depth + 1,
+                self.MAX_DECOMPOSITION_ATTEMPTS,
+            )
+            should_decompose = True
+            error_type = "JSONParseError"
 
         except LLMTruncatedError as e:
             logger.warning(
-                "Response truncated (%d chars partial). Next step -> Decomposing task",
+                "LLMTruncatedError (%d chars partial). Next step -> Decomposing task (depth %d/%d)",
                 len(e.partial_content),
+                _depth + 1,
+                self.MAX_DECOMPOSITION_ATTEMPTS,
             )
             raw_responses.append(e.partial_content)
-            total_attempts += 1
+            should_decompose = True
+            error_type = "LLMTruncatedError"
 
-        subtasks = self._decompose_task(prompt, expected_keys, decomposition_hints)
+        if should_decompose:
+            if _depth >= self.MAX_DECOMPOSITION_ATTEMPTS:
+                raise RuntimeError(
+                    f"Maximum decomposition depth ({self.MAX_DECOMPOSITION_ATTEMPTS}) "
+                    f"reached without successful response. Error type: {error_type}"
+                )
 
-        if subtasks:
-            combined_result: Dict[str, Any] = {}
-            subtask_success = True
+            subtasks = self._decompose_task(prompt, expected_keys, decomposition_hints)
 
-            for subtask in subtasks:
-                if decomposition_attempts >= self.MAX_DECOMPOSITION_ATTEMPTS:
-                    logger.error(
-                        "Reached maximum decomposition attempts (%d)",
-                        self.MAX_DECOMPOSITION_ATTEMPTS
-                    )
-                    subtask_success = False
-                    break
+            if subtasks:
+                combined_result: Dict[str, Any] = {}
+                all_succeeded = True
 
-                decomposition_attempts += 1
-                total_attempts += 1
+                for subtask in subtasks:
+                    try:
+                        subtask_result = self._robust_json_extraction(
+                            subtask["prompt"],
+                            temperature=temperature,
+                            expected_keys=None,
+                            decomposition_hints=None,
+                            _depth=_depth + 1,
+                        )
 
-                try:
-                    subtask_response = self._ollama_complete(
-                        subtask["prompt"],
-                        temperature=temperature,
-                        json_mode=True,
-                    )
-                    raw_responses.append(subtask_response)
-
-                    subtask_parsed = self._try_parse_json(subtask_response)
-
-                    if subtask_parsed is not None:
-                        if subtask["key"]:
-                            combined_result[subtask["key"]] = subtask_parsed.get(
-                                subtask["key"], subtask_parsed
+                        if subtask_result:
+                            if subtask["key"]:
+                                combined_result[subtask["key"]] = subtask_result.get(
+                                    subtask["key"], subtask_result
+                                )
+                            else:
+                                combined_result.update(subtask_result)
+                            logger.info(
+                                "Subtask '%s' completed (depth %d)",
+                                subtask["key"],
+                                _depth + 1,
                             )
-                        else:
-                            combined_result.update(subtask_parsed)
-                        logger.info("Subtask '%s' completed successfully", subtask["key"])
-                    else:
-                        logger.warning("Subtask '%s' failed to parse", subtask["key"])
-                        subtask_success = False
-                except LLMTruncatedError as e:
-                    logger.warning(
-                        "Subtask '%s' truncated (%d chars)",
-                        subtask["key"],
-                        len(e.partial_content),
-                    )
-                    raw_responses.append(e.partial_content)
-                    subtask_success = False
+                    except RuntimeError as e:
+                        logger.warning(
+                            "Subtask '%s' failed at depth %d: %s",
+                            subtask["key"],
+                            _depth + 1,
+                            str(e)[:100],
+                        )
+                        all_succeeded = False
 
-            if combined_result and subtask_success:
-                return combined_result
+                if combined_result:
+                    return combined_result
+
+                if not all_succeeded:
+                    raise RuntimeError(
+                        f"Decomposition failed at depth {_depth}/{self.MAX_DECOMPOSITION_ATTEMPTS}. "
+                        "Some subtasks could not be processed."
+                    )
 
         raise JSONExtractionFailure(
-            message="Failed to extract valid JSON after all recovery attempts",
+            message=f"Failed to extract valid JSON (error: {error_type})",
             original_prompt=prompt,
-            attempts_made=total_attempts,
+            attempts_made=1,
             continuation_attempts=0,
-            decomposition_attempts=decomposition_attempts,
+            decomposition_attempts=_depth,
             raw_responses=raw_responses,
             recovery_suggestions=self._generate_recovery_suggestions(prompt, raw_responses),
         )

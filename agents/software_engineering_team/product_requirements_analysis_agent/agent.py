@@ -40,8 +40,7 @@ logger = logging.getLogger(__name__)
 
 OPEN_QUESTIONS_POLL_INTERVAL = 5.0
 MAX_ITERATIONS = 5
-JSON_RECOVERY_MAX_RETRIES = 2
-MAX_DECOMPOSITION_DEPTH = 10
+MAX_DECOMPOSITION_DEPTH = 20
 
 
 class ProductRequirementsAnalysisAgent:
@@ -245,96 +244,61 @@ class ProductRequirementsAnalysisAgent:
         self,
         prompt: str,
         phase_name: str = "LLM",
-        max_retries: int = JSON_RECOVERY_MAX_RETRIES,
         decompose_fn: Optional[Callable[[str], List[str]]] = None,
         merge_fn: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]] = None,
         original_content: Optional[str] = None,
         chunk_prompt_template: Optional[str] = None,
         _depth: int = 0,
     ) -> Dict[str, Any]:
-        """Parse LLM JSON response with truncation-triggered decomposition.
+        """Parse LLM JSON response with immediate decomposition on errors.
 
-        When a truncated response is detected (via LLMTruncatedError), immediately
-        decomposes the task into smaller chunks rather than attempting partial recovery.
+        When truncation or JSON parse errors are detected, immediately decomposes
+        the task into smaller chunks rather than retrying. Only transient network
+        errors trigger retries.
 
         Args:
             prompt: The prompt to send to the LLM
             phase_name: Name for logging purposes
-            max_retries: Number of retry attempts for non-truncation errors
             decompose_fn: Optional function to split content into chunks
             merge_fn: Optional function to merge results from chunks
             original_content: The original content being processed (for decomposition)
             chunk_prompt_template: Template for chunk prompts (must have {chunk_content})
             _depth: Internal recursion depth tracker
 
-        Returns empty dict only if all recovery attempts fail.
+        Returns:
+            Parsed JSON dict.
+
+        Raises:
+            RuntimeError: If decomposition fails after max depth reached.
         """
         from shared.llm import LLMTruncatedError, LLMJsonParseError
 
-        last_error: Optional[Exception] = None
-
-        for attempt in range(max_retries + 1):
-            try:
-                return self.llm.complete_json(prompt)
-            except LLMTruncatedError as e:
+        try:
+            return self.llm.complete_json(prompt)
+        except (LLMTruncatedError, LLMJsonParseError) as e:
+            # Both truncation and parse errors trigger immediate decomposition
+            error_type = type(e).__name__
+            if isinstance(e, LLMTruncatedError):
                 logger.warning(
-                    "PRA %s: Response truncated (%d chars partial). Next step -> Decomposing task",
+                    "PRA %s: %s (%d chars partial). Next step -> Decomposing task (depth %d/%d)",
                     phase_name,
+                    error_type,
                     len(e.partial_content),
+                    _depth + 1,
+                    MAX_DECOMPOSITION_DEPTH,
                 )
-                return self._decompose_and_process(
-                    prompt=prompt,
-                    phase_name=phase_name,
-                    max_retries=max_retries,
-                    decompose_fn=decompose_fn,
-                    merge_fn=merge_fn,
-                    original_content=original_content,
-                    chunk_prompt_template=chunk_prompt_template,
-                    _depth=_depth,
-                )
-            except LLMJsonParseError as e:
-                last_error = e
+            else:
                 logger.warning(
-                    "PRA %s: JSON parse failed (attempt %d/%d): %s",
+                    "PRA %s: %s detected. Next step -> Decomposing task (depth %d/%d)",
                     phase_name,
-                    attempt + 1,
-                    max_retries + 1,
-                    str(e)[:200],
+                    error_type,
+                    _depth + 1,
+                    MAX_DECOMPOSITION_DEPTH,
                 )
-                if attempt < max_retries:
-                    logger.info(
-                        "PRA %s: Next step -> Re-prompting LLM (attempt %d/%d)",
-                        phase_name,
-                        attempt + 2,
-                        max_retries + 1,
-                    )
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    "PRA %s: LLM call failed (attempt %d/%d): %s",
-                    phase_name,
-                    attempt + 1,
-                    max_retries + 1,
-                    str(e)[:200],
-                )
-                if attempt < max_retries:
-                    logger.info(
-                        "PRA %s: Next step -> Re-prompting LLM (attempt %d/%d)",
-                        phase_name,
-                        attempt + 2,
-                        max_retries + 1,
-                    )
 
-        # All retries exhausted - try decomposition as last resort
-        if decompose_fn is not None and merge_fn is not None and original_content:
-            logger.info(
-                "PRA %s: All retries exhausted. Next step -> Attempting decomposition",
-                phase_name,
-            )
             result = self._decompose_and_process(
                 prompt=prompt,
                 phase_name=phase_name,
-                max_retries=max_retries,
                 decompose_fn=decompose_fn,
                 merge_fn=merge_fn,
                 original_content=original_content,
@@ -344,48 +308,46 @@ class ProductRequirementsAnalysisAgent:
             if result:
                 return result
 
-        logger.error(
-            "PRA %s: All recovery attempts exhausted. Recovery summary: "
-            "1) Retried LLM %d times, 2) Attempted decomposition. Final error: %s",
-            phase_name,
-            max_retries + 1,
-            last_error,
-        )
-        return {}
+            # Decomposition failed
+            raise RuntimeError(
+                f"PRA {phase_name}: Decomposition exhausted at depth {_depth}/{MAX_DECOMPOSITION_DEPTH}. "
+                f"Original error: {e}"
+            ) from e
 
     def _decompose_and_process(
         self,
         prompt: str,
         phase_name: str,
-        max_retries: int,
         decompose_fn: Optional[Callable[[str], List[str]]],
         merge_fn: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]],
         original_content: Optional[str],
         chunk_prompt_template: Optional[str],
         _depth: int,
     ) -> Dict[str, Any]:
-        """Decompose content into chunks and process each recursively."""
+        """Decompose content into chunks and process each recursively.
+
+        Raises:
+            RuntimeError: If max decomposition depth is reached.
+        """
         if decompose_fn is None or merge_fn is None:
-            logger.info(
+            logger.warning(
                 "PRA %s: Decomposition not available (no decompose/merge functions)",
                 phase_name,
             )
             return {}
 
         if not original_content:
-            logger.info(
+            logger.warning(
                 "PRA %s: Decomposition not possible (no content to decompose)",
                 phase_name,
             )
             return {}
 
         if _depth >= MAX_DECOMPOSITION_DEPTH:
-            logger.warning(
-                "PRA %s: Maximum decomposition depth (%d) reached",
-                phase_name,
-                MAX_DECOMPOSITION_DEPTH,
+            raise RuntimeError(
+                f"PRA {phase_name}: Maximum decomposition depth ({MAX_DECOMPOSITION_DEPTH}) "
+                "reached without successful response"
             )
-            return {}
 
         chunks = decompose_fn(original_content)
         if len(chunks) <= 1:
@@ -419,18 +381,26 @@ class ProductRequirementsAnalysisAgent:
             else:
                 chunk_prompt = self._create_generic_chunk_prompt(prompt, chunk)
 
-            chunk_result = self._parse_json_with_recovery(
-                prompt=chunk_prompt,
-                phase_name=f"{phase_name}_chunk{i + 1}",
-                max_retries=max_retries,
-                decompose_fn=decompose_fn,
-                merge_fn=merge_fn,
-                original_content=chunk,
-                chunk_prompt_template=chunk_prompt_template,
-                _depth=_depth + 1,
-            )
-            if chunk_result:
-                results.append(chunk_result)
+            try:
+                chunk_result = self._parse_json_with_recovery(
+                    prompt=chunk_prompt,
+                    phase_name=f"{phase_name}_chunk{i + 1}",
+                    decompose_fn=decompose_fn,
+                    merge_fn=merge_fn,
+                    original_content=chunk,
+                    chunk_prompt_template=chunk_prompt_template,
+                    _depth=_depth + 1,
+                )
+                if chunk_result:
+                    results.append(chunk_result)
+            except RuntimeError as e:
+                logger.warning(
+                    "PRA %s: Chunk %d/%d failed: %s",
+                    phase_name,
+                    i + 1,
+                    len(chunks),
+                    str(e)[:100],
+                )
 
         if results:
             merged = merge_fn(results)

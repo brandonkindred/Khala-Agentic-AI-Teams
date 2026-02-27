@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MAX_DECOMPOSITION_DEPTH = 10
+MAX_DECOMPOSITION_DEPTH = 20
 DEFAULT_CHUNK_SIZE = 4000
 
 
@@ -17,23 +17,22 @@ def parse_json_with_recovery(
     llm: "LLMClient",
     prompt: str,
     agent_name: str = "ToolAgent",
-    max_retries: int = 1,
     decompose_fn: Optional[Callable[[str], List[str]]] = None,
     merge_fn: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]] = None,
     original_content: Optional[str] = None,
     chunk_prompt_template: Optional[str] = None,
     _depth: int = 0,
 ) -> Dict[str, Any]:
-    """Parse LLM JSON response with truncation-triggered decomposition.
+    """Parse LLM JSON response with immediate decomposition on errors.
 
-    When a truncated response is detected (via LLMTruncatedError), immediately
-    decomposes the task into smaller chunks rather than attempting partial recovery.
+    When truncation or JSON parse errors are detected, immediately decomposes
+    the task into smaller chunks rather than retrying. Only transient network
+    errors trigger retries.
 
     Args:
         llm: LLM client for completions
         prompt: The prompt to send to the LLM
         agent_name: Name for logging purposes
-        max_retries: Number of retry attempts for non-truncation errors
         decompose_fn: Optional function to split content into chunks
         merge_fn: Optional function to merge results from chunks
         original_content: The original content being processed (for decomposition)
@@ -41,76 +40,39 @@ def parse_json_with_recovery(
         _depth: Internal recursion depth tracker
 
     Returns:
-        Parsed JSON dict, or empty dict if all recovery fails
+        Parsed JSON dict.
+
+    Raises:
+        RuntimeError: If decomposition fails after max depth reached.
     """
     from shared.llm import LLMTruncatedError, LLMJsonParseError
 
-    last_error: Optional[Exception] = None
-
-    for attempt in range(max_retries + 1):
-        try:
-            return llm.complete_json(prompt)
-        except LLMTruncatedError as e:
+    try:
+        return llm.complete_json(prompt)
+    except (LLMTruncatedError, LLMJsonParseError) as e:
+        error_type = type(e).__name__
+        if isinstance(e, LLMTruncatedError):
             logger.warning(
-                "%s: Response truncated (%d chars partial). Next step -> Decomposing task",
+                "%s: %s (%d chars partial). Next step -> Decomposing task (depth %d/%d)",
                 agent_name,
+                error_type,
                 len(e.partial_content),
+                _depth + 1,
+                MAX_DECOMPOSITION_DEPTH,
             )
-            return _decompose_and_process(
-                llm=llm,
-                prompt=prompt,
-                agent_name=agent_name,
-                max_retries=max_retries,
-                decompose_fn=decompose_fn,
-                merge_fn=merge_fn,
-                original_content=original_content,
-                chunk_prompt_template=chunk_prompt_template,
-                _depth=_depth,
-            )
-        except LLMJsonParseError as e:
-            last_error = e
+        else:
             logger.warning(
-                "%s: JSON parse failed (attempt %d/%d): %s",
+                "%s: %s detected. Next step -> Decomposing task (depth %d/%d)",
                 agent_name,
-                attempt + 1,
-                max_retries + 1,
-                str(e)[:200],
+                error_type,
+                _depth + 1,
+                MAX_DECOMPOSITION_DEPTH,
             )
-            if attempt < max_retries:
-                logger.info(
-                    "%s: Next step -> Re-prompting LLM (attempt %d/%d)",
-                    agent_name,
-                    attempt + 2,
-                    max_retries + 1,
-                )
-        except Exception as e:
-            last_error = e
-            logger.warning(
-                "%s: LLM call failed (attempt %d/%d): %s",
-                agent_name,
-                attempt + 1,
-                max_retries + 1,
-                str(e)[:200],
-            )
-            if attempt < max_retries:
-                logger.info(
-                    "%s: Next step -> Re-prompting LLM (attempt %d/%d)",
-                    agent_name,
-                    attempt + 2,
-                    max_retries + 1,
-                )
 
-    # All retries exhausted - try decomposition as last resort
-    if decompose_fn is not None and merge_fn is not None and original_content:
-        logger.info(
-            "%s: All retries exhausted. Next step -> Attempting decomposition",
-            agent_name,
-        )
         result = _decompose_and_process(
             llm=llm,
             prompt=prompt,
             agent_name=agent_name,
-            max_retries=max_retries,
             decompose_fn=decompose_fn,
             merge_fn=merge_fn,
             original_content=original_content,
@@ -120,49 +82,46 @@ def parse_json_with_recovery(
         if result:
             return result
 
-    logger.error(
-        "%s: All recovery attempts exhausted. Recovery summary: "
-        "1) Retried LLM %d times, 2) Attempted decomposition. Final error: %s",
-        agent_name,
-        max_retries + 1,
-        last_error,
-    )
-    return {}
+        raise RuntimeError(
+            f"{agent_name}: Decomposition exhausted at depth {_depth}/{MAX_DECOMPOSITION_DEPTH}. "
+            f"Original error: {e}"
+        ) from e
 
 
 def _decompose_and_process(
     llm: "LLMClient",
     prompt: str,
     agent_name: str,
-    max_retries: int,
     decompose_fn: Optional[Callable[[str], List[str]]],
     merge_fn: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]],
     original_content: Optional[str],
     chunk_prompt_template: Optional[str],
     _depth: int,
 ) -> Dict[str, Any]:
-    """Decompose content into chunks and process each recursively."""
+    """Decompose content into chunks and process each recursively.
+
+    Raises:
+        RuntimeError: If max decomposition depth is reached.
+    """
     if decompose_fn is None or merge_fn is None:
-        logger.info(
+        logger.warning(
             "%s: Decomposition not available (no decompose/merge functions)",
             agent_name,
         )
         return {}
 
     if not original_content:
-        logger.info(
+        logger.warning(
             "%s: Decomposition not possible (no content to decompose)",
             agent_name,
         )
         return {}
 
     if _depth >= MAX_DECOMPOSITION_DEPTH:
-        logger.warning(
-            "%s: Maximum decomposition depth (%d) reached",
-            agent_name,
-            MAX_DECOMPOSITION_DEPTH,
+        raise RuntimeError(
+            f"{agent_name}: Maximum decomposition depth ({MAX_DECOMPOSITION_DEPTH}) "
+            "reached without successful response"
         )
-        return {}
 
     chunks = decompose_fn(original_content)
     if len(chunks) <= 1:
@@ -196,19 +155,27 @@ def _decompose_and_process(
         else:
             chunk_prompt = _create_generic_chunk_prompt(prompt, chunk)
 
-        chunk_result = parse_json_with_recovery(
-            llm=llm,
-            prompt=chunk_prompt,
-            agent_name=f"{agent_name}_chunk{i + 1}",
-            max_retries=max_retries,
-            decompose_fn=decompose_fn,
-            merge_fn=merge_fn,
-            original_content=chunk,
-            chunk_prompt_template=chunk_prompt_template,
-            _depth=_depth + 1,
-        )
-        if chunk_result:
-            results.append(chunk_result)
+        try:
+            chunk_result = parse_json_with_recovery(
+                llm=llm,
+                prompt=chunk_prompt,
+                agent_name=f"{agent_name}_chunk{i + 1}",
+                decompose_fn=decompose_fn,
+                merge_fn=merge_fn,
+                original_content=chunk,
+                chunk_prompt_template=chunk_prompt_template,
+                _depth=_depth + 1,
+            )
+            if chunk_result:
+                results.append(chunk_result)
+        except RuntimeError as e:
+            logger.warning(
+                "%s: Chunk %d/%d failed: %s",
+                agent_name,
+                i + 1,
+                len(chunks),
+                str(e)[:100],
+            )
 
     if results:
         merged = merge_fn(results)
