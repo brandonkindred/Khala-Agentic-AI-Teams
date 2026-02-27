@@ -51,6 +51,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 | **Setup** | top-level | Git Setup |
 | **Implementation** | backend | Backend Expert |
 | **Implementation** | frontend_team | UX Designer, UI Designer, Design System, Frontend Architect, Feature Agent, UX Engineer, Performance Engineer, Build/Release |
+| **Implementation** | ai_agent_development_team | Intake/Planning/Execution/Review/Problem-solving/Delivery phases for spec-to-agent-system workflows with dedicated tool agents |
 | **Quality** | quality gates (cross-cutting) | Code Review, QA Expert, Cybersecurity Expert, Accessibility Expert, Acceptance Verifier, DbC Comments |
 | **Integration / release** | top-level | Integration Agent, DevOps Team (sub-orchestrator), Documentation Agent |
 
@@ -385,6 +386,12 @@ software_engineering_team/
 │   ├── performance_engineer/
 │   ├── build_release/
 │   └── orchestrator.py   # FrontendOrchestratorAgent
+├── ai_agent_development_team/  # Spec-to-agent-system sub-team (phase-based, backend_v2-style)
+│   ├── orchestrator.py
+│   ├── models.py
+│   ├── prompts.py
+│   ├── phases/
+│   └── tool_agents/
 ├── qa_agent/
 ├── acceptance_verifier_agent/
 ├── code_review_agent/     # Chunk Reviewer + Coordinator for large code; single-call for small

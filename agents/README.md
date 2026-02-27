@@ -9,6 +9,7 @@ This repository provides **multiple Strands-style agent systems** in a monorepo:
 - **Investment team** – Multi-asset investment organization with IPS hard constraints, strategy validation, promotion gates (`reject/revise/paper/live`), separation-of-duties, risk veto, and monitor-only safety degradation.
 - **Market research team** – Human-AI collaborative workflow for user discovery and product concept viability; transcript ingestion, UX synthesis, experiment scripts, and human approval gates.
 - **Branding team** – Brand strategy codification, moodboard ideation, design and writing standards, plus an asynchronous open-question feed and answer workflow.
+- **AI systems team** – Agent-factory workflow that takes a structured spec and designs/builds a goal-aligned AI agent system with orchestration, safety gates, and evaluation criteria.
 
 ## Project structure
 
@@ -22,6 +23,7 @@ strands-agents/
 ├── investment_team/            # Multi-asset investment organization (IPS-first)
 ├── market_research_team/       # Market research and concept viability
 ├── branding_team/              # Branding strategy + interactive clarification API
+├── ai_systems_team/            # Spec-to-agent-system blueprint and build workflow
 └── requirements.txt            # Shared dependencies
 ```
 
@@ -34,6 +36,7 @@ strands-agents/
 | [soc2_compliance_team/](soc2_compliance_team/README.md) | SOC2 compliance audit: Security, Availability, Processing Integrity, Confidentiality, Privacy TSC agents; produces compliance report or next-steps document. |
 | [investment_team/](investment_team/README.md) | Multi-asset investment organization with IPS constraints, validation/promotion gates, and safety-first orchestration. |
 | [market_research_team/](market_research_team/README.md) | Market research and business concept viability; transcript ingestion, UX synthesis, experiment scripts, human approval gates. |
+| [ai_systems_team/](ai_systems_team/README.md) | Spec-driven AI agent factory: maps goals to agent roles, orchestration, guardrails, and acceptance tests. |
 
 ```mermaid
 flowchart LR

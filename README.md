@@ -34,6 +34,7 @@ This repository provides **multiple Strands-style agent systems** in a unified m
 | **Market Research** | Human-AI collaborative workflow for user discovery and product concept viability; transcript ingestion, UX synthesis, experiment scripts, human approval gates. |
 | **Investment Team** | Multi-asset investment organization with IPS hard constraints, strategy validation, promotion gates, separation-of-duties, risk veto, and monitor-only safety degradation. |
 | **Branding Team** | Brand strategy, codification, moodboard concepts, design/writing standards, and interactive async open-question workflow. |
+| **AI Systems Team** | Spec-driven agent factory sub-team that converts structured specs into deployable AI agent systems with orchestration, guardrails, and measurable acceptance criteria. |
 
 The **User Interface** is an Angular 19 application that provides interactive dashboards for all agent APIs.
 
@@ -122,6 +123,7 @@ strands-agents/
 │   ├── investment_team/             # Multi-asset investment (IPS-first)
 │   ├── market_research_team/        # Market research and concept viability
 │   ├── branding_team/               # Branding strategy + interactive clarification API
+│   ├── ai_systems_team/             # Spec-to-agent-system blueprint and build workflow
 │   ├── docker/                      # Docker config, default spec
 │   ├── Dockerfile                   # Multi-stage image (all 6 teams)
 │   ├── docker-compose.yml           # Run all APIs in one container
@@ -188,6 +190,12 @@ Human-AI workflow: transcript ingestion, UX synthesis, viability recommendation,
 IPS-first multi-asset organization with PolicyGuardian, Validation, PromotionGate, InvestmentCommittee agents. Separation-of-duties, risk veto, monitor-only safety.
 
 - **Docs:** [agents/investment_team/README.md](agents/investment_team/README.md)
+
+### AI Systems Team
+
+Spec-driven sub-team for creating AI systems from requirements. Takes a structured spec and outputs an Agent System Blueprint, including role design, orchestration flow, safety gates, evaluation criteria, and rollout guidance.
+
+- **Docs:** [agents/ai_systems_team/README.md](agents/ai_systems_team/README.md)
 
 ---
 
