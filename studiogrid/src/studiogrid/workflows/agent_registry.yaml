@@ -1,0 +1,9 @@
+agents:
+  design_lead:
+    prompt_file: prompts/agents/design_lead.md
+    tools:
+      - figma_tool
+      - contrast_check_tool
+    permissions:
+      - read_artifacts
+      - write_artifacts

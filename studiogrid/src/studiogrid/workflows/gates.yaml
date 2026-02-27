@@ -1,0 +1,5 @@
+gates:
+  INTAKE: [schema]
+  DISCOVERY: [schema, consistency]
+  HIFI: [schema, accessibility]
+  HANDOFF: [schema]
