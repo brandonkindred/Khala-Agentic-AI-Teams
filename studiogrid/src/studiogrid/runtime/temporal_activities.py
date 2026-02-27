@@ -52,8 +52,12 @@ async def set_phase(payload: dict) -> None:
 
 @activity.defn(name="RunPhase")
 async def run_phase(payload: dict) -> None:
+    await _execute_phase(payload["ctx"], payload["phase"], payload.get("scope", payload["phase"]))
+
+
+async def _execute_phase(ctx_payload: dict, phase: str, scope: str) -> None:
     orch = build_orchestrator()
-    ctx = _ctx(payload["ctx"], payload["phase"])
+    ctx = _ctx(ctx_payload, phase)
     tasks = orch.build_phase_tasks(ctx=ctx)
     for task in tasks:
         orch.dispatch_task_to_agent(
@@ -63,15 +67,15 @@ async def run_phase(payload: dict) -> None:
         )
     gate_results = orch.run_gates_for_phase(
         ctx=ctx,
-        gates=_gates_for(payload["phase"]),
-        idempotency_key=_key(ctx.run_id, "RunGates", payload["phase"]),
+        gates=_gates_for(phase),
+        idempotency_key=_key(ctx.run_id, "RunGates", scope),
     )
     if any(not result.passed for result in gate_results):
         review_ids = [rid for result in gate_results for rid in result.review_ids]
         orch.create_revision_tasks_from_reviews(
             ctx=ctx,
             review_ids=review_ids,
-            idempotency_key=_key(ctx.run_id, "CreateRevisionTasks", payload["phase"]),
+            idempotency_key=_key(ctx.run_id, "CreateRevisionTasks", scope),
         )
 
 
@@ -119,7 +123,8 @@ async def set_running(payload: dict) -> None:
 
 @activity.defn(name="RunRevisionLoop")
 async def run_revision_loop(payload: dict) -> None:
-    await run_phase({"ctx": payload["ctx"], "phase": payload["phase"]})
+    revision_scope = f"{payload['phase']}:revision:{payload['decision_id']}"
+    await _execute_phase(payload["ctx"], payload["phase"], revision_scope)
 
 
 @activity.defn(name="FailRun")
