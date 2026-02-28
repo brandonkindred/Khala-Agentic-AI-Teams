@@ -83,7 +83,7 @@ class InvestmentTeamOrchestrator:
         proposer_agent_id: str,
         approver: AgentIdentity,
         risk_veto: bool,
-        human_live_approval: bool,
+        human_live_approval: bool = False,
     ) -> PromotionDecision:
         decision = self.promotion_gate.decide(
             strategy=strategy,

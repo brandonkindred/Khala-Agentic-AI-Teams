@@ -109,3 +109,39 @@ def test_orchestrator_degrades_to_monitor_only_on_integrity_failure() -> None:
     orch.handle_data_integrity(state, integrity_ok=False)
 
     assert state.mode.value == "monitor_only"
+
+
+def test_promotion_gate_revises_when_validation_strategy_mismatch() -> None:
+    ips = _sample_ips()
+    strategy = StrategySpec(strategy_id="s1", authored_by="research", asset_class="equities", hypothesis="h", signal_definition="s")
+    validation = _sample_validation()
+    validation.strategy_id = "other"
+
+    decision = PromotionGateAgent().decide(
+        strategy=strategy,
+        validation=validation,
+        ips=ips,
+        proposer_agent_id="proposer-1",
+        approver=AgentIdentity(agent_id="approver-1", role="promotion_gate", version="1.0"),
+        risk_veto=False,
+    )
+
+    assert decision.outcome == PromotionStage.REVISE
+    assert any("strategy_id does not match" in action for action in decision.required_actions)
+
+
+def test_policy_guardian_rejects_excluded_asset_class() -> None:
+    ips = _sample_ips()
+    ips.profile.preferences.excluded_asset_classes = ["crypto"]
+    proposal = PortfolioProposal(
+        proposal_id="p2",
+        prepared_by="designer",
+        ips_version="1.0",
+        data_snapshot_id="snap-1",
+        objective="balanced",
+        positions=[PortfolioPosition(symbol="BTC", asset_class="crypto", weight_pct=5, rationale="alpha")],
+    )
+
+    violations = PolicyGuardianAgent().check_portfolio(ips, proposal)
+
+    assert any("excluded by IPS preferences" in item for item in violations)

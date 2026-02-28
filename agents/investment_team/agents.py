@@ -48,10 +48,19 @@ class PolicyGuardianAgent:
                     f"({pos.weight_pct}% > {constraints.max_single_position_pct}%)."
                 )
 
+        total_weight = sum(pos.weight_pct for pos in proposal.positions)
+        if total_weight > 100:
+            violations.append(f"Total portfolio weight exceeds 100% ({total_weight}%).")
+
         for asset_class, weight in sorted(asset_class_weights.items()):
             class_cap = constraints.max_asset_class_pct.get(asset_class)
             if class_cap is not None and weight > class_cap:
                 violations.append(f"Asset class {asset_class} exceeds cap ({weight}% > {class_cap}%).")
+
+        excluded_classes = set(ips.profile.preferences.excluded_asset_classes)
+        for asset_class in sorted(excluded_classes):
+            if asset_class_weights.get(asset_class, 0) > 0:
+                violations.append(f"Asset class {asset_class} is excluded by IPS preferences.")
 
         if not ips.profile.preferences.crypto_allowed and asset_class_weights.get("crypto", 0) > 0:
             violations.append("Crypto position present despite IPS disallowing crypto.")
@@ -103,9 +112,21 @@ class PromotionGateAgent:
         proposer_agent_id: str,
         approver: AgentIdentity,
         risk_veto: bool,
-        human_live_approval: bool,
+        human_live_approval: bool = False,
     ) -> PromotionDecision:
         gate_results: List[GateCheckResult] = []
+
+        def build_audit() -> AuditContext:
+            return AuditContext(
+                data_snapshot_id=validation.data_snapshot_id,
+                assumptions=strategy.audit.assumptions,
+                gate_trace=[f"{r.gate.value}:{r.result.value}" for r in gate_results],
+                agent_versions={
+                    "proposer": strategy.authored_by,
+                    "approver": approver.version,
+                    "validator": validation.generated_by,
+                },
+            )
 
         if proposer_agent_id == approver.agent_id:
             gate_results.append(
@@ -122,6 +143,7 @@ class PromotionGateAgent:
                 rationale="Separation-of-duties violation: proposer cannot self-approve.",
                 required_actions=["Assign independent approval agent."],
                 gate_results=gate_results,
+                audit=build_audit(),
             )
         gate_results.append(
             GateCheckResult(
@@ -146,6 +168,7 @@ class PromotionGateAgent:
                 rationale="Risk management veto invoked.",
                 required_actions=["Address risk concerns and rerun validation."],
                 gate_results=gate_results,
+                audit=build_audit(),
             )
         gate_results.append(
             GateCheckResult(
@@ -157,6 +180,8 @@ class PromotionGateAgent:
 
         validator = ValidationAgent()
         failures = validator.checklist_failures(validation)
+        if validation.strategy_id != strategy.strategy_id:
+            failures.append("Validation report strategy_id does not match strategy spec.")
         if failures:
             gate_results.append(
                 GateCheckResult(
@@ -172,6 +197,7 @@ class PromotionGateAgent:
                 rationale="Validation checklist not satisfied.",
                 required_actions=failures,
                 gate_results=gate_results,
+                audit=build_audit(),
             )
         gate_results.append(
             GateCheckResult(
@@ -196,6 +222,7 @@ class PromotionGateAgent:
                 rationale="IPS does not permit live trading; defaulting to paper mode.",
                 required_actions=["Obtain explicit human approval + IPS update for live promotion."],
                 gate_results=gate_results,
+                audit=build_audit(),
             )
 
         gate_results.append(
@@ -221,6 +248,7 @@ class PromotionGateAgent:
                 rationale="Live trading requires explicit human approval.",
                 required_actions=["Obtain human approval before live promotion."],
                 gate_results=gate_results,
+                audit=build_audit(),
             )
 
         gate_results.append(
@@ -238,12 +266,7 @@ class PromotionGateAgent:
             rationale="All checklist gates passed, no veto, IPS allows live trading, and human approval was recorded.",
             required_actions=["Enable tight risk limits and monitor-first rollout window."],
             gate_results=gate_results,
-            audit=AuditContext(
-                data_snapshot_id=validation.data_snapshot_id,
-                assumptions=strategy.audit.assumptions,
-                gate_trace=[f"{r.gate.value}:{r.result.value}" for r in gate_results],
-                agent_versions={"approver": approver.version},
-            ),
+            audit=build_audit(),
         )
 
 
