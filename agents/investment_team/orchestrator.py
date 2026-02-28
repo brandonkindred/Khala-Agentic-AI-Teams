@@ -6,7 +6,14 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from .agents import AgentIdentity, PolicyGuardianAgent, PromotionGateAgent
-from .models import IPS, PortfolioProposal, PromotionDecision, StrategySpec, ValidationReport
+from .models import (
+    IPS,
+    PortfolioProposal,
+    PromotionDecision,
+    StrategySpec,
+    ValidationReport,
+    WorkflowMode,
+)
 
 
 @dataclass
@@ -28,7 +35,7 @@ class WorkflowState:
             "escalation": [],
         }
     )
-    mode: str = "monitor_only"
+    mode: WorkflowMode = WorkflowMode.MONITOR_ONLY
     audit_log: List[str] = field(default_factory=list)
 
 
@@ -46,13 +53,17 @@ class InvestmentTeamOrchestrator:
         self.policy_guardian = PolicyGuardianAgent()
         self.promotion_gate = PromotionGateAgent()
 
+    def bootstrap(self, state: WorkflowState, ips: IPS) -> None:
+        state.mode = ips.default_mode
+        state.audit_log.append(f"workflow_bootstrap:mode={state.mode.value}")
+
     def enqueue(self, state: WorkflowState, item: QueueItem) -> None:
         state.queues[item.queue].append(item)
         state.audit_log.append(f"enqueued:{item.queue}:{item.payload_id}:{item.priority}")
 
     def handle_data_integrity(self, state: WorkflowState, integrity_ok: bool) -> None:
         if not integrity_ok:
-            state.mode = "monitor_only"
+            state.mode = WorkflowMode.MONITOR_ONLY
             state.audit_log.append("data_integrity_failed:degrade_to_monitor_only")
 
     def check_proposal(self, state: WorkflowState, ips: IPS, proposal: PortfolioProposal) -> List[str]:
@@ -72,6 +83,7 @@ class InvestmentTeamOrchestrator:
         proposer_agent_id: str,
         approver: AgentIdentity,
         risk_veto: bool,
+        human_live_approval: bool = False,
     ) -> PromotionDecision:
         decision = self.promotion_gate.decide(
             strategy=strategy,
@@ -80,6 +92,7 @@ class InvestmentTeamOrchestrator:
             proposer_agent_id=proposer_agent_id,
             approver=approver,
             risk_veto=risk_veto,
+            human_live_approval=human_live_approval,
         )
         state.audit_log.append(f"promotion:{strategy.strategy_id}:{decision.outcome.value}")
         if decision.outcome.value in {"reject", "revise"}:
