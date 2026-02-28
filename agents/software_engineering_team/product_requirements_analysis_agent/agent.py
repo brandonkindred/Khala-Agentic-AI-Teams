@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -41,6 +42,43 @@ logger = logging.getLogger(__name__)
 OPEN_QUESTIONS_POLL_INTERVAL = 5.0
 MAX_ITERATIONS = 5
 MAX_DECOMPOSITION_DEPTH = 20
+MAX_ISSUES = 10
+MAX_GAPS = 10
+
+
+def _dedupe_items(items: List[str], similarity_threshold: float = 0.85) -> List[str]:
+    """Remove near-duplicate items from a list based on string similarity.
+    
+    Uses SequenceMatcher to detect items that are variations of the same concern.
+    Keeps the first occurrence (typically more complete) and discards similar ones.
+    
+    The threshold of 0.85 catches obvious duplicates (same sentence with minor word changes)
+    while preserving items that follow similar patterns but address different topics.
+    
+    Args:
+        items: List of string items to deduplicate.
+        similarity_threshold: Items with similarity >= this value are considered duplicates (0.0-1.0).
+    
+    Returns:
+        Deduplicated list preserving order.
+    """
+    if not items:
+        return items
+    
+    unique: List[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        is_duplicate = False
+        item_lower = item.lower()
+        for existing in unique:
+            ratio = SequenceMatcher(None, item_lower, existing.lower()).ratio()
+            if ratio >= similarity_threshold:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            unique.append(item)
+    return unique
 
 
 class ProductRequirementsAnalysisAgent:
@@ -937,13 +975,34 @@ Previously Answered Questions:
         return None
 
     def _parse_spec_review_response(self, raw: Any) -> SpecReviewResult:
-        """Parse LLM response into SpecReviewResult."""
+        """Parse LLM response into SpecReviewResult.
+        
+        Applies deduplication and enforces max limits on issues/gaps to prevent
+        runaway repetitive output from the LLM.
+        """
         if not isinstance(raw, dict):
             return SpecReviewResult(summary="Spec review completed (no structured output)")
 
-        issues = raw.get("issues", [])
-        gaps = raw.get("gaps", [])
+        raw_issues = raw.get("issues", [])
+        raw_gaps = raw.get("gaps", [])
         raw_questions = raw.get("open_questions", [])
+
+        # Deduplicate and limit issues/gaps to prevent repetitive LLM output
+        issues = list(raw_issues) if isinstance(raw_issues, list) else []
+        gaps = list(raw_gaps) if isinstance(raw_gaps, list) else []
+        
+        original_issue_count = len(issues)
+        original_gap_count = len(gaps)
+        
+        issues = _dedupe_items(issues)[:MAX_ISSUES]
+        gaps = _dedupe_items(gaps)[:MAX_GAPS]
+        
+        if len(issues) < original_issue_count or len(gaps) < original_gap_count:
+            logger.info(
+                "Deduplicated spec review results: issues %d->%d, gaps %d->%d",
+                original_issue_count, len(issues),
+                original_gap_count, len(gaps),
+            )
 
         open_questions = []
         if isinstance(raw_questions, list):
@@ -951,8 +1010,8 @@ Previously Answered Questions:
                 open_questions.append(self._parse_open_question(q, i))
 
         return SpecReviewResult(
-            issues=list(issues) if isinstance(issues, list) else [],
-            gaps=list(gaps) if isinstance(gaps, list) else [],
+            issues=issues,
+            gaps=gaps,
             open_questions=open_questions,
             summary=str(raw.get("summary", "") or "Spec review complete"),
         )

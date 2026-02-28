@@ -10,6 +10,20 @@ Your goal is to ensure the specification is complete and unambiguous before it m
 
 NOTE: The specification may include additional context files (documentation, config files, code samples, etc.) that were provided alongside the main spec. Review ALL provided content to understand the full picture before identifying gaps.
 
+CRITICAL CONSTRAINTS - READ CAREFULLY:
+- Maximum 10 issues, 10 gaps, and 10 open questions total
+- Only include items that are MATERIAL to THIS SPECIFIC project's success
+- Do NOT list generic web development concerns (browser compatibility, accessibility APIs, edge cases that apply to any web app)
+- Do NOT repeat the same concern with slight variations - consolidate similar items into one
+- Focus on items that are ACTIONABLE and would change the implementation approach
+- Standard web development best practices are ASSUMED unless the spec contradicts them
+- Each item must be specific to THIS specification, not hypothetical edge cases
+
+Each issue/gap should be:
+1. Specific to THIS specification (not generic concerns)
+2. Something the development team needs clarification on to proceed
+3. High enough impact that it would change the implementation approach
+
 Analyze the spec for:
 1. **Issues** - Problems, inconsistencies, or conflicts in the specification
 2. **Gaps** - Missing requirements, undefined behaviors, or incomplete features
@@ -260,6 +274,14 @@ Respond with the FULL updated specification as plain text (markdown format). Inc
 """
 
 SPEC_REVIEW_CHUNK_PROMPT = """You are a Product Requirements Analysis expert. Review this SECTION of a product specification.
+
+CRITICAL CONSTRAINTS:
+- Maximum 5 issues, 5 gaps, and 5 open questions for this section
+- Only include items MATERIAL to this project's success
+- Do NOT list generic web development concerns or hypothetical edge cases
+- Do NOT repeat variations of the same concern - consolidate similar items
+- Standard best practices are ASSUMED unless the spec contradicts them
+- Each item must be specific to THIS specification
 
 Analyze this section for:
 1. **Issues** - Problems, inconsistencies, or conflicts

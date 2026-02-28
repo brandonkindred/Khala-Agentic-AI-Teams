@@ -264,12 +264,12 @@ def test_get_llm_for_agent_global_fallback() -> None:
     _clear_client_cache_for_testing()
     with patch.dict(
         os.environ,
-        {"SW_LLM_PROVIDER": "ollama", "SW_LLM_MODEL": "glm-5:cloud"},
+        {"SW_LLM_PROVIDER": "ollama", "SW_LLM_MODEL": "qwen3.5:397b-cloud"},
         clear=False,
     ):
         client = get_llm_for_agent("backend")
     assert isinstance(client, OllamaLLMClient)
-    assert client.model == "glm-5:cloud"
+    assert client.model == "qwen3.5:397b-cloud"
 
 
 def test_get_llm_for_agent_uses_default_when_no_env() -> None:

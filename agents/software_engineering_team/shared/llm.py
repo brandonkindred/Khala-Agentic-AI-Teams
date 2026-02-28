@@ -33,8 +33,7 @@ ENV_LLM_ENABLE_THINKING = "SW_LLM_ENABLE_THINKING"  # "true"/"false"; enables th
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
 # Model max context (tokens). Effective context = max - largest agent reservation.
-# 198K = 198000 (minimax, glm-5). 256K = 262144 (qwen models).
-# Largest reservations: tech_lead 118K (glm-5), coding/review 20K (qwen3-coder, qwen3.5).
+# 256K = 262144 (qwen models). Largest reservations: coding/review 20K (qwen3-coder, qwen3.5).
 KNOWN_MODEL_CONTEXT: dict[str, int] = {
     "qwen3.5:397b": 262144,
     "qwen3.5:397b-cloud": 242144,  # 256K - 20K
@@ -43,8 +42,6 @@ KNOWN_MODEL_CONTEXT: dict[str, int] = {
     "qwen3-coder-next:cloud": 242144,  # 256K - 20K
     "qwen3-coder:480b-cloud": 242144,
     "qwen3-coder:480b": 242144,
-    "glm-5:cloud": 80_000,  # 198K - 118K (tech_lead)
-    "minimax-m2.5:cloud": 178_000,  # 198K - 20K
 }
 
 # Recommended default model per agent (all :cloud versions). Used when SW_LLM_MODEL_<agent_key> and SW_LLM_MODEL are unset.
@@ -55,12 +52,13 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     "repair": "qwen3-coder-next:cloud",
     "devops": "qwen3-coder-next:cloud",
     "dbc_comments": "qwen3-coder-next:cloud",
-    "tech_lead": "glm-5:cloud",
-    "architecture": "glm-5:cloud",
-    "spec_intake": "glm-5:cloud",
-    "spec_clarification": "glm-5:cloud",
-    "project_planning": "glm-5:cloud",
-    "integration": "glm-5:cloud",
+    "tech_lead": "qwen3.5:397b-cloud",
+    "architecture": "qwen3.5:397b-cloud",
+    "spec_intake": "qwen3.5:397b-cloud",
+    "spec_clarification": "qwen3.5:397b-cloud",
+    "product_analysis": "qwen3.5:397b-cloud",
+    "project_planning": "qwen3.5:397b-cloud",
+    "integration": "qwen3.5:397b-cloud",
     "api_contract": "qwen3.5:397b-cloud",
     "data_architecture": "qwen3.5:397b-cloud",
     "ui_ux": "qwen3.5:397b-cloud",
@@ -72,9 +70,9 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     "observability": "qwen3.5:397b-cloud",
     "acceptance_verifier": "qwen3.5:397b-cloud",
     "documentation": "qwen3.5:397b-cloud",
-    "qa": "minimax-m2.5:cloud",
-    "security": "minimax-m2.5:cloud",
-    "accessibility": "minimax-m2.5:cloud",
+    "qa": "qwen3.5:397b-cloud",
+    "security": "qwen3.5:397b-cloud",
+    "accessibility": "qwen3.5:397b-cloud",
 }
 
 # Cache for OllamaLLMClient instances keyed by (model, base_url, timeout)
