@@ -61,7 +61,7 @@ export class ProductAnalysisJobStatusComponent implements OnChanges, OnDestroy {
           this.error = null;
           this.statusChange.emit(res);
 
-          if (res.status === 'completed' || res.status === 'failed') {
+          if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
             this.pollSub?.unsubscribe();
           }
         },

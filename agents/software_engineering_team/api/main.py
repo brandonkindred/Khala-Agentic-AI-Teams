@@ -40,6 +40,7 @@ from shared.job_store import (
     JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
     create_job,
     get_job,
+    is_cancel_requested,
     list_jobs,
     request_cancel,
     update_job,
@@ -1346,6 +1347,11 @@ def _run_planning_v2_background(
             job_id=job_id,
         )
 
+        # Honor cancellation: if job was cancelled during execution, don't overwrite status
+        if is_cancel_requested(job_id):
+            logger.info("Planning-v2 workflow: cancellation detected, preserving cancelled state for job %s", job_id)
+            return
+
         final_status = "completed" if result.success else "failed"
         phase_results: Dict[str, Any] = {}
         if result.spec_review_result is not None:
@@ -1372,7 +1378,11 @@ def _run_planning_v2_background(
         )
     except Exception as e:
         logger.exception("Planning-v2 workflow failed")
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        # Honor cancellation: don't overwrite cancelled status with failed
+        if not is_cancel_requested(job_id):
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        else:
+            logger.info("Planning-v2 workflow: exception during cancelled job %s, preserving cancelled state", job_id)
 
 
 @app.post(

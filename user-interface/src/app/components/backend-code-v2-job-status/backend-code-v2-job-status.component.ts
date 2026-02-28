@@ -47,7 +47,7 @@ export class BackendCodeV2JobStatusComponent implements OnInit, OnDestroy {
       next: (res) => {
         this.status = res;
         this.error = null;
-        if (res.status === 'completed' || res.status === 'failed') {
+        if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
           if (this.pollTimer) {
             clearInterval(this.pollTimer);
             this.pollTimer = null;

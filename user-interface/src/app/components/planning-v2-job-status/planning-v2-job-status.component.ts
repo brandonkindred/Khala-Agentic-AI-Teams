@@ -58,7 +58,7 @@ export class PlanningV2JobStatusComponent implements OnInit, OnDestroy {
         this.status = res;
         this.error = null;
         this.statusChange.emit(res);
-        if (res.status === 'completed' || res.status === 'failed') {
+        if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
           if (this.pollTimer) {
             clearInterval(this.pollTimer);
             this.pollTimer = null;

@@ -112,7 +112,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
           this.status = res;
           this.statusChange.emit(res);
           this.loading = false;
-          if (res.status === 'completed' || res.status === 'failed') {
+          if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
             this.pollSub?.unsubscribe();
             this.pollSub = null;
           } else if (wasWaiting !== isWaiting) {

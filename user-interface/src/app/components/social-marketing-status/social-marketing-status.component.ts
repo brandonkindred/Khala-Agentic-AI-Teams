@@ -29,7 +29,7 @@ export class SocialMarketingStatusComponent implements OnInit, OnDestroy {
           next: (res) => {
             this.status = res;
             this.loading = false;
-            if (res.status === 'completed' || res.status === 'failed') {
+            if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
               this.sub?.unsubscribe();
               this.sub = null;
             }

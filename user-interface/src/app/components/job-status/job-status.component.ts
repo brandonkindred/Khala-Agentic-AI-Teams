@@ -45,7 +45,7 @@ export class JobStatusComponent implements OnInit, OnDestroy {
           this.status = res;
           this.statusChange.emit(res);
           this.loading = false;
-          if (res.status === 'completed' || res.status === 'failed') {
+          if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
             this.sub?.unsubscribe();
             this.sub = null;
           } else if (wasWaiting !== isWaiting) {
