@@ -11,6 +11,19 @@ This repository provides **multiple Strands-style agent systems** in a monorepo:
 - **Market research team** – Human-AI collaborative workflow for user discovery and product concept viability; transcript ingestion, UX synthesis, experiment scripts, and human approval gates.
 - **Branding team** – Brand strategy codification, moodboard ideation, design and writing standards, plus an asynchronous open-question feed and answer workflow.
 - **Agent provisioning team** – Provisions agent environments with databases, git repos, Docker containers, and secure credential management.
+- **AI systems team** – Agent-factory workflow that takes a structured spec and designs/builds a goal-aligned AI agent system with orchestration, safety gates, and evaluation criteria.
+
+## Shared integrations layer
+
+This repository now includes a shared integrations module at `integrations/` that can be used by **any** agent team.
+
+- Provider-neutral contracts (`discover/read/create/update/notify/schedule` via request metadata)
+- Capability routing (`ticketing.create`, `chat.notify`, `cloud.deploy`, etc.)
+- Registry-driven provider configuration from YAML (Slack, Fireflies.ai, Jira, Trello, Obsidian, Figma, Google Drive/Workspace, Dropbox, AWS/GCP/DigitalOcean/Heroku, Zapier/n8n, GitHub/GitLab)
+- Discovery metadata so agents can inspect each integration's capabilities/actions before use
+- API/MCP transport abstraction to support both vendor APIs and MCP servers
+
+See [integrations/README.md](integrations/README.md) for architecture and setup.
 
 ## Project structure
 
@@ -31,6 +44,8 @@ strands-agents/
 ├── market_research_team/       # Market research and concept viability
 ├── branding_team/              # Branding strategy + interactive clarification API
 ├── agent_provisioning_team/    # Agent environment provisioning
+├── ai_systems_team/            # Spec-to-agent-system blueprint and build workflow
+├── integrations/               # Shared API/MCP integration layer used by all teams
 └── requirements.txt            # Shared dependencies
 ```
 
@@ -55,6 +70,8 @@ strands-agents/
 | [frontend_code_v2_team/](software_engineering_team/frontend_code_v2_team/README.md) | Frontend development with 17 tool agents supporting Angular, React, and Vue. |
 | [devops_team/](software_engineering_team/devops_team/README.md) | DevOps automation with 9 core agents and 9 tool agents for infrastructure and deployment. |
 | [shared/](software_engineering_team/shared/README.md) | Common utilities, LLM client, models, and infrastructure used across SE team agents. |
+| [ai_systems_team/](ai_systems_team/README.md) | Spec-driven AI agent factory: maps goals to agent roles, orchestration, guardrails, and acceptance tests. |
+| [integrations/](integrations/README.md) | Shared tool integration layer (provider registry, capability router, API/MCP adapter service) reusable by every team. |
 
 ```mermaid
 flowchart LR

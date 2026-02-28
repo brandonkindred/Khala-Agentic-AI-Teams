@@ -28,6 +28,35 @@ class ValidationStatus(str, Enum):
     FAIL = "fail"
 
 
+class WorkflowMode(str, Enum):
+    ADVISORY = "advisory"
+    PAPER = "paper"
+    LIVE = "live"
+    MONITOR_ONLY = "monitor_only"
+
+
+class PromotionGate(str, Enum):
+    SEPARATION_OF_DUTIES = "separation_of_duties"
+    RISK_VETO = "risk_veto"
+    VALIDATION = "validation"
+    IPS_PERMISSION = "ips_permission"
+    HUMAN_APPROVAL = "human_approval"
+
+
+class GateResult(str, Enum):
+    PASS = "pass"
+    FAIL = "fail"
+    WARN = "warn"
+
+
+class AuditContext(BaseModel):
+    data_snapshot_id: str = ""
+    assumptions: List[str] = Field(default_factory=list)
+    calc_artifacts: List[str] = Field(default_factory=list)
+    gate_trace: List[str] = Field(default_factory=list)
+    agent_versions: Dict[str, str] = Field(default_factory=dict)
+
+
 class PlannedLargeExpense(BaseModel):
     name: str
     amount: float
@@ -101,8 +130,10 @@ class InvestmentProfile(BaseModel):
 class IPS(BaseModel):
     profile: InvestmentProfile
     live_trading_enabled: bool = False
+    human_approval_required_for_live: bool = True
     speculative_sleeve_cap_pct: float = 10
     rebalance_frequency: str = "quarterly"
+    default_mode: WorkflowMode = WorkflowMode.MONITOR_ONLY
     notes: List[str] = Field(default_factory=list)
 
 
@@ -131,6 +162,7 @@ class PortfolioProposal(BaseModel):
     expected_volatility_pct: Optional[float] = None
     expected_max_drawdown_pct: Optional[float] = None
     assumptions: List[str] = Field(default_factory=list)
+    audit: AuditContext = Field(default_factory=AuditContext)
 
 
 class StrategySpec(BaseModel):
@@ -143,6 +175,8 @@ class StrategySpec(BaseModel):
     exit_rules: List[str] = Field(default_factory=list)
     sizing_rules: List[str] = Field(default_factory=list)
     risk_limits: Dict[str, Any] = Field(default_factory=dict)
+    speculative: bool = False
+    audit: AuditContext = Field(default_factory=AuditContext)
 
 
 class ValidationCheck(BaseModel):
@@ -159,6 +193,13 @@ class ValidationReport(BaseModel):
     scenario_set: List[str] = Field(default_factory=list)
     checks: List[ValidationCheck] = Field(default_factory=list)
     summary: str = ""
+    audit: AuditContext = Field(default_factory=AuditContext)
+
+
+class GateCheckResult(BaseModel):
+    gate: PromotionGate
+    result: GateResult
+    details: str
 
 
 class PromotionDecision(BaseModel):
@@ -167,6 +208,8 @@ class PromotionDecision(BaseModel):
     outcome: PromotionStage
     rationale: str
     required_actions: List[str] = Field(default_factory=list)
+    gate_results: List[GateCheckResult] = Field(default_factory=list)
+    audit: AuditContext = Field(default_factory=AuditContext)
 
 
 class OrderIntent(BaseModel):
@@ -217,3 +260,4 @@ class InvestmentCommitteeMemo(BaseModel):
     rationale: str
     dissenting_views: List[str] = Field(default_factory=list)
     attachments: List[str] = Field(default_factory=list)
+    audit: AuditContext = Field(default_factory=AuditContext)

@@ -1,0 +1,278 @@
+providers:
+  - name: slack
+    display_name: Slack
+    category: communication
+    description: Team chat and notifications.
+    transport: mcp
+    capabilities: ["chat.notify", "chat.read", "chat.channel.list"]
+    actions:
+      chat.notify: Post messages
+      chat.read: Read channel history
+      chat.channel.list: List available channels
+    auth:
+      type: oauth2
+      scopes: ["chat:write", "channels:history", "channels:read"]
+    settings:
+      server: slack
+      workspace: your-workspace
+      default_channel: "#agent-updates"
+
+  - name: fireflies
+    display_name: Fireflies.ai
+    category: meetings
+    description: Meeting transcripts and AI summaries.
+    transport: api
+    capabilities: ["meeting.transcript.read", "meeting.summary.read"]
+    actions:
+      meeting.transcript.read: Fetch transcript by meeting ID
+      meeting.summary.read: Fetch summary and action items
+    auth:
+      type: api_key
+    settings:
+      base_url: https://api.fireflies.ai/graphql
+
+  - name: jira
+    display_name: Jira
+    category: project_management
+    description: Issue and sprint management.
+    transport: api
+    capabilities: ["ticketing.create", "ticketing.update", "ticketing.read", "ticketing.search"]
+    actions:
+      ticketing.create: Create issues
+      ticketing.update: Transition/update issues
+      ticketing.read: Read issue details
+      ticketing.search: Run JQL searches
+    auth:
+      type: oauth2
+      scopes: ["read:jira-work", "write:jira-work"]
+    settings:
+      base_url: https://your-domain.atlassian.net
+      project_key: ENG
+
+  - name: trello
+    display_name: Trello
+    category: project_management
+    description: Board and card workflow management.
+    transport: api
+    capabilities: ["ticketing.create", "ticketing.update", "ticketing.read"]
+    actions:
+      ticketing.create: Create cards
+      ticketing.update: Move/update cards
+      ticketing.read: Read board/card data
+    auth:
+      type: api_key
+    settings:
+      workspace_id: your-workspace-id
+      default_board_id: your-board-id
+
+  - name: obsidian
+    display_name: Obsidian
+    category: knowledge
+    description: Knowledge base notes in vaults.
+    transport: mcp
+    capabilities: ["knowledge.read", "knowledge.write", "knowledge.search"]
+    actions:
+      knowledge.read: Read notes
+      knowledge.write: Create/update notes
+      knowledge.search: Search notes by keyword/tag
+    auth:
+      type: local_or_mcp
+    settings:
+      server: obsidian
+      vault: company-knowledge
+
+  - name: figma
+    display_name: Figma
+    category: design
+    description: Design file and comment workflows.
+    transport: api
+    capabilities: ["design.read", "design.comment", "design.export"]
+    actions:
+      design.read: Read file metadata/components
+      design.comment: Create/resolve comments
+      design.export: Export assets
+    auth:
+      type: oauth2
+      scopes: ["file_read", "file_write"]
+    settings:
+      team_id: your-team-id
+
+  - name: google_drive
+    display_name: Google Drive
+    category: storage
+    description: File storage and sharing.
+    transport: api
+    capabilities: ["storage.read", "storage.write", "docs.share", "docs.search"]
+    actions:
+      storage.read: Read files and metadata
+      storage.write: Upload/update files
+      docs.share: Share files with users/groups
+      docs.search: Search files
+    auth:
+      type: oauth2
+      scopes: ["https://www.googleapis.com/auth/drive"]
+    settings:
+      default_folder_id: your-folder-id
+
+  - name: dropbox
+    display_name: Dropbox
+    category: storage
+    description: Cloud file storage and collaboration.
+    transport: api
+    capabilities: ["storage.read", "storage.write", "docs.share"]
+    actions:
+      storage.read: Read files and metadata
+      storage.write: Upload/update files
+      docs.share: Create shared links
+    auth:
+      type: oauth2
+    settings:
+      root_path: /agents
+
+  - name: google_workspace
+    display_name: Google Workspace
+    category: productivity
+    description: Gmail, Calendar, Docs, and Slides operations.
+    transport: api
+    capabilities: ["mail.send", "calendar.read", "calendar.create", "docs.create", "slides.create"]
+    actions:
+      mail.send: Send emails
+      calendar.read: Read calendar events
+      calendar.create: Create calendar events
+      docs.create: Create docs
+      slides.create: Create slide decks
+    auth:
+      type: oauth2
+      scopes:
+        - https://www.googleapis.com/auth/gmail.send
+        - https://www.googleapis.com/auth/calendar
+        - https://www.googleapis.com/auth/documents
+        - https://www.googleapis.com/auth/presentations
+    settings:
+      domain: your-company.com
+
+  - name: aws
+    display_name: AWS
+    category: cloud
+    description: Amazon Web Services cloud operations.
+    transport: api
+    capabilities: ["cloud.deploy", "cloud.logs.read", "cloud.resource.read"]
+    actions:
+      cloud.deploy: Deploy workloads
+      cloud.logs.read: Read CloudWatch logs
+      cloud.resource.read: Query cloud resources
+    auth:
+      type: iam_role_or_keys
+    settings:
+      region: us-east-1
+
+  - name: google_cloud
+    display_name: Google Cloud
+    category: cloud
+    description: Google Cloud Platform operations.
+    transport: api
+    capabilities: ["cloud.deploy", "cloud.logs.read", "cloud.resource.read"]
+    actions:
+      cloud.deploy: Deploy workloads
+      cloud.logs.read: Read Cloud Logging
+      cloud.resource.read: Query project resources
+    auth:
+      type: service_account
+      scopes: ["https://www.googleapis.com/auth/cloud-platform"]
+    settings:
+      project_id: your-project-id
+
+  - name: digitalocean
+    display_name: DigitalOcean
+    category: cloud
+    description: App platform, droplets, and networking.
+    transport: api
+    capabilities: ["cloud.deploy", "cloud.logs.read", "cloud.resource.read"]
+    actions:
+      cloud.deploy: Deploy apps
+      cloud.logs.read: Read app logs
+      cloud.resource.read: Read droplets/services
+    auth:
+      type: api_token
+    settings:
+      region: nyc1
+
+  - name: heroku
+    display_name: Heroku
+    category: cloud
+    description: Application deployment and logs.
+    transport: api
+    capabilities: ["cloud.deploy", "cloud.logs.read", "cloud.resource.read"]
+    actions:
+      cloud.deploy: Release/deploy app
+      cloud.logs.read: Read app logs
+      cloud.resource.read: Read app/dyno state
+    auth:
+      type: oauth2
+    settings:
+      app_name: your-app-name
+
+  - name: zapier
+    display_name: Zapier
+    category: automation
+    description: Trigger and orchestrate third-party workflows.
+    transport: api
+    capabilities: ["automation.trigger", "automation.workflow.run", "automation.workflow.list"]
+    actions:
+      automation.trigger: Trigger automation
+      automation.workflow.run: Run workflow with inputs
+      automation.workflow.list: List available workflows
+    auth:
+      type: oauth2
+    settings:
+      workspace: your-workspace
+
+  - name: n8n
+    display_name: n8n
+    category: automation
+    description: Self-hosted workflow automation.
+    transport: api
+    capabilities: ["automation.trigger", "automation.workflow.run", "automation.workflow.list"]
+    actions:
+      automation.trigger: Trigger workflow webhook
+      automation.workflow.run: Start workflow execution
+      automation.workflow.list: List workflows
+    auth:
+      type: api_key
+    settings:
+      base_url: https://n8n.your-company.com
+
+  - name: github
+    display_name: GitHub
+    category: engineering
+    description: Repositories, issues, and pull requests.
+    transport: api
+    capabilities: ["scm.pr.create", "scm.issue.create", "scm.repo.read", "scm.ci.status.read"]
+    actions:
+      scm.pr.create: Open pull requests
+      scm.issue.create: Create issues
+      scm.repo.read: Read repository contents
+      scm.ci.status.read: Read workflow status
+    auth:
+      type: oauth2
+      scopes: ["repo", "workflow"]
+    settings:
+      owner: your-org
+      repo: your-repo
+
+  - name: gitlab
+    display_name: GitLab
+    category: engineering
+    description: Repositories, merge requests, pipelines.
+    transport: api
+    capabilities: ["scm.pr.create", "scm.issue.create", "scm.repo.read", "scm.ci.status.read"]
+    actions:
+      scm.pr.create: Open merge requests
+      scm.issue.create: Create issues
+      scm.repo.read: Read repository/project contents
+      scm.ci.status.read: Read pipeline status
+    auth:
+      type: oauth2_or_pat
+      scopes: ["api", "read_repository", "write_repository"]
+    settings:
+      project_id: your-project-id
