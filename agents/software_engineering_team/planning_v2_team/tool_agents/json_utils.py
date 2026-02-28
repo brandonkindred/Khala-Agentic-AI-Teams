@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_DECOMPOSITION_DEPTH = 20
+MAX_CONTINUATION_CYCLES = 10
 DEFAULT_CHUNK_SIZE = 4000
 
 
@@ -22,12 +23,15 @@ def parse_json_with_recovery(
     original_content: Optional[str] = None,
     chunk_prompt_template: Optional[str] = None,
     _depth: int = 0,
+    _continuation_attempted: bool = False,
+    _partial_responses: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Parse LLM JSON response with immediate decomposition on errors.
+    """Parse LLM JSON response with 3-step recovery flow.
 
-    When truncation or JSON parse errors are detected, immediately decomposes
-    the task into smaller chunks rather than retrying. Only transient network
-    errors trigger retries.
+    Recovery flow:
+    1. On truncation: Attempt continuation via multi-turn conversation (5 cycles max)
+    2. If continuation fails: Decompose task into smaller chunks (20 levels max)
+    3. If decomposition fails: Write post-mortem and raise error
 
     Args:
         llm: LLM client for completions
@@ -38,33 +42,65 @@ def parse_json_with_recovery(
         original_content: The original content being processed (for decomposition)
         chunk_prompt_template: Template for chunk prompts (must have {chunk_content})
         _depth: Internal recursion depth tracker
+        _continuation_attempted: Whether continuation was already tried (internal)
+        _partial_responses: Accumulated partial responses for post-mortem (internal)
 
     Returns:
         Parsed JSON dict.
 
     Raises:
-        RuntimeError: If decomposition fails after max depth reached.
+        RuntimeError: If all recovery strategies fail.
     """
     from shared.llm import LLMTruncatedError, LLMJsonParseError
+    from shared.continuation import ResponseContinuator, ContinuationResult
+    from shared.post_mortem import write_post_mortem
+
+    if _partial_responses is None:
+        _partial_responses = []
 
     try:
         return llm.complete_json(prompt)
-    except (LLMTruncatedError, LLMJsonParseError) as e:
-        error_type = type(e).__name__
-        if isinstance(e, LLMTruncatedError):
-            logger.warning(
-                "%s: %s (%d chars partial). Next step -> Decomposing task (depth %d/%d)",
+    except LLMTruncatedError as e:
+        error_type = "LLMTruncatedError"
+        _partial_responses.append(e.partial_content)
+
+        if not _continuation_attempted:
+            logger.info(
+                "%s: Response truncated (%d chars). Step 1 -> Attempting continuation",
                 agent_name,
-                error_type,
                 len(e.partial_content),
+            )
+
+            continued_content = _attempt_continuation_for_json(
+                llm=llm,
+                prompt=prompt,
+                partial_content=e.partial_content,
+                agent_name=agent_name,
+            )
+
+            if continued_content:
+                _partial_responses.append(continued_content)
+                try:
+                    return llm._extract_json(continued_content)
+                except LLMJsonParseError:
+                    logger.warning(
+                        "%s: Continuation produced content but JSON parse failed. "
+                        "Step 2 -> Decomposing task",
+                        agent_name,
+                    )
+
+            logger.warning(
+                "%s: Continuation exhausted. Step 2 -> Decomposing task (depth %d/%d)",
+                agent_name,
                 _depth + 1,
                 MAX_DECOMPOSITION_DEPTH,
             )
         else:
             logger.warning(
-                "%s: %s detected. Next step -> Decomposing task (depth %d/%d)",
+                "%s: %s (%d chars). Decomposing task (depth %d/%d)",
                 agent_name,
                 error_type,
+                len(e.partial_content),
                 _depth + 1,
                 MAX_DECOMPOSITION_DEPTH,
             )
@@ -78,14 +114,140 @@ def parse_json_with_recovery(
             original_content=original_content,
             chunk_prompt_template=chunk_prompt_template,
             _depth=_depth,
+            _continuation_attempted=True,
+            _partial_responses=_partial_responses,
         )
         if result:
             return result
 
+        write_post_mortem(
+            agent_name=agent_name,
+            task_description=f"Planning V2 tool agent - {agent_name}",
+            original_prompt=prompt,
+            partial_responses=_partial_responses,
+            continuation_attempts=MAX_CONTINUATION_CYCLES if not _continuation_attempted else 0,
+            decomposition_depth=_depth,
+            error=e,
+        )
+
+        raise RuntimeError(
+            f"{agent_name}: All recovery strategies exhausted. "
+            f"Continuation cycles: {MAX_CONTINUATION_CYCLES}, Decomposition depth: {_depth}/{MAX_DECOMPOSITION_DEPTH}. "
+            f"See post_mortems/POST_MORTEMS.md for details."
+        ) from e
+
+    except LLMJsonParseError as e:
+        error_type = "LLMJsonParseError"
+        _partial_responses.append(getattr(e, "response_preview", ""))
+        logger.warning(
+            "%s: %s detected. Step 2 -> Decomposing task (depth %d/%d)",
+            agent_name,
+            error_type,
+            _depth + 1,
+            MAX_DECOMPOSITION_DEPTH,
+        )
+
+        result = _decompose_and_process(
+            llm=llm,
+            prompt=prompt,
+            agent_name=agent_name,
+            decompose_fn=decompose_fn,
+            merge_fn=merge_fn,
+            original_content=original_content,
+            chunk_prompt_template=chunk_prompt_template,
+            _depth=_depth,
+            _continuation_attempted=True,
+            _partial_responses=_partial_responses,
+        )
+        if result:
+            return result
+
+        write_post_mortem(
+            agent_name=agent_name,
+            task_description=f"Planning V2 tool agent - {agent_name}",
+            original_prompt=prompt,
+            partial_responses=_partial_responses,
+            continuation_attempts=0,
+            decomposition_depth=_depth,
+            error=e,
+        )
+
         raise RuntimeError(
             f"{agent_name}: Decomposition exhausted at depth {_depth}/{MAX_DECOMPOSITION_DEPTH}. "
-            f"Original error: {e}"
+            f"See post_mortems/POST_MORTEMS.md for details."
         ) from e
+
+
+def _attempt_continuation_for_json(
+    llm: "LLMClient",
+    prompt: str,
+    partial_content: str,
+    agent_name: str,
+    max_cycles: int = MAX_CONTINUATION_CYCLES,
+    project_root: Optional[str] = None,
+) -> Optional[str]:
+    """Attempt to continue a truncated JSON response.
+
+    Args:
+        llm: LLM client.
+        prompt: The original prompt.
+        partial_content: The truncated response content.
+        agent_name: Agent name for logging and log file naming.
+        max_cycles: Maximum continuation cycles.
+        project_root: Optional root directory for continuation logs.
+
+    Returns:
+        Complete content if successful, None if continuation fails.
+    """
+    from shared.continuation import ResponseContinuator, ContinuationResult
+    from pathlib import Path
+
+    system_message = (
+        "You are a strict JSON generator. Respond with a single valid JSON object only, "
+        "no explanatory text, no Markdown, no code fences."
+    )
+
+    try:
+        continuator = ResponseContinuator(
+            base_url=llm.base_url,
+            model=llm.model,
+            timeout=llm.timeout,
+            max_cycles=max_cycles,
+        )
+
+        result: ContinuationResult = continuator.attempt_continuation(
+            original_prompt=prompt,
+            partial_content=partial_content,
+            system_prompt=system_message,
+            json_mode=True,
+            task_id=agent_name,
+            project_root=Path(project_root) if project_root else None,
+        )
+
+        if result.success:
+            logger.info(
+                "%s: Continuation succeeded after %d cycles (%d chars total)",
+                agent_name,
+                result.cycles_used,
+                len(result.content),
+            )
+            return result.content
+
+        logger.warning(
+            "%s: Continuation exhausted after %d cycles (%d chars accumulated)",
+            agent_name,
+            result.cycles_used,
+            len(result.content),
+        )
+        return None
+
+    except Exception as e:
+        logger.warning(
+            "%s: Continuation failed with error: %s",
+            agent_name,
+            str(e)[:100],
+        )
+        return None
 
 
 def _decompose_and_process(
@@ -97,6 +259,8 @@ def _decompose_and_process(
     original_content: Optional[str],
     chunk_prompt_template: Optional[str],
     _depth: int,
+    _continuation_attempted: bool = False,
+    _partial_responses: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Decompose content into chunks and process each recursively.
 
@@ -165,6 +329,8 @@ def _decompose_and_process(
                 original_content=chunk,
                 chunk_prompt_template=chunk_prompt_template,
                 _depth=_depth + 1,
+                _continuation_attempted=_continuation_attempted,
+                _partial_responses=_partial_responses,
             )
             if chunk_result:
                 results.append(chunk_result)

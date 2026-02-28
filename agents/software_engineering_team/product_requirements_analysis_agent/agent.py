@@ -249,12 +249,15 @@ class ProductRequirementsAnalysisAgent:
         original_content: Optional[str] = None,
         chunk_prompt_template: Optional[str] = None,
         _depth: int = 0,
+        _continuation_attempted: bool = False,
+        _partial_responses: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Parse LLM JSON response with immediate decomposition on errors.
+        """Parse LLM JSON response with 3-step recovery flow.
 
-        When truncation or JSON parse errors are detected, immediately decomposes
-        the task into smaller chunks rather than retrying. Only transient network
-        errors trigger retries.
+        Recovery flow:
+        1. On truncation: Attempt continuation via multi-turn conversation (5 cycles max)
+        2. If continuation fails: Decompose task into smaller chunks (20 levels max)
+        3. If decomposition fails: Write post-mortem and raise error
 
         Args:
             prompt: The prompt to send to the LLM
@@ -264,34 +267,64 @@ class ProductRequirementsAnalysisAgent:
             original_content: The original content being processed (for decomposition)
             chunk_prompt_template: Template for chunk prompts (must have {chunk_content})
             _depth: Internal recursion depth tracker
+            _continuation_attempted: Whether continuation was already tried (internal)
+            _partial_responses: Accumulated partial responses for post-mortem (internal)
 
         Returns:
             Parsed JSON dict.
 
         Raises:
-            RuntimeError: If decomposition fails after max depth reached.
+            RuntimeError: If all recovery strategies fail.
         """
         from shared.llm import LLMTruncatedError, LLMJsonParseError
+        from shared.continuation import ResponseContinuator, MAX_CONTINUATION_CYCLES
+        from shared.post_mortem import write_post_mortem
+
+        if _partial_responses is None:
+            _partial_responses = []
 
         try:
             return self.llm.complete_json(prompt)
-        except (LLMTruncatedError, LLMJsonParseError) as e:
-            # Both truncation and parse errors trigger immediate decomposition
-            error_type = type(e).__name__
-            if isinstance(e, LLMTruncatedError):
-                logger.warning(
-                    "PRA %s: %s (%d chars partial). Next step -> Decomposing task (depth %d/%d)",
+        except LLMTruncatedError as e:
+            error_type = "LLMTruncatedError"
+            _partial_responses.append(e.partial_content)
+
+            if not _continuation_attempted:
+                logger.info(
+                    "PRA %s: Response truncated (%d chars). Step 1 -> Attempting continuation",
                     phase_name,
-                    error_type,
                     len(e.partial_content),
+                )
+
+                continued_content = self._attempt_continuation_for_json(
+                    prompt=prompt,
+                    partial_content=e.partial_content,
+                    phase_name=phase_name,
+                )
+
+                if continued_content:
+                    _partial_responses.append(continued_content)
+                    try:
+                        return self.llm._extract_json(continued_content)
+                    except LLMJsonParseError:
+                        logger.warning(
+                            "PRA %s: Continuation produced content but JSON parse failed. "
+                            "Step 2 -> Decomposing task",
+                            phase_name,
+                        )
+
+                logger.warning(
+                    "PRA %s: Continuation exhausted. Step 2 -> Decomposing task (depth %d/%d)",
+                    phase_name,
                     _depth + 1,
                     MAX_DECOMPOSITION_DEPTH,
                 )
             else:
                 logger.warning(
-                    "PRA %s: %s detected. Next step -> Decomposing task (depth %d/%d)",
+                    "PRA %s: %s (%d chars). Decomposing task (depth %d/%d)",
                     phase_name,
                     error_type,
+                    len(e.partial_content),
                     _depth + 1,
                     MAX_DECOMPOSITION_DEPTH,
                 )
@@ -304,15 +337,133 @@ class ProductRequirementsAnalysisAgent:
                 original_content=original_content,
                 chunk_prompt_template=chunk_prompt_template,
                 _depth=_depth,
+                _continuation_attempted=True,
+                _partial_responses=_partial_responses,
             )
             if result:
                 return result
 
-            # Decomposition failed
+            write_post_mortem(
+                agent_name=f"PRA_{phase_name}",
+                task_description=f"Product Requirements Analysis - {phase_name}",
+                original_prompt=prompt,
+                partial_responses=_partial_responses,
+                continuation_attempts=MAX_CONTINUATION_CYCLES if not _continuation_attempted else 0,
+                decomposition_depth=_depth,
+                error=e,
+            )
+
+            raise RuntimeError(
+                f"PRA {phase_name}: All recovery strategies exhausted. "
+                f"Continuation cycles: {MAX_CONTINUATION_CYCLES}, Decomposition depth: {_depth}/{MAX_DECOMPOSITION_DEPTH}. "
+                f"See post_mortems/POST_MORTEMS.md for details."
+            ) from e
+
+        except LLMJsonParseError as e:
+            error_type = "LLMJsonParseError"
+            _partial_responses.append(getattr(e, "response_preview", ""))
+            logger.warning(
+                "PRA %s: %s detected. Step 2 -> Decomposing task (depth %d/%d)",
+                phase_name,
+                error_type,
+                _depth + 1,
+                MAX_DECOMPOSITION_DEPTH,
+            )
+
+            result = self._decompose_and_process(
+                prompt=prompt,
+                phase_name=phase_name,
+                decompose_fn=decompose_fn,
+                merge_fn=merge_fn,
+                original_content=original_content,
+                chunk_prompt_template=chunk_prompt_template,
+                _depth=_depth,
+                _continuation_attempted=True,
+                _partial_responses=_partial_responses,
+            )
+            if result:
+                return result
+
+            write_post_mortem(
+                agent_name=f"PRA_{phase_name}",
+                task_description=f"Product Requirements Analysis - {phase_name}",
+                original_prompt=prompt,
+                partial_responses=_partial_responses,
+                continuation_attempts=0,
+                decomposition_depth=_depth,
+                error=e,
+            )
+
             raise RuntimeError(
                 f"PRA {phase_name}: Decomposition exhausted at depth {_depth}/{MAX_DECOMPOSITION_DEPTH}. "
-                f"Original error: {e}"
+                f"See post_mortems/POST_MORTEMS.md for details."
             ) from e
+
+    def _attempt_continuation_for_json(
+        self,
+        prompt: str,
+        partial_content: str,
+        phase_name: str,
+        max_cycles: int = 5,
+    ) -> Optional[str]:
+        """Attempt to continue a truncated JSON response.
+
+        Args:
+            prompt: The original prompt.
+            partial_content: The truncated response content.
+            phase_name: Phase name for logging and log file naming.
+            max_cycles: Maximum continuation cycles.
+
+        Returns:
+            Complete content if successful, None if continuation fails.
+        """
+        from shared.continuation import ResponseContinuator, ContinuationResult
+
+        system_message = (
+            "You are a strict JSON generator. Respond with a single valid JSON object only, "
+            "no explanatory text, no Markdown, no code fences."
+        )
+
+        try:
+            continuator = ResponseContinuator(
+                base_url=self.llm.base_url,
+                model=self.llm.model,
+                timeout=self.llm.timeout,
+                max_cycles=max_cycles,
+            )
+
+            result: ContinuationResult = continuator.attempt_continuation(
+                original_prompt=prompt,
+                partial_content=partial_content,
+                system_prompt=system_message,
+                json_mode=True,
+                task_id=f"PRA_{phase_name}",
+            )
+
+            if result.success:
+                logger.info(
+                    "PRA %s: Continuation succeeded after %d cycles (%d chars total)",
+                    phase_name,
+                    result.cycles_used,
+                    len(result.content),
+                )
+                return result.content
+
+            logger.warning(
+                "PRA %s: Continuation exhausted after %d cycles (%d chars accumulated)",
+                phase_name,
+                result.cycles_used,
+                len(result.content),
+            )
+            return None
+
+        except Exception as e:
+            logger.warning(
+                "PRA %s: Continuation failed with error: %s",
+                phase_name,
+                str(e)[:100],
+            )
+            return None
 
     def _decompose_and_process(
         self,
@@ -323,6 +474,8 @@ class ProductRequirementsAnalysisAgent:
         original_content: Optional[str],
         chunk_prompt_template: Optional[str],
         _depth: int,
+        _continuation_attempted: bool = False,
+        _partial_responses: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Decompose content into chunks and process each recursively.
 
@@ -390,6 +543,8 @@ class ProductRequirementsAnalysisAgent:
                     original_content=chunk,
                     chunk_prompt_template=chunk_prompt_template,
                     _depth=_depth + 1,
+                    _continuation_attempted=_continuation_attempted,
+                    _partial_responses=_partial_responses,
                 )
                 if chunk_result:
                     results.append(chunk_result)

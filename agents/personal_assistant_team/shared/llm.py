@@ -6,11 +6,17 @@ import json
 import logging
 import os
 import re
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
 
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "software_engineering_team"))
+
 logger = logging.getLogger(__name__)
+
+MAX_CONTINUATION_CYCLES = 10
 
 
 class LLMError(Exception):
@@ -255,12 +261,36 @@ class LLMClient:
 
         except LLMTruncatedError as e:
             logger.warning(
-                "LLMTruncatedError (%d chars partial). Next step -> Decomposing task (depth %d/%d)",
+                "LLMTruncatedError (%d chars partial). Next step -> Attempting continuation",
                 len(e.partial_content),
-                _depth + 1,
-                self.MAX_DECOMPOSITION_ATTEMPTS,
             )
             raw_responses.append(e.partial_content)
+
+            continuation_result = self._attempt_continuation(
+                prompt,
+                e.partial_content,
+                system_prompt=system_prompt,
+            )
+
+            if continuation_result is not None:
+                parsed = self._try_parse_json(continuation_result)
+                if parsed is not None:
+                    logger.info("Continuation succeeded, JSON parsed successfully")
+                    return parsed
+                logger.warning(
+                    "Continuation produced content but JSON parse failed. "
+                    "Next step -> Decomposing task (depth %d/%d)",
+                    _depth + 1,
+                    self.MAX_DECOMPOSITION_ATTEMPTS,
+                )
+                raw_responses.append(continuation_result)
+            else:
+                logger.warning(
+                    "Continuation exhausted. Next step -> Decomposing task (depth %d/%d)",
+                    _depth + 1,
+                    self.MAX_DECOMPOSITION_ATTEMPTS,
+                )
+
             should_decompose = True
             error_type = "LLMTruncatedError"
 
@@ -364,6 +394,81 @@ class LLMClient:
                 pass
         
         return None
+
+    def _attempt_continuation(
+        self,
+        original_prompt: str,
+        partial_content: str,
+        *,
+        system_prompt: Optional[str] = None,
+        max_cycles: int = MAX_CONTINUATION_CYCLES,
+        task_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Attempt to continue a truncated response using multi-turn conversation.
+
+        Uses the native /api/chat endpoint to send a continuation prompt.
+
+        Args:
+            original_prompt: The original user prompt.
+            partial_content: The truncated response content.
+            system_prompt: Optional system prompt.
+            max_cycles: Maximum continuation cycles.
+            task_id: Optional task identifier for logging continuation responses.
+
+        Returns:
+            Complete content if successful, None if continuation fails/exhausts.
+        """
+        try:
+            from shared.continuation import ResponseContinuator, ContinuationResult
+        except ImportError:
+            logger.warning("Continuation module not available, skipping continuation")
+            return None
+
+        logger.info(
+            "Attempting continuation (%d chars partial, max %d cycles)",
+            len(partial_content),
+            max_cycles,
+        )
+
+        json_system_prompt = system_prompt or (
+            "You are a strict JSON generator. Respond with a single valid JSON object only, "
+            "no explanatory text, no Markdown, no code fences."
+        )
+
+        try:
+            continuator = ResponseContinuator(
+                base_url=self.base_url,
+                model=self.model,
+                timeout=self.timeout,
+                max_cycles=max_cycles,
+            )
+
+            result: ContinuationResult = continuator.attempt_continuation(
+                original_prompt=original_prompt,
+                partial_content=partial_content,
+                system_prompt=json_system_prompt,
+                json_mode=True,
+                task_id=task_id or "personal_assistant",
+            )
+
+            if result.success:
+                logger.info(
+                    "Continuation succeeded after %d cycles (%d chars total)",
+                    result.cycles_used,
+                    len(result.content),
+                )
+                return result.content
+
+            logger.warning(
+                "Continuation exhausted after %d cycles (%d chars accumulated)",
+                result.cycles_used,
+                len(result.content),
+            )
+            return None
+
+        except Exception as e:
+            logger.warning("Continuation failed with error: %s", str(e)[:100])
+            return None
 
     def _decompose_task(
         self,

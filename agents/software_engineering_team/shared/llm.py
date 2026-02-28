@@ -27,6 +27,7 @@ ENV_LLM_BACKOFF_MAX = "SW_LLM_BACKOFF_MAX_SECONDS"  # max backoff seconds (defau
 ENV_LLM_MAX_CONCURRENCY = "SW_LLM_MAX_CONCURRENCY"  # max concurrent complete_json calls (default 2)
 ENV_LLM_MAX_TOKENS = "SW_LLM_MAX_TOKENS"  # max tokens to generate; if unset, min(context_size, 32768)
 ENV_LLM_CONTEXT_SIZE = "SW_LLM_CONTEXT_SIZE"  # context window in tokens; if unset, uses known model or Ollama /api/show
+ENV_LLM_ENABLE_THINKING = "SW_LLM_ENABLE_THINKING"  # "true"/"false"; enables thinking mode for qwen3.5 models (default: true)
 
 # Default cap for max_tokens (max output length) in API requests. Many APIs limit output to 32K even when context is 256K.
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
@@ -950,6 +951,20 @@ class OllamaLLMClient(LLMClient):
             response_preview=text[:500],
         )
 
+    def _should_enable_thinking(self) -> bool:
+        """Check if thinking mode should be enabled for this model.
+        
+        Thinking mode is enabled for qwen3.5 models by default, but can be
+        controlled via the SW_LLM_ENABLE_THINKING environment variable.
+        """
+        env_val = os.environ.get(ENV_LLM_ENABLE_THINKING, "").lower()
+        if env_val == "false":
+            return False
+        if env_val == "true":
+            return "qwen3.5" in self.model.lower()
+        # Default: enable for qwen3.5 models
+        return "qwen3.5" in self.model.lower()
+
     def complete_json(self, prompt: str, *, temperature: float = 0.0) -> Dict[str, Any]:
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         sem = _get_ollama_semaphore()
@@ -979,6 +994,10 @@ class OllamaLLMClient(LLMClient):
                 {"role": "user", "content": prompt},
             ],
         }
+        # Enable thinking mode for qwen3.5 models (improves reasoning quality)
+        if self._should_enable_thinking():
+            payload["think"] = True
+            logger.debug("Thinking mode enabled for model %s", self.model)
         content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
         return self._extract_json(content)
 
@@ -1000,7 +1019,156 @@ class OllamaLLMClient(LLMClient):
                 {"role": "user", "content": prompt},
             ],
         }
+        # Enable thinking mode for qwen3.5 models (improves reasoning quality)
+        if self._should_enable_thinking():
+            payload["think"] = True
+            logger.debug("Thinking mode enabled for model %s", self.model)
         return self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+
+    def complete_json_with_continuation(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        max_continuation_cycles: int = 5,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Complete JSON request with automatic continuation on truncation.
+
+        This method attempts to get a complete JSON response. If the response
+        is truncated (finish_reason=length), it uses multi-turn conversation
+        to continue the response up to max_continuation_cycles times.
+
+        Args:
+            prompt: The prompt to send.
+            temperature: Sampling temperature.
+            max_continuation_cycles: Max continuation attempts before raising.
+            task_id: Optional task identifier for logging continuation responses.
+
+        Returns:
+            Parsed JSON dict.
+
+        Raises:
+            LLMTruncatedError: If truncated and continuation fails.
+            LLMJsonParseError: If JSON parsing fails.
+        """
+        from shared.continuation import ResponseContinuator, ContinuationResult
+
+        try:
+            return self.complete_json(prompt, temperature=temperature)
+        except LLMTruncatedError as e:
+            logger.info(
+                "Response truncated (%d chars). Attempting continuation (max %d cycles)",
+                len(e.partial_content),
+                max_continuation_cycles,
+            )
+
+            system_message = (
+                "You are a strict JSON generator. Respond with a single valid JSON object only, "
+                "no explanatory text, no Markdown, no code fences. "
+                "If you use a code block, put only the JSON object inside it with no surrounding text."
+            )
+
+            continuator = ResponseContinuator(
+                base_url=self.base_url,
+                model=self.model,
+                timeout=self.timeout,
+                max_cycles=max_continuation_cycles,
+            )
+
+            result: ContinuationResult = continuator.attempt_continuation(
+                original_prompt=prompt,
+                partial_content=e.partial_content,
+                system_prompt=system_message,
+                json_mode=True,
+                task_id=task_id or "sw_eng_json",
+            )
+
+            if result.success:
+                logger.info(
+                    "Continuation succeeded after %d cycles (%d chars total)",
+                    result.cycles_used,
+                    len(result.content),
+                )
+                return self._extract_json(result.content)
+
+            logger.warning(
+                "Continuation exhausted after %d cycles (%d chars). Re-raising truncation error.",
+                result.cycles_used,
+                len(result.content),
+            )
+            raise LLMTruncatedError(
+                f"Response still truncated after {result.cycles_used} continuation cycles",
+                partial_content=result.content,
+                finish_reason="length",
+            )
+
+    def complete_text_with_continuation(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        max_continuation_cycles: int = 5,
+        task_id: Optional[str] = None,
+    ) -> str:
+        """Complete text request with automatic continuation on truncation.
+
+        Args:
+            prompt: The prompt to send.
+            temperature: Sampling temperature.
+            max_continuation_cycles: Max continuation attempts before raising.
+            task_id: Optional task identifier for logging continuation responses.
+
+        Returns:
+            Complete text response.
+
+        Raises:
+            LLMTruncatedError: If truncated and continuation fails.
+        """
+        from shared.continuation import ResponseContinuator, ContinuationResult
+
+        try:
+            return self.complete_text(prompt, temperature=temperature)
+        except LLMTruncatedError as e:
+            logger.info(
+                "Text response truncated (%d chars). Attempting continuation (max %d cycles)",
+                len(e.partial_content),
+                max_continuation_cycles,
+            )
+
+            continuator = ResponseContinuator(
+                base_url=self.base_url,
+                model=self.model,
+                timeout=self.timeout,
+                max_cycles=max_continuation_cycles,
+            )
+
+            result: ContinuationResult = continuator.attempt_continuation(
+                original_prompt=prompt,
+                partial_content=e.partial_content,
+                system_prompt=None,
+                json_mode=False,
+                task_id=task_id or "sw_eng_text",
+            )
+
+            if result.success:
+                logger.info(
+                    "Text continuation succeeded after %d cycles (%d chars total)",
+                    result.cycles_used,
+                    len(result.content),
+                )
+                return result.content
+
+            logger.warning(
+                "Text continuation exhausted after %d cycles (%d chars). Re-raising.",
+                result.cycles_used,
+                len(result.content),
+            )
+            raise LLMTruncatedError(
+                f"Response still truncated after {result.cycles_used} continuation cycles",
+                partial_content=result.content,
+                finish_reason="length",
+            )
 
     def _ollama_post(
         self,

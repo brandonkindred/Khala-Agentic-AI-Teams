@@ -12,6 +12,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -38,6 +39,8 @@ class DecompositionContext:
         chunks_processed: Number of chunks processed so far.
         total_chunks: Total number of chunks in current decomposition.
         decomposition_reason: Why decomposition was triggered (e.g., "truncated").
+        continuation_attempted: Whether continuation was attempted before decomposition.
+        partial_responses: List of partial responses collected for post-mortem.
     """
 
     original_task: str
@@ -48,7 +51,9 @@ class DecompositionContext:
     chunks_processed: int = 0
     total_chunks: int = 0
     decomposition_reason: str = "truncated"
+    continuation_attempted: bool = False
     _decomposition_history: List[str] = field(default_factory=list)
+    _partial_responses: List[str] = field(default_factory=list)
 
     def create_child(self, chunk_index: int, total_chunks: int) -> "DecompositionContext":
         """Create a child context for processing a chunk."""
@@ -61,10 +66,20 @@ class DecompositionContext:
             chunks_processed=0,
             total_chunks=0,
             decomposition_reason=self.decomposition_reason,
+            continuation_attempted=self.continuation_attempted,
             _decomposition_history=self._decomposition_history.copy(),
+            _partial_responses=self._partial_responses,
         )
         child._decomposition_history.append(f"depth_{self.depth}_chunk_{chunk_index + 1}_of_{total_chunks}")
         return child
+
+    def add_partial_response(self, content: str) -> None:
+        """Add a partial response to the tracking list."""
+        self._partial_responses.append(content)
+
+    def mark_continuation_attempted(self) -> None:
+        """Mark that continuation was attempted."""
+        self.continuation_attempted = True
 
     def can_decompose(self) -> bool:
         """Check if further decomposition is allowed."""
@@ -289,7 +304,12 @@ class RecursiveProcessor(Generic[T]):
         process_fn: Optional[Callable[[str], T]] = None,
         context: Optional[DecompositionContext] = None,
     ) -> T:
-        """Process content, automatically decomposing on truncation.
+        """Process content with 3-step recovery flow.
+
+        Recovery flow:
+        1. On truncation: Attempt continuation via multi-turn conversation (5 cycles max)
+        2. If continuation fails: Decompose task into smaller chunks (up to max_depth)
+        3. If decomposition fails: Write post-mortem and raise error
 
         Args:
             llm: LLM client for making requests.
@@ -307,7 +327,9 @@ class RecursiveProcessor(Generic[T]):
             LLMTruncatedError: If max decomposition depth is exceeded and
                               response is still truncated.
         """
-        from shared.llm import LLMTruncatedError
+        from shared.llm import LLMTruncatedError, LLMJsonParseError
+        from shared.continuation import ResponseContinuator, ContinuationResult, MAX_CONTINUATION_CYCLES
+        from shared.post_mortem import write_post_mortem
 
         if context is None:
             context = DecompositionContext(
@@ -321,11 +343,41 @@ class RecursiveProcessor(Generic[T]):
                 return process_fn(prompt)
             return llm.complete_json(prompt)
         except LLMTruncatedError as e:
-            logger.warning(
-                "%s: Response truncated (%d chars partial). Next step -> Decomposing task",
-                agent_name,
-                len(e.partial_content),
-            )
+            context.add_partial_response(e.partial_content)
+
+            if not context.continuation_attempted:
+                logger.info(
+                    "%s: Response truncated (%d chars). Step 1 -> Attempting continuation",
+                    agent_name,
+                    len(e.partial_content),
+                )
+
+                continued_content = self._attempt_continuation(
+                    llm, prompt, e.partial_content, agent_name
+                )
+
+                if continued_content:
+                    context.add_partial_response(continued_content)
+                    try:
+                        return llm._extract_json(continued_content)
+                    except (LLMJsonParseError, Exception):
+                        logger.warning(
+                            "%s: Continuation produced content but JSON parse failed. "
+                            "Step 2 -> Decomposing task",
+                            agent_name,
+                        )
+
+                context.mark_continuation_attempted()
+                logger.warning(
+                    "%s: Continuation exhausted. Step 2 -> Decomposing task",
+                    agent_name,
+                )
+            else:
+                logger.warning(
+                    "%s: Response truncated (%d chars). Decomposing task",
+                    agent_name,
+                    len(e.partial_content),
+                )
 
             if not context.can_decompose():
                 logger.error(
@@ -335,11 +387,91 @@ class RecursiveProcessor(Generic[T]):
                     self.max_depth,
                     context.get_decomposition_path(),
                 )
+
+                write_post_mortem(
+                    agent_name=agent_name,
+                    task_description=context.original_task,
+                    original_prompt=prompt,
+                    partial_responses=context._partial_responses,
+                    continuation_attempts=MAX_CONTINUATION_CYCLES,
+                    decomposition_depth=context.depth,
+                    error=e,
+                )
+
                 raise
 
             return self._decompose_and_process(
                 llm, prompt, content, agent_name, process_fn, context
             )
+
+    def _attempt_continuation(
+        self,
+        llm: "LLMClient",
+        prompt: str,
+        partial_content: str,
+        agent_name: str,
+        project_root: Optional[Path] = None,
+    ) -> Optional[str]:
+        """Attempt to continue a truncated response.
+
+        Args:
+            llm: LLM client.
+            prompt: The original prompt.
+            partial_content: The truncated response content.
+            agent_name: Agent name for logging and log file naming.
+            project_root: Optional root directory for continuation logs.
+
+        Returns:
+            Complete content if successful, None if continuation fails.
+        """
+        from shared.continuation import ResponseContinuator, ContinuationResult, MAX_CONTINUATION_CYCLES
+
+        system_message = (
+            "You are a strict JSON generator. Respond with a single valid JSON object only, "
+            "no explanatory text, no Markdown, no code fences."
+        )
+
+        try:
+            continuator = ResponseContinuator(
+                base_url=llm.base_url,
+                model=llm.model,
+                timeout=llm.timeout,
+                max_cycles=MAX_CONTINUATION_CYCLES,
+            )
+
+            result: ContinuationResult = continuator.attempt_continuation(
+                original_prompt=prompt,
+                partial_content=partial_content,
+                system_prompt=system_message,
+                json_mode=True,
+                task_id=agent_name,
+                project_root=project_root,
+            )
+
+            if result.success:
+                logger.info(
+                    "%s: Continuation succeeded after %d cycles (%d chars total)",
+                    agent_name,
+                    result.cycles_used,
+                    len(result.content),
+                )
+                return result.content
+
+            logger.warning(
+                "%s: Continuation exhausted after %d cycles (%d chars accumulated)",
+                agent_name,
+                result.cycles_used,
+                len(result.content),
+            )
+            return None
+
+        except Exception as e:
+            logger.warning(
+                "%s: Continuation failed with error: %s",
+                agent_name,
+                str(e)[:100],
+            )
+            return None
 
     def _decompose_and_process(
         self,

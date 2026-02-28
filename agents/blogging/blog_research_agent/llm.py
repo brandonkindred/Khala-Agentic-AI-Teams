@@ -27,6 +27,7 @@ ENV_BLOG_LLM_MODEL = "BLOG_LLM_MODEL"
 ENV_BLOG_LLM_BASE_URL = "BLOG_LLM_BASE_URL"
 ENV_BLOG_LLM_TIMEOUT = "BLOG_LLM_TIMEOUT"
 ENV_BLOG_LLM_MAX_RETRIES = "BLOG_LLM_MAX_RETRIES"
+ENV_LLM_ENABLE_THINKING = "SW_LLM_ENABLE_THINKING"  # shared with SW team; "true"/"false"
 
 # Default configuration
 DEFAULT_MODEL = "qwen3.5:397b-cloud"
@@ -406,6 +407,20 @@ class OllamaLLMClient(LLMClient):
             cause=last_error,
         )
 
+    def _should_enable_thinking(self) -> bool:
+        """Check if thinking mode should be enabled for this model.
+        
+        Thinking mode is enabled for qwen3.5 models by default, but can be
+        controlled via the SW_LLM_ENABLE_THINKING environment variable.
+        """
+        env_val = os.environ.get(ENV_LLM_ENABLE_THINKING, "").lower()
+        if env_val == "false":
+            return False
+        if env_val == "true":
+            return "qwen3.5" in self.model.lower()
+        # Default: enable for qwen3.5 models
+        return "qwen3.5" in self.model.lower()
+
     def complete_json(self, prompt: str, *, temperature: float = 0.0) -> Dict[str, Any]:
         """
         Call the Ollama chat completions API and return a parsed JSON dict.
@@ -437,6 +452,11 @@ class OllamaLLMClient(LLMClient):
                 {"role": "user", "content": prompt},
             ],
         }
+
+        # Enable thinking mode for qwen3.5 models (improves reasoning quality)
+        if self._should_enable_thinking():
+            payload["think"] = True
+            logger.debug("Thinking mode enabled for model %s", self.model)
 
         data = self._make_request(payload)
         
