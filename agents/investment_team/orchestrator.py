@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from .agents import AgentIdentity, PolicyGuardianAgent, PromotionGateAgent
+from .tool_agents.web_interfaces import InvestmentWebInterfaceCoordinator
+
 from .models import (
     IPS,
     PortfolioProposal,
@@ -49,9 +51,10 @@ class InvestmentTeamOrchestrator:
     - Live promotion requires IPS permission and independent approver.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, web_interface_coordinator: InvestmentWebInterfaceCoordinator | None = None) -> None:
         self.policy_guardian = PolicyGuardianAgent()
         self.promotion_gate = PromotionGateAgent()
+        self.web_interface_coordinator = web_interface_coordinator
 
     def bootstrap(self, state: WorkflowState, ips: IPS) -> None:
         state.mode = ips.default_mode
@@ -98,3 +101,18 @@ class InvestmentTeamOrchestrator:
         if decision.outcome.value in {"reject", "revise"}:
             self.enqueue(state, QueueItem(queue="escalation", payload_id=strategy.strategy_id, priority="high"))
         return decision
+
+    def run_web_action(
+        self,
+        action: str,
+        payload: Dict[str, Any] | None = None,
+        workspace_name: str | None = None,
+    ) -> Dict[str, Any]:
+        """Run provider-backed web action when coordinator is configured."""
+        if not self.web_interface_coordinator:
+            raise RuntimeError("web interface coordinator is not configured")
+        return self.web_interface_coordinator.execute_action(
+            action=action,
+            payload=payload,
+            workspace_name=workspace_name,
+        )

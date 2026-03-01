@@ -27,6 +27,11 @@ from agents.investment_team.models import (
     ValidationStatus,
 )
 from agents.investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
+from agents.investment_team.tool_agents.web_interfaces import (
+    BrowserType,
+    InvestmentWebInterfaceCoordinator,
+    WebAgentConfig,
+)
 
 
 def _sample_ips() -> IPS:
@@ -151,6 +156,44 @@ def test_policy_guardian_rejects_excluded_asset_class() -> None:
     violations = PolicyGuardianAgent().check_portfolio(ips, proposal)
 
     assert any("excluded by IPS preferences" in item for item in violations)
+
+
+def test_web_interface_coordinator_selects_provider_and_runs_action() -> None:
+    coordinator = InvestmentWebInterfaceCoordinator(
+        provider="quantconnect",
+        config=WebAgentConfig(browser=BrowserType.FIREFOX, workspace_name="alpha-lab"),
+    )
+
+    result = coordinator.execute_action(action="deploy_strategy", payload={"strategy_id": "s1"})
+
+    assert result["provider"] == "quantconnect"
+    assert result["results"]["login"]["details"]["browser"] == "firefox"
+    assert result["results"]["open_workspace"]["details"]["workspace"] == "alpha-lab"
+    assert result["artifacts"][0]["action"] == "deploy_strategy"
+
+
+def test_orchestrator_web_action_uses_optional_coordinator() -> None:
+    coordinator = InvestmentWebInterfaceCoordinator(
+        provider="tradingview",
+        config=WebAgentConfig(browser=BrowserType.CHROMIUM),
+    )
+    orch = InvestmentTeamOrchestrator(web_interface_coordinator=coordinator)
+
+    result = orch.run_web_action(action="capture_chart", payload={"symbol": "SPY"}, workspace_name="swing")
+
+    assert result["provider"] == "tradingview"
+    assert result["results"]["open_workspace"]["details"]["workspace"] == "swing"
+
+
+def test_orchestrator_web_action_requires_configured_coordinator() -> None:
+    orch = InvestmentTeamOrchestrator()
+
+    try:
+        orch.run_web_action(action="noop")
+    except RuntimeError as exc:
+        assert "not configured" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError when coordinator missing")
 
 
 def test_platform_action_models_capture_compliance_metadata() -> None:
