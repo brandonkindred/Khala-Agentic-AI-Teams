@@ -41,6 +41,12 @@ export interface TaskStateEntry {
   started_at?: string;
   finished_at?: string;
   error?: string;
+  /** Parent initiative ID from planning hierarchy. */
+  initiative_id?: string;
+  /** Parent epic ID from planning hierarchy. */
+  epic_id?: string;
+  /** Parent story ID from planning hierarchy. */
+  story_id?: string;
 }
 
 /** Per-team progress when multiple teams run in parallel. */
@@ -103,6 +109,41 @@ export const PRODUCT_ANALYSIS_PHASES: PhaseDefinition[] = [
   { id: 'spec_cleanup', label: 'Cleanup', icon: 'cleaning_services' },
 ];
 
+// ---------------------------------------------------------------------------
+// Planning Hierarchy Types for Work Breakdown Tree
+// ---------------------------------------------------------------------------
+
+/** Initiative item in planning hierarchy. */
+export interface PlanningInitiative {
+  id: string;
+  title: string;
+  description?: string;
+}
+
+/** Epic item in planning hierarchy. */
+export interface PlanningEpic {
+  id: string;
+  title: string;
+  description?: string;
+  initiative_id: string;
+}
+
+/** Story item in planning hierarchy. */
+export interface PlanningStory {
+  id: string;
+  title: string;
+  description?: string;
+  epic_id: string;
+  initiative_id: string;
+}
+
+/** Planning hierarchy for work breakdown tree display. */
+export interface PlanningHierarchy {
+  initiatives: PlanningInitiative[];
+  epics: PlanningEpic[];
+  stories: PlanningStory[];
+}
+
 /** Response from GET /run-team/{job_id}. */
 export interface JobStatusResponse {
   job_id: string;
@@ -138,6 +179,8 @@ export interface JobStatusResponse {
   analysis_subprocess?: string;
   /** Completed subprocesses within the product_analysis phase. */
   analysis_completed_phases?: string[];
+  /** Planning hierarchy with initiatives, epics, stories for work breakdown tree display. */
+  planning_hierarchy?: PlanningHierarchy;
 }
 
 /** Response from POST /run-team/{job_id}/retry-failed. */

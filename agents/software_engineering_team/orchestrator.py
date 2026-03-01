@@ -2034,19 +2034,62 @@ def run_orchestrator(
 
         # Store execution order and per-task state for API tracking panel; set phase to execution
         _task_map = {t.id: t for t in assignment.tasks}
-        task_states = {
-            tid: {
+
+        def _extract_task_state(tid: str) -> dict:
+            """Extract task state including hierarchy metadata."""
+            task = _task_map.get(tid)
+            metadata = getattr(task, "metadata", {}) or {}
+            return {
                 "status": "pending",
-                "assignee": getattr(_task_map.get(tid), "assignee", "unknown") or "unknown",
-                "title": getattr(_task_map.get(tid), "title", tid) or tid,
-                "dependencies": getattr(_task_map.get(tid), "dependencies", []) or [],
+                "assignee": getattr(task, "assignee", "unknown") or "unknown",
+                "title": getattr(task, "title", tid) or tid,
+                "dependencies": getattr(task, "dependencies", []) or [],
+                "initiative_id": metadata.get("initiative_id"),
+                "epic_id": metadata.get("epic_id"),
+                "story_id": metadata.get("story_id"),
             }
-            for tid in assignment.execution_order
-        }
+
+        task_states = {tid: _extract_task_state(tid) for tid in assignment.execution_order}
+
+        # Build planning hierarchy summary for UI work breakdown tree
+        hierarchy_summary = None
+        if tech_lead_output and tech_lead_output.planning_hierarchy:
+            hierarchy = tech_lead_output.planning_hierarchy
+            initiatives = []
+            epics = []
+            stories = []
+            for init in hierarchy.initiatives:
+                initiatives.append({
+                    "id": init.id,
+                    "title": init.title,
+                    "description": getattr(init, "description", "") or "",
+                })
+                for epic in init.epics:
+                    epics.append({
+                        "id": epic.id,
+                        "title": epic.title,
+                        "description": getattr(epic, "description", "") or "",
+                        "initiative_id": init.id,
+                    })
+                    for story in epic.stories:
+                        stories.append({
+                            "id": story.id,
+                            "title": story.title,
+                            "description": getattr(story, "description", "") or "",
+                            "epic_id": epic.id,
+                            "initiative_id": init.id,
+                        })
+            hierarchy_summary = {
+                "initiatives": initiatives,
+                "epics": epics,
+                "stories": stories,
+            }
+
         update_job(
             job_id,
             execution_order=assignment.execution_order,
             task_states=task_states,
+            planning_hierarchy=hierarchy_summary,
             phase="execution",
             status_text="Starting task execution",
         )
