@@ -9,7 +9,7 @@ todos:
     content: Replace qwen3.5:cloud with qwen3.5:397b-cloud in AGENT_DEFAULT_MODELS for all 11 planning/documentation agents
     status: completed
   - id: update-readme
-    content: Update README.md model table and SW_LLM_CONTEXT_SIZE description with new context values and glm-5 note
+    content: Update README.md model table and SW_LLM_CONTEXT_SIZE description with new context values and qwen3.5 note
     status: completed
 isProject: false
 ---
@@ -20,7 +20,7 @@ isProject: false
 
 1. **Correct model context sizes** in `KNOWN_MODEL_CONTEXT`:
   - minimax-m2.5:cloud: 198K (198,000)
-  - glm-5:cloud: 198K (198,000)
+  - qwen3.5:cloud: 198K (198,000)
   - qwen3-coder-next:cloud: 256K (262,144)
   - qwen3.5:397b-cloud: 256K (262,144) - replaces qwen3.5:cloud
 2. **Replace qwen3.5:cloud with qwen3.5:397b-cloud** in `AGENT_DEFAULT_MODELS` for all agents that currently use qwen3.5:cloud (api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, acceptance_verifier, documentation).
@@ -31,7 +31,7 @@ isProject: false
 
 | Model                  | Agents                                                              | Largest Agent              | Largest Reservation                  |
 | ---------------------- | ------------------------------------------------------------------- | -------------------------- | ------------------------------------ |
-| glm-5:cloud            | tech_lead, architecture, spec_intake, project_planning, integration | tech_lead (Task Generator) | 110K prompt + 8K response = **118K** |
+| qwen3.5:cloud            | tech_lead, architecture, spec_intake, project_planning, integration | tech_lead (Task Generator) | 110K prompt + 8K response = **118K** |
 | minimax-m2.5:cloud     | qa, security, accessibility                                         | any                        | ~12K prompt + 8K response = **20K**  |
 | qwen3-coder-next:cloud | backend, frontend, code_review, repair, devops, dbc_comments        | backend/frontend           | 12K prompt + 8K response = **20K**   |
 | qwen3.5:397b-cloud     | api_contract, data_architecture, ui_ux, etc.                        | documentation              | 12K prompt + 8K response = **20K**   |
@@ -42,13 +42,13 @@ isProject: false
 
 | Model                  | Max Context | Largest Agent | Configured (max - largest) |
 | ---------------------- | ----------- | ------------- | -------------------------- |
-| glm-5:cloud            | 198,000     | 118,000       | **80,000**                 |
+| qwen3.5:cloud            | 198,000     | 118,000       | **80,000**                 |
 | minimax-m2.5:cloud     | 198,000     | 20,000        | **178,000**                |
 | qwen3-coder-next:cloud | 262,144     | 20,000        | **242,144**                |
 | qwen3.5:397b-cloud     | 262,144     | 20,000        | **242,144**                |
 
 
-**Important:** For glm-5:cloud, the tech_lead (Task Generator) reserves 110K tokens. With configured context 80K, `compute_task_generator_spec_chars` would compute `available = 80K - 110K - 8K` = negative, falling back to 512 tokens and 12K chars. This may severely limit tech_lead for large specs. If this causes issues, users can override with `SW_LLM_CONTEXT_SIZE=198000` for glm-5.
+**Important:** For qwen3.5:cloud, the tech_lead (Task Generator) reserves 110K tokens. With configured context 80K, `compute_task_generator_spec_chars` would compute `available = 80K - 110K - 8K` = negative, falling back to 512 tokens and 12K chars. This may severely limit tech_lead for large specs. If this causes issues, users can override with `SW_LLM_CONTEXT_SIZE=198000` for qwen3.5.
 
 ## Files to Modify
 
@@ -58,8 +58,8 @@ isProject: false
 
 ```python
 # Model max context (tokens). Effective context = max - largest agent reservation.
-# 198K = 198000 (minimax, glm-5). 256K = 262144 (qwen models).
-# Largest reservations: tech_lead 118K (glm-5), coding/review 20K (qwen3-coder, qwen3.5).
+# 198K = 198000 (minimax, qwen3.5). 256K = 262144 (qwen models).
+# Largest reservations: tech_lead 118K (qwen3.5), coding/review 20K (qwen3-coder, qwen3.5).
 KNOWN_MODEL_CONTEXT: dict[str, int] = {
     "qwen3.5:397b": 262144,
     "qwen3.5:397b-cloud": 242144,   # 256K - 20K
@@ -68,7 +68,7 @@ KNOWN_MODEL_CONTEXT: dict[str, int] = {
     "qwen3-coder-next:cloud": 242144,  # 256K - 20K
     "qwen3-coder:480b-cloud": 242144,
     "qwen3-coder:480b": 242144,
-    "glm-5:cloud": 80_000,         # 198K - 118K (tech_lead)
+    "qwen3.5:cloud": 80_000,         # 198K - 118K (tech_lead)
     "minimax-m2.5:cloud": 178_000, # 198K - 20K
 }
 ```
@@ -93,10 +93,10 @@ KNOWN_MODEL_CONTEXT: dict[str, int] = {
 
 Update the model table and SW_LLM_CONTEXT_SIZE description to reflect:
 
-- minimax-m2.5:cloud, glm-5:cloud: 198K max
+- minimax-m2.5:cloud, qwen3.5:cloud: 198K max
 - qwen3-coder-next:cloud, qwen3.5:397b-cloud: 256K max
 - Effective context = max minus largest agent reservation
-- Note on glm-5 tech_lead: if planning fails on large specs, set `SW_LLM_CONTEXT_SIZE=198000`
+- Note on qwen3.5 tech_lead: if planning fails on large specs, set `SW_LLM_CONTEXT_SIZE=198000`
 
 ## Alternative: Store Max, Subtract in context_sizing
 

@@ -33,25 +33,23 @@ ENV_LLM_ENABLE_THINKING = "SW_LLM_ENABLE_THINKING"  # "true"/"false"; enables th
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
 # Model max context (tokens). Effective context = max - largest agent reservation.
-# 256K = 262144 (qwen models). Largest reservations: coding/review 20K (qwen3-coder, qwen3.5).
+# 256K = 262144 (qwen models). Largest reservations: coding/review 20K (qwen3.5).
 KNOWN_MODEL_CONTEXT: dict[str, int] = {
     "qwen3.5:397b": 262144,
     "qwen3.5:397b-cloud": 242144,  # 256K - 20K
     "qwen3.5:cloud": 242144,  # keep for overrides; 256K - 20K
-    "qwen3-coder-next": 242144,
-    "qwen3-coder-next:cloud": 242144,  # 256K - 20K
     "qwen3-coder:480b-cloud": 242144,
     "qwen3-coder:480b": 242144,
 }
 
 # Recommended default model per agent (all :cloud versions). Used when SW_LLM_MODEL_<agent_key> and SW_LLM_MODEL are unset.
 AGENT_DEFAULT_MODELS: dict[str, str] = {
-    "backend": "qwen3-coder-next:cloud",
-    "frontend": "qwen3-coder-next:cloud",
-    "code_review": "qwen3-coder-next:cloud",
-    "repair": "qwen3-coder-next:cloud",
-    "devops": "qwen3-coder-next:cloud",
-    "dbc_comments": "qwen3-coder-next:cloud",
+    "backend": "qwen3.5:397b-cloud",
+    "frontend": "qwen3.5:397b-cloud",
+    "code_review": "qwen3.5:397b-cloud",
+    "repair": "qwen3.5:397b-cloud",
+    "devops": "qwen3.5:397b-cloud",
+    "dbc_comments": "qwen3.5:397b-cloud",
     "tech_lead": "qwen3.5:397b-cloud",
     "architecture": "qwen3.5:397b-cloud",
     "spec_intake": "qwen3.5:397b-cloud",
@@ -165,7 +163,7 @@ def get_llm_config_summary() -> str:
     """
     provider = (os.environ.get(ENV_LLM_PROVIDER) or "ollama").lower().strip()
     if provider == "ollama":
-        model = os.environ.get(ENV_LLM_MODEL) or "qwen3-coder-next:cloud"
+        model = os.environ.get(ENV_LLM_MODEL) or "qwen3.5:397b-cloud"
         base_url = os.environ.get(ENV_LLM_BASE_URL) or "http://127.0.0.1:11434"
         return f"provider={provider}, model={model}, base_url={base_url}"
     return f"provider={provider}"
@@ -1346,7 +1344,7 @@ def get_llm_for_agent(agent_key: str) -> Union["DummyLLMClient", "OllamaLLMClien
     1. SW_LLM_MODEL_<agent_key> (e.g. SW_LLM_MODEL_backend)
     2. SW_LLM_MODEL (global fallback)
     3. AGENT_DEFAULT_MODELS[agent_key] (recommended default)
-    4. qwen3-coder-next:cloud (hardcoded fallback)
+    4. qwen3.5:397b-cloud (hardcoded fallback)
 
     When SW_LLM_PROVIDER=dummy, returns DummyLLMClient regardless of model config.
     OllamaLLMClient instances are cached by (model, base_url, timeout).
@@ -1358,7 +1356,7 @@ def get_llm_for_agent(agent_key: str) -> Union["DummyLLMClient", "OllamaLLMClien
     per_agent = os.environ.get(f"SW_LLM_MODEL_{agent_key}")
     global_model = os.environ.get(ENV_LLM_MODEL)
     default_model = AGENT_DEFAULT_MODELS.get(agent_key)
-    model = (per_agent or global_model or default_model or "qwen3-coder-next:cloud").strip()
+    model = (per_agent or global_model or default_model or "qwen3.5:397b-cloud").strip()
 
     base_url = os.environ.get(ENV_LLM_BASE_URL) or "http://127.0.0.1:11434"
     try:
@@ -1385,13 +1383,13 @@ def get_llm_client() -> Union["DummyLLMClient", "OllamaLLMClient"]:
 
     Environment variables:
     - SW_LLM_PROVIDER: "ollama" (default) or "dummy"
-    - SW_LLM_MODEL: model name for ollama (default: qwen3-coder-next:cloud)
+    - SW_LLM_MODEL: model name for ollama (default: qwen3.5:397b-cloud)
     - SW_LLM_BASE_URL: ollama base URL (default: http://127.0.0.1:11434)
     - SW_LLM_TIMEOUT: timeout in seconds (default: 1800)
     """
     provider = (os.environ.get(ENV_LLM_PROVIDER) or "ollama").lower().strip()
     if provider == "ollama":
-        model = os.environ.get(ENV_LLM_MODEL) or "qwen3-coder-next:cloud"
+        model = os.environ.get(ENV_LLM_MODEL) or "qwen3.5:397b-cloud"
         base_url = os.environ.get(ENV_LLM_BASE_URL) or "http://127.0.0.1:11434"
         try:
             timeout = float(os.environ.get(ENV_LLM_TIMEOUT) or "1800")

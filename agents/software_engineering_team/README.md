@@ -171,7 +171,7 @@ By default, the script uses `DummyLLMClient` for testing without an LLM. To use 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SW_LLM_PROVIDER` | `dummy` or `ollama` | `dummy` |
-| `SW_LLM_MODEL` | Model name for Ollama | `qwen3-coder-next:cloud` |
+| `SW_LLM_MODEL` | Model name for Ollama | `qwen3.5:397b-cloud` |
 | `SW_LLM_BASE_URL` | Ollama API base URL | `http://127.0.0.1:11434` |
 | `SW_LLM_TIMEOUT` | Timeout in seconds | `1800` |
 | `SW_LLM_MAX_RETRIES` | Max retries for 429/5xx errors | `4` |
@@ -179,31 +179,28 @@ By default, the script uses `DummyLLMClient` for testing without an LLM. To use 
 | `SW_LLM_BACKOFF_MAX_SECONDS` | Max backoff seconds | `60` |
 | `SW_LLM_MAX_CONCURRENCY` | Max concurrent LLM calls (default 4; set 4–6 for faster runs with parallel planning and backend+frontend workers; lower to 2 if GPU/memory limited) | `4` |
 | `SW_LLM_MAX_TOKENS` | Max tokens to generate; if unset, uses min(context size, 32768) so APIs that cap output (e.g. 32K) work | 32768 (capped) |
-| `SW_LLM_CONTEXT_SIZE` | Context window in tokens; if unset, uses known model table or Ollama /api/show. Effective context = max minus largest agent reservation. qwen3-coder-next:cloud, qwen3.5:397b-cloud: 256K max (242K effective). minimax-m2.5:cloud, glm-5:cloud: 198K max (178K/80K effective). If tech_lead planning fails on large specs with glm-5, set `SW_LLM_CONTEXT_SIZE=198000` | (model-dependent) |
+| `SW_LLM_CONTEXT_SIZE` | Context window in tokens; if unset, uses known model table or Ollama /api/show. Effective context = max minus largest agent reservation. qwen3.5:397b-cloud: 256K max (242K effective). | (model-dependent) |
 | `SW_LLM_ENABLE_THINKING` | Enable thinking mode for qwen3.5 models; improves reasoning quality but increases latency and token usage. Set to `false` to disable. | `true` (for qwen3.5) |
 | `SW_ENABLE_PLANNING_CACHE` | Reuse cached TaskAssignment when spec and architecture unchanged; set to `0` or `false` to disable | `1` (enabled) |
 
-**Per-agent model configuration:** Each agent can use a different model. Set `SW_LLM_MODEL_<agent_key>` to override (e.g. `SW_LLM_MODEL_backend`, `SW_LLM_MODEL_tech_lead`). Model resolution order: per-agent env var → `SW_LLM_MODEL` (global fallback) → recommended default for that agent → `qwen3-coder-next:cloud`.
+**Per-agent model configuration:** Each agent can use a different model. Set `SW_LLM_MODEL_<agent_key>` to override (e.g. `SW_LLM_MODEL_backend`, `SW_LLM_MODEL_tech_lead`). Model resolution order: per-agent env var → `SW_LLM_MODEL` (global fallback) → recommended default for that agent → `qwen3.5:397b-cloud`.
 
 Recommended defaults (all :cloud versions) when no overrides are set:
 
 | Model | Agents |
 |-------|--------|
-| qwen3-coder-next:cloud | backend, frontend, code_review, repair, devops, dbc_comments |
-| glm-5:cloud | tech_lead, architecture, spec_intake, project_planning, integration |
-| qwen3.5:397b-cloud | api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, acceptance_verifier, documentation |
-| minimax-m2.5:cloud | qa, security, accessibility |
+| qwen3.5:397b-cloud | All agents (backend, frontend, code_review, repair, devops, dbc_comments, tech_lead, architecture, spec_intake, spec_clarification, product_analysis, project_planning, integration, api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, acceptance_verifier, documentation, qa, security, accessibility) |
 
-Example: `export SW_LLM_MODEL_tech_lead=glm-5:cloud` overrides only the Tech Lead; other agents use their defaults or `SW_LLM_MODEL`.
+Example: `export SW_LLM_MODEL_tech_lead=qwen3.5:cloud` overrides only the Tech Lead; other agents use their defaults or `SW_LLM_MODEL`.
 
 Example with Ollama:
 ```bash
 export SW_LLM_PROVIDER=ollama
-export SW_LLM_MODEL=qwen3-coder-next:cloud
+export SW_LLM_MODEL=qwen3.5:397b-cloud
 python -m agent_implementations.run_team
 ```
 
-Ensure Ollama is running with the model (e.g. `ollama run qwen3-coder-next:cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `SW_LLM_MODEL` to a model your API supports (e.g. `export SW_LLM_MODEL=llama3.2` for Ollama, or your provider's model id).
+Ensure Ollama is running with the model (e.g. `ollama run qwen3.5:397b-cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `SW_LLM_MODEL` to a model your API supports (e.g. `export SW_LLM_MODEL=llama3.2` for Ollama, or your provider's model id).
 
 **Iteration caps (environment variables):** Lowering these can speed runs but may reduce refinement.
 

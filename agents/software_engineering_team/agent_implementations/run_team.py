@@ -34,7 +34,7 @@ from qa_agent import QAExpertAgent, QAInput
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# Uses get_llm_client() which reads SW_LLM_PROVIDER, SW_LLM_MODEL (default: qwen3-coder-next:cloud)
+# Uses get_llm_client() which reads SW_LLM_PROVIDER, SW_LLM_MODEL (default: qwen3.5:397b-cloud)
 LLM = get_llm_client()
 
 # Example product requirements
