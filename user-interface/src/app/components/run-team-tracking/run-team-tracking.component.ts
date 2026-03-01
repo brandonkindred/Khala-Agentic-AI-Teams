@@ -80,6 +80,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   readonly statusChange = output<JobStatusResponse>();
 
   status: JobStatusResponse | null = null;
+  workTreeRows: FlatWorkTreeNode[] = [];
   loading = true;
   private pollSub: Subscription | null = null;
 
@@ -104,6 +105,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   ngOnChanges(changes: SimpleChanges): void {
     if (changes['jobId'] && !changes['jobId'].firstChange) {
       this.status = null;
+      this.workTreeRows = [];
       this.loading = true;
       if (this.jobId) {
         this.startPolling();
@@ -129,6 +131,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
           const wasWaiting = this.status?.waiting_for_answers;
           const isWaiting = res.waiting_for_answers;
           this.status = res;
+          this.workTreeRows = this.buildWorkTreeRows(res);
           this.statusChange.emit(res);
           this.loading = false;
           if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
@@ -822,22 +825,22 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   // Work Breakdown Tree (initiative/epic/task/subtask)
   // ---------------------------------------------------------------------------
 
-  getWorkTreeRows(): FlatWorkTreeNode[] {
-    const root = this.buildWorkBreakdownTree();
+  private buildWorkTreeRows(status: JobStatusResponse): FlatWorkTreeNode[] {
+    const root = this.buildWorkBreakdownTree(status);
     return this.flattenWorkTree(root);
   }
 
-  private buildWorkBreakdownTree(): WorkTreeNode {
+  private buildWorkBreakdownTree(status: JobStatusResponse): WorkTreeNode {
     const root: WorkTreeNode = {
-      id: this.status?.job_id ?? 'project-root',
-      label: this.status?.requirements_title || this.status?.repo_path || 'Project Root',
+      id: status.job_id || 'project-root',
+      label: status.requirements_title || status.repo_path || 'Project Root',
       level: 'root',
-      status: this.getRootWorkStatus(),
+      status: this.getRootWorkStatus(status.status),
       children: [],
     };
 
-    const taskIds = this.status?.task_ids ?? [];
-    const taskStates = this.status?.task_states ?? {};
+    const taskIds = status.task_ids ?? [];
+    const taskStates = status.task_states ?? {};
 
     if (!taskIds.length) {
       return root;
@@ -1004,8 +1007,8 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
     return 'pending';
   }
 
-  private getRootWorkStatus(): WorkItemStatus {
-    const status = (this.status?.status ?? '').toLowerCase();
+  private getRootWorkStatus(jobStatus: string | undefined): WorkItemStatus {
+    const status = (jobStatus ?? '').toLowerCase();
     if (status === 'completed') return 'completed';
     if (status === 'failed' || status === 'cancelled') return 'failed';
     if (status === 'running') return 'in_progress';

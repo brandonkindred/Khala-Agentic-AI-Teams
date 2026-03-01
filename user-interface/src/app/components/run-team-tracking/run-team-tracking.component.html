@@ -447,9 +447,9 @@
       </div>
 
       <div class="work-tree-list">
-        @for (row of getWorkTreeRows(); track row.id) {
+        @for (row of workTreeRows; track row.id + '-' + row.depth) {
           <div class="work-tree-row" [style.padding-left.px]="row.depth * 24">
-            <div class="work-tree-node" [class]="'work-status-' + row.status">
+            <div class="work-tree-node" [ngClass]="'work-status-' + row.status">
               <mat-icon class="work-tree-status-icon">{{ workItemStatusIcon(row.status) }}</mat-icon>
               <span class="work-tree-level">{{ row.level }}</span>
               <span class="work-tree-label">{{ row.label }}</span>
