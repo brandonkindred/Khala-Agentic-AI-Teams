@@ -40,6 +40,25 @@ export interface DAGNode {
   children?: DAGNode[];
 }
 
+type WorkItemStatus = 'completed' | 'in_progress' | 'failed' | 'pending';
+type WorkItemLevel = 'root' | 'initiative' | 'epic' | 'task' | 'subtask';
+
+interface WorkTreeNode {
+  id: string;
+  label: string;
+  level: WorkItemLevel;
+  status: WorkItemStatus;
+  children: WorkTreeNode[];
+}
+
+interface FlatWorkTreeNode {
+  id: string;
+  label: string;
+  level: WorkItemLevel;
+  status: WorkItemStatus;
+  depth: number;
+}
+
 @Component({
   selector: 'app-run-team-tracking',
   standalone: true,
@@ -61,6 +80,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   readonly statusChange = output<JobStatusResponse>();
 
   status: JobStatusResponse | null = null;
+  workTreeRows: FlatWorkTreeNode[] = [];
   loading = true;
   private pollSub: Subscription | null = null;
 
@@ -85,6 +105,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   ngOnChanges(changes: SimpleChanges): void {
     if (changes['jobId'] && !changes['jobId'].firstChange) {
       this.status = null;
+      this.workTreeRows = [];
       this.loading = true;
       if (this.jobId) {
         this.startPolling();
@@ -110,6 +131,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
           const wasWaiting = this.status?.waiting_for_answers;
           const isWaiting = res.waiting_for_answers;
           this.status = res;
+          this.workTreeRows = this.buildWorkTreeRows(res);
           this.statusChange.emit(res);
           this.loading = false;
           if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
@@ -797,5 +819,229 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
         status,
       };
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Work Breakdown Tree (initiative/epic/task/subtask)
+  // ---------------------------------------------------------------------------
+
+  private buildWorkTreeRows(status: JobStatusResponse): FlatWorkTreeNode[] {
+    const root = this.buildWorkBreakdownTree(status);
+    return this.flattenWorkTree(root);
+  }
+
+  private buildWorkBreakdownTree(status: JobStatusResponse): WorkTreeNode {
+    const root: WorkTreeNode = {
+      id: status.job_id || 'project-root',
+      label: status.requirements_title || status.repo_path || 'Project Root',
+      level: 'root',
+      status: this.getRootWorkStatus(status.status),
+      children: [],
+    };
+
+    const taskIds = status.task_ids ?? [];
+    const taskStates = status.task_states ?? {};
+
+    if (!taskIds.length) {
+      return root;
+    }
+
+    const initiatives: WorkTreeNode[] = [];
+    const initiativeById = new Map<string, WorkTreeNode>();
+    const epicsByParent = new Map<string, WorkTreeNode[]>();
+    const tasksByParent = new Map<string, WorkTreeNode[]>();
+    const subtasksByParent = new Map<string, WorkTreeNode[]>();
+
+    const getOrCreateInitiative = (id: string, label: string, status: WorkItemStatus): WorkTreeNode => {
+      const existing = initiativeById.get(id);
+      if (existing) {
+        existing.status = this.mergeStatuses(existing.status, status);
+        return existing;
+      }
+      const node: WorkTreeNode = { id, label, level: 'initiative', status, children: [] };
+      initiativeById.set(id, node);
+      initiatives.push(node);
+      return node;
+    };
+
+    let fallbackInitiative: WorkTreeNode | null = null;
+    const getFallbackInitiative = (): WorkTreeNode => {
+      if (!fallbackInitiative) {
+        fallbackInitiative = getOrCreateInitiative('initiative-uncategorized', 'Uncategorized Initiative', 'pending');
+      }
+      return fallbackInitiative;
+    };
+    const fallbackEpic: WorkTreeNode = {
+      id: 'epic-uncategorized',
+      label: 'General Epic',
+      level: 'epic',
+      status: 'pending',
+      children: [],
+    };
+    const fallbackTask: WorkTreeNode = {
+      id: 'task-uncategorized',
+      label: 'General Task Group',
+      level: 'task',
+      status: 'pending',
+      children: [],
+    };
+
+    for (const taskId of taskIds) {
+      const state = taskStates[taskId];
+      const label = state?.title || taskId;
+      const classification = this.classifyWorkItem(label, taskId);
+      const status = this.mapWorkItemStatus(state?.status);
+
+      const node: WorkTreeNode = {
+        id: taskId,
+        label,
+        level: classification,
+        status,
+        children: [],
+      };
+
+      if (classification === 'initiative') {
+        getOrCreateInitiative(taskId, label, status);
+        continue;
+      }
+
+      if (classification === 'epic') {
+        const parentKey = this.findParentByLevel(state?.dependencies, taskStates, 'initiative') ?? getFallbackInitiative().id;
+        const epics = epicsByParent.get(parentKey) ?? [];
+        epics.push(node);
+        epicsByParent.set(parentKey, epics);
+        continue;
+      }
+
+      if (classification === 'task') {
+        const parentKey = this.findParentByLevel(state?.dependencies, taskStates, 'epic') ?? fallbackEpic.id;
+        const tasks = tasksByParent.get(parentKey) ?? [];
+        tasks.push(node);
+        tasksByParent.set(parentKey, tasks);
+        continue;
+      }
+
+      const parentKey = this.findParentByLevel(state?.dependencies, taskStates, 'task') ?? fallbackTask.id;
+      const subtasks = subtasksByParent.get(parentKey) ?? [];
+      subtasks.push(node);
+      subtasksByParent.set(parentKey, subtasks);
+    }
+
+    // Ensure fallbacks are connected only when needed.
+    if (tasksByParent.has(fallbackEpic.id) || subtasksByParent.has(fallbackTask.id)) {
+      const fallbackInitiativeId = getFallbackInitiative().id;
+      const fallbackEpics = epicsByParent.get(fallbackInitiativeId) ?? [];
+      if (!fallbackEpics.some((item) => item.id === fallbackEpic.id)) {
+        fallbackEpics.push(fallbackEpic);
+        epicsByParent.set(fallbackInitiativeId, fallbackEpics);
+      }
+    }
+    if (subtasksByParent.has(fallbackTask.id)) {
+      const fallbackTasks = tasksByParent.get(fallbackEpic.id) ?? [];
+      if (!fallbackTasks.some((item) => item.id === fallbackTask.id)) {
+        fallbackTasks.push(fallbackTask);
+        tasksByParent.set(fallbackEpic.id, fallbackTasks);
+      }
+    }
+
+    for (const initiative of initiatives) {
+      const initiativeEpics = epicsByParent.get(initiative.id) ?? [];
+      for (const epic of initiativeEpics) {
+        const epicTasks = tasksByParent.get(epic.id) ?? [];
+        for (const task of epicTasks) {
+          task.children = subtasksByParent.get(task.id) ?? [];
+          task.status = this.deriveStatusFromChildren(task.status, task.children);
+        }
+        epic.children = epicTasks;
+        epic.status = this.deriveStatusFromChildren(epic.status, epic.children);
+      }
+      initiative.children = initiativeEpics;
+      initiative.status = this.deriveStatusFromChildren(initiative.status, initiative.children);
+    }
+
+    root.children = initiatives;
+    root.status = this.deriveStatusFromChildren(root.status, root.children);
+    return root;
+  }
+
+  private flattenWorkTree(root: WorkTreeNode): FlatWorkTreeNode[] {
+    const rows: FlatWorkTreeNode[] = [];
+    const visit = (node: WorkTreeNode, depth: number): void => {
+      rows.push({
+        id: node.id,
+        label: node.label,
+        level: node.level,
+        status: node.status,
+        depth,
+      });
+      for (const child of node.children) {
+        visit(child, depth + 1);
+      }
+    };
+    visit(root, 0);
+    return rows;
+  }
+
+  private classifyWorkItem(label: string, taskId: string): WorkItemLevel {
+    const text = `${label} ${taskId}`.toLowerCase();
+    if (/(^|\b)(initiative|init)(\b|:)/.test(text)) return 'initiative';
+    if (/(^|\b)epic(\b|:)/.test(text)) return 'epic';
+    if (/(^|\b)(subtask|microtask)(\b|:)/.test(text)) return 'subtask';
+    return 'task';
+  }
+
+  private findParentByLevel(
+    dependencies: string[] | undefined,
+    taskStates: Record<string, TaskStateEntry>,
+    targetLevel: WorkItemLevel
+  ): string | null {
+    if (!dependencies?.length) return null;
+    for (const dep of dependencies) {
+      const state = taskStates[dep];
+      const label = state?.title || dep;
+      if (this.classifyWorkItem(label, dep) === targetLevel) {
+        return dep;
+      }
+    }
+    return null;
+  }
+
+  private mapWorkItemStatus(rawStatus: string | undefined): WorkItemStatus {
+    const status = (rawStatus ?? '').toLowerCase();
+    if (['completed', 'done', 'success'].includes(status)) return 'completed';
+    if (['in_progress', 'running', 'active'].includes(status)) return 'in_progress';
+    if (['failed', 'error', 'cancelled'].includes(status)) return 'failed';
+    return 'pending';
+  }
+
+  private getRootWorkStatus(jobStatus: string | undefined): WorkItemStatus {
+    const status = (jobStatus ?? '').toLowerCase();
+    if (status === 'completed') return 'completed';
+    if (status === 'failed' || status === 'cancelled') return 'failed';
+    if (status === 'running') return 'in_progress';
+    return 'pending';
+  }
+
+  private deriveStatusFromChildren(base: WorkItemStatus, children: WorkTreeNode[]): WorkItemStatus {
+    if (!children.length) return base;
+    const childStatuses = children.map((item) => item.status);
+    if (childStatuses.some((status) => status === 'failed')) return 'failed';
+    if (childStatuses.some((status) => status === 'in_progress')) return 'in_progress';
+    if (childStatuses.every((status) => status === 'completed')) return 'completed';
+    return base === 'completed' ? 'in_progress' : 'pending';
+  }
+
+  private mergeStatuses(a: WorkItemStatus, b: WorkItemStatus): WorkItemStatus {
+    const order: WorkItemStatus[] = ['pending', 'completed', 'in_progress', 'failed'];
+    return order[Math.max(order.indexOf(a), order.indexOf(b))] ?? a;
+  }
+
+  workItemStatusIcon(status: WorkItemStatus): string {
+    switch (status) {
+      case 'completed': return 'check_circle';
+      case 'in_progress': return 'autorenew';
+      case 'failed': return 'error';
+      default: return 'radio_button_unchecked';
+    }
   }
 }
