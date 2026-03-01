@@ -191,7 +191,7 @@ You can also run individual team APIs separately:
 | `PA_LLM_PROVIDER` | Personal Assistant | LLM provider: `ollama` or `dummy` |
 | `PA_CREDENTIAL_KEY` | Personal Assistant | Fernet encryption key for credential storage |
 | `SW_LLM_PROVIDER` | Software engineering | `dummy` or `ollama` |
-| `SW_LLM_MODEL` | Software engineering | Model name (e.g. `qwen3-coder-next:cloud`) |
+| `SW_LLM_MODEL` | Software engineering | Model name (e.g. `qwen3.5:397b-cloud`) |
 | `SW_LLM_BASE_URL` | Software engineering | Ollama API base URL |
 | `SW_LLM_*` | Software engineering | See [software_engineering_team/README.md](software_engineering_team/README.md) for full LLM and iteration config. |
 

@@ -1,3 +1,4 @@
+import pytest
 from agents.investment_team.agents import AgentIdentity, PolicyGuardianAgent, PromotionGateAgent
 from agents.investment_team.models import (
     IPS,
@@ -22,6 +23,11 @@ from agents.investment_team.models import (
     ValidationStatus,
 )
 from agents.investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
+from agents.investment_team.tool_agents.web_interfaces import (
+    BrowserType,
+    InvestmentWebInterfaceCoordinator,
+    WebAgentConfig,
+)
 
 
 def _sample_ips() -> IPS:
@@ -159,3 +165,103 @@ def test_execution_report_accepts_non_session_status_values() -> None:
     )
 
     assert report.status == "filled"
+def test_web_interface_coordinator_selects_provider_and_runs_action() -> None:
+    coordinator = InvestmentWebInterfaceCoordinator(
+        provider="quantconnect",
+        config=WebAgentConfig(browser=BrowserType.FIREFOX, workspace_name="alpha-lab"),
+    )
+
+    result = coordinator.execute_action(action="deploy_strategy", payload={"strategy_id": "s1"})
+
+    assert result["provider"] == "quantconnect"
+    assert result["results"]["login"]["details"]["browser"] == "firefox"
+    assert result["results"]["open_workspace"]["details"]["workspace"] == "alpha-lab"
+    assert result["artifacts"][0]["action"] == "deploy_strategy"
+
+
+def test_orchestrator_web_action_uses_optional_coordinator() -> None:
+    coordinator = InvestmentWebInterfaceCoordinator(
+        provider="tradingview",
+        config=WebAgentConfig(browser=BrowserType.CHROMIUM),
+    )
+    orch = InvestmentTeamOrchestrator(web_interface_coordinator=coordinator)
+
+    result = orch.run_web_action(action="capture_chart", payload={"symbol": "SPY"}, workspace_name="swing")
+
+    assert result["provider"] == "tradingview"
+    assert result["results"]["open_workspace"]["details"]["workspace"] == "swing"
+
+
+def test_orchestrator_web_action_requires_configured_coordinator() -> None:
+    orch = InvestmentTeamOrchestrator()
+
+    try:
+        orch.run_web_action(action="noop")
+    except RuntimeError as exc:
+        assert "not configured" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError when coordinator missing")
+
+
+def test_web_interface_coordinator_returns_run_scoped_artifacts() -> None:
+    coordinator = InvestmentWebInterfaceCoordinator(
+        provider="quantconnect",
+        config=WebAgentConfig(browser=BrowserType.CHROMIUM),
+    )
+
+    first = coordinator.execute_action(action="deploy_strategy", payload={"strategy_id": "s1"})
+    second = coordinator.execute_action(action="deploy_strategy", payload={"strategy_id": "s2"})
+
+    assert len(first["artifacts"]) == 1
+    assert first["artifacts"][0]["payload"]["strategy_id"] == "s1"
+    assert len(second["artifacts"]) == 1
+    assert second["artifacts"][0]["payload"]["strategy_id"] == "s2"
+
+
+def test_web_interface_coordinator_accepts_string_browser_config() -> None:
+    coordinator = InvestmentWebInterfaceCoordinator(
+        provider="tradingview",
+        config=WebAgentConfig(browser="firefox"),
+    )
+
+    result = coordinator.execute_action(action="capture_chart", payload={"symbol": "QQQ"})
+
+    assert result["results"]["login"]["details"]["browser"] == "firefox"
+
+
+def test_web_interface_coordinator_logs_out_when_action_fails() -> None:
+    class _FailingAgent:
+        def __init__(self) -> None:
+            self.logged_out = False
+
+        def login(self):
+            return type("Result", (), {"provider": "quantconnect", "action": "login", "status": "ok", "details": {}})()
+
+        def open_workspace(self, workspace_name=None):
+            return type(
+                "Result",
+                (),
+                {"provider": "quantconnect", "action": "open_workspace", "status": "ok", "details": {}},
+            )()
+
+        def run_action(self, action, payload=None):
+            raise RuntimeError("run failed")
+
+        def collect_artifacts(self):
+            return []
+
+        def logout(self):
+            self.logged_out = True
+            return type("Result", (), {"provider": "quantconnect", "action": "logout", "status": "ok", "details": {}})()
+
+    coordinator = InvestmentWebInterfaceCoordinator(
+        provider="quantconnect",
+        config=WebAgentConfig(browser=BrowserType.CHROMIUM),
+    )
+    failing_agent = _FailingAgent()
+    coordinator._build_agent = lambda provider, config: failing_agent  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="run failed"):
+        coordinator.execute_action(action="deploy_strategy", payload={"strategy_id": "s1"})
+
+    assert failing_agent.logged_out is True

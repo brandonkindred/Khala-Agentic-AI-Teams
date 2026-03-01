@@ -1753,3 +1753,94 @@ mat-progress-bar {
   border-radius: 10px;
   margin-left: 4px;
 }
+
+.work-tree-card {
+  margin-top: 16px;
+}
+
+.work-tree-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 12px;
+  font-size: 12px;
+
+  span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    text-transform: capitalize;
+  }
+
+  .legend-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
+
+  .completed { color: #2e7d32; }
+  .in-progress { color: #1976d2; }
+  .pending { color: #9e9e9e; }
+  .failed { color: #c62828; }
+}
+
+.work-tree-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.work-tree-row {
+  position: relative;
+}
+
+.work-tree-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.04));
+  border: 1px solid transparent;
+}
+
+.work-tree-status-icon {
+  font-size: 18px;
+  width: 18px;
+  height: 18px;
+}
+
+.work-tree-level {
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+
+.work-tree-label {
+  font-size: 13px;
+}
+
+.work-status-completed {
+  border-color: rgba(76, 175, 80, 0.35);
+  .work-tree-status-icon { color: #2e7d32; }
+}
+
+.work-status-in_progress {
+  border-color: rgba(33, 150, 243, 0.35);
+  .work-tree-status-icon {
+    color: #1976d2;
+    animation: spin 1.5s linear infinite;
+  }
+}
+
+.work-status-pending {
+  border-color: rgba(158, 158, 158, 0.25);
+  .work-tree-status-icon { color: #9e9e9e; }
+}
+
+.work-status-failed {
+  border-color: rgba(244, 67, 54, 0.35);
+  background: rgba(244, 67, 54, 0.08);
+  .work-tree-status-icon { color: #c62828; }
+}

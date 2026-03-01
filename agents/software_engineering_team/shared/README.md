@@ -41,7 +41,7 @@ The LLM client provides a unified interface for text and JSON generation with su
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
 | `SW_LLM_PROVIDER` | `ollama` or `dummy` | `dummy` |
-| `SW_LLM_MODEL` | Model name | `qwen3-coder-next:cloud` |
+| `SW_LLM_MODEL` | Model name | `qwen3.5:397b-cloud` |
 | `SW_LLM_BASE_URL` | Ollama API URL | `http://127.0.0.1:11434` |
 | `SW_LLM_TIMEOUT` | Request timeout (seconds) | 600 |
 | `SW_LLM_MAX_RETRIES` | Retry attempts | 4 |
@@ -54,13 +54,13 @@ The LLM client provides a unified interface for text and JSON generation with su
 
 ```python
 AGENT_DEFAULT_MODELS = {
-    "backend": "qwen3-coder-next:cloud",
-    "frontend": "qwen3-coder-next:cloud",
-    "tech_lead": "glm-5:cloud",
-    "architecture": "glm-5:cloud",
-    "qa": "minimax-m2.5:cloud",
-    "security": "minimax-m2.5:cloud",
-    # ... more agents
+    "backend": "qwen3.5:397b-cloud",
+    "frontend": "qwen3.5:397b-cloud",
+    "tech_lead": "qwen3.5:397b-cloud",
+    "architecture": "qwen3.5:397b-cloud",
+    "qa": "qwen3.5:397b-cloud",
+    "security": "qwen3.5:397b-cloud",
+    # ... all agents use qwen3.5:397b-cloud
 }
 ```
 

@@ -218,9 +218,9 @@ def test_complete_json_continue_still_invalid_raises() -> None:
     assert err.response_preview == "abc"
 
 
-def test_qwen3_coder_next_uses_known_context_size() -> None:
-    """qwen3-coder-next uses known effective context 242144 (256K - 20K) without /api/show call."""
-    client = OllamaLLMClient(model="qwen3-coder-next", base_url="http://localhost:9999", timeout=5)
+def test_qwen35_397b_cloud_uses_known_context_size() -> None:
+    """qwen3.5:397b-cloud uses known effective context 242144 (256K - 20K) without /api/show call."""
+    client = OllamaLLMClient(model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5)
     assert client.get_max_context_tokens() == 242144
 
 
@@ -273,7 +273,7 @@ def test_get_llm_for_agent_global_fallback() -> None:
 
 
 def test_get_llm_for_agent_uses_default_when_no_env() -> None:
-    """When no env overrides, agent default (e.g. qwen3-coder-next:cloud for backend) is used."""
+    """When no env overrides, agent default (e.g. qwen3.5:397b-cloud for backend) is used."""
     _clear_client_cache_for_testing()
     with patch.dict(
         os.environ,
@@ -286,7 +286,7 @@ def test_get_llm_for_agent_uses_default_when_no_env() -> None:
     ):
         client = get_llm_for_agent("backend")
     assert isinstance(client, OllamaLLMClient)
-    assert client.model == "qwen3-coder-next:cloud"
+    assert client.model == "qwen3.5:397b-cloud"
 
 
 def test_get_llm_for_agent_cache_returns_same_instance() -> None:

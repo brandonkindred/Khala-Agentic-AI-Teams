@@ -431,4 +431,33 @@
       }
     </mat-card-content>
   </mat-card>
+
+  <!-- Work Breakdown Tree (initiative/epic/task/subtask) -->
+  <mat-card class="work-tree-card">
+    <mat-card-header>
+      <mat-card-title>Project Work Breakdown Tree</mat-card-title>
+      <mat-card-subtitle>Root → initiative → epic → task → subtask</mat-card-subtitle>
+    </mat-card-header>
+    <mat-card-content>
+      <div class="work-tree-legend">
+        <span><mat-icon class="legend-icon completed">check_circle</mat-icon>Completed</span>
+        <span><mat-icon class="legend-icon in-progress">autorenew</mat-icon>In progress</span>
+        <span><mat-icon class="legend-icon pending">radio_button_unchecked</mat-icon>Pending</span>
+        <span><mat-icon class="legend-icon failed">error</mat-icon>Failed</span>
+      </div>
+
+      <div class="work-tree-list">
+        @for (row of workTreeRows; track row.id + '-' + row.depth) {
+          <div class="work-tree-row" [style.padding-left.px]="row.depth * 24">
+            <div class="work-tree-node" [ngClass]="'work-status-' + row.status">
+              <mat-icon class="work-tree-status-icon">{{ workItemStatusIcon(row.status) }}</mat-icon>
+              <span class="work-tree-level">{{ row.level }}</span>
+              <span class="work-tree-label">{{ row.label }}</span>
+            </div>
+          </div>
+        }
+      </div>
+    </mat-card-content>
+  </mat-card>
+
 }
