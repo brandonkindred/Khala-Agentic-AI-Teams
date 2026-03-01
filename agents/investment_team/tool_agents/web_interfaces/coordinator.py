@@ -21,7 +21,7 @@ class InvestmentWebInterfaceCoordinator:
     def __init__(self, provider: WebProvider | str, config: WebAgentConfig) -> None:
         provider_value = provider.value if isinstance(provider, WebProvider) else provider.lower()
         self.provider = WebProvider(provider_value)
-        self.agent = self._build_agent(self.provider, config)
+        self.config = config
 
     @staticmethod
     def _build_agent(provider: WebProvider, config: WebAgentConfig) -> WebBrokerInterface:
@@ -37,11 +37,12 @@ class InvestmentWebInterfaceCoordinator:
         payload: Dict[str, Any] | None = None,
         workspace_name: str | None = None,
     ) -> Dict[str, Any]:
-        login_result = self.agent.login()
-        workspace_result = self.agent.open_workspace(workspace_name=workspace_name)
-        action_result = self.agent.run_action(action, payload=payload)
-        artifacts = self.agent.collect_artifacts()
-        logout_result = self.agent.logout()
+        agent = self._build_agent(self.provider, self.config)
+        login_result = agent.login()
+        workspace_result = agent.open_workspace(workspace_name=workspace_name)
+        action_result = agent.run_action(action, payload=payload)
+        artifacts = agent.collect_artifacts()
+        logout_result = agent.logout()
 
         return {
             "provider": self.provider.value,

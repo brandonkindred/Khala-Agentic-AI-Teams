@@ -20,10 +20,16 @@ class BrowserType(str, Enum):
 class WebAgentConfig:
     """Runtime settings for web broker agents."""
 
-    browser: BrowserType = BrowserType.CHROMIUM
+    browser: BrowserType | str = BrowserType.CHROMIUM
     headless: bool = True
     workspace_name: str | None = None
     provider_options: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Normalize browser values from enum or string configs."""
+        if isinstance(self.browser, BrowserType):
+            return
+        self.browser = BrowserType(self.browser.lower())
 
 
 @dataclass
