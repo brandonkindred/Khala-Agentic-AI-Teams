@@ -48,7 +48,7 @@ For each agent, resolve model in this order:
 | Model                      | Agents                                                                                                                                                                                 |
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **qwen3-coder-next:cloud** | backend, frontend, code_review, repair, devops, dbc_comments                                                                                                                           |
-| **glm-5:cloud**            | tech_lead, architecture, spec_intake, project_planning, integration                                                                                                                    |
+| **qwen3.5:cloud**            | tech_lead, architecture, spec_intake, project_planning, integration                                                                                                                    |
 | **qwen3.5:cloud**          | api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, acceptance_verifier, documentation |
 | **minimax-m2.5:cloud**     | qa, security, accessibility                                                                                                                                                            |
 
@@ -92,7 +92,7 @@ When `SW_LLM_PROVIDER=dummy`, all agents receive `DummyLLMClient` regardless of 
 - Add a new subsection "Per-agent model configuration" under LLM configuration.
 - Document `SW_LLM_MODEL_<agent_key>` (e.g. `SW_LLM_MODEL_backend`, `SW_LLM_MODEL_tech_lead`).
 - Document the recommended default mapping and that `SW_LLM_MODEL` remains the global fallback.
-- Example: `export SW_LLM_MODEL_tech_lead=glm-5` to override only Tech Lead.
+- Example: `export SW_LLM_MODEL_tech_lead=qwen3.5` to override only Tech Lead.
 
 ---
 

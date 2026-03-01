@@ -94,7 +94,7 @@ TAVILY_API_KEY=your_tavily_key
 
 # Software Engineering (for real LLM runs)
 SW_LLM_PROVIDER=ollama
-SW_LLM_MODEL=qwen3-coder-next:cloud
+SW_LLM_MODEL=qwen3.5:397b-cloud
 SW_LLM_BASE_URL=http://127.0.0.1:11434
 
 # SOC2 (optional)

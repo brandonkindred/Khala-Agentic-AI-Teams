@@ -390,7 +390,7 @@ See [agents/docker/README.md](agents/docker/README.md) for environment variables
 |----------|------|-------------|---------|
 | `TAVILY_API_KEY` | Blogging | Web search API key | Required for research |
 | `SW_LLM_PROVIDER` | Software Engineering | `dummy` or `ollama` | `dummy` |
-| `SW_LLM_MODEL` | Software Engineering | Model name | `qwen3-coder-next:cloud` |
+| `SW_LLM_MODEL` | Software Engineering | Model name | `qwen3.5:397b-cloud` |
 | `SW_LLM_BASE_URL` | Software Engineering | Ollama API URL | `http://127.0.0.1:11434` |
 | `SW_LLM_MODEL_<AGENT>` | Software Engineering | Per-agent model override | - |
 | `SOC2_LLM_PROVIDER` | SOC2 | `ollama` or `dummy` | `ollama` |

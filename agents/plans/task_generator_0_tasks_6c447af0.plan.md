@@ -58,7 +58,7 @@ sequenceDiagram
 
 ### Core Issue
 
-The `glm-5:cloud` model is not returning valid JSON that the parsing logic can extract. The failure cascades through multiple recovery attempts:
+The `qwen3.5:cloud` model is not returning valid JSON that the parsing logic can extract. The failure cascades through multiple recovery attempts:
 
 1. **Primary JSON parse** ([llm.py:738-740](software_engineering_team/shared/llm.py)) - `json.loads()` fails
 2. **Repaired JSON parse** ([llm.py:742-746](software_engineering_team/shared/llm.py)) - Trailing comma fix doesn't help
@@ -69,7 +69,7 @@ The `glm-5:cloud` model is not returning valid JSON that the parsing logic can e
 
 ### Why This Happens
 
-The `glm-5:cloud` model is likely returning:
+The `qwen3.5:cloud` model is likely returning:
 
 - Plain text explanation instead of JSON
 - JSON with severe syntax errors (unbalanced braces, invalid escaping)

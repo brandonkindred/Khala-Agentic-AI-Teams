@@ -34,7 +34,7 @@ curl http://localhost:18005/health
 |----------|---------|-------------|
 | `SW_LLM_PROVIDER` | `ollama` | LLM provider (ollama or dummy) |
 | `SW_LLM_BASE_URL` | `http://host.docker.internal:11434` | Ollama API URL. Use this to reach Ollama on the host. |
-| `SW_LLM_MODEL` | `qwen3-coder-next:cloud` | Default model for agents |
+| `SW_LLM_MODEL` | `qwen3.5:397b-cloud` | Default model for agents |
 | `SW_LLM_MODEL_<AGENT_KEY>` | - | Per-agent model override (e.g. `SW_LLM_MODEL_BACKEND_EXPERT`) |
 | `PYTHONUNBUFFERED` | `1` | Ensures Python output is not buffered |
 
