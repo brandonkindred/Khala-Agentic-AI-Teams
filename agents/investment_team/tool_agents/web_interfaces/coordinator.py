@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from .interfaces import WebActionResult, WebAgentConfig, WebBrokerInterface
 from .quantconnect_agent import QuantConnectWebAgent

@@ -6,8 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 from .agents import AgentIdentity, PolicyGuardianAgent, PromotionGateAgent
-from .tool_agents.web_interfaces import InvestmentWebInterfaceCoordinator
-
 from .models import (
     IPS,
     PortfolioProposal,
@@ -16,6 +14,7 @@ from .models import (
     ValidationReport,
     WorkflowMode,
 )
+from .tool_agents.web_interfaces import InvestmentWebInterfaceCoordinator
 
 
 @dataclass
