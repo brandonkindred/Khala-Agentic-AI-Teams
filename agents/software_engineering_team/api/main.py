@@ -128,6 +128,9 @@ class TaskStateEntry(BaseModel):
     started_at: Optional[str] = Field(None, description="ISO timestamp when task started.")
     finished_at: Optional[str] = Field(None, description="ISO timestamp when task finished.")
     error: Optional[str] = Field(None, description="Error message if failed.")
+    initiative_id: Optional[str] = Field(None, description="Parent initiative ID from planning hierarchy.")
+    epic_id: Optional[str] = Field(None, description="Parent epic ID from planning hierarchy.")
+    story_id: Optional[str] = Field(None, description="Parent story ID from planning hierarchy.")
 
 
 class TeamProgressEntry(BaseModel):
@@ -230,6 +233,10 @@ class JobStatusResponse(BaseModel):
     analysis_completed_phases: List[str] = Field(
         default_factory=list,
         description="Completed subprocesses within the product_analysis phase.",
+    )
+    planning_hierarchy: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Planning hierarchy with initiatives, epics, stories for work breakdown tree display.",
     )
 
 
@@ -568,6 +575,7 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         "planning_completed_phases": data.get("planning_completed_phases") or [],
         "analysis_subprocess": data.get("analysis_subprocess"),
         "analysis_completed_phases": data.get("analysis_completed_phases") or [],
+        "planning_hierarchy": data.get("planning_hierarchy"),
     }
     return JobStatusResponse.model_validate(payload)
 
@@ -783,6 +791,7 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
         planning_completed_phases=updated_data.get("planning_completed_phases") or [],
         analysis_subprocess=updated_data.get("analysis_subprocess"),
         analysis_completed_phases=updated_data.get("analysis_completed_phases") or [],
+        planning_hierarchy=updated_data.get("planning_hierarchy"),
     )
 
 

@@ -71,7 +71,7 @@ The Review → Problem Solving → Execution cycle repeats up to 5 times until r
 
 | Agent | Execution Tasks | Review Participation |
 |-------|-----------------|---------------------|
-| **Data Engineering** | Database models, migrations, schemas | Schema validation |
+| **Data Engineering** | Database models, schemas, data integrity | Schema validation |
 | **API/OpenAPI** | REST endpoints, OpenAPI specs | API contract review |
 | **Auth** | Authentication, authorization, JWT/OAuth | Security review |
 | **CI/CD** | Pipeline config (GitHub Actions, etc.) | Pipeline validation |

@@ -47,7 +47,7 @@ PLANNING_PROMPT = """You are the Planning Agent for a backend development team.
 **Context:** You receive a single **task** (assigned to the backend team from the Tech Lead's plan). Your job is to produce **subtasks** (microtasks) that together implement this task. Each subtask should be small enough that a single specialist tool-agent (or a general code-generation step) can handle it. The task's acceptance criteria and detailed description define what "done" means; your subtasks must collectively satisfy them.
 
 **Available tool-agent domains you can assign microtasks to:**
-- data_engineering — schema design, migrations, data integrity, query optimisation
+- data_engineering — schema design, data models, data integrity, query optimisation (NO migrations unless explicitly requested)
 - api_openapi — API endpoint design, OpenAPI contract, route implementation
 - auth — authentication, authorisation, RBAC, permissions, secure defaults
 - cicd — CI/CD pipeline configuration or updates
@@ -84,6 +84,7 @@ Rules:
 - Emit 2-10 microtasks. Prefer smaller, focused microtasks over large monolithic ones.
 - Include at least one testing_qa microtask unless the task is pure docs/config.
 - Dependency order matters: list prerequisites in depends_on (pipe-separated IDs).
+- Do NOT create migration microtasks (Alembic, Flyway, etc.) for greenfield projects. Migrations are only needed when modifying an existing database schema. If the project is new, create models/schemas directly without migration infrastructure.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
 

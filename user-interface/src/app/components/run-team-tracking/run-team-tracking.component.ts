@@ -846,6 +846,147 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
       return root;
     }
 
+    // Use planning hierarchy data if available (new approach)
+    if (status.planning_hierarchy) {
+      return this.buildTreeFromHierarchy(root, status.planning_hierarchy, taskIds, taskStates);
+    }
+
+    // Fallback to legacy text-pattern matching for older jobs without hierarchy data
+    return this.buildTreeFromLegacyClassification(root, taskIds, taskStates);
+  }
+
+  /**
+   * Build work tree using proper planning hierarchy data from the API.
+   * Tasks are assigned to their correct initiative/epic/story parents using metadata.
+   */
+  private buildTreeFromHierarchy(
+    root: WorkTreeNode,
+    hierarchy: NonNullable<JobStatusResponse['planning_hierarchy']>,
+    taskIds: string[],
+    taskStates: Record<string, TaskStateEntry>
+  ): WorkTreeNode {
+    const initiativeNodes = new Map<string, WorkTreeNode>();
+    const epicNodes = new Map<string, WorkTreeNode>();
+    const storyNodes = new Map<string, WorkTreeNode>();
+
+    // Create initiative nodes
+    for (const init of hierarchy.initiatives) {
+      const node: WorkTreeNode = {
+        id: init.id,
+        label: init.title,
+        level: 'initiative',
+        status: 'pending',
+        children: [],
+      };
+      initiativeNodes.set(init.id, node);
+    }
+
+    // Create epic nodes and attach to initiatives
+    for (const epic of hierarchy.epics) {
+      const node: WorkTreeNode = {
+        id: epic.id,
+        label: epic.title,
+        level: 'epic',
+        status: 'pending',
+        children: [],
+      };
+      epicNodes.set(epic.id, node);
+
+      const parentInit = initiativeNodes.get(epic.initiative_id);
+      if (parentInit) {
+        parentInit.children.push(node);
+      }
+    }
+
+    // Create story nodes and attach to epics
+    for (const story of hierarchy.stories) {
+      const node: WorkTreeNode = {
+        id: story.id,
+        label: story.title,
+        level: 'task',
+        status: 'pending',
+        children: [],
+      };
+      storyNodes.set(story.id, node);
+
+      const parentEpic = epicNodes.get(story.epic_id);
+      if (parentEpic) {
+        parentEpic.children.push(node);
+      }
+    }
+
+    // Assign tasks to their parent stories (or epics if no story)
+    const orphanTasks: WorkTreeNode[] = [];
+    for (const taskId of taskIds) {
+      const state = taskStates[taskId];
+      if (!state) continue;
+
+      const taskNode: WorkTreeNode = {
+        id: taskId,
+        label: state.title || taskId,
+        level: 'subtask',
+        status: this.mapWorkItemStatus(state.status),
+        children: [],
+      };
+
+      // Try to attach to story, then epic, then orphan
+      if (state.story_id && storyNodes.has(state.story_id)) {
+        storyNodes.get(state.story_id)!.children.push(taskNode);
+      } else if (state.epic_id && epicNodes.has(state.epic_id)) {
+        epicNodes.get(state.epic_id)!.children.push(taskNode);
+      } else if (state.initiative_id && initiativeNodes.has(state.initiative_id)) {
+        // Attach directly to initiative if no epic/story
+        initiativeNodes.get(state.initiative_id)!.children.push(taskNode);
+      } else {
+        orphanTasks.push(taskNode);
+      }
+    }
+
+    // Handle orphan tasks with fallback
+    if (orphanTasks.length > 0) {
+      const fallbackInitiative: WorkTreeNode = {
+        id: 'initiative-uncategorized',
+        label: 'Uncategorized Initiative',
+        level: 'initiative',
+        status: 'pending',
+        children: [],
+      };
+      const fallbackEpic: WorkTreeNode = {
+        id: 'epic-uncategorized',
+        label: 'General Epic',
+        level: 'epic',
+        status: 'pending',
+        children: orphanTasks,
+      };
+      fallbackInitiative.children.push(fallbackEpic);
+      initiativeNodes.set(fallbackInitiative.id, fallbackInitiative);
+    }
+
+    // Derive statuses bottom-up
+    for (const story of storyNodes.values()) {
+      story.status = this.deriveStatusFromChildren(story.status, story.children);
+    }
+    for (const epic of epicNodes.values()) {
+      epic.status = this.deriveStatusFromChildren(epic.status, epic.children);
+    }
+    for (const initiative of initiativeNodes.values()) {
+      initiative.status = this.deriveStatusFromChildren(initiative.status, initiative.children);
+    }
+
+    root.children = Array.from(initiativeNodes.values());
+    root.status = this.deriveStatusFromChildren(root.status, root.children);
+    return root;
+  }
+
+  /**
+   * Legacy fallback: build work tree using text pattern matching.
+   * Used for older jobs that don't have planning_hierarchy data.
+   */
+  private buildTreeFromLegacyClassification(
+    root: WorkTreeNode,
+    taskIds: string[],
+    taskStates: Record<string, TaskStateEntry>
+  ): WorkTreeNode {
     const initiatives: WorkTreeNode[] = [];
     const initiativeById = new Map<string, WorkTreeNode>();
     const epicsByParent = new Map<string, WorkTreeNode[]>();
