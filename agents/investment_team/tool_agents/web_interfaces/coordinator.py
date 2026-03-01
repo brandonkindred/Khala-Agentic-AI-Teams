@@ -38,11 +38,26 @@ class InvestmentWebInterfaceCoordinator:
         workspace_name: str | None = None,
     ) -> Dict[str, Any]:
         agent = self._build_agent(self.provider, self.config)
-        login_result = agent.login()
-        workspace_result = agent.open_workspace(workspace_name=workspace_name)
-        action_result = agent.run_action(action, payload=payload)
-        artifacts = agent.collect_artifacts()
-        logout_result = agent.logout()
+        logout_result: WebActionResult | None = None
+        request_failed = False
+
+        try:
+            login_result = agent.login()
+            workspace_result = agent.open_workspace(workspace_name=workspace_name)
+            action_result = agent.run_action(action, payload=payload)
+            artifacts = agent.collect_artifacts()
+        except Exception:
+            request_failed = True
+            raise
+        finally:
+            try:
+                logout_result = agent.logout()
+            except Exception:
+                if not request_failed:
+                    raise
+
+        if logout_result is None:
+            raise RuntimeError("logout result missing after execute_action")
 
         return {
             "provider": self.provider.value,

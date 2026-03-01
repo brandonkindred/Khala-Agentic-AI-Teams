@@ -1,3 +1,4 @@
+import pytest
 from agents.investment_team.agents import AgentIdentity, PolicyGuardianAgent, PromotionGateAgent
 from agents.investment_team.models import (
     IPS,
@@ -256,3 +257,41 @@ def test_web_interface_coordinator_accepts_string_browser_config() -> None:
     result = coordinator.execute_action(action="capture_chart", payload={"symbol": "QQQ"})
 
     assert result["results"]["login"]["details"]["browser"] == "firefox"
+
+
+def test_web_interface_coordinator_logs_out_when_action_fails() -> None:
+    class _FailingAgent:
+        def __init__(self) -> None:
+            self.logged_out = False
+
+        def login(self):
+            return type("Result", (), {"provider": "quantconnect", "action": "login", "status": "ok", "details": {}})()
+
+        def open_workspace(self, workspace_name=None):
+            return type(
+                "Result",
+                (),
+                {"provider": "quantconnect", "action": "open_workspace", "status": "ok", "details": {}},
+            )()
+
+        def run_action(self, action, payload=None):
+            raise RuntimeError("run failed")
+
+        def collect_artifacts(self):
+            return []
+
+        def logout(self):
+            self.logged_out = True
+            return type("Result", (), {"provider": "quantconnect", "action": "logout", "status": "ok", "details": {}})()
+
+    coordinator = InvestmentWebInterfaceCoordinator(
+        provider="quantconnect",
+        config=WebAgentConfig(browser=BrowserType.CHROMIUM),
+    )
+    failing_agent = _FailingAgent()
+    coordinator._build_agent = lambda provider, config: failing_agent  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="run failed"):
+        coordinator.execute_action(action="deploy_strategy", payload={"strategy_id": "s1"})
+
+    assert failing_agent.logged_out is True
