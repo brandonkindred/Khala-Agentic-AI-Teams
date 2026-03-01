@@ -56,13 +56,8 @@
                     type="submit"
                     [disabled]="buildForm.invalid || submitting"
                   >
-                    @if (submitting) {
-                      <mat-icon>hourglass_empty</mat-icon>
-                      Building...
-                    } @else {
-                      <mat-icon>play_arrow</mat-icon>
-                      Start Build
-                    }
+                    <mat-icon>{{ submitting ? 'hourglass_empty' : 'play_arrow' }}</mat-icon>
+                    {{ submitting ? 'Building...' : 'Start Build' }}
                   </button>
                 </div>
               </form>

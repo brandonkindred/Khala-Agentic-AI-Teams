@@ -66,13 +66,8 @@
                     type="submit"
                     [disabled]="provisionForm.invalid || submitting"
                   >
-                    @if (submitting) {
-                      <mat-icon>hourglass_empty</mat-icon>
-                      Provisioning...
-                    } @else {
-                      <mat-icon>play_arrow</mat-icon>
-                      Start Provisioning
-                    }
+                    <mat-icon>{{ submitting ? 'hourglass_empty' : 'play_arrow' }}</mat-icon>
+                    {{ submitting ? 'Provisioning...' : 'Start Provisioning' }}
                   </button>
                 </div>
               </form>
@@ -130,7 +125,7 @@
                   <mat-icon>build</mat-icon>
                   <span>Provisioning: {{ currentJobStatus.current_tool }}</span>
                   <span class="tool-progress">
-                    ({{ currentJobStatus.tools_completed ?? 0 }}/{{ currentJobStatus.tools_total ?? 0 }})
+                    ({{ currentJobStatus.tools_completed }}/{{ currentJobStatus.tools_total }})
                   </span>
                 </div>
               }
