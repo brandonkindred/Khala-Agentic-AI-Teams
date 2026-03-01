@@ -864,7 +864,13 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
       return node;
     };
 
-    const fallbackInitiative = getOrCreateInitiative('initiative-uncategorized', 'Uncategorized Initiative', 'pending');
+    let fallbackInitiative: WorkTreeNode | null = null;
+    const getFallbackInitiative = (): WorkTreeNode => {
+      if (!fallbackInitiative) {
+        fallbackInitiative = getOrCreateInitiative('initiative-uncategorized', 'Uncategorized Initiative', 'pending');
+      }
+      return fallbackInitiative;
+    };
     const fallbackEpic: WorkTreeNode = {
       id: 'epic-uncategorized',
       label: 'General Epic',
@@ -900,7 +906,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
       }
 
       if (classification === 'epic') {
-        const parentKey = this.findParentByLevel(state?.dependencies, taskStates, 'initiative') ?? fallbackInitiative.id;
+        const parentKey = this.findParentByLevel(state?.dependencies, taskStates, 'initiative') ?? getFallbackInitiative().id;
         const epics = epicsByParent.get(parentKey) ?? [];
         epics.push(node);
         epicsByParent.set(parentKey, epics);
@@ -923,10 +929,11 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
 
     // Ensure fallbacks are connected only when needed.
     if (tasksByParent.has(fallbackEpic.id) || subtasksByParent.has(fallbackTask.id)) {
-      const fallbackEpics = epicsByParent.get(fallbackInitiative.id) ?? [];
+      const fallbackInitiativeId = getFallbackInitiative().id;
+      const fallbackEpics = epicsByParent.get(fallbackInitiativeId) ?? [];
       if (!fallbackEpics.some((item) => item.id === fallbackEpic.id)) {
         fallbackEpics.push(fallbackEpic);
-        epicsByParent.set(fallbackInitiative.id, fallbackEpics);
+        epicsByParent.set(fallbackInitiativeId, fallbackEpics);
       }
     }
     if (subtasksByParent.has(fallbackTask.id)) {
