@@ -23,6 +23,114 @@ class TaskType(str, Enum):
     DOCUMENTATION = "documentation"
 
 
+class PricingTier(str, Enum):
+    """Pricing model for a tool or service."""
+
+    FREE = "free"
+    FREEMIUM = "freemium"
+    PAID = "paid"
+    ENTERPRISE = "enterprise"
+    USAGE_BASED = "usage_based"
+
+
+class LicenseType(str, Enum):
+    """License type for a tool or library."""
+
+    MIT = "mit"
+    APACHE_2 = "apache_2"
+    GPL = "gpl"
+    BSD = "bsd"
+    PROPRIETARY = "proprietary"
+    CUSTOM_OSS = "custom_oss"
+    UNKNOWN = "unknown"
+
+
+class ToolRecommendation(BaseModel):
+    """
+    Structured recommendation for a tool, library, framework, or service.
+
+    Provides decision-relevant details for founders and technical leaders:
+    pricing, licensing, adoption complexity, and risk factors.
+    """
+
+    name: str = Field(..., description="Name of the tool/service")
+    category: str = Field(
+        ...,
+        description="Category: database, ci_cd, monitoring, framework, hosting, auth, etc.",
+    )
+    description: str = Field(..., description="Brief description of what the tool does")
+    rationale: str = Field(..., description="Why this tool is recommended for this use case")
+
+    # Pricing
+    pricing_tier: PricingTier = Field(..., description="Pricing model")
+    pricing_details: str = Field(
+        ...,
+        description="Specific pricing info, e.g. 'Free tier: 10k events/mo; Pro: $25/mo'",
+    )
+    estimated_monthly_cost: Optional[str] = Field(
+        default=None,
+        description="Estimated monthly cost for the use case, e.g. '$0-50', 'usage-based'",
+    )
+
+    # Licensing
+    license_type: LicenseType = Field(..., description="License type")
+    is_open_source: bool = Field(..., description="Whether the tool is open source")
+    source_url: Optional[str] = Field(
+        default=None,
+        description="URL to source code if open source (GitHub, GitLab, etc.)",
+    )
+
+    # Adoption considerations
+    ease_of_integration: str = Field(
+        default="medium",
+        description="Ease of integration: low, medium, high",
+    )
+    learning_curve: str = Field(
+        default="moderate",
+        description="Learning curve: minimal, moderate, steep",
+    )
+    documentation_quality: str = Field(
+        default="good",
+        description="Documentation quality: poor, adequate, good, excellent",
+    )
+    community_size: str = Field(
+        default="medium",
+        description="Community size: small, medium, large, massive",
+    )
+    maturity: str = Field(
+        default="mature",
+        description="Maturity level: emerging, growing, mature, legacy",
+    )
+
+    # Risk factors
+    vendor_lock_in_risk: str = Field(
+        default="low",
+        description="Vendor lock-in risk: none, low, medium, high",
+    )
+    migration_complexity: str = Field(
+        default="moderate",
+        description="Migration complexity if switching away: trivial, moderate, complex",
+    )
+
+    # Alternatives
+    alternatives: List[str] = Field(
+        default_factory=list,
+        description="1-3 alternative tools/services",
+    )
+    why_not_alternatives: str = Field(
+        default="",
+        description="Brief explanation of why the primary recommendation beats alternatives",
+    )
+
+    # Confidence
+    confidence: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score (0.0-1.0) that this is the right choice",
+    )
+
+
 class TaskStatus(str, Enum):
     """Status of a task."""
 

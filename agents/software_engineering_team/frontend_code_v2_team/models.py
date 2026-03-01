@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from shared.models import ToolRecommendation
+
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -265,6 +267,10 @@ class ToolAgentPhaseOutput(BaseModel):
     """Output from tool agent phase methods (plan, review, problem_solve, deliver)."""
 
     recommendations: List[str] = Field(default_factory=list)
+    tool_recommendations: List[ToolRecommendation] = Field(
+        default_factory=list,
+        description="Structured tool/service recommendations with pricing, licensing, and adoption details.",
+    )
     issues: List[ReviewIssue] = Field(default_factory=list)
     files: Dict[str, str] = Field(default_factory=dict)
     summary: str = Field(default="")

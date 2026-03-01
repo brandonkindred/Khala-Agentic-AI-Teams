@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
-import os
 from pathlib import Path
 
 from studiogrid.runtime.runtime_factory import build_orchestrator
@@ -51,20 +49,6 @@ def cmd_decision_choose(args: argparse.Namespace) -> None:
     _print(orch.get_decision(decision_id=args.decision_id))
 
 
-async def cmd_workflow_signal_decision(args: argparse.Namespace) -> None:
-    from temporalio.client import Client
-
-    from studiogrid.runtime.temporal_workflow import StudioGridWorkflow
-
-    client = await Client.connect(
-        os.getenv("STUDIOGRID_TEMPORAL_SERVER", "localhost:7233"),
-        namespace=os.getenv("STUDIOGRID_TEMPORAL_NAMESPACE", "default"),
-    )
-    handle = client.get_workflow_handle(args.run_id)
-    await handle.signal(StudioGridWorkflow.decision_resolved, args.decision_id)
-    _print({"run_id": args.run_id, "decision_id": args.decision_id, "signal": "decision_resolved"})
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="studiogrid")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -91,21 +75,13 @@ def build_parser() -> argparse.ArgumentParser:
     choose.add_argument("--option", required=True)
     choose.set_defaults(func=cmd_decision_choose)
 
-    workflow = sub.add_parser("workflow")
-    workflow_sub = workflow.add_subparsers(dest="action", required=True)
-    signal = workflow_sub.add_parser("signal-decision")
-    signal.add_argument("--run-id", required=True)
-    signal.add_argument("--decision-id", required=True)
-    signal.set_defaults(func=cmd_workflow_signal_decision)
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    result = args.func(args)
-    if asyncio.iscoroutine(result):
-        asyncio.run(result)
+    args.func(args)
 
 
 if __name__ == "__main__":

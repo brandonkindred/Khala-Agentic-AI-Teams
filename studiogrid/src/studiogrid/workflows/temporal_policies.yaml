@@ -1,8 +1,0 @@
-retry:
-  maximum_attempts: 3
-  initial_interval_seconds: 1
-  non_retryable_errors:
-    - SchemaValidationError
-    - PermissionError
-    - PolicyViolationError
-max_revision_loops_per_phase: 2

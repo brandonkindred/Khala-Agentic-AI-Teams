@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from shared.models import Initiative, Epic, StoryPlan, TaskPlan, PlanningHierarchy
+from shared.models import Initiative, Epic, StoryPlan, TaskPlan, PlanningHierarchy, ToolRecommendation
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +83,10 @@ class ToolAgentPhaseOutput(BaseModel):
 
     summary: str = Field(default="")
     recommendations: List[str] = Field(default_factory=list)
+    tool_recommendations: List[ToolRecommendation] = Field(
+        default_factory=list,
+        description="Structured tool/service recommendations with pricing, licensing, and adoption details.",
+    )
     issues: List[str] = Field(default_factory=list)
     files: Dict[str, str] = Field(default_factory=dict)
     hierarchy: Optional[PlanningHierarchy] = None

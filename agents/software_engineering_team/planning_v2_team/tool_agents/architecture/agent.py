@@ -12,11 +12,59 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput
 from ..json_utils import parse_json_with_recovery, default_decompose_by_sections, complete_with_continuation
+from shared.models import ToolRecommendation, PricingTier, LicenseType
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_tool_recommendations(raw_recommendations: List[Dict[str, Any]]) -> List[ToolRecommendation]:
+    """Parse raw tool recommendation dicts into ToolRecommendation models."""
+    parsed = []
+    for rec in raw_recommendations:
+        if not isinstance(rec, dict):
+            continue
+        try:
+            pricing_tier_str = rec.get("pricing_tier", "paid").lower()
+            try:
+                pricing_tier = PricingTier(pricing_tier_str)
+            except ValueError:
+                pricing_tier = PricingTier.PAID
+
+            license_type_str = rec.get("license_type", "unknown").lower()
+            try:
+                license_type = LicenseType(license_type_str)
+            except ValueError:
+                license_type = LicenseType.UNKNOWN
+
+            tool_rec = ToolRecommendation(
+                name=rec.get("name", "Unknown"),
+                category=rec.get("category", "unknown"),
+                description=rec.get("description", ""),
+                rationale=rec.get("rationale", ""),
+                pricing_tier=pricing_tier,
+                pricing_details=rec.get("pricing_details", ""),
+                estimated_monthly_cost=rec.get("estimated_monthly_cost"),
+                license_type=license_type,
+                is_open_source=rec.get("is_open_source", False),
+                source_url=rec.get("source_url"),
+                ease_of_integration=rec.get("ease_of_integration", "medium"),
+                learning_curve=rec.get("learning_curve", "moderate"),
+                documentation_quality=rec.get("documentation_quality", "good"),
+                community_size=rec.get("community_size", "medium"),
+                maturity=rec.get("maturity", "mature"),
+                vendor_lock_in_risk=rec.get("vendor_lock_in_risk", "low"),
+                migration_complexity=rec.get("migration_complexity", "moderate"),
+                alternatives=rec.get("alternatives", []),
+                why_not_alternatives=rec.get("why_not_alternatives", ""),
+                confidence=float(rec.get("confidence", 0.8)),
+            )
+            parsed.append(tool_rec)
+        except Exception as e:
+            logger.warning("Failed to parse tool recommendation: %s - %s", rec.get("name", "?"), e)
+    return parsed
 
 
 def _merge_architecture_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -54,7 +102,7 @@ def _merge_architecture_results(results: List[Dict[str, Any]]) -> Dict[str, Any]
 
 ARCHITECTURE_SPEC_REVIEW_PROMPT = """You are an Architecture expert. Review this specification and identify:
 1. Architectural patterns needed (monolith, microservices, event-driven, etc.)
-2. Technology stack recommendations
+2. Technology stack recommendations with structured details
 3. Non-functional requirements (performance, security, scalability)
 4. Architectural risks or constraints
 
@@ -67,6 +115,30 @@ Respond with JSON:
 {{
   "patterns": ["recommended architectural patterns"],
   "tech_stack": {{"frontend": "...", "backend": "...", "database": "...", "infrastructure": "..."}},
+  "tool_recommendations": [
+    {{
+      "name": "Technology Name",
+      "category": "framework|database|cache|queue|monitoring|etc",
+      "description": "What it does",
+      "rationale": "Why recommended for this use case",
+      "pricing_tier": "free|freemium|paid|enterprise|usage_based",
+      "pricing_details": "Specific pricing info",
+      "estimated_monthly_cost": "Cost estimate or null",
+      "license_type": "mit|apache_2|gpl|bsd|proprietary|custom_oss|unknown",
+      "is_open_source": true,
+      "source_url": "GitHub URL if open source",
+      "ease_of_integration": "low|medium|high",
+      "learning_curve": "minimal|moderate|steep",
+      "documentation_quality": "poor|adequate|good|excellent",
+      "community_size": "small|medium|large|massive",
+      "maturity": "emerging|growing|mature|legacy",
+      "vendor_lock_in_risk": "none|low|medium|high",
+      "migration_complexity": "trivial|moderate|complex",
+      "alternatives": ["Alt1", "Alt2"],
+      "why_not_alternatives": "Tradeoff explanation",
+      "confidence": 0.85
+    }}
+  ],
   "nfrs": ["non-functional requirements"],
   "risks": ["architectural risks"],
   "summary": "brief summary"
@@ -89,6 +161,30 @@ Respond with JSON:
   "cross_cutting": ["logging", "security", "monitoring"],
   "deployment_model": "how it will be deployed",
   "recommendations": ["architecture recommendations"],
+  "tool_recommendations": [
+    {{
+      "name": "Technology Name",
+      "category": "framework|database|cache|queue|monitoring|etc",
+      "description": "What it does",
+      "rationale": "Why recommended for this use case",
+      "pricing_tier": "free|freemium|paid|enterprise|usage_based",
+      "pricing_details": "Specific pricing info",
+      "estimated_monthly_cost": "Cost estimate or null",
+      "license_type": "mit|apache_2|gpl|bsd|proprietary|custom_oss|unknown",
+      "is_open_source": true,
+      "source_url": "GitHub URL if open source",
+      "ease_of_integration": "low|medium|high",
+      "learning_curve": "minimal|moderate|steep",
+      "documentation_quality": "poor|adequate|good|excellent",
+      "community_size": "small|medium|large|massive",
+      "maturity": "emerging|growing|mature|legacy",
+      "vendor_lock_in_risk": "none|low|medium|high",
+      "migration_complexity": "trivial|moderate|complex",
+      "alternatives": ["Alt1", "Alt2"],
+      "why_not_alternatives": "Tradeoff explanation",
+      "confidence": 0.85
+    }}
+  ],
   "summary": "brief summary"
 }}
 """
@@ -196,10 +292,16 @@ class ArchitectureToolAgent:
         recommendations = data.get("recommendations") or []
         if not isinstance(recommendations, list):
             recommendations = [str(recommendations)]
+
+        raw_tool_recs = data.get("tool_recommendations") or []
+        if not isinstance(raw_tool_recs, list):
+            raw_tool_recs = []
+        tool_recommendations = _parse_tool_recommendations(raw_tool_recs)
         
         return ToolAgentPhaseOutput(
             summary=data.get("summary", "Architecture planning complete."),
             recommendations=recommendations,
+            tool_recommendations=tool_recommendations,
             metadata={
                 "architecture_style": data.get("architecture_style", ""),
                 "layers": data.get("layers", []),
@@ -399,10 +501,16 @@ class ArchitectureToolAgent:
         risks = data.get("risks") or []
         if not isinstance(risks, list):
             risks = [str(risks)] if risks else []
+
+        raw_tool_recs = data.get("tool_recommendations") or []
+        if not isinstance(raw_tool_recs, list):
+            raw_tool_recs = []
+        tool_recommendations = _parse_tool_recommendations(raw_tool_recs)
         
         return ToolAgentPhaseOutput(
             summary=data.get("summary", "Architecture spec review complete."),
             issues=risks,
+            tool_recommendations=tool_recommendations,
             metadata={
                 "patterns": data.get("patterns", []),
                 "tech_stack": data.get("tech_stack", {}),

@@ -1,6 +1,6 @@
 # StudioGrid Team
 
-Strands + Temporal scaffold for a durable design-system multi-agent workflow.
+Strands scaffold for a design-system multi-agent workflow.
 
 ## Quick start
 

@@ -1,2 +1,1 @@
-temporalio>=1.7.0
 pyyaml>=6.0.1
