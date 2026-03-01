@@ -1,4 +1,4 @@
-import { Component, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, RouterModule } from '@angular/router';
 import { FormBuilder, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
@@ -30,6 +30,7 @@ export class IntegrationConfigPageComponent implements OnInit {
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
   private readonly fb = inject(FormBuilder);
+  private readonly destroyRef = inject(DestroyRef);
 
   integration?: IntegrationDefinition;
   form: FormGroup = this.fb.group({});
@@ -37,7 +38,7 @@ export class IntegrationConfigPageComponent implements OnInit {
 
   ngOnInit(): void {
     this.route.paramMap
-      .pipe(takeUntilDestroyed())
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((params) => {
         this.loadIntegration(params.get('integrationId'));
       });
