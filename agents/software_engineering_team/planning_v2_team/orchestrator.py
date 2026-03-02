@@ -33,7 +33,6 @@ from .models import (
     PlanningPhaseResult,
     PlanningRole,
     PlanningV2WorkflowResult,
-    ProblemSolvingPhaseResult,
     ReviewPhaseResult,
     ToolAgentKind,
     ToolAgentPhaseInput,
@@ -42,7 +41,6 @@ from .models import (
 from .phases.planning import run_planning
 from .phases.implementation import run_implementation
 from .phases.review import run_review
-from .phases.problem_solving import run_problem_solving
 from .phases.deliver import run_deliver
 
 logger = logging.getLogger(__name__)
@@ -52,7 +50,6 @@ PHASE_ORDER: List[str] = [
     Phase.PLANNING.value,
     Phase.IMPLEMENTATION.value,
     Phase.REVIEW.value,
-    Phase.PROBLEM_SOLVING.value,
     Phase.DELIVER.value,
 ]
 
@@ -71,7 +68,6 @@ PHASE_ROLES: dict[Phase, List[PlanningRole]] = {
         PlanningRole.ARCHITECTURE_HIGH_LEVEL,
         PlanningRole.TASK_DEPENDENCY_ANALYZER,
     ],
-    Phase.PROBLEM_SOLVING: [PlanningRole.SYSTEM_DESIGN, PlanningRole.ARCHITECTURE_HIGH_LEVEL],
     Phase.DELIVER: [PlanningRole.SYSTEM_DESIGN, PlanningRole.ARCHITECTURE_HIGH_LEVEL],
 }
 
@@ -98,11 +94,6 @@ PHASE_TOOL_AGENTS: Dict[Phase, List[ToolAgentKind]] = {
         ToolAgentKind.ARCHITECTURE,
         ToolAgentKind.USER_STORY,
         ToolAgentKind.TASK_DEPENDENCY,
-    ],
-    Phase.PROBLEM_SOLVING: [
-        ToolAgentKind.SYSTEM_DESIGN,
-        ToolAgentKind.ARCHITECTURE,
-        ToolAgentKind.USER_STORY,
     ],
     Phase.DELIVER: [
         ToolAgentKind.SYSTEM_DESIGN,
@@ -144,7 +135,12 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
 
 class PlanningV2PlanningAgent:
     """
-    Layer 2: Planning Agent that orchestrates the 8 tool agents across 5 phases.
+    Layer 2: Planning Agent that orchestrates the 8 tool agents across 4 phases.
+    
+    Phases: Planning -> Implementation -> Review -> Deliver
+    
+    When Review finds issues, they are passed back to Implementation for fixing.
+    Implementation agents decide how to handle fixes (batch, one-by-one, or all at once).
     
     Called by PlanningV2ProductLead after initial spec intake.
     
@@ -225,19 +221,30 @@ class PlanningV2PlanningAgent:
             return result
         _update_job(current_phase=Phase.PLANNING.value, progress=35)
 
-        # ── Phases 2–3: Implementation → Review (with Problem-solving retry) ─
+        # ── Phases 2–3: Implementation → Review (loop until review passes) ─
+        review_result = None
         for iteration in range(1, MAX_REVIEW_ITERATIONS + 1):
             # Phase 2: Implementation
-            logger.info(
-                "Planning-v2: Next step -> Starting Phase 2: Implementation (iteration %d/%d)",
-                iteration, MAX_REVIEW_ITERATIONS,
-            )
+            issue_count = len(review_result.issues) if review_result and review_result.issues else 0
+            if issue_count > 0:
+                logger.info(
+                    "Planning-v2: Next step -> Starting Phase 2: Implementation (iteration %d/%d, fixing %d review issues)",
+                    iteration, MAX_REVIEW_ITERATIONS, issue_count,
+                )
+                status_text = f"Fixing {issue_count} review issues (iteration {iteration})"
+            else:
+                logger.info(
+                    "Planning-v2: Next step -> Starting Phase 2: Implementation (iteration %d/%d)",
+                    iteration, MAX_REVIEW_ITERATIONS,
+                )
+                status_text = f"Creating implementation plan and task breakdown (iteration {iteration})"
+            
             result.current_phase = Phase.IMPLEMENTATION
             _update_job(
                 current_phase=Phase.IMPLEMENTATION.value,
                 progress=40 + (iteration - 1) * 10,
                 active_roles=_active_roles_for_phase(Phase.IMPLEMENTATION),
-                status_text=f"Creating implementation plan and task breakdown (iteration {iteration})",
+                status_text=status_text,
             )
             try:
                 implementation_result = run_implementation(
@@ -249,6 +256,7 @@ class PlanningV2PlanningAgent:
                     inspiration_content=inspiration_content,
                     tool_agents=self.tool_agents,
                     hierarchy=hierarchy,
+                    review_result=review_result,
                 )
                 result.implementation_result = implementation_result
                 current_files.update({
@@ -288,52 +296,15 @@ class PlanningV2PlanningAgent:
                 logger.info("Planning-v2: Review passed on iteration %d", iteration)
                 break
 
-            # Phase: Problem-solving
+            # Review did not pass - log issues and loop back to Implementation
             issue_count = len(review_result.issues) if review_result.issues else 0
             logger.info(
-                "Planning-v2: Review did not pass (%d issues). Next step -> Starting Problem-solving phase",
+                "Planning-v2: Review did not pass (%d issues). Next step -> Returning to Implementation phase",
                 issue_count,
             )
-            result.current_phase = Phase.PROBLEM_SOLVING
-            _update_job(
-                current_phase=Phase.PROBLEM_SOLVING.value,
-                progress=70,
-                active_roles=_active_roles_for_phase(Phase.PROBLEM_SOLVING),
-                status_text=f"Resolving {issue_count} identified issues in the plan",
-            )
-
-            def _problem_solving_detail_callback(detail: str) -> None:
-                """Update job status with problem-solving progress details."""
-                _update_job(
-                    current_phase=Phase.PROBLEM_SOLVING.value,
-                    status_text=detail,
-                )
-
-            try:
-                problem_solving_result = run_problem_solving(
-                    llm=self.llm,
-                    spec_content=spec_content,
-                    repo_path=repo_path,
-                    spec_review_result=None,
-                    planning_result=planning_result,
-                    implementation_result=implementation_result,
-                    review_result=review_result,
-                    tool_agents=self.tool_agents,
-                    detail_callback=_problem_solving_detail_callback,
-                )
-                result.problem_solving_result = problem_solving_result
-
-                if problem_solving_result.unresolved_issues:
-                    logger.warning(
-                        "Planning-v2: Problem-solving left %d unresolved issues",
-                        len(problem_solving_result.unresolved_issues),
-                    )
-            except Exception as exc:
-                logger.warning("Planning-v2: Problem-solving failed (non-blocking): %s", exc)
-                break
 
         # ── Phase 4: Deliver ─────────────────────────────────────────────
-        logger.info("Planning-v2: Next step -> Starting Phase 4: Deliver")
+        logger.info("Planning-v2: Next step -> Starting Deliver phase")
         result.current_phase = Phase.DELIVER
         _update_job(
             current_phase=Phase.DELIVER.value,

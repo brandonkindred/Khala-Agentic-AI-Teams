@@ -311,9 +311,29 @@ class ArchitectureToolAgent:
         )
 
     def execute(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Implementation phase: generate architecture artifacts."""
+        """Implementation phase: generate architecture artifacts and fix review issues.
+        
+        If review_issues are provided, this agent handles fixes however it sees fit.
+        """
         if not self.llm:
             return ToolAgentPhaseOutput(summary="Architecture execute skipped (no LLM).")
+        
+        fixes_applied: List[str] = []
+        all_files: Dict[str, str] = {}
+        
+        arch_issues = [
+            i for i in inp.review_issues
+            if any(kw in i.lower() for kw in ["architect", "layer", "module", "component", "integration", "deployment"])
+        ]
+        
+        if arch_issues:
+            logger.info("Architecture: handling %d review issues", len(arch_issues))
+            for issue in arch_issues:
+                result = self.fix_single_issue(issue, inp)
+                if result.files:
+                    all_files.update(result.files)
+                    fixes_applied.append(result.summary)
+            logger.info("Architecture: fixed %d/%d issues", len(fixes_applied), len(arch_issues))
         
         arch_style = inp.metadata.get("architecture_style", "")
         layers = inp.metadata.get("layers", [])
@@ -345,13 +365,17 @@ class ArchitectureToolAgent:
         if deployment_model:
             content_parts.append(f"## Deployment Model\n{deployment_model}\n\n")
         
-        files = {}
         if arch_style or layers:
-            files["plan/architecture.md"] = "".join(content_parts)
+            all_files["plan/architecture.md"] = "".join(content_parts)
+        
+        summary = "Architecture artifacts generated."
+        if fixes_applied:
+            summary = f"Architecture artifacts generated. Fixed {len(fixes_applied)} review issues."
         
         return ToolAgentPhaseOutput(
-            summary="Architecture artifacts generated.",
-            files=files,
+            summary=summary,
+            files=all_files,
+            recommendations=fixes_applied if fixes_applied else [],
         )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:

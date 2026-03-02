@@ -204,9 +204,29 @@ class SystemDesignToolAgent:
         )
 
     def execute(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Implementation phase: generate system design artifacts."""
+        """Implementation phase: generate system design artifacts and fix review issues.
+        
+        If review_issues are provided, this agent handles fixes however it sees fit.
+        """
         if not self.llm:
             return ToolAgentPhaseOutput(summary="System Design execute skipped (no LLM).")
+        
+        fixes_applied: List[str] = []
+        all_files: Dict[str, str] = {}
+        
+        design_issues = [
+            i for i in inp.review_issues
+            if any(kw in i.lower() for kw in ["design", "system", "diagram", "flow", "interface", "component"])
+        ]
+        
+        if design_issues:
+            logger.info("SystemDesign: handling %d review issues", len(design_issues))
+            for issue in design_issues:
+                result = self.fix_single_issue(issue, inp)
+                if result.files:
+                    all_files.update(result.files)
+                    fixes_applied.append(result.summary)
+            logger.info("SystemDesign: fixed %d/%d issues", len(fixes_applied), len(design_issues))
         
         component_design = inp.metadata.get("component_design", [])
         data_flow = inp.metadata.get("data_flow", "")
@@ -233,13 +253,17 @@ class SystemDesignToolAgent:
             content_parts.append("## Integration Strategy\n")
             content_parts.append(f"{integration_strategy}\n\n")
         
-        files = {}
         if component_design or data_flow:
-            files["plan/system_design.md"] = "".join(content_parts)
+            all_files["plan/system_design.md"] = "".join(content_parts)
+        
+        summary = "System design artifacts generated."
+        if fixes_applied:
+            summary = f"System design artifacts generated. Fixed {len(fixes_applied)} review issues."
         
         return ToolAgentPhaseOutput(
-            summary="System design artifacts generated.",
-            files=files,
+            summary=summary,
+            files=all_files,
+            recommendations=fixes_applied if fixes_applied else [],
         )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:

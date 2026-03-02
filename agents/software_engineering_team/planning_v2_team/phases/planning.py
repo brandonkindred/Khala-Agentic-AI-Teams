@@ -2,13 +2,16 @@
 Planning phase: high-level plan, milestones, user stories, hierarchy.
 
 Tool agents: System Design, Architecture, User Story, DevOps, UI Design.
+
+Collects clarification questions from tool agents (e.g., DevOps needing deployment target info)
+and returns them in PlanningPhaseResult for the orchestrator to surface to the user.
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from shared.llm import LLMClient
 from shared.models import PlanningHierarchy
@@ -17,6 +20,30 @@ from ..models import PlanningPhaseResult, SpecReviewResult, ToolAgentKind, ToolA
 from ..prompts import PLANNING_PROMPT
 
 logger = logging.getLogger(__name__)
+
+
+def _collect_clarification_questions(
+    agent_name: str,
+    metadata: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Extract clarification questions from tool agent metadata.
+    
+    Args:
+        agent_name: Name of the agent (e.g., "devops", "architecture")
+        metadata: The metadata dict from ToolAgentPhaseOutput
+        
+    Returns:
+        List of question dicts with source and question_text
+    """
+    questions: List[Dict[str, Any]] = []
+    if metadata.get("needs_clarification"):
+        for q_text in metadata.get("clarification_questions", []):
+            if isinstance(q_text, str) and q_text.strip():
+                questions.append({
+                    "source": agent_name,
+                    "question_text": q_text.strip(),
+                })
+    return questions
 
 
 def _parse_planning_response(raw: Any) -> PlanningPhaseResult:
@@ -57,10 +84,14 @@ def run_planning(
     Run Planning phase.
     
     Tool agents participating: System Design, Architecture, User Story, DevOps, UI Design.
+    
+    Collects clarification questions from tool agents and returns them in the result
+    for the orchestrator to surface to the user via the Open Questions UI.
     """
     all_recommendations: list[str] = []
     hierarchy: Optional[PlanningHierarchy] = None
     metadata: Dict[str, Any] = {}
+    clarification_questions: List[Dict[str, Any]] = []
     
     tool_agent_input = ToolAgentPhaseInput(
         spec_content=spec_content,
@@ -117,6 +148,10 @@ def run_planning(
                 all_recommendations.extend(devops_result.recommendations)
                 metadata["devops"] = devops_result.metadata
                 logger.info("Planning: DevOps provided %d recommendations", len(devops_result.recommendations))
+                devops_questions = _collect_clarification_questions("devops", devops_result.metadata)
+                if devops_questions:
+                    clarification_questions.extend(devops_questions)
+                    logger.info("Planning: DevOps raised %d clarification questions", len(devops_questions))
             except Exception as e:
                 logger.warning(
                     "DevOps plan failed: %s. Next step -> Continuing with other planning agents",
@@ -179,10 +214,12 @@ def run_planning(
             others=result.others,
             summary=result.summary,
             hierarchy=hierarchy,
+            clarification_questions=clarification_questions,
         )
     except Exception as e:
         logger.warning("Planning LLM call failed, using tool agent results: %s", e)
         return PlanningPhaseResult(
             summary="Planning completed with tool agents.",
             hierarchy=hierarchy,
+            clarification_questions=clarification_questions,
         )

@@ -316,6 +316,12 @@ class TaskPlan(BaseModel):
         default_factory=dict,
         description="Optional metadata (e.g. framework_target for frontend).",
     )
+    complexity_points: int = Field(
+        default=2,
+        ge=1,
+        le=13,
+        description="Fibonacci complexity estimate (1, 2, 3, 5, 8, 13). Target 2-3 points per task.",
+    )
 
 
 class StoryPlan(BaseModel):

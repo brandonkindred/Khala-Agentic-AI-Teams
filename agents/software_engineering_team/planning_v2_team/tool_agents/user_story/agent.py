@@ -53,20 +53,20 @@ IMPORTANT: Stories and Tasks must be highly detailed with:
 - Team assignment (frontend, backend, devops, qa)
 
 TASK SIZING - CRITICAL:
-Each task MUST be small enough that an experienced engineer would estimate it as a 1 or 2 on the Fibonacci scale (1, 2, 3, 5, 8, 13...) during sprint planning.
+Each task should be estimated as a 2 or 3 on the Fibonacci scale (1, 2, 3, 5, 8, 13...) during sprint planning.
 
-A 1-2 point task typically:
-- Can be completed in less than half a day to one day
-- Has a single, clear objective
-- Touches 1-3 files at most
-- Does NOT combine multiple concerns (e.g., "build API and UI" should be separate tasks)
+A 2-3 point task typically:
+- Can be completed in 1-2 days
+- Has a focused objective with clear boundaries
+- Touches 2-5 files
+- May involve related concerns that logically belong together (e.g., "Create login form with validation" is acceptable)
 - Is independently testable
 
-If a task feels like a 3, 5, or larger, BREAK IT DOWN into smaller tasks. For example:
+If a task feels like a 5 or larger, BREAK IT DOWN into smaller tasks. For example:
 - BAD: "Implement user authentication" (too broad, likely 8+ points)
-- GOOD: Split into: "Create login form UI", "Add form validation", "Create /login API endpoint", "Add JWT token generation", "Store session in localStorage", "Add auth middleware"
+- GOOD: Split into: "Create login form with validation", "Create /login API endpoint with JWT", "Add auth middleware and session storage"
 
-Prefer MORE granular tasks over fewer large ones.
+If a task feels like a 1, consider combining it with a closely related task.
 
 Specification:
 ---
@@ -102,7 +102,8 @@ Respond with JSON:
                   "description": "Detailed task description",
                   "acceptance_criteria": ["task completion criteria"],
                   "assigned_team": "frontend|backend|devops|qa",
-                  "example": "Implementation example if applicable"
+                  "example": "Implementation example if applicable",
+                  "complexity_points": 2
                 }}
               ]
             }}
@@ -118,9 +119,10 @@ Respond with JSON:
 USER_STORY_REVIEW_PROMPT = """You are a Product Planning expert. Review these user stories and tasks for:
 1. Completeness of acceptance criteria
 2. Clear team assignments
-3. Task granularity - each task should be Fibonacci 1-2 points (small, single-objective, completable in under a day)
+3. Task granularity - each task should be Fibonacci 2-3 points (focused objective, completable in 1-2 days)
 4. Dependency clarity
-5. Tasks that are too large (3+ points) should be flagged for splitting
+5. Tasks that are too large (5+ points) should be flagged for splitting
+6. Tasks that are too small (1 point) should be flagged for combining with related tasks
 
 Artifacts:
 ---
@@ -145,7 +147,7 @@ SECTION:
 
 Create user stories and tasks for THIS section only.
 
-TASK SIZING: Each task must be Fibonacci 1-2 points (half-day to one-day effort, single objective, 1-3 files). Break larger work into multiple small tasks.
+TASK SIZING: Each task should be Fibonacci 2-3 points (1-2 day effort, focused objective, 2-5 files). Break 5+ point tasks into smaller tasks; combine 1-point tasks with related work.
 
 Respond with concise JSON:
 {{
@@ -171,7 +173,8 @@ Respond with concise JSON:
                   "id": "TASK-1",
                   "title": "Task title",
                   "description": "Task details",
-                  "assigned_team": "frontend|backend|devops|qa"
+                  "assigned_team": "frontend|backend|devops|qa",
+                  "complexity_points": 2
                 }}
               ]
             }}
@@ -392,21 +395,51 @@ class UserStoryToolAgent:
         )
 
     def execute(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Implementation phase: generate user story artifacts."""
+        """Implementation phase: generate user story artifacts and fix review issues.
+        
+        If review_issues are provided, this agent handles fixes however it sees fit:
+        - May process all issues in one prompt
+        - May batch similar issues together
+        - May handle issues one-by-one
+        """
         hierarchy = inp.hierarchy
+        all_files: Dict[str, str] = {}
+        fixes_applied: List[str] = []
+        
+        story_issues = [
+            i for i in inp.review_issues
+            if any(kw in i.lower() for kw in ["story", "task", "epic", "user", "acceptance", "criteria"])
+        ]
+        
+        if story_issues and self.llm:
+            logger.info("UserStory: handling %d review issues", len(story_issues))
+            for issue in story_issues:
+                result = self.fix_single_issue(issue, inp)
+                if result.files:
+                    all_files.update(result.files)
+                    fixes_applied.append(result.summary)
+                if result.hierarchy:
+                    hierarchy = result.hierarchy
+            logger.info("UserStory: fixed %d/%d issues", len(fixes_applied), len(story_issues))
+        
         if not hierarchy:
-            return ToolAgentPhaseOutput(summary="User Story execute skipped (no hierarchy).")
+            return ToolAgentPhaseOutput(
+                summary="User Story execute skipped (no hierarchy).",
+                recommendations=fixes_applied if fixes_applied else [],
+            )
         
         content = _hierarchy_to_markdown(hierarchy)
+        all_files["plan/user_stories.md"] = content
         
-        files = {
-            "plan/user_stories.md": content,
-        }
+        summary = "User story artifacts generated."
+        if fixes_applied:
+            summary = f"User story artifacts generated. Fixed {len(fixes_applied)} review issues."
         
         return ToolAgentPhaseOutput(
-            summary="User story artifacts generated.",
-            files=files,
+            summary=summary,
+            files=all_files,
             hierarchy=hierarchy,
+            recommendations=fixes_applied if fixes_applied else [],
         )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:

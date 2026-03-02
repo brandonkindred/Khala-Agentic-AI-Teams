@@ -1,10 +1,14 @@
 """
-Problem-solving phase: identify root causes and fix issues one at a time.
+DEPRECATED: Problem-solving phase has been removed from the workflow.
 
-Tool agents: System Design, Architecture, User Story.
+Review issues are now passed directly to the Implementation phase, which handles
+fixes however it sees fit (batch, one-by-one, or all at once).
 
-This phase processes each review issue individually with detailed progress logging,
-matching the approach used by Frontend/Backend V2 teams.
+This module is kept for backward compatibility only. Do not use in new code.
+
+Previous purpose:
+- Identify root causes and fix issues one at a time
+- Tool agents: System Design, Architecture, User Story
 """
 
 from __future__ import annotations

@@ -3,13 +3,16 @@ Implementation phase: create or update planning assets.
 
 Tool agents: All 8 (System Design, Architecture, User Story, DevOps, UI, UX, Task Classification, Task Dependency).
 Note: Task Dependency only participates in Review per the matrix, but we include others in Implementation.
+
+When review_result contains issues, they are passed to tool agents for fixing.
+Agents decide how to handle fixes (batch, one-by-one, or all at once).
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from shared.llm import LLMClient
 from shared.models import PlanningHierarchy
@@ -17,6 +20,7 @@ from shared.models import PlanningHierarchy
 from ..models import (
     ImplementationPhaseResult,
     PlanningPhaseResult,
+    ReviewPhaseResult,
     SpecReviewResult,
     ToolAgentKind,
     ToolAgentPhaseInput,
@@ -35,11 +39,16 @@ def run_implementation(
     inspiration_content: Optional[str] = None,
     tool_agents: Optional[Dict[ToolAgentKind, Any]] = None,
     hierarchy: Optional[PlanningHierarchy] = None,
+    review_result: Optional[ReviewPhaseResult] = None,
 ) -> ImplementationPhaseResult:
     """
     Run Implementation phase with all participating tool agents.
     
     Tool agents: System Design, Architecture, User Story, DevOps, UI Design, UX Design, Task Classification.
+    
+    Args:
+        review_result: If provided and contains issues, they are passed to tool agents for fixing.
+                      Agents decide how to handle fixes (batch, one-by-one, or all at once).
     """
     assets_created: list[str] = []
     assets_updated: list[str] = []
@@ -58,12 +67,22 @@ def run_implementation(
         if planning_result:
             pass
         
+        review_issues: List[str] = []
+        if review_result and review_result.issues:
+            review_issues = review_result.issues
+            logger.info(
+                "Implementation: received %d review issues to address",
+                len(review_issues),
+            )
+        
         tool_agent_input = ToolAgentPhaseInput(
             spec_content=spec_content,
             inspiration_content=inspiration_content or "",
             repo_path=str(repo_path),
             spec_review_result=spec_review_result,
             planning_result=planning_result,
+            review_result=review_result,
+            review_issues=review_issues,
             hierarchy=effective_hierarchy,
             metadata=metadata,
         )
