@@ -11,7 +11,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput
-from ..json_utils import parse_json_with_recovery, default_decompose_by_sections
+from ..json_utils import parse_json_with_recovery, default_decompose_by_sections, complete_with_continuation
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
@@ -103,6 +103,34 @@ Respond with concise JSON for THIS section only:
 }}
 """
 
+UI_DESIGN_FIX_SINGLE_ISSUE_PROMPT = """You are a UI Design expert. Fix this specific issue in the UI design artifacts.
+
+ISSUE TO FIX:
+---
+{issue}
+---
+
+CURRENT UI DESIGN ARTIFACT:
+---
+{current_artifact}
+---
+
+SPECIFICATION CONTEXT:
+---
+{spec_excerpt}
+---
+
+Analyze and fix this issue. If the issue relates to design tokens, components, layouts, breakpoints, or accessibility, provide the complete updated file content.
+
+Respond with JSON:
+{{
+  "root_cause": "why this issue exists",
+  "fix_description": "what you are changing to fix it",
+  "resolved": true or false,
+  "updated_content": "the complete updated file content (or empty string if no change needed)"
+}}
+"""
+
 
 class UIDesignToolAgent:
     """
@@ -153,12 +181,44 @@ class UIDesignToolAgent:
         )
 
     def execute(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Implementation phase: generate UI design artifacts."""
-        design_tokens = inp.metadata.get("design_tokens", {})
-        components = inp.metadata.get("components", [])
-        layouts = inp.metadata.get("layouts", [])
-        breakpoints = inp.metadata.get("breakpoints", {})
-        accessibility = inp.metadata.get("accessibility", [])
+        """Implementation phase: generate or update UI design artifacts.
+        
+        If review_issues are provided, this agent handles fixes first.
+        Only regenerates the document if it doesn't already exist.
+        """
+        all_files: Dict[str, str] = {}
+        fixes_applied: List[str] = []
+        
+        ui_issues = [
+            i for i in inp.review_issues
+            if any(kw in i.lower() for kw in ["ui", "design token", "component", "layout", "breakpoint", "accessibility", "visual", "responsive"])
+        ]
+        
+        if ui_issues and self.llm:
+            logger.info("UIDesign: handling %d review issues", len(ui_issues))
+            for issue in ui_issues:
+                result = self.fix_single_issue(issue, inp)
+                if result.files:
+                    all_files.update(result.files)
+                    fixes_applied.append(result.summary)
+            logger.info("UIDesign: fixed %d/%d issues", len(fixes_applied), len(ui_issues))
+        
+        existing_doc = inp.current_files.get("plan/ui_design.md") if inp.current_files else None
+        if existing_doc or all_files.get("plan/ui_design.md"):
+            summary = "UI Design artifacts updated."
+            if fixes_applied:
+                summary = f"UI Design artifacts updated. Fixed {len(fixes_applied)} review issues."
+            return ToolAgentPhaseOutput(
+                summary=summary,
+                files=all_files,
+                recommendations=fixes_applied if fixes_applied else [],
+            )
+        
+        design_tokens = inp.metadata.get("design_tokens", {}) if inp.metadata else {}
+        components = inp.metadata.get("components", []) if inp.metadata else []
+        layouts = inp.metadata.get("layouts", []) if inp.metadata else []
+        breakpoints = inp.metadata.get("breakpoints", {}) if inp.metadata else {}
+        accessibility = inp.metadata.get("accessibility", []) if inp.metadata else []
         
         content_parts = ["# UI Design Plan\n\n"]
         
@@ -197,14 +257,81 @@ class UIDesignToolAgent:
                 content_parts.append(f"- {item}\n")
             content_parts.append("\n")
         
-        files = {}
         if design_tokens or components:
-            files["plan/ui_design.md"] = "".join(content_parts)
+            all_files["plan/ui_design.md"] = "".join(content_parts)
         
         return ToolAgentPhaseOutput(
             summary="UI Design artifacts generated.",
-            files=files,
+            files=all_files,
         )
+
+    def fix_single_issue(self, issue: str, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
+        """Fix a single UI design issue.
+
+        Args:
+            issue: The issue description to fix.
+            inp: Tool agent phase input with context.
+
+        Returns:
+            ToolAgentPhaseOutput with updated files if fix was applied.
+        """
+        if not self.llm:
+            return ToolAgentPhaseOutput(
+                summary="UI Design fix skipped (no LLM).",
+                resolved=False,
+            )
+
+        current_artifact = ""
+        if inp.current_files:
+            current_artifact = inp.current_files.get("plan/ui_design.md", "")
+            if not current_artifact:
+                for path, content in inp.current_files.items():
+                    if "ui_design" in path.lower():
+                        current_artifact = content
+                        break
+
+        prompt = UI_DESIGN_FIX_SINGLE_ISSUE_PROMPT.format(
+            issue=issue,
+            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            spec_excerpt=(inp.spec_content or "")[:3000],
+        )
+
+        try:
+            raw = complete_with_continuation(
+                llm=self.llm,
+                prompt=prompt,
+                mode="json",
+                agent_name="UIDesign_FixSingleIssue",
+            )
+
+            if not isinstance(raw, dict):
+                return ToolAgentPhaseOutput(
+                    summary="Fix failed: invalid response format",
+                    resolved=False,
+                )
+
+            updated_content = raw.get("updated_content", "")
+            fix_desc = raw.get("fix_description", "")
+            resolved = raw.get("resolved", False)
+
+            files: Dict[str, str] = {}
+            if updated_content and isinstance(updated_content, str) and updated_content.strip():
+                files["plan/ui_design.md"] = updated_content
+                logger.info("UIDesign: fix applied — %s", fix_desc[:60])
+
+            return ToolAgentPhaseOutput(
+                summary=fix_desc or f"UI design issue addressed: {issue[:50]}",
+                files=files,
+                resolved=resolved or bool(files),
+                metadata={"root_cause": raw.get("root_cause", "")},
+            )
+
+        except Exception as e:
+            logger.warning("UIDesign fix_single_issue failed: %s", e)
+            return ToolAgentPhaseOutput(
+                summary=f"Fix failed: {str(e)[:50]}",
+                resolved=False,
+            )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Review phase: UI Design does not participate."""

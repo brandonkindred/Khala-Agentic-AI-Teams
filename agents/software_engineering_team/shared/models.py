@@ -7,7 +7,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class TaskType(str, Enum):
@@ -129,6 +129,21 @@ class ToolRecommendation(BaseModel):
         le=1.0,
         description="Confidence score (0.0-1.0) that this is the right choice",
     )
+
+    @field_validator("estimated_monthly_cost", mode="before")
+    @classmethod
+    def coerce_cost_to_string(cls, v):
+        """Coerce numeric values to strings for estimated_monthly_cost.
+        
+        LLMs sometimes return float/int values instead of strings.
+        """
+        if v is None:
+            return v
+        if isinstance(v, (int, float)):
+            if v == 0:
+                return "$0"
+            return f"${v:.2f}" if isinstance(v, float) else f"${v}"
+        return v
 
 
 class TaskStatus(str, Enum):

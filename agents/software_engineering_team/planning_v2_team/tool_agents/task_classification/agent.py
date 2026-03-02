@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from shared.models import PlanningHierarchy
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput
-from ..json_utils import parse_json_with_recovery
+from ..json_utils import parse_json_with_recovery, complete_with_continuation
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
@@ -114,6 +114,34 @@ Respond with concise JSON:
 }}
 """
 
+TASK_CLASSIFICATION_FIX_SINGLE_ISSUE_PROMPT = """You are a Task Classification expert. Fix this specific issue in the task classification artifacts.
+
+ISSUE TO FIX:
+---
+{issue}
+---
+
+CURRENT TASK CLASSIFICATION ARTIFACT:
+---
+{current_artifact}
+---
+
+SPECIFICATION CONTEXT:
+---
+{spec_excerpt}
+---
+
+Analyze and fix this issue. If the issue relates to task team assignments or classification, provide the complete updated file content.
+
+Respond with JSON:
+{{
+  "root_cause": "why this issue exists",
+  "fix_description": "what you are changing to fix it",
+  "resolved": true or false,
+  "updated_content": "the complete updated file content (or empty string if no change needed)"
+}}
+"""
+
 
 def _extract_tasks_from_hierarchy(hierarchy: Optional[PlanningHierarchy]) -> List[Dict[str, str]]:
     """Extract all tasks from hierarchy for classification."""
@@ -149,7 +177,39 @@ class TaskClassificationToolAgent:
         return ToolAgentPhaseOutput(summary="Task Classification planning not applicable (per matrix).")
 
     def execute(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        """Implementation phase: classify tasks into teams."""
+        """Implementation phase: classify tasks into teams or update existing classifications.
+        
+        If review_issues are provided, this agent handles fixes first.
+        Only regenerates the document if it doesn't already exist.
+        """
+        all_files: Dict[str, str] = {}
+        fixes_applied: List[str] = []
+        
+        classification_issues = [
+            i for i in inp.review_issues
+            if any(kw in i.lower() for kw in ["classification", "team assignment", "task team", "frontend", "backend", "devops", "qa"])
+        ]
+        
+        if classification_issues and self.llm:
+            logger.info("TaskClassification: handling %d review issues", len(classification_issues))
+            for issue in classification_issues:
+                result = self.fix_single_issue(issue, inp)
+                if result.files:
+                    all_files.update(result.files)
+                    fixes_applied.append(result.summary)
+            logger.info("TaskClassification: fixed %d/%d issues", len(fixes_applied), len(classification_issues))
+        
+        existing_doc = inp.current_files.get("plan/task_classification.md") if inp.current_files else None
+        if existing_doc or all_files.get("plan/task_classification.md"):
+            summary = "Task Classification artifacts updated."
+            if fixes_applied:
+                summary = f"Task Classification artifacts updated. Fixed {len(fixes_applied)} review issues."
+            return ToolAgentPhaseOutput(
+                summary=summary,
+                files=all_files,
+                recommendations=fixes_applied if fixes_applied else [],
+            )
+        
         if not self.llm:
             return ToolAgentPhaseOutput(
                 summary="Task Classification execute skipped (no LLM).",
@@ -200,18 +260,85 @@ class TaskClassificationToolAgent:
                     content_parts.append(f"- **{task_id}** → {team}: {reason}\n")
             content_parts.append("\n")
         
-        files = {}
         if classifications:
-            files["plan/task_classification.md"] = "".join(content_parts)
+            all_files["plan/task_classification.md"] = "".join(content_parts)
         
         return ToolAgentPhaseOutput(
             summary=data.get("summary", f"Classified {len(classifications)} tasks."),
-            files=files,
+            files=all_files,
             metadata={
                 "classifications": classifications,
                 "team_summary": team_summary,
             },
         )
+
+    def fix_single_issue(self, issue: str, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
+        """Fix a single task classification issue.
+
+        Args:
+            issue: The issue description to fix.
+            inp: Tool agent phase input with context.
+
+        Returns:
+            ToolAgentPhaseOutput with updated files if fix was applied.
+        """
+        if not self.llm:
+            return ToolAgentPhaseOutput(
+                summary="Task Classification fix skipped (no LLM).",
+                resolved=False,
+            )
+
+        current_artifact = ""
+        if inp.current_files:
+            current_artifact = inp.current_files.get("plan/task_classification.md", "")
+            if not current_artifact:
+                for path, content in inp.current_files.items():
+                    if "task_classification" in path.lower() or "classification" in path.lower():
+                        current_artifact = content
+                        break
+
+        prompt = TASK_CLASSIFICATION_FIX_SINGLE_ISSUE_PROMPT.format(
+            issue=issue,
+            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            spec_excerpt=(inp.spec_content or "")[:3000],
+        )
+
+        try:
+            raw = complete_with_continuation(
+                llm=self.llm,
+                prompt=prompt,
+                mode="json",
+                agent_name="TaskClassification_FixSingleIssue",
+            )
+
+            if not isinstance(raw, dict):
+                return ToolAgentPhaseOutput(
+                    summary="Fix failed: invalid response format",
+                    resolved=False,
+                )
+
+            updated_content = raw.get("updated_content", "")
+            fix_desc = raw.get("fix_description", "")
+            resolved = raw.get("resolved", False)
+
+            files: Dict[str, str] = {}
+            if updated_content and isinstance(updated_content, str) and updated_content.strip():
+                files["plan/task_classification.md"] = updated_content
+                logger.info("TaskClassification: fix applied — %s", fix_desc[:60])
+
+            return ToolAgentPhaseOutput(
+                summary=fix_desc or f"Task classification issue addressed: {issue[:50]}",
+                files=files,
+                resolved=resolved or bool(files),
+                metadata={"root_cause": raw.get("root_cause", "")},
+            )
+
+        except Exception as e:
+            logger.warning("TaskClassification fix_single_issue failed: %s", e)
+            return ToolAgentPhaseOutput(
+                summary=f"Fix failed: {str(e)[:50]}",
+                resolved=False,
+            )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Review phase: Task Classification does not participate."""

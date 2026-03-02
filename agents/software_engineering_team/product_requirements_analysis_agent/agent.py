@@ -32,6 +32,11 @@ from .prompts import (
     SPEC_REVIEW_CHUNK_PROMPT,
     SPEC_REVIEW_PROMPT,
     SPEC_UPDATE_PROMPT,
+    PRD_PROMPT,
+)
+from planning_v2_team.tool_agents.json_utils import (
+    parse_json_with_recovery,
+    default_decompose_by_sections,
 )
 
 if TYPE_CHECKING:
@@ -79,6 +84,251 @@ def _dedupe_items(items: List[str], similarity_threshold: float = 0.85) -> List[
         if not is_duplicate:
             unique.append(item)
     return unique
+
+
+# ---------------------------------------------------------------------------
+# Constraint Domain Definitions and Analysis
+# ---------------------------------------------------------------------------
+
+CONSTRAINT_DOMAINS_CONFIG = {
+    "infrastructure": {
+        "name": "Deployment/Hosting",
+        "max_layer": 4,
+        "indicators": {
+            1: [  # Platform category
+                ("heroku", 2), ("render", 2), ("railway", 2),  # PaaS → skip to L2
+                ("aws", 2), ("gcp", 2), ("azure", 2), ("google cloud", 2),  # Cloud → L2
+                ("self-hosted", 2), ("on-premises", 2), ("docker", 2), ("kubernetes", 2),
+                ("vercel", 2), ("cloudflare", 2), ("netlify", 2),  # Edge → L2
+                ("paas", 1), ("platform as a service", 1),
+                ("cloud infrastructure", 1), ("cloud-based", 1),
+                ("edge", 1), ("serverless", 1),
+            ],
+            2: [  # Specific provider
+                ("heroku", 3), ("render", 3), ("railway", 3), ("fly.io", 3),
+                ("aws", 3), ("amazon web services", 3),
+                ("gcp", 3), ("google cloud platform", 3),
+                ("azure", 3), ("microsoft azure", 3),
+                ("digitalocean", 3), ("linode", 3),
+                ("vercel", 3), ("cloudflare workers", 3), ("netlify", 3),
+            ],
+            3: [  # Compute model
+                ("lambda", 4), ("cloud functions", 4), ("serverless", 4),
+                ("ecs", 4), ("fargate", 4), ("cloud run", 4), ("container", 4),
+                ("ec2", 4), ("compute engine", 4), ("vm", 4), ("virtual machine", 4),
+                ("app runner", 4), ("elastic beanstalk", 4),
+            ],
+            4: [  # Specific services
+                ("lambda", 4), ("api gateway", 4), ("step functions", 4),
+                ("ecs fargate", 4), ("ecs ec2", 4),
+                ("cloud run", 4), ("app engine", 4),
+                ("app runner", 4),
+            ],
+        },
+    },
+    "frontend": {
+        "name": "Frontend Technology",
+        "max_layer": 4,
+        "indicators": {
+            1: [  # Rendering strategy
+                ("spa", 1), ("single page", 1), ("client-side", 1),
+                ("ssr", 1), ("server-side render", 1), ("server render", 1),
+                ("ssg", 1), ("static site", 1), ("static generation", 1),
+                ("hybrid", 1),
+                ("no frontend", 4), ("api only", 4), ("headless", 4),
+            ],
+            2: [  # Framework
+                ("react", 2), ("angular", 2), ("vue", 2), ("svelte", 2),
+                ("vanilla", 2), ("no framework", 2),
+            ],
+            3: [  # Meta-framework
+                ("next.js", 3), ("nextjs", 3), ("remix", 3),
+                ("nuxt", 3), ("sveltekit", 3),
+                ("create react app", 3), ("cra", 3), ("vite", 3),
+                ("angular cli", 3),
+            ],
+            4: [  # Styling
+                ("tailwind", 4), ("css modules", 4), ("styled-components", 4),
+                ("scss", 4), ("sass", 4), ("emotion", 4), ("css-in-js", 4),
+                ("bootstrap", 4), ("material ui", 4), ("mui", 4), ("chakra", 4),
+            ],
+        },
+    },
+    "backend": {
+        "name": "Backend Technology",
+        "max_layer": 4,
+        "indicators": {
+            1: [  # Architecture
+                ("monolith", 1), ("microservice", 1), ("serverless function", 1),
+                ("bff", 1), ("backend for frontend", 1),
+            ],
+            2: [  # Language
+                ("python", 2), ("node", 2), ("nodejs", 2), ("typescript", 2),
+                ("java", 2), ("kotlin", 2), ("go", 2), ("golang", 2),
+                ("rust", 2), ("c#", 2), (".net", 2), ("ruby", 2),
+            ],
+            3: [  # Framework
+                ("fastapi", 3), ("django", 3), ("flask", 3),
+                ("express", 3), ("nestjs", 3), ("fastify", 3), ("koa", 3),
+                ("spring", 3), ("spring boot", 3), ("quarkus", 3),
+                ("gin", 3), ("echo", 3), ("fiber", 3),
+                ("actix", 3), ("axum", 3), ("rocket", 3),
+                ("rails", 3), ("ruby on rails", 3),
+                ("asp.net", 3),
+            ],
+            4: [  # API style
+                ("rest", 4), ("restful", 4), ("graphql", 4), ("grpc", 4),
+                ("trpc", 4), ("websocket", 4),
+            ],
+        },
+    },
+    "database": {
+        "name": "Database",
+        "max_layer": 4,
+        "indicators": {
+            1: [  # Type
+                ("relational", 1), ("sql", 1),
+                ("document", 1), ("nosql", 1),
+                ("key-value", 1), ("graph", 1), ("time-series", 1),
+            ],
+            2: [  # Hosting model
+                ("rds", 2), ("cloud sql", 2), ("planetscale", 2), ("managed", 2),
+                ("self-managed", 2), ("self-hosted", 2),
+                ("serverless", 2), ("aurora serverless", 2), ("neon", 2),
+            ],
+            3: [  # Specific database
+                ("postgresql", 3), ("postgres", 3), ("mysql", 3), ("mariadb", 3),
+                ("mongodb", 3), ("dynamodb", 3), ("firestore", 3),
+                ("redis", 3), ("cassandra", 3), ("neo4j", 3),
+                ("sqlite", 3), ("supabase", 3),
+            ],
+            4: [  # Additional stores
+                ("redis", 4), ("memcached", 4), ("caching", 4),
+                ("elasticsearch", 4), ("opensearch", 4), ("algolia", 4),
+                ("rabbitmq", 4), ("sqs", 4), ("kafka", 4), ("message queue", 4),
+            ],
+        },
+    },
+    "auth": {
+        "name": "Authentication",
+        "max_layer": 4,
+        "indicators": {
+            1: [  # Strategy
+                ("third-party auth", 1), ("auth provider", 1), ("external auth", 1),
+                ("custom auth", 1), ("self-built auth", 1),
+                ("hybrid auth", 1),
+            ],
+            2: [  # Provider
+                ("auth0", 2), ("clerk", 2), ("firebase auth", 2),
+                ("cognito", 2), ("aws cognito", 2),
+                ("supabase auth", 2), ("keycloak", 2),
+                ("okta", 2), ("fusionauth", 2),
+            ],
+            3: [  # Methods
+                ("oauth", 3), ("oidc", 3), ("openid", 3),
+                ("email/password", 3), ("email password", 3),
+                ("passwordless", 3), ("magic link", 3), ("otp", 3),
+                ("sso", 3), ("saml", 3), ("ldap", 3),
+                ("api key", 3),
+            ],
+            4: [  # Security features
+                ("mfa", 4), ("2fa", 4), ("two-factor", 4), ("multi-factor", 4),
+                ("session", 4), ("jwt", 4), ("token refresh", 4),
+                ("rbac", 4), ("role-based", 4), ("permissions", 4),
+            ],
+        },
+    },
+}
+
+
+def _word_boundary_match(indicator: str, text: str) -> bool:
+    """Check if indicator appears as a whole word/phrase in text.
+    
+    Uses regex word boundaries to avoid false positives like 'gin' in 'login'.
+    """
+    pattern = r'\b' + re.escape(indicator) + r'\b'
+    return bool(re.search(pattern, text))
+
+
+def analyze_constraint_status(
+    spec_content: str,
+    answered_questions: List[AnsweredQuestion],
+) -> Dict[str, int]:
+    """Analyze which constraint domains are resolved and to what layer.
+    
+    Scans the spec content and answered questions to determine the current
+    resolution level for each constraint domain.
+    
+    Args:
+        spec_content: The current specification content.
+        answered_questions: List of questions that have been answered.
+        
+    Returns:
+        Dict mapping domain name to resolved layer (0 = unresolved, 1-4 = layer resolved).
+    """
+    status: Dict[str, int] = {domain: 0 for domain in CONSTRAINT_DOMAINS_CONFIG}
+    
+    spec_lower = spec_content.lower()
+    
+    # Also include answered questions in the analysis
+    answers_text = ""
+    for aq in answered_questions:
+        answers_text += f" {aq.question_text} {aq.selected_answer} "
+    answers_lower = answers_text.lower()
+    
+    combined_text = spec_lower + " " + answers_lower
+    
+    for domain, config in CONSTRAINT_DOMAINS_CONFIG.items():
+        max_resolved = 0
+        indicators = config.get("indicators", {})
+        
+        # Check each layer's indicators using word boundary matching
+        for layer in range(1, config["max_layer"] + 1):
+            layer_indicators = indicators.get(layer, [])
+            for indicator, resolves_to in layer_indicators:
+                if _word_boundary_match(indicator, combined_text):
+                    max_resolved = max(max_resolved, resolves_to)
+        
+        status[domain] = min(max_resolved, config["max_layer"])
+    
+    return status
+
+
+def generate_constraint_hints(constraint_status: Dict[str, int]) -> str:
+    """Generate hints for the LLM about which constraint layers need questions.
+    
+    Args:
+        constraint_status: Dict mapping domain to resolved layer.
+        
+    Returns:
+        Formatted string with hints about which domains need attention.
+    """
+    hints = []
+    
+    for domain, resolved_layer in constraint_status.items():
+        config = CONSTRAINT_DOMAINS_CONFIG.get(domain, {})
+        max_layer = config.get("max_layer", 4)
+        domain_name = config.get("name", domain)
+        
+        if resolved_layer >= max_layer:
+            hints.append(f"- {domain_name}: FULLY RESOLVED (Layer {max_layer}/{max_layer}) - No questions needed")
+        elif resolved_layer == 0:
+            hints.append(f"- {domain_name}: UNRESOLVED - Ask Layer 1 question (start from the beginning)")
+        else:
+            next_layer = resolved_layer + 1
+            hints.append(f"- {domain_name}: Resolved to Layer {resolved_layer}/{max_layer} - Ask Layer {next_layer} question")
+    
+    if not hints:
+        return ""
+    
+    return """## CONSTRAINT STATUS (from previous answers)
+
+Based on analysis of the specification and previous answers, here is the current constraint resolution status:
+
+""" + "\n".join(hints) + """
+
+Focus your questions on domains that are NOT fully resolved. Ask ONLY the next layer question for each domain.
+"""
 
 
 class ProductRequirementsAnalysisAgent:
@@ -155,7 +405,10 @@ class ProductRequirementsAnalysisAgent:
             try:
                 _update_job(status_text="Performing gap analysis on the specification")
                 spec_review_result, current_spec = self._run_spec_review(
-                    current_spec, repo_path, iteration
+                    current_spec, 
+                    repo_path, 
+                    iteration,
+                    answered_questions=all_answered_questions,
                 )
                 result.spec_review_result = spec_review_result
                 if spec_review_result.open_questions:
@@ -245,30 +498,45 @@ class ProductRequirementsAnalysisAgent:
             _update_job(status_text="Running final validation and cleanup on specification")
             cleanup_result = self._run_spec_cleanup(current_spec, repo_path)
             result.spec_cleanup_result = cleanup_result
-            result.final_spec_content = cleanup_result.cleaned_spec
+            # Generate a Product Requirements Document (PRD) from the cleaned spec
+            prd_content = self._generate_prd_document(
+                cleaned_spec=cleanup_result.cleaned_spec,
+                answered_questions=all_answered_questions,
+            )
+            result.final_spec_content = prd_content
         except Exception as exc:
             result.failure_reason = f"Spec cleanup failed: {exc}"
             logger.error("Product Requirements Analysis: %s", result.failure_reason)
             return result
 
-        # Save validated spec
+        # Save validated spec (PRD) and also keep the raw cleaned spec accessible
         validated_spec_path = repo_path / "plan" / "validated_spec.md"
         validated_spec_path.parent.mkdir(parents=True, exist_ok=True)
-        validated_spec_path.write_text(cleanup_result.cleaned_spec, encoding="utf-8")
+        validated_spec_path.write_text(result.final_spec_content, encoding="utf-8")
         result.validated_spec_path = str(validated_spec_path)
+
+        # Also write an explicit PRD file for clarity
+        try:
+            prd_path = validated_spec_path.parent / "product_requirements_document.md"
+            prd_path.write_text(result.final_spec_content, encoding="utf-8")
+            logger.info("Product Requirements Analysis: PRD saved to %s", prd_path.name)
+        except Exception as exc:
+            logger.warning(
+                "Product Requirements Analysis: Failed to write PRD alias file: %s", exc
+            )
 
         result.success = True
         result.summary = (
             f"Analysis complete: {result.iterations} iteration(s), "
             f"{len(all_answered_questions)} questions answered. "
-            f"Validated spec saved to {validated_spec_path.name}"
+            f"PRD saved to {validated_spec_path.name}"
         )
 
         _update_job(
             current_phase=AnalysisPhase.SPEC_CLEANUP.value,
             progress=100,
             message=result.summary,
-            status_text="Product analysis complete - specification validated",
+            status_text="Product analysis complete - PRD generated and validated",
         )
 
         elapsed = time.monotonic() - start_time
@@ -277,383 +545,6 @@ class ProductRequirementsAnalysisAgent:
         )
 
         return result
-
-    def _parse_json_with_recovery(
-        self,
-        prompt: str,
-        phase_name: str = "LLM",
-        decompose_fn: Optional[Callable[[str], List[str]]] = None,
-        merge_fn: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]] = None,
-        original_content: Optional[str] = None,
-        chunk_prompt_template: Optional[str] = None,
-        _depth: int = 0,
-        _continuation_attempted: bool = False,
-        _partial_responses: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
-        """Parse LLM JSON response with 3-step recovery flow.
-
-        Recovery flow:
-        1. On truncation: Attempt continuation via multi-turn conversation (5 cycles max)
-        2. If continuation fails: Decompose task into smaller chunks (20 levels max)
-        3. If decomposition fails: Write post-mortem and raise error
-
-        Args:
-            prompt: The prompt to send to the LLM
-            phase_name: Name for logging purposes
-            decompose_fn: Optional function to split content into chunks
-            merge_fn: Optional function to merge results from chunks
-            original_content: The original content being processed (for decomposition)
-            chunk_prompt_template: Template for chunk prompts (must have {chunk_content})
-            _depth: Internal recursion depth tracker
-            _continuation_attempted: Whether continuation was already tried (internal)
-            _partial_responses: Accumulated partial responses for post-mortem (internal)
-
-        Returns:
-            Parsed JSON dict.
-
-        Raises:
-            RuntimeError: If all recovery strategies fail.
-        """
-        from shared.llm import LLMTruncatedError, LLMJsonParseError
-        from shared.continuation import ResponseContinuator, MAX_CONTINUATION_CYCLES
-        from shared.post_mortem import write_post_mortem
-
-        if _partial_responses is None:
-            _partial_responses = []
-
-        try:
-            return self.llm.complete_json(prompt)
-        except LLMTruncatedError as e:
-            error_type = "LLMTruncatedError"
-            _partial_responses.append(e.partial_content)
-
-            if not _continuation_attempted:
-                logger.info(
-                    "PRA %s: Response truncated (%d chars). Step 1 -> Attempting continuation",
-                    phase_name,
-                    len(e.partial_content),
-                )
-
-                continued_content = self._attempt_continuation_for_json(
-                    prompt=prompt,
-                    partial_content=e.partial_content,
-                    phase_name=phase_name,
-                )
-
-                if continued_content:
-                    _partial_responses.append(continued_content)
-                    try:
-                        return self.llm._extract_json(continued_content)
-                    except LLMJsonParseError:
-                        logger.warning(
-                            "PRA %s: Continuation produced content but JSON parse failed. "
-                            "Step 2 -> Decomposing task",
-                            phase_name,
-                        )
-
-                logger.warning(
-                    "PRA %s: Continuation exhausted. Step 2 -> Decomposing task (depth %d/%d)",
-                    phase_name,
-                    _depth + 1,
-                    MAX_DECOMPOSITION_DEPTH,
-                )
-            else:
-                logger.warning(
-                    "PRA %s: %s (%d chars). Decomposing task (depth %d/%d)",
-                    phase_name,
-                    error_type,
-                    len(e.partial_content),
-                    _depth + 1,
-                    MAX_DECOMPOSITION_DEPTH,
-                )
-
-            result = self._decompose_and_process(
-                prompt=prompt,
-                phase_name=phase_name,
-                decompose_fn=decompose_fn,
-                merge_fn=merge_fn,
-                original_content=original_content,
-                chunk_prompt_template=chunk_prompt_template,
-                _depth=_depth,
-                _continuation_attempted=True,
-                _partial_responses=_partial_responses,
-            )
-            if result:
-                return result
-
-            write_post_mortem(
-                agent_name=f"PRA_{phase_name}",
-                task_description=f"Product Requirements Analysis - {phase_name}",
-                original_prompt=prompt,
-                partial_responses=_partial_responses,
-                continuation_attempts=MAX_CONTINUATION_CYCLES if not _continuation_attempted else 0,
-                decomposition_depth=_depth,
-                error=e,
-            )
-
-            raise RuntimeError(
-                f"PRA {phase_name}: All recovery strategies exhausted. "
-                f"Continuation cycles: {MAX_CONTINUATION_CYCLES}, Decomposition depth: {_depth}/{MAX_DECOMPOSITION_DEPTH}. "
-                f"See post_mortems/POST_MORTEMS.md for details."
-            ) from e
-
-        except LLMJsonParseError as e:
-            error_type = "LLMJsonParseError"
-            _partial_responses.append(getattr(e, "response_preview", ""))
-            logger.warning(
-                "PRA %s: %s detected. Step 2 -> Decomposing task (depth %d/%d)",
-                phase_name,
-                error_type,
-                _depth + 1,
-                MAX_DECOMPOSITION_DEPTH,
-            )
-
-            result = self._decompose_and_process(
-                prompt=prompt,
-                phase_name=phase_name,
-                decompose_fn=decompose_fn,
-                merge_fn=merge_fn,
-                original_content=original_content,
-                chunk_prompt_template=chunk_prompt_template,
-                _depth=_depth,
-                _continuation_attempted=True,
-                _partial_responses=_partial_responses,
-            )
-            if result:
-                return result
-
-            write_post_mortem(
-                agent_name=f"PRA_{phase_name}",
-                task_description=f"Product Requirements Analysis - {phase_name}",
-                original_prompt=prompt,
-                partial_responses=_partial_responses,
-                continuation_attempts=0,
-                decomposition_depth=_depth,
-                error=e,
-            )
-
-            raise RuntimeError(
-                f"PRA {phase_name}: Decomposition exhausted at depth {_depth}/{MAX_DECOMPOSITION_DEPTH}. "
-                f"See post_mortems/POST_MORTEMS.md for details."
-            ) from e
-
-    def _attempt_continuation_for_json(
-        self,
-        prompt: str,
-        partial_content: str,
-        phase_name: str,
-        max_cycles: int = 5,
-    ) -> Optional[str]:
-        """Attempt to continue a truncated JSON response.
-
-        Args:
-            prompt: The original prompt.
-            partial_content: The truncated response content.
-            phase_name: Phase name for logging and log file naming.
-            max_cycles: Maximum continuation cycles.
-
-        Returns:
-            Complete content if successful, None if continuation fails.
-        """
-        from shared.continuation import ResponseContinuator, ContinuationResult
-
-        system_message = (
-            "You are a strict JSON generator. Respond with a single valid JSON object only, "
-            "no explanatory text, no Markdown, no code fences."
-        )
-
-        try:
-            continuator = ResponseContinuator(
-                base_url=self.llm.base_url,
-                model=self.llm.model,
-                timeout=self.llm.timeout,
-                max_cycles=max_cycles,
-            )
-
-            result: ContinuationResult = continuator.attempt_continuation(
-                original_prompt=prompt,
-                partial_content=partial_content,
-                system_prompt=system_message,
-                json_mode=True,
-                task_id=f"PRA_{phase_name}",
-            )
-
-            if result.success:
-                logger.info(
-                    "PRA %s: Continuation succeeded after %d cycles (%d chars total)",
-                    phase_name,
-                    result.cycles_used,
-                    len(result.content),
-                )
-                return result.content
-
-            logger.warning(
-                "PRA %s: Continuation exhausted after %d cycles (%d chars accumulated)",
-                phase_name,
-                result.cycles_used,
-                len(result.content),
-            )
-            return None
-
-        except Exception as e:
-            logger.warning(
-                "PRA %s: Continuation failed with error: %s",
-                phase_name,
-                str(e)[:100],
-            )
-            return None
-
-    def _decompose_and_process(
-        self,
-        prompt: str,
-        phase_name: str,
-        decompose_fn: Optional[Callable[[str], List[str]]],
-        merge_fn: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]],
-        original_content: Optional[str],
-        chunk_prompt_template: Optional[str],
-        _depth: int,
-        _continuation_attempted: bool = False,
-        _partial_responses: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
-        """Decompose content into chunks and process each recursively.
-
-        Raises:
-            RuntimeError: If max decomposition depth is reached.
-        """
-        if decompose_fn is None or merge_fn is None:
-            logger.warning(
-                "PRA %s: Decomposition not available (no decompose/merge functions)",
-                phase_name,
-            )
-            return {}
-
-        if not original_content:
-            logger.warning(
-                "PRA %s: Decomposition not possible (no content to decompose)",
-                phase_name,
-            )
-            return {}
-
-        if _depth >= MAX_DECOMPOSITION_DEPTH:
-            raise RuntimeError(
-                f"PRA {phase_name}: Maximum decomposition depth ({MAX_DECOMPOSITION_DEPTH}) "
-                "reached without successful response"
-            )
-
-        chunks = decompose_fn(original_content)
-        if len(chunks) <= 1:
-            logger.warning(
-                "PRA %s: Cannot decompose further (only %d chunk)",
-                phase_name,
-                len(chunks),
-            )
-            return {}
-
-        logger.info(
-            "PRA %s: Decomposing into %d chunks (depth %d/%d)",
-            phase_name,
-            len(chunks),
-            _depth + 1,
-            MAX_DECOMPOSITION_DEPTH,
-        )
-
-        results: List[Dict[str, Any]] = []
-        for i, chunk in enumerate(chunks):
-            logger.debug(
-                "PRA %s: Processing chunk %d/%d (%d chars)",
-                phase_name,
-                i + 1,
-                len(chunks),
-                len(chunk),
-            )
-
-            if chunk_prompt_template:
-                chunk_prompt = chunk_prompt_template.format(chunk_content=chunk)
-            else:
-                chunk_prompt = self._create_generic_chunk_prompt(prompt, chunk)
-
-            try:
-                chunk_result = self._parse_json_with_recovery(
-                    prompt=chunk_prompt,
-                    phase_name=f"{phase_name}_chunk{i + 1}",
-                    decompose_fn=decompose_fn,
-                    merge_fn=merge_fn,
-                    original_content=chunk,
-                    chunk_prompt_template=chunk_prompt_template,
-                    _depth=_depth + 1,
-                    _continuation_attempted=_continuation_attempted,
-                    _partial_responses=_partial_responses,
-                )
-                if chunk_result:
-                    results.append(chunk_result)
-            except RuntimeError as e:
-                logger.warning(
-                    "PRA %s: Chunk %d/%d failed: %s",
-                    phase_name,
-                    i + 1,
-                    len(chunks),
-                    str(e)[:100],
-                )
-
-        if results:
-            merged = merge_fn(results)
-            logger.info(
-                "PRA %s: Merged %d chunk results successfully",
-                phase_name,
-                len(results),
-            )
-            return merged
-
-        logger.warning("PRA %s: Chunk processing produced no valid results", phase_name)
-        return {}
-
-    def _create_generic_chunk_prompt(self, original_prompt: str, chunk: str) -> str:
-        """Create a generic chunk prompt based on the original prompt."""
-        # Extract the JSON schema hint from the original prompt if present
-        schema_match = re.search(r"(\{[^}]*\"[^\"]+\"[^}]*\})", original_prompt)
-        schema_hint = schema_match.group(1) if schema_match else ""
-
-        return f"""Process this portion of the content and return JSON with the same structure.
-
-CONTENT CHUNK:
----
-{chunk}
----
-
-{f"Expected JSON structure: {schema_hint}" if schema_hint else "Return JSON with the relevant fields found in this chunk."}
-
-Keep your response concise. Only include findings from THIS chunk.
-"""
-
-    def _decompose_spec_for_review(
-        self, spec_content: str, chunk_size: int = 4000
-    ) -> List[str]:
-        """Split spec into reviewable sections by markdown headers or fixed chunks.
-
-        Args:
-            spec_content: The full specification content
-            chunk_size: Maximum size for fixed chunks (fallback)
-
-        Returns:
-            List of spec sections/chunks
-        """
-        # Try splitting by ## headers first
-        sections = re.split(r"\n(?=## )", spec_content)
-        if len(sections) > 1:
-            return [s.strip() for s in sections if s.strip()]
-
-        # Try splitting by # headers
-        sections = re.split(r"\n(?=# )", spec_content)
-        if len(sections) > 1:
-            return [s.strip() for s in sections if s.strip()]
-
-        # Fall back to fixed-size chunks
-        chunks = []
-        for i in range(0, len(spec_content), chunk_size):
-            chunk = spec_content[i : i + chunk_size]
-            if chunk.strip():
-                chunks.append(chunk)
-        return chunks if chunks else [spec_content]
 
     def _merge_spec_review_results(
         self, results: List[Dict[str, Any]]
@@ -747,6 +638,7 @@ The following additional files were provided in the project folder. Review these
         spec_content: str,
         repo_path: Path,
         iteration: int = 1,
+        answered_questions: Optional[List[AnsweredQuestion]] = None,
     ) -> tuple[SpecReviewResult, str]:
         """Run the Spec Review phase to identify gaps and questions.
         
@@ -754,6 +646,7 @@ The following additional files were provided in the project folder. Review these
             spec_content: Current specification content.
             repo_path: Path to the repository.
             iteration: Current iteration number for versioning.
+            answered_questions: List of previously answered questions for constraint analysis.
             
         Returns:
             Tuple of (SpecReviewResult, updated_spec_content). The spec may be
@@ -761,6 +654,18 @@ The following additional files were provided in the project folder. Review these
         """
         # Read previously answered questions to avoid asking duplicates
         qa_history = self._read_qa_history(repo_path)
+
+        # Analyze constraint status and generate hints for the LLM
+        constraint_status = analyze_constraint_status(
+            spec_content, 
+            answered_questions or []
+        )
+        constraint_hints = generate_constraint_hints(constraint_status)
+        
+        logger.info(
+            "Constraint status: %s",
+            {d: f"L{l}" for d, l in constraint_status.items()}
+        )
 
         # Build the full content including context files
         context_section = self._format_context_for_review()
@@ -773,7 +678,10 @@ The following additional files were provided in the project folder. Review these
             )
 
         if qa_history:
-            prompt = SPEC_REVIEW_PROMPT.format(spec_content=full_spec_content[:20000])
+            prompt = SPEC_REVIEW_PROMPT.format(
+                spec_content=full_spec_content[:20000],
+                constraint_hints=constraint_hints,
+            )
             prompt += f"""
 
 IMPORTANT: The following questions have ALREADY been answered. Do NOT ask these questions again or any variations of them. Only ask NEW questions about topics NOT covered below:
@@ -784,12 +692,16 @@ Previously Answered Questions:
 ---
 """
         else:
-            prompt = SPEC_REVIEW_PROMPT.format(spec_content=full_spec_content[:20000])
+            prompt = SPEC_REVIEW_PROMPT.format(
+                spec_content=full_spec_content[:20000],
+                constraint_hints=constraint_hints,
+            )
 
-        raw = self._parse_json_with_recovery(
+        raw = parse_json_with_recovery(
+            llm=self.llm,
             prompt=prompt,
-            phase_name="spec_review",
-            decompose_fn=self._decompose_spec_for_review,
+            agent_name="PRA_spec_review",
+            decompose_fn=default_decompose_by_sections,
             merge_fn=self._merge_spec_review_results,
             original_content=spec_content,
             chunk_prompt_template=SPEC_REVIEW_CHUNK_PROMPT,
@@ -1338,6 +1250,44 @@ Previously Answered Questions:
             lines.append("")
         return "\n".join(lines)
 
+    def _generate_prd_document(
+        self,
+        cleaned_spec: str,
+        answered_questions: List[AnsweredQuestion],
+    ) -> str:
+        """Generate a Product Requirements Document (PRD) from the spec and answers.
+
+        Uses the cleaned, validated spec as the base and integrates resolved answers
+        (including constraint decisions) into a structured PRD suitable for Planning V2.
+        """
+        # Summarize answered questions for the prompt; this may be empty on the first run
+        answered_summary = self._format_answered_questions(answered_questions)
+
+        # Keep prompt size reasonable while still providing enough context
+        max_chars = 20000
+        cleaned_spec_snippet = cleaned_spec[:max_chars]
+        answered_summary_snippet = answered_summary[:max_chars]
+
+        prompt = PRD_PROMPT.format(
+            cleaned_spec=cleaned_spec_snippet,
+            answered_questions_summary=answered_summary_snippet,
+        )
+
+        try:
+            prd_content = self.llm.complete_text(prompt)
+        except Exception as e:
+            logger.error("Failed to generate PRD with LLM: %s", e)
+            return cleaned_spec
+
+        if not isinstance(prd_content, str) or not prd_content.strip():
+            logger.warning(
+                "Product Requirements Analysis: PRD generation returned empty output, "
+                "falling back to cleaned specification"
+            )
+            return cleaned_spec
+
+        return prd_content
+
     def _update_spec_from_duplicates(
         self,
         duplicate_questions: List[OpenQuestion],
@@ -1394,15 +1344,14 @@ Previously Answered Questions:
             logger.error("Failed to clarify spec with LLM: %s", e)
             return current_spec
         
-        # Save the clarified spec
+        # Save the clarified spec using the same versioned pattern as _update_spec
         plan_dir = repo_path / "plan"
         plan_dir.mkdir(parents=True, exist_ok=True)
         
-        clarification_file = plan_dir / f"spec_clarification_v{iteration}.md"
-        clarification_file.write_text(clarified_spec, encoding="utf-8")
-        logger.info("Saved clarified spec to %s", clarification_file)
+        spec_file = plan_dir / f"updated_spec_v{iteration}.md"
+        spec_file.write_text(clarified_spec, encoding="utf-8")
+        logger.info("Saved updated spec (clarification) to %s", spec_file)
         
-        # Also update the latest spec
         latest_file = plan_dir / "updated_spec.md"
         latest_file.write_text(clarified_spec, encoding="utf-8")
         
@@ -1455,10 +1404,11 @@ Previously Answered Questions:
         """Run the Spec Cleanup phase to validate and clean the spec."""
         prompt = SPEC_CLEANUP_PROMPT.format(spec_content=spec_content)
 
-        raw = self._parse_json_with_recovery(
+        raw = parse_json_with_recovery(
+            llm=self.llm,
             prompt=prompt,
-            phase_name="spec_cleanup",
-            decompose_fn=self._decompose_spec_for_review,
+            agent_name="PRA_spec_cleanup",
+            decompose_fn=default_decompose_by_sections,
             merge_fn=self._merge_spec_cleanup_results,
             original_content=spec_content,
             chunk_prompt_template=SPEC_CLEANUP_CHUNK_PROMPT,

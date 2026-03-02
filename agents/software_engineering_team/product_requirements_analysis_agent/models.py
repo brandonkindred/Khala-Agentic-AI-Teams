@@ -67,6 +67,20 @@ class OpenQuestion(BaseModel):
         default="medium",
         description="Priority: high, medium, low",
     )
+    
+    # Constraint drilling fields for systematic technology decision tracking
+    constraint_domain: str = Field(
+        default="",
+        description="Constraint domain: infrastructure, frontend, backend, database, auth, or empty for non-constraint questions",
+    )
+    constraint_layer: int = Field(
+        default=0,
+        description="Layer depth (1-4) within the constraint domain. 0 = not a constraint question",
+    )
+    depends_on: Optional[str] = Field(
+        default=None,
+        description="Question ID this depends on (for follow-up questions in a drilling chain)",
+    )
 
 
 class AnsweredQuestion(BaseModel):

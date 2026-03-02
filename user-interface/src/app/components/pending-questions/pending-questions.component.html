@@ -21,153 +21,19 @@
       }
 
       <div class="questions-list">
-        @for (question of questions; track question.id) {
-          <div class="question-item" [class.answered]="isQuestionAnswered(question)">
-            <div class="question-header">
-              <span class="question-number">Q{{ $index + 1 }}</span>
-              <span class="question-text">{{ question.question_text }}</span>
-              @if (question.required) {
-                <span class="required-badge">Required</span>
-              }
-              <button
-                mat-icon-button
-                class="auto-answer-btn"
-                [disabled]="isAutoAnswering(question.id)"
-                (click)="autoAnswerQuestion(question)"
-                matTooltip="Auto-answer using AI based on industry best practices"
-              >
-                @if (isAutoAnswering(question.id)) {
-                  <mat-spinner diameter="20"></mat-spinner>
-                } @else {
-                  <mat-icon>auto_awesome</mat-icon>
-                }
-              </button>
-            </div>
-
-            @if (question.context) {
-              <p class="question-context">{{ question.context }}</p>
-            }
-
-            <!-- Auto-answer result panel -->
-            @if (hasAutoAnswerResult(question.id)) {
-              <div class="auto-answer-result">
-                <div class="auto-answer-header">
-                  <mat-icon>lightbulb</mat-icon>
-                  <span class="auto-answer-title">AI Recommendation</span>
-                  <span 
-                    class="confidence-badge"
-                    [class.high]="getAutoAnswerResult(question.id)!.confidence >= 0.8"
-                    [class.medium]="getAutoAnswerResult(question.id)!.confidence >= 0.6 && getAutoAnswerResult(question.id)!.confidence < 0.8"
-                    [class.low]="getAutoAnswerResult(question.id)!.confidence < 0.6"
-                  >
-                    {{ getConfidenceLabel(getAutoAnswerResult(question.id)!.confidence) }} confidence
-                    ({{ (getAutoAnswerResult(question.id)!.confidence * 100).toFixed(0) }}%)
-                  </span>
-                </div>
-                <div class="auto-answer-content">
-                  <p class="selected-answer">
-                    <strong>Recommended:</strong> {{ getAutoAnswerResult(question.id)!.selected_answer }}
-                  </p>
-                  <p class="rationale">{{ getAutoAnswerResult(question.id)!.rationale }}</p>
-                  @if (getAutoAnswerResult(question.id)!.risks.length > 0) {
-                    <div class="risks-section">
-                      <span class="risks-label">Potential risks:</span>
-                      <ul class="risks-list">
-                        @for (risk of getAutoAnswerResult(question.id)!.risks; track risk) {
-                          <li>{{ risk }}</li>
-                        }
-                      </ul>
-                    </div>
-                  }
-                </div>
-                <div class="auto-answer-actions">
-                  <button 
-                    mat-stroked-button 
-                    color="primary" 
-                    (click)="applyAutoAnswer(question.id)"
-                    [disabled]="isAutoAnswering(question.id)"
-                  >
-                    @if (isAutoAnswering(question.id)) {
-                      <mat-spinner diameter="16"></mat-spinner>
-                      Submitting...
-                    } @else {
-                      <ng-container>
-                        <mat-icon>check</mat-icon>
-                        Accept
-                      </ng-container>
-                    }
-                  </button>
-                  <button 
-                    mat-stroked-button 
-                    (click)="dismissAutoAnswer(question.id)"
-                    [disabled]="isAutoAnswering(question.id)"
-                  >
-                    <mat-icon>close</mat-icon>
-                    Dismiss
-                  </button>
-                </div>
-              </div>
-            }
-
-            <!-- Show if this was auto-answered and applied -->
-            @if (getAnswer(question.id)?.wasAutoAnswered) {
-              <div class="auto-answered-badge">
-                <mat-icon>auto_awesome</mat-icon>
-                <span>Auto-answered with {{ (getAnswer(question.id)!.autoAnswerConfidence * 100).toFixed(0) }}% confidence</span>
-              </div>
-            }
-
-            <div class="options-list">
-              <!-- All questions use checkboxes for multi-select -->
-              <div class="multi-select-hint">
-                <mat-icon>info_outline</mat-icon>
-                <span>Select all that apply</span>
-              </div>
-              @for (option of question.options; track option.id) {
-                <div class="option-wrapper">
-                  <mat-checkbox
-                    [checked]="isOptionSelected(question.id, option.id)"
-                    (change)="onMultiOptionToggle(question.id, option.id, $event.checked)"
-                    class="option-checkbox"
-                  >
-                    {{ option.label }}
-                    @if (option.is_default) {
-                      <span class="default-badge">Recommended</span>
-                    }
-                  </mat-checkbox>
-                  @if (option.rationale) {
-                    <p class="option-rationale">{{ option.rationale }}</p>
-                  }
-                </div>
-              }
-              <div class="option-wrapper">
-                <mat-checkbox
-                  [checked]="isOtherSelected(question.id)"
-                  (change)="onMultiOptionToggle(question.id, 'other', $event.checked)"
-                  class="option-checkbox other-option"
-                >
-                  Other (specify below)
-                </mat-checkbox>
-              </div>
-
-              @if (isOtherSelected(question.id)) {
-                <mat-form-field appearance="outline" class="other-input">
-                  <mat-label>Your answer</mat-label>
-                  <textarea
-                    matInput
-                    rows="2"
-                    [value]="getAnswer(question.id)?.otherText ?? ''"
-                    (input)="onOtherTextChange(question.id, $any($event.target).value)"
-                    placeholder="Please provide your specific answer..."
-                  ></textarea>
-                </mat-form-field>
-              }
-            </div>
-
-            <div class="question-source">
-              Source: {{ question.source }}
-            </div>
-          </div>
+        @for (question of questions; track question.id; let i = $index) {
+          <app-question-card
+            [question]="question"
+            [questionIndex]="i"
+            [autoAnswerResult]="getAutoAnswerResult(question.id)"
+            [isAutoAnswering]="isAutoAnswering(question.id)"
+            [isAnswered]="isQuestionAnswered(question)"
+            (optionToggled)="onQuestionOptionToggled(question.id, $event)"
+            (otherTextChanged)="onQuestionOtherTextChanged(question.id, $event)"
+            (autoAnswerRequested)="autoAnswerQuestion(question)"
+            (autoAnswerApplied)="applyAutoAnswer(question.id)"
+            (autoAnswerDismissed)="dismissAutoAnswer(question.id)"
+          />
         }
       </div>
     } @else {

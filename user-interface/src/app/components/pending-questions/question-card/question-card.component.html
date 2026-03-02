@@ -1,0 +1,146 @@
+<div class="question-item" [class.answered]="hasSelections()">
+  <div class="question-header">
+    <span class="question-number">Q{{ questionIndex + 1 }}</span>
+    <span class="question-text">{{ question.question_text }}</span>
+    @if (question.required) {
+      <span class="required-badge">Required</span>
+    }
+    <button
+      mat-icon-button
+      class="auto-answer-btn"
+      [disabled]="isAutoAnswering"
+      (click)="onAutoAnswerRequest()"
+      matTooltip="Auto-answer using AI based on industry best practices"
+    >
+      @if (isAutoAnswering) {
+        <mat-spinner diameter="20"></mat-spinner>
+      } @else {
+        <mat-icon>auto_awesome</mat-icon>
+      }
+    </button>
+  </div>
+
+  @if (question.context) {
+    <p class="question-context">{{ question.context }}</p>
+  }
+
+  <!-- Auto-answer result panel -->
+  @if (autoAnswerResult) {
+    <div class="auto-answer-result">
+      <div class="auto-answer-header">
+        <mat-icon>lightbulb</mat-icon>
+        <span class="auto-answer-title">AI Recommendation</span>
+        <span 
+          class="confidence-badge"
+          [class.high]="autoAnswerResult.confidence >= 0.8"
+          [class.medium]="autoAnswerResult.confidence >= 0.6 && autoAnswerResult.confidence < 0.8"
+          [class.low]="autoAnswerResult.confidence < 0.6"
+        >
+          {{ getConfidenceLabel(autoAnswerResult.confidence) }} confidence
+          ({{ (autoAnswerResult.confidence * 100).toFixed(0) }}%)
+        </span>
+      </div>
+      <div class="auto-answer-content">
+        <p class="selected-answer">
+          <strong>Recommended:</strong> {{ autoAnswerResult.selected_answer }}
+        </p>
+        <p class="rationale">{{ autoAnswerResult.rationale }}</p>
+        @if (autoAnswerResult.risks.length > 0) {
+          <div class="risks-section">
+            <span class="risks-label">Potential risks:</span>
+            <ul class="risks-list">
+              @for (risk of autoAnswerResult.risks; track $index) {
+                <li>{{ risk }}</li>
+              }
+            </ul>
+          </div>
+        }
+      </div>
+      <div class="auto-answer-actions">
+        <button 
+          mat-stroked-button 
+          color="primary" 
+          (click)="onApplyAutoAnswer()"
+          [disabled]="isAutoAnswering"
+        >
+          @if (isAutoAnswering) {
+            <mat-spinner diameter="16"></mat-spinner>
+            Submitting...
+          } @else {
+            <ng-container>
+              <mat-icon>check</mat-icon>
+              Accept
+            </ng-container>
+          }
+        </button>
+        <button 
+          mat-stroked-button 
+          (click)="onDismissAutoAnswer()"
+          [disabled]="isAutoAnswering"
+        >
+          <mat-icon>close</mat-icon>
+          Dismiss
+        </button>
+      </div>
+    </div>
+  }
+
+  <!-- Show if this was auto-answered and applied -->
+  @if (wasAutoAnswered) {
+    <div class="auto-answered-badge">
+      <mat-icon>auto_awesome</mat-icon>
+      <span>Auto-answered with {{ (autoAnswerConfidence * 100).toFixed(0) }}% confidence</span>
+    </div>
+  }
+
+  <div class="options-list">
+    <!-- All questions use checkboxes for multi-select -->
+    <div class="multi-select-hint">
+      <mat-icon>info_outline</mat-icon>
+      <span>Select all that apply</span>
+    </div>
+    @for (option of question.options; track option.id) {
+      <div class="option-wrapper">
+        <mat-checkbox
+          [checked]="isOptionSelected(option.id)"
+          (change)="onOptionToggle(option.id, $event.checked)"
+          class="option-checkbox"
+        >
+          {{ option.label }}
+          @if (option.is_default) {
+            <span class="default-badge">Recommended</span>
+          }
+        </mat-checkbox>
+        @if (option.rationale) {
+          <p class="option-rationale">{{ option.rationale }}</p>
+        }
+      </div>
+    }
+    <div class="option-wrapper">
+      <mat-checkbox
+        [checked]="isOtherSelected()"
+        (change)="onOptionToggle('other', $event.checked)"
+        class="option-checkbox other-option"
+      >
+        Other (specify below)
+      </mat-checkbox>
+    </div>
+
+    @if (isOtherSelected()) {
+      <mat-form-field appearance="outline" class="other-input">
+        <mat-label>Your answer</mat-label>
+        <textarea
+          matInput
+          rows="2"
+          [value]="otherText"
+          (input)="onOtherTextChange($any($event.target).value)"
+          placeholder="Please provide your specific answer..."
+        ></textarea>
+      </mat-form-field>
+    }
+  </div>
+
+  <div class="question-source">
+    Source: {{ question.source }}
+  </div>
+</div>

@@ -6,6 +6,11 @@ Note: Task Dependency only participates in Review per the matrix, but we include
 
 When review_result contains issues, they are passed to tool agents for fixing.
 Agents decide how to handle fixes (batch, one-by-one, or all at once).
+
+Document Ownership: Each tool agent is responsible for its own document lifecycle.
+- If a document already exists and there are review issues, agents apply targeted fixes
+- Only if no document exists does the agent generate from scratch
+- This prevents overwriting fixes made in previous iterations
 """
 
 from __future__ import annotations
@@ -28,6 +33,24 @@ from ..models import (
 from ..tool_agents.user_story.agent import _hierarchy_to_markdown
 
 logger = logging.getLogger(__name__)
+
+
+def _read_planning_artifacts(repo_path: Path) -> Dict[str, str]:
+    """Read existing planning artifacts from repo for update semantics.
+    
+    This allows agents to see their current documents and apply targeted fixes
+    instead of regenerating from scratch.
+    """
+    files: Dict[str, str] = {}
+    plan_dir = repo_path / "plan"
+    if plan_dir.exists():
+        for f in plan_dir.glob("*.md"):
+            try:
+                content = f.read_text(encoding="utf-8")
+                files[str(f.relative_to(repo_path))] = content
+            except Exception:
+                pass
+    return files
 
 
 def run_implementation(
@@ -63,6 +86,13 @@ def run_implementation(
         if planning_result and planning_result.hierarchy:
             effective_hierarchy = planning_result.hierarchy
         
+        current_files = _read_planning_artifacts(repo_path)
+        if current_files:
+            logger.info(
+                "Implementation: read %d existing planning artifacts for update semantics",
+                len(current_files),
+            )
+        
         metadata: Dict[str, Any] = {}
         if planning_result:
             pass
@@ -85,6 +115,7 @@ def run_implementation(
             review_issues=review_issues,
             hierarchy=effective_hierarchy,
             metadata=metadata,
+            current_files=current_files,
         )
         
         participating_agents = [

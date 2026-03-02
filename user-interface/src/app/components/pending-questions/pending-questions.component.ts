@@ -14,6 +14,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { Observable } from 'rxjs';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { PendingQuestion, AnswerSubmission, JobStatusResponse, PlanningV2StatusResponse, AutoAnswerResponse } from '../../models';
+import { QuestionCardComponent } from './question-card/question-card.component';
 
 /** Endpoint type determines which API to call for submitting answers. */
 export type SubmitEndpointType = 'run-team' | 'planning-v2' | 'product-analysis';
@@ -45,6 +46,7 @@ interface QuestionAnswer {
     MatTooltipModule,
     MatExpansionModule,
     MatChipsModule,
+    QuestionCardComponent,
   ],
   templateUrl: './pending-questions.component.html',
   styleUrl: './pending-questions.component.scss',
@@ -105,42 +107,27 @@ export class PendingQuestionsComponent implements OnChanges {
     return this.answers.get(questionId);
   }
 
-  /** Handle option toggle (checkboxes) */
-  onMultiOptionToggle(questionId: string, optionId: string, checked: boolean): void {
+  /** Handle option toggle events from child QuestionCardComponent */
+  onQuestionOptionToggled(questionId: string, event: { optionId: string; checked: boolean }): void {
     const answer = this.answers.get(questionId);
     if (answer) {
-      if (checked) {
-        answer.selectedOptionIds.add(optionId);
-        // If selecting a regular option, deselect "other"
-        if (optionId !== 'other') {
-          // Keep other text if "other" is also selected
-        }
+      if (event.checked) {
+        answer.selectedOptionIds.add(event.optionId);
       } else {
-        answer.selectedOptionIds.delete(optionId);
-        // If deselecting "other", clear the text
-        if (optionId === 'other') {
+        answer.selectedOptionIds.delete(event.optionId);
+        if (event.optionId === 'other') {
           answer.otherText = '';
         }
       }
       if (answer.wasAutoAnswered) {
         answer.wasAutoAnswered = false;
       }
+      this.answers = new Map(this.answers);
     }
   }
 
-  /** Check if an option is selected */
-  isOptionSelected(questionId: string, optionId: string): boolean {
-    const answer = this.answers.get(questionId);
-    return answer?.selectedOptionIds.has(optionId) ?? false;
-  }
-
-  /** Check if "other" is selected */
-  isOtherSelected(questionId: string): boolean {
-    const answer = this.answers.get(questionId);
-    return answer?.selectedOptionIds.has('other') ?? false;
-  }
-
-  onOtherTextChange(questionId: string, text: string): void {
+  /** Handle other text change events from child QuestionCardComponent */
+  onQuestionOtherTextChanged(questionId: string, text: string): void {
     const answer = this.answers.get(questionId);
     if (answer) {
       answer.otherText = text;
@@ -261,18 +248,6 @@ export class PendingQuestionsComponent implements OnChanges {
 
   dismissAutoAnswer(questionId: string): void {
     this.autoAnswerResults.delete(questionId);
-  }
-
-  getConfidenceColor(confidence: number): string {
-    if (confidence >= 0.8) return 'primary';
-    if (confidence >= 0.6) return 'accent';
-    return 'warn';
-  }
-
-  getConfidenceLabel(confidence: number): string {
-    if (confidence >= 0.8) return 'High';
-    if (confidence >= 0.6) return 'Medium';
-    return 'Low';
   }
 
   submitAnswers(): void {
