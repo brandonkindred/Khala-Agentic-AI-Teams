@@ -1074,19 +1074,24 @@ mat-progress-bar {
   align-items: center;
   min-width: 60px;
   padding: 0 2px;
-}
+  position: relative;
+  z-index: 1;
 
-// Horizontal connector between main phases
-.dag-phase-connector {
-  display: flex;
-  align-items: center;
-  padding-top: 16px;
-  
-  .dag-connector-line-horizontal {
-    width: 12px;
+  // Connector line between phase icons (same pattern as Job Progress card)
+  &.has-connector::after {
+    content: '';
+    position: absolute;
+    top: 23px;
+    left: calc(50% + 20px);
+    width: calc(100% - 40px + 4px);
     height: 2px;
     background: rgba(255, 255, 255, 0.25);
     border-radius: 1px;
+    z-index: 0;
+  }
+
+  &.has-connector.next-completed::after {
+    background: #81c784;
   }
 }
 

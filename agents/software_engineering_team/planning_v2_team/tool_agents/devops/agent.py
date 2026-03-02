@@ -11,7 +11,8 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput
-from ..json_utils import parse_json_with_recovery, default_decompose_by_sections, complete_with_continuation
+from ...output_templates import parse_devops_planning_output, parse_fix_output
+from ..json_utils import complete_text_with_continuation
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
@@ -19,51 +20,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _merge_devops_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Merge devops results from multiple chunks."""
-    merged: Dict[str, Any] = {
-        "needs_clarification": False,
-        "clarification_questions": [],
-        "pipeline_stages": [],
-        "infrastructure": {},
-        "deployment_strategy": "",
-        "monitoring": [],
-        "security": [],
-        "recommendations": [],
-        "summary": "",
-    }
-    strategies = []
-    summaries = []
+DEVOPS_PLANNING_PROMPT = """You are a DevOps expert. Create a DevOps plan for the specification.
 
-    for r in results:
-        if r.get("needs_clarification"):
-            merged["needs_clarification"] = True
-        if isinstance(r.get("clarification_questions"), list):
-            for q in r["clarification_questions"]:
-                if q not in merged["clarification_questions"]:
-                    merged["clarification_questions"].append(q)
-        if isinstance(r.get("pipeline_stages"), list):
-            for stage in r["pipeline_stages"]:
-                if stage not in merged["pipeline_stages"]:
-                    merged["pipeline_stages"].append(stage)
-        if isinstance(r.get("infrastructure"), dict):
-            merged["infrastructure"].update(r["infrastructure"])
-        if r.get("deployment_strategy"):
-            strategies.append(str(r["deployment_strategy"]))
-        if isinstance(r.get("monitoring"), list):
-            merged["monitoring"].extend(r["monitoring"])
-        if isinstance(r.get("security"), list):
-            merged["security"].extend(r["security"])
-        if isinstance(r.get("recommendations"), list):
-            merged["recommendations"].extend(r["recommendations"])
-        if r.get("summary"):
-            summaries.append(str(r["summary"]))
+If deployment target is NOT specified in the spec, set NEEDS_CLARIFICATION to true and list questions in CLARIFICATION_QUESTIONS. Do not assume cloud provider.
 
-    merged["deployment_strategy"] = strategies[0] if strategies else ""
-    merged["summary"] = f"Merged {len(results)} sections. " + " ".join(summaries[:2])
-    return merged
+Respond using this EXACT format:
 
-DEVOPS_PLANNING_PROMPT = """You are a DevOps expert. Create a DevOps plan for:
+## NEEDS_CLARIFICATION ##
+true or false
+## END NEEDS_CLARIFICATION ##
+
+## CLARIFICATION_QUESTIONS ##
+- Where should this application be deployed?
+- What are the expected SLA requirements?
+## END CLARIFICATION_QUESTIONS ##
+
+## RECOMMENDATIONS ##
+- DevOps recommendation 1
+- DevOps recommendation 2
+## END RECOMMENDATIONS ##
+
+## SUMMARY ##
+Brief summary.
+## END SUMMARY ##
 
 Specification:
 ---
@@ -71,72 +50,6 @@ Specification:
 ---
 
 Plan summary from spec review: {plan_summary}
-
-CRITICAL RULES:
-1. Do NOT assume any deployment target or cloud provider if not explicitly stated in the specification.
-2. If the spec does not clearly specify WHERE the application should be deployed (e.g., Heroku, AWS, DigitalOcean, on-premises), you MUST:
-   - Set "needs_clarification": true
-   - Add questions about deployment target to "clarification_questions"
-   - Do NOT generate provider-specific infrastructure recommendations
-3. If deployment IS specified, prefer cost-effective solutions:
-   - For simple apps: Heroku, Railway, Render, DigitalOcean App Platform
-   - Only suggest AWS/GCP/Azure if the requirements explicitly justify it (scale, compliance, specific services)
-
-Plan for:
-1. CI/CD pipeline stages
-2. Infrastructure requirements (ONLY if deployment target is specified)
-3. Deployment strategy
-4. Monitoring and observability
-5. Security considerations
-
-Respond with JSON:
-{{
-  "needs_clarification": false,
-  "clarification_questions": [],
-  "pipeline_stages": ["build", "test", "deploy"],
-  "infrastructure": {{"compute": "...", "database": "...", "networking": "..."}},
-  "deployment_strategy": "blue-green|rolling|canary",
-  "monitoring": ["metrics", "logs", "traces"],
-  "security": ["secrets management", "network policies"],
-  "recommendations": ["devops recommendations"],
-  "summary": "brief summary"
-}}
-
-If deployment target is NOT specified, respond with:
-{{
-  "needs_clarification": true,
-  "clarification_questions": [
-    "Where should this application be deployed? (e.g., Heroku, Railway, DigitalOcean, AWS, on-premises)",
-    "What are the expected SLA requirements (uptime, RTO, RPO)?",
-    "Are there any budget constraints for infrastructure?"
-  ],
-  "pipeline_stages": ["build", "test"],
-  "infrastructure": {{}},
-  "deployment_strategy": "",
-  "monitoring": [],
-  "security": [],
-  "recommendations": ["Deployment target must be specified before infrastructure planning can proceed"],
-  "summary": "Cannot complete DevOps planning - deployment target not specified in specification"
-}}
-"""
-
-DEVOPS_PLANNING_CHUNK_PROMPT = """You are a DevOps expert. Analyze this SECTION of a specification for DevOps:
-
-SECTION:
----
-{chunk_content}
----
-
-Respond with concise JSON for THIS section only:
-{{
-  "pipeline_stages": ["relevant stages"],
-  "infrastructure": {{"relevant": "requirements"}},
-  "deployment_strategy": "strategy if applicable",
-  "monitoring": ["monitoring needs"],
-  "security": ["security considerations"],
-  "recommendations": ["devops recommendations"],
-  "summary": "brief summary"
-}}
 """
 
 DEVOPS_FIX_SINGLE_ISSUE_PROMPT = """You are a DevOps expert. Fix this specific issue in the DevOps artifacts.
@@ -156,15 +69,25 @@ SPECIFICATION CONTEXT:
 {spec_excerpt}
 ---
 
-Analyze and fix this issue. If the issue relates to CI/CD pipelines, infrastructure, deployment, monitoring, or security, provide the complete updated file content.
+Respond using this EXACT format:
 
-Respond with JSON:
-{{
-  "root_cause": "why this issue exists",
-  "fix_description": "what you are changing to fix it",
-  "resolved": true or false,
-  "updated_content": "the complete updated file content (or empty string if no change needed)"
-}}
+## ROOT_CAUSE ##
+Why this issue exists.
+## END ROOT_CAUSE ##
+
+## FIX_DESCRIPTION ##
+What you are changing to fix it.
+## END FIX_DESCRIPTION ##
+
+## RESOLVED ##
+true or false
+## END RESOLVED ##
+
+## FILE_UPDATES ##
+### plan/devops.md ###
+Complete updated file content here.
+### END FILE ###
+## END FILE_UPDATES ##
 """
 
 
@@ -195,15 +118,10 @@ class DevOpsToolAgent:
             spec_content=spec_content[:6000],
             plan_summary=plan_summary[:2000],
         )
-        data = parse_json_with_recovery(
-            self.llm,
-            prompt,
-            agent_name="DevOps",
-            decompose_fn=default_decompose_by_sections,
-            merge_fn=_merge_devops_results,
-            original_content=spec_content,
-            chunk_prompt_template=DEVOPS_PLANNING_CHUNK_PROMPT,
+        raw_text = complete_text_with_continuation(
+            self.llm, prompt, agent_name="DevOps",
         )
+        data = parse_devops_planning_output(raw_text)
         
         recommendations = data.get("recommendations") or []
         if not isinstance(recommendations, list):
@@ -341,27 +259,27 @@ class DevOpsToolAgent:
         )
 
         try:
-            raw = complete_with_continuation(
-                llm=self.llm,
-                prompt=prompt,
-                mode="json",
-                agent_name="DevOps_FixSingleIssue",
+            raw_text = complete_text_with_continuation(
+                self.llm, prompt, agent_name="DevOps_FixSingleIssue",
             )
-
-            if not isinstance(raw, dict):
-                return ToolAgentPhaseOutput(
-                    summary="Fix failed: invalid response format",
-                    resolved=False,
-                )
-
+            raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
             fix_desc = raw.get("fix_description", "")
             resolved = raw.get("resolved", False)
+            file_updates = raw.get("file_updates") or {}
+            if not updated_content and file_updates:
+                updated_content = next(iter(file_updates.values()), "")
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 files["plan/devops.md"] = updated_content
                 logger.info("DevOps: fix applied — %s", fix_desc[:60])
+            elif file_updates:
+                for path, content in file_updates.items():
+                    if content and isinstance(content, str) and content.strip():
+                        files[path] = content
+                        logger.info("DevOps: fix applied — %s", fix_desc[:60])
+                        break
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"DevOps issue addressed: {issue[:50]}",

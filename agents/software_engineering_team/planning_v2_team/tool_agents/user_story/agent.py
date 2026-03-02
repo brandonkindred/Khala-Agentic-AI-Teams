@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from shared.models import Initiative, Epic, StoryPlan, TaskPlan, PlanningHierarchy
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput
-from ..json_utils import parse_json_with_recovery, default_decompose_by_sections, complete_with_continuation
+from ...output_templates import parse_fix_output, parse_review_output
+from ..json_utils import complete_text_with_continuation
+from shared.deduplication import dedupe_by_key
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
@@ -21,8 +23,67 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _parse_hierarchy_text_to_data(text: str) -> Dict[str, Any]:
+    """Parse line-based hierarchy format into dict for _build_hierarchy_from_data.
+
+    Format (one line per node; pipe-separated):
+    INIT | id | title | description
+    EPIC | id | title | description
+    STORY | id | title | description
+    TASK | id | title | assignee | complexity_points
+    Hierarchy: EPIC under last INIT, STORY under last EPIC, TASK under last STORY.
+    """
+    initiatives: List[Dict[str, Any]] = []
+    current_init: Optional[Dict[str, Any]] = None
+    current_epic: Optional[Dict[str, Any]] = None
+    current_story: Optional[Dict[str, Any]] = None
+    summary = ""
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 2:
+            continue
+        kind = parts[0].upper()
+        if kind == "INIT" and len(parts) >= 3:
+            current_init = {"id": parts[1], "title": parts[2], "description": parts[3] if len(parts) > 3 else "", "epics": []}
+            initiatives.append(current_init)
+            current_epic = None
+            current_story = None
+        elif kind == "EPIC" and len(parts) >= 3 and current_init:
+            current_epic = {"id": parts[1], "title": parts[2], "description": parts[3] if len(parts) > 3 else "", "acceptance_criteria": [], "stories": []}
+            current_init["epics"].append(current_epic)
+            current_story = None
+        elif kind == "STORY" and len(parts) >= 3 and current_epic:
+            current_story = {"id": parts[1], "title": parts[2], "description": parts[3] if len(parts) > 3 else "", "acceptance_criteria": [], "tasks": []}
+            current_epic["stories"].append(current_story)
+        elif kind == "TASK" and len(parts) >= 4 and current_story:
+            assignee = parts[3] if len(parts) > 3 else "backend"
+            points = 2
+            if len(parts) > 4 and str(parts[4]).strip().isdigit():
+                points = min(13, max(1, int(parts[4])))
+            current_story["tasks"].append({
+                "id": parts[1],
+                "title": parts[2],
+                "description": "",
+                "assigned_team": assignee,
+                "acceptance_criteria": [],
+                "complexity_points": points,
+            })
+
+    summary_section = text.find("## SUMMARY ##")
+    if summary_section >= 0:
+        end = text.find("## END SUMMARY ##", summary_section)
+        if end > summary_section:
+            summary = text[summary_section + len("## SUMMARY ##"):end].strip().split("\n")[0].strip()[:500]
+
+    return {"initiatives": initiatives, "summary": summary or "User story hierarchy created."}
+
+
 def _merge_user_story_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Merge user story results from multiple chunks."""
+    """Merge user story results from multiple chunks with semantic deduplication by initiative name."""
     merged: Dict[str, Any] = {
         "initiatives": [],
         "summary": "",
@@ -36,37 +97,32 @@ def _merge_user_story_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             summaries.append(str(r["summary"]))
 
     merged["summary"] = f"Merged {len(results)} sections. " + " ".join(summaries[:2])
+    if merged["initiatives"]:
+        merged["initiatives"] = dedupe_by_key(
+            merged["initiatives"],
+            key_fn=lambda x: x.get("name", x.get("title", "")) if isinstance(x, dict) else str(x),
+        )
     return merged
 
-USER_STORY_PLANNING_PROMPT = """You are a Product Planning expert specializing in user story creation and prioritization.
 
-Given the specification below, create a hierarchical plan with:
-- Initiatives (high-level goals)
-- Epics (features within each initiative)
-- Stories (detailed user stories with acceptance criteria)
-- Tasks (actionable work items assigned to teams)
+USER_STORY_PLANNING_PROMPT = """You are a Product Planning expert. Create a hierarchical plan: Initiative -> Epic -> Story -> Task.
 
-IMPORTANT: Stories and Tasks must be highly detailed with:
-- Clear descriptions
-- Acceptance criteria
-- Examples where appropriate
-- Team assignment (frontend, backend, devops, qa)
+Output EXACTLY one line per node using this format (pipe-separated). No JSON.
 
-TASK SIZING - CRITICAL:
-Each task should be estimated as a 2 or 3 on the Fibonacci scale (1, 2, 3, 5, 8, 13...) during sprint planning.
+INIT | id | title | description
+EPIC | id | title | description
+STORY | id | title | description
+TASK | id | title | assignee | complexity_points
 
-A 2-3 point task typically:
-- Can be completed in 1-2 days
-- Has a focused objective with clear boundaries
-- Touches 2-5 files
-- May involve related concerns that logically belong together (e.g., "Create login form with validation" is acceptable)
-- Is independently testable
+Rules:
+- Each task should be Fibonacci 2-3 points (1-2 days, focused). Use complexity_points 2 or 3.
+- assignee is one of: frontend, backend, devops, qa
+- List INIT first, then EPIC under it, then STORY under EPIC, then TASK under STORY. Order matters.
 
-If a task feels like a 5 or larger, BREAK IT DOWN into smaller tasks. For example:
-- BAD: "Implement user authentication" (too broad, likely 8+ points)
-- GOOD: Split into: "Create login form with validation", "Create /login API endpoint with JWT", "Add auth middleware and session storage"
-
-If a task feels like a 1, consider combining it with a closely related task.
+At the end add:
+## SUMMARY ##
+Brief planning summary.
+## END SUMMARY ##
 
 Specification:
 ---
@@ -74,117 +130,33 @@ Specification:
 ---
 
 Plan Summary: {plan_summary}
-
-Respond with JSON:
-{{
-  "initiatives": [
-    {{
-      "id": "INIT-1",
-      "title": "Initiative title",
-      "description": "What this initiative achieves",
-      "epics": [
-        {{
-          "id": "EPIC-1",
-          "title": "Epic title",
-          "description": "Feature description",
-          "acceptance_criteria": ["criterion 1", "criterion 2"],
-          "stories": [
-            {{
-              "id": "STORY-1",
-              "title": "Story title",
-              "description": "As a [user], I want [feature] so that [benefit]",
-              "acceptance_criteria": ["Given/When/Then criteria"],
-              "example": "Example usage scenario",
-              "tasks": [
-                {{
-                  "id": "TASK-1",
-                  "title": "Task title",
-                  "description": "Detailed task description",
-                  "acceptance_criteria": ["task completion criteria"],
-                  "assigned_team": "frontend|backend|devops|qa",
-                  "example": "Implementation example if applicable",
-                  "complexity_points": 2
-                }}
-              ]
-            }}
-          ]
-        }}
-      ]
-    }}
-  ],
-  "summary": "Brief planning summary"
-}}
 """
 
-USER_STORY_REVIEW_PROMPT = """You are a Product Planning expert. Review these user stories and tasks for:
-1. Completeness of acceptance criteria
-2. Clear team assignments
-3. Task granularity - each task should be Fibonacci 2-3 points (focused objective, completable in 1-2 days)
-4. Dependency clarity
-5. Tasks that are too large (5+ points) should be flagged for splitting
-6. Tasks that are too small (1 point) should be flagged for combining with related tasks
+USER_STORY_REVIEW_PROMPT = """You are a Product Planning expert. Review these user stories and tasks for completeness, team assignments, task granularity (Fibonacci 2-3 points), and flag issues.
 
 Artifacts:
 ---
 {artifacts}
 ---
 
-Respond with JSON:
-{{
-  "passed": true or false,
-  "issues": ["list of issues found"],
-  "recommendations": ["improvements"],
-  "summary": "brief summary"
-}}
-"""
+Respond using this EXACT format:
 
-USER_STORY_PLANNING_CHUNK_PROMPT = """You are a Product Planning expert. Analyze this SECTION of a specification for user stories:
+## PASSED ##
+true or false
+## END PASSED ##
 
-SECTION:
----
-{chunk_content}
----
+## ISSUES ##
+- Issue 1
+- Issue 2
+## END ISSUES ##
 
-Create user stories and tasks for THIS section only.
+## RECOMMENDATIONS ##
+- Improvement 1
+## END RECOMMENDATIONS ##
 
-TASK SIZING: Each task should be Fibonacci 2-3 points (1-2 day effort, focused objective, 2-5 files). Break 5+ point tasks into smaller tasks; combine 1-point tasks with related work.
-
-Respond with concise JSON:
-{{
-  "initiatives": [
-    {{
-      "id": "INIT-1",
-      "title": "Initiative for this section",
-      "description": "What this achieves",
-      "epics": [
-        {{
-          "id": "EPIC-1",
-          "title": "Epic title",
-          "description": "Feature description",
-          "acceptance_criteria": ["criterion"],
-          "stories": [
-            {{
-              "id": "STORY-1",
-              "title": "Story title",
-              "description": "As a user, I want...",
-              "acceptance_criteria": ["Given/When/Then"],
-              "tasks": [
-                {{
-                  "id": "TASK-1",
-                  "title": "Task title",
-                  "description": "Task details",
-                  "assigned_team": "frontend|backend|devops|qa",
-                  "complexity_points": 2
-                }}
-              ]
-            }}
-          ]
-        }}
-      ]
-    }}
-  ],
-  "summary": "Brief summary"
-}}
+## SUMMARY ##
+Brief summary.
+## END SUMMARY ##
 """
 
 USER_STORY_FIX_SINGLE_ISSUE_PROMPT = """You are a Product Planning expert. Fix this specific issue in the user story artifacts.
@@ -204,15 +176,27 @@ SPECIFICATION CONTEXT:
 {spec_excerpt}
 ---
 
-Analyze and fix this issue. If the issue relates to task sizing, acceptance criteria, or missing stories/tasks, provide the complete updated file content.
+Analyze and fix this issue. If the issue requires updating the artifact, provide the complete updated file content.
 
-Respond with JSON:
-{{
-  "root_cause": "why this issue exists",
-  "fix_description": "what you are changing to fix it",
-  "resolved": true or false,
-  "updated_content": "the complete updated file content (or empty string if no change needed)"
-}}
+Respond using this EXACT format:
+
+## ROOT_CAUSE ##
+Why this issue exists.
+## END ROOT_CAUSE ##
+
+## FIX_DESCRIPTION ##
+What you are changing to fix it.
+## END FIX_DESCRIPTION ##
+
+## RESOLVED ##
+true or false
+## END RESOLVED ##
+
+## FILE_UPDATES ##
+### plan/user_stories.md ###
+Complete updated file content here.
+### END FILE ###
+## END FILE_UPDATES ##
 """
 
 
@@ -368,16 +352,10 @@ class UserStoryToolAgent:
             spec_content=spec_content[:10000],
             plan_summary=plan_summary[:3000],
         )
-        data = parse_json_with_recovery(
-            self.llm,
-            prompt,
-            agent_name="UserStory",
-            decompose_fn=default_decompose_by_sections,
-            merge_fn=_merge_user_story_results,
-            original_content=spec_content,
-            chunk_prompt_template=USER_STORY_PLANNING_CHUNK_PROMPT,
+        raw_text = complete_text_with_continuation(
+            self.llm, prompt, agent_name="UserStory",
         )
-        
+        data = _parse_hierarchy_text_to_data(raw_text)
         hierarchy = _build_hierarchy_from_data(data)
         
         init_count = len(hierarchy.initiatives) if hierarchy else 0
@@ -460,7 +438,10 @@ class UserStoryToolAgent:
             )
         
         prompt = USER_STORY_REVIEW_PROMPT.format(artifacts=artifacts)
-        data = parse_json_with_recovery(self.llm, prompt, agent_name="UserStory")
+        raw_text = complete_text_with_continuation(
+            self.llm, prompt, agent_name="UserStory_Review",
+        )
+        data = parse_review_output(raw_text)
         
         issues = data.get("issues") or []
         if not isinstance(issues, list):
@@ -531,27 +512,27 @@ class UserStoryToolAgent:
         )
 
         try:
-            raw = complete_with_continuation(
-                llm=self.llm,
-                prompt=prompt,
-                mode="json",
-                agent_name="UserStory_FixSingleIssue",
+            raw_text = complete_text_with_continuation(
+                self.llm, prompt, agent_name="UserStory_FixSingleIssue",
             )
-
-            if not isinstance(raw, dict):
-                return ToolAgentPhaseOutput(
-                    summary="Fix failed: invalid response format",
-                    resolved=False,
-                )
-
+            raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
             fix_desc = raw.get("fix_description", "")
             resolved = raw.get("resolved", False)
+            file_updates = raw.get("file_updates") or {}
+            if not updated_content and file_updates:
+                updated_content = next(iter(file_updates.values()), "")
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 files["plan/user_stories.md"] = updated_content
                 logger.info("UserStory: fix applied — %s", fix_desc[:60])
+            elif file_updates:
+                for path, content in file_updates.items():
+                    if content and isinstance(content, str) and content.strip():
+                        files[path] = content
+                        logger.info("UserStory: fix applied — %s", fix_desc[:60])
+                        break
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"User story issue addressed: {issue[:50]}",

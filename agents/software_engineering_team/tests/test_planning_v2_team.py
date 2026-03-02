@@ -200,48 +200,22 @@ class TestUserStoryToolAgent:
     """Tests for UserStoryToolAgent."""
     
     def test_plan_creates_hierarchy(self, mock_llm: MagicMock):
-        """Test plan method creates hierarchy."""
+        """Test plan method creates hierarchy from text template output."""
         from planning_v2_team.tool_agents.user_story import UserStoryToolAgent
-        
-        mock_llm.complete_json.return_value = {
-            "initiatives": [
-                {
-                    "id": "INIT-1",
-                    "title": "Test Initiative",
-                    "description": "Test description",
-                    "epics": [
-                        {
-                            "id": "EPIC-1",
-                            "title": "Test Epic",
-                            "description": "Epic description",
-                            "acceptance_criteria": ["AC1"],
-                            "stories": [
-                                {
-                                    "id": "STORY-1",
-                                    "title": "Test Story",
-                                    "description": "Story description",
-                                    "acceptance_criteria": ["Story AC"],
-                                    "tasks": [
-                                        {
-                                            "id": "TASK-1",
-                                            "title": "Test Task",
-                                            "description": "Task description",
-                                            "assigned_team": "backend",
-                                            "assignee": "backend",
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ],
-            "summary": "Created hierarchy"
-        }
-        
+
+        # User story agent uses line-based format (INIT|EPIC|STORY|TASK), not JSON
+        hierarchy_text = (
+            "INIT | INIT-1 | Test Initiative | Test description\n"
+            "EPIC | EPIC-1 | Test Epic | Epic description\n"
+            "STORY | STORY-1 | Test Story | Story description\n"
+            "TASK | TASK-1 | Test Task | backend | 2\n"
+            "## SUMMARY ##\nCreated hierarchy\n## END SUMMARY ##"
+        )
+        mock_llm.complete_text.return_value = hierarchy_text
+
         agent = UserStoryToolAgent(mock_llm)
         inp = ToolAgentPhaseInput(spec_content="Test spec")
-        
+
         result = agent.plan(inp)
         assert result.hierarchy is not None
         assert len(result.hierarchy.initiatives) == 1
@@ -374,7 +348,8 @@ class TestWorkflowExecution:
             repo_path=temp_repo,
         )
 
-        plan_dir = temp_repo / "planning_v2"
+        # Workflow writes to plan/ (e.g. plan/planning_artifacts.md, plan/product_spec.md)
+        plan_dir = temp_repo / "plan"
         assert plan_dir.exists()
 
     def test_workflow_result_structure(
@@ -411,10 +386,11 @@ class TestWorkflowExecution:
             spec_content=sample_spec,
             repo_path=temp_repo,
         )
-        
-        assert result.spec_review_result is not None
+
+        # PlanningV2WorkflowResult has planning_result, implementation_result, review_result, etc. (no spec_review_result)
         assert result.planning_result is not None
         assert result.implementation_result is not None
+        assert result.review_result is not None
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +451,7 @@ class TestImplementationPhase:
         )
         
         assert len(result.assets_created) > 0
-        assert (temp_repo / "planning_v2").exists()
+        assert (temp_repo / "plan").exists()
 
 
 if __name__ == "__main__":

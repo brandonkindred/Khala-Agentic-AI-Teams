@@ -8,47 +8,22 @@ Focuses on component layout, system boundaries, and integration points.
 from __future__ import annotations
 
 import logging
-import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput
-from ..json_utils import parse_json_with_recovery, default_decompose_by_sections, complete_with_continuation
+from ...output_templates import (
+    parse_fix_output,
+    parse_planning_tool_output,
+    parse_review_output,
+    parse_spec_review_output,
+)
+from ..json_utils import complete_text_with_continuation
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
-
-def _merge_system_design_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Merge system design results from multiple chunks."""
-    merged: Dict[str, Any] = {
-        "component_design": [],
-        "data_flow": "",
-        "integration_strategy": "",
-        "recommendations": [],
-        "summary": "",
-    }
-    data_flows = []
-    integration_strategies = []
-    summaries = []
-
-    for r in results:
-        if isinstance(r.get("component_design"), list):
-            merged["component_design"].extend(r["component_design"])
-        if r.get("data_flow"):
-            data_flows.append(str(r["data_flow"]))
-        if r.get("integration_strategy"):
-            integration_strategies.append(str(r["integration_strategy"]))
-        if isinstance(r.get("recommendations"), list):
-            merged["recommendations"].extend(r["recommendations"])
-        if r.get("summary"):
-            summaries.append(str(r["summary"]))
-
-    merged["data_flow"] = " ".join(data_flows)
-    merged["integration_strategy"] = " ".join(integration_strategies)
-    merged["summary"] = f"Merged {len(results)} sections. " + " ".join(summaries[:2])
-    return merged
 
 SYSTEM_DESIGN_SPEC_REVIEW_PROMPT = """You are a System Design expert. Review this specification and identify:
 1. Component boundaries and responsibilities
@@ -61,14 +36,30 @@ Specification:
 {spec_content}
 ---
 
-Respond with JSON:
-{{
-  "components": ["list of identified components"],
-  "integration_points": ["list of integration points"],
-  "gaps": ["list of design gaps"],
-  "scalability_notes": "scalability considerations",
-  "summary": "brief summary"
-}}
+Respond using this EXACT format:
+
+## COMPONENTS ##
+- Component 1
+- Component 2
+## END COMPONENTS ##
+
+## INTEGRATION_POINTS ##
+- Point 1
+- Point 2
+## END INTEGRATION_POINTS ##
+
+## GAPS ##
+- Gap 1
+- Gap 2
+## END GAPS ##
+
+## SCALABILITY_NOTES ##
+Scalability considerations (one short paragraph).
+## END SCALABILITY_NOTES ##
+
+## SUMMARY ##
+Brief summary.
+## END SUMMARY ##
 """
 
 SYSTEM_DESIGN_PLANNING_PROMPT = """You are a System Design expert. Create a system design plan for:
@@ -80,14 +71,29 @@ Specification:
 
 Prior analysis: {prior_analysis}
 
-Respond with JSON:
-{{
-  "component_design": [{{"name": "component_name", "responsibility": "what it does", "dependencies": ["dep1"]}}],
-  "data_flow": "description of data flow between components",
-  "integration_strategy": "how components integrate",
-  "recommendations": ["design recommendations"],
-  "summary": "brief summary"
-}}
+Respond using this EXACT format:
+
+## COMPONENT_DESIGN ##
+ComponentName: responsibility and dependencies
+AnotherComponent: what it does
+## END COMPONENT_DESIGN ##
+
+## DATA_FLOW ##
+Description of data flow between components.
+## END DATA_FLOW ##
+
+## INTEGRATION_STRATEGY ##
+How components integrate.
+## END INTEGRATION_STRATEGY ##
+
+## RECOMMENDATIONS ##
+- Recommendation 1
+- Recommendation 2
+## END RECOMMENDATIONS ##
+
+## SUMMARY ##
+Brief summary.
+## END SUMMARY ##
 """
 
 SYSTEM_DESIGN_REVIEW_PROMPT = """You are a System Design expert. Review these planning artifacts for design coherence:
@@ -97,30 +103,25 @@ Artifacts:
 {artifacts}
 ---
 
-Respond with JSON:
-{{
-  "passed": true or false,
-  "issues": ["list of design issues found"],
-  "recommendations": ["improvements"],
-  "summary": "brief summary"
-}}
-"""
+Respond using this EXACT format:
 
-SYSTEM_DESIGN_PLANNING_CHUNK_PROMPT = """You are a System Design expert. Analyze this SECTION of a specification for system design:
+## PASSED ##
+true or false
+## END PASSED ##
 
-SECTION:
----
-{chunk_content}
----
+## ISSUES ##
+- Issue 1
+- Issue 2
+## END ISSUES ##
 
-Respond with concise JSON for THIS section only:
-{{
-  "component_design": [{{"name": "component_name", "responsibility": "what it does", "dependencies": ["dep1"]}}],
-  "data_flow": "data flow in this section",
-  "integration_strategy": "integration points",
-  "recommendations": ["design recommendations"],
-  "summary": "brief summary"
-}}
+## RECOMMENDATIONS ##
+- Improvement 1
+- Improvement 2
+## END RECOMMENDATIONS ##
+
+## SUMMARY ##
+Brief summary.
+## END SUMMARY ##
 """
 
 SYSTEM_DESIGN_FIX_SINGLE_ISSUE_PROMPT = """You are a System Design expert. Fix this specific issue in the planning artifacts.
@@ -140,15 +141,27 @@ SPECIFICATION CONTEXT:
 {spec_excerpt}
 ---
 
-Analyze and fix this issue. Provide the complete updated file content.
+Analyze and fix this issue. Provide the complete updated file content using the format below.
 
-Respond with JSON:
-{{
-  "root_cause": "why this issue exists",
-  "fix_description": "what you are changing to fix it",
-  "resolved": true or false,
-  "updated_content": "the complete updated file content (or empty string if no change needed)"
-}}
+Respond using this EXACT format:
+
+## ROOT_CAUSE ##
+Why this issue exists.
+## END ROOT_CAUSE ##
+
+## FIX_DESCRIPTION ##
+What you are changing to fix it.
+## END FIX_DESCRIPTION ##
+
+## RESOLVED ##
+true or false
+## END RESOLVED ##
+
+## FILE_UPDATES ##
+### plan/system_design.md ###
+Complete updated file content here.
+### END FILE ###
+## END FILE_UPDATES ##
 """
 
 
@@ -179,16 +192,10 @@ class SystemDesignToolAgent:
             spec_content=spec_content[:8000],
             prior_analysis=prior_analysis[:2000],
         )
-        data = parse_json_with_recovery(
-            self.llm,
-            prompt,
-            agent_name="SystemDesign",
-            decompose_fn=default_decompose_by_sections,
-            merge_fn=_merge_system_design_results,
-            original_content=spec_content,
-            chunk_prompt_template=SYSTEM_DESIGN_PLANNING_CHUNK_PROMPT,
+        raw_text = complete_text_with_continuation(
+            self.llm, prompt, agent_name="SystemDesign",
         )
-        
+        data = parse_planning_tool_output(raw_text)
         recommendations = data.get("recommendations") or []
         if not isinstance(recommendations, list):
             recommendations = [str(recommendations)]
@@ -283,8 +290,10 @@ class SystemDesignToolAgent:
             )
         
         prompt = SYSTEM_DESIGN_REVIEW_PROMPT.format(artifacts=artifacts)
-        data = parse_json_with_recovery(self.llm, prompt, agent_name="SystemDesign")
-        
+        raw_text = complete_text_with_continuation(
+            self.llm, prompt, agent_name="SystemDesign",
+        )
+        data = parse_review_output(raw_text)
         issues = data.get("issues") or []
         if not isinstance(issues, list):
             issues = [str(issues)] if issues else []
@@ -354,27 +363,27 @@ class SystemDesignToolAgent:
         )
 
         try:
-            raw = complete_with_continuation(
-                llm=self.llm,
-                prompt=prompt,
-                mode="json",
-                agent_name="SystemDesign_FixSingleIssue",
+            raw_text = complete_text_with_continuation(
+                self.llm, prompt, agent_name="SystemDesign_FixSingleIssue",
             )
-
-            if not isinstance(raw, dict):
-                return ToolAgentPhaseOutput(
-                    summary="Fix failed: invalid response format",
-                    resolved=False,
-                )
-
+            raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
             fix_desc = raw.get("fix_description", "")
             resolved = raw.get("resolved", False)
+            file_updates = raw.get("file_updates") or {}
+            if not updated_content and file_updates:
+                updated_content = next(iter(file_updates.values()), "")
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 files["plan/system_design.md"] = updated_content
                 logger.info("SystemDesign: fix applied — %s", fix_desc[:60])
+            elif file_updates:
+                for path, content in file_updates.items():
+                    if content and isinstance(content, str) and content.strip():
+                        files[path] = content
+                        logger.info("SystemDesign: fix applied — %s", fix_desc[:60])
+                        break
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"System design issue addressed: {issue[:50]}",
@@ -408,8 +417,10 @@ class SystemDesignToolAgent:
         prompt = SYSTEM_DESIGN_SPEC_REVIEW_PROMPT.format(
             spec_content=(inp.spec_content or "")[:10000],
         )
-        data = parse_json_with_recovery(self.llm, prompt, agent_name="SystemDesign")
-        
+        raw_text = complete_text_with_continuation(
+            self.llm, prompt, agent_name="SystemDesign",
+        )
+        data = parse_spec_review_output(raw_text)
         gaps = data.get("gaps") or []
         if not isinstance(gaps, list):
             gaps = [str(gaps)] if gaps else []

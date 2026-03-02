@@ -23,6 +23,7 @@ from ..models import (
     ToolAgentKind,
     ToolAgentPhaseInput,
 )
+from ..output_templates import parse_review_output
 from ..prompts import REVIEW_PROMPT
 from ..tool_agents.json_utils import complete_with_continuation
 
@@ -110,20 +111,12 @@ def run_review(
         artifacts=artifacts_text,
     )
     try:
-        raw = complete_with_continuation(
+        raw_text = complete_with_continuation(
             llm=llm,
             prompt=prompt,
-            mode="json",
             agent_name="PlanningV2_Review",
         )
-        if not isinstance(raw, dict):
-            passed = len(all_issues) == 0
-            return ReviewPhaseResult(
-                passed=passed,
-                issues=all_issues,
-                summary="Review complete (tool agents only).",
-            )
-
+        raw = parse_review_output(raw_text)
         llm_issues = raw.get("issues") or []
         if isinstance(llm_issues, list):
             all_issues.extend(llm_issues)

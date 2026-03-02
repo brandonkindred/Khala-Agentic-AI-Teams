@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from shared.models import PlanningHierarchy
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput
-from ..json_utils import parse_json_with_recovery
+from ...output_templates import parse_review_output
+from ..json_utils import complete_text_with_continuation
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
@@ -72,52 +73,47 @@ def _merge_task_dependency_results(results: List[Dict[str, Any]]) -> Dict[str, A
     merged["summary"] = (
         f"Analyzed {len(merged['dependencies'])} dependencies. " + " ".join(summaries[:2])
     )
+    if merged["dependencies"]:
+        merged["dependencies"] = dedupe_by_key(
+            merged["dependencies"],
+            key_fn=lambda x: f"{x.get('from_task','')}|{x.get('to_task','')}" if isinstance(x, dict) else str(x),
+        )
+    if all(isinstance(x, str) for x in merged["circular_risks"]):
+        merged["circular_risks"] = dedupe_strings(merged["circular_risks"])
+    if merged["parallelizable"]:
+        merged["parallelizable"] = dedupe_by_key(
+            merged["parallelizable"],
+            key_fn=lambda x: "|".join(sorted(x)) if isinstance(x, list) else str(x),
+        )
+    if all(isinstance(x, str) for x in merged["issues"]):
+        merged["issues"] = dedupe_strings(merged["issues"])[:DEFAULT_MAX_ISSUES]
     return merged
 
-TASK_DEPENDENCY_REVIEW_PROMPT = """You are a Task Dependency Analyzer. Review these tasks and identify dependencies.
+TASK_DEPENDENCY_REVIEW_PROMPT = """You are a Task Dependency Analyzer. Review these tasks and identify dependency issues, circular risks, and a brief summary.
 
 Tasks:
 ---
 {tasks}
 ---
 
-Analyze:
-1. Which tasks block others (must complete before another can start)
-2. Circular dependency risks
-3. Critical path (longest chain of dependent tasks)
-4. Parallelization opportunities
+Respond using this EXACT format:
 
-Respond with JSON:
-{{
-  "dependencies": [
-    {{"from_task": "TASK-1", "to_task": "TASK-2", "type": "blocks|requires|enables"}}
-  ],
-  "circular_risks": ["description of any circular dependency risks"],
-  "critical_path": ["TASK-1", "TASK-2", "TASK-3"],
-  "parallelizable": [["TASK-4", "TASK-5"], ["TASK-6", "TASK-7"]],
-  "issues": ["any dependency issues found"],
-  "summary": "brief summary"
-}}
-"""
+## PASSED ##
+true or false
+## END PASSED ##
 
-TASK_DEPENDENCY_REVIEW_CHUNK_PROMPT = """You are a Task Dependency Analyzer. Review these tasks for dependencies:
+## ISSUES ##
+- Dependency issue 1 (e.g. TASK-1 blocks TASK-2)
+- Circular risk or other issue
+## END ISSUES ##
 
-TASKS:
----
-{chunk_content}
----
+## RECOMMENDATIONS ##
+- Recommendation 1
+## END RECOMMENDATIONS ##
 
-Respond with concise JSON:
-{{
-  "dependencies": [
-    {{"from_task": "TASK-1", "to_task": "TASK-2", "type": "blocks|requires|enables"}}
-  ],
-  "circular_risks": ["risks"],
-  "critical_path": ["task sequence"],
-  "parallelizable": [["parallel tasks"]],
-  "issues": ["issues found"],
-  "summary": "brief summary"
-}}
+## SUMMARY ##
+Brief summary.
+## END SUMMARY ##
 """
 
 
@@ -189,64 +185,40 @@ class TaskDependencyToolAgent:
             tasks_json = json.dumps([{"id": t["id"], "team": t["team"], "title": t["title"], "description": t["description"][:80]} for t in tasks[:50]])
         
         prompt = TASK_DEPENDENCY_REVIEW_PROMPT.format(tasks=tasks_text)
-        data = parse_json_with_recovery(
-            self.llm,
-            prompt,
-            agent_name="TaskDependency",
-            decompose_fn=_decompose_tasks_into_groups if tasks_json else None,
-            merge_fn=_merge_task_dependency_results if tasks_json else None,
-            original_content=tasks_json if tasks_json else None,
-            chunk_prompt_template=TASK_DEPENDENCY_REVIEW_CHUNK_PROMPT if tasks_json else None,
+        raw_text = complete_text_with_continuation(
+            self.llm, prompt, agent_name="TaskDependency",
         )
-        
-        dependencies = data.get("dependencies") or []
-        circular_risks = data.get("circular_risks") or []
-        critical_path = data.get("critical_path") or []
-        parallelizable = data.get("parallelizable") or []
+        data = parse_review_output(raw_text)
         issues = data.get("issues") or []
-        
+        recommendations = data.get("recommendations") or []
+        summary = data.get("summary", "Task dependency review complete.")
+        dependencies: List[Dict[str, Any]] = []
+        circular_risks: List[str] = []
+        critical_path: List[str] = []
+        parallelizable: List[List[str]] = []
         if not isinstance(issues, list):
             issues = [str(issues)] if issues else []
-        
+
         content_parts = ["# Task Dependency Analysis\n\n"]
-        
-        if critical_path:
-            content_parts.append("## Critical Path\n")
-            content_parts.append(" → ".join(critical_path))
-            content_parts.append("\n\n")
-        
-        if dependencies:
-            content_parts.append("## Dependencies\n")
-            for dep in dependencies:
-                if isinstance(dep, dict):
-                    from_task = dep.get("from_task", "")
-                    to_task = dep.get("to_task", "")
-                    dep_type = dep.get("type", "blocks")
-                    content_parts.append(f"- {from_task} --[{dep_type}]--> {to_task}\n")
+        content_parts.append(f"## Summary\n{summary}\n\n")
+        if issues:
+            content_parts.append("## Issues\n")
+            for issue in issues:
+                content_parts.append(f"- {issue}\n")
             content_parts.append("\n")
-        
-        if parallelizable:
-            content_parts.append("## Parallelization Opportunities\n")
-            for group in parallelizable:
-                if isinstance(group, list):
-                    content_parts.append(f"- {', '.join(group)}\n")
+        if recommendations:
+            content_parts.append("## Recommendations\n")
+            for rec in recommendations:
+                content_parts.append(f"- {rec}\n")
             content_parts.append("\n")
-        
-        if circular_risks:
-            content_parts.append("## Circular Dependency Risks\n")
-            for risk in circular_risks:
-                content_parts.append(f"- ⚠️ {risk}\n")
-            content_parts.append("\n")
-        
-        files = {}
-        if dependencies or critical_path:
+
+        files: Dict[str, str] = {}
+        if issues or recommendations or summary:
             files["plan/task_dependencies.md"] = "".join(content_parts)
-        
-        all_issues = issues + circular_risks
-        
+
         return ToolAgentPhaseOutput(
-            summary=data.get("summary", f"Analyzed {len(dependencies)} dependencies."),
-            issues=all_issues,
+            summary=summary,
+            issues=issues,
             files=files,
             metadata={
                 "dependencies": dependencies,

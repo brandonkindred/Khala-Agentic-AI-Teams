@@ -14,21 +14,63 @@ are included. Use the Product Requirements Analysis agent for spec validation.
 
 PLANNING_PROMPT = """You are a Product Planning expert. Using the spec and any prior review, produce a comprehensive product plan.
 
-Create a structured plan covering all aspects of the product. Respond with a JSON object only, with these exact keys:
+Respond using this EXACT format. Use the section markers exactly as shown.
 
-- "goals_vision": string (the product's goals and vision statement)
-- "constraints_limitations": string (technical and business constraints)
-- "key_features": list of strings (main features to be implemented)
-- "milestones": list of strings (project milestones with deliverables)
-- "architecture": string (high-level architecture overview)
-- "maintainability": string (code quality, testing, and maintenance considerations)
-- "security": string (security requirements and considerations)
-- "file_system": string (proposed file/folder structure)
-- "styling": string (UI/UX styling guidelines and design system)
-- "dependencies": list of strings (external libraries and dependencies)
-- "microservices": string (microservices breakdown if applicable, or "N/A" for monolithic)
-- "others": string (additional notes, edge cases, or considerations)
-- "summary": string (overall planning summary)
+## GOALS_VISION ##
+The product's goals and vision statement (one short paragraph).
+## END GOALS_VISION ##
+
+## CONSTRAINTS_LIMITATIONS ##
+Technical and business constraints.
+## END CONSTRAINTS_LIMITATIONS ##
+
+## KEY_FEATURES ##
+- Feature 1
+- Feature 2
+- Feature 3
+## END KEY_FEATURES ##
+
+## MILESTONES ##
+- Milestone 1 with deliverables
+- Milestone 2 with deliverables
+## END MILESTONES ##
+
+## ARCHITECTURE ##
+High-level architecture overview.
+## END ARCHITECTURE ##
+
+## MAINTAINABILITY ##
+Code quality, testing, and maintenance considerations.
+## END MAINTAINABILITY ##
+
+## SECURITY ##
+Security requirements and considerations.
+## END SECURITY ##
+
+## FILE_SYSTEM ##
+Proposed file/folder structure.
+## END FILE_SYSTEM ##
+
+## STYLING ##
+UI/UX styling guidelines and design system.
+## END STYLING ##
+
+## DEPENDENCIES ##
+- Library 1
+- Library 2
+## END DEPENDENCIES ##
+
+## MICROSERVICES ##
+Microservices breakdown if applicable, or "N/A" for monolithic.
+## END MICROSERVICES ##
+
+## OTHERS ##
+Additional notes, edge cases, or considerations.
+## END OTHERS ##
+
+## SUMMARY ##
+Overall planning summary (one short paragraph).
+## END SUMMARY ##
 
 Spec excerpt:
 ---
@@ -40,10 +82,20 @@ Prior review summary (if any): {review_summary}
 
 REVIEW_PROMPT = """You are reviewing planning assets for cohesion and alignment with the spec.
 
-Respond with a JSON object only:
-- "passed": boolean (true if assets are cohesive and align with spec)
-- "issues": list of strings (any issues found)
-- "summary": string
+Respond using this EXACT format:
+
+## PASSED ##
+true or false
+## END PASSED ##
+
+## ISSUES ##
+- Issue 1 (if any)
+- Issue 2 (if any)
+## END ISSUES ##
+
+## SUMMARY ##
+Brief summary of the review.
+## END SUMMARY ##
 
 Spec excerpt:
 ---
@@ -58,10 +110,20 @@ Artifacts to review:
 
 PROBLEM_SOLVING_PROMPT = """You are a problem-solving expert. Given review issues, suggest fixes.
 
-Respond with a JSON object only:
-- "fixes_applied": list of strings (description of each fix)
-- "resolved": boolean
-- "summary": string
+Respond using this EXACT format:
+
+## FIXES_APPLIED ##
+- Description of fix 1
+- Description of fix 2
+## END FIXES_APPLIED ##
+
+## RESOLVED ##
+true or false
+## END RESOLVED ##
+
+## SUMMARY ##
+Brief summary.
+## END SUMMARY ##
 
 Review issues: {issues}
 """
@@ -83,19 +145,29 @@ CURRENT PLANNING ARTIFACTS:
 {current_artifacts}
 ---
 
-Analyze this specific issue and provide a fix. If the issue requires updating a planning artifact file, provide the complete updated file content.
+Analyze this specific issue and provide a fix. If the issue requires updating a planning artifact file, provide the complete updated file content using the format below.
 
-Respond with a JSON object only:
-{{
-  "root_cause": "explanation of why this issue exists",
-  "fix_description": "description of the fix being applied",
-  "resolved": true or false,
-  "file_updates": {{
-    "plan/filename.md": "complete updated file content if needed"
-  }}
-}}
+Respond using this EXACT format:
 
-If no file updates are needed (issue is informational or already addressed), set "file_updates" to an empty object and explain in "fix_description".
+## ROOT_CAUSE ##
+Explanation of why this issue exists.
+## END ROOT_CAUSE ##
+
+## FIX_DESCRIPTION ##
+Description of the fix being applied.
+## END FIX_DESCRIPTION ##
+
+## RESOLVED ##
+true or false
+## END RESOLVED ##
+
+## FILE_UPDATES ##
+### plan/filename.md ###
+Complete updated file content here (if needed). Use a new ### path ### block for each file.
+### END FILE ###
+## END FILE_UPDATES ##
+
+If no file updates are needed, leave ## FILE_UPDATES ## empty and explain in FIX_DESCRIPTION.
 """
 
 # ---------------------------------------------------------------------------

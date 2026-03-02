@@ -11,7 +11,8 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput
-from ..json_utils import parse_json_with_recovery, default_decompose_by_sections, complete_with_continuation
+from ...output_templates import parse_fix_output, parse_planning_tool_output
+from ..json_utils import complete_text_with_continuation
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
@@ -19,116 +20,72 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _merge_ui_design_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Merge UI design results from multiple chunks."""
-    merged: Dict[str, Any] = {
-        "design_tokens": {},
-        "components": [],
-        "layouts": [],
-        "breakpoints": {},
-        "accessibility": [],
-        "recommendations": [],
-        "summary": "",
-    }
-    summaries = []
+UI_DESIGN_PLANNING_PROMPT = """You are a UI Design expert. Create a UI design plan for the specification.
 
-    for r in results:
-        if isinstance(r.get("design_tokens"), dict):
-            for k, v in r["design_tokens"].items():
-                if k not in merged["design_tokens"]:
-                    merged["design_tokens"][k] = v
-                elif isinstance(v, list) and isinstance(merged["design_tokens"][k], list):
-                    merged["design_tokens"][k].extend(v)
-        if isinstance(r.get("components"), list):
-            for c in r["components"]:
-                if c not in merged["components"]:
-                    merged["components"].append(c)
-        if isinstance(r.get("layouts"), list):
-            for lay in r["layouts"]:
-                if lay not in merged["layouts"]:
-                    merged["layouts"].append(lay)
-        if isinstance(r.get("breakpoints"), dict):
-            merged["breakpoints"].update(r["breakpoints"])
-        if isinstance(r.get("accessibility"), list):
-            merged["accessibility"].extend(r["accessibility"])
-        if isinstance(r.get("recommendations"), list):
-            merged["recommendations"].extend(r["recommendations"])
-        if r.get("summary"):
-            summaries.append(str(r["summary"]))
+Respond using this EXACT format:
 
-    merged["summary"] = f"Merged {len(results)} sections. " + " ".join(summaries[:2])
-    return merged
+## COMPONENT_DESIGN ##
+ComponentName: purpose
+AnotherComponent: purpose
+## END COMPONENT_DESIGN ##
 
-UI_DESIGN_PLANNING_PROMPT = """You are a UI Design expert. Create a UI design plan for:
+## DATA_FLOW ##
+(optional) Brief data/design flow.
+## END DATA_FLOW ##
+
+## INTEGRATION_STRATEGY ##
+(optional) How UI integrates with backend.
+## END INTEGRATION_STRATEGY ##
+
+## RECOMMENDATIONS ##
+- UI recommendation 1
+- UI recommendation 2
+## END RECOMMENDATIONS ##
+
+## SUMMARY ##
+Brief summary.
+## END SUMMARY ##
 
 Specification:
 ---
 {spec_content}
 ---
-
-Plan for:
-1. Design system (colors, typography, spacing)
-2. Component library (buttons, forms, cards, etc.)
-3. Page layouts and templates
-4. Responsive breakpoints
-5. Accessibility considerations
-
-Respond with JSON:
-{{
-  "design_tokens": {{"colors": ["primary", "secondary"], "typography": ["heading", "body"], "spacing": ["sm", "md", "lg"]}},
-  "components": ["Button", "Card", "Form", "Modal", "Navigation"],
-  "layouts": ["Dashboard", "Detail", "List", "Auth"],
-  "breakpoints": {{"mobile": "320px", "tablet": "768px", "desktop": "1024px"}},
-  "accessibility": ["WCAG 2.1 AA", "keyboard navigation", "screen reader support"],
-  "recommendations": ["ui design recommendations"],
-  "summary": "brief summary"
-}}
 """
 
-UI_DESIGN_PLANNING_CHUNK_PROMPT = """You are a UI Design expert. Analyze this SECTION for UI design:
+UI_DESIGN_FIX_SINGLE_ISSUE_PROMPT = """You are a UI Design expert. Fix this specific issue. Use this EXACT format:
 
-SECTION:
----
-{chunk_content}
----
+## ROOT_CAUSE ##
+Why this issue exists.
+## END ROOT_CAUSE ##
 
-Respond with concise JSON for THIS section only:
-{{
-  "design_tokens": {{"relevant": "tokens"}},
-  "components": ["components needed"],
-  "layouts": ["layouts needed"],
-  "accessibility": ["considerations"],
-  "recommendations": ["recommendations"],
-  "summary": "brief summary"
-}}
-"""
+## FIX_DESCRIPTION ##
+What you are changing to fix it.
+## END FIX_DESCRIPTION ##
 
-UI_DESIGN_FIX_SINGLE_ISSUE_PROMPT = """You are a UI Design expert. Fix this specific issue in the UI design artifacts.
+## RESOLVED ##
+true or false
+## END RESOLVED ##
+
+## FILE_UPDATES ##
+### plan/ui_design.md ###
+Complete updated file content here.
+### END FILE ###
+## END FILE_UPDATES ##
 
 ISSUE TO FIX:
 ---
 {issue}
 ---
 
-CURRENT UI DESIGN ARTIFACT:
+CURRENT ARTIFACT:
 ---
 {current_artifact}
 ---
 
-SPECIFICATION CONTEXT:
+SPEC CONTEXT:
 ---
 {spec_excerpt}
 ---
-
-Analyze and fix this issue. If the issue relates to design tokens, components, layouts, breakpoints, or accessibility, provide the complete updated file content.
-
-Respond with JSON:
-{{
-  "root_cause": "why this issue exists",
-  "fix_description": "what you are changing to fix it",
-  "resolved": true or false,
-  "updated_content": "the complete updated file content (or empty string if no change needed)"
-}}
 """
 
 
@@ -154,29 +111,26 @@ class UIDesignToolAgent:
         prompt = UI_DESIGN_PLANNING_PROMPT.format(
             spec_content=spec_content[:6000],
         )
-        data = parse_json_with_recovery(
-            self.llm,
-            prompt,
-            agent_name="UIDesign",
-            decompose_fn=default_decompose_by_sections,
-            merge_fn=_merge_ui_design_results,
-            original_content=spec_content,
-            chunk_prompt_template=UI_DESIGN_PLANNING_CHUNK_PROMPT,
+        raw_text = complete_text_with_continuation(
+            self.llm, prompt, agent_name="UIDesign",
         )
+        data = parse_planning_tool_output(raw_text)
         
         recommendations = data.get("recommendations") or []
         if not isinstance(recommendations, list):
             recommendations = [str(recommendations)]
         
+        component_design = data.get("component_design") or []
+        components = [c.get("name", "") for c in component_design if isinstance(c, dict) and c.get("name")]
         return ToolAgentPhaseOutput(
             summary=data.get("summary", "UI Design planning complete."),
             recommendations=recommendations,
             metadata={
-                "design_tokens": data.get("design_tokens", {}),
-                "components": data.get("components", []),
-                "layouts": data.get("layouts", []),
-                "breakpoints": data.get("breakpoints", {}),
-                "accessibility": data.get("accessibility", []),
+                "design_tokens": {},
+                "components": components,
+                "layouts": [],
+                "breakpoints": {},
+                "accessibility": [],
             },
         )
 
@@ -297,27 +251,27 @@ class UIDesignToolAgent:
         )
 
         try:
-            raw = complete_with_continuation(
-                llm=self.llm,
-                prompt=prompt,
-                mode="json",
-                agent_name="UIDesign_FixSingleIssue",
+            raw_text = complete_text_with_continuation(
+                self.llm, prompt, agent_name="UIDesign_FixSingleIssue",
             )
-
-            if not isinstance(raw, dict):
-                return ToolAgentPhaseOutput(
-                    summary="Fix failed: invalid response format",
-                    resolved=False,
-                )
-
+            raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
             fix_desc = raw.get("fix_description", "")
             resolved = raw.get("resolved", False)
+            file_updates = raw.get("file_updates") or {}
+            if not updated_content and file_updates:
+                updated_content = next(iter(file_updates.values()), "")
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 files["plan/ui_design.md"] = updated_content
                 logger.info("UIDesign: fix applied — %s", fix_desc[:60])
+            elif file_updates:
+                for path, content in file_updates.items():
+                    if content and isinstance(content, str) and content.strip():
+                        files[path] = content
+                        logger.info("UIDesign: fix applied — %s", fix_desc[:60])
+                        break
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"UI design issue addressed: {issue[:50]}",

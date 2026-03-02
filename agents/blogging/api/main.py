@@ -8,11 +8,16 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import tempfile
 import threading
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+
+_blogging_root = Path(__file__).resolve().parent.parent
+if str(_blogging_root) not in sys.path:
+    sys.path.insert(0, str(_blogging_root))
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -115,6 +120,14 @@ class ResearchAndReviewRequest(BaseModel):
         ge=1,
         le=50,
         description="Maximum number of references to return.",
+    )
+    work_dir: Optional[str] = Field(
+        None,
+        description="Optional directory path for persisting research/outline artifacts.",
+    )
+    run_id: Optional[str] = Field(
+        None,
+        description="Optional run ID; artifacts are written to a subdir under RUN_ARTIFACTS_BASE when set.",
     )
 
 

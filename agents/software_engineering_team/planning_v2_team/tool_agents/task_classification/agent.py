@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from shared.models import PlanningHierarchy
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput
-from ..json_utils import parse_json_with_recovery, complete_with_continuation
+from ...output_templates import parse_fix_output, parse_task_classification_output
+from ..json_utils import complete_text_with_continuation
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
@@ -65,81 +66,55 @@ def _merge_task_classification_results(results: List[Dict[str, Any]]) -> Dict[st
     merged["summary"] = (
         f"Classified {len(merged['classifications'])} tasks. " + " ".join(summaries[:2])
     )
+    if merged["classifications"]:
+        merged["classifications"] = dedupe_by_key(
+            merged["classifications"],
+            key_fn=lambda x: x.get("task_id", "") if isinstance(x, dict) else str(x),
+        )
     return merged
 
-TASK_CLASSIFICATION_PROMPT = """You are a Task Classification expert. Classify these tasks into execution teams.
+TASK_CLASSIFICATION_PROMPT = """You are a Task Classification expert. Classify each task into one team: frontend, backend, devops, qa.
+
+Respond using this EXACT format:
+
+## CLASSIFICATIONS ##
+TASK-1 | frontend | Login UI components
+TASK-2 | backend | API endpoint
+## END CLASSIFICATIONS ##
+
+## SUMMARY ##
+Brief summary.
+## END SUMMARY ##
 
 Tasks to classify:
 ---
 {tasks}
 ---
-
-For each task, determine the appropriate execution team:
-- frontend: UI components, user interactions, styling, client-side logic
-- backend: API endpoints, business logic, database operations, server-side processing
-- devops: CI/CD, infrastructure, deployment, monitoring
-- qa: testing, quality assurance, test automation
-
-Respond with JSON:
-{{
-  "classifications": [
-    {{"task_id": "TASK-1", "team": "frontend|backend|devops|qa", "reason": "brief reason"}}
-  ],
-  "team_summary": {{
-    "frontend": 5,
-    "backend": 8,
-    "devops": 2,
-    "qa": 3
-  }},
-  "summary": "brief summary"
-}}
 """
 
-TASK_CLASSIFICATION_CHUNK_PROMPT = """You are a Task Classification expert. Classify these tasks into teams:
+TASK_CLASSIFICATION_FIX_SINGLE_ISSUE_PROMPT = """You are a Task Classification expert. Fix this issue. Use this EXACT format:
 
-TASKS:
----
-{chunk_content}
----
+## ROOT_CAUSE ##
+Why this issue exists.
+## END ROOT_CAUSE ##
 
-Teams: frontend, backend, devops, qa
+## FIX_DESCRIPTION ##
+What you are changing to fix it.
+## END FIX_DESCRIPTION ##
 
-Respond with concise JSON:
-{{
-  "classifications": [
-    {{"task_id": "TASK-1", "team": "frontend|backend|devops|qa", "reason": "brief reason"}}
-  ],
-  "team_summary": {{"frontend": 0, "backend": 0, "devops": 0, "qa": 0}},
-  "summary": "brief summary"
-}}
-"""
+## RESOLVED ##
+true or false
+## END RESOLVED ##
 
-TASK_CLASSIFICATION_FIX_SINGLE_ISSUE_PROMPT = """You are a Task Classification expert. Fix this specific issue in the task classification artifacts.
+## FILE_UPDATES ##
+### plan/task_classification.md ###
+Complete updated file content here.
+### END FILE ###
+## END FILE_UPDATES ##
 
-ISSUE TO FIX:
----
-{issue}
----
-
-CURRENT TASK CLASSIFICATION ARTIFACT:
----
-{current_artifact}
----
-
-SPECIFICATION CONTEXT:
----
-{spec_excerpt}
----
-
-Analyze and fix this issue. If the issue relates to task team assignments or classification, provide the complete updated file content.
-
-Respond with JSON:
-{{
-  "root_cause": "why this issue exists",
-  "fix_description": "what you are changing to fix it",
-  "resolved": true or false,
-  "updated_content": "the complete updated file content (or empty string if no change needed)"
-}}
+ISSUE: --- {issue} ---
+CURRENT ARTIFACT: --- {current_artifact} ---
+SPEC: --- {spec_excerpt} ---
 """
 
 
@@ -226,24 +201,19 @@ class TaskClassificationToolAgent:
             f"- {t['id']}: {t['title']} - {t['description'][:100]}"
             for t in tasks[:50]
         )
-        tasks_json = json.dumps([{"id": t["id"], "title": t["title"], "description": t["description"][:100]} for t in tasks[:50]])
-        
         prompt = TASK_CLASSIFICATION_PROMPT.format(tasks=tasks_text)
-        data = parse_json_with_recovery(
-            self.llm,
-            prompt,
-            agent_name="TaskClassification",
-            decompose_fn=_decompose_tasks_into_batches,
-            merge_fn=_merge_task_classification_results,
-            original_content=tasks_json,
-            chunk_prompt_template=TASK_CLASSIFICATION_CHUNK_PROMPT,
+        raw_text = complete_text_with_continuation(
+            self.llm, prompt, agent_name="TaskClassification",
         )
-        
+        data = parse_task_classification_output(raw_text)
         classifications = data.get("classifications") or []
-        team_summary = data.get("team_summary") or {}
-        
+        team_summary: Dict[str, int] = {}
+        for c in classifications:
+            if isinstance(c, dict):
+                team = c.get("team", "backend")
+                team_summary[team] = team_summary.get(team, 0) + 1
+
         content_parts = ["# Task Classification\n\n"]
-        
         if team_summary:
             content_parts.append("## Team Summary\n")
             for team, count in team_summary.items():
@@ -304,27 +274,27 @@ class TaskClassificationToolAgent:
         )
 
         try:
-            raw = complete_with_continuation(
-                llm=self.llm,
-                prompt=prompt,
-                mode="json",
-                agent_name="TaskClassification_FixSingleIssue",
+            raw_text = complete_text_with_continuation(
+                self.llm, prompt, agent_name="TaskClassification_FixSingleIssue",
             )
-
-            if not isinstance(raw, dict):
-                return ToolAgentPhaseOutput(
-                    summary="Fix failed: invalid response format",
-                    resolved=False,
-                )
-
+            raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
             fix_desc = raw.get("fix_description", "")
             resolved = raw.get("resolved", False)
+            file_updates = raw.get("file_updates") or {}
+            if not updated_content and file_updates:
+                updated_content = next(iter(file_updates.values()), "")
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 files["plan/task_classification.md"] = updated_content
                 logger.info("TaskClassification: fix applied — %s", fix_desc[:60])
+            elif file_updates:
+                for path, content in file_updates.items():
+                    if content and isinstance(content, str) and content.strip():
+                        files[path] = content
+                        logger.info("TaskClassification: fix applied — %s", fix_desc[:60])
+                        break
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"Task classification issue addressed: {issue[:50]}",

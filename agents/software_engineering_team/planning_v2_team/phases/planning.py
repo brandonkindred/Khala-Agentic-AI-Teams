@@ -17,7 +17,9 @@ from shared.llm import LLMClient
 from shared.models import PlanningHierarchy
 
 from ..models import PlanningPhaseResult, SpecReviewResult, ToolAgentKind, ToolAgentPhaseInput
+from ..output_templates import parse_planning_output
 from ..prompts import PLANNING_PROMPT
+from ..tool_agents.json_utils import complete_text_with_continuation
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +179,12 @@ def run_planning(
         review_summary=review_summary[:1000],
     )
     try:
-        raw = llm.complete_json(prompt)
+        raw_text = complete_text_with_continuation(
+            llm=llm,
+            prompt=prompt,
+            agent_name="PlanningV2_Planning",
+        )
+        raw = parse_planning_output(raw_text)
         result = _parse_planning_response(raw)
 
         init_count = len(hierarchy.initiatives) if hierarchy else 0

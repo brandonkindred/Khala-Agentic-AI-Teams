@@ -13,7 +13,6 @@ import json
 import logging
 import re
 import time
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -38,6 +37,7 @@ from planning_v2_team.tool_agents.json_utils import (
     parse_json_with_recovery,
     default_decompose_by_sections,
 )
+from shared.deduplication import dedupe_strings as _dedupe_items
 
 if TYPE_CHECKING:
     from shared.llm import LLMClient
@@ -49,41 +49,6 @@ MAX_ITERATIONS = 100
 MAX_DECOMPOSITION_DEPTH = 20
 MAX_ISSUES = 10
 MAX_GAPS = 10
-
-
-def _dedupe_items(items: List[str], similarity_threshold: float = 0.85) -> List[str]:
-    """Remove near-duplicate items from a list based on string similarity.
-    
-    Uses SequenceMatcher to detect items that are variations of the same concern.
-    Keeps the first occurrence (typically more complete) and discards similar ones.
-    
-    The threshold of 0.85 catches obvious duplicates (same sentence with minor word changes)
-    while preserving items that follow similar patterns but address different topics.
-    
-    Args:
-        items: List of string items to deduplicate.
-        similarity_threshold: Items with similarity >= this value are considered duplicates (0.0-1.0).
-    
-    Returns:
-        Deduplicated list preserving order.
-    """
-    if not items:
-        return items
-    
-    unique: List[str] = []
-    for item in items:
-        if not isinstance(item, str):
-            continue
-        is_duplicate = False
-        item_lower = item.lower()
-        for existing in unique:
-            ratio = SequenceMatcher(None, item_lower, existing.lower()).ratio()
-            if ratio >= similarity_threshold:
-                is_duplicate = True
-                break
-        if not is_duplicate:
-            unique.append(item)
-    return unique
 
 
 # ---------------------------------------------------------------------------

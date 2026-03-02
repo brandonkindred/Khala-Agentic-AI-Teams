@@ -276,8 +276,10 @@
         <div class="dag-container">
           <!-- Top Level: Main Phases in a horizontal row -->
           <div class="dag-main-phases">
-            @for (phase of phases; track phase.id; let isFirst = $first; let isLast = $last) {
-              <div class="dag-phase-column">
+            @for (phase of phases; track phase.id; let isFirst = $first; let isLast = $last; let i = $index) {
+              <div class="dag-phase-column"
+                   [class.has-connector]="!isLast"
+                   [class.next-completed]="!isLast && phases[i + 1].status === 'completed'">
                 <!-- Phase node -->
                 <div class="dag-node-wrapper"
                      [title]="phase.label"
@@ -418,13 +420,6 @@
                   </div>
                 }
               </div>
-
-              <!-- Horizontal connector between main phases -->
-              @if (!isLast) {
-                <div class="dag-phase-connector">
-                  <div class="dag-connector-line-horizontal"></div>
-                </div>
-              }
             }
           </div>
         </div>

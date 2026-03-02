@@ -28,6 +28,7 @@ from ..models import (
     ToolAgentKind,
     ToolAgentPhaseInput,
 )
+from ..output_templates import parse_fix_output
 from ..prompts import PROBLEM_SOLVING_PROMPT, PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 from ..tool_agents.json_utils import complete_with_continuation
 
@@ -203,35 +204,33 @@ def run_problem_solving(
                     current_artifacts=_format_artifacts_for_prompt(current_files),
                 )
 
-                raw = complete_with_continuation(
+                raw_text = complete_with_continuation(
                     llm=llm,
                     prompt=prompt,
-                    mode="json",
                     agent_name=f"PlanningV2_ProblemSolving_Issue{issue_idx + 1}",
                 )
+                raw = parse_fix_output(raw_text)
+                fix_desc = raw.get("fix_description", "")
+                file_updates = raw.get("file_updates") or {}
 
-                if isinstance(raw, dict):
-                    fix_desc = raw.get("fix_description", "")
-                    file_updates = raw.get("file_updates") or {}
+                if file_updates and isinstance(file_updates, dict):
+                    for rel_path, content in file_updates.items():
+                        if isinstance(content, str) and content.strip():
+                            full_path = repo_path / rel_path
+                            full_path.parent.mkdir(parents=True, exist_ok=True)
+                            full_path.write_text(content, encoding="utf-8")
+                            current_files[rel_path] = content
+                            logger.info(
+                                "Planning-v2 Problem-solving: LLM updated %s",
+                                rel_path,
+                            )
 
-                    if file_updates and isinstance(file_updates, dict):
-                        for rel_path, content in file_updates.items():
-                            if isinstance(content, str) and content.strip():
-                                full_path = repo_path / rel_path
-                                full_path.parent.mkdir(parents=True, exist_ok=True)
-                                full_path.write_text(content, encoding="utf-8")
-                                current_files[rel_path] = content
-                                logger.info(
-                                    "Planning-v2 Problem-solving: LLM updated %s",
-                                    rel_path,
-                                )
+                    issue_resolved = True
+                    fix_summary = fix_desc or f"LLM fix applied for: {issue_short}"
 
-                        issue_resolved = True
-                        fix_summary = fix_desc or f"LLM fix applied for: {issue_short}"
-
-                    elif raw.get("resolved"):
-                        issue_resolved = True
-                        fix_summary = fix_desc or "Issue marked as resolved by LLM"
+                elif raw.get("resolved"):
+                    issue_resolved = True
+                    fix_summary = fix_desc or "Issue marked as resolved by LLM"
 
             except Exception as e:
                 logger.warning(

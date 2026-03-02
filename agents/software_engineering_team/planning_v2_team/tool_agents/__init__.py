@@ -12,7 +12,7 @@ Product Planning Tool Agents for planning-v2 team.
 - TaskDependencyToolAgent
 """
 
-from .json_utils import parse_json_with_recovery
+from .json_utils import complete_text_with_continuation, complete_with_continuation
 from .system_design import SystemDesignToolAgent
 from .architecture import ArchitectureToolAgent
 from .user_story import UserStoryToolAgent
@@ -23,7 +23,8 @@ from .task_classification import TaskClassificationToolAgent
 from .task_dependency import TaskDependencyToolAgent
 
 __all__ = [
-    "parse_json_with_recovery",
+    "complete_text_with_continuation",
+    "complete_with_continuation",
     "SystemDesignToolAgent",
     "ArchitectureToolAgent",
     "UserStoryToolAgent",
