@@ -1,11 +1,15 @@
 """
-Planning-V2 team orchestrator: 3-layer architecture with 5-phase state machine.
+Planning-V2 team orchestrator: 3-layer architecture with 4-phase state machine.
 
 Layer 1: PlanningV2ProductLead (top) - handles spec intake, inspiration, feedback
 Layer 2: PlanningV2PlanningAgent (middle) - orchestrates 8 tool agents across phases
-Layer 3: Tool Agents (bottom) - 8 specialized agents participating in 5 phases
+Layer 3: Tool Agents (bottom) - 8 specialized agents participating in phases
 
-Phases: Planning → Implementation → Review → Problem-solving → Deliver
+Phases: Planning → Implementation → Review → Deliver
+
+When Review finds issues, they are passed back to Implementation for fixing.
+When tool agents raise clarification questions (e.g., deployment target), they
+are surfaced to the user via the Open Questions UI.
 
 This team expects to receive a pre-validated, complete specification. Use the
 Product Requirements Analysis agent or similar upstream process to validate
@@ -25,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from shared.llm import LLMClient
 from shared.models import PlanningHierarchy
+from shared.job_store import add_pending_questions, is_waiting_for_answers
 
 from .models import (
     DeliverPhaseResult,
@@ -44,6 +49,9 @@ from .phases.review import run_review
 from .phases.deliver import run_deliver
 
 logger = logging.getLogger(__name__)
+
+CLARIFICATION_POLL_INTERVAL = 5.0
+MAX_CLARIFICATION_WAIT_SECONDS = 3600
 
 # Phase order for completed_phases and progress (snake_case for API/UI)
 PHASE_ORDER: List[str] = [
@@ -108,6 +116,69 @@ MAX_REVIEW_ITERATIONS = 100
 def _active_roles_for_phase(phase: Phase) -> List[str]:
     """Return list of role names (snake_case) for the current phase."""
     return [r.value for r in PHASE_ROLES.get(phase, [])]
+
+
+def _convert_clarifications_to_pending_questions(
+    clarification_questions: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Convert tool agent clarification questions to pending question format.
+    
+    Tool agents produce questions in the format:
+        {"source": "devops", "question_text": "What is the deployment target?"}
+    
+    This converts them to the job_store pending question format with sensible defaults.
+    """
+    pending: List[Dict[str, Any]] = []
+    for q in clarification_questions:
+        source = q.get("source", "unknown")
+        question_text = q.get("question_text", "")
+        if not question_text:
+            continue
+        
+        question_id = f"clarify-{source}-{uuid.uuid4().hex[:8]}"
+        
+        options = _generate_options_for_question(question_text, source)
+        
+        pending.append({
+            "id": question_id,
+            "question_text": question_text,
+            "context": f"This question was raised by the {source.upper()} agent during planning.",
+            "options": options,
+            "allow_multiple": False,
+            "required": True,
+            "source": f"planning_v2_{source}",
+            "category": "clarification",
+            "priority": "medium",
+        })
+    return pending
+
+
+def _generate_options_for_question(question_text: str, source: str) -> List[Dict[str, Any]]:
+    """Generate sensible default options based on the question content."""
+    question_lower = question_text.lower()
+    
+    if source == "devops":
+        if "deployment" in question_lower or "deploy" in question_lower:
+            return [
+                {"id": "aws", "label": "AWS (EC2/ECS/Lambda)", "is_default": False, "rationale": "Popular cloud provider", "confidence": 0.0},
+                {"id": "gcp", "label": "Google Cloud Platform", "is_default": False, "rationale": "Popular cloud provider", "confidence": 0.0},
+                {"id": "azure", "label": "Microsoft Azure", "is_default": False, "rationale": "Popular cloud provider", "confidence": 0.0},
+                {"id": "heroku", "label": "Heroku", "is_default": False, "rationale": "Simple PaaS option", "confidence": 0.0},
+                {"id": "digitalocean", "label": "DigitalOcean", "is_default": False, "rationale": "Developer-friendly hosting", "confidence": 0.0},
+                {"id": "vercel", "label": "Vercel", "is_default": False, "rationale": "Good for frontend/JAMstack", "confidence": 0.0},
+                {"id": "docker", "label": "Docker/Kubernetes (self-hosted)", "is_default": False, "rationale": "Container-based deployment", "confidence": 0.0},
+                {"id": "other", "label": "Other (specify in text field)", "is_default": False, "rationale": "", "confidence": 0.0},
+            ]
+        if "ci" in question_lower or "continuous" in question_lower:
+            return [
+                {"id": "github_actions", "label": "GitHub Actions", "is_default": False, "rationale": "Integrated with GitHub", "confidence": 0.0},
+                {"id": "gitlab_ci", "label": "GitLab CI/CD", "is_default": False, "rationale": "Integrated with GitLab", "confidence": 0.0},
+                {"id": "jenkins", "label": "Jenkins", "is_default": False, "rationale": "Traditional CI/CD server", "confidence": 0.0},
+                {"id": "circleci", "label": "CircleCI", "is_default": False, "rationale": "Cloud CI service", "confidence": 0.0},
+                {"id": "other", "label": "Other (specify in text field)", "is_default": False, "rationale": "", "confidence": 0.0},
+            ]
+    
+    return [{"id": "other", "label": "Provide answer in text field", "is_default": True, "rationale": "", "confidence": 0.0}]
 
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
@@ -191,7 +262,6 @@ class PlanningV2PlanningAgent:
         planning_result: Optional[PlanningPhaseResult] = None
         implementation_result: Optional[ImplementationPhaseResult] = None
         review_result: Optional[ReviewPhaseResult] = None
-        problem_solving_result: Optional[ProblemSolvingPhaseResult] = None
         deliver_result: Optional[DeliverPhaseResult] = None
 
         # ── Phase 1: Planning ──────────────────────────────────────────────
@@ -220,6 +290,38 @@ class PlanningV2PlanningAgent:
             logger.error("Planning-v2: %s", result.failure_reason)
             return result
         _update_job(current_phase=Phase.PLANNING.value, progress=35)
+
+        # ── Handle Clarification Questions from Tool Agents ─────────────────
+        if planning_result.clarification_questions and job_id:
+            logger.info(
+                "Planning-v2: Tool agents raised %d clarification questions",
+                len(planning_result.clarification_questions),
+            )
+            pending_questions = _convert_clarifications_to_pending_questions(
+                planning_result.clarification_questions
+            )
+            if pending_questions:
+                add_pending_questions(job_id, pending_questions)
+                _update_job(
+                    waiting_for_answers=True,
+                    status_text=f"Waiting for answers to {len(pending_questions)} question(s)",
+                )
+                logger.info(
+                    "Planning-v2: Sent %d clarification questions to Open Questions UI",
+                    len(pending_questions),
+                )
+                
+                wait_start = time.time()
+                while time.time() - wait_start < MAX_CLARIFICATION_WAIT_SECONDS:
+                    if not is_waiting_for_answers(job_id):
+                        logger.info("Planning-v2: Received answers to clarification questions")
+                        break
+                    time.sleep(CLARIFICATION_POLL_INTERVAL)
+                else:
+                    logger.warning(
+                        "Planning-v2: Timeout waiting for clarification answers after %ds",
+                        MAX_CLARIFICATION_WAIT_SECONDS,
+                    )
 
         # ── Phases 2–3: Implementation → Review (loop until review passes) ─
         review_result = None
