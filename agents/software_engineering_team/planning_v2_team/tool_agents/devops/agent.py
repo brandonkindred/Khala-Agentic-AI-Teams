@@ -8,6 +8,7 @@ Focuses on CI/CD pipelines, infrastructure, and deployment planning.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput
@@ -152,12 +153,11 @@ class DevOpsToolAgent:
 
     def execute(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Implementation phase: generate or update DevOps artifacts.
-        
-        If review_issues are provided, this agent handles fixes first.
-        Only regenerates the document if it doesn't already exist.
+        Writes to disk as fixes are applied; returns files_written so implementation phase does not overwrite.
         """
-        all_files: Dict[str, str] = {}
         fixes_applied: List[str] = []
+        files_written: List[str] = []
+        current_files: Dict[str, str] = dict(inp.current_files or {})
         
         devops_issues = [
             i for i in inp.review_issues
@@ -166,22 +166,39 @@ class DevOpsToolAgent:
         
         if devops_issues and self.llm:
             logger.info("DevOps: handling %d review issues", len(devops_issues))
+            fix_inp = inp.model_copy(update={"current_files": current_files})
             for issue in devops_issues:
-                result = self.fix_single_issue(issue, inp)
+                result = self.fix_single_issue(issue, fix_inp)
                 if result.files:
-                    all_files.update(result.files)
+                    repo = Path(inp.repo_path or ".")
+                    for rel_path, content in result.files.items():
+                        full_path = repo / rel_path
+                        full_path.parent.mkdir(parents=True, exist_ok=True)
+                        full_path.write_text(content, encoding="utf-8")
+                        if rel_path not in files_written:
+                            files_written.append(rel_path)
+                        current_files[rel_path] = content
+                    fix_inp = inp.model_copy(update={"current_files": current_files})
                     fixes_applied.append(result.summary)
             logger.info("DevOps: fixed %d/%d issues", len(fixes_applied), len(devops_issues))
         
         existing_doc = inp.current_files.get("plan/devops.md") if inp.current_files else None
-        if existing_doc or all_files.get("plan/devops.md"):
+        if existing_doc and not devops_issues:
+            return ToolAgentPhaseOutput(
+                summary="DevOps artifacts unchanged (file exists, no review issues).",
+                files={},
+                recommendations=[],
+                files_written=[],
+            )
+        if files_written:
             summary = "DevOps artifacts updated."
             if fixes_applied:
                 summary = f"DevOps artifacts updated. Fixed {len(fixes_applied)} review issues."
             return ToolAgentPhaseOutput(
                 summary=summary,
-                files=all_files,
+                files={},
                 recommendations=fixes_applied if fixes_applied else [],
+                files_written=files_written,
             )
         
         pipeline_stages = inp.metadata.get("pipeline_stages", []) if inp.metadata else []
@@ -220,11 +237,18 @@ class DevOpsToolAgent:
             content_parts.append("\n")
         
         if pipeline_stages or infrastructure:
-            all_files["plan/devops.md"] = "".join(content_parts)
+            rel_path = "plan/devops.md"
+            content = "".join(content_parts)
+            repo = Path(inp.repo_path or ".")
+            full_path = repo / rel_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(content, encoding="utf-8")
+            files_written.append(rel_path)
         
         return ToolAgentPhaseOutput(
             summary="DevOps artifacts generated.",
-            files=all_files,
+            files={},
+            files_written=files_written,
         )
 
     def fix_single_issue(self, issue: str, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
