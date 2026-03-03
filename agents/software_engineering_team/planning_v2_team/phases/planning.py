@@ -10,8 +10,9 @@ and returns them in PlanningPhaseResult for the orchestrator to surface to the u
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from software_engineering_team.shared.llm import LLMClient
 from software_engineering_team.shared.models import PlanningHierarchy
@@ -101,78 +102,63 @@ def run_planning(
         repo_path=str(repo_path),
         spec_review_result=spec_review_result,
     )
-    
+
+    participating_agents = [
+        ToolAgentKind.SYSTEM_DESIGN,
+        ToolAgentKind.ARCHITECTURE,
+        ToolAgentKind.USER_STORY,
+        ToolAgentKind.DEVOPS,
+        ToolAgentKind.UI_DESIGN,
+    ]
+
+    def _run_one_plan(agent_kind: ToolAgentKind) -> Tuple[ToolAgentKind, Any, Optional[Exception]]:
+        agent = tool_agents.get(agent_kind) if tool_agents else None
+        if agent and hasattr(agent, "plan"):
+            try:
+                result = agent.plan(tool_agent_input)
+                return (agent_kind, result, None)
+            except Exception as e:
+                return (agent_kind, None, e)
+        return (agent_kind, None, None)
+
     if tool_agents:
-        system_design_agent = tool_agents.get(ToolAgentKind.SYSTEM_DESIGN)
-        if system_design_agent and hasattr(system_design_agent, "plan"):
-            try:
-                sd_result = system_design_agent.plan(tool_agent_input)
-                all_recommendations.extend(sd_result.recommendations)
-                metadata["system_design"] = sd_result.metadata
-                logger.info("Planning: SystemDesign provided %d recommendations", len(sd_result.recommendations))
-            except Exception as e:
-                logger.warning(
-                    "SystemDesign plan failed: %s. Next step -> Continuing with other planning agents",
-                    e,
-                )
-        
-        architecture_agent = tool_agents.get(ToolAgentKind.ARCHITECTURE)
-        if architecture_agent and hasattr(architecture_agent, "plan"):
-            try:
-                arch_result = architecture_agent.plan(tool_agent_input)
-                all_recommendations.extend(arch_result.recommendations)
-                metadata["architecture"] = arch_result.metadata
-                logger.info("Planning: Architecture provided %d recommendations", len(arch_result.recommendations))
-            except Exception as e:
-                logger.warning(
-                    "Architecture plan failed: %s. Next step -> Continuing with other planning agents",
-                    e,
-                )
-        
-        user_story_agent = tool_agents.get(ToolAgentKind.USER_STORY)
-        if user_story_agent and hasattr(user_story_agent, "plan"):
-            try:
-                us_result = user_story_agent.plan(tool_agent_input)
-                all_recommendations.extend(us_result.recommendations)
-                if us_result.hierarchy:
-                    hierarchy = us_result.hierarchy
-                    logger.info("Planning: UserStory created hierarchy with %d initiatives", len(hierarchy.initiatives))
-            except Exception as e:
-                logger.warning(
-                    "UserStory plan failed: %s. Next step -> Continuing with other planning agents",
-                    e,
-                )
-        
-        devops_agent = tool_agents.get(ToolAgentKind.DEVOPS)
-        if devops_agent and hasattr(devops_agent, "plan"):
-            try:
-                devops_result = devops_agent.plan(tool_agent_input)
-                all_recommendations.extend(devops_result.recommendations)
-                metadata["devops"] = devops_result.metadata
-                logger.info("Planning: DevOps provided %d recommendations", len(devops_result.recommendations))
-                devops_questions = _collect_clarification_questions("devops", devops_result.metadata)
-                if devops_questions:
-                    clarification_questions.extend(devops_questions)
-                    logger.info("Planning: DevOps raised %d clarification questions", len(devops_questions))
-            except Exception as e:
-                logger.warning(
-                    "DevOps plan failed: %s. Next step -> Continuing with other planning agents",
-                    e,
-                )
-        
-        ui_design_agent = tool_agents.get(ToolAgentKind.UI_DESIGN)
-        if ui_design_agent and hasattr(ui_design_agent, "plan"):
-            try:
-                ui_result = ui_design_agent.plan(tool_agent_input)
-                all_recommendations.extend(ui_result.recommendations)
-                metadata["ui_design"] = ui_result.metadata
-                logger.info("Planning: UIDesign provided %d recommendations", len(ui_result.recommendations))
-            except Exception as e:
-                logger.warning(
-                    "UIDesign plan failed: %s. Next step -> Continuing to LLM synthesis",
-                    e,
-                )
-    
+        with ThreadPoolExecutor(max_workers=len(participating_agents)) as executor:
+            futures = {
+                executor.submit(_run_one_plan, kind): kind
+                for kind in participating_agents
+            }
+            for future in as_completed(futures):
+                agent_kind, result, exc = future.result()
+                if exc:
+                    logger.warning(
+                        "Planning: %s plan failed: %s. Next step -> Continuing with other planning agents",
+                        agent_kind.value,
+                        exc,
+                    )
+                    continue
+                if result:
+                    all_recommendations.extend(result.recommendations)
+                    metadata[agent_kind.value] = result.metadata
+                    logger.info(
+                        "Planning: %s provided %d recommendations",
+                        agent_kind.value,
+                        len(result.recommendations),
+                    )
+                    questions = _collect_clarification_questions(agent_kind.value, result.metadata)
+                    if questions:
+                        clarification_questions.extend(questions)
+                        logger.info(
+                            "Planning: %s raised %d clarification questions",
+                            agent_kind.value,
+                            len(questions),
+                        )
+                    if agent_kind == ToolAgentKind.USER_STORY and result.hierarchy:
+                        hierarchy = result.hierarchy
+                        logger.info(
+                            "Planning: UserStory created hierarchy with %d initiatives",
+                            len(hierarchy.initiatives),
+                        )
+
     review_summary = (spec_review_result.summary if spec_review_result else "") or "None"
     prompt = PLANNING_PROMPT.format(
         spec_content=(spec_content or "")[:8000],

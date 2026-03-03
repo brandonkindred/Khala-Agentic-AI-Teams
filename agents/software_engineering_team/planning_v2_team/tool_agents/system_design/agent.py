@@ -159,7 +159,7 @@ true or false
 ## END RESOLVED ##
 
 ## FILE_UPDATES ##
-### plan/system_design.md ###
+### plan/planning_team/system_design.md ###
 Complete updated file content here.
 ### END FILE ###
 ## END FILE_UPDATES ##
@@ -228,7 +228,10 @@ class SystemDesignToolAgent:
         ]
         
         if design_issues:
-            logger.info("SystemDesign: handling %d review issues", len(design_issues))
+            logger.info(
+                "SystemDesign: handling %d review issue(s) (will apply fixes and write updated artifacts to disk).",
+                len(design_issues),
+            )
             fix_inp = inp.model_copy(update={"current_files": current_files})
             for issue in design_issues:
                 result = self.fix_single_issue(issue, fix_inp)
@@ -238,14 +241,24 @@ class SystemDesignToolAgent:
                         full_path = repo / rel_path
                         full_path.parent.mkdir(parents=True, exist_ok=True)
                         full_path.write_text(content, encoding="utf-8")
+                        file_name = full_path.name
+                        logger.info(
+                            "SystemDesign: applied fix — writing to file: %s; full contents:\n%s",
+                            file_name,
+                            content,
+                        )
                         if rel_path not in files_written:
                             files_written.append(rel_path)
                         current_files[rel_path] = content
                     fix_inp = inp.model_copy(update={"current_files": current_files})
                     fixes_applied.append(result.summary)
-            logger.info("SystemDesign: fixed %d/%d issues", len(fixes_applied), len(design_issues))
+            logger.info(
+                "SystemDesign: fixed %d out of %d review issue(s) (all fixes written to planning artifacts).",
+                len(fixes_applied),
+                len(design_issues),
+            )
         
-        existing_design = (inp.current_files or {}).get("plan/system_design.md")
+        existing_design = (inp.current_files or {}).get("plan/planning_team/system_design.md")
         if existing_design and not design_issues:
             return ToolAgentPhaseOutput(
                 summary="System design artifacts unchanged (file exists, no review issues).",
@@ -279,8 +292,8 @@ class SystemDesignToolAgent:
             content_parts.append("## Integration Strategy\n")
             content_parts.append(f"{integration_strategy}\n\n")
         
-        if (component_design or data_flow) and "plan/system_design.md" not in files_written:
-            rel_path = "plan/system_design.md"
+        if (component_design or data_flow) and "plan/planning_team/system_design.md" not in files_written:
+            rel_path = "plan/planning_team/system_design.md"
             content = "".join(content_parts)
             repo = Path(inp.repo_path or ".")
             full_path = repo / rel_path
@@ -375,7 +388,7 @@ class SystemDesignToolAgent:
                 resolved=False,
             )
 
-        current_artifact = inp.current_files.get("plan/system_design.md", "")
+        current_artifact = inp.current_files.get("plan/planning_team/system_design.md", "")
         if not current_artifact:
             for path, content in inp.current_files.items():
                 if "system" in path.lower() or "design" in path.lower():
@@ -402,13 +415,13 @@ class SystemDesignToolAgent:
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
-                files["plan/system_design.md"] = updated_content
-                logger.info("SystemDesign: fix applied — %s", fix_desc[:60])
+                files["plan/planning_team/system_design.md"] = updated_content
+                logger.info("SystemDesign: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
                     if content and isinstance(content, str) and content.strip():
                         files[path] = content
-                        logger.info("SystemDesign: fix applied — %s", fix_desc[:60])
+                        logger.info("SystemDesign: fix applied (single-issue) — %s", fix_desc[:120])
                         break
 
             return ToolAgentPhaseOutput(

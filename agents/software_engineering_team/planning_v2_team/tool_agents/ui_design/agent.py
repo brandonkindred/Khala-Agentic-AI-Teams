@@ -68,7 +68,7 @@ true or false
 ## END RESOLVED ##
 
 ## FILE_UPDATES ##
-### plan/ui_design.md ###
+### plan/planning_team/ui_design.md ###
 Complete updated file content here.
 ### END FILE ###
 ## END FILE_UPDATES ##
@@ -149,7 +149,10 @@ class UIDesignToolAgent:
         ]
         
         if ui_issues and self.llm:
-            logger.info("UIDesign: handling %d review issues", len(ui_issues))
+            logger.info(
+                "UIDesign: handling %d review issue(s) (will apply fixes and write updated artifacts to disk).",
+                len(ui_issues),
+            )
             fix_inp = inp.model_copy(update={"current_files": current_files})
             for issue in ui_issues:
                 result = self.fix_single_issue(issue, fix_inp)
@@ -159,14 +162,24 @@ class UIDesignToolAgent:
                         full_path = repo / rel_path
                         full_path.parent.mkdir(parents=True, exist_ok=True)
                         full_path.write_text(content, encoding="utf-8")
+                        file_name = full_path.name
+                        logger.info(
+                            "UIDesign: applied fix — writing to file: %s; full contents:\n%s",
+                            file_name,
+                            content,
+                        )
                         if rel_path not in files_written:
                             files_written.append(rel_path)
                         current_files[rel_path] = content
                     fix_inp = inp.model_copy(update={"current_files": current_files})
                     fixes_applied.append(result.summary)
-            logger.info("UIDesign: fixed %d/%d issues", len(fixes_applied), len(ui_issues))
+            logger.info(
+                "UIDesign: fixed %d out of %d review issue(s) (all fixes written to planning artifacts).",
+                len(fixes_applied),
+                len(ui_issues),
+            )
         
-        existing_doc = inp.current_files.get("plan/ui_design.md") if inp.current_files else None
+        existing_doc = inp.current_files.get("plan/planning_team/ui_design.md") if inp.current_files else None
         if existing_doc and not ui_issues:
             return ToolAgentPhaseOutput(
                 summary="UI Design artifacts unchanged (file exists, no review issues).",
@@ -229,7 +242,7 @@ class UIDesignToolAgent:
             content_parts.append("\n")
         
         if design_tokens or components:
-            rel_path = "plan/ui_design.md"
+            rel_path = "plan/planning_team/ui_design.md"
             content = "".join(content_parts)
             repo = Path(inp.repo_path or ".")
             full_path = repo / rel_path
@@ -261,7 +274,7 @@ class UIDesignToolAgent:
 
         current_artifact = ""
         if inp.current_files:
-            current_artifact = inp.current_files.get("plan/ui_design.md", "")
+            current_artifact = inp.current_files.get("plan/planning_team/ui_design.md", "")
             if not current_artifact:
                 for path, content in inp.current_files.items():
                     if "ui_design" in path.lower():
@@ -288,13 +301,13 @@ class UIDesignToolAgent:
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
-                files["plan/ui_design.md"] = updated_content
-                logger.info("UIDesign: fix applied — %s", fix_desc[:60])
+                files["plan/planning_team/ui_design.md"] = updated_content
+                logger.info("UIDesign: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
                     if content and isinstance(content, str) and content.strip():
                         files[path] = content
-                        logger.info("UIDesign: fix applied — %s", fix_desc[:60])
+                        logger.info("UIDesign: fix applied (single-issue) — %s", fix_desc[:120])
                         break
 
             return ToolAgentPhaseOutput(

@@ -65,9 +65,9 @@ def _classify_issue(issue: str) -> ToolAgentKind:
 
 
 def _read_planning_artifacts(repo_path: Path) -> Dict[str, str]:
-    """Read planning artifacts from repo for problem-solving context."""
+    """Read planning artifacts from plan/planning_team for problem-solving context."""
     files: Dict[str, str] = {}
-    plan_dir = repo_path / "plan"
+    plan_dir = repo_path / "plan" / "planning_team"
     if plan_dir.exists():
         for f in plan_dir.glob("*.md"):
             try:
@@ -130,7 +130,7 @@ def run_problem_solving(
     current_files = _read_planning_artifacts(repo_path)
 
     logger.info(
-        "Planning-v2 Problem-solving: starting to fix %d issue(s)",
+        "Planning-v2 Problem-solving: starting to fix %d review issue(s) (will process each issue and apply fixes to planning artifacts).",
         total_issues,
     )
 
@@ -139,7 +139,7 @@ def run_problem_solving(
         issue_short = issue[:80]
 
         logger.info(
-            "Planning-v2 Problem-solving: fixing issue %d/%d (%d resolved, %d remaining) — %s",
+            "Planning-v2 Problem-solving: fixing issue %d/%d (%d resolved so far, %d remaining) — current issue: %s",
             issue_idx + 1,
             total_issues,
             resolved_count,
@@ -179,10 +179,12 @@ def run_problem_solving(
                         full_path.parent.mkdir(parents=True, exist_ok=True)
                         full_path.write_text(content, encoding="utf-8")
                         current_files[rel_path] = content
+                        file_name = Path(rel_path).name
                         logger.info(
-                            "Planning-v2 Problem-solving: %s updated %s",
+                            "Planning-v2 Problem-solving: applied fix via %s — writing to file: %s; full contents:\n%s",
                             agent_kind.value,
-                            rel_path,
+                            file_name,
+                            content,
                         )
 
                 issue_resolved = getattr(fix_result, "resolved", False) or bool(fix_result.files)
@@ -220,9 +222,11 @@ def run_problem_solving(
                             full_path.parent.mkdir(parents=True, exist_ok=True)
                             full_path.write_text(content, encoding="utf-8")
                             current_files[rel_path] = content
+                            file_name = Path(rel_path).name
                             logger.info(
-                                "Planning-v2 Problem-solving: LLM updated %s",
-                                rel_path,
+                                "Planning-v2 Problem-solving: applied fix via LLM — writing to file: %s; full contents:\n%s",
+                                file_name,
+                                content,
                             )
 
                     issue_resolved = True
@@ -243,24 +247,24 @@ def run_problem_solving(
             resolved_count += 1
             fixes_applied.append(fix_summary)
             logger.info(
-                "Planning-v2 Problem-solving: issue %d/%d RESOLVED — %s",
+                "Planning-v2 Problem-solving: issue %d/%d RESOLVED (fix applied successfully) — summary: %s",
                 issue_idx + 1,
                 total_issues,
-                fix_summary[:60],
+                fix_summary[:120],
             )
         else:
             unresolved_issues.append(issue)
             logger.warning(
-                "Planning-v2 Problem-solving: issue %d/%d UNRESOLVED — %s",
+                "Planning-v2 Problem-solving: issue %d/%d UNRESOLVED (no fix applied or fix failed) — issue description: %s",
                 issue_idx + 1,
                 total_issues,
-                issue_short,
+                issue[:160] if len(issue) > 160 else issue,
             )
 
     all_resolved = len(unresolved_issues) == 0
 
     logger.info(
-        "Planning-v2 Problem-solving complete: %d/%d issues resolved, %d unresolved",
+        "Planning-v2 Problem-solving phase complete: %d out of %d issues resolved successfully, %d issue(s) remain unresolved.",
         resolved_count,
         total_issues,
         len(unresolved_issues),

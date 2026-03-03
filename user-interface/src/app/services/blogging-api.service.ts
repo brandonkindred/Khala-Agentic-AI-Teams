@@ -10,6 +10,7 @@ import type {
   HealthResponse,
   BlogJobListItem,
   BlogJobStatusResponse,
+  StartJobResponse,
 } from '../models';
 
 /**
@@ -41,6 +42,28 @@ export class BloggingApiService {
   fullPipeline(request: FullPipelineRequest): Observable<FullPipelineResponse> {
     return this.http.post<FullPipelineResponse>(
       `${this.baseUrl}/full-pipeline`,
+      request
+    );
+  }
+
+  /**
+   * POST /full-pipeline-async
+   * Starts the full pipeline in the background. Returns job_id for polling.
+   */
+  startFullPipelineAsync(request: FullPipelineRequest): Observable<StartJobResponse> {
+    return this.http.post<StartJobResponse>(
+      `${this.baseUrl}/full-pipeline-async`,
+      request
+    );
+  }
+
+  /**
+   * POST /research-and-review-async
+   * Starts research and review in the background. Returns job_id for polling.
+   */
+  startResearchReviewAsync(request: ResearchAndReviewRequest): Observable<StartJobResponse> {
+    return this.http.post<StartJobResponse>(
+      `${this.baseUrl}/research-and-review-async`,
       request
     );
   }

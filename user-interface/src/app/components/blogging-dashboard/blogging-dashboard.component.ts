@@ -111,10 +111,27 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
     this.loading = true;
     this.error = null;
     this.researchReviewResult = null;
-    this.api.researchAndReview(request).subscribe({
+    this.api.startResearchReviewAsync(request).subscribe({
       next: (res) => {
-        this.researchReviewResult = res;
         this.loading = false;
+        this.api.getJobs(true).subscribe((jobs) => {
+          this.runningJobs = jobs;
+          const j = jobs.find((x) => x.job_id === res.job_id);
+          if (j) {
+            this.selectJob(j);
+          } else {
+            this.runningJobs = [
+              ...this.runningJobs,
+              {
+                job_id: res.job_id,
+                status: 'running',
+                brief: request.brief.slice(0, 100),
+                progress: 0,
+              },
+            ];
+            this.selectJob(this.runningJobs[this.runningJobs.length - 1]);
+          }
+        });
       },
       error: (err) => {
         this.error = err?.error?.detail ?? err?.message ?? 'Request failed';
@@ -127,10 +144,27 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
     this.loading = true;
     this.error = null;
     this.fullPipelineResult = null;
-    this.api.fullPipeline(request).subscribe({
+    this.api.startFullPipelineAsync(request).subscribe({
       next: (res) => {
-        this.fullPipelineResult = res;
         this.loading = false;
+        this.api.getJobs(true).subscribe((jobs) => {
+          this.runningJobs = jobs;
+          const j = jobs.find((x) => x.job_id === res.job_id);
+          if (j) {
+            this.selectJob(j);
+          } else {
+            this.runningJobs = [
+              ...this.runningJobs,
+              {
+                job_id: res.job_id,
+                status: 'running',
+                brief: request.brief.slice(0, 100),
+                progress: 0,
+              },
+            ];
+            this.selectJob(this.runningJobs[this.runningJobs.length - 1]);
+          }
+        });
       },
       error: (err) => {
         this.error = err?.error?.detail ?? err?.message ?? 'Request failed';

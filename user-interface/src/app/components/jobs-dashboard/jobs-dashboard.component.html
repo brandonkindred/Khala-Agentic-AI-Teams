@@ -105,9 +105,9 @@
                 }
               </td>
               <td class="col-agents">
-                @if (job.seDetail?.teamStatuses && job.seDetail.teamStatuses.length > 0) {
+                @if ((job.seDetail?.teamStatuses?.length ?? 0) > 0) {
                   <div class="agents-cell">
-                    @for (team of job.seDetail.teamStatuses; track trackByTeamId($index, team)) {
+                    @for (team of (job.seDetail?.teamStatuses ?? []); track trackByTeamId($index, team)) {
                       <div class="agent-chip" [class]="getPhaseColorClass(team.phase)" [class.inactive]="!team.isActive"
                            [matTooltip]="team.label + ': ' + team.phaseLabel">
                         <mat-icon class="agent-icon">{{ team.icon }}</mat-icon>
