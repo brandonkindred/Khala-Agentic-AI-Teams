@@ -7,9 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
-from shared.development_plan_writer import write_architecture_plan
-from shared.llm import DummyLLMClient
-from shared.models import ProductRequirements
+from software_engineering_team.shared.development_plan_writer import write_architecture_plan
+from software_engineering_team.shared.llm import DummyLLMClient
+from software_engineering_team.shared.models import ProductRequirements
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ def test_architecture_agent_produces_components(requirements: ProductRequirement
 
 def test_architecture_agent_with_existing_architecture(requirements: ProductRequirements) -> None:
     """Architecture Expert accepts existing_architecture for extension."""
-    from shared.models import SystemArchitecture
+    from software_engineering_team.shared.models import SystemArchitecture
     llm = DummyLLMClient()
     agent = ArchitectureExpertAgent(llm_client=llm)
     existing = SystemArchitecture(

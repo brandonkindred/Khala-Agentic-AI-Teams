@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shared.llm import LLMClient
+from software_engineering_team.shared.llm import LLMClient
 
 from devops_team.models import (
     DevOpsCompletionPackage,

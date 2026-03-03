@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from shared.models import ToolRecommendation
+from software_engineering_team.shared.models import ToolRecommendation
 
 
 # ---------------------------------------------------------------------------

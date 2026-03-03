@@ -1,7 +1,7 @@
 """Prompts for the Tech Lead agent."""
 
-from shared.coding_standards import CODING_STANDARDS, COMMIT_MESSAGE_STANDARDS, GIT_BRANCHING_RULES
-from shared.sla_best_practices import SLA_BEST_PRACTICES_CATALOG, SLA_ENTERPRISE_ANCHORING_GUIDANCE
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS, COMMIT_MESSAGE_STANDARDS, GIT_BRANCHING_RULES
+from software_engineering_team.shared.sla_best_practices import SLA_BEST_PRACTICES_CATALOG, SLA_ENTERPRISE_ANCHORING_GUIDANCE
 
 TECH_LEAD_PROMPT = """You are a Staff-level Tech Lead software engineer and orchestrator. Your PRIMARY GOAL is to produce a structured build plan using an Initiative → Epic → Story → Task hierarchy that fully covers the provided spec. You bridge product management and engineering.
 

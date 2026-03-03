@@ -6,8 +6,8 @@ import json
 import logging
 from pathlib import Path
 
-from shared.llm import LLMClient
-from shared.prompt_utils import log_llm_prompt
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.prompt_utils import log_llm_prompt
 
 from .models import RepairInput, RepairOutput
 from .prompts import REPAIR_PROMPT

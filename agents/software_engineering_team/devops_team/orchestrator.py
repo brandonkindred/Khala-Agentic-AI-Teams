@@ -7,8 +7,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from shared.llm import LLMClient
-from shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
 
 from .change_review_agent import ChangeReviewAgent, ChangeReviewInput
 from .cicd_pipeline_agent import CICDPipelineAgent, CICDPipelineAgentInput

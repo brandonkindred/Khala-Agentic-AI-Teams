@@ -7,7 +7,7 @@ from typing import Dict, List
 
 from pydantic import BaseModel, Field
 
-from shared.command_runner import run_command
+from software_engineering_team.shared.command_runner import run_command
 
 
 class PolicyAsCodeInput(BaseModel):

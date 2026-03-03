@@ -7,10 +7,10 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from shared.llm import LLMClient
-from shared.prompt_utils import log_llm_prompt
-from shared.repo_utils import int_env as _int_env
-from shared.task_plan import TaskPlan
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.prompt_utils import log_llm_prompt
+from software_engineering_team.shared.repo_utils import int_env as _int_env
+from software_engineering_team.shared.task_plan import TaskPlan
 
 from .models import DevOpsInput, DevOpsOutput, DevOpsWorkflowResult
 from .prompts import DEVOPS_PLANNING_PROMPT, DEVOPS_PROMPT
@@ -237,8 +237,8 @@ class DevOpsExpertAgent:
         if getattr(input_data, "task_plan", None) and input_data.task_plan:
             context_parts.extend(["", "**Implementation plan:**", input_data.task_plan])
         if getattr(input_data, "build_errors", None) and input_data.build_errors:
-            from shared.context_sizing import compute_build_errors_chars
-            from shared.error_parsing import build_agent_feedback, parse_devops_failure
+            from software_engineering_team.shared.context_sizing import compute_build_errors_chars
+            from software_engineering_team.shared.error_parsing import build_agent_feedback, parse_devops_failure
 
             max_errors = compute_build_errors_chars(self.llm)
             raw_errors = input_data.build_errors
@@ -303,8 +303,8 @@ class DevOpsExpertAgent:
         No feature branch; writes directly to repo_path. On verification failure,
         re-generates with build_errors and retries up to max_iterations.
         """
-        from shared.context_sizing import compute_build_errors_chars
-        from shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
+        from software_engineering_team.shared.context_sizing import compute_build_errors_chars
+        from software_engineering_team.shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
 
         path = Path(repo_path).resolve()
         if subdir:

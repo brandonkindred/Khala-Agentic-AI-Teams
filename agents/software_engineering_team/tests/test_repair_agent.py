@@ -22,7 +22,7 @@ NameError: name 'compute_spec_content_chars' is not defined
                 "file_path": "backend_agent/agent.py",
                 "line_start": 1,
                 "line_end": 15,
-                "replacement_content": "from shared.context_sizing import compute_existing_code_chars, compute_spec_content_chars\n",
+                "replacement_content": "from software_engineering_team.shared.context_sizing import compute_existing_code_chars, compute_spec_content_chars\n",
             }
         ],
         "summary": "Added missing import for compute_spec_content_chars",
@@ -153,7 +153,7 @@ def test_apply_repair_fixes_rejects_path_outside_tree(tmp_path: Path) -> None:
 def test_orchestrator_repair_requeue_on_backend_crash(tmp_path: Path) -> None:
     """On backend NameError crash, repair applied, task re-queued, worker picks it up and completes."""
     import orchestrator
-    from shared.models import Task, TaskType
+    from software_engineering_team.shared.models import Task, TaskType
 
     backend_dir = tmp_path / "backend"
     backend_dir.mkdir()
@@ -238,7 +238,7 @@ def test_orchestrator_repair_requeue_on_backend_crash(tmp_path: Path) -> None:
 def test_orchestrator_requeues_when_task_contract_is_repaired(tmp_path: Path) -> None:
     """Backend task blocked by missing contract fields is refined and re-queued."""
     import orchestrator
-    from shared.models import Task, TaskType
+    from software_engineering_team.shared.models import Task, TaskType
 
     backend_dir = tmp_path / "backend"
     backend_dir.mkdir()

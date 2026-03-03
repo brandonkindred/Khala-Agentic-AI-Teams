@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from shared.models import PlanningHierarchy, ProductRequirements, SystemArchitecture, Task, TaskAssignment
+from software_engineering_team.shared.models import PlanningHierarchy, ProductRequirements, SystemArchitecture, Task, TaskAssignment
 
 
 class SpecRequirementMapping(BaseModel):

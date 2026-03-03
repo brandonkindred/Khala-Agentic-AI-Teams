@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from tech_lead_agent import TechLeadAgent, TechLeadInput
-from shared.llm import DummyLLMClient
-from shared.models import ProductRequirements, SystemArchitecture
+from software_engineering_team.shared.llm import DummyLLMClient
+from software_engineering_team.shared.models import ProductRequirements, SystemArchitecture
 
 
 @pytest.fixture

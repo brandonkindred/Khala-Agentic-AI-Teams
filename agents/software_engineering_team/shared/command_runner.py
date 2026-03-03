@@ -102,7 +102,7 @@ class CommandResult:
         if self.success:
             return []
         try:
-            from shared.error_parsing import parse_command_failure
+            from software_engineering_team.shared.error_parsing import parse_command_failure
             return parse_command_failure(command_kind, self.stdout or "", self.stderr or "")
         except Exception as e:
             logger.debug("Error parsing failures: %s", e)
@@ -1801,7 +1801,7 @@ def ensure_backend_project_initialized(backend_dir: str | Path) -> CommandResult
 
     Returns a :class:`CommandResult` indicating success or the first failure.
     """
-    from shared.git_utils import ensure_files_committed_on_main, initialize_new_repo
+    from software_engineering_team.shared.git_utils import ensure_files_committed_on_main, initialize_new_repo
 
     cwd = Path(backend_dir).resolve()
     requirements = cwd / "requirements.txt"

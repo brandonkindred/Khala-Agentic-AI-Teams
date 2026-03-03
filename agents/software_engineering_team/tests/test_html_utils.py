@@ -2,7 +2,7 @@
 
 import pytest
 
-from shared.html_utils import (
+from software_engineering_team.shared.html_utils import (
     is_html_file,
     is_html_truncated,
     validate_html_completeness,

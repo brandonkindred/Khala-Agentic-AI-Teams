@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from shared.models import ProductRequirements
+from software_engineering_team.shared.models import ProductRequirements
 
 logger = logging.getLogger(__name__)
 

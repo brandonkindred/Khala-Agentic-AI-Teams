@@ -7,26 +7,26 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from shared.job_store import LLM_UNREACHABLE_AFTER_RETRIES
-from shared.llm import LLMClient, LLMUnreachableAfterRetriesError, call_llm_with_retries
-from shared.models import SystemArchitecture, Task, TaskUpdate
-from shared.frontend_framework import resolve_frontend_framework
-from shared.prompt_utils import build_problem_solving_header, log_llm_prompt
-from shared.repo_utils import (
+from software_engineering_team.shared.job_store import LLM_UNREACHABLE_AFTER_RETRIES
+from software_engineering_team.shared.llm import LLMClient, LLMUnreachableAfterRetriesError, call_llm_with_retries
+from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
+from software_engineering_team.shared.frontend_framework import resolve_frontend_framework
+from software_engineering_team.shared.prompt_utils import build_problem_solving_header, log_llm_prompt
+from software_engineering_team.shared.repo_utils import (
     int_env as _int_env,
     read_repo_code,
     truncate_for_context,
     FRONTEND_EXTENSIONS,
     REPO_EXCLUDE_DIRS,
 )
-from shared.task_utils import (
+from software_engineering_team.shared.task_utils import (
     task_requirements,
     task_requirements_with_expectations,
 )
 
 from .models import FrontendInput, FrontendOutput, FrontendWorkflowResult
 from .prompts import FRONTEND_PLANNING_PROMPT, FRONTEND_PROMPT
-from shared.task_plan import TaskPlan
+from software_engineering_team.shared.task_plan import TaskPlan
 
 logger = logging.getLogger(__name__)
 
@@ -741,7 +741,7 @@ class FrontendExpertAgent:
 
         # Fail fast when LLM produces no valid output
         if not validated_files and not data.get("needs_clarification", False):
-            from shared.llm import LLMPermanentError
+            from software_engineering_team.shared.llm import LLMPermanentError
             if raw_files:
                 raise LLMPermanentError(
                     f"Frontend: LLM returned {len(raw_files)} files but all were rejected by validation. "
@@ -814,15 +814,15 @@ class FrontendExpertAgent:
 
         Quality gates: build -> code review -> QA -> accessibility -> security -> DBC -> merge.
         """
-        from shared.command_runner import run_command_with_nvm
-        from shared.git_utils import (
+        from software_engineering_team.shared.command_runner import run_command_with_nvm
+        from software_engineering_team.shared.git_utils import (
             DEVELOPMENT_BRANCH,
             checkout_branch,
             create_feature_branch,
             delete_branch,
             merge_branch,
         )
-        from shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
+        from software_engineering_team.shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
 
         task_id = task.id
         branch_name = f"feature/{task_id}"
@@ -843,7 +843,7 @@ class FrontendExpertAgent:
                 failure_reason=f"Feature branch failed: {msg}",
             )
 
-        from shared.command_runner import ensure_frontend_dependencies_installed
+        from software_engineering_team.shared.command_runner import ensure_frontend_dependencies_installed
         install_result = ensure_frontend_dependencies_installed(repo_path)
         if not install_result.success:
             checkout_branch(repo_path, DEVELOPMENT_BRANCH)
@@ -869,7 +869,7 @@ class FrontendExpertAgent:
         rounds_without_decrease = 0
         convergence_hint: Optional[str] = None
 
-        from shared.context_sizing import (
+        from software_engineering_team.shared.context_sizing import (
             compute_api_spec_chars,
             compute_existing_code_chars,
             compute_spec_content_chars,
@@ -988,7 +988,7 @@ class FrontendExpertAgent:
                                 len(lint_result.edits),
                             )
                             if lint_result.edits:
-                                from shared.repo_writer import write_agent_output as _write_lint
+                                from software_engineering_team.shared.repo_writer import write_agent_output as _write_lint
                                 lint_files: Dict[str, str] = {}
                                 repo_root = repo_path.resolve()
                                 for e in lint_result.edits:
@@ -1076,7 +1076,7 @@ class FrontendExpertAgent:
                                     repo_path, bf_result.edits,
                                 )
                                 if ok_apply and files_dict:
-                                    from shared.repo_writer import write_agent_output as _write_bf
+                                    from software_engineering_team.shared.repo_writer import write_agent_output as _write_bf
                                     ok_write, _ = _write_bf(
                                         repo_path,
                                         type("_BF", (), {"files": files_dict, "summary": bf_result.summary})(),
@@ -1154,7 +1154,7 @@ class FrontendExpertAgent:
     
                 suggested_tests_from_qa = None  # Clear after use so we don't re-pass on code review loop
                 code_on_branch = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
-                from shared.context_sizing import compute_code_review_total_chars, compute_existing_code_chars
+                from software_engineering_team.shared.context_sizing import compute_code_review_total_chars, compute_existing_code_chars
                 max_code = compute_existing_code_chars(self.llm)
                 max_review = compute_code_review_total_chars(self.llm)
                 existing_code_ctx = _truncate_for_context(code_on_branch, max_code)
@@ -1388,7 +1388,7 @@ class FrontendExpertAgent:
     ) -> None:
         """Run DBC comments agent on frontend code and commit if changes made."""
         from technical_writers.dbc_comments_agent.models import DbcCommentsInput
-        from shared.git_utils import write_files_and_commit
+        from software_engineering_team.shared.git_utils import write_files_and_commit
 
         try:
             dbc_code = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])

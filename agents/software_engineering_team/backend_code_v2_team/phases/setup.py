@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from shared.git_utils import (
+from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     MAIN_BRANCH,
     ensure_development_branch,
@@ -88,7 +88,7 @@ def _ensure_readme_with_title(path: Path, title: str) -> None:
     readme.write_text(content, encoding="utf-8")
     # Commit if we have git and changes
     try:
-        from shared.git_utils import write_files_and_commit
+        from software_engineering_team.shared.git_utils import write_files_and_commit
         write_files_and_commit(path, {"README.md": content}, "docs: add README with project title")
     except Exception as e:
         logger.warning("Could not commit README: %s", e)

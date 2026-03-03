@@ -1,6 +1,6 @@
 """Prompts for the Frontend Expert agent."""
 
-from shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
 FRONTEND_PLANNING_PROMPT = """You are a Senior Frontend Software Engineer operating in a contract-first frontend team for React and Angular. Before implementing a task, you produce a concise implementation plan.
 

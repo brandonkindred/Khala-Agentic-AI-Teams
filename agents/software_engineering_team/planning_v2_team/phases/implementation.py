@@ -20,8 +20,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from shared.llm import LLMClient
-from shared.models import PlanningHierarchy
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.models import PlanningHierarchy
 
 from ..models import (
     ImplementationPhaseResult,

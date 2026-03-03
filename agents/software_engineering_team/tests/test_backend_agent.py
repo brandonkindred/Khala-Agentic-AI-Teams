@@ -293,7 +293,7 @@ def test_backend_agent_no_problem_solving_logs_when_no_issues(caplog: pytest.Log
 
 def test_backend_agent_content_only_with_code_block_raises_llm_permanent_error() -> None:
     """When LLM returns only content (no files dict), backend raises LLMPermanentError (fail fast)."""
-    from shared.llm import LLMPermanentError
+    from software_engineering_team.shared.llm import LLMPermanentError
 
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {
@@ -306,7 +306,7 @@ def test_backend_agent_content_only_with_code_block_raises_llm_permanent_error()
 
 def test_backend_agent_content_only_raises_llm_permanent_error() -> None:
     """When LLM returns only content with no files/code, agent raises LLMPermanentError (fail fast)."""
-    from shared.llm import LLMPermanentError
+    from software_engineering_team.shared.llm import LLMPermanentError
 
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {"content": "no code blocks here at all"}
@@ -317,7 +317,7 @@ def test_backend_agent_content_only_raises_llm_permanent_error() -> None:
 
 def test_backend_plan_task_returns_plan_markdown() -> None:
     """_plan_task parses LLM JSON and returns (plan_text, False)."""
-    from shared.models import Task, TaskType
+    from software_engineering_team.shared.models import Task, TaskType
 
     mock_llm = MagicMock()
     mock_llm.get_max_context_tokens.return_value = 16384
@@ -412,7 +412,7 @@ def test_run_workflow_exits_at_five_same_build_failures_and_notifies_tech_lead(
     tmp_path: Path,
 ) -> None:
     """When build fails 5 times with same error, workflow exits early and Tech Lead receives task_update with needs_followup."""
-    from shared.models import Task, TaskType
+    from software_engineering_team.shared.models import Task, TaskType
 
     # Minimal git repo with development branch
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
@@ -498,7 +498,7 @@ def test_run_workflow_invokes_build_fix_specialist_when_same_build_fails_twice(
     tmp_path: Path,
 ) -> None:
     """When build fails 2 times with same error, BuildFixSpecialist is invoked (and can apply patch)."""
-    from shared.models import Task, TaskType
+    from software_engineering_team.shared.models import Task, TaskType
 
     from build_fix_specialist.models import CodeEdit
 
@@ -596,7 +596,7 @@ def test_run_workflow_invokes_build_fix_specialist_when_same_build_fails_twice(
 
 def test_run_workflow_skips_specialist_when_none(tmp_path: Path) -> None:
     """When build_fix_specialist=None, specialist is not invoked even on repeated build failure."""
-    from shared.models import Task, TaskType
+    from software_engineering_team.shared.models import Task, TaskType
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, check=True, capture_output=True)
@@ -712,7 +712,7 @@ def test_backend_agent_includes_specialist_findings_in_prompt() -> None:
 
 def test_run_workflow_uses_problem_solver_agent_on_build_failure(tmp_path: Path) -> None:
     """When provided, problem solver agent is invoked during build-failure bug fixing."""
-    from shared.models import Task, TaskType
+    from software_engineering_team.shared.models import Task, TaskType
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, check=True, capture_output=True)
@@ -777,7 +777,7 @@ def test_run_workflow_uses_problem_solver_agent_on_build_failure(tmp_path: Path)
 
 def test_validate_task_contract_flags_missing_contract_fields() -> None:
     """Contract-first validation flags missing machine-readable contract fields."""
-    from shared.models import Task, TaskType
+    from software_engineering_team.shared.models import Task, TaskType
 
     task = Task(
         id="t1",
@@ -798,7 +798,7 @@ def test_validate_task_contract_flags_missing_contract_fields() -> None:
 
 def test_build_completion_package_contains_trace_and_gates() -> None:
     """Completion package includes traceability and quality gate matrix."""
-    from shared.models import Task, TaskType
+    from software_engineering_team.shared.models import Task, TaskType
     from backend_agent.models import BackendOutput, ReviewIterationRecord
 
     task = Task(

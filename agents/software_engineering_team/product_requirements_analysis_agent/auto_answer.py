@@ -14,7 +14,7 @@ from .models import AutoAnswerResult, OpenQuestion, QuestionOption
 from .prompts import AUTO_ANSWER_PROMPT
 
 if TYPE_CHECKING:
-    from shared.llm import LLMClient
+    from software_engineering_team.shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +190,7 @@ def get_auto_answer_for_job(
     Returns:
         AutoAnswerResult or None if question not found
     """
-    from shared.job_store import get_job
+    from software_engineering_team.shared.job_store import get_job
 
     job_data = get_job(job_id)
     if not job_data:

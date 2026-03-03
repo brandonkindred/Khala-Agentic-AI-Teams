@@ -16,7 +16,7 @@ from ...output_templates import parse_fix_output, parse_planning_tool_output
 from ..json_utils import complete_text_with_continuation
 
 if TYPE_CHECKING:
-    from shared.llm import LLMClient
+    from software_engineering_team.shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 

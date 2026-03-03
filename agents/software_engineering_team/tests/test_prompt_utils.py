@@ -3,7 +3,7 @@
 import logging
 import pytest
 
-from shared.prompt_utils import (
+from software_engineering_team.shared.prompt_utils import (
     build_problem_solving_header,
     log_llm_prompt,
 )

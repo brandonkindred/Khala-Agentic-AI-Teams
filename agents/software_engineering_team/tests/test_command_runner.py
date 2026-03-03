@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from shared.command_runner import (
+from software_engineering_team.shared.command_runner import (
     CommandResult,
     _ensure_angular_common_in_package_json,
     _ensure_angular_material_in_package_json,

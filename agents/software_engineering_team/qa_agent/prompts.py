@@ -1,6 +1,6 @@
 """Prompts for the QA Expert agent."""
 
-from shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
 QA_PROMPT = """You are a Software Quality Assurance Expert. Your job is to review code and produce a list of well-defined QA issues for the coding agent to fix. You do NOT write fixes yourself – the coding agent implements them.
 

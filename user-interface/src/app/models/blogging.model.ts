@@ -48,3 +48,34 @@ export interface FullPipelineResponse {
   outline: string;
   draft_preview?: string;
 }
+
+/** Summary item for GET /jobs (blog pipeline job list). */
+export interface BlogJobListItem {
+  job_id: string;
+  status: string;
+  brief: string;
+  phase?: string;
+  progress: number;
+  created_at?: string;
+}
+
+/** Full status for GET /job/{job_id} (blog pipeline job polling). */
+export interface BlogJobStatusResponse {
+  job_id: string;
+  status: string;
+  phase?: string;
+  progress: number;
+  status_text?: string;
+  error?: string;
+  failed_phase?: string;
+  title_choices: TitleChoiceResponse[];
+  outline?: string;
+  draft_preview?: string;
+  work_dir?: string;
+  research_sources_count: number;
+  draft_iterations: number;
+  rewrite_iterations: number;
+  created_at?: string;
+  started_at?: string;
+  completed_at?: string;
+}

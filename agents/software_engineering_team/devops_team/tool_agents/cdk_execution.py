@@ -8,7 +8,7 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from shared.command_runner import run_command
+from software_engineering_team.shared.command_runner import run_command
 
 logger = logging.getLogger(__name__)
 

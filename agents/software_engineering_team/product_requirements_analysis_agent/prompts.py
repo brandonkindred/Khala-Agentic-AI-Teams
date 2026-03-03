@@ -290,6 +290,40 @@ Respond with a JSON object only, no markdown:
 }}
 """
 
+CONSOLIDATE_QUESTIONS_PROMPT = """You are a Product Analyst. You have a list of open questions from a product specification review. Some questions are worded differently but ask the same thing (e.g. "Which OAuth provider for the MVP?" and "Should we use GitHub or Google for authentication?").
+
+Your task: Consolidate the list so there are NO duplicate questions. For each distinct decision or topic, keep exactly ONE question.
+
+Rules:
+- Two questions are duplicates if they are asking the same decision (e.g. OAuth provider, token handling, pipeline behavior). Merge them into one.
+- Keep the clearest, most professional question_text. Prefer the one that is concise and specific.
+- Merge options from duplicate questions: combine all unique options (by meaning), deduplicate options that say the same thing. Keep at most 4-5 options per question; drop redundant ones.
+- For each consolidated question, keep the highest priority among merged questions (high > medium > low) and the most specific category.
+- Preserve allow_multiple if any of the merged questions had it true.
+- Output the same JSON structure so each item has: id, question_text, context, category, priority, allow_multiple, options (each with id, label, is_default, rationale, confidence). Use short stable ids (e.g. auth_provider, token_handling).
+
+Input questions (JSON array):
+{questions_json}
+
+Respond with a JSON object only, no markdown:
+{{
+  "consolidated_questions": [
+    {{
+      "id": "auth_provider",
+      "question_text": "Which OAuth provider should be used for the MVP?",
+      "context": "Brief context for why this matters.",
+      "category": "security",
+      "priority": "high",
+      "allow_multiple": false,
+      "options": [
+        {{ "id": "opt_github", "label": "GitHub", "is_default": true, "rationale": "...", "confidence": 0.7 }},
+        {{ "id": "opt_google", "label": "Google", "is_default": false, "rationale": "...", "confidence": 0.6 }}
+      ]
+    }}
+  ]
+}}
+"""
+
 SPEC_UPDATE_PROMPT = """You are a Product Specification Writer. Update the product specification to incorporate the answers to open questions.
 
 For each answered question:

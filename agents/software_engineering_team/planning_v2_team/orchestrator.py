@@ -27,9 +27,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from shared.llm import LLMClient
-from shared.models import PlanningHierarchy
-from shared.job_store import add_pending_questions, is_waiting_for_answers
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.models import PlanningHierarchy
+from software_engineering_team.shared.job_store import add_pending_questions, is_waiting_for_answers
 
 from .models import (
     DeliverPhaseResult,

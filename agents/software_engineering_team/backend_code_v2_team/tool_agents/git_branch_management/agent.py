@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from shared.git_utils import (
+from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     abort_merge,
     checkout_branch,
@@ -143,7 +143,7 @@ class GitBranchManagementToolAgent:
             ok, created_branch = self.create_feature_branch(repo_path, task_id, task_title)
             if not ok or not created_branch:
                 return ToolAgentPhaseOutput(success=False, summary="Feature branch creation failed.")
-            from shared.repo_writer import write_agent_output
+            from software_engineering_team.shared.repo_writer import write_agent_output
 
             scope = slug[:20]
             summary = (phase_inp.task_description or "")[:72]

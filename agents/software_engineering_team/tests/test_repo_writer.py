@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from shared.repo_writer import (
+from software_engineering_team.shared.repo_writer import (
     NO_FILES_TO_WRITE_MSG,
     write_agent_output,
 )

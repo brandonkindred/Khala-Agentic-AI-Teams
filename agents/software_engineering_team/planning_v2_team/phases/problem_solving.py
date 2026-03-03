@@ -17,7 +17,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from shared.llm import LLMClient
+from software_engineering_team.shared.llm import LLMClient
 
 from ..models import (
     ImplementationPhaseResult,

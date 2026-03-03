@@ -97,7 +97,7 @@ class TestSetupPhase:
 class TestPlanningPhase:
     def test_language_detection_angular(self, tmp_path):
         from frontend_code_v2_team.phases.planning import _detect_language
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         (tmp_path / "angular.json").write_text("{}")
         task = Task(id="t1", type=TaskType.FRONTEND, assignee="frontend-code-v2", status=TaskStatus.PENDING, description="build ui")
@@ -105,7 +105,7 @@ class TestPlanningPhase:
 
     def test_language_detection_from_description(self, tmp_path):
         from frontend_code_v2_team.phases.planning import _detect_language
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         task = Task(id="t1", type=TaskType.FRONTEND, assignee="frontend-code-v2", status=TaskStatus.PENDING, description="Use React and TypeScript")
         assert _detect_language(tmp_path, task) == "react"
@@ -129,7 +129,7 @@ class TestPlanningPhase:
 
     def test_run_planning_fallback(self, tmp_path):
         from frontend_code_v2_team.phases.planning import run_planning
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         mock_llm.complete_text.return_value = (

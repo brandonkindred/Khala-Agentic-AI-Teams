@@ -12,8 +12,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from shared.llm import LLMClient
-from shared.models import Task
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.models import Task
 
 from ..models import (
     DocumentationSelfReviewResult,

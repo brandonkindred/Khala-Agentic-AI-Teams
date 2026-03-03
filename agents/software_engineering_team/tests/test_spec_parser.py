@@ -8,7 +8,7 @@ from spec_parser import (
     validate_repo_path,
     SPEC_FILENAME,
 )
-from shared.llm import DummyLLMClient
+from software_engineering_team.shared.llm import DummyLLMClient
 
 
 def test_parse_spec_with_llm_uses_dummy() -> None:

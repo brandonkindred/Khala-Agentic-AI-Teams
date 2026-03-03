@@ -2,9 +2,9 @@
 
 import pytest
 
-from shared.llm import DummyLLMClient
-from shared.models import ProductRequirements, SystemArchitecture
-from shared.models import ProductRequirements
+from software_engineering_team.shared.llm import DummyLLMClient
+from software_engineering_team.shared.models import ProductRequirements, SystemArchitecture
+from software_engineering_team.shared.models import ProductRequirements
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 from tech_lead_agent import TechLeadAgent, TechLeadInput
 from devops_agent import DevOpsExpertAgent, DevOpsInput

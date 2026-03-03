@@ -10,7 +10,7 @@ chunk + prompt + response stays within the model context window.
 
 from __future__ import annotations
 
-from shared.llm import LLMClient
+from software_engineering_team.shared.llm import LLMClient
 
 # Conservative chars per token for code/spec (used for token estimates from char counts)
 CHARS_PER_TOKEN = 3.5

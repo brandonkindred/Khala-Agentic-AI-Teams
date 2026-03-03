@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput, FrontendOutput
-from shared.llm import DummyLLMClient
+from software_engineering_team.shared.llm import DummyLLMClient
 
 
 def test_frontend_output_has_npm_packages_to_install() -> None:
@@ -256,7 +256,7 @@ def test_frontend_agent_rejects_empty_content() -> None:
 
 def test_frontend_agent_with_architecture() -> None:
     """Agent includes architecture in context when provided."""
-    from shared.models import ArchitectureComponent, SystemArchitecture
+    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
 
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {
@@ -530,7 +530,7 @@ def test_frontend_agent_needs_clarification() -> None:
 
 def test_frontend_agent_all_files_rejected_raises_llm_permanent_error() -> None:
     """When all files rejected by validation, agent raises LLMPermanentError (fail fast)."""
-    from shared.llm import LLMPermanentError
+    from software_engineering_team.shared.llm import LLMPermanentError
 
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {
@@ -588,7 +588,7 @@ def test_read_repo_code_excludes_node_modules_and_dist(tmp_path):
 
 def test_frontend_plan_task_returns_plan_markdown() -> None:
     """_plan_task parses LLM JSON and returns plan markdown."""
-    from shared.models import Task, TaskType
+    from software_engineering_team.shared.models import Task, TaskType
 
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {

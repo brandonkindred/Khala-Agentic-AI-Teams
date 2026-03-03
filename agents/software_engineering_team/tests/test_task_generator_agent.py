@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from planning_team.task_generator_agent import TaskGeneratorAgent, TaskGeneratorInput
-from shared.models import ProductRequirements, TaskAssignment
-from shared.task_parsing import parse_assignment_from_data
+from software_engineering_team.shared.models import ProductRequirements, TaskAssignment
+from software_engineering_team.shared.task_parsing import parse_assignment_from_data
 
 
 @pytest.fixture

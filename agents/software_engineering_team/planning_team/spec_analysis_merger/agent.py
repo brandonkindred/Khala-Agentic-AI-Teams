@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any, Dict
 
-from shared.llm import LLMClient
+from software_engineering_team.shared.llm import LLMClient
 
 from .models import MergedSpecAnalysis, SpecAnalysisMergerInput
 from .prompts import SPEC_ANALYSIS_MERGER_PROMPT
@@ -53,7 +53,7 @@ class SpecAnalysisMerger:
         prompt = SPEC_ANALYSIS_MERGER_PROMPT
         prompt += "\n\n---\n\n**Chunk analyses to merge:**\n\n" + chunks_text
         if spec_outline:
-            from shared.context_sizing import compute_spec_outline_chars
+            from software_engineering_team.shared.context_sizing import compute_spec_outline_chars
             max_outline = compute_spec_outline_chars(self.llm)
             prompt += "\n\n---\n\n**Spec outline (section structure):**\n" + spec_outline[:max_outline]
 

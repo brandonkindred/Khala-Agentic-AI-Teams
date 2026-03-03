@@ -27,7 +27,7 @@ class TestContinuationModule(unittest.TestCase):
 
     def test_continuation_result_dataclass(self):
         """Test ContinuationResult initialization."""
-        from shared.continuation import ContinuationResult
+        from software_engineering_team.shared.continuation import ContinuationResult
 
         result = ContinuationResult(
             success=True,
@@ -45,7 +45,7 @@ class TestContinuationModule(unittest.TestCase):
 
     def test_continuation_prompt_creation(self):
         """Test that continuation prompts are created correctly."""
-        from shared.continuation import ResponseContinuator
+        from software_engineering_team.shared.continuation import ResponseContinuator
 
         continuator = ResponseContinuator(
             base_url="http://localhost:11434",
@@ -60,7 +60,7 @@ class TestContinuationModule(unittest.TestCase):
 
     def test_message_building(self):
         """Test that conversation messages are built correctly."""
-        from shared.continuation import ResponseContinuator
+        from software_engineering_team.shared.continuation import ResponseContinuator
 
         continuator = ResponseContinuator(
             base_url="http://localhost:11434",
@@ -81,7 +81,7 @@ class TestContinuationModule(unittest.TestCase):
 
     def test_overlap_detection(self):
         """Test overlap detection between responses."""
-        from shared.continuation import ResponseContinuator
+        from software_engineering_team.shared.continuation import ResponseContinuator
 
         continuator = ResponseContinuator(
             base_url="http://localhost:11434",
@@ -96,7 +96,7 @@ class TestContinuationModule(unittest.TestCase):
 
     def test_response_merging(self):
         """Test merging of partial responses."""
-        from shared.continuation import ResponseContinuator
+        from software_engineering_team.shared.continuation import ResponseContinuator
 
         continuator = ResponseContinuator(
             base_url="http://localhost:11434",
@@ -126,7 +126,7 @@ class TestPostMortemModule(unittest.TestCase):
 
     def test_post_mortem_creation(self):
         """Test that post-mortems are created correctly."""
-        from shared.post_mortem import PostMortemWriter
+        from software_engineering_team.shared.post_mortem import PostMortemWriter
 
         writer = PostMortemWriter(project_root=Path(self.temp_dir))
 
@@ -151,7 +151,7 @@ class TestPostMortemModule(unittest.TestCase):
 
     def test_post_mortem_appending(self):
         """Test that multiple post-mortems are appended."""
-        from shared.post_mortem import PostMortemWriter
+        from software_engineering_team.shared.post_mortem import PostMortemWriter
 
         writer = PostMortemWriter(project_root=Path(self.temp_dir))
 
@@ -188,7 +188,7 @@ class TestDecompositionContext(unittest.TestCase):
 
     def test_context_tracking(self):
         """Test that context tracks continuation state."""
-        from shared.decomposition import DecompositionContext
+        from software_engineering_team.shared.decomposition import DecompositionContext
 
         context = DecompositionContext(
             original_task="Test task",
@@ -206,7 +206,7 @@ class TestDecompositionContext(unittest.TestCase):
 
     def test_child_context_inherits_state(self):
         """Test that child contexts inherit continuation state."""
-        from shared.decomposition import DecompositionContext
+        from software_engineering_team.shared.decomposition import DecompositionContext
 
         parent = DecompositionContext(
             original_task="Test task",

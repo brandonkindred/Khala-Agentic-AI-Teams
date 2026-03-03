@@ -101,7 +101,11 @@ def _try_mount_blogging(app: FastAPI) -> bool:
 
 
 def _try_mount_software_engineering(app: FastAPI) -> bool:
-    """Mount software engineering team API."""
+    """Mount software engineering team API.
+
+    The team uses 'software_engineering_team.shared' (not 'shared') so it
+    does not conflict with blogging's shared package when both are loaded.
+    """
     try:
         from software_engineering_team.api.main import app as se_app
 

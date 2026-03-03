@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from shared.llm import DummyLLMClient
-from shared.models import Task, TaskType
+from software_engineering_team.shared.llm import DummyLLMClient
+from software_engineering_team.shared.models import Task, TaskType
 
 from frontend_team.feature_agent import FrontendExpertAgent
 from frontend_team.feature_agent.models import FrontendWorkflowResult

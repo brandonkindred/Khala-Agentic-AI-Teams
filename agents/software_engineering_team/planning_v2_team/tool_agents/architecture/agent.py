@@ -19,10 +19,10 @@ from ...output_templates import (
     parse_spec_review_output,
 )
 from ..json_utils import complete_text_with_continuation
-from shared.models import ToolRecommendation, PricingTier, LicenseType
+from software_engineering_team.shared.models import ToolRecommendation, PricingTier, LicenseType
 
 if TYPE_CHECKING:
-    from shared.llm import LLMClient
+    from software_engineering_team.shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 

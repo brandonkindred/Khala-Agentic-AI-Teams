@@ -24,7 +24,7 @@ from ...prompts import (
 )
 
 if TYPE_CHECKING:
-    from shared.llm import LLMClient
+    from software_engineering_team.shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) 
 def _run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     """Run backend syntax check and optionally pytest; return one ReviewIssue per parsed failure."""
     try:
-        from shared.command_runner import run_command, run_pytest, run_python_syntax_check
+        from software_engineering_team.shared.command_runner import run_command, run_pytest, run_python_syntax_check
     except ImportError:
         logger.warning("Build Specialist: shared.command_runner not available")
         return []

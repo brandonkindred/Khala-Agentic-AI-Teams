@@ -35,7 +35,7 @@ _arch_dir = _team_dir / "architect-agents"
 if _arch_dir.exists() and str(_arch_dir) not in sys.path:
     sys.path.insert(0, str(_arch_dir))
 
-from shared.git_utils import (
+from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,
     create_feature_branch,
@@ -43,7 +43,7 @@ from shared.git_utils import (
     ensure_development_branch,
     merge_branch,
 )
-from shared.llm import (
+from software_engineering_team.shared.llm import (
     LLMError,
     LLMJsonParseError,
     LLMPermanentError,
@@ -53,7 +53,7 @@ from shared.llm import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
     get_llm_for_agent,
 )
-from shared.job_store import (
+from software_engineering_team.shared.job_store import (
     JOB_STATUS_AGENT_CRASH,
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
@@ -69,20 +69,20 @@ from shared.job_store import (
     is_cancel_requested,
     get_job,
 )
-from shared.command_runner import run_command_with_nvm
-from shared.execution_tracker import execution_tracker
+from software_engineering_team.shared.command_runner import run_command_with_nvm
+from software_engineering_team.shared.execution_tracker import execution_tracker
 # Plan dir: kept in planning_team (also used by planning_consolidation; shared/plan_dir would require moving consolidation)
 from planning_team.plan_dir import ensure_plan_dir
-from shared.development_plan_writer import (
+from software_engineering_team.shared.development_plan_writer import (
     write_architecture_plan,
     write_features_and_functionality_plan,
     write_project_overview_plan,
     write_tech_lead_plan,
 )
-from shared.models import TaskUpdate, model_to_dict
-from shared.repo_writer import write_agent_output
-from shared.repo_utils import read_repo_code, truncate_for_context
-from shared.task_utils import task_requirements
+from software_engineering_team.shared.models import TaskUpdate, model_to_dict
+from software_engineering_team.shared.repo_writer import write_agent_output
+from software_engineering_team.shared.repo_utils import read_repo_code, truncate_for_context
+from software_engineering_team.shared.task_utils import task_requirements
 
 logger = logging.getLogger(__name__)
 
@@ -479,7 +479,7 @@ def _run_dbc_comments_review(
         - Any failures are logged but do not block the pipeline
     """
     from technical_writers.dbc_comments_agent.models import DbcCommentsInput
-    from shared.git_utils import write_files_and_commit
+    from software_engineering_team.shared.git_utils import write_files_and_commit
 
     try:
         dbc_code = _read_repo_code(repo_path)
@@ -537,7 +537,7 @@ def _run_tech_lead_review(
     (or to the queue provided via append_task_id_fn when running in a worker).
     After review, the Tech Lead triggers the Documentation Agent if available.
     """
-    from shared.context_sizing import compute_existing_code_chars
+    from software_engineering_team.shared.context_sizing import compute_existing_code_chars
 
     completed_tasks = [t for tid, t in all_tasks.items() if tid in completed]
     remaining_ids = set(execution_queue)
@@ -593,7 +593,7 @@ def _run_code_review(
     Run the code review agent on the given code.
     Returns the CodeReviewOutput.
     """
-    from shared.context_sizing import compute_code_review_total_chars
+    from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
     from code_review_agent.models import CodeReviewInput
 
     llm = agents["code_review"].llm
@@ -665,7 +665,7 @@ def _run_build_verification(
     For frontend: runs ng build.
     For backend: runs python syntax check (pytest if tests exist).
     """
-    from shared.command_runner import run_command, run_ng_build_with_nvm_fallback, run_python_syntax_check, run_pytest
+    from software_engineering_team.shared.command_runner import run_command, run_ng_build_with_nvm_fallback, run_python_syntax_check, run_pytest
 
     if agent_type == "frontend":
         # repo_path may be frontend repo root (package.json here) or work path (frontend/ subdir)
@@ -673,7 +673,7 @@ def _run_build_verification(
         if not (frontend_dir / "package.json").exists():
             logger.info("Build verification: no frontend project found, skipping frontend build")
             return True, ""
-        from shared.command_runner import is_ng_build_environment_failure
+        from software_engineering_team.shared.command_runner import is_ng_build_environment_failure
         result = run_ng_build_with_nvm_fallback(frontend_dir)
         if not result.success:
             if is_ng_build_environment_failure(result):
@@ -686,7 +686,7 @@ def _run_build_verification(
                 return True, ""
             failures = result.parsed_failures("ng_build")
             if failures:
-                from shared.error_parsing import build_agent_feedback, get_failure_class_tag
+                from software_engineering_team.shared.error_parsing import build_agent_feedback, get_failure_class_tag
                 feedback = build_agent_feedback(failures)
                 logger.warning(
                     "Build verification failed for task %s: %s",
@@ -736,7 +736,7 @@ def _run_build_verification(
             if not test_result.success:
                 failures = test_result.parsed_failures("pytest")
                 if failures:
-                    from shared.error_parsing import build_agent_feedback, get_failure_class_tag
+                    from software_engineering_team.shared.error_parsing import build_agent_feedback, get_failure_class_tag
                     summary = build_agent_feedback(failures)
                     logger.warning(
                         "Tests failed for task %s: %s",
@@ -763,7 +763,7 @@ def _run_build_verification(
     elif agent_type == "devops":
         # Validate YAML files and run docker build if Dockerfile exists
         import yaml
-        from shared.command_runner import run_command
+        from software_engineering_team.shared.command_runner import run_command
 
         errors: list[str] = []
         # Validate .github/workflows/*.yml
@@ -828,7 +828,7 @@ def _try_build_fix_one_at_a_time(
     Use a tool-agent style flow to identify all build issues, then fix them one at a time.
     Returns (True, "") if build passes after fixes; otherwise (False, error_summary).
     """
-    from shared.command_runner import (
+    from software_engineering_team.shared.command_runner import (
         run_command,
         run_ng_build_with_nvm_fallback,
         run_python_syntax_check,
@@ -840,7 +840,7 @@ def _try_build_fix_one_at_a_time(
         if not (project_dir / "package.json").exists():
             return False, "No frontend project found"
         try:
-            from shared.command_runner import is_ng_build_environment_failure
+            from software_engineering_team.shared.command_runner import is_ng_build_environment_failure
             result = run_ng_build_with_nvm_fallback(project_dir)
         except Exception as e:
             logger.warning("Build fix: ng build failed to run: %s", e)
@@ -1118,7 +1118,7 @@ def _backend_code_v2_worker(
     backend team's (backend_code_v2_team) ``run_workflow``.
     Designed to run in its own thread, parallel with frontend worker.
     """
-    from shared.models import SystemArchitecture
+    from software_engineering_team.shared.models import SystemArchitecture
     team_lead = agents.get("backend")
     if team_lead is None:
         for tid in backend_code_v2_queue:
@@ -1199,7 +1199,7 @@ def _frontend_code_v2_worker(
     repo_path: Path,
 ) -> None:
     """Worker that drains frontend_code_v2_queue by calling frontend_code_v2_team run_workflow."""
-    from shared.models import SystemArchitecture
+    from software_engineering_team.shared.models import SystemArchitecture
     team_lead = agents.get("frontend_code_v2")
     if team_lead is None:
         for tid in frontend_code_v2_queue:
@@ -1327,7 +1327,7 @@ def _run_backend_frontend_workers(
             logger.info("%s[%s] >>> Backend worker starting task %s", log_prefix, task_id, task_id)
             task_start_time = time.monotonic()
             try:
-                from shared.command_runner import ensure_backend_project_initialized
+                from software_engineering_team.shared.command_runner import ensure_backend_project_initialized
                 init_result = ensure_backend_project_initialized(backend_dir)
                 if not init_result.success:
                     update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=init_result.error_summary)
@@ -1508,8 +1508,8 @@ def _run_backend_frontend_workers(
             logger.info("%s[%s] >>> Frontend worker starting task %s", log_prefix, task_id, task_id)
             task_start_time = time.monotonic()
             try:
-                from shared.command_runner import ensure_frontend_project_initialized
-                from shared.frontend_framework import resolve_frontend_framework
+                from software_engineering_team.shared.command_runner import ensure_frontend_project_initialized
+                from software_engineering_team.shared.frontend_framework import resolve_frontend_framework
                 # Detect framework from task metadata, project files, or spec
                 task_meta = getattr(task, "metadata", None) or {}
                 detected_framework = resolve_frontend_framework(task_meta, spec_content, frontend_dir)
@@ -1932,7 +1932,7 @@ def run_orchestrator(
         from architecture_expert.models import ArchitectureInput
         from tech_lead_agent.models import TechLeadInput
 
-        from shared.context_sizing import compute_existing_code_chars
+        from software_engineering_team.shared.context_sizing import compute_existing_code_chars
 
         arch_agent = agents["architecture"]
         tech_lead = agents["tech_lead"]
@@ -2393,7 +2393,7 @@ def run_orchestrator(
                             completed_task_ids=completed_code_task_ids,
                         )
                     else:
-                        from shared.context_sizing import compute_existing_code_chars
+                        from software_engineering_team.shared.context_sizing import compute_existing_code_chars
                         max_code_chars = compute_existing_code_chars(doc_agent.llm)
                         codebase_content = _truncate_for_context(
                             _read_repo_code(
@@ -2465,8 +2465,8 @@ def run_failed_tasks(job_id: str) -> None:
     re-queues them, and executes them through the same pipeline.
     Runs in a background thread (same pattern as run_orchestrator).
     """
-    from shared.job_store import get_job
-    from shared.models import Task
+    from software_engineering_team.shared.job_store import get_job
+    from software_engineering_team.shared.models import Task
 
     job_data = get_job(job_id)
     if not job_data:
@@ -2505,7 +2505,7 @@ def run_failed_tasks(job_id: str) -> None:
         spec_content = load_spec_from_repo(path)
 
         # Reconstruct minimal architecture from stored overview
-        from shared.models import SystemArchitecture
+        from software_engineering_team.shared.models import SystemArchitecture
         arch_overview = job_data.get("_architecture_overview") or job_data.get("architecture_overview") or ""
         architecture = SystemArchitecture(overview=arch_overview)
 

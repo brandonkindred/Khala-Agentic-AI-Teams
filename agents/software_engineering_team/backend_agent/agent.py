@@ -6,17 +6,17 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from shared.context_sizing import compute_existing_code_chars, compute_spec_content_chars
-from shared.llm import LLMClient
-from shared.models import SystemArchitecture, Task, TaskUpdate
-from shared.prompt_utils import build_problem_solving_header, log_llm_prompt
-from shared.repo_utils import (
+from software_engineering_team.shared.context_sizing import compute_existing_code_chars, compute_spec_content_chars
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
+from software_engineering_team.shared.prompt_utils import build_problem_solving_header, log_llm_prompt
+from software_engineering_team.shared.repo_utils import (
     int_env as _int_env,
     read_repo_code,
     truncate_for_context,
     BACKEND_EXTENSIONS,
 )
-from shared.task_utils import (
+from software_engineering_team.shared.task_utils import (
     task_requirements,
     task_requirements_with_expectations,
 )
@@ -27,7 +27,7 @@ from .models import (
     ReviewIterationRecord,
 )
 from .prompts import BACKEND_PLANNING_PROMPT, BACKEND_PROMPT
-from shared.task_plan import TaskPlan
+from software_engineering_team.shared.task_plan import TaskPlan
 MAX_EXISTING_CODE_CHARS = 10000
 logger = logging.getLogger(__name__)
 
@@ -598,7 +598,7 @@ class BackendExpertAgent:
         Returns:
             BackendWorkflowResult with success status, review history, and final files.
         """
-        from shared.git_utils import (
+        from software_engineering_team.shared.git_utils import (
             DEVELOPMENT_BRANCH,
             _run_git,
             abort_merge,
@@ -608,7 +608,7 @@ class BackendExpertAgent:
             delete_branch,
             merge_branch,
         )
-        from shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
+        from software_engineering_team.shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
         task_id = task.id
         workflow_start = time.monotonic()
         review_history: List[ReviewIterationRecord] = []
@@ -724,7 +724,7 @@ class BackendExpertAgent:
         result: Optional[BackendOutput] = None
         plan_text_for_fix_loop: str = ""  # Persists for review loop; passed to _regenerate_with_issues for first 2-3 fix attempts
         # Handle clarification sub-loop (separate from the review loop)
-        from shared.context_sizing import compute_existing_code_chars
+        from software_engineering_team.shared.context_sizing import compute_existing_code_chars
         for clar_round in range(MAX_CLARIFICATION_ROUNDS + 1):
             max_code_chars = compute_existing_code_chars(self.llm)
             existing_code = _truncate_for_context(
@@ -2193,7 +2193,7 @@ class BackendExpertAgent:
         build_verifier: Callable[..., Tuple[bool, str]],
     ) -> tuple[bool, Optional[BackendOutput], str]:
         """Run up to MAX_PROBLEM_SOLVER_CYCLES to patch a bug before moving on."""
-        from shared.repo_writer import write_agent_output
+        from software_engineering_team.shared.repo_writer import write_agent_output
         last_error = base_issue.get("description", "")
         last_result: Optional[BackendOutput] = None
         for cycle in range(1, MAX_PROBLEM_SOLVER_CYCLES + 1):
@@ -2249,7 +2249,7 @@ class BackendExpertAgent:
         Postconditions:
             - Returns a ``CodeReviewOutput`` with ``approved`` and ``issues``.
         """
-        from shared.context_sizing import compute_code_review_total_chars
+        from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
         from code_review_agent.models import CodeReviewInput
         max_chars = compute_code_review_total_chars(code_review_agent.llm)
         code_capped = _truncate_for_context(code, max_chars)
@@ -2348,7 +2348,7 @@ class BackendExpertAgent:
         New tests are picked up by the next build verification (pytest).
         Returns True if any test files were written (so caller can re-run build verification).
         """
-        from shared.git_utils import write_files_and_commit
+        from software_engineering_team.shared.git_utils import write_files_and_commit
         files_to_write: Dict[str, str] = {}
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in task_id)[:50]
         if getattr(qa_output, "integration_tests", "").strip():
@@ -2409,7 +2409,7 @@ class BackendExpertAgent:
             Tuple of (comments_added, comments_updated, already_compliant).
         """
         from technical_writers.dbc_comments_agent.models import DbcCommentsInput
-        from shared.git_utils import write_files_and_commit
+        from software_engineering_team.shared.git_utils import write_files_and_commit
         try:
             dbc_code = _read_repo_code(repo_path)
             if not dbc_code or dbc_code == "# No code files found":
@@ -2669,7 +2669,7 @@ class BackendExpertAgent:
                 continue
             # Fail fast when LLM produces no valid output
             if not validated_files and not data.get("needs_clarification", False):
-                from shared.llm import LLMPermanentError
+                from software_engineering_team.shared.llm import LLMPermanentError
                 if raw_files:
                     raise LLMPermanentError(
                         f"Backend: LLM returned {len(raw_files)} files but all were rejected by validation. "

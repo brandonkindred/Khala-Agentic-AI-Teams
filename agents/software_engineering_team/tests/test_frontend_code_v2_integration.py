@@ -18,8 +18,8 @@ _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
 
-from shared.models import Task, TaskStatus, TaskType
-from shared.task_parsing import parse_assignment_from_data, _assignee_to_task_type
+from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+from software_engineering_team.shared.task_parsing import parse_assignment_from_data, _assignee_to_task_type
 
 
 class TestTaskParsingFrontendCodeV2:

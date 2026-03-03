@@ -10,8 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
-from shared.llm import LLMClient
-from shared.models import Task
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.models import Task
 
 from ..models import (
     Microtask,

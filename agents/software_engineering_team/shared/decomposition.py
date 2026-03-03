@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from shared.llm import LLMClient
+    from software_engineering_team.shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -327,9 +327,9 @@ class RecursiveProcessor(Generic[T]):
             LLMTruncatedError: If max decomposition depth is exceeded and
                               response is still truncated.
         """
-        from shared.llm import LLMTruncatedError, LLMJsonParseError
-        from shared.continuation import ResponseContinuator, ContinuationResult, MAX_CONTINUATION_CYCLES
-        from shared.post_mortem import write_post_mortem
+        from software_engineering_team.shared.llm import LLMTruncatedError, LLMJsonParseError
+        from software_engineering_team.shared.continuation import ResponseContinuator, ContinuationResult, MAX_CONTINUATION_CYCLES
+        from software_engineering_team.shared.post_mortem import write_post_mortem
 
         if context is None:
             context = DecompositionContext(
@@ -424,7 +424,7 @@ class RecursiveProcessor(Generic[T]):
         Returns:
             Complete content if successful, None if continuation fails.
         """
-        from shared.continuation import ResponseContinuator, ContinuationResult, MAX_CONTINUATION_CYCLES
+        from software_engineering_team.shared.continuation import ResponseContinuator, ContinuationResult, MAX_CONTINUATION_CYCLES
 
         system_message = (
             "You are a strict JSON generator. Respond with a single valid JSON object only, "

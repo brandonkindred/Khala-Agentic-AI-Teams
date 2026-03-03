@@ -14,7 +14,7 @@ from frontend_team.feature_agent.agent import (
     _read_frontend_affected_files_code,
 )
 
-from shared.command_runner import CommandResult
+from software_engineering_team.shared.command_runner import CommandResult
 
 _INSTALL_OK = CommandResult(success=True, exit_code=0, stdout="", stderr="")
 
@@ -143,7 +143,7 @@ class TestFrontendWorkflowBuildFixSpecialist:
 
     @patch("shared.command_runner.ensure_frontend_dependencies_installed", return_value=_INSTALL_OK)
     def test_specialist_invoked_on_repeated_failure(self, _mock_install: MagicMock, _setup_repo: Path) -> None:
-        from shared.models import Task, TaskType
+        from software_engineering_team.shared.models import Task, TaskType
         from build_fix_specialist.models import CodeEdit
 
         task = Task(
@@ -219,7 +219,7 @@ class TestFrontendWorkflowBuildFixSpecialist:
 
     @patch("shared.command_runner.ensure_frontend_dependencies_installed", return_value=_INSTALL_OK)
     def test_falls_back_to_qa_when_no_edits(self, _mock_install: MagicMock, _setup_repo: Path) -> None:
-        from shared.models import Task, TaskType
+        from software_engineering_team.shared.models import Task, TaskType
 
         task = Task(
             id="fe-2", type=TaskType.FRONTEND, assignee="frontend",
@@ -282,7 +282,7 @@ class TestFrontendWorkflowBuildFixSpecialist:
 
     @patch("shared.command_runner.ensure_frontend_dependencies_installed", return_value=_INSTALL_OK)
     def test_specialist_failure_is_nonblocking(self, _mock_install: MagicMock, _setup_repo: Path) -> None:
-        from shared.models import Task, TaskType
+        from software_engineering_team.shared.models import Task, TaskType
 
         task = Task(
             id="fe-3", type=TaskType.FRONTEND, assignee="frontend",

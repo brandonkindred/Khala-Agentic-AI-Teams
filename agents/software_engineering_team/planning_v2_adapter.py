@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from shared.models import PlanningHierarchy, ProductRequirements
+from software_engineering_team.shared.models import PlanningHierarchy, ProductRequirements
 
 logger = logging.getLogger(__name__)
 

@@ -9,9 +9,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from shared.llm import LLMClient
+from software_engineering_team.shared.llm import LLMClient
 
-from shared.context_sizing import (
+from software_engineering_team.shared.context_sizing import (
     compute_task_generator_arch_chars,
     compute_task_generator_existing_chars,
     compute_task_generator_features_chars,

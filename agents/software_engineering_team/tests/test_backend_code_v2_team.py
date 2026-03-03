@@ -120,7 +120,7 @@ class TestSetupPhase:
 class TestPlanningPhase:
     def test_language_detection_python(self, tmp_path):
         from backend_code_v2_team.phases.planning import _detect_language
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         (tmp_path / "requirements.txt").write_text("flask")
         task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build api")
@@ -128,7 +128,7 @@ class TestPlanningPhase:
 
     def test_language_detection_java(self, tmp_path):
         from backend_code_v2_team.phases.planning import _detect_language
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         (tmp_path / "pom.xml").write_text("<project/>")
         task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build api")
@@ -136,7 +136,7 @@ class TestPlanningPhase:
 
     def test_language_detection_from_description(self, tmp_path):
         from backend_code_v2_team.phases.planning import _detect_language
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="Use Spring Boot and Java")
         assert _detect_language(tmp_path, task) == "java"
@@ -159,7 +159,7 @@ class TestPlanningPhase:
 
     def test_run_planning_fallback(self, tmp_path):
         from backend_code_v2_team.phases.planning import run_planning
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         mock_llm.complete_text.return_value = (
@@ -180,7 +180,7 @@ class TestPlanningPhase:
 class TestExecutionPhase:
     def test_run_execution_with_tool_runners(self, tmp_path):
         from backend_code_v2_team.phases.execution import run_execution
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build")
@@ -204,7 +204,7 @@ class TestExecutionPhase:
 
     def test_run_execution_general_fallback(self, tmp_path):
         from backend_code_v2_team.phases.execution import run_execution
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         mock_llm.complete_text.return_value = (
@@ -226,7 +226,7 @@ class TestExecutionPhase:
 class TestReviewPhase:
     def test_review_passes_no_issues(self, tmp_path):
         from backend_code_v2_team.phases.review import run_review
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         mock_llm.complete_text.return_value = (
@@ -242,7 +242,7 @@ class TestReviewPhase:
 
     def test_review_fails_on_critical_issues(self, tmp_path):
         from backend_code_v2_team.phases.review import run_review
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         mock_llm.complete_text.return_value = (
@@ -263,7 +263,7 @@ class TestReviewPhase:
 class TestProblemSolvingPhase:
     def test_no_actionable_issues(self):
         from backend_code_v2_team.phases.problem_solving import run_problem_solving
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build")
@@ -275,7 +275,7 @@ class TestProblemSolvingPhase:
 
     def test_applies_fixes(self):
         from backend_code_v2_team.phases.problem_solving import run_problem_solving
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         mock_llm.complete_text.return_value = (
@@ -376,7 +376,7 @@ class TestToolAgents:
         create_ok, branch = agent.create_feature_branch(tmp_path, "t1", "API")
         assert not create_ok and branch is None
 
-        from shared.git_utils import initialize_new_repo
+        from software_engineering_team.shared.git_utils import initialize_new_repo
         ok, _ = initialize_new_repo(tmp_path)
         assert ok
         create_ok, branch = agent.create_feature_branch(tmp_path, "t1", "API")
@@ -385,7 +385,7 @@ class TestToolAgents:
 
     def test_git_agent_commit_current_changes(self, tmp_path):
         from backend_code_v2_team.tool_agents.git_branch_management import GitBranchManagementToolAgent
-        from shared.git_utils import initialize_new_repo
+        from software_engineering_team.shared.git_utils import initialize_new_repo
 
         initialize_new_repo(tmp_path)
         (tmp_path / "foo.txt").write_text("hi")
@@ -395,7 +395,7 @@ class TestToolAgents:
 
     def test_git_agent_deliver_with_feature_branch_name(self, tmp_path):
         from backend_code_v2_team.tool_agents.git_branch_management import GitBranchManagementToolAgent
-        from shared.git_utils import initialize_new_repo, create_feature_branch
+        from software_engineering_team.shared.git_utils import initialize_new_repo, create_feature_branch
 
         initialize_new_repo(tmp_path)
         ok, branch = create_feature_branch(tmp_path, "development", "t1-api")
@@ -500,7 +500,7 @@ class TestBackendCodeV2TeamLead:
     def test_team_lead_runs_setup_then_delegates(self, tmp_path):
         """BackendCodeV2TeamLead runs Setup then delegates to BackendDevelopmentAgent."""
         from backend_code_v2_team.orchestrator import BackendCodeV2TeamLead
-        from shared.models import Task, TaskStatus, TaskType
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         planning_response = (

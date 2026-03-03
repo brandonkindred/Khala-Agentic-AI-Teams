@@ -26,7 +26,7 @@ if str(_team_dir) not in sys.path:
 
 def _create_test_task(task_type: str = "frontend") -> "Task":
     """Create a valid Task object for testing."""
-    from shared.models import Task, TaskStatus, TaskType
+    from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
     return Task(
         id="task-1",

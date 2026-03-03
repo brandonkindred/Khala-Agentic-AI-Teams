@@ -2,7 +2,7 @@
 
 import pytest
 
-from shared.task_plan import TaskPlan
+from software_engineering_team.shared.task_plan import TaskPlan
 
 
 def test_task_plan_to_markdown() -> None:

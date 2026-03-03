@@ -1,6 +1,6 @@
 """Prompts for the Cybersecurity Expert agent."""
 
-from shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
 SECURITY_PROMPT = """You are a Cybersecurity Expert. Your job is to review code and produce a list of well-defined security issues for the coding agent to fix. You do NOT write fixes yourself – the coding agent implements them.
 

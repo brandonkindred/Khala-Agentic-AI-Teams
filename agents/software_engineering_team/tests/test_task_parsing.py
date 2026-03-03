@@ -2,8 +2,8 @@
 
 import pytest
 
-from shared.models import Task, TaskAssignment, TaskStatus, TaskType
-from shared.task_parsing import (
+from software_engineering_team.shared.models import Task, TaskAssignment, TaskStatus, TaskType
+from software_engineering_team.shared.task_parsing import (
     flatten_hierarchy_to_assignment,
     parse_assignment_from_data,
     parse_hierarchy_from_data,

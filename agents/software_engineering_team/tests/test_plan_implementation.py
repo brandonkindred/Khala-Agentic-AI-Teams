@@ -8,7 +8,7 @@ import pytest
 
 from backend_agent.agent import BackendExpertAgent
 from frontend_team.feature_agent.agent import FrontendExpertAgent
-from shared.llm import DummyLLMClient
+from software_engineering_team.shared.llm import DummyLLMClient
 
 
 def test_backend_run_workflow_accepts_security_agent() -> None:
@@ -32,7 +32,7 @@ def test_backend_has_persist_qa_artifacts() -> None:
 
 def test_backend_persist_qa_artifacts_writes_test_files(tmp_path: Path) -> None:
     """_persist_qa_artifacts writes integration_tests and unit_tests when provided."""
-    from shared.git_utils import _run_git
+    from software_engineering_team.shared.git_utils import _run_git
 
     # Init git repo (need initial commit for write_files_and_commit to work)
     _run_git(tmp_path, ["git", "init"])

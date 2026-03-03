@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from shared.llm import LLMClient
+from software_engineering_team.shared.llm import LLMClient
 
 from .models import CICDPipelineAgentInput, CICDPipelineAgentOutput
 from .prompts import CICD_PIPELINE_PROMPT

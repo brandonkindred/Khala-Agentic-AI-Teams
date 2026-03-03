@@ -30,8 +30,8 @@ if _arch_dir.exists() and str(_arch_dir) not in sys.path:
     sys.path.insert(0, str(_arch_dir))
 
 from spec_parser import validate_work_path
-from shared.execution_tracker import execution_tracker
-from shared.job_store import (
+from software_engineering_team.shared.execution_tracker import execution_tracker
+from software_engineering_team.shared.job_store import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -46,7 +46,7 @@ from shared.job_store import (
     submit_answers as store_submit_answers,
 )
 
-from shared.logging_config import setup_logging
+from software_engineering_team.shared.logging_config import setup_logging
 
 setup_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -771,7 +771,7 @@ def architect_design(request: ArchitectDesignRequest) -> ArchitectDesignResponse
         from architecture_expert import ArchitectureExpertAgent
         from architecture_expert.models import ArchitectureInput
         from spec_parser import parse_spec_with_llm
-        from shared.llm import get_llm_for_agent
+        from software_engineering_team.shared.llm import get_llm_for_agent
     except ImportError as e:
         logger.exception("Failed to import architect dependencies")
         raise HTTPException(status_code=500, detail=f"Architect agent unavailable: {e}") from e
@@ -913,8 +913,8 @@ def _run_frontend_code_v2_background(job_id: str, repo_path: str, task_dict: dic
     try:
         from pathlib import Path as _Path
         from frontend_code_v2_team import FrontendCodeV2TeamLead
-        from shared.llm import get_llm_for_agent
-        from shared.models import Task, TaskStatus, TaskType, SystemArchitecture
+        from software_engineering_team.shared.llm import get_llm_for_agent
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType, SystemArchitecture
         import uuid as _uuid
 
         update_job(job_id, status="running")
@@ -1089,8 +1089,8 @@ def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict
     try:
         from pathlib import Path as _Path
         from backend_code_v2_team import BackendCodeV2TeamLead
-        from shared.llm import get_llm_for_agent
-        from shared.models import Task, TaskStatus, TaskType, SystemArchitecture
+        from software_engineering_team.shared.llm import get_llm_for_agent
+        from software_engineering_team.shared.models import Task, TaskStatus, TaskType, SystemArchitecture
         import uuid as _uuid
 
         update_job(job_id, status="running")
@@ -1154,7 +1154,7 @@ def _run_planning_v2_background(
         from pathlib import Path as _Path
         from planning_v2_team import PlanningV2TeamLead
         from planning_v2_team.models import Phase
-        from shared.llm import get_llm_for_agent
+        from software_engineering_team.shared.llm import get_llm_for_agent
 
         update_job(job_id, status="running")
 
@@ -1568,7 +1568,7 @@ def auto_answer_run_team_question(
 
     try:
         from product_requirements_analysis_agent import get_auto_answer_for_job
-        from shared.llm import get_llm_for_agent
+        from software_engineering_team.shared.llm import get_llm_for_agent
 
         llm = get_llm_for_agent("backend")
         result = get_auto_answer_for_job(
@@ -1645,7 +1645,7 @@ def auto_answer_planning_v2_question(
 
     try:
         from product_requirements_analysis_agent import get_auto_answer_for_job
-        from shared.llm import get_llm_for_agent
+        from software_engineering_team.shared.llm import get_llm_for_agent
 
         llm = get_llm_for_agent("backend")
         result = get_auto_answer_for_job(
@@ -1772,7 +1772,7 @@ def _run_product_analysis_background(
             AnalysisPhase,
             ProductRequirementsAnalysisAgent,
         )
-        from shared.llm import get_llm_for_agent
+        from software_engineering_team.shared.llm import get_llm_for_agent
         from spec_parser import gather_context_files
 
         update_job(job_id, status="running")
@@ -1993,7 +1993,7 @@ def auto_answer_product_analysis_question(
 
     try:
         from product_requirements_analysis_agent import get_auto_answer_for_job
-        from shared.llm import get_llm_for_agent
+        from software_engineering_team.shared.llm import get_llm_for_agent
 
         llm = get_llm_for_agent("backend")
         result = get_auto_answer_for_job(

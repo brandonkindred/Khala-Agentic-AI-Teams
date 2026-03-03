@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-from shared.models import SystemArchitecture
+from software_engineering_team.shared.models import SystemArchitecture
 
 
 class BugReport(BaseModel):

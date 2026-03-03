@@ -6,8 +6,8 @@ from unittest.mock import patch
 import pytest
 
 from frontend_team.feature_agent import FrontendOutput
-from shared.command_runner import CommandResult
-import shared.command_runner as command_runner_module
+from software_engineering_team.shared.command_runner import CommandResult
+import software_engineering_team.shared.command_runner as command_runner_module
 
 
 def test_npm_install_called_with_packages_from_frontend_output(tmp_path: Path) -> None:

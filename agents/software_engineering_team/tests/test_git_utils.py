@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from shared.git_utils import (
+from software_engineering_team.shared.git_utils import (
     _clear_disposable_files_if_blocking,
     checkout_branch,
     create_feature_branch,

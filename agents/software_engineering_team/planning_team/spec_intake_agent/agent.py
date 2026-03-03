@@ -6,8 +6,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
-from shared.llm import LLMClient
-from shared.models import ProductRequirements
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.models import ProductRequirements
 
 from .models import AcceptanceCriterionItem, SpecIntakeInput, SpecIntakeOutput, validated_spec_to_requirements
 from .prompts import SPEC_INTAKE_PROMPT

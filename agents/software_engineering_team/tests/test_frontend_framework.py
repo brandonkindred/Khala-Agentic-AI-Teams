@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 
-from shared.frontend_framework import (
+from software_engineering_team.shared.frontend_framework import (
     get_frontend_framework_from_spec,
     resolve_frontend_framework,
     detect_framework_from_project,

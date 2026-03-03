@@ -2,6 +2,128 @@
   margin-bottom: 1rem;
 }
 
+.dashboard-layout {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  margin-top: 1rem;
+}
+
+.main-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.running-jobs-panel {
+  flex-shrink: 0;
+  width: 380px;
+  max-width: 100%;
+  position: sticky;
+  top: 1rem;
+
+  .running-jobs-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .job-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+    width: 100%;
+
+    &:hover {
+      background: var(--mat-sys-surface-container-highest, rgba(0, 0, 0, 0.04));
+    }
+
+    &.selected {
+      border-color: var(--mat-sys-primary);
+      background: var(--mat-sys-surface-container-high, rgba(25, 118, 210, 0.08));
+    }
+
+    .job-brief {
+      font-weight: 500;
+      font-size: 0.875rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 100%;
+    }
+
+    .job-id {
+      font-size: 0.75rem;
+      color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+      word-break: break-all;
+    }
+
+    .job-status {
+      font-size: 0.75rem;
+      color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+      text-transform: lowercase;
+
+      &.status-running,
+      &.status-pending {
+        color: var(--mat-sys-primary, #1976d2);
+      }
+
+      &.status-completed,
+      &.status-needs_human_review {
+        color: var(--mat-sys-tertiary, #2e7d32);
+      }
+
+      &.status-failed {
+        color: var(--mat-sys-error, #c62828);
+      }
+    }
+  }
+
+  .job-detail {
+    border-top: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+    padding-top: 1rem;
+    margin-top: 0.5rem;
+
+    h3 {
+      margin: 0 0 0.75rem 0;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .detail-row {
+      margin: 0.25rem 0;
+      font-size: 0.875rem;
+      line-height: 1.4;
+
+      &.error {
+        color: var(--mat-sys-error, #c62828);
+      }
+    }
+
+    .draft-preview {
+      margin-top: 0.75rem;
+      padding: 0.5rem;
+      background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
+      border-radius: 4px;
+      font-size: 0.8125rem;
+      max-height: 120px;
+      overflow-y: auto;
+
+      p {
+        margin: 0.25rem 0 0 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    }
+  }
+}
+
 .tab-content {
   padding: 1rem 0;
   display: flex;

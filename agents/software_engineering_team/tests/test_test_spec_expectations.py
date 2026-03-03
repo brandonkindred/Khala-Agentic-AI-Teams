@@ -3,7 +3,7 @@
 import tempfile
 from pathlib import Path
 
-from shared.test_spec_expectations import (
+from software_engineering_team.shared.test_spec_expectations import (
     build_test_spec_checklist,
     extract_backend_test_expectations,
     extract_frontend_route_expectations,

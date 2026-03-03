@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from shared.context_sizing import (
+from software_engineering_team.shared.context_sizing import (
     compute_code_review_chunk_chars,
     compute_code_review_total_chars,
 )
-from shared.llm import LLMClient
+from software_engineering_team.shared.llm import LLMClient
 
 from .coordinator import run_coordinator
 from .models import CodeReviewInput, CodeReviewIssue, CodeReviewOutput

@@ -16,7 +16,7 @@ from ...output_templates import parse_problem_solving_single_issue_template, par
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT, SECURITY_TOOL_AGENT_REVIEW_PROMPT
 
 if TYPE_CHECKING:
-    from shared.llm import LLMClient
+    from software_engineering_team.shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 """Prompts for the Backend Expert agent."""
 
-from shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
 BACKEND_PLANNING_PROMPT = """You are a Senior Backend Software Engineer. Before implementing a task, you produce a concise implementation plan.
 

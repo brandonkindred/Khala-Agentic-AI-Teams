@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from shared.llm import (
+from software_engineering_team.shared.llm import (
     DummyLLMClient,
     LLMJsonParseError,
     LLMPermanentError,
@@ -304,7 +304,7 @@ def test_get_llm_for_agent_cache_returns_same_instance() -> None:
 
 def test_extract_task_assignment_from_content_recovers_tasks() -> None:
     """When LLM returns raw content with embedded JSON, extract_task_assignment_from_content recovers it."""
-    from shared.llm_response_utils import extract_task_assignment_from_content
+    from software_engineering_team.shared.llm_response_utils import extract_task_assignment_from_content
 
     content = '''Here is the task plan:
 
@@ -327,7 +327,7 @@ def test_extract_task_assignment_from_content_recovers_tasks() -> None:
 
 def test_extract_task_assignment_from_content_returns_none_for_empty() -> None:
     """extract_task_assignment_from_content returns None when no tasks in content."""
-    from shared.llm_response_utils import extract_task_assignment_from_content
+    from software_engineering_team.shared.llm_response_utils import extract_task_assignment_from_content
 
     assert extract_task_assignment_from_content("") is None
     assert extract_task_assignment_from_content("No JSON here") is None

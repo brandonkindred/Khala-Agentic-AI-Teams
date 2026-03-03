@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import List
 
-from shared.git_utils import _run_git
+from software_engineering_team.shared.git_utils import _run_git
 
 from .models import GitOperationInput, GitOperationOutput
 

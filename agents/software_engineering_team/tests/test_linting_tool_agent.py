@@ -293,7 +293,7 @@ def test_backend_workflow_calls_linting_tool_agent(tmp_path: Path) -> None:
     def build_verifier(_repo_path, _agent_type, _task_id):
         return True, ""
 
-    from shared.models import Task, TaskType
+    from software_engineering_team.shared.models import Task, TaskType
 
     task = Task(
         id="test-lint-1",

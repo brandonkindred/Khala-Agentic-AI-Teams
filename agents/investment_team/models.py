@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RiskTolerance(str, Enum):
@@ -240,6 +240,8 @@ class DealCard(BaseModel):
 
 
 class UnderwritingSummary(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     deal_id: str
     model_version: str
     base_case_irr_pct: float

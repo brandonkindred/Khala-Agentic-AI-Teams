@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from shared.models import SystemArchitecture
+from software_engineering_team.shared.models import SystemArchitecture
 
 
 class DocumentationStatus(str, Enum):

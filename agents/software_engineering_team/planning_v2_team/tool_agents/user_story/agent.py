@@ -11,15 +11,15 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from shared.models import Initiative, Epic, StoryPlan, TaskPlan, PlanningHierarchy
+from software_engineering_team.shared.models import Initiative, Epic, StoryPlan, TaskPlan, PlanningHierarchy
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput
 from ...output_templates import parse_fix_output, parse_review_output
 from ..json_utils import complete_text_with_continuation
-from shared.deduplication import dedupe_by_key
+from software_engineering_team.shared.deduplication import dedupe_by_key
 
 if TYPE_CHECKING:
-    from shared.llm import LLMClient
+    from software_engineering_team.shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 

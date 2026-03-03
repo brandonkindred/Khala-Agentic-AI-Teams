@@ -9,8 +9,8 @@ import logging
 import pytest
 
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
-from shared.llm import DummyLLMClient
-from shared.models import ProductRequirements
+from software_engineering_team.shared.llm import DummyLLMClient
+from software_engineering_team.shared.models import ProductRequirements
 
 
 def test_architecture_agent_logs_start_and_done(caplog) -> None:

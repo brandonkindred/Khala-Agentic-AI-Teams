@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from shared.command_runner import (
+from software_engineering_team.shared.command_runner import (
     _get_nvm_script_prefix,
     ensure_frontend_project_initialized,
     run_ng_build_with_nvm_fallback,

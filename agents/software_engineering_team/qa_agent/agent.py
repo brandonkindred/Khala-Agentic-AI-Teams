@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from shared.llm import LLMClient, LLMJsonParseError
+from software_engineering_team.shared.llm import LLMClient, LLMJsonParseError
 
 from .models import BugReport, QAInput, QAOutput
 from .prompts import QA_PROMPT, QA_PROMPT_FIX_BUILD, QA_PROMPT_WRITE_TESTS

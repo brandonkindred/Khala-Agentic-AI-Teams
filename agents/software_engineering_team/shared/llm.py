@@ -1048,7 +1048,7 @@ class OllamaLLMClient(LLMClient):
             LLMTruncatedError: If truncated and continuation fails.
             LLMJsonParseError: If JSON parsing fails.
         """
-        from shared.continuation import ResponseContinuator, ContinuationResult
+        from software_engineering_team.shared.continuation import ResponseContinuator, ContinuationResult
 
         try:
             return self.complete_json(prompt, temperature=temperature)
@@ -1121,7 +1121,7 @@ class OllamaLLMClient(LLMClient):
         Raises:
             LLMTruncatedError: If truncated and continuation fails.
         """
-        from shared.continuation import ResponseContinuator, ContinuationResult
+        from software_engineering_team.shared.continuation import ResponseContinuator, ContinuationResult
 
         try:
             return self.complete_text(prompt, temperature=temperature)

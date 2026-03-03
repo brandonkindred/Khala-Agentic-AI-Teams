@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from shared.git_utils import (
+from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     abort_merge,
     checkout_branch,
@@ -19,7 +19,7 @@ from shared.git_utils import (
     delete_branch,
     merge_branch,
 )
-from shared.repo_writer import write_agent_output
+from software_engineering_team.shared.repo_writer import write_agent_output
 
 from ..models import DeliverResult, Phase, ToolAgentKind, ToolAgentPhaseInput
 from ..prompts import DELIVER_COMMIT_MSG_TEMPLATE

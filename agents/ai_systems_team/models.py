@@ -9,7 +9,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Phase(str, Enum):
@@ -164,6 +164,8 @@ class ArchitectureResult(BaseModel):
 
 class CapabilitiesResult(BaseModel):
     """Result of the capabilities planning phase."""
+
+    model_config = ConfigDict(protected_namespaces=())
 
     success: bool
     tool_contracts: List[ToolContract] = Field(default_factory=list)

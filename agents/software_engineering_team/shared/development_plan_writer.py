@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared.models import Task, TaskAssignment, SystemArchitecture
+from software_engineering_team.shared.models import Task, TaskAssignment, SystemArchitecture
 
 logger = logging.getLogger(__name__)
 

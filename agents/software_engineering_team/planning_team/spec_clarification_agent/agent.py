@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from shared.llm import LLMClient
+from software_engineering_team.shared.llm import LLMClient
 
 from .models import SpecClarificationInput, SpecClarificationOutput
 from .prompts import ASK_NEXT_PROMPT, PROCESS_ANSWER_PROMPT

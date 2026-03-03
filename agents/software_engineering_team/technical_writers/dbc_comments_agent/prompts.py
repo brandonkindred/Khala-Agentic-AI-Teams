@@ -1,6 +1,6 @@
 """Prompts for the Design by Contract Comments agent."""
 
-from shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
 DBC_COMMENTS_PROMPT = """You are a Senior Technical Writer and Design by Contract (DbC) specialist. Your sole responsibility is to review code and ensure every method, function, class, and interface has comments that comply with Design by Contract principles.
 

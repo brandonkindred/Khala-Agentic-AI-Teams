@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-from shared.models import ProductRequirements, Task, TaskAssignment
+from software_engineering_team.shared.models import ProductRequirements, Task, TaskAssignment
 
 
 def validate_task(task: Task, valid_task_ids: set[str]) -> List[str]:

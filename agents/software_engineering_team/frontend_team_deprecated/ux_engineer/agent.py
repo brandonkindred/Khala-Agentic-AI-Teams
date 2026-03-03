@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from shared.llm import LLMClient
-from shared.models import SystemArchitecture
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.models import SystemArchitecture
 
 from .models import UXEngineerInput, UXEngineerOutput
 from .prompts import UX_ENGINEER_PROMPT

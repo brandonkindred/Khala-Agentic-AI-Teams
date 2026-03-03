@@ -5,7 +5,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from frontend_team_deprecated.models import UIDesignerOutput
-from shared.models import SystemArchitecture
+from software_engineering_team.shared.models import SystemArchitecture
 
 
 class DesignSystemInput(BaseModel):

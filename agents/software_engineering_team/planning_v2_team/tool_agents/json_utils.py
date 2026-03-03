@@ -8,10 +8,10 @@ import logging
 import re
 from typing import Any, Callable, Dict, List, Optional, Union, TYPE_CHECKING
 
-from shared.deduplication import dedupe_strings
+from software_engineering_team.shared.deduplication import dedupe_strings
 
 if TYPE_CHECKING:
-    from shared.llm import LLMClient
+    from software_engineering_team.shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +38,9 @@ def complete_text_with_continuation(
     Raises:
         RuntimeError: If continuation is exhausted and response is still truncated.
     """
-    from shared.llm import LLMTruncatedError
-    from shared.continuation import ResponseContinuator
-    from shared.post_mortem import write_post_mortem
+    from software_engineering_team.shared.llm import LLMTruncatedError
+    from software_engineering_team.shared.continuation import ResponseContinuator
+    from software_engineering_team.shared.post_mortem import write_post_mortem
 
     try:
         return llm.complete_text(prompt)
@@ -115,6 +115,62 @@ def complete_with_continuation(
         agent_name=agent_name,
         max_continuation_cycles=max_continuation_cycles,
     )
+
+
+def parse_json_with_recovery(
+    llm: "LLMClient",
+    prompt: str,
+    *,
+    agent_name: str = "PlanningV2",
+    decompose_fn: Optional[Callable[[str], List[str]]] = None,
+    merge_fn: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]] = None,
+    original_content: Optional[str] = None,
+    chunk_prompt_template: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Call LLM for JSON with continuation; optionally decompose content into chunks and merge.
+
+    If decompose_fn, merge_fn, original_content, and chunk_prompt_template are provided,
+    decomposes original_content into chunks, gets JSON per chunk (with continuation),
+    and merges with merge_fn. Otherwise calls the LLM once for the given prompt and
+    returns parsed JSON or None on failure.
+    """
+    from software_engineering_team.shared.llm import LLMTruncatedError, LLMJsonParseError
+
+    if (
+        decompose_fn is not None
+        and merge_fn is not None
+        and original_content is not None
+        and chunk_prompt_template is not None
+    ):
+        chunks = decompose_fn(original_content)
+        if not chunks:
+            try:
+                return llm.complete_json_with_continuation(prompt, task_id=agent_name)
+            except (LLMTruncatedError, LLMJsonParseError, Exception):
+                return None
+        results: List[Dict[str, Any]] = []
+        for i, chunk in enumerate(chunks):
+            chunk_prompt = chunk_prompt_template.format(chunk_content=chunk)
+            try:
+                data = llm.complete_json_with_continuation(
+                    chunk_prompt,
+                    task_id=f"{agent_name}_chunk{i}",
+                )
+                if isinstance(data, dict):
+                    results.append(data)
+            except (LLMTruncatedError, LLMJsonParseError, Exception) as e:
+                logger.warning(
+                    "%s: Chunk %d JSON failed: %s",
+                    agent_name,
+                    i,
+                    str(e)[:200],
+                )
+                return None
+        return merge_fn(results) if results else None
+    try:
+        return llm.complete_json_with_continuation(prompt, task_id=agent_name)
+    except (LLMTruncatedError, LLMJsonParseError, Exception):
+        return None
 
 
 def default_decompose_by_sections(content: str, chunk_size: int = DEFAULT_CHUNK_SIZE) -> List[str]:

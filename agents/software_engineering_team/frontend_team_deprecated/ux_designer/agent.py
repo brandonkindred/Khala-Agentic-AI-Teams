@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from shared.llm import LLMClient
-from shared.models import SystemArchitecture
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.models import SystemArchitecture
 
 from frontend_team_deprecated.models import UXDesignerOutput
 from .models import UXDesignerInput

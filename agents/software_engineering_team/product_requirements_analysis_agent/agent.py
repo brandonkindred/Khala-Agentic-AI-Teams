@@ -26,6 +26,7 @@ from .models import (
     SpecReviewResult,
 )
 from .prompts import (
+    CONSOLIDATE_QUESTIONS_PROMPT,
     SPEC_CLEANUP_CHUNK_PROMPT,
     SPEC_CLEANUP_PROMPT,
     SPEC_REVIEW_CHUNK_PROMPT,
@@ -37,10 +38,10 @@ from planning_v2_team.tool_agents.json_utils import (
     parse_json_with_recovery,
     default_decompose_by_sections,
 )
-from shared.deduplication import dedupe_strings as _dedupe_items
+from software_engineering_team.shared.deduplication import dedupe_strings as _dedupe_items
 
 if TYPE_CHECKING:
-    from shared.llm import LLMClient
+    from software_engineering_team.shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -385,12 +386,28 @@ class ProductRequirementsAnalysisAgent:
                 logger.error("Product Requirements Analysis: %s", result.failure_reason)
                 return result
 
+            # Consolidate duplicate/semantically-similar questions before sending to user
+            original_count = len(spec_review_result.open_questions)
+            consolidated_questions = self._consolidate_open_questions(
+                spec_review_result.open_questions
+            )
+            if len(consolidated_questions) < original_count:
+                logger.info(
+                    "Consolidated open questions: %d -> %d",
+                    original_count,
+                    len(consolidated_questions),
+                )
+            spec_review_result = spec_review_result.model_copy(
+                update={"open_questions": consolidated_questions}
+            )
+            open_count = len(spec_review_result.open_questions)
+
             logger.info(
                 "Iteration %d: Found %d issues, %d gaps, %d open questions",
                 iteration,
                 len(spec_review_result.issues),
                 len(spec_review_result.gaps),
-                len(spec_review_result.open_questions),
+                open_count,
             )
 
             if not spec_review_result.open_questions:
@@ -957,6 +974,60 @@ Previously Answered Questions:
             confidence=0.5,
         )
 
+    def _consolidate_open_questions(
+        self, open_questions: List[OpenQuestion]
+    ) -> List[OpenQuestion]:
+        """Merge duplicate or semantically equivalent questions before sending to user.
+
+        Uses a single LLM call to identify questions that ask the same thing
+        (e.g. OAuth provider asked multiple ways) and consolidate them into
+        one question per distinct decision, with merged options.
+        """
+        if len(open_questions) <= 1:
+            return list(open_questions)
+
+        questions_json = json.dumps(
+            [
+                {
+                    "question_text": q.question_text,
+                    "context": q.context,
+                    "category": q.category,
+                    "priority": q.priority,
+                    "allow_multiple": q.allow_multiple,
+                    "options": [
+                        {
+                            "id": o.id,
+                            "label": o.label,
+                            "is_default": o.is_default,
+                            "rationale": o.rationale,
+                            "confidence": o.confidence,
+                        }
+                        for o in q.options
+                    ],
+                }
+                for q in open_questions
+            ],
+            indent=2,
+        )
+        prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
+        try:
+            raw = self.llm.complete_json(prompt, temperature=0.1)
+            if not isinstance(raw, dict):
+                return list(open_questions)
+            consolidated = raw.get("consolidated_questions", [])
+            if not isinstance(consolidated, list) or len(consolidated) == 0:
+                return list(open_questions)
+            result = []
+            for i, q_data in enumerate(consolidated):
+                result.append(self._parse_open_question(q_data, i))
+            return result
+        except Exception as e:
+            logger.warning(
+                "Question consolidation failed, using original list: %s",
+                str(e)[:200],
+            )
+            return list(open_questions)
+
     def _communicate_with_user(
         self,
         job_id: Optional[str],
@@ -971,7 +1042,7 @@ Previously Answered Questions:
                 "A job_id is required to collect user input."
             )
 
-        from shared.job_store import (
+        from software_engineering_team.shared.job_store import (
             add_pending_questions,
             get_submitted_answers,
             is_waiting_for_answers,
@@ -1005,7 +1076,7 @@ Previously Answered Questions:
 
     def _wait_for_answers(self, job_id: str) -> bool:
         """Wait indefinitely for user to submit answers."""
-        from shared.job_store import get_job, is_waiting_for_answers
+        from software_engineering_team.shared.job_store import get_job, is_waiting_for_answers
 
         while True:
             if not is_waiting_for_answers(job_id):

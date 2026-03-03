@@ -13,8 +13,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared.llm import LLMClient
-from shared.models import PlanningHierarchy
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.models import PlanningHierarchy
 
 from ..models import PlanningPhaseResult, SpecReviewResult, ToolAgentKind, ToolAgentPhaseInput
 from ..output_templates import parse_planning_output

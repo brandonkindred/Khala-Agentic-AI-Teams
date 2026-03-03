@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import List
 
-from shared.models import Task
+from software_engineering_team.shared.models import Task
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def task_requirements_with_expectations(
     """
     base = task_requirements(task)
     try:
-        from shared.test_spec_expectations import build_test_spec_checklist
+        from software_engineering_team.shared.test_spec_expectations import build_test_spec_checklist
         checklist = build_test_spec_checklist(repo_path, domain)
         if checklist:
             base += "\n\n" + checklist

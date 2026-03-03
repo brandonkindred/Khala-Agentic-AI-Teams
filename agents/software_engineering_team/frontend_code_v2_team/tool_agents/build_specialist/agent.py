@@ -17,7 +17,7 @@ from ...output_templates import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 
 if TYPE_CHECKING:
-    from shared.llm import LLMClient
+    from software_engineering_team.shared.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) 
 def _run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     """Run frontend build and return one ReviewIssue per parsed failure."""
     try:
-        from shared.command_runner import run_frontend_build, detect_frontend_framework
+        from software_engineering_team.shared.command_runner import run_frontend_build, detect_frontend_framework
     except ImportError:
         logger.warning("Build Specialist: shared.command_runner not available")
         return []

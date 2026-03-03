@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Union
 
-from shared.git_utils import initialize_new_repo
+from software_engineering_team.shared.git_utils import initialize_new_repo
 
 from .models import GitSetupResult
 

@@ -20,8 +20,8 @@ import _path_setup  # noqa: F401
 import logging
 from pathlib import Path
 
-from shared.llm import get_llm_for_agent
-from shared.models import ProductRequirements, TaskType
+from software_engineering_team.shared.llm import get_llm_for_agent
+from software_engineering_team.shared.models import ProductRequirements, TaskType
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 from tech_lead_agent import TechLeadAgent, TechLeadInput
 from devops_agent import DevOpsExpertAgent, DevOpsInput

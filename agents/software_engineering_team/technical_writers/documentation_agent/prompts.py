@@ -1,6 +1,6 @@
 """Prompts for the Documentation agent."""
 
-from shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
 DOCUMENTATION_README_PROMPT = """You are an expert Technical Writer specializing in developer documentation. Your primary goal is to write clear, concise, and actionable documentation that helps users do everything they need regarding deploying, running, testing, using, and integrating with the project.
 

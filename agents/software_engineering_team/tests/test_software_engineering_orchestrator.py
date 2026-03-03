@@ -6,9 +6,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from shared.command_runner import CommandResult
-from shared.llm import LLMJsonParseError, LLMRateLimitError, OLLAMA_WEEKLY_LIMIT_MESSAGE
-from shared.models import (
+from software_engineering_team.shared.command_runner import CommandResult
+from software_engineering_team.shared.llm import LLMJsonParseError, LLMRateLimitError, OLLAMA_WEEKLY_LIMIT_MESSAGE
+from software_engineering_team.shared.models import (
     ProductRequirements,
     SystemArchitecture,
     Task,
@@ -102,7 +102,7 @@ def test_run_failed_tasks_pauses_on_llm_rate_limit(tmp_path: Path) -> None:
         assignee="backend",
     )
     task_data = task.model_dump() if hasattr(task, "model_dump") else task.dict()
-    from shared.job_store import create_job, update_job
+    from software_engineering_team.shared.job_store import create_job, update_job
     create_job(job_id, str(tmp_path))
     update_job(
         job_id,
@@ -291,7 +291,7 @@ def test_frontend_json_parse_failure_triggers_tech_lead_review_for_task_breakdow
     tmp_path: Path,
 ) -> None:
     """When frontend run_workflow raises LLMJsonParseError, _run_tech_lead_review is called to break task."""
-    from shared.job_store import create_job, update_job
+    from software_engineering_team.shared.job_store import create_job, update_job
 
     (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
     frontend_dir = tmp_path / "frontend"

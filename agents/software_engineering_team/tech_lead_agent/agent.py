@@ -7,9 +7,9 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared.llm import LLMClient
-from shared.models import Task, TaskAssignment, TaskStatus, TaskType, TaskUpdate
-from shared.task_parsing import (
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.models import Task, TaskAssignment, TaskStatus, TaskType, TaskUpdate
+from software_engineering_team.shared.task_parsing import (
     flatten_hierarchy_to_assignment,
     parse_assignment_from_data,
     parse_hierarchy_from_data,
@@ -90,7 +90,7 @@ class TechLeadAgent:
         Generate a detailed development plan summary from the Planning V2 hierarchy
         and plan artifacts.
         """
-        from shared.models import PlanningHierarchy, ProductRequirements
+        from software_engineering_team.shared.models import PlanningHierarchy, ProductRequirements
         
         parts: List[str] = []
         
@@ -402,7 +402,7 @@ class TechLeadAgent:
         Refine a task based on specialist clarification requests.
         Returns an updated Task with more detailed description, requirements, and acceptance criteria.
         """
-        from shared.context_sizing import compute_spec_excerpt_chars
+        from software_engineering_team.shared.context_sizing import compute_spec_excerpt_chars
 
         logger.info("Tech Lead: refining task %s with %s clarification requests", task.id, len(clarification_requests))
         max_spec = compute_spec_excerpt_chars(self.llm)
@@ -453,7 +453,7 @@ class TechLeadAgent:
         Evaluate QA feedback and create fix tasks if the delivered code does not meet spec.
         Returns a list of new Task objects (may be empty).
         """
-        from shared.context_sizing import compute_spec_excerpt_chars
+        from software_engineering_team.shared.context_sizing import compute_spec_excerpt_chars
 
         logger.info("Tech Lead: evaluating QA feedback for task %s", task.id)
         qa_bugs = getattr(qa_result, "bugs_found", []) or []
@@ -519,7 +519,7 @@ class TechLeadAgent:
         """
         if not completed_code_task_ids:
             return False
-        from shared.context_sizing import compute_requirement_mapping_chars, compute_spec_excerpt_chars
+        from software_engineering_team.shared.context_sizing import compute_requirement_mapping_chars, compute_spec_excerpt_chars
 
         logger.info("Tech Lead: evaluating if security review should run (%s completed code tasks)", len(completed_code_task_ids))
         max_spec = compute_spec_excerpt_chars(self.llm)
@@ -615,7 +615,7 @@ class TechLeadAgent:
             ])
 
         if codebase_summary:
-            from shared.context_sizing import compute_existing_code_chars
+            from software_engineering_team.shared.context_sizing import compute_existing_code_chars
             max_code = compute_existing_code_chars(self.llm)
             code_excerpt = codebase_summary[:max_code] + ("..." if len(codebase_summary) > max_code else "")
             context_parts.extend([
@@ -710,7 +710,7 @@ class TechLeadAgent:
             should_update = force_docs_because_readme_empty
             rationale = ""
             if not force_docs_because_readme_empty:
-                from shared.context_sizing import compute_spec_excerpt_chars
+                from software_engineering_team.shared.context_sizing import compute_spec_excerpt_chars
                 max_code = compute_spec_excerpt_chars(self.llm)
                 code_excerpt = (codebase_summary or "")[:max_code] + ("..." if len(codebase_summary or "") > max_code else "")
                 context_parts = [

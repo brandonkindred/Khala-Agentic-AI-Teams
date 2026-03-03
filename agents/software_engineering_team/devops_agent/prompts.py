@@ -1,6 +1,6 @@
 """Prompts for the DevOps Expert agent."""
 
-from shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
 DEVOPS_PLANNING_PROMPT = """You are an expert DevOps engineer. Before implementing a task, you produce a concise implementation plan.
 

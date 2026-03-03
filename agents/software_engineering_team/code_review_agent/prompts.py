@@ -1,6 +1,6 @@
 """Prompts for the Code Review agent."""
 
-from shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
 CODE_REVIEW_PROMPT = """You are a Senior Code Reviewer. You review code produced by other engineers to ensure it meets production quality standards, follows the project specification, and integrates properly with the existing codebase.
 

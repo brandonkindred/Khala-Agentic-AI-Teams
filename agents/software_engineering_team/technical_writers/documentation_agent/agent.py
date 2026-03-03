@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from shared.git_utils import (
+from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,
     create_feature_branch,
@@ -15,8 +15,8 @@ from shared.git_utils import (
     merge_branch,
     write_files_and_commit,
 )
-from shared.llm import LLMClient
-from shared.repo_utils import read_repo_code, DOCUMENTATION_EXTENSIONS
+from software_engineering_team.shared.llm import LLMClient
+from software_engineering_team.shared.repo_utils import read_repo_code, DOCUMENTATION_EXTENSIONS
 
 from .models import DocumentationInput, DocumentationOutput, DocumentationStatus
 from .prompts import (
@@ -544,7 +544,7 @@ class DocumentationAgent:
             len(completed_task_ids),
         )
         try:
-            from shared.context_sizing import compute_existing_code_chars
+            from software_engineering_team.shared.context_sizing import compute_existing_code_chars
             extensions = [".py"] if repo_name == "backend" else [".ts", ".tsx", ".html", ".scss"]
             raw_code = _read_repo_code(path, extensions)
             max_chars = compute_existing_code_chars(self.llm)
