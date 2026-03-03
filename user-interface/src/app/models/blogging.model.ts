@@ -79,3 +79,9 @@ export interface BlogJobStatusResponse {
   started_at?: string;
   completed_at?: string;
 }
+
+/** Response from POST /full-pipeline-async or POST /research-and-review-async. */
+export interface StartJobResponse {
+  job_id: string;
+  message?: string;
+}

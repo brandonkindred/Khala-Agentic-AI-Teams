@@ -32,9 +32,9 @@ logger = logging.getLogger(__name__)
 
 
 def _read_planning_artifacts(repo_path: Path) -> Dict[str, str]:
-    """Read planning artifacts from repo for review."""
+    """Read planning artifacts from plan/planning_team for review."""
     files: Dict[str, str] = {}
-    plan_dir = repo_path / "plan"
+    plan_dir = repo_path / "plan" / "planning_team"
     if plan_dir.exists():
         for f in plan_dir.glob("*.md"):
             try:
@@ -113,7 +113,13 @@ def run_review(
                             full_path = repo_path / rel_path
                             full_path.parent.mkdir(parents=True, exist_ok=True)
                             full_path.write_text(content, encoding="utf-8")
-                            logger.info("Review: %s wrote %s", agent_kind.value, rel_path)
+                            file_name = Path(rel_path).name
+                            logger.info(
+                                "Review: %s applied fix — writing to file: %s; full contents:\n%s",
+                                agent_kind.value,
+                                file_name,
+                                content,
+                            )
     
     artifacts_text = "\n".join(
         f"--- {path} ---\n{content[:2000]}"

@@ -6,6 +6,7 @@ import type { RunningJobSummary } from './software-engineering.model';
 import type { BlogJobListItem } from './blogging.model';
 import type { AISystemJobSummary } from './ai-systems.model';
 import type { ProvisionJobSummary } from './agent-provisioning.model';
+import type { MarketingJobListItem } from './social-marketing.model';
 
 export type JobSource =
   | 'software_engineering'

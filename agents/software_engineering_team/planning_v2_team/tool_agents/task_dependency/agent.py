@@ -214,7 +214,7 @@ class TaskDependencyToolAgent:
 
         files: Dict[str, str] = {}
         if issues or recommendations or summary:
-            files["plan/task_dependencies.md"] = "".join(content_parts)
+            files["plan/planning_team/task_dependencies.md"] = "".join(content_parts)
 
         return ToolAgentPhaseOutput(
             summary=summary,

@@ -59,7 +59,7 @@ true or false
 ## END RESOLVED ##
 
 ## FILE_UPDATES ##
-### plan/ux_design.md ###
+### plan/planning_team/ux_design.md ###
 Complete updated file content here.
 ### END FILE ###
 ## END FILE_UPDATES ##
@@ -93,14 +93,17 @@ class UXDesignToolAgent:
         files_written: List[str] = []
         current_files: Dict[str, str] = dict(inp.current_files or {})
         
-        existing_doc = inp.current_files.get("plan/ux_design.md") if inp.current_files else None
+        existing_doc = inp.current_files.get("plan/planning_team/ux_design.md") if inp.current_files else None
         ux_issues = [
             i for i in inp.review_issues
             if any(kw in i.lower() for kw in ["ux", "persona", "journey", "flow", "usability", "user experience", "interaction"])
         ]
         
         if ux_issues and self.llm:
-            logger.info("UXDesign: handling %d review issues", len(ux_issues))
+            logger.info(
+                "UXDesign: handling %d review issue(s) (will apply fixes and write updated artifacts to disk).",
+                len(ux_issues),
+            )
             fix_inp = inp.model_copy(update={"current_files": current_files})
             for issue in ux_issues:
                 result = self.fix_single_issue(issue, fix_inp)
@@ -110,12 +113,22 @@ class UXDesignToolAgent:
                         full_path = repo / rel_path
                         full_path.parent.mkdir(parents=True, exist_ok=True)
                         full_path.write_text(content, encoding="utf-8")
+                        file_name = full_path.name
+                        logger.info(
+                            "UXDesign: applied fix — writing to file: %s; full contents:\n%s",
+                            file_name,
+                            content,
+                        )
                         if rel_path not in files_written:
                             files_written.append(rel_path)
                         current_files[rel_path] = content
                     fix_inp = inp.model_copy(update={"current_files": current_files})
                     fixes_applied.append(result.summary)
-            logger.info("UXDesign: fixed %d/%d issues", len(fixes_applied), len(ux_issues))
+            logger.info(
+                "UXDesign: fixed %d out of %d review issue(s) (all fixes written to planning artifacts).",
+                len(fixes_applied),
+                len(ux_issues),
+            )
         
         if existing_doc and not ux_issues:
             return ToolAgentPhaseOutput(
@@ -172,7 +185,7 @@ class UXDesignToolAgent:
             content_parts.append("\n")
 
         if component_design or recommendations:
-            rel_path = "plan/ux_design.md"
+            rel_path = "plan/planning_team/ux_design.md"
             content = "".join(content_parts)
             repo = Path(inp.repo_path or ".")
             full_path = repo / rel_path
@@ -204,7 +217,7 @@ class UXDesignToolAgent:
 
         current_artifact = ""
         if inp.current_files:
-            current_artifact = inp.current_files.get("plan/ux_design.md", "")
+            current_artifact = inp.current_files.get("plan/planning_team/ux_design.md", "")
             if not current_artifact:
                 for path, content in inp.current_files.items():
                     if "ux_design" in path.lower() or "ux" in path.lower():
@@ -231,13 +244,13 @@ class UXDesignToolAgent:
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
-                files["plan/ux_design.md"] = updated_content
-                logger.info("UXDesign: fix applied — %s", fix_desc[:60])
+                files["plan/planning_team/ux_design.md"] = updated_content
+                logger.info("UXDesign: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
                     if content and isinstance(content, str) and content.strip():
                         files[path] = content
-                        logger.info("UXDesign: fix applied — %s", fix_desc[:60])
+                        logger.info("UXDesign: fix applied (single-issue) — %s", fix_desc[:120])
                         break
 
             return ToolAgentPhaseOutput(

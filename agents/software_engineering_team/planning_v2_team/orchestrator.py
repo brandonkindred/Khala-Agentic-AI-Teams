@@ -22,6 +22,7 @@ No code from planning_team or project_planning_agent is imported or reused.
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -258,6 +259,22 @@ class PlanningV2PlanningAgent:
                     pass
 
         logger.info("Planning-v2 Planning Agent WORKFLOW START")
+
+        # Initialize plan/planning_team and copy latest spec + PRD into it
+        planning_team_dir = repo_path / "plan" / "planning_team"
+        planning_team_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            from spec_parser import get_latest_spec_path
+            src = get_latest_spec_path(repo_path)
+            shutil.copy2(src, planning_team_dir / "updated_spec.md")
+            logger.info("Planning-v2: copied latest spec to plan/planning_team/updated_spec.md (from %s)", src)
+        except FileNotFoundError as e:
+            logger.warning("Planning-v2: no spec file to copy into plan/planning_team: %s", e)
+        prd_src = repo_path / "plan" / "product_requirements_document.md"
+        if prd_src.exists():
+            shutil.copy2(prd_src, planning_team_dir / "product_requirements_document.md")
+            logger.info("Planning-v2: copied plan/product_requirements_document.md to plan/planning_team/")
+        logger.info("Planning-v2: plan/planning_team initialized")
 
         planning_result: Optional[PlanningPhaseResult] = None
         implementation_result: Optional[ImplementationPhaseResult] = None

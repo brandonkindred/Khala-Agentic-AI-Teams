@@ -142,20 +142,20 @@ def run_deliver(
 def _finalize_product_spec(repo_path: Path, fallback_spec: str) -> str:
     """
     Finalize the product spec by:
-    1. Reading the final updated_spec.md content
-    2. Renaming it to product_spec.md
-    3. Deleting all intermediate updated_spec_v*.md files
+    1. Reading the final updated_spec.md from plan/planning_team
+    2. Writing it to product_spec.md in plan/planning_team
+    3. Deleting updated_spec_v*.md only under plan/planning_team
     
     Returns the final spec content.
     """
-    plan_dir = repo_path / "plan"
+    plan_dir = repo_path / "plan" / "planning_team"
     if not plan_dir.exists():
-        logger.info("Deliver: No plan directory, using original spec content")
+        logger.info("Deliver: No plan/planning_team directory, using original spec content")
         return fallback_spec
-    
+
     updated_spec_file = plan_dir / "updated_spec.md"
     product_spec_file = plan_dir / "product_spec.md"
-    
+
     # Read the final spec content
     if updated_spec_file.exists():
         try:
@@ -165,16 +165,16 @@ def _finalize_product_spec(repo_path: Path, fallback_spec: str) -> str:
             logger.warning("Deliver: Failed to read updated_spec.md: %s", e)
             final_content = fallback_spec
     else:
-        logger.info("Deliver: No updated_spec.md found, using original spec content")
+        logger.info("Deliver: No updated_spec.md in plan/planning_team, using original spec content")
         final_content = fallback_spec
-    
-    # Write to product_spec.md
+
+    # Write to product_spec.md under plan/planning_team
     try:
         product_spec_file.write_text(final_content, encoding="utf-8")
-        logger.info("Deliver: Wrote product_spec.md")
+        logger.info("Deliver: Wrote product_spec.md in plan/planning_team")
     except Exception as e:
         logger.warning("Deliver: Failed to write product_spec.md: %s", e)
-    
+
     # Delete updated_spec.md if it exists (now that we have product_spec.md)
     if updated_spec_file.exists():
         try:
@@ -182,13 +182,13 @@ def _finalize_product_spec(repo_path: Path, fallback_spec: str) -> str:
             logger.info("Deliver: Deleted updated_spec.md")
         except Exception as e:
             logger.warning("Deliver: Failed to delete updated_spec.md: %s", e)
-    
-    # Delete all intermediate updated_spec_v*.md files
+
+    # Delete intermediate updated_spec_v*.md only under plan/planning_team
     for versioned_file in plan_dir.glob("updated_spec_v*.md"):
         try:
             versioned_file.unlink()
             logger.info("Deliver: Deleted %s", versioned_file.name)
         except Exception as e:
             logger.warning("Deliver: Failed to delete %s: %s", versioned_file.name, e)
-    
+
     return final_content
