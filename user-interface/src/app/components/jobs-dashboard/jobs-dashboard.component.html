@@ -39,8 +39,9 @@
         <thead>
           <tr>
             <th class="col-status">Status</th>
+            <th class="col-team">Team</th>
             <th class="col-type">Type</th>
-            <th class="col-repo">Repository</th>
+            <th class="col-repo">Repository / Context</th>
             <th class="col-progress">Progress</th>
             <th class="col-activity">Current Activity</th>
             <th class="col-agents">Active Agents</th>
@@ -54,25 +55,37 @@
               <td class="col-status">
                 <span class="status-badge" [class]="getStatusClass(job)">{{ getStatusLabel(job) }}</span>
               </td>
+              <td class="col-team">
+                <div class="team-cell">
+                  <mat-icon class="team-icon">{{ SOURCE_DISPLAY[job.unified.source].icon }}</mat-icon>
+                  <span>{{ SOURCE_DISPLAY[job.unified.source].label }}</span>
+                </div>
+              </td>
               <td class="col-type">
                 <div class="type-cell">
-                  <mat-icon class="type-icon">{{ getJobTypeInfo(job.summary.job_type).icon }}</mat-icon>
-                  <span>{{ getJobTypeInfo(job.summary.job_type).label }}</span>
+                  <mat-icon class="type-icon">{{ getJobTypeInfo(job).icon }}</mat-icon>
+                  <span>{{ getJobTypeInfo(job).label }}</span>
                 </div>
               </td>
               <td class="col-repo">
-                <span class="repo-name" [matTooltip]="job.summary.repo_path || ''">{{ getRepoName(job.summary.repo_path) }}</span>
+                <span class="repo-name" [matTooltip]="job.unified.repoPath || job.unified.label">
+                  @if (job.unified.source === 'software_engineering' && job.unified.repoPath) {
+                    {{ getRepoName(job.unified.repoPath) }}
+                  } @else {
+                    {{ job.unified.label }}
+                  }
+                </span>
               </td>
               <td class="col-progress">
                 <div class="progress-cell">
-                  @if (job.progress != null) {
+                  @if (getProgress(job) != null) {
                     <mat-progress-bar
                       mode="determinate"
-                      [value]="job.progress"
-                      [color]="job.summary.status === 'failed' ? 'warn' : 'primary'"
+                      [value]="getProgress(job)!"
+                      [color]="job.unified.status === 'failed' ? 'warn' : 'primary'"
                     ></mat-progress-bar>
-                    <span class="progress-label">{{ job.progress }}%</span>
-                  } @else if (job.summary.status === 'running' && !job.waitingForAnswers) {
+                    <span class="progress-label">{{ getProgress(job) }}%</span>
+                  } @else if (getShowIndeterminate(job)) {
                     <mat-progress-bar mode="indeterminate"></mat-progress-bar>
                   } @else {
                     <span class="progress-na">—</span>
@@ -82,8 +95,8 @@
               <td class="col-activity">
                 @if (getActivityText(job)) {
                   <div class="activity-cell">
-                    <mat-icon class="activity-icon" [class.spinning]="job.summary.status === 'running' && !job.waitingForAnswers">
-                      {{ job.waitingForAnswers ? 'help_outline' : 'sync' }}
+                    <mat-icon class="activity-icon" [class.spinning]="job.unified.status === 'running' && !job.seDetail?.waitingForAnswers">
+                      {{ job.seDetail?.waitingForAnswers ? 'help_outline' : 'sync' }}
                     </mat-icon>
                     <span class="activity-text">{{ getActivityText(job) }}</span>
                   </div>
@@ -92,9 +105,9 @@
                 }
               </td>
               <td class="col-agents">
-                @if (job.teamStatuses && job.teamStatuses.length > 0) {
+                @if (job.seDetail?.teamStatuses && job.seDetail.teamStatuses.length > 0) {
                   <div class="agents-cell">
-                    @for (team of job.teamStatuses; track trackByTeamId($index, team)) {
+                    @for (team of job.seDetail.teamStatuses; track trackByTeamId($index, team)) {
                       <div class="agent-chip" [class]="getPhaseColorClass(team.phase)" [class.inactive]="!team.isActive"
                            [matTooltip]="team.label + ': ' + team.phaseLabel">
                         <mat-icon class="agent-icon">{{ team.icon }}</mat-icon>
@@ -107,11 +120,11 @@
                 }
               </td>
               <td class="col-time">
-                <span class="time-ago">{{ getTimeAgo(job.summary.created_at) }}</span>
+                <span class="time-ago">{{ getTimeAgo(job.unified.createdAt) }}</span>
               </td>
               <td class="col-actions">
                 @if (canCancelJob(job)) {
-                  <button mat-icon-button 
+                  <button mat-icon-button
                           class="stop-button"
                           (click)="cancelJob($event, job)"
                           matTooltip="Stop job">

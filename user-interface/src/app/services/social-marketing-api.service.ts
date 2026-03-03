@@ -2,10 +2,12 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
+import { HttpParams } from '@angular/common/http';
 import type {
   RunMarketingTeamRequest,
   RunMarketingTeamResponse,
   MarketingJobStatusResponse,
+  MarketingJobListItem,
   PerformanceIngestRequest,
   PerformanceIngestResponse,
   ReviseMarketingTeamRequest,
@@ -28,6 +30,21 @@ export class SocialMarketingApiService {
     return this.http.post<RunMarketingTeamResponse>(
       `${this.baseUrl}/social-marketing/run`,
       request
+    );
+  }
+
+  /**
+   * GET /social-marketing/jobs
+   * List marketing jobs, optionally only running/pending.
+   */
+  listJobs(runningOnly = false): Observable<MarketingJobListItem[]> {
+    let params = new HttpParams();
+    if (runningOnly) {
+      params = params.set('running_only', 'true');
+    }
+    return this.http.get<MarketingJobListItem[]>(
+      `${this.baseUrl}/social-marketing/jobs`,
+      { params }
     );
   }
 

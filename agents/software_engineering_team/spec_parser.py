@@ -105,6 +105,72 @@ def load_spec_from_repo(repo_path: str | Path) -> str:
     return spec_file.read_text()
 
 
+def get_latest_spec_content(repo_path: str | Path) -> str:
+    """
+    Load the latest specification content from the repo, following PRA versioning.
+
+    Precedence (first existing wins):
+    1. plan/validated_spec.md
+    2. plan/updated_spec.md
+    3. plan/updated_spec_vN.md with largest N
+    4. initial_spec.md at repo root
+    5. spec.md at repo root
+
+    Raises FileNotFoundError if no candidate file exists.
+    """
+    path = Path(repo_path).resolve()
+    if not path.exists() or not path.is_dir():
+        raise FileNotFoundError(
+            "No spec file found; repo path does not exist or is not a directory. "
+            "Looked for plan/validated_spec.md, plan/updated_spec.md, plan/updated_spec_v*.md, "
+            f"{SPEC_FILENAME}, spec.md"
+        )
+
+    plan_dir = path / "plan"
+
+    # 1. plan/validated_spec.md
+    candidate = plan_dir / "validated_spec.md"
+    if candidate.exists():
+        return candidate.read_text(encoding="utf-8")
+
+    # 2. plan/updated_spec.md
+    candidate = plan_dir / "updated_spec.md"
+    if candidate.exists():
+        return candidate.read_text(encoding="utf-8")
+
+    # 3. plan/updated_spec_vN.md with largest N
+    versioned = list(plan_dir.glob("updated_spec_v*.md")) if plan_dir.exists() else []
+    if versioned:
+        best: Optional[Tuple[int, Path]] = None
+        for f in versioned:
+            try:
+                # stem is e.g. "updated_spec_v2"
+                n_str = f.stem.split("_v")[-1] if "_v" in f.stem else ""
+                n = int(n_str) if n_str.isdigit() else -1
+                if best is None or n > best[0]:
+                    best = (n, f)
+            except (ValueError, IndexError):
+                continue
+        if best is not None:
+            return best[1].read_text(encoding="utf-8")
+
+    # 4. initial_spec.md at root
+    candidate = path / SPEC_FILENAME
+    if candidate.exists():
+        return candidate.read_text(encoding="utf-8")
+
+    # 5. spec.md at root
+    candidate = path / "spec.md"
+    if candidate.exists():
+        return candidate.read_text(encoding="utf-8")
+
+    raise FileNotFoundError(
+        "No spec file found; looked for plan/validated_spec.md, plan/updated_spec.md, "
+        "plan/updated_spec_v*.md, "
+        f"{SPEC_FILENAME}, spec.md at {path}"
+    )
+
+
 def _should_include_path(path: Path, base_path: Path) -> bool:
     """Check if a path should be included in context gathering."""
     # Check if any parent directory matches exclude patterns

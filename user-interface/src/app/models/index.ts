@@ -12,3 +12,4 @@ export * from './accessibility.model';
 export * from './agent-provisioning.model';
 export * from './ai-systems.model';
 export * from './investment.model';
+export * from './jobs-dashboard.model';

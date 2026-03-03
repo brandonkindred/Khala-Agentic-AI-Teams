@@ -47,6 +47,16 @@ export interface ReviseMarketingTeamRequest {
   approved_for_testing?: boolean;
 }
 
+/** Item from GET /social-marketing/jobs (job list). */
+export interface MarketingJobListItem {
+  job_id: string;
+  status: string;
+  current_stage: string;
+  progress: number;
+  created_at?: string;
+  last_updated_at?: string;
+}
+
 /** Response from GET /social-marketing/status/{job_id}. */
 export interface MarketingJobStatusResponse {
   job_id: string;
