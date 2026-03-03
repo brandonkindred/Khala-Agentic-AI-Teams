@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from shared.models import PlanningHierarchy
@@ -153,12 +154,11 @@ class TaskClassificationToolAgent:
 
     def execute(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Implementation phase: classify tasks into teams or update existing classifications.
-        
-        If review_issues are provided, this agent handles fixes first.
-        Only regenerates the document if it doesn't already exist.
+        Writes to disk as fixes are applied; returns files_written so implementation phase does not overwrite.
         """
-        all_files: Dict[str, str] = {}
         fixes_applied: List[str] = []
+        files_written: List[str] = []
+        current_files: Dict[str, str] = dict(inp.current_files or {})
         
         classification_issues = [
             i for i in inp.review_issues
@@ -167,34 +167,53 @@ class TaskClassificationToolAgent:
         
         if classification_issues and self.llm:
             logger.info("TaskClassification: handling %d review issues", len(classification_issues))
+            fix_inp = inp.model_copy(update={"current_files": current_files})
             for issue in classification_issues:
-                result = self.fix_single_issue(issue, inp)
+                result = self.fix_single_issue(issue, fix_inp)
                 if result.files:
-                    all_files.update(result.files)
+                    repo = Path(inp.repo_path or ".")
+                    for rel_path, content in result.files.items():
+                        full_path = repo / rel_path
+                        full_path.parent.mkdir(parents=True, exist_ok=True)
+                        full_path.write_text(content, encoding="utf-8")
+                        if rel_path not in files_written:
+                            files_written.append(rel_path)
+                        current_files[rel_path] = content
+                    fix_inp = inp.model_copy(update={"current_files": current_files})
                     fixes_applied.append(result.summary)
             logger.info("TaskClassification: fixed %d/%d issues", len(fixes_applied), len(classification_issues))
         
         existing_doc = inp.current_files.get("plan/task_classification.md") if inp.current_files else None
-        if existing_doc or all_files.get("plan/task_classification.md"):
+        if existing_doc and not classification_issues:
+            return ToolAgentPhaseOutput(
+                summary="Task Classification artifacts unchanged (file exists, no review issues).",
+                files={},
+                recommendations=[],
+                files_written=[],
+            )
+        if files_written:
             summary = "Task Classification artifacts updated."
             if fixes_applied:
                 summary = f"Task Classification artifacts updated. Fixed {len(fixes_applied)} review issues."
             return ToolAgentPhaseOutput(
                 summary=summary,
-                files=all_files,
+                files={},
                 recommendations=fixes_applied if fixes_applied else [],
+                files_written=files_written,
             )
         
         if not self.llm:
             return ToolAgentPhaseOutput(
                 summary="Task Classification execute skipped (no LLM).",
                 recommendations=["Classify tasks by team: frontend, backend, devops, qa"],
+                files_written=[],
             )
         
         tasks = _extract_tasks_from_hierarchy(inp.hierarchy)
         if not tasks:
             return ToolAgentPhaseOutput(
                 summary="Task Classification skipped (no tasks to classify).",
+                files_written=[],
             )
         
         tasks_text = "\n".join(
@@ -231,11 +250,18 @@ class TaskClassificationToolAgent:
             content_parts.append("\n")
         
         if classifications:
-            all_files["plan/task_classification.md"] = "".join(content_parts)
+            rel_path = "plan/task_classification.md"
+            content = "".join(content_parts)
+            repo = Path(inp.repo_path or ".")
+            full_path = repo / rel_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(content, encoding="utf-8")
+            files_written.append(rel_path)
         
         return ToolAgentPhaseOutput(
             summary=data.get("summary", f"Classified {len(classifications)} tasks."),
-            files=all_files,
+            files={},
+            files_written=files_written,
             metadata={
                 "classifications": classifications,
                 "team_summary": team_summary,

@@ -265,14 +265,14 @@ class ArchitectureToolAgent:
 
     def execute(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Implementation phase: generate architecture artifacts and fix review issues.
-        
-        If review_issues are provided, this agent handles fixes however it sees fit.
+        Writes to disk as fixes are applied; returns files_written so implementation phase does not overwrite.
         """
         if not self.llm:
             return ToolAgentPhaseOutput(summary="Architecture execute skipped (no LLM).")
         
         fixes_applied: List[str] = []
-        all_files: Dict[str, str] = {}
+        files_written: List[str] = []
+        current_files: Dict[str, str] = dict(inp.current_files or {})
         
         arch_issues = [
             i for i in inp.review_issues
@@ -281,10 +281,19 @@ class ArchitectureToolAgent:
         
         if arch_issues:
             logger.info("Architecture: handling %d review issues", len(arch_issues))
+            fix_inp = inp.model_copy(update={"current_files": current_files})
             for issue in arch_issues:
-                result = self.fix_single_issue(issue, inp)
+                result = self.fix_single_issue(issue, fix_inp)
                 if result.files:
-                    all_files.update(result.files)
+                    repo = Path(inp.repo_path or ".")
+                    for rel_path, content in result.files.items():
+                        full_path = repo / rel_path
+                        full_path.parent.mkdir(parents=True, exist_ok=True)
+                        full_path.write_text(content, encoding="utf-8")
+                        if rel_path not in files_written:
+                            files_written.append(rel_path)
+                        current_files[rel_path] = content
+                    fix_inp = inp.model_copy(update={"current_files": current_files})
                     fixes_applied.append(result.summary)
             logger.info("Architecture: fixed %d/%d issues", len(fixes_applied), len(arch_issues))
         
@@ -294,6 +303,7 @@ class ArchitectureToolAgent:
                 summary="Architecture artifacts unchanged (file exists, no review issues).",
                 files={},
                 recommendations=fixes_applied if fixes_applied else [],
+                files_written=[],
             )
         
         arch_style = inp.metadata.get("architecture_style", "")
@@ -326,8 +336,14 @@ class ArchitectureToolAgent:
         if deployment_model:
             content_parts.append(f"## Deployment Model\n{deployment_model}\n\n")
         
-        if arch_style or layers:
-            all_files["plan/architecture.md"] = "".join(content_parts)
+        if (arch_style or layers) and "plan/architecture.md" not in files_written:
+            rel_path = "plan/architecture.md"
+            content = "".join(content_parts)
+            repo = Path(inp.repo_path or ".")
+            full_path = repo / rel_path
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(content, encoding="utf-8")
+            files_written.append(rel_path)
         
         summary = "Architecture artifacts generated."
         if fixes_applied:
@@ -335,8 +351,9 @@ class ArchitectureToolAgent:
         
         return ToolAgentPhaseOutput(
             summary=summary,
-            files=all_files,
+            files={},
             recommendations=fixes_applied if fixes_applied else [],
+            files_written=files_written,
         )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
