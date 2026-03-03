@@ -1685,28 +1685,19 @@ def auto_answer_planning_v2_question(
 
 
 def _get_spec_content_for_job(data: Dict[str, Any]) -> str:
-    """Get spec content for a job from its repo path."""
+    """Get latest spec content for a job from its repo path. Returns '' if no spec file found."""
     repo_path = data.get("repo_path")
     if not repo_path:
         return ""
 
     repo = Path(repo_path)
+    try:
+        from spec_parser import get_latest_spec_content
 
-    spec_files = [
-        repo / "plan" / "validated_spec.md",
-        repo / "plan" / "updated_spec.md",
-        repo / "initial_spec.md",
-        repo / "spec.md",
-    ]
-
-    for spec_file in spec_files:
-        if spec_file.exists():
-            try:
-                return spec_file.read_text(encoding="utf-8")[:12000]
-            except Exception:
-                continue
-
-    return ""
+        content = get_latest_spec_content(repo)
+        return content[:12000]
+    except FileNotFoundError:
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1828,13 +1819,15 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
 
     spec_content = request.spec_content
     if not spec_content:
-        spec_file = repo / "initial_spec.md"
-        if not spec_file.exists():
+        try:
+            from spec_parser import get_latest_spec_content
+
+            spec_content = get_latest_spec_content(repo)
+        except FileNotFoundError as e:
             raise HTTPException(
                 status_code=400,
-                detail=f"No spec_content provided and {spec_file} does not exist.",
-            )
-        spec_content = spec_file.read_text(encoding="utf-8")
+                detail=f"No spec file found. {e}. Provide spec_content or add a spec file (e.g. initial_spec.md, plan/validated_spec.md).",
+            ) from e
 
     job_id = str(uuid.uuid4())
     create_job(job_id, request.repo_path, job_type="product_analysis")

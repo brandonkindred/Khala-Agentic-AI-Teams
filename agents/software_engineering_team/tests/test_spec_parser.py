@@ -3,8 +3,9 @@
 import pytest
 
 from spec_parser import (
-    parse_spec_with_llm,
+    get_latest_spec_content,
     load_spec_from_repo,
+    parse_spec_with_llm,
     validate_repo_path,
     SPEC_FILENAME,
 )
@@ -92,3 +93,54 @@ def test_validate_repo_path_success(tmp_path) -> None:
     (tmp_path / SPEC_FILENAME).write_text("# Project")
     result = validate_repo_path(tmp_path)
     assert result == tmp_path.resolve()
+
+
+# ---------------------------------------------------------------------------
+# get_latest_spec_content
+# ---------------------------------------------------------------------------
+
+
+def test_get_latest_spec_content_precedence_validated_over_updated(tmp_path) -> None:
+    """When both plan/validated_spec.md and plan/updated_spec.md exist, content comes from validated_spec.md."""
+    (tmp_path / SPEC_FILENAME).write_text("# initial")
+    plan = tmp_path / "plan"
+    plan.mkdir()
+    (plan / "updated_spec.md").write_text("# updated")
+    (plan / "validated_spec.md").write_text("# validated")
+
+    content = get_latest_spec_content(tmp_path)
+    assert content == "# validated"
+
+
+def test_get_latest_spec_content_versioned_max_n(tmp_path) -> None:
+    """When only plan/updated_spec_v1.md and plan/updated_spec_v2.md exist, content comes from v2."""
+    (tmp_path / SPEC_FILENAME).write_text("# initial")
+    plan = tmp_path / "plan"
+    plan.mkdir()
+    (plan / "updated_spec_v1.md").write_text("# v1")
+    (plan / "updated_spec_v2.md").write_text("# v2")
+
+    content = get_latest_spec_content(tmp_path)
+    assert content == "# v2"
+
+
+def test_get_latest_spec_content_fallback_to_initial_spec(tmp_path) -> None:
+    """When no plan files exist, content comes from initial_spec.md at root."""
+    (tmp_path / SPEC_FILENAME).write_text("# root initial")
+
+    content = get_latest_spec_content(tmp_path)
+    assert content == "# root initial"
+
+
+def test_get_latest_spec_content_fallback_to_spec_md(tmp_path) -> None:
+    """When initial_spec.md is missing but spec.md exists at root, content comes from spec.md."""
+    (tmp_path / "spec.md").write_text("# spec.md content")
+
+    content = get_latest_spec_content(tmp_path)
+    assert content == "# spec.md content"
+
+
+def test_get_latest_spec_content_raises_when_none_exist(tmp_path) -> None:
+    """get_latest_spec_content raises FileNotFoundError when no candidate spec file exists."""
+    with pytest.raises(FileNotFoundError, match="No spec file found"):
+        get_latest_spec_content(tmp_path)

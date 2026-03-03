@@ -1773,8 +1773,8 @@ def run_orchestrator(
         agents = _get_agents()
 
         # 1. Read spec from work path or use override (no git required at root)
-        from spec_parser import load_spec_from_repo, parse_spec_with_llm, gather_context_files
-        spec_content = spec_content_override if spec_content_override is not None else load_spec_from_repo(path)
+        from spec_parser import get_latest_spec_content, parse_spec_with_llm, gather_context_files
+        spec_content = spec_content_override if spec_content_override is not None else get_latest_spec_content(path)
         
         # Gather all context files from the repo for PRA agent
         context_files = gather_context_files(path)
@@ -2501,8 +2501,8 @@ def run_failed_tasks(job_id: str) -> None:
                 logger.warning("Could not reconstruct task %s from stored data - skipping", tid)
 
         # Re-read spec for agents that need it
-        from spec_parser import load_spec_from_repo
-        spec_content = load_spec_from_repo(path)
+        from spec_parser import get_latest_spec_content
+        spec_content = get_latest_spec_content(path)
 
         # Reconstruct minimal architecture from stored overview
         from software_engineering_team.shared.models import SystemArchitecture

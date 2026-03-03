@@ -7,31 +7,32 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Subscription, forkJoin, of, timer } from 'rxjs';
-import { switchMap, catchError } from 'rxjs/operators';
+import { switchMap, catchError, map } from 'rxjs/operators';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
-import type { RunningJobSummary, JobStatusResponse, PlanningV2StatusResponse, ProductAnalysisStatusResponse, TeamProgressEntry } from '../../models';
+import { BloggingApiService } from '../../services/blogging-api.service';
+import { AISystemsApiService } from '../../services/ai-systems-api.service';
+import { AgentProvisioningApiService } from '../../services/agent-provisioning-api.service';
+import { SocialMarketingApiService } from '../../services/social-marketing-api.service';
+import type {
+  RunningJobSummary,
+  JobStatusResponse,
+  PlanningV2StatusResponse,
+  ProductAnalysisStatusResponse,
+  TeamProgressEntry,
+} from '../../models';
+import {
+  type DashboardRow,
+  type SEDetail,
+  type TeamStatus,
+  SOURCE_DISPLAY,
+  fromRunningJobSummary,
+  fromBlogJobListItem,
+  fromAISystemJobSummary,
+  fromProvisionJobSummary,
+  fromSocialMarketingJobListItem,
+} from '../../models';
 
-/** Per-team status for dashboard display. */
-interface TeamStatus {
-  teamId: string;
-  label: string;
-  icon: string;
-  phase: string;
-  phaseLabel: string;
-  isActive: boolean;
-}
-
-/** Extended job info with detailed status for dashboard display. */
-interface DashboardJob {
-  summary: RunningJobSummary;
-  progress?: number;
-  statusText?: string;
-  currentPhase?: string;
-  waitingForAnswers?: boolean;
-  teamStatuses?: TeamStatus[];
-}
-
-/** Job type metadata for display. */
+/** Job type metadata for SE display. */
 interface JobTypeInfo {
   label: string;
   icon: string;
@@ -87,13 +88,19 @@ const PHASE_DISPLAY: Record<string, string> = {
   styleUrl: './jobs-dashboard.component.scss',
 })
 export class JobsDashboardComponent implements OnInit, OnDestroy {
-  private readonly api = inject(SoftwareEngineeringApiService);
+  private readonly seApi = inject(SoftwareEngineeringApiService);
+  private readonly bloggingApi = inject(BloggingApiService);
+  private readonly aiSystemsApi = inject(AISystemsApiService);
+  private readonly agentProvisioningApi = inject(AgentProvisioningApiService);
+  private readonly socialMarketingApi = inject(SocialMarketingApiService);
   private readonly router = inject(Router);
 
-  jobs: DashboardJob[] = [];
+  jobs: DashboardRow[] = [];
   loading = true;
   error: string | null = null;
   lastUpdated: Date | null = null;
+
+  readonly SOURCE_DISPLAY = SOURCE_DISPLAY;
 
   private pollSub: Subscription | null = null;
   private readonly POLL_INTERVAL = 10000;
@@ -110,15 +117,8 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     this.pollSub?.unsubscribe();
     this.pollSub = timer(0, this.POLL_INTERVAL)
       .pipe(
-        switchMap(() => this.api.getRunningJobs()),
-        switchMap((response) => {
-          const jobs = response.jobs;
-          if (jobs.length === 0) {
-            return of([]);
-          }
-          const detailRequests = jobs.map((job) => this.fetchJobDetails(job));
-          return forkJoin(detailRequests);
-        }),
+        switchMap(() => this.fetchAllJobLists()),
+        switchMap((rows) => this.enrichSERows(rows)),
         catchError((err) => {
           this.error = err?.message ?? 'Failed to fetch jobs';
           this.loading = false;
@@ -126,8 +126,8 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
         })
       )
       .subscribe({
-        next: (dashboardJobs) => {
-          this.jobs = dashboardJobs;
+        next: (dashboardRows) => {
+          this.jobs = dashboardRows;
           this.loading = false;
           this.error = null;
           this.lastUpdated = new Date();
@@ -135,66 +135,131 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       });
   }
 
-  private fetchJobDetails(summary: RunningJobSummary) {
-    const jobType = summary.job_type;
+  /** Fetch from all team list endpoints and merge into sorted DashboardRow[] (seDetail not set yet). */
+  private fetchAllJobLists() {
+    return forkJoin({
+      se: this.seApi.getRunningJobs().pipe(catchError(() => of({ jobs: [] as RunningJobSummary[] }))),
+      blogging: this.bloggingApi.getJobs(true).pipe(catchError(() => of([]))),
+      ai: this.aiSystemsApi.listJobs(true).pipe(catchError(() => of({ jobs: [] }))),
+      prov: this.agentProvisioningApi.listJobs(true).pipe(catchError(() => of({ jobs: [] }))),
+      social: this.socialMarketingApi.listJobs(true).pipe(catchError(() => of([]))),
+    }).pipe(
+      map(({ se, blogging, ai, prov, social }) => {
+        type RowWithSe = DashboardRow & { seSummary?: RunningJobSummary };
+        const rows: RowWithSe[] = [];
+        for (const s of se.jobs) {
+          rows.push({ unified: fromRunningJobSummary(s), seSummary: s });
+        }
+        for (const s of blogging) {
+          rows.push({ unified: fromBlogJobListItem(s) });
+        }
+        for (const s of ai.jobs ?? []) {
+          rows.push({ unified: fromAISystemJobSummary(s) });
+        }
+        for (const s of prov.jobs ?? []) {
+          rows.push({ unified: fromProvisionJobSummary(s) });
+        }
+        for (const s of social) {
+          rows.push({ unified: fromSocialMarketingJobListItem(s) });
+        }
+        rows.sort((a, b) => (b.unified.createdAt ?? '').localeCompare(a.unified.createdAt ?? ''));
+        return rows;
+      })
+    );
+  }
 
+  /** Enrich rows that have seSummary with detail from SE APIs; return rows with seDetail set for SE. */
+  private enrichSERows(rows: Array<DashboardRow & { seSummary?: RunningJobSummary }>) {
+    const toRow = (r: (typeof rows)[0], detail: SEDetail | null): DashboardRow => ({
+      unified: r.unified,
+      seDetail: detail ?? undefined,
+    });
+    const seIndices = rows
+      .map((r, i) => (r.seSummary ? i : -1))
+      .filter((i) => i >= 0);
+    if (seIndices.length === 0) {
+      return of(rows.map((r) => toRow(r, null)));
+    }
+    const detailRequests = seIndices.map((i) => this.fetchSEDetail(rows[i].seSummary!));
+    return forkJoin(detailRequests).pipe(
+      map((details) => {
+        const detailBySeIndex = new Map(seIndices.map((j, idx) => [j, details[idx]]));
+        return rows.map((r, i) => toRow(r, detailBySeIndex.get(i) ?? null));
+      })
+    );
+  }
+
+  private fetchSEDetail(summary: RunningJobSummary) {
+    const jobType = summary.job_type;
     if (jobType === 'planning_v2') {
-      return this.api.getPlanningV2Status(summary.job_id).pipe(
-        switchMap((status: PlanningV2StatusResponse) => of(this.toDashboardJob(summary, {
+      return this.seApi.getPlanningV2Status(summary.job_id).pipe(
+        map((status: PlanningV2StatusResponse) => this.toSEDetail({
           progress: status.progress,
           currentPhase: status.current_phase,
           waitingForAnswers: status.waiting_for_answers,
-          teamStatuses: this.buildTeamStatuses({ 'planning': { current_phase: status.current_phase, progress: status.progress } }),
-        }))),
-        catchError(() => of(this.toDashboardJob(summary)))
+          teamProgress: { 'planning': { current_phase: status.current_phase, progress: status.progress } },
+        })),
+        catchError(() => of(null))
       );
     }
-
     if (jobType === 'product_analysis') {
-      return this.api.getProductAnalysisStatus(summary.job_id).pipe(
-        switchMap((status: ProductAnalysisStatusResponse) => of(this.toDashboardJob(summary, {
+      return this.seApi.getProductAnalysisStatus(summary.job_id).pipe(
+        map((status: ProductAnalysisStatusResponse) => this.toSEDetail({
           progress: status.progress,
           statusText: status.status_text,
           currentPhase: status.current_phase,
           waitingForAnswers: status.waiting_for_answers,
-          teamStatuses: this.buildTeamStatuses({ 'product_analysis': { current_phase: status.current_phase, progress: status.progress } }),
-        }))),
-        catchError(() => of(this.toDashboardJob(summary)))
+          teamProgress: { 'product_analysis': { current_phase: status.current_phase, progress: status.progress } },
+        })),
+        catchError(() => of(null))
       );
     }
-
     if (jobType === 'backend_code_v2') {
-      return this.api.getBackendCodeV2Status(summary.job_id).pipe(
-        switchMap((status) => of(this.toDashboardJob(summary, {
+      return this.seApi.getBackendCodeV2Status(summary.job_id).pipe(
+        map((status) => this.toSEDetail({
           progress: status.progress,
           currentPhase: status.current_phase,
-          teamStatuses: this.buildTeamStatuses({ 'backend-code-v2': { current_phase: status.current_phase, progress: status.progress } }),
-        }))),
-        catchError(() => of(this.toDashboardJob(summary)))
+          teamProgress: { 'backend-code-v2': { current_phase: status.current_phase, progress: status.progress } },
+        })),
+        catchError(() => of(null))
       );
     }
-
     if (jobType === 'frontend_code_v2') {
-      return this.api.getFrontendCodeV2Status(summary.job_id).pipe(
-        switchMap((status) => of(this.toDashboardJob(summary, {
+      return this.seApi.getFrontendCodeV2Status(summary.job_id).pipe(
+        map((status) => this.toSEDetail({
           progress: status.progress,
           currentPhase: status.current_phase,
-          teamStatuses: this.buildTeamStatuses({ 'frontend-code-v2': { current_phase: status.current_phase, progress: status.progress } }),
-        }))),
-        catchError(() => of(this.toDashboardJob(summary)))
+          teamProgress: { 'frontend-code-v2': { current_phase: status.current_phase, progress: status.progress } },
+        })),
+        catchError(() => of(null))
       );
     }
-
-    return this.api.getJobStatus(summary.job_id).pipe(
-      switchMap((status: JobStatusResponse) => of(this.toDashboardJob(summary, {
+    return this.seApi.getJobStatus(summary.job_id).pipe(
+      map((status: JobStatusResponse) => this.toSEDetail({
         progress: status.progress,
         statusText: status.status_text,
         currentPhase: status.phase,
         waitingForAnswers: status.waiting_for_answers,
-        teamStatuses: this.buildTeamStatuses(status.team_progress),
-      }))),
-      catchError(() => of(this.toDashboardJob(summary)))
+        teamProgress: status.team_progress,
+      })),
+      catchError(() => of(null))
     );
+  }
+
+  private toSEDetail(params: {
+    progress?: number;
+    statusText?: string;
+    currentPhase?: string;
+    waitingForAnswers?: boolean;
+    teamProgress?: Record<string, TeamProgressEntry>;
+  }): SEDetail {
+    return {
+      progress: params.progress,
+      statusText: params.statusText,
+      currentPhase: params.currentPhase,
+      waitingForAnswers: params.waitingForAnswers,
+      teamStatuses: this.buildTeamStatuses(params.teamProgress),
+    };
   }
 
   private buildTeamStatuses(teamProgress?: Record<string, TeamProgressEntry>): TeamStatus[] {
@@ -216,27 +281,22 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       });
   }
 
-  private toDashboardJob(
-    summary: RunningJobSummary,
-    details?: Partial<Pick<DashboardJob, 'progress' | 'statusText' | 'currentPhase' | 'waitingForAnswers' | 'teamStatuses'>>
-  ): DashboardJob {
-    return {
-      summary,
-      progress: details?.progress,
-      statusText: details?.statusText,
-      currentPhase: details?.currentPhase,
-      waitingForAnswers: details?.waitingForAnswers,
-      teamStatuses: details?.teamStatuses,
-    };
-  }
-
   refresh(): void {
     this.loading = true;
     this.startPolling();
   }
 
-  getJobTypeInfo(jobType: string): JobTypeInfo {
-    return JOB_TYPE_INFO[jobType] ?? { label: jobType, icon: 'work', route: '/software-engineering' };
+  getJobTypeInfo(job: DashboardRow): JobTypeInfo {
+    if (job.unified.source === 'software_engineering' && job.unified.jobType) {
+      return JOB_TYPE_INFO[job.unified.jobType] ?? { label: job.unified.jobType, icon: 'work', route: '/software-engineering' };
+    }
+    const typeLabels: Record<string, JobTypeInfo> = {
+      blogging: { label: 'Blog pipeline', icon: 'article', route: '/blogging' },
+      ai_systems: { label: 'Build', icon: 'smart_toy', route: '/ai-systems' },
+      agent_provisioning: { label: 'Provisioning', icon: 'settings', route: '/agent-provisioning' },
+      social_marketing: { label: 'Campaign', icon: 'campaign', route: '/social-marketing' },
+    };
+    return typeLabels[job.unified.source] ?? { label: job.unified.source, icon: 'work', route: '/' };
   }
 
   getRepoName(repoPath?: string): string {
@@ -245,9 +305,9 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     return parts[parts.length - 1] || repoPath;
   }
 
-  getStatusClass(job: DashboardJob): string {
-    if (job.waitingForAnswers) return 'status-waiting';
-    switch (job.summary.status) {
+  getStatusClass(job: DashboardRow): string {
+    if (job.seDetail?.waitingForAnswers) return 'status-waiting';
+    switch (job.unified.status) {
       case 'running': return 'status-running';
       case 'completed': return 'status-completed';
       case 'failed': return 'status-failed';
@@ -256,9 +316,9 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     }
   }
 
-  getStatusLabel(job: DashboardJob): string {
-    if (job.waitingForAnswers) return 'Waiting';
-    return job.summary.status.charAt(0).toUpperCase() + job.summary.status.slice(1);
+  getStatusLabel(job: DashboardRow): string {
+    if (job.seDetail?.waitingForAnswers) return 'Waiting';
+    return (job.unified.status ?? '').charAt(0).toUpperCase() + (job.unified.status ?? '').slice(1);
   }
 
   getTimeAgo(createdAt?: string): string {
@@ -275,42 +335,54 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     return `${diffDays}d ago`;
   }
 
-  getActivityText(job: DashboardJob): string {
-    if (job.waitingForAnswers) return 'Waiting for answers';
-    if (job.statusText) return job.statusText;
-    if (job.currentPhase) {
-      return job.currentPhase.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  getActivityText(job: DashboardRow): string {
+    if (job.seDetail?.waitingForAnswers) return 'Waiting for answers';
+    if (job.seDetail?.statusText) return job.seDetail.statusText;
+    if (job.seDetail?.currentPhase) {
+      return job.seDetail.currentPhase.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    }
+    if (job.unified.phase) {
+      return job.unified.phase.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
     }
     return '';
   }
 
-  truncateJobId(jobId: string): string {
-    if (jobId.length <= 12) return jobId;
-    return jobId.substring(0, 8) + '...';
+  getProgress(job: DashboardRow): number | null {
+    if (job.seDetail?.progress != null) return job.seDetail.progress;
+    if (job.unified.progress != null) return job.unified.progress;
+    return null;
   }
 
-  navigateToJob(job: DashboardJob): void {
-    const info = this.getJobTypeInfo(job.summary.job_type);
-    const queryParams: Record<string, string | number> = { jobId: job.summary.job_id };
-    if (info.tabIndex !== undefined) {
-      queryParams['tab'] = info.tabIndex;
-    }
-    this.router.navigate([info.route], { queryParams });
+  getShowIndeterminate(job: DashboardRow): boolean {
+    return job.unified.status === 'running' && !job.seDetail?.waitingForAnswers && this.getProgress(job) == null;
   }
 
-  cancelJob(event: Event, job: DashboardJob): void {
-    event.stopPropagation();
-    const jobId = job.summary.job_id;
-    const repoName = this.getRepoName(job.summary.repo_path);
-    
-    if (!confirm(`Are you sure you want to stop the job for "${repoName}"?`)) {
+  navigateToJob(job: DashboardRow): void {
+    const u = job.unified;
+    if (u.source === 'software_engineering' && u.jobType) {
+      const info = this.getJobTypeInfo(job);
+      const queryParams: Record<string, string | number> = { jobId: u.jobId };
+      if (info.tabIndex !== undefined) {
+        queryParams['tab'] = info.tabIndex;
+      }
+      this.router.navigate([info.route], { queryParams });
       return;
     }
+    const info = SOURCE_DISPLAY[u.source];
+    if (info) {
+      this.router.navigate([info.route], { queryParams: { jobId: u.jobId } });
+    }
+  }
 
-    this.api.cancelJob(jobId).subscribe({
-      next: () => {
-        this.refresh();
-      },
+  cancelJob(event: Event, job: DashboardRow): void {
+    event.stopPropagation();
+    if (job.unified.source !== 'software_engineering') return;
+    const label = job.unified.label;
+    if (!confirm(`Are you sure you want to stop the job for "${label}"?`)) {
+      return;
+    }
+    this.seApi.cancelJob(job.unified.jobId).subscribe({
+      next: () => this.refresh(),
       error: (err) => {
         console.error('Failed to cancel job:', err);
         this.error = err?.error?.detail ?? err?.message ?? 'Failed to cancel job';
@@ -318,13 +390,14 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
-  canCancelJob(job: DashboardJob): boolean {
-    const status = job.summary.status;
+  canCancelJob(job: DashboardRow): boolean {
+    if (job.unified.source !== 'software_engineering') return false;
+    const status = job.unified.status;
     return status === 'running' || status === 'pending';
   }
 
-  trackByJobId(_index: number, job: DashboardJob): string {
-    return job.summary.job_id;
+  trackByJobId(_index: number, job: DashboardRow): string {
+    return `${job.unified.source}:${job.unified.jobId}`;
   }
 
   getPhaseColorClass(phase: string): string {

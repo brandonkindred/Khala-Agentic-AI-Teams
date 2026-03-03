@@ -553,19 +553,22 @@ class PlanningV2ProductLead:
                     exc,
                 )
         
-        # Also check for validated_spec.md in repo
-        validated_spec_path = repo_path / "plan" / "validated_spec.md"
-        if validated_spec_path.exists() and not validated_spec_content:
+        # When no validated_spec_content was provided, try loading latest spec from repo (validated_spec, updated_spec, etc.)
+        if not validated_spec_content:
             try:
-                file_spec = validated_spec_path.read_text(encoding="utf-8")
-                if file_spec.strip():
+                from spec_parser import get_latest_spec_content
+
+                disk_spec = get_latest_spec_content(repo_path)
+                if disk_spec.strip():
                     logger.info(
-                        "Planning-v2: Found validated_spec.md, using it instead of original spec"
+                        "Planning-v2: Using latest spec from repo (validated_spec.md, updated_spec.md, or fallback)"
                     )
-                    final_spec = file_spec
+                    final_spec = disk_spec
+            except FileNotFoundError:
+                pass  # Keep final_spec from spec_content or PRA result
             except Exception as exc:
                 logger.warning(
-                    "Planning-v2: Could not read validated_spec.md: %s", exc
+                    "Planning-v2: Could not read latest spec from repo: %s", exc
                 )
         
         planning_agent = PlanningV2PlanningAgent(self.llm)

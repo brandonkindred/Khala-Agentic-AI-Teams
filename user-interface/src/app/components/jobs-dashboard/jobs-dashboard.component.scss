@@ -167,6 +167,10 @@
   width: 100px;
 }
 
+.col-team {
+  width: 160px;
+}
+
 .col-type {
   width: 160px;
 }
@@ -237,11 +241,13 @@
   }
 }
 
+.team-cell,
 .type-cell {
   display: flex;
   align-items: center;
   gap: 0.5rem;
 
+  .team-icon,
   .type-icon {
     font-size: 1.125rem;
     width: 1.125rem;
