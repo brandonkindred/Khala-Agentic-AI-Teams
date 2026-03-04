@@ -68,3 +68,8 @@ Safety defaults:
 
 - `schemas/investment_profile.schema.json` contains the implementation-ready schema for the user profile object.
 - Remaining contract objects are represented as typed Pydantic models in `models.py`.
+
+## Spec coverage additions
+
+- `spec_models.py` now includes codex-friendly Pydantic representations for the full v1 spec entities, including `IPSV1`, `StrategySpecV1`, `ValidationReportV1`, `PromotionDecisionV1`, deal underwriting, diligence, and IC memo artifacts.
+- `agent_catalog.py` defines the core cross-asset agent catalog and specialist desk lineup (equities, bonds/treasuries, options, crypto, FX, real estate) for orchestration and UI introspection.
