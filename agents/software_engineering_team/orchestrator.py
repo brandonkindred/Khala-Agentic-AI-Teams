@@ -84,6 +84,11 @@ from software_engineering_team.shared.repo_writer import write_agent_output
 from software_engineering_team.shared.repo_utils import read_repo_code, truncate_for_context
 from software_engineering_team.shared.task_utils import task_requirements
 
+try:
+    from unified_api.slack_notifier import notify_open_questions as slack_notify_open_questions
+except ImportError:
+    slack_notify_open_questions = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -1986,6 +1991,10 @@ def run_orchestrator(
                     source="tech_lead",
                 )
                 add_pending_questions(job_id, structured_questions)
+                if slack_notify_open_questions:
+                    slack_notify_open_questions(
+                        job_id, structured_questions, source="run-team"
+                    )
                 logger.info(
                     "Job %s waiting for %d clarification answers from user",
                     job_id,

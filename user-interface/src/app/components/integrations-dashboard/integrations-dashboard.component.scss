@@ -1,0 +1,32 @@
+.slack-card {
+  max-width: 560px;
+  margin-top: 1rem;
+}
+
+.header-icon {
+  font-size: 2rem;
+  width: 2rem;
+  height: 2rem;
+}
+
+.form-row {
+  margin-bottom: 1rem;
+
+  &.form-row:last-of-type {
+    margin-bottom: 0;
+  }
+}
+
+.full-width {
+  width: 100%;
+}
+
+.error-message {
+  color: var(--mat-error-color, #b00020);
+  margin-bottom: 1rem;
+}
+
+.success-message {
+  color: var(--mat-primary-color, #1976d2);
+  margin-bottom: 1rem;
+}

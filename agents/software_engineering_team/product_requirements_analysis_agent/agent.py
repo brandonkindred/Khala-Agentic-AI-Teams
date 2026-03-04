@@ -1088,6 +1088,11 @@ Previously Answered Questions:
 
         pending = self._convert_to_pending_questions(open_questions)
         add_pending_questions(job_id, pending)
+        try:
+            from unified_api.slack_notifier import notify_open_questions
+            notify_open_questions(job_id, pending, source="product-analysis")
+        except ImportError:
+            pass
 
         update_job(
             job_id,

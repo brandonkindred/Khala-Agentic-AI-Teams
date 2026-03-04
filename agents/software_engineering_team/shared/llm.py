@@ -20,6 +20,7 @@ import httpx
 ENV_LLM_PROVIDER = "SW_LLM_PROVIDER"  # "dummy" or "ollama"
 ENV_LLM_MODEL = "SW_LLM_MODEL"  # model name for ollama
 ENV_LLM_BASE_URL = "SW_LLM_BASE_URL"  # ollama base URL
+ENV_LLM_OLLAMA_API_KEY = "SW_LLM_OLLAMA_API_KEY"  # Ollama Cloud API key (or use OLLAMA_API_KEY)
 ENV_LLM_TIMEOUT = "SW_LLM_TIMEOUT"  # timeout in seconds
 ENV_LLM_MAX_RETRIES = "SW_LLM_MAX_RETRIES"  # max retries for temporary errors (default 4)
 ENV_LLM_BACKOFF_BASE = "SW_LLM_BACKOFF_BASE"  # base seconds for exponential backoff (default 2)
@@ -775,6 +776,13 @@ class OllamaLLMClient(LLMClient):
         self.timeout = timeout
         self._model_num_ctx: int | None = None  # cached from /api/show
 
+    def _ollama_auth_headers(self) -> dict[str, str]:
+        """Return Authorization Bearer header for Ollama Cloud when API key is set."""
+        key = os.environ.get(ENV_LLM_OLLAMA_API_KEY) or os.environ.get("OLLAMA_API_KEY")
+        if not key:
+            return {}
+        return {"Authorization": f"Bearer {key}"}
+
     def _fetch_model_num_ctx(self) -> int:
         """Fetch model's num_ctx from env, known model table, or Ollama /api/show. Cached per client. Fallback 16384 on failure."""
         if self._model_num_ctx is not None:
@@ -793,8 +801,9 @@ class OllamaLLMClient(LLMClient):
             return self._model_num_ctx
         try:
             url = f"{self.base_url}/api/show"
+            headers = self._ollama_auth_headers()
             with httpx.Client(timeout=min(30, self.timeout)) as client:
-                resp = client.post(url, json={"model": self.model})
+                resp = client.post(url, json={"model": self.model}, headers=headers)
             if resp.status_code != 200:
                 logger.warning(
                     "Ollama /api/show returned %s for model %s; using max_tokens=16384",
@@ -1189,11 +1198,12 @@ class OllamaLLMClient(LLMClient):
             pass
         # #endregion
         last_error: Exception | None = None
+        headers = self._ollama_auth_headers()
         for attempt in range(max_retries + 1):
             try:
                 with sem:
                     with httpx.Client(timeout=self.timeout) as client:
-                        response = client.post(url, json=payload)
+                        response = client.post(url, json=payload, headers=headers)
                         status = response.status_code
                         # #region agent log
                         if status >= 500:

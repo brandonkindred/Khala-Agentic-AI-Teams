@@ -15,4 +15,5 @@ export const environment = {
   agentProvisioningApiUrl: '/api/agent-provisioning',
   aiSystemsApiUrl: '/api/ai-systems',
   investmentApiUrl: '/api/investment',
+  integrationsApiUrl: '/api/integrations',
 };

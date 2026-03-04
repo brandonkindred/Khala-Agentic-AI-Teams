@@ -1,0 +1,117 @@
+# Full stack: Postgres, Temporal, Ollama (optional), and strands-agents.
+# Run from repo root: docker compose -f docker/docker-compose.yml up --build
+# Ports: 5432 Postgres, 7233 Temporal gRPC, 8080 Temporal UI, 8888 Agents nginx, 11434 Ollama (optional)
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: strands-stack-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - stack
+
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    container_name: strands-stack-temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      DBNAME: temporal
+      SKIP_DB_CREATE: "true"
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7233:7233"
+    networks:
+      - stack
+
+  temporal-ui:
+    image: temporalio/ui:2.28.0
+    container_name: strands-stack-temporal-ui
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: "http://localhost:3000"
+    ports:
+      - "8080:8080"
+    networks:
+      - stack
+
+  ollama:
+    image: ollama/ollama
+    container_name: strands-stack-ollama
+    ports:
+      - "11434:11434"
+    environment:
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+    networks:
+      - stack
+
+  strands-agents:
+    build:
+      context: ..
+      dockerfile: agents/Dockerfile
+      args:
+        SPEC_FILE: ${SPEC_FILE:-agents/docker/default_initial_spec.md}
+    container_name: strands-agents
+    privileged: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./workspace:/workspace
+      - agents_postgres_data:/var/lib/postgresql/data
+    ports:
+      - "8888:80"
+      - "18000:8000"
+      - "18001:8001"
+      - "18002:8002"
+      - "18003:8003"
+      - "18004:8004"
+      - "18005:8005"
+    environment:
+      SW_LLM_PROVIDER: ollama
+      SW_LLM_BASE_URL: ${SW_LLM_BASE_URL:-https://ollama.com}
+      SW_LLM_MODEL: ${SW_LLM_MODEL:-qwen3.5:397b-cloud}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      PYTHONUNBUFFERED: "1"
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: strands
+      POSTGRES_PASSWORD: strands
+      POSTGRES_DB: strands
+      ENABLE_LOG_API: ${ENABLE_LOG_API:-0}
+    networks:
+      - stack
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  stack:
+    name: strands-stack
+
+volumes:
+  postgres_data:
+  agents_postgres_data:

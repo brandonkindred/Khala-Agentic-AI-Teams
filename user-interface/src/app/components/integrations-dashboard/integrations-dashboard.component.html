@@ -1,0 +1,65 @@
+<h1>Integrations</h1>
+<p>Configure external integrations. When enabled, agents can notify you via the configured Slack channel (open questions and Personal Assistant replies).</p>
+
+@if (loading) {
+  <p>Loading…</p>
+} @else {
+  <mat-card class="slack-card">
+    <mat-card-header>
+      <mat-icon mat-card-avatar class="header-icon">integration_instructions</mat-icon>
+      <mat-card-title>Slack</mat-card-title>
+      <mat-card-subtitle>
+        Open questions and Personal Assistant messages are posted to your Slack channel when enabled.
+      </mat-card-subtitle>
+    </mat-card-header>
+    <mat-card-content>
+      @if (error) {
+        <p class="error-message">{{ error }}</p>
+      }
+      @if (success) {
+        <p class="success-message">{{ success }}</p>
+      }
+      <div class="form-row">
+        <mat-slide-toggle [(ngModel)]="slackEnabled" color="primary">
+          Enable Slack integration
+        </mat-slide-toggle>
+      </div>
+      <div class="form-row">
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-label>Webhook URL</mat-label>
+          <input
+            matInput
+            [(ngModel)]="webhookUrl"
+            type="url"
+            placeholder="https://hooks.slack.com/services/..."
+          />
+          <mat-hint>Create an Incoming Webhook in your Slack app and paste the URL here. Leave blank if already configured (e.g. via env).</mat-hint>
+          @if (webhookConfigured && !webhookUrl) {
+            <mat-hint align="end">Webhook is configured</mat-hint>
+          }
+        </mat-form-field>
+      </div>
+      <div class="form-row">
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-label>Channel name (optional)</mat-label>
+          <input
+            matInput
+            [(ngModel)]="channelDisplayName"
+            placeholder="#engineering"
+          />
+          <mat-hint>Display label only (e.g. #engineering).</mat-hint>
+        </mat-form-field>
+      </div>
+      <div class="form-row">
+        <button
+          mat-raised-button
+          color="primary"
+          (click)="saveSlack()"
+          [disabled]="saving || (slackEnabled && webhookUrlInvalid())"
+        >
+          @if (saving) { Saving… } @else { Save }
+        </button>
+      </div>
+    </mat-card-content>
+  </mat-card>
+}

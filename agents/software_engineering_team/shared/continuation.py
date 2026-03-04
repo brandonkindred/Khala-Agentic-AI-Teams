@@ -25,6 +25,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ENV_LLM_ENABLE_THINKING = "SW_LLM_ENABLE_THINKING"
+ENV_LLM_OLLAMA_API_KEY = "SW_LLM_OLLAMA_API_KEY"
+
+
+def _ollama_auth_headers() -> Dict[str, str]:
+    """Return Authorization Bearer header for Ollama Cloud when API key is set."""
+    key = os.environ.get(ENV_LLM_OLLAMA_API_KEY) or os.environ.get("OLLAMA_API_KEY")
+    if not key:
+        return {}
+    return {"Authorization": f"Bearer {key}"}
 
 MAX_CONTINUATION_CYCLES = 10
 CONTINUATION_CONTEXT_CHARS = 150
@@ -330,8 +339,9 @@ class ResponseContinuator:
             json_mode,
         )
 
+        headers = _ollama_auth_headers()
         with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(url, json=payload)
+            response = client.post(url, json=payload, headers=headers)
 
             if response.status_code != 200:
                 raise Exception(
