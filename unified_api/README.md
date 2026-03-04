@@ -290,6 +290,20 @@ kill -9 <PID>
 python run_unified_api.py --port 9000
 ```
 
+### Slack integration (Phase 1)
+
+- **Integrations API:** `GET /api/integrations`, `GET /api/integrations/slack`, `PUT /api/integrations/slack`. Configure Slack (webhook URL, channel label) via UI or env (`SLACK_WEBHOOK_URL`).
+- **Manual E2E checklist:** (1) Start unified API and Angular UI. (2) Open **Integrations**, enable Slack, paste a valid Incoming Webhook URL, save. (3) Run a software-engineering job (or planning-v2 / product-analysis) that produces open questions; confirm a message appears in the Slack channel with a link to the UI. (4) Send a message to the Personal Assistant; confirm the assistant reply appears in the same Slack channel.
+
+### Phase 2: Inbound from Slack (optional)
+
+To allow answering open questions and PA chat from Slack (instead of only the UI):
+
+1. **Slack App setup:** Create a Slack App at api.slack.com. Enable **Incoming Webhooks** (for outbound). For inbound: add a **Bot token** and enable **Events API** (e.g. `message.channels`, `message.im`) or **Socket Mode** so the backend can receive events without a public URL. Install the app to your workspace.
+2. **Events service:** Run a small service (e.g. in `unified_api` or a separate process) that receives Slack events (HTTP endpoint for Events API or Socket Mode client). Map Slack channel/thread to `job_id` (e.g. when posting "open questions" to Slack, store `thread_ts` → `job_id` in a file or cache).
+3. **Submit answers:** On message events in the question thread, parse the user reply (or use interactive Block Kit buttons), build `AnswerSubmission[]`, and call the existing `store_submit_answers(job_id, answers)` (and planning-v2 / product-analysis equivalents by job type).
+4. **PA chat from Slack:** On message events (e.g. DM to bot or message in configured channel), call `POST /users/{user_id}/assistant` (map Slack user to `user_id` via config or store), then post `AssistantResponse.message` back to Slack via `chat.postMessage` (Bot token).
+
 ### CORS Issues
 
 The unified API enables CORS by default with `allow_origins=["*"]`. For production, modify `main.py` to restrict origins:
