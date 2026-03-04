@@ -11,6 +11,8 @@ from typing import Optional
 
 from blog_research_agent.llm import LLMClient
 
+from shared.errors import LLMJsonParseError
+
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
 from .prompts import COPY_EDITOR_PROMPT, MINIMAL_STYLE_CHECKLIST
 
@@ -143,7 +145,34 @@ class BlogCopyEditorAgent:
 
         prompt = COPY_EDITOR_PROMPT + "\n\n" + "\n".join(context_parts)
 
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        data = None
+        for attempt in range(2):
+            try:
+                data = self.llm.complete_json(prompt, temperature=0.2)
+                break
+            except LLMJsonParseError as e:
+                if attempt == 0:
+                    logger.warning(
+                        "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
+                        e,
+                    )
+                    prompt = prompt + "\n\nRespond with a single JSON object only (no markdown, no code fence). Keys: summary (string), feedback_items (array of objects with category, severity, location?, issue, suggestion?)."
+                else:
+                    logger.warning(
+                        "Copy editor JSON parse failed after retry; using fallback output: %s",
+                        e,
+                    )
+                    data = {
+                        "summary": "Copy editor could not parse the model response. Please review the draft manually.",
+                        "feedback_items": [],
+                    }
+                    break
+
+        if not data:
+            data = {
+                "summary": "Copy editor could not parse the model response. Please review the draft manually.",
+                "feedback_items": [],
+            }
 
         summary = (data.get("summary") or "").strip() or "No summary generated."
         feedback_data = data.get("feedback_items") or []

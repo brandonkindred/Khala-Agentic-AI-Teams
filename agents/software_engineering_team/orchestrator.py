@@ -1773,8 +1773,13 @@ def run_orchestrator(
         agents = _get_agents()
 
         # 1. Read spec from work path or use override (no git required at root)
-        from spec_parser import get_latest_spec_content, parse_spec_with_llm, gather_context_files
-        spec_content = spec_content_override if spec_content_override is not None else get_latest_spec_content(path)
+        from spec_parser import get_newest_spec_path, get_newest_spec_content, parse_spec_with_llm, gather_context_files
+        initial_spec_path = None
+        if spec_content_override is not None:
+            spec_content = spec_content_override
+        else:
+            initial_spec_path = get_newest_spec_path(path)
+            spec_content = get_newest_spec_content(path)
         
         # Gather all context files from the repo for PRA agent
         context_files = gather_context_files(path)
@@ -1829,6 +1834,7 @@ def run_orchestrator(
             job_id=job_id,
             job_updater=_pra_job_updater,
             context_files=context_files,
+            initial_spec_path=initial_spec_path,
         )
         if not pra_result.success:
             err = pra_result.failure_reason or "Product Requirements Analysis did not complete successfully."

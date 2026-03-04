@@ -1,9 +1,5 @@
-<h1>Blogging API</h1>
-<p>Research and review pipeline, full pipeline with gates.</p>
-
-<div class="header-row">
-  <app-health-indicator [healthCheck]="healthCheck" label="Blogging API" />
-</div>
+<h1 class="mat-headline-5">Blogging</h1>
+<p class="mat-body-2 page-subtitle">Research and review pipeline, full pipeline with gates.</p>
 
 @if (loading) {
   <app-loading-spinner message="Processing..." />
@@ -35,30 +31,44 @@
     </mat-tab-group>
   </div>
 
-  @if (runningJobs.length > 0) {
-    <aside class="running-jobs-panel">
-      <mat-card>
-        <mat-card-header>
-          <mat-card-title>Running jobs</mat-card-title>
-          <mat-card-subtitle>{{ runningJobs.length }} job(s) in progress</mat-card-subtitle>
-        </mat-card-header>
-        <mat-card-content>
-          <div class="running-jobs-list">
+  <aside class="jobs-panel">
+    <mat-card>
+      <mat-card-header>
+        <mat-card-title>Jobs</mat-card-title>
+        <mat-card-subtitle>Running and completed pipeline jobs</mat-card-subtitle>
+      </mat-card-header>
+      <mat-card-content>
+        @if (allJobs.length === 0) {
+          <p class="no-jobs">No jobs yet. Start a pipeline from the tabs.</p>
+        } @else {
+          <mat-list>
+            <h3 mat-subheader>Running</h3>
             @for (job of runningJobs; track job.job_id) {
-              <button
-                type="button"
-                class="job-item"
-                [class.selected]="selectedBlogJob?.job_id === job.job_id"
-                (click)="selectJob(job)"
-              >
-                <span class="job-brief">{{ job.brief ? (job.brief | slice:0:60) + (job.brief.length > 60 ? '…' : '') : 'Pipeline' }}</span>
-                <span class="job-id">{{ job.job_id }}</span>
-                <span class="job-status" [class]="'status-' + job.status">{{ job.status }}</span>
-              </button>
+              <mat-list-item (click)="selectJob(job)" class="job-list-item" [class.selected]="selectedBlogJob?.job_id === job.job_id">
+                <span matListItemTitle>{{ job.brief ? (job.brief | slice:0:50) + (job.brief.length > 50 ? '…' : '') : 'Pipeline' }}</span>
+                <span matListItemLine class="job-meta">{{ job.job_id }}</span>
+                <mat-chip-set matListItemMeta>
+                  <mat-chip [class]="'status-' + job.status">{{ job.status }}</mat-chip>
+                </mat-chip-set>
+              </mat-list-item>
             }
-          </div>
+            @if (runningJobs.length === 0) {
+              <mat-list-item><span matListItemTitle>None</span></mat-list-item>
+            }
+            <h3 mat-subheader>Completed</h3>
+            @for (job of completedJobs; track job.job_id) {
+              <mat-list-item (click)="selectJob(job)" class="job-list-item" [class.selected]="selectedBlogJob?.job_id === job.job_id">
+                <span matListItemTitle>{{ job.brief ? (job.brief | slice:0:50) + (job.brief.length > 50 ? '…' : '') : 'Pipeline' }}</span>
+                <span matListItemLine class="job-meta">{{ job.job_id }} · {{ job.created_at ? (job.created_at | slice:0:10) : '' }}</span>
+                <mat-chip-set matListItemMeta>
+                  <mat-chip [class]="'status-' + job.status">{{ job.status }}</mat-chip>
+                </mat-chip-set>
+              </mat-list-item>
+            }
+          </mat-list>
 
           @if (selectedBlogJob && selectedJobStatus) {
+            <mat-divider />
             <div class="job-detail">
               <h3>Job details</h3>
               <p class="detail-row"><strong>Phase:</strong> {{ selectedJobStatus.phase ?? '—' }}</p>
@@ -84,7 +94,7 @@
               @if (selectedJobStatus.completed_at) {
                 <p class="detail-row"><strong>Completed:</strong> {{ selectedJobStatus.completed_at }}</p>
               }
-              @if (selectedJobStatus.title_choices.length) {
+              @if (selectedJobStatus.title_choices?.length) {
                 <p class="detail-row"><strong>Title choices:</strong> {{ selectedJobStatus.title_choices.length }}</p>
               }
               @if (selectedJobStatus.draft_preview) {
@@ -94,9 +104,39 @@
                 </div>
               }
             </div>
+
+            @if (isTerminalStatus(selectedJobStatus.status)) {
+              <mat-divider />
+              <div class="produced-assets">
+                <h3>Produced assets</h3>
+                @if (artifactsLoading) {
+                  <p class="assets-loading">Loading artifacts…</p>
+                } @else if (artifactsError) {
+                  <p class="assets-error">{{ artifactsError }}</p>
+                } @else if (selectedJobArtifacts.length === 0) {
+                  <p class="assets-empty">No artifacts found for this job.</p>
+                } @else {
+                  <mat-accordion>
+                    @for (name of selectedJobArtifacts; track name) {
+                      <mat-expansion-panel (openedChange)="$event && loadArtifactContent(name)">
+                        <mat-expansion-panel-header>
+                          <mat-panel-title>{{ artifactLabel(name) }}</mat-panel-title>
+                          @if (artifactContentLoading[name]) {
+                            <mat-panel-description>Loading…</mat-panel-description>
+                          }
+                        </mat-expansion-panel-header>
+                        <div class="artifact-body" [class.artifact-json]="isArtifactJson(name)">
+                          <pre>{{ getArtifactContentDisplay(name) }}</pre>
+                        </div>
+                      </mat-expansion-panel>
+                    }
+                  </mat-accordion>
+                }
+              </div>
+            }
           }
-        </mat-card-content>
-      </mat-card>
-    </aside>
-  }
+        }
+      </mat-card-content>
+    </mat-card>
+  </aside>
 </div>

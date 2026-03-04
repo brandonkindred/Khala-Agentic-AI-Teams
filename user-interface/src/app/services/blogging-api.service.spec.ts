@@ -74,4 +74,34 @@ describe('BloggingApiService', () => {
     expect(req.request.method).toBe('GET');
     req.flush({ status: 'ok' });
   });
+
+  it('should call GET /job/{jobId}/artifacts', () => {
+    const jobId = 'abc-123';
+    const mockResponse = { artifacts: ['final.md', 'outline.md'] };
+
+    service.getJobArtifacts(jobId).subscribe((res) => {
+      expect(res.artifacts).toEqual(['final.md', 'outline.md']);
+    });
+
+    const req = httpMock.expectOne(`${baseUrl}/job/${jobId}/artifacts`);
+    expect(req.request.method).toBe('GET');
+    req.flush(mockResponse);
+  });
+
+  it('should call GET /job/{jobId}/artifacts/{artifactName} with encoded name', () => {
+    const jobId = 'abc-123';
+    const artifactName = 'final.md';
+    const mockResponse = { name: 'final.md', content: '# Draft' };
+
+    service.getJobArtifactContent(jobId, artifactName).subscribe((res) => {
+      expect(res.name).toBe('final.md');
+      expect(res.content).toBe('# Draft');
+    });
+
+    const req = httpMock.expectOne(
+      `${baseUrl}/job/${jobId}/artifacts/${encodeURIComponent(artifactName)}`
+    );
+    expect(req.request.method).toBe('GET');
+    req.flush(mockResponse);
+  });
 });

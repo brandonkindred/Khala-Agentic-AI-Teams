@@ -24,10 +24,10 @@
       <textarea
         matInput
         [(ngModel)]="specContent"
-        placeholder="Paste spec content here, or leave empty to read from initial_spec.md..."
+        placeholder="Paste spec content here, or leave empty to use the latest spec from the repo..."
         rows="8"
       ></textarea>
-      <mat-hint>If empty, the spec will be read from initial_spec.md in the repository</mat-hint>
+      <mat-hint>If empty, the newest spec file (name contains '_spec') is used, by modification time: plan/product_analysis/, plan/, or root</mat-hint>
     </mat-form-field>
   </mat-card-content>
 

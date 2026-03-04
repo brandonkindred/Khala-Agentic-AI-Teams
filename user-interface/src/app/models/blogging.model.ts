@@ -85,3 +85,14 @@ export interface StartJobResponse {
   job_id: string;
   message?: string;
 }
+
+/** Response from GET /job/{job_id}/artifacts (list of artifact filenames). */
+export interface BlogJobArtifactsResponse {
+  artifacts: string[];
+}
+
+/** Response from GET /job/{job_id}/artifacts/{name} (single artifact content). */
+export interface BlogJobArtifactContentResponse {
+  name: string;
+  content: string | object;
+}

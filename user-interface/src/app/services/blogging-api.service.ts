@@ -10,6 +10,8 @@ import type {
   HealthResponse,
   BlogJobListItem,
   BlogJobStatusResponse,
+  BlogJobArtifactsResponse,
+  BlogJobArtifactContentResponse,
   StartJobResponse,
 } from '../models';
 
@@ -94,5 +96,23 @@ export class BloggingApiService {
    */
   getJobStatus(job_id: string): Observable<BlogJobStatusResponse> {
     return this.http.get<BlogJobStatusResponse>(`${this.baseUrl}/job/${job_id}`);
+  }
+
+  /**
+   * GET /job/{job_id}/artifacts
+   * List artifact filenames that exist for a pipeline job.
+   */
+  getJobArtifacts(jobId: string): Observable<BlogJobArtifactsResponse> {
+    return this.http.get<BlogJobArtifactsResponse>(`${this.baseUrl}/job/${jobId}/artifacts`);
+  }
+
+  /**
+   * GET /job/{job_id}/artifacts/{artifact_name}
+   * Get content of a single artifact for a job.
+   */
+  getJobArtifactContent(jobId: string, artifactName: string): Observable<BlogJobArtifactContentResponse> {
+    return this.http.get<BlogJobArtifactContentResponse>(
+      `${this.baseUrl}/job/${jobId}/artifacts/${encodeURIComponent(artifactName)}`
+    );
   }
 }

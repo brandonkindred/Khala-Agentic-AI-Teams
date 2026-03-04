@@ -13,9 +13,12 @@ describe('BloggingDashboardComponent', () => {
     apiSpy = jasmine.createSpyObj('BloggingApiService', [
       'researchAndReview',
       'fullPipeline',
-      'health',
+      'getJobs',
+      'getJobStatus',
+      'getJobArtifacts',
+      'getJobArtifactContent',
     ]);
-    apiSpy.health.and.returnValue(of({ status: 'ok' }));
+    apiSpy.getJobs.and.returnValue(of([]));
 
     await TestBed.configureTestingModule({
       imports: [BloggingDashboardComponent, NoopAnimationsModule],
@@ -29,6 +32,10 @@ describe('BloggingDashboardComponent', () => {
 
   it('should create', () => {
     expect(component).toBeTruthy();
+  });
+
+  it('should fetch all jobs via getJobs(false) on init', () => {
+    expect(apiSpy.getJobs).toHaveBeenCalledWith(false);
   });
 
   it('should call researchAndReview and set result on success', () => {

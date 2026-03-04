@@ -12,6 +12,135 @@ This team defines and operationalizes an enterprise brand system through a coord
 6. **Fields on-brand requests** by evaluating assets and returning confidence, rationale, and revision suggestions.
 7. **Runs an interactive asynchronous clarification loop** where open questions are published to a feed and answered one-by-one.
 
+## Agent setup and flow
+
+The orchestrator coordinates six specialist agents. Inputs are `BrandingMission`, `HumanReview`, and optional `BrandCheckRequest` list; output is a single `TeamOutput` whose status depends on `human_review.approved`.
+
+```mermaid
+flowchart TB
+    subgraph api [API Layer]
+        RunRequest[RunBrandingTeamRequest]
+        RunRequest --> Mission[BrandingMission]
+        RunRequest --> HumanReview[HumanReview]
+    end
+
+    subgraph orch [BrandingTeamOrchestrator]
+        direction TB
+        Codifier[BrandCodificationAgent - Brand Strategist]
+        Moodboard[MoodBoardIdeationAgent - Brand Visual Ideation Lead]
+        Refinement[CreativeRefinementAgent - Creative Director]
+        Guidelines[BrandGuidelinesAgent - Brand Systems Architect]
+        Wiki[BrandWikiAgent - Knowledge Systems Manager]
+        Compliance[BrandComplianceAgent - Brand Compliance Reviewer]
+    end
+
+    Mission --> Codifier
+    Codifier --> Codification[BrandCodification]
+    Mission --> Moodboard
+    Moodboard --> MoodBoards[MoodBoardConcept list]
+    Refinement --> RefinementPlan[CreativeRefinementPlan]
+    Mission --> Guidelines
+    Codification --> Guidelines
+    Guidelines --> WritingGuide[WritingGuidelines]
+    Guidelines --> BrandGuide[Brand guidelines list]
+    Guidelines --> DesignSystem[DesignSystemDefinition]
+    Mission --> Wiki
+    Wiki --> WikiBacklog[WikiEntry list]
+    Mission --> Compliance
+    BrandChecks[BrandCheckRequest list] --> Compliance
+    Compliance --> BrandCheckResults[BrandCheckResult list]
+
+    Codification --> TeamOutput[TeamOutput]
+    MoodBoards --> TeamOutput
+    RefinementPlan --> TeamOutput
+    WritingGuide --> TeamOutput
+    BrandGuide --> TeamOutput
+    DesignSystem --> TeamOutput
+    WikiBacklog --> TeamOutput
+    BrandCheckResults --> TeamOutput
+    HumanReview --> TeamOutput
+
+    TeamOutput --> Status{human_review.approved?}
+    Status -->|No| NeedsHuman[status: NEEDS_HUMAN_DECISION]
+    Status -->|Yes| Ready[status: READY_FOR_ROLLOUT]
+```
+
+## API and session flow
+
+**Synchronous:** `POST /branding/run` builds mission and human review, runs the orchestrator once, and returns `TeamOutput`.
+
+**Interactive session:** create a session (orchestrator runs with `approved=False`), then read open questions, answer them one-by-one; each answer updates the mission and the orchestrator is re-run to refresh artifacts.
+
+```mermaid
+flowchart LR
+    subgraph sync [Synchronous]
+        POST_run["POST /branding/run"]
+        POST_run --> BuildMission1[Build BrandingMission and HumanReview]
+        BuildMission1 --> OrchRun1[orchestrator.run]
+        OrchRun1 --> TeamOutput1[TeamOutput]
+    end
+
+    subgraph async [Interactive session]
+        POST_sessions["POST /branding/sessions"]
+        POST_sessions --> BuildMission2[Build BrandingMission]
+        BuildMission2 --> OrchRun2[orchestrator.run with approved=False]
+        OrchRun2 --> CreateSession[SessionStore.create]
+        CreateSession --> OpenQuestions[Open questions feed]
+        OpenQuestions --> GET_questions["GET /sessions/id/questions"]
+        GET_questions --> POST_answer["POST /sessions/id/questions/qid/answer"]
+        POST_answer --> ApplyAnswer[Apply answer to mission]
+        ApplyAnswer --> ReRunOrch[orchestrator.run with updated mission]
+        ReRunOrch --> UpdateSession[Update session latest_output]
+        UpdateSession --> GET_session["GET /sessions/id"]
+    end
+```
+
+## Agent roles and outputs
+
+| Agent | Role | Input | Output |
+|-------|------|--------|--------|
+| **BrandCodificationAgent** | Brand Strategist | BrandingMission | BrandCodification (positioning, promise, pillars) |
+| **MoodBoardIdeationAgent** | Brand Visual Ideation Lead | BrandingMission | List of MoodBoardConcept |
+| **CreativeRefinementAgent** | Creative Director | — | CreativeRefinementPlan (phases, prompts, criteria) |
+| **BrandGuidelinesAgent** | Brand Systems Architect | Mission + Codification | WritingGuidelines, brand guidelines list, DesignSystemDefinition |
+| **BrandWikiAgent** | Knowledge Systems Manager | BrandingMission | List of WikiEntry (backlog) |
+| **BrandComplianceAgent** | Brand Compliance Reviewer | BrandCheckRequest list + Mission | List of BrandCheckResult |
+
+### Orchestrator run sequence
+
+Within a single `orchestrator.run()` call, agents are invoked in this order; all outputs are combined into `TeamOutput`.
+
+```mermaid
+sequenceDiagram
+    participant API
+    participant Orch as BrandingTeamOrchestrator
+    participant Codifier
+    participant Moodboard
+    participant Refinement
+    participant Guidelines
+    participant Wiki
+    participant Compliance
+
+    API->>Orch: run(mission, human_review, brand_checks)
+    Orch->>Codifier: codify(mission)
+    Codifier-->>Orch: BrandCodification
+    Orch->>Moodboard: ideate(mission)
+    Moodboard-->>Orch: mood_boards
+    Orch->>Refinement: build_plan()
+    Refinement-->>Orch: creative_refinement
+    Orch->>Guidelines: writing_guidelines(mission)
+    Guidelines-->>Orch: writing_guidelines
+    Orch->>Guidelines: brand_guidelines(codification)
+    Guidelines-->>Orch: brand_guidelines
+    Orch->>Guidelines: design_system()
+    Guidelines-->>Orch: design_system
+    Orch->>Wiki: build_wiki_backlog(mission)
+    Wiki-->>Orch: wiki_backlog
+    Orch->>Compliance: evaluate(brand_checks, mission)
+    Compliance-->>Orch: brand_checks
+    Orch->>API: TeamOutput with status by human_review.approved
+```
+
 ## API
 
 Start:

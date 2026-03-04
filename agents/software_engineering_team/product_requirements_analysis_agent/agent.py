@@ -327,6 +327,7 @@ class ProductRequirementsAnalysisAgent:
         job_updater: Optional[Callable[..., None]] = None,
         max_iterations: int = MAX_ITERATIONS,
         context_files: Optional[Dict[str, str]] = None,
+        initial_spec_path: Optional[Path] = None,
     ) -> AnalysisWorkflowResult:
         """
         Execute the full Product Requirements Analysis workflow.
@@ -338,6 +339,7 @@ class ProductRequirementsAnalysisAgent:
             job_updater: Callback to update job status
             max_iterations: Maximum number of spec review cycles
             context_files: Optional dict of additional context files (path -> content)
+            initial_spec_path: Path to the file the spec was loaded from (for rename when needing more detail)
 
         Returns:
             AnalysisWorkflowResult with validated spec and answered questions
@@ -358,6 +360,9 @@ class ProductRequirementsAnalysisAgent:
 
         logger.info("Product Requirements Analysis Agent: WORKFLOW START")
 
+        from spec_parser import get_next_updated_spec_version
+
+        base_version = get_next_updated_spec_version(repo_path)
         product_analysis_dir = repo_path / "plan" / "product_analysis"
         product_analysis_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Initialized %s for PRA artifacts", PRODUCT_ANALYSIS_SUBDIR)
@@ -378,9 +383,10 @@ class ProductRequirementsAnalysisAgent:
             try:
                 _update_job(status_text="Performing gap analysis on the specification")
                 spec_review_result, current_spec = self._run_spec_review(
-                    current_spec, 
-                    repo_path, 
-                    iteration,
+                    current_spec,
+                    repo_path,
+                    iteration=iteration,
+                    spec_version=base_version + (iteration - 1),
                     answered_questions=all_answered_questions,
                 )
                 result.spec_review_result = spec_review_result
@@ -420,6 +426,25 @@ class ProductRequirementsAnalysisAgent:
             if not spec_review_result.open_questions:
                 logger.info("No open questions, proceeding to Spec Cleanup")
                 break
+
+            # If we need more detail and the input was validated_spec.md, rename it to
+            # updated_spec_v{next} so we don't overwrite it; subsequent Q&A updates use v+1, v+2, ...
+            validated_spec_path = product_analysis_dir / "validated_spec.md"
+            if (
+                iteration == 1
+                and initial_spec_path is not None
+                and initial_spec_path.resolve() == validated_spec_path.resolve()
+                and validated_spec_path.exists()
+            ):
+                next_v = base_version
+                target = product_analysis_dir / f"updated_spec_v{next_v}.md"
+                validated_spec_path.rename(target)
+                logger.info(
+                    "Renamed validated_spec.md to %s (agent needs more detail); updates will use v%d+",
+                    target.name,
+                    next_v,
+                )
+                base_version = get_next_updated_spec_version(repo_path)
 
             # Phase 2: Communicate with User
             result.current_phase = AnalysisPhase.COMMUNICATE
@@ -466,7 +491,7 @@ class ProductRequirementsAnalysisAgent:
                     current_spec=current_spec,
                     answered_questions=answered_questions,
                     repo_path=repo_path,
-                    iteration=iteration,
+                    version=base_version + (iteration - 1),
                 )
                 _update_job(status_text="Specification updated successfully")
             except Exception as exc:
@@ -628,6 +653,7 @@ The following additional files were provided in the project folder. Review these
         spec_content: str,
         repo_path: Path,
         iteration: int = 1,
+        spec_version: Optional[int] = None,
         answered_questions: Optional[List[AnsweredQuestion]] = None,
     ) -> tuple[SpecReviewResult, str]:
         """Run the Spec Review phase to identify gaps and questions.
@@ -635,13 +661,16 @@ The following additional files were provided in the project folder. Review these
         Args:
             spec_content: Current specification content.
             repo_path: Path to the repository.
-            iteration: Current iteration number for versioning.
+            iteration: Current iteration number (for logging/qa_history).
+            spec_version: Version number for updated_spec_vN.md when writing (e.g. from duplicates). If None, iteration is used.
             answered_questions: List of previously answered questions for constraint analysis.
             
         Returns:
             Tuple of (SpecReviewResult, updated_spec_content). The spec may be
             updated if duplicate questions were found and clarified.
         """
+        if spec_version is None:
+            spec_version = iteration
         # Read previously answered questions to avoid asking duplicates
         qa_history = self._read_qa_history(repo_path)
 
@@ -730,7 +759,7 @@ Previously Answered Questions:
                     len(duplicates),
                 )
                 updated_spec = self._update_spec_from_duplicates(
-                    duplicates, qa_history, spec_content, repo_path, iteration
+                    duplicates, qa_history, spec_content, repo_path, spec_version
                 )
 
         return result, updated_spec
@@ -1248,9 +1277,9 @@ Previously Answered Questions:
         current_spec: str,
         answered_questions: List[AnsweredQuestion],
         repo_path: Path,
-        iteration: int,
+        version: int,
     ) -> str:
-        """Update the spec with answered questions."""
+        """Update the spec with answered questions. version is used for updated_spec_v{version}.md filename."""
         answered_text = self._format_answered_questions(answered_questions)
 
         prompt = SPEC_UPDATE_PROMPT.format(
@@ -1267,7 +1296,7 @@ Previously Answered Questions:
         plan_dir = repo_path / "plan" / "product_analysis"
         plan_dir.mkdir(parents=True, exist_ok=True)
 
-        spec_file = plan_dir / f"updated_spec_v{iteration}.md"
+        spec_file = plan_dir / f"updated_spec_v{version}.md"
         spec_file.write_text(updated_spec, encoding="utf-8")
         logger.info("Saved updated spec to %s", spec_file)
 
@@ -1338,7 +1367,7 @@ Previously Answered Questions:
         qa_history: str,
         current_spec: str,
         repo_path: Path,
-        iteration: int,
+        version: int,
     ) -> str:
         """Update spec using answers from qa_history for duplicate questions.
         
@@ -1351,7 +1380,7 @@ Previously Answered Questions:
             qa_history: Raw content of qa_history.md file.
             current_spec: Current specification content.
             repo_path: Path to the repository.
-            iteration: Current iteration number.
+            version: Version number for updated_spec_v{version}.md filename.
             
         Returns:
             Updated specification content.
@@ -1392,7 +1421,7 @@ Previously Answered Questions:
         plan_dir = repo_path / "plan" / "product_analysis"
         plan_dir.mkdir(parents=True, exist_ok=True)
         
-        spec_file = plan_dir / f"updated_spec_v{iteration}.md"
+        spec_file = plan_dir / f"updated_spec_v{version}.md"
         spec_file.write_text(clarified_spec, encoding="utf-8")
         logger.info("Saved updated spec (clarification) to %s", spec_file)
         

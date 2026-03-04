@@ -274,6 +274,87 @@ def get_latest_spec_path(repo_path: str | Path) -> Path:
     raise FileNotFoundError(f"{_NO_SPEC_MESSAGE} at {path}")
 
 
+def get_next_updated_spec_version(repo_path: str | Path) -> int:
+    """
+    Return the next version number to use for updated_spec_vN.md in plan/product_analysis/.
+
+    Scans only plan/product_analysis/ for updated_spec_v*.md, parses N from each
+    filename, and returns max(N) + 1. Returns 1 if the directory does not exist
+    or no updated_spec_v*.md files are present. Malformed filenames (e.g. no
+    numeric suffix) are ignored.
+    """
+    path = Path(repo_path).resolve()
+    product_analysis_dir = path / "plan" / "product_analysis"
+    if not product_analysis_dir.exists() or not product_analysis_dir.is_dir():
+        return 1
+    versioned = list(product_analysis_dir.glob("updated_spec_v*.md"))
+    max_n = 0
+    for f in versioned:
+        try:
+            n_str = f.stem.split("_v")[-1] if "_v" in f.stem else ""
+            if n_str.isdigit():
+                max_n = max(max_n, int(n_str))
+        except (ValueError, IndexError):
+            continue
+    return max_n + 1
+
+
+def get_newest_spec_path(repo_path: str | Path) -> Path:
+    """
+    Return the path of the newest specification file that has "_spec" in the name.
+
+    Searches plan/product_analysis/, then plan/, then repo root for any .md file
+    whose name contains "_spec" (e.g. validated_spec.md, updated_spec.md,
+    updated_spec_vN.md, initial_spec.md) or is spec.md. Returns the file with the
+    most recent modification time. If no such file exists, falls back to
+    get_latest_spec_path (precedence order).
+
+    Raises FileNotFoundError if no spec file exists.
+    """
+    path = Path(repo_path).resolve()
+    if not path.exists() or not path.is_dir():
+        raise FileNotFoundError(
+            f"{_NO_SPEC_MESSAGE}. Repo path does not exist or is not a directory."
+        )
+
+    candidates: List[Path] = []
+    for directory, pattern in [
+        (path / "plan" / "product_analysis", "*spec*.md"),
+        (path / "plan", "*spec*.md"),
+    ]:
+        if directory.exists() and directory.is_dir():
+            candidates.extend(directory.glob(pattern))
+    if (path / SPEC_FILENAME).exists():
+        candidates.append(path / SPEC_FILENAME)
+    if (path / "spec.md").exists():
+        candidates.append(path / "spec.md")
+
+    if not candidates:
+        return get_latest_spec_path(path)
+
+    newest: Optional[Tuple[float, Path]] = None
+    for f in candidates:
+        if not f.is_file():
+            continue
+        try:
+            mtime = f.stat().st_mtime
+            if newest is None or mtime > newest[0]:
+                newest = (mtime, f)
+        except OSError:
+            continue
+    if newest is not None:
+        return newest[1]
+    return get_latest_spec_path(path)
+
+
+def get_newest_spec_content(repo_path: str | Path) -> str:
+    """
+    Load the content of the newest spec file (by mtime, name contains "_spec").
+    Same search as get_newest_spec_path. Raises FileNotFoundError if no spec exists.
+    """
+    return get_newest_spec_path(repo_path).read_text(encoding="utf-8")
+
+
 def _should_include_path(path: Path, base_path: Path) -> bool:
     """Check if a path should be included in context gathering."""
     # Check if any parent directory matches exclude patterns

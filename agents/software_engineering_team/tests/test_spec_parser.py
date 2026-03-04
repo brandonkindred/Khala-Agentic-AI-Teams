@@ -4,6 +4,9 @@ import pytest
 
 from spec_parser import (
     get_latest_spec_content,
+    get_newest_spec_content,
+    get_newest_spec_path,
+    get_next_updated_spec_version,
     load_spec_from_repo,
     parse_spec_with_llm,
     validate_repo_path,
@@ -185,3 +188,72 @@ def test_get_latest_spec_content_raises_when_none_exist(tmp_path) -> None:
     """get_latest_spec_content raises FileNotFoundError when no candidate spec file exists."""
     with pytest.raises(FileNotFoundError, match="No spec file found"):
         get_latest_spec_content(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# get_next_updated_spec_version
+# ---------------------------------------------------------------------------
+
+
+def test_get_next_updated_spec_version_no_dir_returns_1(tmp_path) -> None:
+    """When plan/product_analysis does not exist, returns 1."""
+    assert get_next_updated_spec_version(tmp_path) == 1
+
+
+def test_get_next_updated_spec_version_empty_dir_returns_1(tmp_path) -> None:
+    """When plan/product_analysis exists but has no updated_spec_v*.md, returns 1."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    assert get_next_updated_spec_version(tmp_path) == 1
+
+
+def test_get_next_updated_spec_version_only_v3_returns_4(tmp_path) -> None:
+    """When only updated_spec_v3.md exists in plan/product_analysis, returns 4."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    (tmp_path / "plan" / "product_analysis" / "updated_spec_v3.md").write_text("# v3")
+    assert get_next_updated_spec_version(tmp_path) == 4
+
+
+def test_get_next_updated_spec_version_v1_and_v6_returns_7(tmp_path) -> None:
+    """When updated_spec_v1.md and updated_spec_v6.md exist, returns 7."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    (tmp_path / "plan" / "product_analysis" / "updated_spec_v1.md").write_text("# v1")
+    (tmp_path / "plan" / "product_analysis" / "updated_spec_v6.md").write_text("# v6")
+    assert get_next_updated_spec_version(tmp_path) == 7
+
+
+def test_get_next_updated_spec_version_malformed_names_ignored(tmp_path) -> None:
+    """Malformed filenames (no numeric suffix or invalid) are ignored; only v2 counts."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    (tmp_path / "plan" / "product_analysis" / "updated_spec_v2.md").write_text("# v2")
+    (tmp_path / "plan" / "product_analysis" / "updated_spec_vx.md").write_text("# vx")
+    (tmp_path / "plan" / "product_analysis" / "updated_spec_v.md").write_text("# v")
+    (tmp_path / "plan" / "product_analysis" / "validated_spec.md").write_text("# validated")
+    assert get_next_updated_spec_version(tmp_path) == 3
+
+
+# ---------------------------------------------------------------------------
+# get_newest_spec_path / get_newest_spec_content
+# ---------------------------------------------------------------------------
+
+
+def test_get_newest_spec_path_returns_most_recent_by_mtime(tmp_path) -> None:
+    """get_newest_spec_path returns the file with the latest mtime among *spec*.md."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    older = tmp_path / "plan" / "product_analysis" / "validated_spec.md"
+    newer = tmp_path / "plan" / "product_analysis" / "updated_spec_v2.md"
+    older.write_text("# validated")
+    newer.write_text("# v2")
+    import time
+    time.sleep(0.02)
+    newer.write_text("# v2 updated")
+    got = get_newest_spec_path(tmp_path)
+    assert got == newer
+    assert get_newest_spec_content(tmp_path) == "# v2 updated"
+
+
+def test_get_newest_spec_path_fallback_when_no_spec_candidates(tmp_path) -> None:
+    """When no *spec*.md in plan dirs, falls back to get_latest_spec_path (e.g. initial_spec at root)."""
+    (tmp_path / "initial_spec.md").write_text("# root")
+    got = get_newest_spec_path(tmp_path)
+    assert got == tmp_path / "initial_spec.md"
+    assert get_newest_spec_content(tmp_path) == "# root"

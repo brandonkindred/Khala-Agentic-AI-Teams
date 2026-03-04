@@ -1779,7 +1779,10 @@ class ProductAnalysisRunRequest(BaseModel):
     spec_content: Optional[str] = Field(
         None,
         max_length=500_000,
-        description="Optional spec content. If not provided, loads the latest spec from repo (plan/product_analysis, plan/, or root).",
+        description="Optional spec content. If not provided, the system loads the newest spec file whose name contains '_spec' "
+        "(by modification time) from plan/product_analysis/, plan/, or root. Leave empty to use that file. "
+        "If the agent needs more detail and the input was validated_spec.md, it is renamed to updated_spec_vN; "
+        "subsequent updates use later versions.",
     )
 
 
@@ -1818,6 +1821,7 @@ def _run_product_analysis_background(
     job_id: str,
     repo_path: str,
     spec_content: str,
+    initial_spec_path: Optional[str] = None,
 ) -> None:
     """Run product analysis workflow in a background thread."""
     try:
@@ -1846,6 +1850,7 @@ def _run_product_analysis_background(
             job_id=job_id,
             job_updater=_job_updater,
             context_files=context_files,
+            initial_spec_path=_Path(initial_spec_path) if initial_spec_path else None,
         )
 
         final_status = "completed" if result.success else "failed"
@@ -1869,6 +1874,8 @@ def _run_product_analysis_background(
     response_model=ProductAnalysisRunResponse,
     summary="Start Product Requirements Analysis",
     description="Analyze product specification for completeness, identify gaps, and generate questions. "
+    "If spec_content is omitted, the newest spec file (name contains '_spec') is loaded by modification time from plan/product_analysis/, plan/, or root. "
+    "If the agent needs more detail and the input was validated_spec.md, it is renamed to updated_spec_vN and updates use subsequent versions. "
     "Returns job_id immediately. Poll GET /product-analysis/status/{job_id} for progress.",
 )
 def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisRunResponse:
@@ -1881,11 +1888,13 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
         )
 
     spec_content = request.spec_content
+    initial_spec_path = None
     if not spec_content:
         try:
-            from spec_parser import get_latest_spec_content
+            from spec_parser import get_newest_spec_path, get_newest_spec_content
 
-            spec_content = get_latest_spec_content(repo)
+            initial_spec_path = get_newest_spec_path(repo)
+            spec_content = get_newest_spec_content(repo)
         except FileNotFoundError as e:
             raise HTTPException(
                 status_code=400,
@@ -1897,7 +1906,7 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
 
     thread = threading.Thread(
         target=_run_product_analysis_background,
-        args=(job_id, request.repo_path, spec_content),
+        args=(job_id, request.repo_path, spec_content, initial_spec_path),
     )
     thread.daemon = True
     thread.start()

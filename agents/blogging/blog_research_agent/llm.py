@@ -258,6 +258,44 @@ class OllamaLLMClient(LLMClient):
             self.model, self.base_url, self.timeout, self.max_retries
         )
 
+
+def _extract_balanced_json(text: str) -> Optional[str]:
+    """Extract a single top-level {...} by matching braces. Returns None if invalid."""
+    if not text.startswith("{"):
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    quote = None
+    for i, c in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if c == "\\" and in_string:
+            escape = True
+            continue
+        if not in_string:
+            if c in ("'", '"'):
+                in_string = True
+                quote = c
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[: i + 1]
+        else:
+            if c == quote:
+                in_string = False
+    return None
+
+
+def _repair_trailing_commas(text: str) -> str:
+    """Remove trailing commas before } or ] to allow parsing."""
+    return re.sub(r",\s*([}\]])", r"\1", text)
+
+
     def _extract_json(self, text: str) -> Dict[str, Any]:
         """
         Extract and parse a JSON object from the model's text response.
@@ -286,7 +324,7 @@ class OllamaLLMClient(LLMClient):
         except Exception:
             pass
 
-        # Fallback: take the first {...} block
+        # Fallback: take the first {...} block (greedy)
         obj_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
         if obj_match:
             candidate = obj_match.group(0)
@@ -294,6 +332,19 @@ class OllamaLLMClient(LLMClient):
                 return json.loads(candidate)
             except Exception:
                 pass
+
+        # Fallback: extract single top-level object by balanced braces
+        start = text.find("{")
+        if start >= 0:
+            candidate = _extract_balanced_json(text[start:])
+            if candidate:
+                for raw in (candidate, _repair_trailing_commas(candidate)):
+                    if not raw:
+                        continue
+                    try:
+                        return json.loads(raw)
+                    except Exception:
+                        pass
 
         # Draft fallback: model may have returned invalid JSON with markdown inside.
         if "draft" in text.lower():

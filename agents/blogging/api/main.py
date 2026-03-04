@@ -29,8 +29,10 @@ from blog_research_agent.models import ResearchBriefInput
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
 
 try:
-    from shared.artifacts import write_artifact
+    from shared.artifacts import ARTIFACT_NAMES, read_artifact, write_artifact
 except ImportError:
+    ARTIFACT_NAMES = ()
+    read_artifact = None
     write_artifact = None
 
 try:
@@ -507,6 +509,19 @@ class BlogJobListItem(BaseModel):
     created_at: Optional[str] = None
 
 
+class ArtifactListResponse(BaseModel):
+    """Response listing artifact names that exist for a job."""
+
+    artifacts: List[str] = Field(..., description="Names of existing artifact files")
+
+
+class ArtifactContentResponse(BaseModel):
+    """Response with the content of a single artifact (string for .md/.yaml, object for .json)."""
+
+    name: str = Field(..., description="Artifact filename")
+    content: Union[str, Dict[str, Any]] = Field(..., description="Artifact content as string or parsed JSON")
+
+
 class StartPipelineResponse(BaseModel):
     """Response from starting an async pipeline."""
 
@@ -705,6 +720,58 @@ def get_job_status(job_id: str) -> BlogJobStatusResponse:
         started_at=job.get("started_at"),
         completed_at=job.get("completed_at"),
     )
+
+
+@app.get(
+    "/job/{job_id}/artifacts",
+    response_model=ArtifactListResponse,
+    summary="List job artifacts",
+    description="List artifact filenames that exist for a pipeline job. Returns 404 if the job is missing or has no work_dir.",
+)
+def list_job_artifacts(job_id: str) -> ArtifactListResponse:
+    """List existing artifact names for a job."""
+    if get_blog_job is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Job store not available",
+        )
+    job = get_blog_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    work_dir = job.get("work_dir")
+    if not work_dir:
+        raise HTTPException(status_code=404, detail="Job has no artifact directory")
+    work_path = Path(work_dir)
+    existing = [name for name in ARTIFACT_NAMES if (work_path / name).exists()]
+    return ArtifactListResponse(artifacts=existing)
+
+
+@app.get(
+    "/job/{job_id}/artifacts/{artifact_name}",
+    response_model=ArtifactContentResponse,
+    summary="Get job artifact content",
+    description="Return the content of a single artifact. Path traversal is blocked; artifact_name must be in the allowed list.",
+)
+def get_job_artifact_content(job_id: str, artifact_name: str) -> ArtifactContentResponse:
+    """Return content of one artifact for a job."""
+    if get_blog_job is None or read_artifact is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Job store or artifact reader not available",
+        )
+    job = get_blog_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    work_dir = job.get("work_dir")
+    if not work_dir:
+        raise HTTPException(status_code=404, detail="Job has no artifact directory")
+    if artifact_name not in ARTIFACT_NAMES:
+        raise HTTPException(status_code=404, detail=f"Unknown artifact: {artifact_name!r}")
+    parse_json = artifact_name.endswith(".json")
+    content = read_artifact(work_dir, artifact_name, default=None, parse_json=parse_json)
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"Artifact {artifact_name!r} not found")
+    return ArtifactContentResponse(name=artifact_name, content=content)
 
 
 @app.get(
