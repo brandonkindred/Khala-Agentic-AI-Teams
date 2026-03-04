@@ -365,6 +365,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Integrations API (Slack config)
+from unified_api.routes.integrations import router as integrations_router
+app.include_router(integrations_router)
+
 
 @app.get("/", response_model=ApiInfoResponse, tags=["root"])
 async def root() -> ApiInfoResponse:

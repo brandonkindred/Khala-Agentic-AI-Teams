@@ -45,6 +45,11 @@ from ..shared.pa_job_store import (
     PA_JOB_STATUS_CANCELLED,
 )
 
+try:
+    from unified_api.slack_notifier import notify_pa_response as slack_notify_pa_response
+except ImportError:
+    slack_notify_pa_response = None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -325,6 +330,18 @@ def _run_assistant_job(
             status_text="Request completed successfully",
             response=response.model_dump(),
         )
+        if slack_notify_pa_response:
+            threading.Thread(
+                target=slack_notify_pa_response,
+                args=(
+                    user_id,
+                    message,
+                    response.message,
+                    response.actions_taken,
+                    response.follow_up_suggestions,
+                ),
+                daemon=True,
+            ).start()
 
     except Exception as e:
         logger.exception("Job %s failed: %s", job_id, e)
@@ -367,6 +384,18 @@ async def start_assistant_job(user_id: str, body: AssistantJobRequest):
             progress=100,
             response=response.model_dump(),
         )
+        if slack_notify_pa_response:
+            threading.Thread(
+                target=slack_notify_pa_response,
+                args=(
+                    user_id,
+                    body.message,
+                    response.message,
+                    response.actions_taken,
+                    response.follow_up_suggestions,
+                ),
+                daemon=True,
+            ).start()
         return AssistantJobResponse(
             job_id=job_id,
             status=PA_JOB_STATUS_COMPLETED,
@@ -482,6 +511,18 @@ async def assistant_request(user_id: str, body: AssistantRequestBody):
     )
     
     response = orchestrator.handle_request(request)
+    if slack_notify_pa_response:
+        threading.Thread(
+            target=slack_notify_pa_response,
+            args=(
+                user_id,
+                body.message,
+                response.message,
+                response.actions_taken,
+                response.follow_up_suggestions,
+            ),
+            daemon=True,
+        ).start()
     return response
 
 

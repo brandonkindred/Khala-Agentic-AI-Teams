@@ -13,6 +13,7 @@ import { AccessibilityDashboardComponent } from './components/accessibility-dash
 import { AgentProvisioningDashboardComponent } from './components/agent-provisioning-dashboard/agent-provisioning-dashboard.component';
 import { AISystemsDashboardComponent } from './components/ai-systems-dashboard/ai-systems-dashboard.component';
 import { InvestmentDashboardComponent } from './components/investment-dashboard/investment-dashboard.component';
+import { IntegrationsDashboardComponent } from './components/integrations-dashboard/integrations-dashboard.component';
 
 export const routes: Routes = [
   {
@@ -33,6 +34,7 @@ export const routes: Routes = [
       { path: 'agent-provisioning', component: AgentProvisioningDashboardComponent },
       { path: 'ai-systems', component: AISystemsDashboardComponent },
       { path: 'investment', component: InvestmentDashboardComponent },
+      { path: 'integrations', component: IntegrationsDashboardComponent },
     ],
   },
   { path: '**', redirectTo: '/dashboard' },

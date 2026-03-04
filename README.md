@@ -323,6 +323,27 @@ Run from `agents/` directory with `PYTHONPATH` set as needed.
 
 ## Docker Deployment
 
+### Full stack (Postgres, Temporal, Ollama, Agents)
+
+To run **PostgreSQL**, **Temporal**, **Temporal UI**, optional **Ollama**, and **Strands Agents** in one stack (e.g. for integration testing or a full environment):
+
+```bash
+# From repo root
+cp docker/.env.example docker/.env
+# Set OLLAMA_API_KEY in docker/.env (from https://ollama.com/settings/keys)
+docker compose -f docker/docker-compose.yml up --build
+```
+
+- **Agents UI + API:** http://localhost:8888  
+- **Temporal UI:** http://localhost:8080  
+- **Postgres:** localhost:5432 (databases `temporal`, `strands` created by init script)
+
+The agents use **Ollama Cloud** by default (`SW_LLM_BASE_URL=https://ollama.com`) with `OLLAMA_API_KEY` for authentication. To view server logs during testing, set `ENABLE_LOG_API=1` in `.env` and use `GET http://localhost:8888/api/software-engineering/logs?service=sw_api&lines=100`.
+
+See [docker/README.md](docker/README.md) for required env vars, logs API, and security notes.
+
+### Agents-only container
+
 Run all 6 agent teams in one container with pre-installed tools (Node.js, Angular CLI, Git, Docker-in-Docker).
 
 ### Quick Start

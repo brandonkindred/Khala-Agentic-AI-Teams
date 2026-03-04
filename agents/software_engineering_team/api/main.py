@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -17,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # Path setup for imports when run as uvicorn from project root
@@ -2116,6 +2117,52 @@ def get_product_analysis_jobs() -> RunningJobsResponse:
         for item in raw
     ]
     return RunningJobsResponse(jobs=jobs)
+
+
+SUPERVISOR_LOG_DIR = Path("/var/log/supervisor")
+ALLOWED_SERVICES = frozenset({
+    "sw_api", "blogging_api", "market_research_api", "soc2_compliance_api",
+    "social_marketing_api", "blog_research_api", "agent_provisioning_api",
+    "postgresql", "nginx", "dockerd",
+})
+
+
+@app.get("/logs", response_class=PlainTextResponse)
+def get_logs(
+    service: str = "sw_api",
+    lines: int = 500,
+    stderr: bool = False,
+) -> PlainTextResponse:
+    """
+    Return recent supervisor log content for debugging (only when ENABLE_LOG_API=1).
+    Query params: service (e.g. sw_api, blogging_api, or 'all'), lines (default 500), stderr (include *_err.log).
+    """
+    if os.environ.get("ENABLE_LOG_API", "").strip() not in ("1", "true", "True"):
+        raise HTTPException(status_code=404, detail="Log API disabled")
+    if not SUPERVISOR_LOG_DIR.exists():
+        raise HTTPException(status_code=503, detail="Log directory not available")
+    if service != "all" and service not in ALLOWED_SERVICES:
+        raise HTTPException(status_code=400, detail=f"Unknown service. Allowed: {sorted(ALLOWED_SERVICES)} or 'all'")
+    lines = max(1, min(lines, 10000))
+    parts: List[str] = []
+    if service == "all":
+        candidates = sorted(ALLOWED_SERVICES - {"postgresql", "dockerd"})
+    else:
+        candidates = [service]
+    for name in candidates:
+        for suffix in (".log", "_err.log") if stderr else (".log",):
+            path = SUPERVISOR_LOG_DIR / f"{name}{suffix}"
+            if path.exists():
+                try:
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                    tail = "\n".join(content.splitlines()[-lines:])
+                    parts.append(f"=== {path.name} ===\n{tail}")
+                except OSError as e:
+                    parts.append(f"=== {path.name} (read error: {e}) ===\n")
+    if not parts:
+        return PlainTextResponse(content="(no log files found)\n", status_code=200)
+    return PlainTextResponse(content="\n\n".join(parts))
 
 
 @app.get("/health")

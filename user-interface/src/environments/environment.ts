@@ -26,4 +26,6 @@ export const environment = {
   aiSystemsApiUrl: 'http://localhost:8080/api/ai-systems',
   /** Investment Team API */
   investmentApiUrl: 'http://localhost:8080/api/investment',
+  /** Integrations API (Slack, etc.) - unified API */
+  integrationsApiUrl: 'http://localhost:8080/api/integrations',
 };

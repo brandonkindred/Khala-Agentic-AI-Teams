@@ -22,6 +22,7 @@ No code from planning_team or project_planning_agent is imported or reused.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import time
 import uuid
@@ -31,6 +32,11 @@ from typing import Any, Callable, Dict, List, Optional
 from software_engineering_team.shared.llm import LLMClient
 from software_engineering_team.shared.models import PlanningHierarchy
 from software_engineering_team.shared.job_store import add_pending_questions, is_waiting_for_answers
+
+try:
+    from unified_api.slack_notifier import notify_open_questions as slack_notify_open_questions
+except ImportError:
+    slack_notify_open_questions = None
 
 from .models import (
     DeliverPhaseResult,
@@ -343,6 +349,12 @@ class PlanningV2PlanningAgent:
             )
             if pending_questions:
                 add_pending_questions(job_id, pending_questions)
+                if slack_notify_open_questions:
+                    base = os.getenv("UI_BASE_URL", "http://localhost:4200").rstrip("/")
+                    status_url = f"{base}/software-engineering/planning-v2?job={job_id}"
+                    slack_notify_open_questions(
+                        job_id, pending_questions, source="planning-v2", status_url=status_url
+                    )
                 _update_job(
                     waiting_for_answers=True,
                     status_text=f"Waiting for answers to {len(pending_questions)} question(s)",
