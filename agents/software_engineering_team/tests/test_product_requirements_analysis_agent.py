@@ -155,3 +155,107 @@ def test_run_workflow_renames_validated_spec_when_needs_more_detail(tmp_path: Pa
     assert v1.read_text() == "# Validated content", "v1 should contain the original validated content from the rename"
     assert len(update_spec_calls) >= 1
     assert update_spec_calls[0] == 2, "First _update_spec after rename should use version 2"
+
+
+def test_parse_open_question_preserves_extended_metadata() -> None:
+    """_parse_open_question should keep constraint and lifecycle metadata fields."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    parsed = agent._parse_open_question(
+        {
+            "id": "Q-002",
+            "question_text": "Which SLO tier should we target?",
+            "context": "NFR targets are missing.",
+            "category": "performance",
+            "priority": "high",
+            "constraint_domain": "backend",
+            "constraint_layer": 3,
+            "depends_on": "Q-001",
+            "blocking": True,
+            "owner": "user",
+            "section_impact": ["Requirements", "Acceptance Criteria"],
+            "due_date": "2026-03-06",
+            "status": "asked",
+            "asked_via": ["slack", "web_ui"],
+            "options": [
+                {
+                    "id": "opt_standard",
+                    "label": "Standard tier",
+                    "is_default": True,
+                    "rationale": "Balanced",
+                    "confidence": 0.8,
+                }
+            ],
+        },
+        index=0,
+    )
+
+    assert parsed.constraint_domain == "backend"
+    assert parsed.constraint_layer == 3
+    assert parsed.depends_on == "Q-001"
+    assert parsed.blocking is True
+    assert parsed.owner == "user"
+    assert parsed.section_impact == ["Requirements", "Acceptance Criteria"]
+    assert parsed.due_date == "2026-03-06"
+    assert parsed.status == "asked"
+    assert parsed.asked_via == ["slack", "web_ui"]
+
+
+def test_convert_to_pending_questions_includes_extended_metadata() -> None:
+    """Pending question payload should include gate-aware metadata for UI and orchestration."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    open_questions = [
+        OpenQuestion(
+            id="Q-100",
+            question_text="Choose deployment option",
+            context="Infrastructure unresolved",
+            category="infrastructure",
+            priority="high",
+            constraint_domain="infrastructure",
+            constraint_layer=1,
+            depends_on=None,
+            blocking=True,
+            owner="stakeholder",
+            section_impact=["Technical Approach"],
+            due_date="2026-03-10",
+            status="open",
+            asked_via=["email"],
+            options=[QuestionOption(id="opt_paas", label="PaaS", is_default=True, rationale="", confidence=0.7)],
+        )
+    ]
+
+    pending = agent._convert_to_pending_questions(open_questions)
+
+    assert pending[0]["constraint_domain"] == "infrastructure"
+    assert pending[0]["constraint_layer"] == 1
+    assert pending[0]["blocking"] is True
+    assert pending[0]["owner"] == "stakeholder"
+    assert pending[0]["section_impact"] == ["Technical Approach"]
+    assert pending[0]["due_date"] == "2026-03-10"
+    assert pending[0]["status"] == "open"
+    assert pending[0]["asked_via"] == ["email"]
+
+
+def test_build_specialist_collaboration_plan_recommends_ui_arch_and_risk_agents() -> None:
+    """Specialist plan should include new UI/UX, architecture, and risk-focused agents when relevant."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    cleaned_spec = """
+    Build a web UI onboarding workflow with multiple screens and design consistency.
+    The architecture includes API integrations, event tracking dashboards, and phased rollout.
+    We must capture key risks, dependencies, and security/privacy requirements.
+    """
+
+    plan = agent._build_specialist_collaboration_plan(cleaned_spec, answered_questions=[])
+
+    assert "UX and Flows Agent" in plan
+    assert "Design System Tool Agent" in plan
+    assert "Branding Guidance Agent" in plan
+    assert "Architecture Agent" in plan
+    assert "API and Integration Agent" in plan
+    assert "Risk Analysis Agent" in plan
+    assert "Security, Privacy, and Compliance Agent" in plan
+    assert "Data and Analytics Agent" in plan

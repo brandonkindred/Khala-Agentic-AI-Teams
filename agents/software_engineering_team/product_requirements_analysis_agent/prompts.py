@@ -171,6 +171,12 @@ Respond with a JSON object only, no markdown:
       "constraint_domain": "infrastructure",
       "constraint_layer": 1,
       "depends_on": null,
+      "blocking": true,
+      "owner": "user",
+      "section_impact": ["Technical Approach"],
+      "due_date": "2026-03-06",
+      "status": "open",
+      "asked_via": ["web_ui"],
       "options": [
         {{
           "id": "opt_paas",
@@ -212,6 +218,12 @@ Respond with a JSON object only, no markdown:
       "constraint_domain": "backend",
       "constraint_layer": 2,
       "depends_on": null,
+      "blocking": true,
+      "owner": "user",
+      "section_impact": ["Technical Approach"],
+      "due_date": "2026-03-06",
+      "status": "open",
+      "asked_via": ["web_ui"],
       "options": [
         {{
           "id": "opt_python",
@@ -300,7 +312,7 @@ Rules:
 - Merge options from duplicate questions: combine all unique options (by meaning), deduplicate options that say the same thing. Keep at most 4-5 options per question; drop redundant ones.
 - For each consolidated question, keep the highest priority among merged questions (high > medium > low) and the most specific category.
 - Preserve allow_multiple if any of the merged questions had it true.
-- Output the same JSON structure so each item has: id, question_text, context, category, priority, allow_multiple, options (each with id, label, is_default, rationale, confidence). Use short stable ids (e.g. auth_provider, token_handling).
+- Output the same JSON structure so each item preserves metadata fields used by orchestration: id, question_text, context, category, priority, allow_multiple, constraint_domain, constraint_layer, depends_on, blocking, owner, section_impact, due_date, status, asked_via, options (each with id, label, is_default, rationale, confidence). Use short stable ids (e.g. auth_provider, token_handling).
 
 Input questions (JSON array):
 {questions_json}
@@ -315,6 +327,15 @@ Respond with a JSON object only, no markdown:
       "category": "security",
       "priority": "high",
       "allow_multiple": false,
+      "constraint_domain": "auth",
+      "constraint_layer": 2,
+      "depends_on": null,
+      "blocking": true,
+      "owner": "user",
+      "section_impact": ["Technical Approach", "Security, Privacy, and Compliance"],
+      "due_date": "2026-03-06",
+      "status": "open",
+      "asked_via": ["web_ui"],
       "options": [
         {{ "id": "opt_github", "label": "GitHub", "is_default": true, "rationale": "...", "confidence": 0.7 }},
         {{ "id": "opt_google", "label": "Google", "is_default": false, "rationale": "...", "confidence": 0.6 }}
@@ -377,66 +398,87 @@ Respond with a JSON object only, no markdown:
 }}
 """
 
-PRD_PROMPT = """You are a senior Product Manager.
+PRD_PROMPT = """You are the PRD Orchestrator for a hub-and-spoke PRD Factory.
 
 You will be given:
 - A **cleaned and validated product specification**
 - A set of **answered clarification questions** with rationales and confidence scores
 
-Your goal is to synthesize these into a single, cohesive **Product Requirements Document (PRD)** written in clear, professional Markdown.
+Your goal is to synthesize these inputs into a complete, implementation-ready **Product Requirements Document (PRD)** in professional Markdown.
 
-### PRD Audience
-- Product managers
-- Engineering leads
-- Design/UX leads
-- Stakeholders and leadership
+## Core operating rules (non-negotiable)
+1. The PRD **cannot be marked Final** if blocking open questions remain.
+2. Every **Must** functional requirement must include explicit acceptance criteria.
+3. Every requirement and major decision must be traceable to evidence, answers, or approved assumptions.
+4. Use deterministic, inspectable structure. Avoid freeform sections outside the required template.
+5. If information is missing, keep it as TBD only when linked to a blocking question or approved assumption.
 
-### PRD Requirements
+## Required PRD template (use this ordering)
+1. Title, Owner, Date, Status (Draft | Review | Final)
+2. Executive Summary
+3. Problem Statement
+4. Goals and Non-Goals
+5. Personas and Target Users
+6. User Stories and Use Cases
+7. Requirements
+   - Functional Requirements (FR-###, with priority: must/should/could/wont)
+   - Non-Functional Requirements (measurable targets or selectable tiers)
+   - Constraints
+8. Scope
+   - In-scope
+   - Out-of-scope
+9. UX
+   - Key workflows
+   - Wireframe notes (text-only)
+   - Accessibility considerations
+   - Design system notes (components, interaction patterns, states)
+   - Branding guidance (voice/tone, visual direction, key brand constraints)
+10. Technical Approach (high level)
+    - Components
+    - Integrations
+    - Data flows
+    - Architecture overview
+11. Data and Analytics
+    - Events
+    - Dashboards
+    - KPIs tied to goals
+12. Risks, Assumptions, Dependencies
+13. Rollout Plan
+    - Milestones
+    - Feature flags
+    - Migration/backfill
+14. Acceptance Criteria
+15. Open Questions (id, owner, due date, section impact, blocking/non-blocking, status)
+16. Appendix
+    - Glossary
+    - References to source spec/evidence
 
-1. **Use the cleaned specification as the primary source of truth.**
-2. **Integrate all relevant answered questions**, especially those that:
-   - Resolve technology and architecture constraints (infrastructure, frontend, backend, database, auth)
-   - Clarify business rules, edge cases, and success criteria
-   - Add constraints that materially affect implementation
-3. **Do NOT introduce new requirements** that are not supported by the spec or answers.
-4. **Resolve ambiguities** by incorporating the clarifications directly into the requirements.
+## Team-of-agents simulation requirement
+Draft content as if specialist spokes contributed to sections below. Ensure these perspectives are reflected:
+- Requirements Analyst
+- Personas and Use-Case
+- Scope and Milestones Planner
+- UX and Flows
+- API and Integration
+- Data and Analytics
+- Non-Functional Requirements
+- Security, Privacy, and Compliance
+- Risks, Assumptions, Dependencies
+- QA and Acceptance Criteria
+- Editor and Consistency
+- PRD Critic (quality gate findings)
+- Question Concierge (human question management)
 
-### PRD Structure (Markdown)
+## Quality gates checklist (must be internally validated before output)
+- Completeness: all required sections present.
+- Consistency: no contradictions between scope, requirements, milestones.
+- Testability: FR/NFR are measurable/verifiable.
+- Traceability: requirements and decisions link to evidence or answers.
+- Pragmatism: rollout is feasible; risks have mitigations and owners.
 
-Use headings and subheadings similar to:
+If a gate would fail, call it out explicitly in Open Questions and Risks/Assumptions/Dependencies.
 
-1. Product Overview
-   - Vision
-   - Problem statement
-   - In-scope vs out-of-scope
-2. Target Users & Use Cases
-   - Primary personas
-   - Key user journeys
-3. Goals & Success Metrics
-   - Business goals
-   - User goals
-   - Measurable KPIs/metrics
-4. Functional Requirements
-   - Group by feature or area (e.g., Authentication, Onboarding, Dashboard, Reporting)
-   - For each requirement, be specific and testable
-5. Non-Functional Requirements
-   - Performance and scalability
-   - Reliability & availability
-   - Security & compliance
-   - Observability, logging, and monitoring
-6. Technology & Architecture Constraints
-   - Hosting / deployment decisions (infrastructure domain)
-   - Frontend stack (framework, rendering strategy, styling)
-   - Backend stack (language, framework, API style)
-   - Database & data stores (primary DB, additional stores, hosting model)
-   - Authentication & authorization strategy
-   - Any other hard constraints the implementation must follow
-7. Risks, Assumptions, and Open Questions
-   - Known risks or trade-offs
-   - Key assumptions
-   - Remaining open questions (if any)
-
-### Inputs
+## Inputs
 
 Cleaned specification:
 ---
@@ -448,11 +490,15 @@ Answered questions (including technology and constraint decisions):
 {answered_questions_summary}
 ---
 
-### Output Instructions
+Specialist collaboration recommendations (agents/tooling):
+---
+{specialist_collaboration_plan}
+---
 
+## Output instructions
 - Respond with **only** the final PRD in Markdown format.
-- Do **not** wrap the PRD in JSON or code fences.
-- Do **not** include any commentary about how you constructed it; just output the PRD content.
+- Do **not** wrap output in code fences or JSON.
+- Keep IDs stable and explicit where applicable (FR-###, Q-###).
 """
 
 QUESTION_GENERATION_PROMPT = """Based on the following gap or issue identified in the specification, generate a structured question with answer options.

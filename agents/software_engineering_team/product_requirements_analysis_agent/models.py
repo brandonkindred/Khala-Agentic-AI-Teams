@@ -81,6 +81,30 @@ class OpenQuestion(BaseModel):
         default=None,
         description="Question ID this depends on (for follow-up questions in a drilling chain)",
     )
+    blocking: bool = Field(
+        default=True,
+        description="Whether this question blocks final PRD completion",
+    )
+    owner: str = Field(
+        default="user",
+        description="Owner expected to answer (e.g. user, stakeholder, security_team)",
+    )
+    section_impact: List[str] = Field(
+        default_factory=list,
+        description="PRD sections impacted by this question",
+    )
+    due_date: str = Field(
+        default="",
+        description="Suggested due date (ISO date) for receiving an answer",
+    )
+    status: str = Field(
+        default="open",
+        description="Question lifecycle status: open, asked, answered, stale",
+    )
+    asked_via: List[str] = Field(
+        default_factory=list,
+        description="Delivery channels used for this question (slack, email, web_ui, etc.)",
+    )
 
 
 class AnsweredQuestion(BaseModel):
