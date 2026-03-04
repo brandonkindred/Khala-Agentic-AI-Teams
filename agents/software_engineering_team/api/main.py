@@ -44,6 +44,7 @@ from software_engineering_team.shared.job_store import (
     get_job,
     is_cancel_requested,
     list_jobs,
+    mark_stale_jobs_failed,
     request_cancel,
     update_job,
     submit_answers as store_submit_answers,
@@ -53,6 +54,31 @@ from software_engineering_team.shared.logging_config import setup_logging
 
 setup_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+_stale_monitor_started = False
+_stale_monitor_lock = threading.Lock()
+
+
+def _start_stale_job_monitor_once() -> None:
+    global _stale_monitor_started
+    with _stale_monitor_lock:
+        if _stale_monitor_started:
+            return
+
+        def _monitor() -> None:
+            while True:
+                try:
+                    mark_stale_jobs_failed(
+                        stale_after_seconds=600.0,
+                        reason="Job heartbeat stale while pending/running",
+                    )
+                except Exception as exc:
+                    logger.warning("stale job monitor error: %s", exc)
+                time.sleep(30)
+
+        thread = threading.Thread(target=_monitor, name="se-team-stale-job-monitor", daemon=True)
+        thread.start()
+        _stale_monitor_started = True
 
 app = FastAPI(
     title="Software Engineering Team API",
@@ -347,6 +373,8 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
         repo_path = validate_work_path(request.repo_path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+    _start_stale_job_monitor_once()
 
     job_id = str(uuid.uuid4())
     create_job(job_id, str(repo_path), job_type="run_team")
