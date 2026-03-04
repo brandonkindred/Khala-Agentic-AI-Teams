@@ -12,6 +12,15 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from shared_job_management import (
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    CentralJobManager,
+    start_stale_job_monitor,
+)
+
 from social_media_marketing_team.models import (
     BrandGoals,
     CampaignPerformanceSnapshot,
@@ -24,8 +33,13 @@ from social_media_marketing_team.orchestrator import SocialMediaMarketingOrchest
 app = FastAPI(title="Social Media Marketing Team API", version="1.0.0")
 
 logger = logging.getLogger(__name__)
-_jobs: Dict[str, dict] = {}
-_jobs_lock = threading.Lock()
+_job_manager = CentralJobManager(team="social_media_marketing_team")
+_stale_monitor_stop = start_stale_job_monitor(
+    _job_manager,
+    interval_seconds=15.0,
+    stale_after_seconds=300.0,
+    reason="Job heartbeat stale while pending/running",
+)
 
 
 class RunMarketingTeamRequest(BaseModel):
@@ -99,23 +113,12 @@ def _read_text_file(path: str) -> str:
 
 
 def _update_job(job_id: str, **fields) -> None:
-    with _jobs_lock:
-        if job_id in _jobs:
-            _jobs[job_id].update(fields)
-            _jobs[job_id]["last_updated_at"] = _now()
+    _job_manager.update_job(job_id, **fields)
 
 
 def mark_all_running_jobs_failed(reason: str) -> None:
     """Mark all pending or running marketing jobs as failed (e.g. on server shutdown)."""
-    try:
-        with _jobs_lock:
-            for job in _jobs.values():
-                if job.get("status") in ("pending", "running"):
-                    job["status"] = "failed"
-                    job["error"] = reason
-                    job["last_updated_at"] = _now()
-    except Exception as e:
-        logger.warning("mark_all_running_jobs_failed: %s", e)
+    _job_manager.mark_stale_active_jobs_failed(stale_after_seconds=0, reason=reason)
 
 
 def _run_team_job(job_id: str, request: RunMarketingTeamRequest) -> None:
@@ -153,7 +156,7 @@ def _run_team_job(job_id: str, request: RunMarketingTeamRequest) -> None:
         )
         performance = CampaignPerformanceSnapshot(
             campaign_name=f"{request.brand_name} multi-platform growth sprint",
-            observations=_jobs.get(job_id, {}).get("performance_observations", []),
+            observations=(_job_manager.get_job(job_id) or {}).get("performance_observations", []),
         )
         result = orchestrator.run(
             goals=goals,
@@ -166,14 +169,14 @@ def _run_team_job(job_id: str, request: RunMarketingTeamRequest) -> None:
 
         _update_job(
             job_id,
-            status="completed",
+            status=JOB_STATUS_COMPLETED,
             current_stage="completed",
             progress=100,
             eta_hint="done",
-            result=result,
+            result=result.model_dump(),
         )
     except Exception as exc:
-        _update_job(job_id, status="failed", current_stage="failed", error=str(exc), eta_hint=None)
+        _update_job(job_id, status=JOB_STATUS_FAILED, current_stage="failed", error=str(exc), eta_hint=None)
 
 
 @app.post("/social-marketing/run", response_model=RunMarketingTeamResponse)
@@ -184,24 +187,24 @@ def run_marketing_team(request: RunMarketingTeamRequest) -> RunMarketingTeamResp
 
     job_id = str(uuid.uuid4())
     now = _now()
-    with _jobs_lock:
-        _jobs[job_id] = {
-            "job_id": job_id,
-            "status": "pending",
-            "current_stage": "queued",
-            "progress": 0,
-            "llm_model_name": request.llm_model_name,
-            "brand_guidelines_path": request.brand_guidelines_path,
-            "brand_objectives_path": request.brand_objectives_path,
-            "result": None,
-            "error": None,
-            "eta_hint": "queued",
-            "performance_observations": [],
-            "created_at": now,
-            "last_updated_at": now,
-            "revision_history": [],
-            "request_payload": request,
-        }
+    _job_manager.create_job(
+        job_id,
+        job_type="run_marketing_team",
+        status=JOB_STATUS_PENDING,
+        current_stage="queued",
+        progress=0,
+        llm_model_name=request.llm_model_name,
+        brand_guidelines_path=request.brand_guidelines_path,
+        brand_objectives_path=request.brand_objectives_path,
+        result=None,
+        error=None,
+        eta_hint="queued",
+        performance_observations=[],
+        created_at=now,
+        last_updated_at=now,
+        revision_history=[],
+        request_payload=request.model_dump(),
+    )
 
     thread = threading.Thread(target=_run_team_job, args=(job_id, request), daemon=True)
     thread.start()
@@ -215,12 +218,12 @@ def run_marketing_team(request: RunMarketingTeamRequest) -> RunMarketingTeamResp
 
 @app.post("/social-marketing/performance/{job_id}", response_model=PerformanceIngestResponse)
 def ingest_performance(job_id: str, payload: PerformanceIngestRequest) -> PerformanceIngestResponse:
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-        job.setdefault("performance_observations", []).extend(payload.observations)
-        job["last_updated_at"] = _now()
+    job = _job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    observations = job.get("performance_observations", [])
+    observations.extend([obs.model_dump() for obs in payload.observations])
+    _job_manager.update_job(job_id, performance_observations=observations, last_updated_at=_now())
 
     campaign_name = None
     if job.get("result") and getattr(job["result"], "proposal", None):
@@ -236,26 +239,31 @@ def ingest_performance(job_id: str, payload: PerformanceIngestRequest) -> Perfor
 
 @app.post("/social-marketing/revise/{job_id}", response_model=RunMarketingTeamResponse)
 def revise_marketing_team(job_id: str, request: ReviseMarketingTeamRequest) -> RunMarketingTeamResponse:
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-        original_request = job.get("request_payload")
-        if not isinstance(original_request, RunMarketingTeamRequest):
-            raise HTTPException(status_code=400, detail="Original run payload not available for revision")
+    job = _job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    original_payload = job.get("request_payload")
+    if not isinstance(original_payload, dict):
+        raise HTTPException(status_code=400, detail="Original run payload not available for revision")
 
-        revised = original_request.model_copy(update={
-            "human_feedback": request.feedback,
-            "human_approved_for_testing": request.approved_for_testing,
-        })
-        job["status"] = "running"
-        job["current_stage"] = "revision_queued"
-        job["progress"] = 10
-        job["eta_hint"] = "~1-2 minutes"
-        job["error"] = None
-        job.setdefault("revision_history", []).append(request.feedback)
-        job["request_payload"] = revised
-        job["last_updated_at"] = _now()
+    original_request = RunMarketingTeamRequest(**original_payload)
+    revised = original_request.model_copy(update={
+        "human_feedback": request.feedback,
+        "human_approved_for_testing": request.approved_for_testing,
+    })
+    revision_history = job.get("revision_history", [])
+    revision_history.append(request.feedback)
+    _job_manager.update_job(
+        job_id,
+        status=JOB_STATUS_RUNNING,
+        current_stage="revision_queued",
+        progress=10,
+        eta_hint="~1-2 minutes",
+        error=None,
+        revision_history=revision_history,
+        request_payload=revised.model_dump(),
+        last_updated_at=_now(),
+    )
 
     thread = threading.Thread(target=_run_team_job, args=(job_id, revised), daemon=True)
     thread.start()
@@ -271,10 +279,9 @@ def list_marketing_jobs(
     running_only: bool = False,
 ) -> List[MarketingJobListItem]:
     """List all marketing jobs, optionally filtered to pending/running only."""
-    with _jobs_lock:
-        jobs = list(_jobs.values())
+    jobs = _job_manager.list_jobs()
     if running_only:
-        jobs = [j for j in jobs if j.get("status") in ("pending", "running")]
+        jobs = [j for j in jobs if j.get("status") in (JOB_STATUS_PENDING, JOB_STATUS_RUNNING)]
     items = [
         MarketingJobListItem(
             job_id=j.get("job_id", ""),
@@ -292,8 +299,7 @@ def list_marketing_jobs(
 
 @app.get("/social-marketing/status/{job_id}", response_model=MarketingJobStatusResponse)
 def get_marketing_job_status(job_id: str) -> MarketingJobStatusResponse:
-    with _jobs_lock:
-        job = _jobs.get(job_id)
+    job = _job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     return MarketingJobStatusResponse(**{k: v for k, v in job.items() if k in MarketingJobStatusResponse.model_fields})

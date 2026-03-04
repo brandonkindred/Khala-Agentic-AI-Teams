@@ -3,29 +3,37 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+from shared_job_management import CentralJobManager
 from social_media_marketing_team.api import main as api_main
 
 
 def _seed_job(job_id: str, request: api_main.RunMarketingTeamRequest) -> None:
-    api_main._jobs[job_id] = {
-        "job_id": job_id,
-        "status": "pending",
-        "current_stage": "queued",
-        "progress": 0,
-        "llm_model_name": request.llm_model_name,
-        "brand_guidelines_path": request.brand_guidelines_path,
-        "brand_objectives_path": request.brand_objectives_path,
-        "result": None,
-        "error": None,
-        "eta_hint": "queued",
-        "performance_observations": [],
-        "last_updated_at": api_main._now(),
-        "revision_history": [],
-        "request_payload": request,
-    }
+    api_main._job_manager.create_job(
+        job_id,
+        status="pending",
+        current_stage="queued",
+        progress=0,
+        llm_model_name=request.llm_model_name,
+        brand_guidelines_path=request.brand_guidelines_path,
+        brand_objectives_path=request.brand_objectives_path,
+        result=None,
+        error=None,
+        eta_hint="queued",
+        performance_observations=[],
+        last_updated_at=api_main._now(),
+        revision_history=[],
+        request_payload=request.model_dump(),
+    )
 
 
-def test_read_text_file_and_update_job(tmp_path: Path) -> None:
+@pytest.fixture
+def temp_job_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    manager = CentralJobManager(team="social_media_marketing_team_test", cache_dir=tmp_path / "cache")
+    monkeypatch.setattr(api_main, "_job_manager", manager)
+    return manager
+
+
+def test_read_text_file_and_update_job(tmp_path: Path, temp_job_manager: CentralJobManager) -> None:
     file_path = tmp_path / "doc.txt"
     file_path.write_text("hello")
     assert api_main._read_text_file(str(file_path)) == "hello"
@@ -33,9 +41,8 @@ def test_read_text_file_and_update_job(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         api_main._read_text_file(str(tmp_path / "missing.txt"))
 
-    api_main._jobs.clear()
     api_main._update_job("missing", status="running")
-    assert "missing" not in api_main._jobs
+    assert temp_job_manager.get_job("missing") is not None
 
     req = api_main.RunMarketingTeamRequest(
         brand_guidelines_path=str(file_path),
@@ -43,19 +50,19 @@ def test_read_text_file_and_update_job(tmp_path: Path) -> None:
         llm_model_name="x",
     )
     _seed_job("job-1", req)
-    old_ts = api_main._jobs["job-1"]["last_updated_at"]
+    old_ts = temp_job_manager.get_job("job-1")["last_heartbeat_at"]
     api_main._update_job("job-1", status="running")
-    assert api_main._jobs["job-1"]["status"] == "running"
-    assert api_main._jobs["job-1"]["last_updated_at"] >= old_ts
+    job = temp_job_manager.get_job("job-1")
+    assert job["status"] == "running"
+    assert job["last_heartbeat_at"] >= old_ts
 
 
-def test_run_team_job_success_and_failure(tmp_path: Path) -> None:
+def test_run_team_job_success_and_failure(tmp_path: Path, temp_job_manager: CentralJobManager) -> None:
     guidelines = tmp_path / "guidelines.md"
     objectives = tmp_path / "objectives.md"
     guidelines.write_text("Keep tone direct")
     objectives.write_text("Grow followers")
 
-    api_main._jobs.clear()
     req = api_main.RunMarketingTeamRequest(
         brand_guidelines_path=str(guidelines),
         brand_objectives_path=str(objectives),
@@ -67,8 +74,9 @@ def test_run_team_job_success_and_failure(tmp_path: Path) -> None:
     _seed_job("ok", req)
 
     api_main._run_team_job("ok", req)
-    assert api_main._jobs["ok"]["status"] == "completed"
-    assert api_main._jobs["ok"]["result"].llm_model_name == "llama3.1"
+    ok_job = temp_job_manager.get_job("ok")
+    assert ok_job["status"] == "completed"
+    assert ok_job["result"]["llm_model_name"] == "llama3.1"
 
     bad_req = api_main.RunMarketingTeamRequest(
         brand_guidelines_path=str(tmp_path / "missing-guidelines.md"),
@@ -77,11 +85,16 @@ def test_run_team_job_success_and_failure(tmp_path: Path) -> None:
     )
     _seed_job("bad", bad_req)
     api_main._run_team_job("bad", bad_req)
-    assert api_main._jobs["bad"]["status"] == "failed"
-    assert api_main._jobs["bad"]["error"]
+    bad_job = temp_job_manager.get_job("bad")
+    assert bad_job["status"] == "failed"
+    assert bad_job["error"]
 
 
-def test_run_and_status_functions_with_inline_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_and_status_functions_with_inline_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    temp_job_manager: CentralJobManager,
+) -> None:
     guidelines = tmp_path / "guidelines.md"
     objectives = tmp_path / "objectives.md"
     guidelines.write_text("Voice guide")
@@ -124,7 +137,7 @@ def test_run_and_status_functions_with_inline_thread(tmp_path: Path, monkeypatch
         api_main.get_marketing_job_status("missing-job-id")
 
 
-def test_run_marketing_team_validation_and_health() -> None:
+def test_run_marketing_team_validation_and_health(temp_job_manager: CentralJobManager) -> None:
     with pytest.raises(HTTPException):
         api_main.run_marketing_team(
             api_main.RunMarketingTeamRequest(

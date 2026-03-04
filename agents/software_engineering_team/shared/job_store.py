@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from shared_job_management import CentralJobManager
+
 logger = logging.getLogger(__name__)
 
 JOB_STATUS_PENDING = "pending"
@@ -33,6 +35,10 @@ LLM_UNREACHABLE_AFTER_RETRIES = (
 
 DEFAULT_CACHE_DIR: str | Path = ".agent_cache"
 _lock = threading.Lock()
+
+
+def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
+    return CentralJobManager(team="software_engineering_team", cache_dir=cache_dir)
 
 
 def _jobs_dir(cache_dir: str | Path) -> Path:
@@ -97,10 +103,7 @@ def create_job(
     }
     if job_type is not None:
         data["job_type"] = job_type
-    with _lock:
-        _job_file(job_id, cache_dir).write_text(
-            json.dumps(data, indent=2), encoding="utf-8"
-        )
+    _manager(cache_dir).create_job(**data)
 
 
 def get_job(
@@ -108,9 +111,8 @@ def get_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> Optional[Dict[str, Any]]:
     """Get job data from cache, or None if not found."""
-    with _lock:
-        data = _read_job_file(_job_file(job_id, cache_dir))
-        return copy.deepcopy(data) if data else None
+    data = _manager(cache_dir).get_job(job_id)
+    return copy.deepcopy(data) if data else None
 
 
 def list_jobs(
@@ -122,27 +124,18 @@ def list_jobs(
     If job_type is set, only include jobs with that job_type."""
     running_statuses = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING)
     result: List[Dict[str, Any]] = []
-    jobs_path = _jobs_dir(cache_dir)
-    if not jobs_path.exists():
-        return result
-    with _lock:
-        for path in jobs_path.glob("*.json"):
-            job_id = path.stem
-            data = _read_job_file(path)
-            if not data:
-                continue
-            status = data.get("status", JOB_STATUS_PENDING)
-            if running_only and status not in running_statuses:
-                continue
-            if job_type is not None and data.get("job_type") != job_type:
-                continue
-            result.append({
-                "job_id": job_id,
-                "status": status,
-                "repo_path": data.get("repo_path"),
-                "job_type": data.get("job_type"),
-                "created_at": data.get("created_at"),
-            })
+    statuses = list(running_statuses) if running_only else None
+    jobs = _manager(cache_dir).list_jobs(statuses=statuses)
+    for data in jobs:
+        if job_type is not None and data.get("job_type") != job_type:
+            continue
+        result.append({
+            "job_id": data.get("job_id", ""),
+            "status": data.get("status", JOB_STATUS_PENDING),
+            "repo_path": data.get("repo_path"),
+            "job_type": data.get("job_type"),
+            "created_at": data.get("created_at"),
+        })
     return result
 
 
@@ -161,17 +154,25 @@ def mark_all_running_jobs_failed(
         logger.warning("mark_all_running_jobs_failed: %s", e)
 
 
+def mark_stale_jobs_failed(
+    stale_after_seconds: float,
+    reason: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> List[str]:
+    """Mark stale pending/running jobs as failed unless they are waiting for answers."""
+    return _manager(cache_dir).mark_stale_active_jobs_failed(
+        stale_after_seconds=stale_after_seconds,
+        reason=reason,
+    )
+
+
 def update_job(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     **kwargs: Any,
 ) -> None:
     """Update job fields. Merges with existing data and persists to cache."""
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        data = _read_job_file(path) or {}
-        data.update(kwargs)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _manager(cache_dir).update_job(job_id, **kwargs)
 
 
 def update_task_state(
