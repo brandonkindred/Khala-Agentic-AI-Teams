@@ -123,12 +123,28 @@
                 <span class="time-ago">{{ getTimeAgo(job.unified.createdAt) }}</span>
               </td>
               <td class="col-actions">
-                @if (canCancelJob(job)) {
+                @if (canStopJob(job)) {
                   <button mat-icon-button
                           class="stop-button"
-                          (click)="cancelJob($event, job)"
+                          (click)="stopJob($event, job)"
                           matTooltip="Stop job">
                     <mat-icon>stop</mat-icon>
+                  </button>
+                }
+                @if (canResumeJob(job)) {
+                  <button mat-icon-button
+                          class="resume-button"
+                          (click)="resumeJob($event, job)"
+                          matTooltip="Resume job">
+                    <mat-icon>play_arrow</mat-icon>
+                  </button>
+                }
+                @if (canRestartJob(job)) {
+                  <button mat-icon-button
+                          class="restart-button"
+                          (click)="restartJob($event, job)"
+                          matTooltip="Restart job">
+                    <mat-icon>replay</mat-icon>
                   </button>
                 }
               </td>

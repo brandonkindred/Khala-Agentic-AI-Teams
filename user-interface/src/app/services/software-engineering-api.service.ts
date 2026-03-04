@@ -88,6 +88,17 @@ export class SoftwareEngineeringApiService {
   }
 
   /**
+   * POST /run-team/{job_id}/restart
+   * Start a brand-new job using the same repo as an existing terminal run_team job.
+   */
+  restartRunTeamJob(jobId: string): Observable<RunTeamResponse> {
+    return this.http.post<RunTeamResponse>(
+      `${this.baseUrl}/run-team/${jobId}/restart`,
+      {}
+    );
+  }
+
+  /**
    * POST /run-team/{job_id}/cancel
    * Request cancellation for a running or pending job.
    */

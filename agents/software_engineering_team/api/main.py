@@ -630,6 +630,12 @@ def cancel_job(job_id: str) -> CancelJobResponse:
 
 
 RESUMABLE_STATUSES = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING, JOB_STATUS_AGENT_CRASH)
+RESTARTABLE_STATUSES = (
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_AGENT_CRASH,
+)
 
 
 @app.post(
@@ -687,6 +693,63 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
         job_id=job_id,
         status="running",
         message="Job resumed. Poll GET /run-team/{job_id} for status.",
+    )
+
+
+@app.post(
+    "/run-team/{job_id}/restart",
+    response_model=RunTeamResponse,
+    summary="Restart a completed/failed/cancelled run-team job",
+    description="Creates a new run-team job using the same repo_path as the referenced job. "
+    "Only allowed when the existing job is in a terminal state (completed, failed, cancelled, or agent_crash). "
+    "Returns a new job_id.",
+)
+def restart_run_team_job(job_id: str) -> RunTeamResponse:
+    """Restart a run_team job by creating a brand-new job for the same repo path."""
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job_type = data.get("job_type")
+    if job_type is not None and job_type != "run_team":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only run_team jobs can be restarted via this endpoint (job_type={job_type}).",
+        )
+
+    status = data.get("status", JOB_STATUS_PENDING)
+    if status not in RESTARTABLE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Job cannot be restarted (status={status}). "
+                "Restart is only allowed for completed, failed, cancelled, or agent_crash jobs."
+            ),
+        )
+
+    repo_path = data.get("repo_path")
+    if not repo_path:
+        raise HTTPException(status_code=400, detail="Job has no repo_path; cannot restart.")
+
+    try:
+        validate_work_path(repo_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    new_job_id = str(uuid.uuid4())
+    create_job(new_job_id, str(repo_path), job_type="run_team")
+
+    thread = threading.Thread(
+        target=_run_orchestrator_background,
+        args=(new_job_id, str(repo_path)),
+        daemon=True,
+    )
+    thread.start()
+
+    return RunTeamResponse(
+        job_id=new_job_id,
+        status="running",
+        message=f"Job restarted from {job_id}. Poll GET /run-team/{{job_id}} for status.",
     )
 
 
