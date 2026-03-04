@@ -374,7 +374,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     }
   }
 
-  cancelJob(event: Event, job: DashboardRow): void {
+  stopJob(event: Event, job: DashboardRow): void {
     event.stopPropagation();
     if (job.unified.source !== 'software_engineering') return;
     const label = job.unified.label;
@@ -384,16 +384,53 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     this.seApi.cancelJob(job.unified.jobId).subscribe({
       next: () => this.refresh(),
       error: (err) => {
-        console.error('Failed to cancel job:', err);
-        this.error = err?.error?.detail ?? err?.message ?? 'Failed to cancel job';
+        console.error('Failed to stop job:', err);
+        this.error = err?.error?.detail ?? err?.message ?? 'Failed to stop job';
       },
     });
   }
 
-  canCancelJob(job: DashboardRow): boolean {
+  resumeJob(event: Event, job: DashboardRow): void {
+    event.stopPropagation();
+    if (job.unified.source !== 'software_engineering') return;
+    this.seApi.resumeRunTeamJob(job.unified.jobId).subscribe({
+      next: () => this.refresh(),
+      error: (err) => {
+        console.error('Failed to resume job:', err);
+        this.error = err?.error?.detail ?? err?.message ?? 'Failed to resume job';
+      },
+    });
+  }
+
+  restartJob(event: Event, job: DashboardRow): void {
+    event.stopPropagation();
+    if (job.unified.source !== 'software_engineering') return;
+    if (!confirm(`Restart job for "${job.unified.label}" from scratch?`)) {
+      return;
+    }
+    this.seApi.restartRunTeamJob(job.unified.jobId).subscribe({
+      next: () => this.refresh(),
+      error: (err) => {
+        console.error('Failed to restart job:', err);
+        this.error = err?.error?.detail ?? err?.message ?? 'Failed to restart job';
+      },
+    });
+  }
+
+  canStopJob(job: DashboardRow): boolean {
     if (job.unified.source !== 'software_engineering') return false;
     const status = job.unified.status;
     return status === 'running' || status === 'pending';
+  }
+
+  canResumeJob(job: DashboardRow): boolean {
+    if (job.unified.source !== 'software_engineering') return false;
+    return ['pending', 'running', 'agent_crash'].includes(job.unified.status);
+  }
+
+  canRestartJob(job: DashboardRow): boolean {
+    if (job.unified.source !== 'software_engineering') return false;
+    return ['completed', 'failed', 'cancelled', 'agent_crash'].includes(job.unified.status);
   }
 
   trackByJobId(_index: number, job: DashboardRow): string {

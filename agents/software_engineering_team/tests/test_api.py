@@ -315,3 +315,57 @@ def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:
     assert job_data is not None
     assert job_data.get("status") == "failed"
     assert job_data.get("error") == "test"
+
+
+# --- Restart endpoint tests ---
+
+
+def test_restart_404_when_job_missing(client: TestClient) -> None:
+    """POST /run-team/{job_id}/restart returns 404 for unknown job."""
+    job_id = str(uuid.uuid4())
+    r = client.post(f"/run-team/{job_id}/restart")
+    assert r.status_code == 404
+
+
+def test_restart_400_when_status_running(client: TestClient, temp_work_path: Path) -> None:
+    """POST /run-team/{job_id}/restart returns 400 when job is still active."""
+    from software_engineering_team.shared.job_store import create_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+
+    r = client.post(f"/run-team/{job_id}/restart")
+    assert r.status_code == 400
+    assert "cannot be restarted" in r.json().get("detail", "").lower() or "status" in r.json().get("detail", "").lower()
+
+
+def test_restart_400_when_job_type_not_run_team(client: TestClient, temp_work_path: Path) -> None:
+    """POST /run-team/{job_id}/restart returns 400 for non-run_team jobs."""
+    from software_engineering_team.shared.job_store import create_job, update_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="planning_v2")
+    update_job(job_id, status="failed")
+
+    r = client.post(f"/run-team/{job_id}/restart")
+    assert r.status_code == 400
+
+
+def test_restart_200_when_failed_creates_new_job(client: TestClient, temp_work_path: Path) -> None:
+    """POST /run-team/{job_id}/restart returns 200 and creates a new running job."""
+    from software_engineering_team.shared.job_store import create_job, get_job, update_job
+
+    old_job_id = str(uuid.uuid4())
+    create_job(old_job_id, str(temp_work_path), job_type="run_team")
+    update_job(old_job_id, status="failed")
+
+    r = client.post(f"/run-team/{old_job_id}/restart")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "running"
+    assert data["job_id"] != old_job_id
+
+    new_job = get_job(data["job_id"])
+    assert new_job is not None
+    assert new_job.get("status") == "running"
+    assert new_job.get("repo_path") == str(temp_work_path)

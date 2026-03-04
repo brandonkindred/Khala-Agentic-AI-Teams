@@ -196,8 +196,13 @@
 }
 
 .col-actions {
-  width: 60px;
+  width: 140px;
   text-align: center;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
 }
 
 .status-badge {
@@ -430,5 +435,22 @@
 
   .jobs-table {
     min-width: 900px;
+  }
+}
+
+
+.resume-button {
+  color: #58a6ff;
+
+  &:hover {
+    background: rgba(88, 166, 255, 0.1);
+  }
+}
+
+.restart-button {
+  color: #bb80ff;
+
+  &:hover {
+    background: rgba(187, 128, 255, 0.1);
   }
 }
