@@ -975,6 +975,15 @@ Previously Answered Questions:
                 source="spec_review",
                 category=str(q_data.get("category", "general")),
                 priority=str(q_data.get("priority", "medium")),
+                constraint_domain=str(q_data.get("constraint_domain", "")),
+                constraint_layer=int(q_data.get("constraint_layer", 0) or 0),
+                depends_on=q_data.get("depends_on"),
+                blocking=bool(q_data.get("blocking", True)),
+                owner=str(q_data.get("owner", "user")),
+                section_impact=list(q_data.get("section_impact", []) or []),
+                due_date=str(q_data.get("due_date", "")),
+                status=str(q_data.get("status", "open")),
+                asked_via=list(q_data.get("asked_via", []) or []),
             )
 
         return OpenQuestion(
@@ -991,6 +1000,12 @@ Previously Answered Questions:
             ],
             allow_multiple=False,
             source="spec_review",
+            blocking=True,
+            owner="user",
+            section_impact=[],
+            due_date="",
+            status="open",
+            asked_via=[],
         )
 
     def _parse_question_option(self, opt_data: Any, index: int) -> QuestionOption:
@@ -1161,6 +1176,15 @@ Previously Answered Questions:
                     "source": q.source,
                     "category": q.category,
                     "priority": q.priority,
+                    "constraint_domain": q.constraint_domain,
+                    "constraint_layer": q.constraint_layer,
+                    "depends_on": q.depends_on,
+                    "blocking": q.blocking,
+                    "owner": q.owner,
+                    "section_impact": q.section_impact,
+                    "due_date": q.due_date,
+                    "status": q.status,
+                    "asked_via": q.asked_via,
                 }
             )
         return pending
@@ -1328,6 +1352,60 @@ Previously Answered Questions:
             lines.append("")
         return "\n".join(lines)
 
+
+    def _build_specialist_collaboration_plan(
+        self,
+        cleaned_spec: str,
+        answered_questions: List[AnsweredQuestion],
+    ) -> str:
+        """Build deterministic recommendations for specialist agents/tooling.
+
+        This gives the PRD writer concrete handoff guidance for areas that often
+        require cross-team collaboration (UX, architecture, risk, data, security).
+        """
+        spec_text = (cleaned_spec + "\n" + self._format_answered_questions(answered_questions)).lower()
+
+        recommendations: List[str] = []
+
+        def include(label: str, reason: str) -> None:
+            recommendations.append(f"- {label}: {reason}")
+
+        # Always include these core spokes for higher-quality PRDs.
+        include("Requirements Analyst Agent", "Own FR/NFR decomposition, prioritization, and traceability mapping.")
+        include("QA and Acceptance Criteria Agent", "Ensure every Must requirement has verifiable acceptance criteria.")
+        include("PRD Critic (Gatekeeper) Agent", "Run completeness/consistency/testability/traceability/pragmatism gates before Final.")
+
+        if any(k in spec_text for k in ["ui", "ux", "screen", "design", "workflow", "journey", "persona", "onboarding"]):
+            include("UX and Flows Agent", "Define textual workflows, edge cases, accessibility baseline, and screen/IA notes.")
+            include("Design System Tool Agent", "Capture reusable component patterns, interaction states, and consistency rules.")
+            include("Branding Guidance Agent", "Document tone, visual direction, and brand constraints for product surfaces.")
+
+        if any(k in spec_text for k in ["architecture", "api", "integration", "service", "event", "database", "deployment"]):
+            include("Architecture Agent", "Define high-level components, interfaces, and data flow boundaries.")
+            include("API and Integration Agent", "Specify integration contracts, failure modes, and auth patterns.")
+
+        if any(k in spec_text for k in ["risk", "assumption", "dependency", "migration", "rollout", "timeline"]):
+            include("Risk Analysis Agent", "Maintain risk register with owners, probabilities, impacts, and mitigations.")
+            include("Scope and Milestones Planner Agent", "Align MVP/V1/VNext scope to dependencies and timeline options.")
+
+        if any(k in spec_text for k in ["security", "privacy", "compliance", "pii", "retention", "audit", "auth"]):
+            include("Security, Privacy, and Compliance Agent", "Define data handling, retention, authz, and compliance questions.")
+
+        if any(k in spec_text for k in ["analytics", "kpi", "metric", "dashboard", "event tracking"]):
+            include("Data and Analytics Agent", "Define events, KPI ownership, and dashboards tied to goals.")
+
+        include("Question Concierge (Human Interface) Agent", "Bundle unresolved questions by owner/impact with due dates and escalation policy.")
+
+        # Keep deterministic output order and avoid duplicates.
+        seen = set()
+        deduped: List[str] = []
+        for item in recommendations:
+            if item not in seen:
+                seen.add(item)
+                deduped.append(item)
+
+        return "\n".join(deduped)
+
     def _generate_prd_document(
         self,
         cleaned_spec: str,
@@ -1345,10 +1423,16 @@ Previously Answered Questions:
         max_chars = 20000
         cleaned_spec_snippet = cleaned_spec[:max_chars]
         answered_summary_snippet = answered_summary[:max_chars]
+        specialist_plan = self._build_specialist_collaboration_plan(
+            cleaned_spec=cleaned_spec_snippet,
+            answered_questions=answered_questions,
+        )
+        specialist_plan_snippet = specialist_plan[:max_chars]
 
         prompt = PRD_PROMPT.format(
             cleaned_spec=cleaned_spec_snippet,
             answered_questions_summary=answered_summary_snippet,
+            specialist_collaboration_plan=specialist_plan_snippet,
         )
 
         try:
