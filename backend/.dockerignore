@@ -1,0 +1,27 @@
+# Virtual env and caches (make clean)
+.venv
+venv
+.pytest_cache
+**/__pycache__
+*.pyc
+*.pyo
+
+# Git and IDE
+.git
+.gitignore
+.cursor
+.vscode
+*.swp
+*~
+
+# Local and test
+.env
+.env.local
+*.log
+workspace
+.agent_cache
+
+# Docs and plans (not needed at runtime)
+**/plans/
+**/*.plan.md
+post_mortems

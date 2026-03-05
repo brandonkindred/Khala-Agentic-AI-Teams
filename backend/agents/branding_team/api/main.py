@@ -10,10 +10,60 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from branding_team.models import BrandCheckRequest, BrandingMission, HumanReview, TeamOutput
+from branding_team.models import (
+    Brand,
+    BrandCheckRequest,
+    BrandingMission,
+    Client,
+    CompetitiveSnapshot,
+    DesignAssetRequestResult,
+    HumanReview,
+    TeamOutput,
+)
 from branding_team.orchestrator import BrandingTeamOrchestrator
+from branding_team.store import get_default_store
 
 app = FastAPI(title="Branding Team API", version="1.0.0")
+branding_store = get_default_store()
+
+
+class CreateClientRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    contact_info: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class CreateBrandRequest(BaseModel):
+    company_name: str = Field(..., min_length=2)
+    company_description: str = Field(..., min_length=10)
+    target_audience: str = Field(..., min_length=3)
+    name: Optional[str] = None
+    values: List[str] = Field(default_factory=list)
+    differentiators: List[str] = Field(default_factory=list)
+    desired_voice: str = Field(default="clear, confident, human")
+    existing_brand_material: List[str] = Field(default_factory=list)
+    wiki_path: Optional[str] = None
+
+
+class UpdateBrandRequest(BaseModel):
+    company_name: Optional[str] = Field(None, min_length=2)
+    company_description: Optional[str] = Field(None, min_length=10)
+    target_audience: Optional[str] = Field(None, min_length=3)
+    name: Optional[str] = Field(None, min_length=1)
+    values: Optional[List[str]] = None
+    differentiators: Optional[List[str]] = None
+    desired_voice: Optional[str] = None
+    existing_brand_material: Optional[List[str]] = None
+    wiki_path: Optional[str] = None
+    status: Optional[str] = None
+
+
+class RunBrandRequest(BaseModel):
+    human_approved: bool = True
+    human_feedback: str = ""
+    include_market_research: bool = False
+    include_design_assets: bool = False
+    brand_checks: List[BrandCheckRequest] = Field(default_factory=list)
 
 
 class RunBrandingTeamRequest(BaseModel):
@@ -28,6 +78,8 @@ class RunBrandingTeamRequest(BaseModel):
     brand_checks: List[BrandCheckRequest] = Field(default_factory=list)
     human_approved: bool = False
     human_feedback: str = ""
+    client_id: Optional[str] = None
+    brand_id: Optional[str] = None
 
 
 class BrandingQuestion(BaseModel):
@@ -138,6 +190,160 @@ def _apply_answer(mission: BrandingMission, question: BrandingQuestion, answer: 
     return mission
 
 
+@app.post("/branding/clients", response_model=Client, status_code=201)
+def create_client(payload: CreateClientRequest) -> Client:
+    return branding_store.create_client(
+        name=payload.name,
+        contact_info=payload.contact_info,
+        notes=payload.notes,
+    )
+
+
+@app.get("/branding/clients", response_model=List[Client])
+def list_clients() -> List[Client]:
+    return branding_store.list_clients()
+
+
+@app.get("/branding/clients/{client_id}", response_model=Client)
+def get_client(client_id: str) -> Client:
+    client = branding_store.get_client(client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return client
+
+
+@app.get("/branding/clients/{client_id}/brands", response_model=List[Brand])
+def list_brands(client_id: str) -> List[Brand]:
+    if not branding_store.get_client(client_id):
+        raise HTTPException(status_code=404, detail="Client not found")
+    return branding_store.list_brands_for_client(client_id)
+
+
+@app.post("/branding/clients/{client_id}/brands", response_model=Brand, status_code=201)
+def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
+    mission = BrandingMission(
+        company_name=payload.company_name,
+        company_description=payload.company_description,
+        target_audience=payload.target_audience,
+        values=payload.values,
+        differentiators=payload.differentiators,
+        desired_voice=payload.desired_voice,
+        existing_brand_material=payload.existing_brand_material,
+        wiki_path=payload.wiki_path,
+    )
+    brand = branding_store.create_brand(client_id=client_id, mission=mission, name=payload.name)
+    if not brand:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return brand
+
+
+@app.get("/branding/clients/{client_id}/brands/{brand_id}", response_model=Brand)
+def get_brand(client_id: str, brand_id: str) -> Brand:
+    brand = branding_store.get_brand(client_id, brand_id)
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    return brand
+
+
+@app.put("/branding/clients/{client_id}/brands/{brand_id}", response_model=Brand)
+def update_brand(client_id: str, brand_id: str, payload: UpdateBrandRequest) -> Brand:
+    brand = branding_store.get_brand(client_id, brand_id)
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    mission = None
+    if any(
+        [
+            payload.company_name is not None,
+            payload.company_description is not None,
+            payload.target_audience is not None,
+            payload.values is not None,
+            payload.differentiators is not None,
+            payload.desired_voice is not None,
+            payload.existing_brand_material is not None,
+            payload.wiki_path is not None,
+        ]
+    ):
+        mission = brand.mission.model_copy(
+            update={
+                k: v
+                for k, v in {
+                    "company_name": payload.company_name,
+                    "company_description": payload.company_description,
+                    "target_audience": payload.target_audience,
+                    "values": payload.values,
+                    "differentiators": payload.differentiators,
+                    "desired_voice": payload.desired_voice,
+                    "existing_brand_material": payload.existing_brand_material,
+                    "wiki_path": payload.wiki_path,
+                }.items()
+                if v is not None
+            }
+        )
+    from branding_team.models import BrandStatus
+
+    status = None
+    if payload.status is not None:
+        try:
+            status = BrandStatus(payload.status)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {payload.status}")
+    updated = branding_store.update_brand(
+        client_id=client_id,
+        brand_id=brand_id,
+        mission=mission,
+        status=status,
+        name=payload.name,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    return updated
+
+
+@app.post("/branding/clients/{client_id}/brands/{brand_id}/run", response_model=TeamOutput)
+def run_brand(client_id: str, brand_id: str, payload: RunBrandRequest) -> TeamOutput:
+    brand = branding_store.get_brand(client_id, brand_id)
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
+    return orchestrator.run(
+        mission=brand.mission,
+        human_review=human_review,
+        brand_checks=payload.brand_checks,
+        store=branding_store,
+        client_id=client_id,
+        brand_id=brand_id,
+        include_market_research=payload.include_market_research,
+        include_design_assets=payload.include_design_assets,
+    )
+
+
+@app.post("/branding/clients/{client_id}/brands/{brand_id}/request-market-research", response_model=CompetitiveSnapshot)
+def request_market_research_for_brand(client_id: str, brand_id: str) -> CompetitiveSnapshot:
+    brand = branding_store.get_brand(client_id, brand_id)
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    try:
+        from branding_team.adapters.market_research import request_market_research
+
+        snapshot = request_market_research(brand.mission)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Market research service unavailable")
+    if not snapshot:
+        raise HTTPException(status_code=503, detail="Market research service unavailable")
+    return snapshot
+
+
+@app.post("/branding/clients/{client_id}/brands/{brand_id}/request-design-assets", response_model=DesignAssetRequestResult)
+def request_design_assets_for_brand(client_id: str, brand_id: str) -> DesignAssetRequestResult:
+    brand = branding_store.get_brand(client_id, brand_id)
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    from branding_team.adapters.design_assets import request_design_assets
+
+    codification = orchestrator.codifier.codify(brand.mission)
+    return request_design_assets(codification, brand.mission.company_name)
+
+
 @app.post("/branding/run", response_model=TeamOutput)
 def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
     mission = BrandingMission(
@@ -151,7 +357,15 @@ def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
         wiki_path=payload.wiki_path,
     )
     human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
-    return orchestrator.run(mission=mission, human_review=human_review, brand_checks=payload.brand_checks)
+    store = branding_store if (payload.client_id and payload.brand_id) else None
+    return orchestrator.run(
+        mission=mission,
+        human_review=human_review,
+        brand_checks=payload.brand_checks,
+        store=store,
+        client_id=payload.client_id,
+        brand_id=payload.brand_id,
+    )
 
 
 @app.post("/branding/sessions", response_model=BrandingSessionResponse)

@@ -1,5 +1,5 @@
 <h1>Branding Team API</h1>
-<p>Interactive async branding workflow with a live open-question feed.</p>
+<p>Interactive async branding workflow with a live open-question feed. Manage clients and brands (agency model), or start a one-off session below.</p>
 
 <div class="header-row">
   <app-health-indicator [healthCheck]="healthCheck" label="Branding API" />
@@ -15,7 +15,78 @@
 
 <mat-card>
   <mat-card-header>
-    <mat-card-title>Start Branding Session</mat-card-title>
+    <mat-card-title>Clients &amp; Brands (Agency)</mat-card-title>
+    <mat-card-subtitle>One client, many brands. Run or evolve a brand, request market research or design assets.</mat-card-subtitle>
+  </mat-card-header>
+  <mat-card-content>
+    <div class="agency-actions">
+      <button mat-stroked-button color="primary" (click)="loadClients()">Load Clients</button>
+      <span class="new-client-row">
+        <input type="text" [(ngModel)]="newClientName" placeholder="New client name" class="client-name-input" />
+        <button mat-stroked-button (click)="createClient()" [disabled]="!newClientName.trim()">Add Client</button>
+      </span>
+    </div>
+    @if (clientLoadError) {
+      <app-error-message [message]="clientLoadError" />
+    }
+    @if (clients.length > 0) {
+      <p class="client-list-label">Select client:</p>
+      <div class="client-list">
+        @for (c of clients; track c.id) {
+          <button mat-stroked-button [color]="selectedClient?.id === c.id ? 'primary' : null" (click)="selectClient(c)">{{ c.name }}</button>
+        }
+      </div>
+      @if (selectedClient) {
+        <p class="brands-label">Brands for {{ selectedClient.name }}:</p>
+        <button mat-stroked-button (click)="showCreateBrand = !showCreateBrand">Create Brand</button>
+        @if (showCreateBrand) {
+          <form [formGroup]="newBrandForm" (ngSubmit)="createBrand()" class="new-brand-form">
+            <mat-form-field appearance="outline">
+              <mat-label>Company name</mat-label>
+              <input matInput formControlName="company_name" />
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Company description</mat-label>
+              <textarea matInput rows="2" formControlName="company_description"></textarea>
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Target audience</mat-label>
+              <input matInput formControlName="target_audience" />
+            </mat-form-field>
+            <mat-form-field appearance="outline">
+              <mat-label>Brand name (optional)</mat-label>
+              <input matInput formControlName="name" />
+            </mat-form-field>
+            <button mat-raised-button color="primary" type="submit">Create Brand</button>
+          </form>
+        }
+        <ul class="brand-list">
+          @for (b of brands; track b.id) {
+            <li class="brand-item">
+              <strong>{{ b.name }}</strong> ({{ b.status }}, v{{ b.version }})
+              <span class="brand-actions">
+                <button mat-stroked-button (click)="runBrand(b)">Run</button>
+                <button mat-stroked-button (click)="requestMarketResearchForBrand(b)">Market Research</button>
+                <button mat-stroked-button (click)="requestDesignAssetsForBrand(b)">Design Assets</button>
+              </span>
+            </li>
+          }
+        </ul>
+        @if (brands.length === 0 && !showCreateBrand) {
+          <p>No brands yet. Create a brand to run the workflow, request market research, or design assets.</p>
+        }
+        @if (brandActionMessage) {
+          <p class="action-message">{{ brandActionMessage }}</p>
+        }
+      }
+    }
+  </mat-card-content>
+</mat-card>
+
+<mat-card>
+  <mat-card-header>
+    <mat-card-title>Start Branding Session (one-off)</mat-card-title>
+    <mat-card-subtitle>No client/brand required. Answer open questions to refine output.</mat-card-subtitle>
   </mat-card-header>
   <mat-card-content>
     <form [formGroup]="form" (ngSubmit)="startSession()" class="session-form">

@@ -1,0 +1,27 @@
+# Unified API server. Run from backend: docker compose up --build
+# API: http://localhost:8080  Docs: http://localhost:8080/docs
+
+version: "3.8"
+
+services:
+  unified-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: strands-unified-api
+    container_name: strands-unified-api
+    ports:
+      - "8080:8080"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      SW_LLM_PROVIDER: ${SW_LLM_PROVIDER:-ollama}
+      SW_LLM_BASE_URL: ${SW_LLM_BASE_URL:-http://host.docker.internal:11434}
+      SW_LLM_MODEL: ${SW_LLM_MODEL:-qwen3.5:397b-cloud}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
