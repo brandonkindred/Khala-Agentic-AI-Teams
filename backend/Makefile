@@ -13,7 +13,7 @@ else
   VENV_PIP = $(VENV_BIN)/pip
 endif
 
-REQUIREMENTS = agents/requirements.txt
+REQUIREMENTS = requirements.txt
 PORT ?= 8080
 HOST ?= 0.0.0.0
 
