@@ -15,3 +15,10 @@ Run CLI:
 ```bash
 PYTHONPATH=src python -m studiogrid.main run start --project-name Demo --intake examples/intake.json
 ```
+
+Agent registry helpers:
+
+```bash
+PYTHONPATH=src python -m studiogrid.main registry list
+PYTHONPATH=src python -m studiogrid.main registry find --problem "Need accessibility review" --skills accessibility_review
+```
