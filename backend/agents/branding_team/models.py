@@ -3,9 +3,27 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+
+
+class Client(BaseModel):
+    """Agency client; one client owns many brands."""
+
+    id: str
+    name: str = Field(..., min_length=1)
+    created_at: str = ""
+    updated_at: str = ""
+    contact_info: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class BrandStatus(str, Enum):
+    draft = "draft"
+    active = "active"
+    evolving = "evolving"
+    archived = "archived"
 
 
 class WorkflowStatus(str, Enum):
@@ -83,6 +101,30 @@ class BrandCheckResult(BaseModel):
     revision_suggestions: List[str] = Field(default_factory=list)
 
 
+class CompetitiveSnapshot(BaseModel):
+    """Market research result: competitive and similar brands context."""
+
+    summary: str = ""
+    similar_brands: List[str] = Field(default_factory=list)
+    insights: List[str] = Field(default_factory=list)
+    source: str = "market_research_team"
+
+
+class DesignAssetRequestResult(BaseModel):
+    """Result of a design asset request (stub or from StudioGrid)."""
+
+    request_id: str
+    status: str = "pending"  # pending | completed
+    artifacts: List[str] = Field(default_factory=list)
+
+
+class BrandBook(BaseModel):
+    """Consolidated brand document for handoff."""
+
+    content: str = ""  # markdown or structured text
+    sections: Dict[str, Any] = Field(default_factory=dict)  # optional structured fields
+
+
 class TeamOutput(BaseModel):
     status: WorkflowStatus
     mission_summary: str
@@ -95,3 +137,29 @@ class TeamOutput(BaseModel):
     wiki_backlog: List[WikiEntry] = Field(default_factory=list)
     brand_checks: List[BrandCheckResult] = Field(default_factory=list)
     human_feedback: Optional[str] = None
+    competitive_snapshot: Optional[CompetitiveSnapshot] = None
+    design_asset_result: Optional[DesignAssetRequestResult] = None
+    brand_book: Optional[BrandBook] = None
+
+
+class BrandVersionSummary(BaseModel):
+    """Summary of a single brand run version for history."""
+
+    version: int
+    created_at: str
+    status: Optional[str] = None
+
+
+class Brand(BaseModel):
+    """A brand owned by a client; can be evolved over time."""
+
+    id: str
+    client_id: str
+    name: str = Field(..., min_length=1)
+    status: BrandStatus = BrandStatus.draft
+    mission: BrandingMission
+    latest_output: Optional[TeamOutput] = None
+    version: int = 0
+    history: List[BrandVersionSummary] = Field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""

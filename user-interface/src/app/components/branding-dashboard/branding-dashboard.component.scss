@@ -21,3 +21,76 @@ mat-card {
 .answer-field {
   width: 100%;
 }
+
+.agency-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.new-client-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.client-name-input {
+  padding: 8px 12px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  min-width: 180px;
+}
+
+.client-list-label,
+.brands-label {
+  margin-top: 12px;
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+.client-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.new-brand-form {
+  display: grid;
+  gap: 12px;
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+}
+
+.brand-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+}
+
+.brand-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #eee;
+}
+
+.brand-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.action-message {
+  margin-top: 12px;
+  padding: 8px;
+  background: #e8f5e9;
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
