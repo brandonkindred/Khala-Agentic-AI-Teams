@@ -1773,7 +1773,7 @@ def run_orchestrator(
         # Check for cancellation at start
         _check_cancellation(job_id)
         
-        update_job(job_id, status=JOB_STATUS_RUNNING, phase="planning", status_text="Starting pipeline")
+        update_job(job_id, status=JOB_STATUS_RUNNING, phase="product_analysis", status_text="Starting pipeline")
 
         agents = _get_agents()
 
