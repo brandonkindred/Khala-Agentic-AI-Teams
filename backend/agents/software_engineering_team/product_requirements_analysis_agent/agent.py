@@ -517,23 +517,23 @@ class ProductRequirementsAnalysisAgent:
                 cleaned_spec=cleanup_result.cleaned_spec,
                 answered_questions=all_answered_questions,
             )
-            result.final_spec_content = prd_content
+            result.final_spec_content = cleanup_result.cleaned_spec
         except Exception as exc:
             result.failure_reason = f"Spec cleanup failed: {exc}"
             logger.error("Product Requirements Analysis: %s", result.failure_reason)
             return result
 
-        # Save validated spec (PRD) and also keep the raw cleaned spec accessible under plan/product_analysis
+        # Save validated spec (cleaned spec) and PRD separately.
         product_analysis_dir = repo_path / "plan" / "product_analysis"
         product_analysis_dir.mkdir(parents=True, exist_ok=True)
         validated_spec_path = product_analysis_dir / "validated_spec.md"
-        validated_spec_path.write_text(result.final_spec_content, encoding="utf-8")
+        validated_spec_path.write_text(cleanup_result.cleaned_spec, encoding="utf-8")
         result.validated_spec_path = str(validated_spec_path)
 
         # Also write an explicit PRD file for clarity
         try:
             prd_path = product_analysis_dir / "product_requirements_document.md"
-            prd_path.write_text(result.final_spec_content, encoding="utf-8")
+            prd_path.write_text(prd_content, encoding="utf-8")
             logger.info("Product Requirements Analysis: PRD saved to %s", prd_path.name)
         except Exception as exc:
             logger.warning(
@@ -544,14 +544,14 @@ class ProductRequirementsAnalysisAgent:
         result.summary = (
             f"Analysis complete: {result.iterations} iteration(s), "
             f"{len(all_answered_questions)} questions answered. "
-            f"PRD saved to {validated_spec_path.name}"
+            f"Validated spec saved to validated_spec.md; PRD saved to product_requirements_document.md"
         )
 
         _update_job(
             current_phase=AnalysisPhase.SPEC_CLEANUP.value,
             progress=100,
             message=result.summary,
-            status_text="Product analysis complete - PRD generated and validated",
+            status_text="Product analysis complete - validated spec and PRD generated",
         )
 
         elapsed = time.monotonic() - start_time

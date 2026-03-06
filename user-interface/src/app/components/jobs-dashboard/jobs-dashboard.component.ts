@@ -99,6 +99,8 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   loading = true;
   error: string | null = null;
   lastUpdated: Date | null = null;
+  /** Set when GET /run-team/jobs fails so user sees why SE jobs are missing. */
+  seFetchError: string | null = null;
 
   readonly SOURCE_DISPLAY = SOURCE_DISPLAY;
 
@@ -138,16 +140,25 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   /** Fetch from all team list endpoints and merge into sorted DashboardRow[] (seDetail not set yet). */
   private fetchAllJobLists() {
     return forkJoin({
-      se: this.seApi.getRunningJobs().pipe(catchError(() => of({ jobs: [] as RunningJobSummary[] }))),
+      se: this.seApi.getRunningJobs().pipe(
+        catchError((err) =>
+          of({
+            jobs: [] as RunningJobSummary[],
+            _error: err?.message ?? err?.error?.detail ?? 'Failed to load',
+          } as { jobs: RunningJobSummary[]; _error?: string })
+        )
+      ),
       blogging: this.bloggingApi.getJobs(true).pipe(catchError(() => of([]))),
       ai: this.aiSystemsApi.listJobs(true).pipe(catchError(() => of({ jobs: [] }))),
       prov: this.agentProvisioningApi.listJobs(true).pipe(catchError(() => of({ jobs: [] }))),
       social: this.socialMarketingApi.listJobs(true).pipe(catchError(() => of([]))),
     }).pipe(
       map(({ se, blogging, ai, prov, social }) => {
+        this.seFetchError = (se as { _error?: string })._error ?? null;
+        const seJobs = (se as { jobs: RunningJobSummary[] }).jobs;
         type RowWithSe = DashboardRow & { seSummary?: RunningJobSummary };
         const rows: RowWithSe[] = [];
-        for (const s of se.jobs) {
+        for (const s of seJobs) {
           rows.push({ unified: fromRunningJobSummary(s), seSummary: s });
         }
         for (const s of blogging) {

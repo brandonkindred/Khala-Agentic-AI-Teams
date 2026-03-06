@@ -290,6 +290,25 @@ kill -9 <PID>
 python run_unified_api.py --port 9000
 ```
 
+### Jobs not showing on Software Engineering or Jobs Overview
+
+The job list (e.g. **Running jobs** on the Software Engineering page and the Jobs Dashboard) is returned by the **same process** that serves the API. Jobs are stored under a cache directory:
+
+- If **AGENT_CACHE** is set, that path is used (resolved to an absolute path).
+- Otherwise, `.agent_cache` is used, relative to the **server process working directory**.
+
+Software Engineering jobs are stored under `{cache_dir}/software_engineering_team/jobs/`. If you start the unified API from a different directory than the process that created the job, or run the job in a different process, the list will be empty.
+
+**What to do:**
+
+1. Ensure the UI talks to the same server that is running the job (e.g. unified API on port 8080).
+2. Set **AGENT_CACHE** to an absolute path and restart the server so job creation and listing use the same directory regardless of CWD:
+   ```bash
+   export AGENT_CACHE=/var/lib/strands/agent_cache
+   python run_unified_api.py
+   ```
+3. Verify the list endpoint: `GET http://localhost:8080/api/software-engineering/run-team/jobs`. If it returns `{ "jobs": [] }` while a job is running elsewhere, the backend is reading from a different store (different process or CWD). Check server logs for the line `Software engineering job store path: ...` to see which directory is used.
+
 ### Slack integration (Phase 1)
 
 - **Integrations API:** `GET /api/integrations`, `GET /api/integrations/slack`, `PUT /api/integrations/slack`. Configure Slack (webhook URL, channel label) via UI or env (`SLACK_WEBHOOK_URL`).
