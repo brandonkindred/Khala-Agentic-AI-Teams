@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List
 
 from .models import (
     IPS,
@@ -38,7 +38,7 @@ class PolicyGuardianAgent:
         if not proposal.positions:
             return ["Portfolio has no positions."]
 
-        asset_class_weights: dict[str, float] = {}
+        asset_class_weights: Dict[str, float] = {}
         for pos in proposal.positions:
             asset_class_weights[pos.asset_class] = asset_class_weights.get(pos.asset_class, 0.0) + pos.weight_pct
 
