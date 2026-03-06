@@ -123,13 +123,23 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
 
   private startPolling(): void {
     this.pollSub?.unsubscribe();
-    const pollInterval = this.status?.waiting_for_answers ? 5000 : 15000;
+    const isProductAnalysisActive =
+      this.status?.phase === 'product_analysis' &&
+      (this.status?.status === 'running' || this.status?.status === 'pending');
+    const pollInterval =
+      this.status?.waiting_for_answers || isProductAnalysisActive ? 5000 : 15000;
     this.pollSub = timer(0, pollInterval)
       .pipe(switchMap(() => this.api.getJobStatus(this.jobId!)))
       .subscribe({
         next: (res) => {
           const wasWaiting = this.status?.waiting_for_answers;
           const isWaiting = res.waiting_for_answers;
+          const needFastPoll = (s: JobStatusResponse | null) =>
+            s?.waiting_for_answers ||
+            (s?.phase === 'product_analysis' &&
+              (s?.status === 'running' || s?.status === 'pending'));
+          const newInterval = needFastPoll(res) ? 5000 : 15000;
+          const oldInterval = needFastPoll(this.status) ? 5000 : 15000;
           this.status = res;
           this.workTreeRows = this.buildWorkTreeRows(res);
           this.statusChange.emit(res);
@@ -137,7 +147,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
           if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
             this.pollSub?.unsubscribe();
             this.pollSub = null;
-          } else if (wasWaiting !== isWaiting) {
+          } else if (wasWaiting !== isWaiting || newInterval !== oldInterval) {
             this.startPolling();
           }
         },

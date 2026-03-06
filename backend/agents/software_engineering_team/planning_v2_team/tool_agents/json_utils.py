@@ -126,6 +126,7 @@ def parse_json_with_recovery(
     merge_fn: Optional[Callable[[List[Dict[str, Any]]], Dict[str, Any]]] = None,
     original_content: Optional[str] = None,
     chunk_prompt_template: Optional[str] = None,
+    on_chunk_progress: Optional[Callable[[int, int], None]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Call LLM for JSON with continuation; optionally decompose content into chunks and merge.
 
@@ -150,6 +151,8 @@ def parse_json_with_recovery(
                 return None
         results: List[Dict[str, Any]] = []
         for i, chunk in enumerate(chunks):
+            if on_chunk_progress is not None:
+                on_chunk_progress(i, len(chunks))
             chunk_prompt = chunk_prompt_template.format(chunk_content=chunk)
             try:
                 data = llm.complete_json_with_continuation(

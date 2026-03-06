@@ -382,12 +382,18 @@ class ProductRequirementsAnalysisAgent:
 
             try:
                 _update_job(status_text="Performing gap analysis on the specification")
+                def _on_spec_review_chunk(chunk_index: int, total_chunks: int) -> None:
+                    _update_job(
+                        status_text=f"Analyzing specification (section {chunk_index + 1}/{total_chunks})..."
+                    )
+
                 spec_review_result, current_spec = self._run_spec_review(
                     current_spec,
                     repo_path,
                     iteration=iteration,
                     spec_version=base_version + (iteration - 1),
                     answered_questions=all_answered_questions,
+                    on_chunk_progress=_on_spec_review_chunk,
                 )
                 result.spec_review_result = spec_review_result
                 if spec_review_result.open_questions:
@@ -493,6 +499,7 @@ class ProductRequirementsAnalysisAgent:
                     repo_path=repo_path,
                     version=base_version + (iteration - 1),
                 )
+                _update_job(status_text="Incorporated answers into spec")
                 _update_job(status_text="Specification updated successfully")
             except Exception as exc:
                 result.failure_reason = f"Spec update failed: {exc}"
@@ -510,8 +517,19 @@ class ProductRequirementsAnalysisAgent:
 
         try:
             _update_job(status_text="Running final validation and cleanup on specification")
-            cleanup_result = self._run_spec_cleanup(current_spec, repo_path)
+
+            def _on_spec_cleanup_chunk(chunk_index: int, total_chunks: int) -> None:
+                _update_job(
+                    status_text=f"Validating specification (section {chunk_index + 1}/{total_chunks})..."
+                )
+
+            cleanup_result = self._run_spec_cleanup(
+                current_spec,
+                repo_path,
+                on_chunk_progress=_on_spec_cleanup_chunk,
+            )
             result.spec_cleanup_result = cleanup_result
+            _update_job(status_text="Validation complete")
             # Generate a Product Requirements Document (PRD) from the cleaned spec
             prd_content = self._generate_prd_document(
                 cleaned_spec=cleanup_result.cleaned_spec,
@@ -655,16 +673,18 @@ The following additional files were provided in the project folder. Review these
         iteration: int = 1,
         spec_version: Optional[int] = None,
         answered_questions: Optional[List[AnsweredQuestion]] = None,
+        on_chunk_progress: Optional[Callable[[int, int], None]] = None,
     ) -> tuple[SpecReviewResult, str]:
         """Run the Spec Review phase to identify gaps and questions.
-        
+
         Args:
             spec_content: Current specification content.
             repo_path: Path to the repository.
             iteration: Current iteration number (for logging/qa_history).
             spec_version: Version number for updated_spec_vN.md when writing (e.g. from duplicates). If None, iteration is used.
             answered_questions: List of previously answered questions for constraint analysis.
-            
+            on_chunk_progress: Optional callback (chunk_index, total_chunks) for progress updates during chunked LLM calls.
+
         Returns:
             Tuple of (SpecReviewResult, updated_spec_content). The spec may be
             updated if duplicate questions were found and clarified.
@@ -724,6 +744,7 @@ Previously Answered Questions:
             merge_fn=self._merge_spec_review_results,
             original_content=spec_content,
             chunk_prompt_template=SPEC_REVIEW_CHUNK_PROMPT,
+            on_chunk_progress=on_chunk_progress,
         )
 
         if not raw:
@@ -1562,6 +1583,7 @@ Previously Answered Questions:
         self,
         spec_content: str,
         repo_path: Path,
+        on_chunk_progress: Optional[Callable[[int, int], None]] = None,
     ) -> SpecCleanupResult:
         """Run the Spec Cleanup phase to validate and clean the spec."""
         prompt = SPEC_CLEANUP_PROMPT.format(spec_content=spec_content)
@@ -1574,6 +1596,7 @@ Previously Answered Questions:
             merge_fn=self._merge_spec_cleanup_results,
             original_content=spec_content,
             chunk_prompt_template=SPEC_CLEANUP_CHUNK_PROMPT,
+            on_chunk_progress=on_chunk_progress,
         )
 
         if not raw:

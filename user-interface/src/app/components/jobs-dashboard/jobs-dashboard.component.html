@@ -154,6 +154,14 @@
                     <mat-icon>replay</mat-icon>
                   </button>
                 }
+                @if (canDeleteJob(job)) {
+                  <button mat-icon-button
+                          class="delete-button"
+                          (click)="deleteJob($event, job)"
+                          matTooltip="Delete job">
+                    <mat-icon>delete</mat-icon>
+                  </button>
+                }
               </td>
             </tr>
           }
