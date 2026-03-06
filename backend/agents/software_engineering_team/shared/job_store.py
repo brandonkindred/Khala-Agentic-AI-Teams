@@ -11,10 +11,7 @@ from __future__ import annotations
 
 import copy
 import os
-import json
 import logging
-import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -39,7 +36,6 @@ LLM_UNREACHABLE_AFTER_RETRIES = (
 )
 
 DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache")).resolve()
-_lock = threading.Lock()
 _jobs_path_logged = False
 
 
@@ -50,41 +46,6 @@ def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
         logger.info("Software engineering job store path: %s", jobs_dir)
         _jobs_path_logged = True
     return CentralJobManager(team="software_engineering_team", cache_dir=cache_dir)
-
-
-def _jobs_dir(cache_dir: str | Path) -> Path:
-    path = Path(cache_dir) / "jobs"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _job_file(job_id: str, cache_dir: str | Path) -> Path:
-    return _jobs_dir(cache_dir) / f"{job_id}.json"
-
-
-def _read_job_file(path: Path) -> Optional[Dict[str, Any]]:
-    """Read job from path (caller must hold _lock if sharing with writers)."""
-    if not path.exists():
-        return None
-    for attempt in range(2):
-        try:
-            raw = path.read_text(encoding="utf-8")
-            if not raw.strip():
-                if attempt == 0:
-                    time.sleep(0.1)
-                    continue
-                return None
-            return json.loads(raw)
-        except (json.JSONDecodeError, ValueError) as e:
-            if attempt == 0:
-                time.sleep(0.1)
-                continue
-            logger.warning("Failed to read job file %s: %s", path, e)
-            return None
-        except Exception as e:
-            logger.warning("Failed to read job file %s: %s", path, e)
-            return None
-    return None
 
 
 def create_job(
@@ -193,13 +154,11 @@ def update_task_state(
     **kwargs: Any,
 ) -> None:
     """Update state for a single task. Merges kwargs into job["task_states"][task_id]."""
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        data = _read_job_file(path) or {}
+    def merge(data: Dict[str, Any]) -> None:
         task_states = data.setdefault("task_states", {})
         existing = task_states.get(task_id, {})
         task_states[task_id] = {**existing, **kwargs}
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _manager(cache_dir).apply_to_job(job_id, merge)
 
 
 def update_job_team_progress(
@@ -209,13 +168,11 @@ def update_job_team_progress(
     **kwargs: Any,
 ) -> None:
     """Update progress for a single team. Merges kwargs into job["team_progress"][team_id]."""
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        data = _read_job_file(path) or {}
+    def merge(data: Dict[str, Any]) -> None:
         team_progress = data.setdefault("team_progress", {})
         existing = team_progress.get(team_id, {})
         team_progress[team_id] = {**existing, **kwargs}
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _manager(cache_dir).apply_to_job(job_id, merge)
 
 
 def add_task_result(
@@ -224,13 +181,11 @@ def add_task_result(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Append a task result to the job and persist to cache."""
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        data = _read_job_file(path) or {}
+    def append(data: Dict[str, Any]) -> None:
         results = data.get("task_results", [])
         results.append(result)
         data["task_results"] = results
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _manager(cache_dir).apply_to_job(job_id, append)
 
 
 def add_pending_questions(
@@ -239,14 +194,12 @@ def add_pending_questions(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Add pending questions and set waiting_for_answers=True to pause job."""
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        data = _read_job_file(path) or {}
+    def add(data: Dict[str, Any]) -> None:
         existing = data.get("pending_questions", [])
         existing.extend(questions)
         data["pending_questions"] = existing
         data["waiting_for_answers"] = True
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _manager(cache_dir).apply_to_job(job_id, add)
 
 
 def submit_answers(
@@ -255,15 +208,13 @@ def submit_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Store submitted answers, clear pending questions, and resume job."""
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        data = _read_job_file(path) or {}
+    def apply(data: Dict[str, Any]) -> None:
         existing_answers = data.get("submitted_answers", [])
         existing_answers.extend(answers)
         data["submitted_answers"] = existing_answers
         data["pending_questions"] = []
         data["waiting_for_answers"] = False
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _manager(cache_dir).apply_to_job(job_id, apply)
 
 
 def is_waiting_for_answers(
@@ -271,10 +222,8 @@ def is_waiting_for_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Check if job is waiting for user answers."""
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        data = _read_job_file(path) or {}
-        return bool(data.get("waiting_for_answers", False))
+    data = _manager(cache_dir).get_job(job_id)
+    return bool(data.get("waiting_for_answers", False)) if data else False
 
 
 def get_submitted_answers(
@@ -282,10 +231,8 @@ def get_submitted_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> List[Dict[str, Any]]:
     """Get submitted answers for a job."""
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        data = _read_job_file(path) or {}
-        return list(data.get("submitted_answers", []))
+    data = _manager(cache_dir).get_job(job_id)
+    return list(data.get("submitted_answers", [])) if data else []
 
 
 def request_cancel(
@@ -293,25 +240,26 @@ def request_cancel(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Request cancellation for a job. Sets cancel_requested=True and status to cancelled.
-    
+
     Returns True if the job was found and cancellation was requested.
     Returns False if the job was not found or is already in a terminal state.
     """
     terminal_statuses = (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_CANCELLED)
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        data = _read_job_file(path)
-        if data is None:
-            return False
-        current_status = data.get("status", JOB_STATUS_PENDING)
-        if current_status in terminal_statuses:
-            return False
-        data["cancel_requested"] = True
-        data["status"] = JOB_STATUS_CANCELLED
-        data["cancelled_at"] = datetime.now(timezone.utc).isoformat()
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        logger.info("Job %s cancellation requested", job_id)
-        return True
+    data = _manager(cache_dir).get_job(job_id)
+    if data is None:
+        return False
+    current_status = data.get("status", JOB_STATUS_PENDING)
+    if current_status in terminal_statuses:
+        return False
+
+    def set_cancelled(d: Dict[str, Any]) -> None:
+        d["cancel_requested"] = True
+        d["status"] = JOB_STATUS_CANCELLED
+        d["cancelled_at"] = datetime.now(timezone.utc).isoformat()
+
+    _manager(cache_dir).apply_to_job(job_id, set_cancelled)
+    logger.info("Job %s cancellation requested", job_id)
+    return True
 
 
 def is_cancel_requested(
@@ -319,7 +267,5 @@ def is_cancel_requested(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Check if cancellation has been requested for a job."""
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        data = _read_job_file(path) or {}
-        return bool(data.get("cancel_requested", False))
+    data = _manager(cache_dir).get_job(job_id)
+    return bool(data.get("cancel_requested", False)) if data else False

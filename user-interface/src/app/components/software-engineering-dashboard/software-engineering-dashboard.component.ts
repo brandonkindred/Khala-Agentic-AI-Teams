@@ -137,7 +137,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     });
 
     this.runningJobsSub = timer(0, 30000).pipe(
-      switchMap(() => this.api.getRunningJobs())
+      switchMap(() => this.api.getRunningJobs(false))
     ).subscribe({
       next: (res) => {
         this.runningJobsError = null;

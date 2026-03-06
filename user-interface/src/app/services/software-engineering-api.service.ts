@@ -1,5 +1,5 @@
 import { Injectable, inject } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import type {
@@ -58,12 +58,15 @@ export class SoftwareEngineeringApiService {
   }
 
   /**
-   * GET /run-team/jobs - list running and pending jobs.
+   * GET /run-team/jobs - list jobs.
+   * @param runningOnly when true (default), only pending/running; when false, all jobs.
    */
-  getRunningJobs(): Observable<RunningJobsResponse> {
-    return this.http.get<RunningJobsResponse>(
-      `${this.baseUrl}/run-team/jobs`
-    );
+  getRunningJobs(runningOnly = true): Observable<RunningJobsResponse> {
+    const url = `${this.baseUrl}/run-team/jobs`;
+    const params = runningOnly
+      ? undefined
+      : new HttpParams().set('running_only', 'false');
+    return this.http.get<RunningJobsResponse>(url, params ? { params } : {});
   }
 
   /**

@@ -113,8 +113,17 @@ def test_get_job_status_404(client: TestClient) -> None:
 
 
 def test_get_running_jobs(client: TestClient) -> None:
-    """GET /run-team/jobs returns list of running/pending jobs."""
+    """GET /run-team/jobs returns list of running/pending jobs (default running_only=True)."""
     r = client.get("/run-team/jobs")
+    assert r.status_code == 200
+    data = r.json()
+    assert "jobs" in data
+    assert isinstance(data["jobs"], list)
+
+
+def test_get_running_jobs_all(client: TestClient) -> None:
+    """GET /run-team/jobs?running_only=false returns all jobs (including completed/failed)."""
+    r = client.get("/run-team/jobs", params={"running_only": "false"})
     assert r.status_code == 200
     data = r.json()
     assert "jobs" in data
@@ -315,6 +324,28 @@ def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:
     assert job_data is not None
     assert job_data.get("status") == "failed"
     assert job_data.get("error") == "test"
+
+
+def test_job_store_single_path_composite_update_visible(tmp_path: Path) -> None:
+    """create_job, update_task_state, then get_job/list_jobs see same data (single path via manager)."""
+    from software_engineering_team.shared.job_store import (
+        create_job,
+        get_job,
+        list_jobs,
+        update_task_state,
+    )
+
+    cache_dir = tmp_path
+    job_id = str(uuid.uuid4())
+    create_job(job_id, "/repo", cache_dir=cache_dir)
+    update_task_state(job_id, "task_1", cache_dir=cache_dir, status="done", assignee="backend")
+
+    job_data = get_job(job_id, cache_dir=cache_dir)
+    assert job_data is not None
+    assert job_data.get("task_states", {}).get("task_1") == {"status": "done", "assignee": "backend"}
+
+    jobs = list_jobs(cache_dir=cache_dir, running_only=False)
+    assert any(j.get("job_id") == job_id for j in jobs)
 
 
 # --- Restart endpoint tests ---

@@ -455,11 +455,11 @@ def _coerce_progress(value: Any) -> Optional[int]:
     "/run-team/jobs",
     response_model=RunningJobsResponse,
     summary="List running jobs",
-    description="Returns all jobs with status pending or running. Used by the UI to show a monitoring panel.",
+    description="Returns jobs with status pending or running when running_only=True (default). Set running_only=false to return all jobs (including completed/failed/cancelled).",
 )
-def get_running_jobs() -> RunningJobsResponse:
-    """List running and pending jobs."""
-    raw = list_jobs(running_only=True)
+def get_running_jobs(running_only: bool = True) -> RunningJobsResponse:
+    """List jobs. When running_only=True (default), only pending or running; otherwise all jobs."""
+    raw = list_jobs(running_only=running_only)
     jobs = [
         RunningJobSummary(
             job_id=item["job_id"],

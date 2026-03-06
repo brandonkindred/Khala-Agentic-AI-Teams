@@ -140,7 +140,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   /** Fetch from all team list endpoints and merge into sorted DashboardRow[] (seDetail not set yet). */
   private fetchAllJobLists() {
     return forkJoin({
-      se: this.seApi.getRunningJobs().pipe(
+      se: this.seApi.getRunningJobs(false).pipe(
         catchError((err) =>
           of({
             jobs: [] as RunningJobSummary[],

@@ -7,7 +7,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,21 @@ class CentralJobManager:
             data["updated_at"] = now
             if heartbeat:
                 data["last_heartbeat_at"] = now
+            self._write(path, data)
+
+    def apply_to_job(
+        self, job_id: str, fn: Callable[[Dict[str, Any]], None]
+    ) -> None:
+        """Atomically read job, call fn(data), write back. No-op if job does not exist."""
+        with self._lock:
+            path = self._job_file(job_id)
+            data = self._read(path)
+            if data is None:
+                return
+            fn(data)
+            now = self._now()
+            data["updated_at"] = now
+            data["last_heartbeat_at"] = now
             self._write(path, data)
 
     def append_event(
