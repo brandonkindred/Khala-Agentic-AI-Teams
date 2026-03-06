@@ -5,8 +5,13 @@ JSON structure (integrations.json):
 {
   "slack": {
     "enabled": false,
+    "mode": "webhook",
     "webhook_url": "",
-    "channel_display_name": ""
+    "bot_token": "",
+    "default_channel": "",
+    "channel_display_name": "",
+    "notify_open_questions": true,
+    "notify_pa_responses": true
   }
 }
 
@@ -70,8 +75,7 @@ def _write_raw(data: Dict[str, Any]) -> None:
 
 def get_slack_config() -> Dict[str, Any]:
     """
-    Return Slack config dict with keys: enabled, webhook_url, channel_display_name.
-    Defaults when file or slack key missing: enabled=False, webhook_url="", channel_display_name="".
+    Return Slack config dict for webhook or bot posting modes.
     If SLACK_WEBHOOK_URL env is set and webhook_url is empty in store, it is used as the webhook_url
     (env override/fallback so deploy can set URL without UI).
     """
@@ -83,25 +87,43 @@ def get_slack_config() -> Dict[str, Any]:
         webhook_url = os.getenv("SLACK_WEBHOOK_URL", "").strip()
     return {
         "enabled": bool(slack.get("enabled", False)),
+        "mode": str(slack.get("mode", "webhook")).strip() or "webhook",
         "webhook_url": webhook_url,
+        "bot_token": str(slack.get("bot_token", "")).strip(),
+        "default_channel": str(slack.get("default_channel", "")).strip(),
         "channel_display_name": str(slack.get("channel_display_name", "")).strip(),
+        "notify_open_questions": bool(slack.get("notify_open_questions", True)),
+        "notify_pa_responses": bool(slack.get("notify_pa_responses", True)),
     }
 
 
 def set_slack_config(
     enabled: bool,
     webhook_url: str,
+    mode: str = "webhook",
+    bot_token: str = "",
+    default_channel: str = "",
     channel_display_name: str = "",
+    notify_open_questions: bool = True,
+    notify_pa_responses: bool = True,
 ) -> None:
     """Persist Slack config with atomic write."""
+    mode = (mode or "webhook").strip() or "webhook"
     webhook_url = (webhook_url or "").strip()
+    bot_token = (bot_token or "").strip()
+    default_channel = (default_channel or "").strip()
     channel_display_name = (channel_display_name or "").strip()
     with _LOCK:
         data = _read_raw()
         data["slack"] = {
             "enabled": enabled,
+            "mode": mode,
             "webhook_url": webhook_url,
+            "bot_token": bot_token,
+            "default_channel": default_channel,
             "channel_display_name": channel_display_name,
+            "notify_open_questions": notify_open_questions,
+            "notify_pa_responses": notify_pa_responses,
         }
         _write_raw(data)
 
