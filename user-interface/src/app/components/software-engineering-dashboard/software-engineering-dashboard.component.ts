@@ -296,6 +296,19 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     this.selectedRunningJob = null;
   }
 
+  onDeleteRunTeamJob(): void {
+    if (!this.jobId) return;
+    if (!confirm('Permanently delete this job? It will be removed from the list.')) {
+      return;
+    }
+    this.api.deleteJob(this.jobId).subscribe({
+      next: () => this.clearRunTeamJob(),
+      error: (err) => {
+        this.error = err?.error?.detail ?? err?.message ?? 'Failed to delete job';
+      },
+    });
+  }
+
   onBackendCodeV2Submit(request: BackendCodeV2RunRequest): void {
     this.loading = true;
     this.error = null;

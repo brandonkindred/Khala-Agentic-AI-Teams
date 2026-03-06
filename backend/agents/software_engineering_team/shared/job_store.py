@@ -5,13 +5,18 @@ Uses AGENT_CACHE environment variable when set (otherwise .agent_cache), resolve
 absolute path so list/create use the same directory regardless of process CWD. Each job
 is stored under {cache_dir}/software_engineering_team/jobs/{job_id}.json via
 CentralJobManager so state survives process restarts.
+
+Stale jobs: JOB_STALE_AFTER_SECONDS (env JOB_STALE_AFTER_SECONDS, default 1800) is the
+age in seconds after which a pending/running job with no recent heartbeat is marked failed.
 """
 
 from __future__ import annotations
 
 import copy
-import os
 import logging
+import os
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -36,6 +41,16 @@ LLM_UNREACHABLE_AFTER_RETRIES = (
 )
 
 DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache")).resolve()
+
+# Seconds after which a pending/running job with no recent heartbeat is marked failed.
+# Set via env JOB_STALE_AFTER_SECONDS (default 1800).
+def get_stale_after_seconds() -> float:
+    try:
+        return float(os.getenv("JOB_STALE_AFTER_SECONDS", "1800"))
+    except (TypeError, ValueError):
+        return 1800.0
+
+
 _jobs_path_logged = False
 
 
@@ -85,6 +100,14 @@ def get_job(
     """Get job data from cache, or None if not found."""
     data = _manager(cache_dir).get_job(job_id)
     return copy.deepcopy(data) if data else None
+
+
+def delete_job(
+    job_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> bool:
+    """Remove the job from the store. Returns True if removed, False if not found."""
+    return _manager(cache_dir).delete_job(job_id)
 
 
 def list_jobs(
@@ -145,6 +168,38 @@ def update_job(
 ) -> None:
     """Update job fields. Merges with existing data and persists to cache."""
     _manager(cache_dir).update_job(job_id, **kwargs)
+
+
+def start_job_heartbeat_thread(
+    job_id: str,
+    interval_seconds: float = 120.0,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Start a daemon thread that periodically updates the job's heartbeat (last_heartbeat_at)
+    while the job is pending or running. The thread exits when the job is missing or in a
+    terminal status (completed, failed, cancelled, etc.)."""
+    active_statuses = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING)
+
+    def _heartbeat_loop() -> None:
+        while True:
+            time.sleep(interval_seconds)
+            try:
+                data = get_job(job_id, cache_dir=cache_dir)
+                if not data:
+                    return
+                if data.get("status") not in active_statuses:
+                    return
+                update_job(job_id, cache_dir=cache_dir)
+            except Exception as exc:
+                logger.warning("Job heartbeat thread for %s: %s", job_id, exc)
+                # Continue loop so one failure does not kill the thread
+
+    thread = threading.Thread(
+        target=_heartbeat_loop,
+        name=f"job-heartbeat-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
 
 
 def update_task_state(

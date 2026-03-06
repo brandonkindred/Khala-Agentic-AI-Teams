@@ -41,6 +41,10 @@
               Restart job
             </button>
           }
+          <button mat-stroked-button (click)="onDeleteRunTeamJob()" [matTooltip]="'Remove this job from the list'">
+            <mat-icon>delete</mat-icon>
+            Delete job
+          </button>
           <button mat-stroked-button (click)="clearRunTeamJob()">
             <mat-icon>add</mat-icon>
             Start New Job

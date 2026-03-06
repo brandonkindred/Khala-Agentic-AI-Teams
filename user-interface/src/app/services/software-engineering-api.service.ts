@@ -113,6 +113,16 @@ export class SoftwareEngineeringApiService {
   }
 
   /**
+   * DELETE /run-team/{job_id}
+   * Remove the job from the store; it will no longer appear in the jobs list.
+   */
+  deleteJob(jobId: string): Observable<{ job_id: string; message: string }> {
+    return this.http.delete<{ job_id: string; message: string }>(
+      `${this.baseUrl}/run-team/${jobId}`
+    );
+  }
+
+  /**
    * POST /run-team/{job_id}/answers
    * Submit answers to pending questions to resume job execution.
    */

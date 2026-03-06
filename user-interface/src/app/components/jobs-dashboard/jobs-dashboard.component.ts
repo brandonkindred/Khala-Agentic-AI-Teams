@@ -428,6 +428,21 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
+  deleteJob(event: Event, job: DashboardRow): void {
+    event.stopPropagation();
+    if (job.unified.source !== 'software_engineering') return;
+    if (!confirm('Permanently delete this job? It will be removed from the list.')) {
+      return;
+    }
+    this.seApi.deleteJob(job.unified.jobId).subscribe({
+      next: () => this.refresh(),
+      error: (err) => {
+        console.error('Failed to delete job:', err);
+        this.error = err?.error?.detail ?? err?.message ?? 'Failed to delete job';
+      },
+    });
+  }
+
   canStopJob(job: DashboardRow): boolean {
     if (job.unified.source !== 'software_engineering') return false;
     const status = job.unified.status;
@@ -442,6 +457,10 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   canRestartJob(job: DashboardRow): boolean {
     if (job.unified.source !== 'software_engineering') return false;
     return ['completed', 'failed', 'cancelled', 'agent_crash'].includes(job.unified.status);
+  }
+
+  canDeleteJob(job: DashboardRow): boolean {
+    return job.unified.source === 'software_engineering';
   }
 
   trackByJobId(_index: number, job: DashboardRow): string {

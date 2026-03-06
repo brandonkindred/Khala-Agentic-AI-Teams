@@ -30,6 +30,9 @@ class HttpxErrorLevelFilter(logging.Filter):
 LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
 LOG_DATE_FORMAT = "%H:%M:%S"
 
+# Default log filename when log_file path is a directory (avoid Errno 21 "Is a directory")
+JOB_LOG_FILENAME = "job.log"
+
 # Agent and infrastructure logger names (enable DEBUG for verbose step-by-step visibility)
 AGENT_LOGGERS = [
     # Orchestrator and infrastructure
@@ -87,10 +90,19 @@ def setup_logging(
 
     if log_file:
         log_file = Path(log_file)
+        if log_file.exists() and log_file.is_dir():
+            log_file = log_file / JOB_LOG_FILENAME
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        root.addHandler(file_handler)
+        try:
+            file_handler = logging.FileHandler(log_file, encoding="utf-8")
+            file_handler.setFormatter(formatter)
+            root.addHandler(file_handler)
+        except OSError as e:
+            logging.getLogger(__name__).warning(
+                "Could not create log file at %s; file logging disabled: %s",
+                log_file,
+                e,
+            )
 
     for name in AGENT_LOGGERS:
         logger = logging.getLogger(name)
