@@ -111,7 +111,7 @@ export interface RunBrandRequest {
 }
 
 /** Response from running the branding team for a brand. */
-export interface TeamOutput {
+export interface BrandingTeamOutput {
   status: string;
   mission_summary: string;
   codification?: unknown;

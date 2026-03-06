@@ -94,7 +94,7 @@
               @if (selectedJobStatus.completed_at) {
                 <p class="detail-row"><strong>Completed:</strong> {{ selectedJobStatus.completed_at }}</p>
               }
-              @if (selectedJobStatus.title_choices?.length) {
+              @if (selectedJobStatus.title_choices.length) {
                 <p class="detail-row"><strong>Title choices:</strong> {{ selectedJobStatus.title_choices.length }}</p>
               }
               @if (selectedJobStatus.draft_preview) {
