@@ -1,7 +1,10 @@
 """Tests for the Product Requirements Analysis agent."""
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from product_requirements_analysis_agent import ProductRequirementsAnalysisAgent
 from product_requirements_analysis_agent.models import (
@@ -97,6 +100,63 @@ def test_run_workflow_uses_next_version_after_existing_v6(tmp_path: Path) -> Non
     assert result.success
     assert len(update_spec_calls) >= 1, "_update_spec should be called with version"
     assert update_spec_calls[0] == 7, "First spec update should use version 7 when v6 exists"
+
+
+def test_run_workflow_re_runs_spec_review_after_clarification(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When _run_spec_review returns a different spec (clarification), re-run spec review on clarified spec and log it."""
+    caplog.set_level(logging.INFO)
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+
+    one_question = OpenQuestion(
+        id="q1",
+        question_text="Which OAuth provider?",
+        options=[QuestionOption(id="opt1", label="GitHub", is_default=True, rationale="", confidence=0.9)],
+    )
+    spec_review_with_question = SpecReviewResult(
+        summary="Review", issues=[], gaps=[], open_questions=[one_question]
+    )
+    spec_review_no_questions = SpecReviewResult(
+        summary="Complete", issues=[], gaps=[], open_questions=[]
+    )
+    cleanup_result = SpecCleanupResult(
+        is_valid=True, validation_issues=[], cleaned_spec="# Cleaned", summary="Done"
+    )
+
+    llm = MagicMock()
+    llm.complete_text.return_value = "# Cleaned spec"
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    run_spec_review_calls = []
+
+    def run_spec_review(spec_content, *args, **kwargs):
+        run_spec_review_calls.append(spec_content)
+        if len(run_spec_review_calls) == 1:
+            return spec_review_with_question, "# Clarified spec"
+        return spec_review_no_questions, "# Clarified spec"
+
+    with patch.object(agent, "_run_spec_review", side_effect=run_spec_review):
+        with patch.object(agent, "_communicate_with_user") as mock_comm:
+            mock_comm.return_value = [
+                AnsweredQuestion(question_id="q1", question_text="Which OAuth provider?", selected_answer="GitHub")
+            ]
+            with patch.object(agent, "_run_spec_cleanup", return_value=cleanup_result):
+                with patch.object(agent, "_generate_prd_document", return_value="# PRD"):
+                    result = agent.run_workflow(
+                        spec_content="# Original spec",
+                        repo_path=tmp_path,
+                        job_id="test-job",
+                        job_updater=lambda **kw: None,
+                    )
+
+    assert result.success
+    assert len(run_spec_review_calls) == 2, "Should call _run_spec_review twice (initial + re-run after clarification)"
+    assert run_spec_review_calls[0] == "# Original spec"
+    assert run_spec_review_calls[1] == "# Clarified spec"
+    assert any(
+        "Re-ran spec review on clarified spec" in rec.message for rec in caplog.records
+    ), "Should log that spec review was re-run after clarification"
 
 
 def test_run_workflow_renames_validated_spec_when_needs_more_detail(tmp_path: Path) -> None:
@@ -305,3 +365,17 @@ def test_build_specialist_collaboration_plan_recommends_ui_arch_and_risk_agents(
     assert "Risk Analysis Agent" in plan
     assert "Security, Privacy, and Compliance Agent" in plan
     assert "Data and Analytics Agent" in plan
+
+
+def test_dedupe_questions_by_similarity_keeps_first_and_drops_near_duplicates() -> None:
+    """_dedupe_questions_by_similarity drops questions similar to an earlier one, preserves order."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    opt = QuestionOption(id="o1", label="Yes", is_default=True, rationale="", confidence=0.9)
+    q1 = OpenQuestion(id="a", question_text="Which OAuth provider?", options=[opt])
+    q2 = OpenQuestion(id="b", question_text="Which oauth provider?", options=[opt])
+    q3 = OpenQuestion(id="c", question_text="Where to deploy?", options=[opt])
+    result = agent._dedupe_questions_by_similarity([q1, q2, q3])
+    assert len(result) == 2
+    assert result[0].id == "a"
+    assert result[1].id == "c"

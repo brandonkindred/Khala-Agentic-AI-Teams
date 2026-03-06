@@ -304,7 +304,7 @@ Respond with a JSON object only, no markdown:
 
 CONSOLIDATE_QUESTIONS_PROMPT = """You are a Product Analyst. You have a list of open questions from a product specification review. Some questions are worded differently but ask the same thing (e.g. "Which OAuth provider for the MVP?" and "Should we use GitHub or Google for authentication?").
 
-Your task: Consolidate the list so there are NO duplicate questions. For each distinct decision or topic, keep exactly ONE question.
+Your task: Consolidate the list so there are NO duplicate questions. For each distinct decision or topic, keep exactly ONE question. Produce a single, thorough list with no repeated topics or near-duplicate phrasings.
 
 Rules:
 - Two questions are duplicates if they are asking the same decision (e.g. OAuth provider, token handling, pipeline behavior). Merge them into one.

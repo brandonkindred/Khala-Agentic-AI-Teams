@@ -387,6 +387,7 @@ class ProductRequirementsAnalysisAgent:
                         status_text=f"Analyzing specification (section {chunk_index + 1}/{total_chunks})..."
                     )
 
+                spec_before_review = current_spec
                 spec_review_result, current_spec = self._run_spec_review(
                     current_spec,
                     repo_path,
@@ -395,6 +396,19 @@ class ProductRequirementsAnalysisAgent:
                     answered_questions=all_answered_questions,
                     on_chunk_progress=_on_spec_review_chunk,
                 )
+                if current_spec != spec_before_review:
+                    _update_job(
+                        status_text="Re-analyzing specification after clarification..."
+                    )
+                    spec_review_result, current_spec = self._run_spec_review(
+                        current_spec,
+                        repo_path,
+                        iteration=iteration,
+                        spec_version=base_version + (iteration - 1),
+                        answered_questions=all_answered_questions,
+                        on_chunk_progress=_on_spec_review_chunk,
+                    )
+                    logger.info("Re-ran spec review on clarified spec")
                 result.spec_review_result = spec_review_result
                 if spec_review_result.open_questions:
                     _update_job(
@@ -420,6 +434,20 @@ class ProductRequirementsAnalysisAgent:
                 update={"open_questions": consolidated_questions}
             )
             open_count = len(spec_review_result.open_questions)
+
+            deduped_questions = self._dedupe_questions_by_similarity(
+                spec_review_result.open_questions
+            )
+            if len(deduped_questions) < open_count:
+                logger.info(
+                    "Deduped open questions by similarity: %d -> %d",
+                    open_count,
+                    len(deduped_questions),
+                )
+                spec_review_result = spec_review_result.model_copy(
+                    update={"open_questions": deduped_questions}
+                )
+                open_count = len(spec_review_result.open_questions)
 
             logger.info(
                 "Iteration %d: Found %d issues, %d gaps, %d open questions",
@@ -987,6 +1015,12 @@ Previously Answered Questions:
                 )
                 options = sorted_opts
 
+            raw_depends = q_data.get("depends_on")
+            if isinstance(raw_depends, list):
+                depends_on = raw_depends[0] if raw_depends else None
+            else:
+                depends_on = raw_depends if isinstance(raw_depends, str) else None
+
             return OpenQuestion(
                 id=str(q_data.get("id", f"q{index}")),
                 question_text=str(q_data.get("question_text", "")),
@@ -998,7 +1032,7 @@ Previously Answered Questions:
                 priority=str(q_data.get("priority", "medium")),
                 constraint_domain=str(q_data.get("constraint_domain", "")),
                 constraint_layer=int(q_data.get("constraint_layer", 0) or 0),
-                depends_on=q_data.get("depends_on"),
+                depends_on=depends_on,
                 blocking=bool(q_data.get("blocking", True)),
                 owner=str(q_data.get("owner", "user")),
                 section_impact=list(q_data.get("section_impact", []) or []),
@@ -1046,6 +1080,53 @@ Previously Answered Questions:
             rationale="",
             confidence=0.5,
         )
+
+    def _dedupe_questions_by_similarity(
+        self, questions: List[OpenQuestion]
+    ) -> List[OpenQuestion]:
+        """Drop questions whose question_text is too similar to an earlier one.
+
+        Keeps the first of each similar group; preserves order. Uses normalized
+        text (lowercase, collapsed whitespace) and treats two questions as
+        similar if one is a substring of the other or word-set overlap is high.
+        """
+        if len(questions) <= 1:
+            return list(questions)
+
+        def norm(t: str) -> str:
+            return " ".join(t.lower().split())
+
+        def words(t: str) -> set:
+            return set(norm(t).split())
+
+        SIMILARITY_THRESHOLD = 0.75
+        kept: List[OpenQuestion] = []
+        kept_norm: List[str] = []
+        kept_words: List[set] = []
+
+        for q in questions:
+            n = norm(q.question_text)
+            w = words(q.question_text)
+            if not n.strip():
+                kept.append(q)
+                kept_norm.append(n)
+                kept_words.append(w)
+                continue
+            is_dupe = False
+            for i, (kn, kw) in enumerate(zip(kept_norm, kept_words)):
+                if n in kn or kn in n:
+                    is_dupe = True
+                    break
+                overlap = len(w & kw) / max(len(w), len(kw), 1)
+                if overlap >= SIMILARITY_THRESHOLD:
+                    is_dupe = True
+                    break
+            if not is_dupe:
+                kept.append(q)
+                kept_norm.append(n)
+                kept_words.append(w)
+
+        return kept
 
     def _consolidate_open_questions(
         self, open_questions: List[OpenQuestion]
