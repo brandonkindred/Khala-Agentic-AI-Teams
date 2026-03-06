@@ -112,6 +112,31 @@ def test_get_job_status_404(client: TestClient) -> None:
     assert r.status_code == 404
 
 
+def test_delete_job_success(client: TestClient, temp_work_path: Path) -> None:
+    """DELETE /run-team/{job_id} removes the job and returns 200."""
+    from software_engineering_team.shared.job_store import create_job, get_job, list_jobs
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+    assert get_job(job_id) is not None
+
+    r = client.delete(f"/run-team/{job_id}")
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("job_id") == job_id
+    assert "message" in data
+
+    assert get_job(job_id) is None
+    job_ids = [j["job_id"] for j in list_jobs(running_only=False)]
+    assert job_id not in job_ids
+
+
+def test_delete_job_404(client: TestClient) -> None:
+    """DELETE /run-team/{job_id} returns 404 for non-existent job."""
+    r = client.delete("/run-team/00000000-0000-0000-0000-000000000000")
+    assert r.status_code == 404
+
+
 def test_get_running_jobs(client: TestClient) -> None:
     """GET /run-team/jobs returns list of running/pending jobs (default running_only=True)."""
     r = client.get("/run-team/jobs")

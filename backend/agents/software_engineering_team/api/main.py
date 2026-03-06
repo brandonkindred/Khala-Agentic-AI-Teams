@@ -41,11 +41,14 @@ from software_engineering_team.shared.job_store import (
     JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
     JOB_STATUS_RUNNING,
     create_job,
+    delete_job,
     get_job,
+    get_stale_after_seconds,
     is_cancel_requested,
     list_jobs,
     mark_stale_jobs_failed,
     request_cancel,
+    start_job_heartbeat_thread,
     update_job,
     submit_answers as store_submit_answers,
 )
@@ -69,7 +72,7 @@ def _start_stale_job_monitor_once() -> None:
             while True:
                 try:
                     mark_stale_jobs_failed(
-                        stale_after_seconds=600.0,
+                        stale_after_seconds=get_stale_after_seconds(),
                         reason="Job heartbeat stale while pending/running",
                     )
                 except Exception as exc:
@@ -385,6 +388,7 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
     )
     thread.daemon = True
     thread.start()
+    start_job_heartbeat_thread(job_id)
 
     return RunTeamResponse(
         job_id=job_id,
@@ -530,6 +534,7 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         "requirements_title": data.get("requirements_title"),
         "architecture_overview": data.get("architecture_overview"),
         "current_task": data.get("current_task"),
+        "status_text": data.get("status_text"),
         "task_results": data.get("task_results") if isinstance(data.get("task_results"), list) else [],
         "task_ids": task_ids,
         "progress": _coerce_progress(data.get("progress")),
@@ -576,6 +581,7 @@ def retry_failed_tasks(job_id: str) -> RetryResponse:
     thread = threading.Thread(target=_run_retry_background, args=(job_id,))
     thread.daemon = True
     thread.start()
+    start_job_heartbeat_thread(job_id)
 
     return RetryResponse(
         job_id=job_id,
@@ -591,6 +597,13 @@ class CancelJobResponse(BaseModel):
     job_id: str = Field(..., description="Job ID.")
     status: str = Field(default="cancelled", description="New status after cancellation.")
     message: str = Field(default="Job cancellation requested.")
+
+
+class DeleteJobResponse(BaseModel):
+    """Response from DELETE /run-team/{job_id}."""
+
+    job_id: str = Field(..., description="Job ID that was deleted.")
+    message: str = Field(default="Job deleted", description="Human-readable result.")
 
 
 @app.post(
@@ -627,6 +640,23 @@ def cancel_job(job_id: str) -> CancelJobResponse:
         status="cancelled",
         message="Job cancellation requested. Running agents will stop at the next checkpoint.",
     )
+
+
+@app.delete(
+    "/run-team/{job_id}",
+    response_model=DeleteJobResponse,
+    summary="Delete a job",
+    description="Remove the job from the store. It will no longer appear in the jobs list. "
+    "If the job was running, any background work may continue until it next updates the job.",
+)
+def delete_run_team_job(job_id: str) -> DeleteJobResponse:
+    """Delete a job by id. Returns 404 if job not found."""
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if not delete_job(job_id):
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return DeleteJobResponse(job_id=job_id, message="Job deleted")
 
 
 RESUMABLE_STATUSES = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING, JOB_STATUS_AGENT_CRASH)
@@ -688,6 +718,7 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
         daemon=True,
     )
     thread.start()
+    start_job_heartbeat_thread(job_id)
 
     return RunTeamResponse(
         job_id=job_id,
@@ -745,6 +776,7 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
         daemon=True,
     )
     thread.start()
+    start_job_heartbeat_thread(new_job_id)
 
     return RunTeamResponse(
         job_id=new_job_id,
@@ -782,6 +814,7 @@ def resume_after_llm_check(job_id: str) -> RetryResponse:
     thread = threading.Thread(target=_run_retry_background, args=(job_id,))
     thread.daemon = True
     thread.start()
+    start_job_heartbeat_thread(job_id)
 
     return RetryResponse(
         job_id=job_id,
@@ -1149,6 +1182,7 @@ def run_frontend_code_v2(request: FrontendCodeV2RunRequest) -> FrontendCodeV2Run
     )
     thread.daemon = True
     thread.start()
+    start_job_heartbeat_thread(job_id)
 
     return FrontendCodeV2RunResponse(
         job_id=job_id,
@@ -1398,6 +1432,7 @@ def run_backend_code_v2(request: BackendCodeV2RunRequest) -> BackendCodeV2RunRes
     )
     thread.daemon = True
     thread.start()
+    start_job_heartbeat_thread(job_id)
 
     return BackendCodeV2RunResponse(
         job_id=job_id,
@@ -1463,6 +1498,7 @@ def run_planning_v2(request: PlanningV2RunRequest) -> PlanningV2RunResponse:
     )
     thread.daemon = True
     thread.start()
+    start_job_heartbeat_thread(job_id)
 
     return PlanningV2RunResponse(
         job_id=job_id,
@@ -2002,6 +2038,7 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
     )
     thread.daemon = True
     thread.start()
+    start_job_heartbeat_thread(job_id)
 
     return ProductAnalysisRunResponse(
         job_id=job_id,

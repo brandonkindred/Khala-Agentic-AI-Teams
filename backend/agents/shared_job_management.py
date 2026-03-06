@@ -79,6 +79,15 @@ class CentralJobManager:
             data = self._read(self._job_file(job_id))
             return copy.deepcopy(data) if data else None
 
+    def delete_job(self, job_id: str) -> bool:
+        """Remove the job file from the store. Returns True if removed, False if not found."""
+        with self._lock:
+            path = self._job_file(job_id)
+            if not path.exists():
+                return False
+            path.unlink()
+            return True
+
     def list_jobs(self, *, statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         result: List[Dict[str, Any]] = []
         with self._lock:
