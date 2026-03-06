@@ -21,6 +21,13 @@
     </div>
   }
 
+  @if (seFetchError) {
+    <div class="error-banner se-fetch-warning">
+      <mat-icon>warning</mat-icon>
+      <span>Software Engineering jobs could not be loaded. {{ seFetchError }}</span>
+    </div>
+  }
+
   @if (loading && jobs.length === 0) {
     <div class="loading-state">
       <mat-icon class="spinning">sync</mat-icon>

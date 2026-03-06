@@ -8,6 +8,7 @@ from product_requirements_analysis_agent.models import (
     AnsweredQuestion,
     OpenQuestion,
     QuestionOption,
+    SpecCleanupResult,
     SpecReviewResult,
 )
 
@@ -155,6 +156,51 @@ def test_run_workflow_renames_validated_spec_when_needs_more_detail(tmp_path: Pa
     assert v1.read_text() == "# Validated content", "v1 should contain the original validated content from the rename"
     assert len(update_spec_calls) >= 1
     assert update_spec_calls[0] == 2, "First _update_spec after rename should use version 2"
+
+
+def test_run_workflow_writes_validated_spec_and_prd_separately(tmp_path: Path) -> None:
+    """After a successful run, validated_spec.md contains the cleaned spec and product_requirements_document.md contains the PRD; they differ."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+
+    cleaned_spec_content = "Cleaned normalized spec content."
+    prd_content = "# Product Requirements Document\n\n## Executive Summary\n\nFull PRD with Open Questions section."
+
+    spec_review_no_questions = SpecReviewResult(
+        summary="Complete", issues=[], gaps=[], open_questions=[]
+    )
+    cleanup_result = SpecCleanupResult(
+        is_valid=True,
+        validation_issues=[],
+        cleaned_spec=cleaned_spec_content,
+        summary="Cleaned",
+    )
+
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+
+    with patch.object(agent, "_run_spec_review", return_value=(spec_review_no_questions, "# Spec")):
+        with patch.object(agent, "_run_spec_cleanup", return_value=cleanup_result):
+            with patch.object(agent, "_generate_prd_document", return_value=prd_content):
+                result = agent.run_workflow(
+                    spec_content="# Spec",
+                    repo_path=tmp_path,
+                    job_id="test-job",
+                    job_updater=lambda **kw: None,
+                )
+
+    assert result.success
+    validated_path = tmp_path / "plan" / "product_analysis" / "validated_spec.md"
+    prd_path = tmp_path / "plan" / "product_analysis" / "product_requirements_document.md"
+    assert validated_path.exists(), "validated_spec.md should exist"
+    assert prd_path.exists(), "product_requirements_document.md should exist"
+
+    validated_text = validated_path.read_text()
+    prd_text = prd_path.read_text()
+    assert validated_text == cleaned_spec_content, "validated_spec.md should contain the cleaned spec"
+    assert prd_text == prd_content, "product_requirements_document.md should contain the PRD"
+    assert validated_text != prd_text, "validated spec and PRD must differ"
+    assert "Executive Summary" in prd_text, "PRD should contain PRD template sections"
+    assert "Executive Summary" not in validated_text, "validated spec is cleaned spec, not the full PRD"
 
 
 def test_parse_open_question_preserves_extended_metadata() -> None:

@@ -1,11 +1,16 @@
 """
 Job store for async API: persists job status and progress per job in a cache directory.
-Each job is stored as {cache_dir}/jobs/{job_id}.json so state survives process restarts.
+
+Uses AGENT_CACHE environment variable when set (otherwise .agent_cache), resolved to an
+absolute path so list/create use the same directory regardless of process CWD. Each job
+is stored under {cache_dir}/software_engineering_team/jobs/{job_id}.json via
+CentralJobManager so state survives process restarts.
 """
 
 from __future__ import annotations
 
 import copy
+import os
 import json
 import logging
 import threading
@@ -33,11 +38,17 @@ LLM_UNREACHABLE_AFTER_RETRIES = (
     "LLM unreachable after 3 attempts with exponential backoff. Check connectivity and resume when ready."
 )
 
-DEFAULT_CACHE_DIR: str | Path = ".agent_cache"
+DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache")).resolve()
 _lock = threading.Lock()
+_jobs_path_logged = False
 
 
 def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
+    global _jobs_path_logged
+    if not _jobs_path_logged:
+        jobs_dir = Path(cache_dir) / "software_engineering_team" / "jobs"
+        logger.info("Software engineering job store path: %s", jobs_dir)
+        _jobs_path_logged = True
     return CentralJobManager(team="software_engineering_team", cache_dir=cache_dir)
 
 

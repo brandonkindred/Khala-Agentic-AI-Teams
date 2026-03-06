@@ -148,31 +148,40 @@
 </mat-tab-group>
   </div>
 
-  @if (runningJobs.length > 0) {
+  @if (runningJobs.length > 0 || runningJobsError) {
     <aside class="running-jobs-panel">
       <mat-card>
         <mat-card-header>
           <mat-card-title>Running jobs</mat-card-title>
-          <mat-card-subtitle>{{ runningJobs.length }} job(s) in progress</mat-card-subtitle>
+          <mat-card-subtitle>
+            @if (runningJobsError) {
+              Could not load list
+            } @else {
+              {{ runningJobs.length }} job(s) in progress
+            }
+          </mat-card-subtitle>
         </mat-card-header>
         <mat-card-content>
-          <div class="running-jobs-list">
-            @for (job of runningJobs; track job.job_id) {
-              <button
-                type="button"
-                class="job-item"
-                [class.selected]="selectedRunningJob?.job_id === job.job_id"
-                (click)="selectRunningJob(job)"
-              >
-                <span class="job-type">{{ runningJobTypeLabel(job.job_type) }}</span>
-                <span class="job-id">{{ job.job_id }}</span>
-                @if (job.repo_path) {
-                  <span class="job-repo">{{ job.repo_path }}</span>
-                }
-              </button>
-            }
-          </div>
-
+          @if (runningJobsError) {
+            <p class="running-jobs-error">{{ runningJobsError }}</p>
+          } @else {
+            <div class="running-jobs-list">
+              @for (job of runningJobs; track job.job_id) {
+                <button
+                  type="button"
+                  class="job-item"
+                  [class.selected]="selectedRunningJob?.job_id === job.job_id"
+                  (click)="selectRunningJob(job)"
+                >
+                  <span class="job-type">{{ runningJobTypeLabel(job.job_type) }}</span>
+                  <span class="job-id">{{ job.job_id }}</span>
+                  @if (job.repo_path) {
+                    <span class="job-repo">{{ job.repo_path }}</span>
+                  }
+                </button>
+              }
+            </div>
+          }
         </mat-card-content>
       </mat-card>
     </aside>

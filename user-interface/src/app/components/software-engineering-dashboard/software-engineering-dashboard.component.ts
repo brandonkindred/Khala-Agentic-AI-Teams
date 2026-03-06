@@ -102,6 +102,8 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
 
   /** Running jobs from GET /run-team/jobs; used by the right-hand panel. */
   runningJobs: RunningJobSummary[] = [];
+  /** Error from failed getRunningJobs() so user sees why the list is empty. */
+  runningJobsError: string | null = null;
   /** Job selected in the running-jobs panel for monitoring. */
   selectedRunningJob: RunningJobSummary | null = null;
   /** Status for the selected run_team job in the panel (from JobStatusComponent). */
@@ -138,6 +140,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
       switchMap(() => this.api.getRunningJobs())
     ).subscribe({
       next: (res) => {
+        this.runningJobsError = null;
         this.runningJobs = res.jobs;
         if (this.runningJobs.length === 0) {
           this.selectedRunningJob = null;
@@ -161,6 +164,10 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
         } else if (this.runningJobs.length > 0 && !this.selectedRunningJob) {
           this.selectRunningJob(this.runningJobs[0]);
         }
+      },
+      error: (err) => {
+        this.runningJobsError = err?.error?.detail ?? err?.message ?? 'Failed to load jobs list';
+        this.runningJobs = [];
       },
     });
   }
