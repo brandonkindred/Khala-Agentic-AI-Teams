@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StrategyValidationType(str, Enum):
@@ -377,6 +377,8 @@ class FindingsV1(BaseModel):
 
 
 class ArtifactsV1(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     equity_curve_ref: str = ""
     trades_ref: str = ""
     model_ref: str = ""

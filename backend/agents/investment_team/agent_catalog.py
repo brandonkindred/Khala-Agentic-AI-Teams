@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+from typing import Dict, List
+
 from pydantic import BaseModel, Field
 
 
 class AgentDefinition(BaseModel):
     name: str
     role: str
-    inputs: list[str] = Field(default_factory=list)
-    outputs: list[str] = Field(default_factory=list)
-    hard_rules: list[str] = Field(default_factory=list)
+    inputs: List[str] = Field(default_factory=list)
+    outputs: List[str] = Field(default_factory=list)
+    hard_rules: List[str] = Field(default_factory=list)
 
 
-CORE_AGENTS: list[AgentDefinition] = [
+CORE_AGENTS: List[AgentDefinition] = [
     AgentDefinition(
         name="IPS Generator Agent",
         role="Convert InvestmentProfile into a normalized IPS constitution.",
@@ -64,7 +66,7 @@ CORE_AGENTS: list[AgentDefinition] = [
 ]
 
 
-SPECIALIST_DESKS: dict[str, list[str]] = {
+SPECIALIST_DESKS: Dict[str, List[str]] = {
     "equities": [
         "Equity Research Agent",
         "Equity Strategy Designer Agent",
