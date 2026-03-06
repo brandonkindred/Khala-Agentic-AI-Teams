@@ -311,7 +311,7 @@ Software Engineering jobs are stored under `{cache_dir}/software_engineering_tea
 
 ### Slack integration (Phase 1)
 
-- **Integrations API:** `GET /api/integrations`, `GET /api/integrations/slack`, `PUT /api/integrations/slack`. Configure Slack (webhook URL, channel label) via UI or env (`SLACK_WEBHOOK_URL`).
+- **Integrations API:** `GET /api/integrations`, `GET /api/integrations/slack`, `PUT /api/integrations/slack`. Configure Slack via UI in either `webhook` mode (Incoming Webhook URL) or `bot` mode (Bot token + default channel), with per-event toggles for open questions and PA responses. `SLACK_WEBHOOK_URL` remains a webhook fallback env var.
 - **Manual E2E checklist:** (1) Start unified API and Angular UI. (2) Open **Integrations**, enable Slack, paste a valid Incoming Webhook URL, save. (3) Run a software-engineering job (or planning-v2 / product-analysis) that produces open questions; confirm a message appears in the Slack channel with a link to the UI. (4) Send a message to the Personal Assistant; confirm the assistant reply appears in the same Slack channel.
 
 ### Phase 2: Inbound from Slack (optional)

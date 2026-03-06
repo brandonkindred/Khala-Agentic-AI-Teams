@@ -1,8 +1,12 @@
 """
-Slack notifier: fire-and-forget posting to Slack Incoming Webhook.
+Slack notifier: fire-and-forget posting to Slack.
+
+Supports two modes:
+- webhook: Incoming Webhook URL
+- bot: Slack Bot token + chat.postMessage default channel
 
 Used to send open questions (software engineering) and PA responses to the configured channel.
-Reads config from integrations_store (and SLACK_WEBHOOK_URL env fallback).
+Reads config from integrations_store (and SLACK_WEBHOOK_URL env fallback for webhook mode).
 All calls are non-blocking; errors are logged only.
 """
 
@@ -25,18 +29,21 @@ def _get_slack_config() -> Dict[str, Any]:
     except ImportError:
         return {
             "enabled": bool(os.getenv("SLACK_WEBHOOK_URL")),
+            "mode": "webhook",
             "webhook_url": os.getenv("SLACK_WEBHOOK_URL", "").strip(),
+            "bot_token": "",
+            "default_channel": "",
             "channel_display_name": "",
+            "notify_open_questions": True,
+            "notify_pa_responses": True,
         }
 
 
 def _get_status_base_url() -> str:
-    """Base URL for UI (e.g. for open-question links). From env or default."""
     return os.getenv("UI_BASE_URL", "http://localhost:4200").rstrip("/")
 
 
 def _post_webhook_sync(url: str, payload: Dict[str, Any]) -> None:
-    """POST JSON to webhook URL. Log errors; do not raise."""
     try:
         import urllib.request
         data = json.dumps(payload).encode("utf-8")
@@ -53,10 +60,41 @@ def _post_webhook_sync(url: str, payload: Dict[str, Any]) -> None:
         logger.warning("Slack webhook post failed: %s", e)
 
 
+def _post_bot_sync(token: str, channel: str, payload: Dict[str, Any]) -> None:
+    try:
+        from slack_sdk import WebClient
+
+        client = WebClient(token=token)
+        response = client.chat_postMessage(
+            channel=channel,
+            text=str(payload.get("text") or ""),
+            blocks=payload.get("blocks"),
+        )
+        if not bool(response.get("ok", False)):
+            logger.warning("Slack bot post failed: %s", response)
+    except Exception as e:
+        logger.warning("Slack bot post failed: %s", e)
+
+
 def _run_in_background(target: Any, *args: Any, **kwargs: Any) -> None:
-    """Run target in a daemon thread. Fire-and-forget."""
     t = threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True)
     t.start()
+
+
+def _send_payload(cfg: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    mode = cfg.get("mode", "webhook")
+    if mode == "bot":
+        token = str(cfg.get("bot_token") or "").strip()
+        channel = str(cfg.get("default_channel") or "").strip()
+        if not token or not channel:
+            return
+        _post_bot_sync(token, channel, payload)
+        return
+
+    webhook_url = str(cfg.get("webhook_url") or "").strip()
+    if not webhook_url:
+        return
+    _post_webhook_sync(webhook_url, payload)
 
 
 def _build_open_questions_blocks(
@@ -65,7 +103,6 @@ def _build_open_questions_blocks(
     source: str,
     status_url: str,
 ) -> List[Dict[str, Any]]:
-    """Build Block Kit blocks for open questions message."""
     source_label = {
         "run-team": "Run team",
         "planning-v2": "Planning v2",
@@ -113,22 +150,17 @@ def notify_open_questions(
     source: str,
     status_url: Optional[str] = None,
 ) -> None:
-    """
-    Post open questions to Slack (fire-and-forget).
-    source: one of run-team, planning-v2, product-analysis.
-    status_url: full URL to job status / answer page; if None, built from UI_BASE_URL + path.
-    """
     cfg = _get_slack_config()
-    if not cfg.get("enabled") or not cfg.get("webhook_url"):
+    if not cfg.get("enabled") or not bool(cfg.get("notify_open_questions", True)):
         return
-    url = cfg["webhook_url"]
+
     base = _get_status_base_url()
     link = status_url or f"{base}/software-engineering?job={job_id}"
     blocks = _build_open_questions_blocks(job_id, questions, source, link)
     payload = {"text": f"Open questions ({source}): job {job_id}", "blocks": blocks}
 
     def _send() -> None:
-        _post_webhook_sync(url, payload)
+        _send_payload(cfg, payload)
 
     _run_in_background(_send)
 
@@ -140,11 +172,10 @@ def notify_pa_response(
     actions_taken: Optional[List[str]] = None,
     follow_ups: Optional[List[str]] = None,
 ) -> None:
-    """Post Personal Assistant request/response to Slack (fire-and-forget)."""
     cfg = _get_slack_config()
-    if not cfg.get("enabled") or not cfg.get("webhook_url"):
+    if not cfg.get("enabled") or not bool(cfg.get("notify_pa_responses", True)):
         return
-    url = cfg["webhook_url"]
+
     text = f"*User ({user_id}):* {user_message[:500]}\n*Assistant:* {response_message[:1500]}"
     blocks: List[Dict[str, Any]] = [
         {
@@ -166,6 +197,6 @@ def notify_pa_response(
     payload = {"text": "Personal Assistant reply", "blocks": blocks}
 
     def _send() -> None:
-        _post_webhook_sync(url, payload)
+        _send_payload(cfg, payload)
 
     _run_in_background(_send)

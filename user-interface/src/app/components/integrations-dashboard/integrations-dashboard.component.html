@@ -1,5 +1,5 @@
 <h1>Integrations</h1>
-<p>Configure external integrations. When enabled, agents can notify you via the configured Slack channel (open questions and Personal Assistant replies).</p>
+<p>Configure external integrations. Slack can follow Codex-style delivery via webhook or bot token mode.</p>
 
 @if (loading) {
   <p>Loading…</p>
@@ -9,7 +9,7 @@
       <mat-icon mat-card-avatar class="header-icon">integration_instructions</mat-icon>
       <mat-card-title>Slack</mat-card-title>
       <mat-card-subtitle>
-        Open questions and Personal Assistant messages are posted to your Slack channel when enabled.
+        Deliver open questions and Personal Assistant messages to Slack with either Incoming Webhook or Bot posting.
       </mat-card-subtitle>
     </mat-card-header>
     <mat-card-content>
@@ -19,44 +19,73 @@
       @if (success) {
         <p class="success-message">{{ success }}</p>
       }
+
       <div class="form-row">
         <mat-slide-toggle [(ngModel)]="slackEnabled" color="primary">
           Enable Slack integration
         </mat-slide-toggle>
       </div>
+
       <div class="form-row">
-        <mat-form-field appearance="outline" class="full-width">
-          <mat-label>Webhook URL</mat-label>
-          <input
-            matInput
-            [(ngModel)]="webhookUrl"
-            type="url"
-            placeholder="https://hooks.slack.com/services/..."
-          />
-          <mat-hint>Create an Incoming Webhook in your Slack app and paste the URL here. Leave blank if already configured (e.g. via env).</mat-hint>
-          @if (webhookConfigured && !webhookUrl) {
-            <mat-hint align="end">Webhook is configured</mat-hint>
-          }
-        </mat-form-field>
+        <label class="mode-label">Delivery mode</label>
+        <mat-radio-group [(ngModel)]="mode" aria-label="Slack mode">
+          <mat-radio-button value="webhook">Incoming Webhook</mat-radio-button>
+          <mat-radio-button value="bot">Bot Token (chat.postMessage)</mat-radio-button>
+        </mat-radio-group>
       </div>
+
+      @if (mode === 'webhook') {
+        <div class="form-row">
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Webhook URL</mat-label>
+            <input
+              matInput
+              [(ngModel)]="webhookUrl"
+              type="url"
+              placeholder="https://hooks.slack.com/services/..."
+            />
+            <mat-hint>Create an Incoming Webhook in your Slack app and paste the URL here.</mat-hint>
+            @if (webhookConfigured && !webhookUrl) {
+              <mat-hint align="end">Webhook is configured</mat-hint>
+            }
+          </mat-form-field>
+        </div>
+      }
+
+      @if (mode === 'bot') {
+        <div class="form-row">
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Bot token</mat-label>
+            <input matInput [(ngModel)]="botToken" type="password" placeholder="xoxb-..." />
+            @if (botTokenConfigured && !botToken) {
+              <mat-hint align="end">Bot token is configured</mat-hint>
+            }
+          </mat-form-field>
+        </div>
+        <div class="form-row">
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Default channel</mat-label>
+            <input matInput [(ngModel)]="defaultChannel" placeholder="#engineering or C123..." />
+            <mat-hint>Used for all Slack notifications in bot mode.</mat-hint>
+          </mat-form-field>
+        </div>
+      }
+
       <div class="form-row">
         <mat-form-field appearance="outline" class="full-width">
           <mat-label>Channel name (optional)</mat-label>
-          <input
-            matInput
-            [(ngModel)]="channelDisplayName"
-            placeholder="#engineering"
-          />
+          <input matInput [(ngModel)]="channelDisplayName" placeholder="#engineering" />
           <mat-hint>Display label only (e.g. #engineering).</mat-hint>
         </mat-form-field>
       </div>
+
+      <div class="form-row toggles">
+        <mat-slide-toggle [(ngModel)]="notifyOpenQuestions" color="primary">Notify open questions</mat-slide-toggle>
+        <mat-slide-toggle [(ngModel)]="notifyPaResponses" color="primary">Notify PA responses</mat-slide-toggle>
+      </div>
+
       <div class="form-row">
-        <button
-          mat-raised-button
-          color="primary"
-          (click)="saveSlack()"
-          [disabled]="saving || (slackEnabled && webhookUrlInvalid())"
-        >
+        <button mat-raised-button color="primary" (click)="saveSlack()" [disabled]="saving">
           @if (saving) { Saving… } @else { Save }
         </button>
       </div>

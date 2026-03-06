@@ -1,5 +1,5 @@
 .slack-card {
-  max-width: 560px;
+  max-width: 680px;
   margin-top: 1rem;
 }
 
@@ -15,6 +15,24 @@
   &.form-row:last-of-type {
     margin-bottom: 0;
   }
+}
+
+.mode-label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+}
+
+mat-radio-group {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 .full-width {
