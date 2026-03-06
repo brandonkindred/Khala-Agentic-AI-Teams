@@ -13,7 +13,7 @@ import type {
   DesignAssetRequestResult,
   RunBrandRequest,
   RunBrandingTeamRequest,
-  TeamOutput,
+  BrandingTeamOutput,
   UpdateBrandRequest,
   HealthResponse,
 } from '../models';
@@ -51,8 +51,8 @@ export class BrandingApiService {
     return this.http.put<Brand>(`${this.baseUrl}/branding/clients/${clientId}/brands/${brandId}`, request);
   }
 
-  runBrand(clientId: string, brandId: string, request?: RunBrandRequest): Observable<TeamOutput> {
-    return this.http.post<TeamOutput>(
+  runBrand(clientId: string, brandId: string, request?: RunBrandRequest): Observable<BrandingTeamOutput> {
+    return this.http.post<BrandingTeamOutput>(
       `${this.baseUrl}/branding/clients/${clientId}/brands/${brandId}/run`,
       request ?? { human_approved: true }
     );
