@@ -7,6 +7,7 @@ Section 508 standards.
 """
 
 from .models import (
+    AuditRequest,
     AuditPlan,
     CoverageMatrix,
     CoverageRow,
@@ -19,9 +20,11 @@ from .models import (
     Severity,
     Surface,
     TestRunConfig,
+    WCAGLevel,
 )
 
 __all__ = [
+    "AuditRequest",
     "AuditPlan",
     "CoverageMatrix",
     "CoverageRow",
@@ -34,4 +37,5 @@ __all__ = [
     "Severity",
     "Surface",
     "TestRunConfig",
+    "WCAGLevel",
 ]

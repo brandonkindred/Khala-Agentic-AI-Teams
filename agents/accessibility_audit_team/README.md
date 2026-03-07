@@ -177,6 +177,27 @@ for finding in result.final_findings:
     print(f"  Fix: {finding.recommended_fix}")
 ```
 
+
+## AWS Strands Integration
+
+The accessibility audit team includes a Strands-compatible registration module at
+`accessibility_audit_team.strands_integration`.
+
+```python
+from accessibility_audit_team.strands_integration import get_team_spec
+
+spec = get_team_spec()
+# spec["input_model"] -> StrandsAuditInvocation
+# spec["output_model"] -> AccessibilityAuditResult
+```
+
+The returned spec exposes both:
+- `handler_factory`: synchronous wrapper for runtimes that call blocking handlers
+- `async_handler_factory`: async handler for native async runtimes
+
+Payloads must include an `audit_request` object matching `AuditRequest`, and may
+optionally include `tech_stack` metadata.
+
 ## API Endpoints
 
 The team exposes a REST API via FastAPI:
