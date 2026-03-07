@@ -19,8 +19,9 @@ from agents.investment_team.models import (
     ValidationCheck,
     ValidationReport,
     ValidationStatus,
+    WorkflowMode,
 )
-from agents.investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
+from agents.investment_team.orchestrator import ExternalUIAction, InvestmentTeamOrchestrator, WebActionClass, WorkflowState
 
 
 def _sample_ips() -> IPS:
@@ -145,3 +146,58 @@ def test_policy_guardian_rejects_excluded_asset_class() -> None:
     violations = PolicyGuardianAgent().check_portfolio(ips, proposal)
 
     assert any("excluded by IPS preferences" in item for item in violations)
+
+
+def test_external_ui_action_gate_blocks_live_action_in_paper_mode() -> None:
+    state = WorkflowState(mode=WorkflowMode.PAPER)
+    ips = _sample_ips()
+    orch = InvestmentTeamOrchestrator()
+    action = ExternalUIAction(
+        event_id="Order 123",
+        platform="alpaca",
+        action_class=WebActionClass.LIVE_TRADING,
+        operation="submit_live_order",
+    )
+
+    allowed = orch.dispatch_external_ui_action(state=state, ips=ips, action=action, human_approval=True)
+
+    assert not allowed
+    assert state.audit_log[-1] == "ui_action:order_123:alpaca:live_trading:denied:mode_blocked:paper"
+
+
+def test_external_ui_action_gate_requires_human_approval_for_irreversible_action() -> None:
+    state = WorkflowState(mode=WorkflowMode.LIVE)
+    ips = _sample_ips()
+    orch = InvestmentTeamOrchestrator()
+    action = ExternalUIAction(
+        event_id="SETTINGS-01",
+        platform="broker_portal",
+        action_class=WebActionClass.ACCOUNT_SETTINGS,
+        operation="modify_account_settings",
+    )
+
+    allowed = orch.dispatch_external_ui_action(state=state, ips=ips, action=action, human_approval=False)
+
+    assert not allowed
+    assert state.audit_log[-1] == (
+        "ui_action:settings_01:broker_portal:account_settings:denied:missing_human_approval"
+    )
+
+
+def test_external_ui_action_gate_approves_and_queues_action() -> None:
+    state = WorkflowState(mode=WorkflowMode.LIVE)
+    ips = _sample_ips()
+    orch = InvestmentTeamOrchestrator()
+    action = ExternalUIAction(
+        event_id="Live-Order#ABC",
+        platform="ibkr",
+        action_class=WebActionClass.LIVE_TRADING,
+        operation="submit_live_order",
+    )
+
+    allowed = orch.dispatch_external_ui_action(state=state, ips=ips, action=action, human_approval=True)
+
+    assert allowed
+    assert state.audit_log[-1] == "enqueued:execution:live_order_abc:high"
+    assert state.audit_log[-2] == "ui_action:live_order_abc:ibkr:live_trading:approved:gate_pass"
+    assert state.queues["execution"][-1].payload_id == "live_order_abc"

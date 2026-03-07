@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, List
 
 from .agents import AgentIdentity, PolicyGuardianAgent, PromotionGateAgent
@@ -21,6 +22,32 @@ class QueueItem:
     queue: str
     payload_id: str
     priority: str = "normal"
+
+
+class WebActionClass(str, Enum):
+    READ_ONLY = "read_only"
+    PAPER_TRADING = "paper_trading"
+    LIVE_TRADING = "live_trading"
+    ACCOUNT_SETTINGS = "account_settings"
+
+
+@dataclass
+class ExternalUIAction:
+    event_id: str
+    platform: str
+    action_class: WebActionClass
+    operation: str
+
+    @property
+    def requires_human_approval(self) -> bool:
+        irreversible_ops = {
+            "submit_live_order",
+            "modify_account_settings",
+        }
+        return self.operation in irreversible_ops or self.action_class in {
+            WebActionClass.LIVE_TRADING,
+            WebActionClass.ACCOUNT_SETTINGS,
+        }
 
 
 @dataclass
@@ -98,3 +125,61 @@ class InvestmentTeamOrchestrator:
         if decision.outcome.value in {"reject", "revise"}:
             self.enqueue(state, QueueItem(queue="escalation", payload_id=strategy.strategy_id, priority="high"))
         return decision
+
+    def dispatch_external_ui_action(
+        self,
+        state: WorkflowState,
+        ips: IPS,
+        action: ExternalUIAction,
+        human_approval: bool = False,
+    ) -> bool:
+        allowed, reason = self._pre_execution_gate(
+            state=state,
+            ips=ips,
+            action=action,
+            human_approval=human_approval,
+        )
+        normalized_event_id = self._normalize_event_id(action.event_id)
+        verdict = "approved" if allowed else "denied"
+        state.audit_log.append(
+            f"ui_action:{normalized_event_id}:{action.platform}:{action.action_class.value}:{verdict}:{reason}"
+        )
+        if allowed:
+            self.enqueue(state, QueueItem(queue="execution", payload_id=normalized_event_id, priority="high"))
+        return allowed
+
+    def _pre_execution_gate(
+        self,
+        state: WorkflowState,
+        ips: IPS,
+        action: ExternalUIAction,
+        human_approval: bool,
+    ) -> tuple[bool, str]:
+        mode_gate = {
+            WorkflowMode.MONITOR_ONLY: {WebActionClass.READ_ONLY},
+            WorkflowMode.PAPER: {WebActionClass.READ_ONLY, WebActionClass.PAPER_TRADING},
+            WorkflowMode.LIVE: {
+                WebActionClass.READ_ONLY,
+                WebActionClass.PAPER_TRADING,
+                WebActionClass.LIVE_TRADING,
+                WebActionClass.ACCOUNT_SETTINGS,
+            },
+            WorkflowMode.ADVISORY: {WebActionClass.READ_ONLY},
+        }
+        allowed_actions = mode_gate.get(state.mode, {WebActionClass.READ_ONLY})
+        if action.action_class not in allowed_actions:
+            return False, f"mode_blocked:{state.mode.value}"
+
+        if action.action_class == WebActionClass.LIVE_TRADING and not ips.live_trading_enabled:
+            return False, "ips_live_trading_disabled"
+
+        if action.requires_human_approval and not human_approval:
+            return False, "missing_human_approval"
+
+        return True, "gate_pass"
+
+    def _normalize_event_id(self, event_id: str) -> str:
+        normalized = "".join(ch if ch.isalnum() else "_" for ch in event_id.strip().lower())
+        while "__" in normalized:
+            normalized = normalized.replace("__", "_")
+        return normalized.strip("_") or "ui_action"
