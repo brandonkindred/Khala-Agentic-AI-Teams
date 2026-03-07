@@ -50,7 +50,7 @@ describe('RunTeamTrackingComponent work tree fallback initiative behavior', () =
       const rows = (component as never as { buildWorkTreeRows: (s: JobStatusResponse) => Array<{ label: string; status: string }> })
         .buildWorkTreeRows(status);
 
-      expect(rows.some((row) => row.label === 'Uncategorized Initiative')).toBeFalse();
+      expect(rows.some((row) => row.label === 'Uncategorized Initiative')).toBe(false);
       expect(rows[0]?.status).toBe('completed');
     });
 
@@ -75,7 +75,7 @@ describe('RunTeamTrackingComponent work tree fallback initiative behavior', () =
       const rows = (component as never as { buildWorkTreeRows: (s: JobStatusResponse) => Array<{ label: string }> })
         .buildWorkTreeRows(status);
 
-      expect(rows.some((row) => row.label === 'Uncategorized Initiative')).toBeTrue();
+      expect(rows.some((row) => row.label === 'Uncategorized Initiative')).toBe(true);
     });
   });
 
@@ -127,12 +127,12 @@ describe('RunTeamTrackingComponent work tree fallback initiative behavior', () =
         .buildWorkTreeRows(status);
 
       // Should have proper hierarchy labels from planning_hierarchy
-      expect(rows.some((row) => row.label === 'Core Task Management')).toBeTrue();
-      expect(rows.some((row) => row.label === 'Task CRUD Operations')).toBeTrue();
-      expect(rows.some((row) => row.label === 'Create Task API')).toBeTrue();
+      expect(rows.some((row) => row.label === 'Core Task Management')).toBe(true);
+      expect(rows.some((row) => row.label === 'Task CRUD Operations')).toBe(true);
+      expect(rows.some((row) => row.label === 'Create Task API')).toBe(true);
       // Should NOT have fallback labels
-      expect(rows.some((row) => row.label === 'Uncategorized Initiative')).toBeFalse();
-      expect(rows.some((row) => row.label === 'General Epic')).toBeFalse();
+      expect(rows.some((row) => row.label === 'Uncategorized Initiative')).toBe(false);
+      expect(rows.some((row) => row.label === 'General Epic')).toBe(false);
     });
 
     it('places orphan tasks in fallback when hierarchy metadata is missing', () => {
@@ -165,8 +165,8 @@ describe('RunTeamTrackingComponent work tree fallback initiative behavior', () =
         .buildWorkTreeRows(status);
 
       // Orphan tasks should go into fallback
-      expect(rows.some((row) => row.label === 'Uncategorized Initiative')).toBeTrue();
-      expect(rows.some((row) => row.label === 'General Epic')).toBeTrue();
+      expect(rows.some((row) => row.label === 'Uncategorized Initiative')).toBe(true);
+      expect(rows.some((row) => row.label === 'General Epic')).toBe(true);
     });
 
     it('derives status from children correctly', () => {

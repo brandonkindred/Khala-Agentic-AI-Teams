@@ -237,6 +237,10 @@ gunicorn unified_api.main:app \
 
 ### With Docker
 
+**Backend + UI (recommended):** From the `backend/` directory, run `docker compose up --build`. This starts the Unified API and the Angular UI; the UI is served at **http://localhost:4200** and proxies `/api`, `/docs`, and `/health` to the API. Direct API access remains at **http://localhost:8080**.
+
+**Backend only:** See `backend/Dockerfile`. Build with `docker build -f backend/Dockerfile backend` from repo root.
+
 ```dockerfile
 FROM python:3.11-slim
 WORKDIR /app

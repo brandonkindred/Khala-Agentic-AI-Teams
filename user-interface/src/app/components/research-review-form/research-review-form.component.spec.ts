@@ -6,6 +6,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
+import { vi } from 'vitest';
 
 describe('ResearchReviewFormComponent', () => {
   let component: ResearchReviewFormComponent;
@@ -29,12 +30,14 @@ describe('ResearchReviewFormComponent', () => {
     fixture.detectChanges();
   });
 
+  afterEach(() => TestBed.resetTestingModule());
+
   it('should create', () => {
     expect(component).toBeTruthy();
   });
 
   it('should emit submitRequest when form is valid', () => {
-    const emitSpy = jasmine.createSpy('submitRequest');
+    const emitSpy = vi.fn();
     component.submitRequest.subscribe(emitSpy);
 
     component.form.patchValue({
@@ -44,7 +47,7 @@ describe('ResearchReviewFormComponent', () => {
     component.onSubmit();
 
     expect(emitSpy).toHaveBeenCalledWith(
-      jasmine.objectContaining({
+      expect.objectContaining({
         brief: 'A valid brief for testing',
         max_results: 20,
       })
@@ -52,7 +55,7 @@ describe('ResearchReviewFormComponent', () => {
   });
 
   it('should not emit when brief is empty', () => {
-    const emitSpy = jasmine.createSpy('submitRequest');
+    const emitSpy = vi.fn();
     component.submitRequest.subscribe(emitSpy);
 
     component.form.patchValue({ brief: '', max_results: 20 });

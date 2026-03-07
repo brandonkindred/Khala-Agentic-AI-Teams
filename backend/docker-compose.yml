@@ -1,5 +1,5 @@
-# Unified API server. Run from backend: docker compose up --build
-# API: http://localhost:8080  Docs: http://localhost:8080/docs
+# Backend (Unified API) + Frontend (Angular UI). Run from backend: docker compose up --build
+# UI: http://localhost:4200  API: http://localhost:4200/api  Docs: http://localhost:4200/docs
 
 version: "3.8"
 
@@ -25,3 +25,16 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
+  frontend:
+    build:
+      context: ../user-interface
+      dockerfile: Dockerfile
+    image: strands-ui
+    container_name: strands-ui
+    ports:
+      - "4200:80"
+    depends_on:
+      unified-api:
+        condition: service_healthy
+    restart: unless-stopped
