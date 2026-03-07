@@ -68,13 +68,19 @@ Output: `dist/user-interface/`
 ng test
 ```
 
-With code coverage:
+With code coverage (target: **80%** line coverage for `src/app`):
 
 ```bash
-ng test --no-watch --code-coverage
+npm run test:coverage
 ```
 
-Coverage report: `coverage/user-interface/index.html`
+Or:
+
+```bash
+ng test --configuration=ci --no-watch
+```
+
+Coverage report: `coverage/user-interface/index.html`. The project aims for at least 80% line coverage under `src/app` (excluding `*.spec.ts` and `*.model.ts`).
 
 **Note:** Tests require Chrome or ChromeHeadless. Set `CHROME_BIN` if Chrome is not in PATH.
 

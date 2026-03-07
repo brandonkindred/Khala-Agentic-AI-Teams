@@ -8,8 +8,9 @@ FROM node:20-alpine AS build
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-# Use npm ci without --legacy-peer-deps after Karma removal and tar override; add back if install fails
-RUN npm ci
+# Use npm install so build works when lock file is out of sync with package.json (e.g. after adding vitest/jsdom).
+# For reproducible installs, run "npm install" locally and commit the updated package-lock.json, then switch back to "npm ci".
+RUN npm install
 
 COPY . .
 RUN npm run build
