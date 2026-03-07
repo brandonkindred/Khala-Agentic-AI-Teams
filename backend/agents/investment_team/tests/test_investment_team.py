@@ -186,6 +186,23 @@ def test_orchestrator_web_action_uses_optional_coordinator() -> None:
     assert result["results"]["open_workspace"]["details"]["workspace"] == "swing"
 
 
+def test_orchestrator_web_action_accepts_protocol_compatible_coordinator() -> None:
+    class _CoordinatorStub:
+        def execute_action(self, action, payload=None, workspace_name=None):
+            return {
+                "provider": "stub",
+                "results": {"run_action": {"action": action, "payload": payload}},
+                "workspace": workspace_name,
+            }
+
+    orch = InvestmentTeamOrchestrator(web_interface_coordinator=_CoordinatorStub())
+
+    result = orch.run_web_action(action="capture_chart", payload={"symbol": "IWM"}, workspace_name="test")
+
+    assert result["provider"] == "stub"
+    assert result["workspace"] == "test"
+
+
 def test_orchestrator_web_action_requires_configured_coordinator() -> None:
     orch = InvestmentTeamOrchestrator()
 
@@ -257,6 +274,17 @@ def test_web_interface_coordinator_accepts_string_browser_config() -> None:
     result = coordinator.execute_action(action="capture_chart", payload={"symbol": "QQQ"})
 
     assert result["results"]["login"]["details"]["browser"] == "firefox"
+
+
+def test_web_interface_coordinator_accepts_webkit_browser_config() -> None:
+    coordinator = InvestmentWebInterfaceCoordinator(
+        provider="tradingview",
+        config=WebAgentConfig(browser="webkit"),
+    )
+
+    result = coordinator.execute_action(action="capture_chart", payload={"symbol": "DIA"})
+
+    assert result["results"]["login"]["details"]["browser"] == "webkit"
 
 
 def test_web_interface_coordinator_logs_out_when_action_fails() -> None:
