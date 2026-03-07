@@ -32,3 +32,43 @@ agents:
     schemas:
       - kind: ARTIFACT
         artifact_type: task_out
+
+  qa_lead:
+    description: Owns quality strategy, test planning, and release-readiness validation for deliverables.
+    prompt_file: prompts/agents/qa_lead.md
+    tools:
+      - test_management_tool
+    permissions:
+      - read_artifacts
+    skills:
+      - accessibility_review
+      - test_strategy
+      - quality_assurance
+    actions:
+      - review_test_plan
+      - validate_release_quality
+    keywords:
+      - qa
+      - quality
+      - accessibility
+      - test
+      - validation
+    resources:
+      - type: artifact
+        name: test_plan
+        required: false
+    schemas:
+      - kind: ARTIFACT
+        artifact_type: review
+
+teams:
+  product_design:
+    description: Team focused on UX and design-system delivery.
+    is_available: true
+    agent_ids:
+      - design_lead
+  delivery_quality:
+    description: Team focused on QA, release confidence, and quality gates.
+    is_available: false
+    agent_ids:
+      - qa_lead

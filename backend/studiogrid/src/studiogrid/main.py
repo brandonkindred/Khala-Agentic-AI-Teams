@@ -69,6 +69,7 @@ def cmd_registry_find(args: argparse.Namespace) -> None:
     candidates = registry.find_assisting_agents(
         problem_description=args.problem,
         required_skills=skills,
+        requesting_agent_id=args.requesting_agent,
         limit=args.limit,
     )
     _print(
@@ -79,6 +80,11 @@ def cmd_registry_find(args: argparse.Namespace) -> None:
             "should_spawn_sub_agents": len(candidates) == 0,
         }
     )
+
+
+def cmd_team_list(args: argparse.Namespace) -> None:
+    registry = _build_registry()
+    _print({"teams": registry.list_teams(available_only=args.available_only)})
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="studiogrid")
@@ -115,8 +121,16 @@ def build_parser() -> argparse.ArgumentParser:
     registry_find = registry_sub.add_parser("find")
     registry_find.add_argument("--problem", required=True)
     registry_find.add_argument("--skills", default="")
+    registry_find.add_argument("--requesting-agent", default=None)
     registry_find.add_argument("--limit", type=int, default=5)
     registry_find.set_defaults(func=cmd_registry_find)
+
+    team = sub.add_parser("team")
+    team_sub = team.add_subparsers(dest="action", required=True)
+
+    team_list = team_sub.add_parser("list")
+    team_list.add_argument("--available-only", action="store_true")
+    team_list.set_defaults(func=cmd_team_list)
 
     return parser
 

@@ -20,5 +20,6 @@ Agent registry helpers:
 
 ```bash
 PYTHONPATH=src python -m studiogrid.main registry list
-PYTHONPATH=src python -m studiogrid.main registry find --problem "Need accessibility review" --skills accessibility_review
+PYTHONPATH=src python -m studiogrid.main registry find --problem "Need accessibility review" --skills accessibility_review --requesting-agent design_lead
+PYTHONPATH=src python -m studiogrid.main team list --available-only
 ```
