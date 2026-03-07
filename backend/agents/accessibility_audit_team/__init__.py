@@ -35,3 +35,7 @@ __all__ = [
     "Surface",
     "TestRunConfig",
 ]
+
+from .a11y_agency_strands import run_engagement as run_strands_engagement
+
+__all__.append("run_strands_engagement")
