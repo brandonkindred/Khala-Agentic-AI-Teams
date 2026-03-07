@@ -14,7 +14,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from .models import (
     AnalysisPhase,
@@ -27,6 +27,8 @@ from .models import (
 )
 from .prompts import (
     CONSOLIDATE_QUESTIONS_PROMPT,
+    GENERATE_QUESTION_RECOMMENDATIONS_PROMPT,
+    REVIEW_QUESTIONS_ALIGNMENT_PROMPT,
     SPEC_CLEANUP_CHUNK_PROMPT,
     SPEC_CLEANUP_PROMPT,
     SPEC_REVIEW_CHUNK_PROMPT,
@@ -448,6 +450,20 @@ class ProductRequirementsAnalysisAgent:
                     update={"open_questions": deduped_questions}
                 )
                 open_count = len(spec_review_result.open_questions)
+
+            aligned_questions = self._review_question_answer_alignment(
+                spec_review_result.open_questions
+            )
+            spec_review_result = spec_review_result.model_copy(
+                update={"open_questions": aligned_questions}
+            )
+
+            questions_with_recommendations = self._add_recommendations(
+                spec_review_result.open_questions, current_spec
+            )
+            spec_review_result = spec_review_result.model_copy(
+                update={"open_questions": questions_with_recommendations}
+            )
 
             logger.info(
                 "Iteration %d: Found %d issues, %d gaps, %d open questions",
@@ -1027,6 +1043,7 @@ Previously Answered Questions:
                 id=str(q_data.get("id", f"q{index}")),
                 question_text=str(q_data.get("question_text", "")),
                 context=str(q_data.get("context", "")),
+                recommendation=str(q_data.get("recommendation", "") or ""),
                 options=options,
                 allow_multiple=bool(q_data.get("allow_multiple", False)),
                 source="spec_review",
@@ -1047,6 +1064,7 @@ Previously Answered Questions:
             id=f"q{index}",
             question_text=str(q_data),
             context="This question was identified during spec review.",
+            recommendation="",
             options=[
                 QuestionOption(
                     id="opt1", label="Yes", is_default=True, rationale="", confidence=0.5
@@ -1184,6 +1202,112 @@ Previously Answered Questions:
             )
             return list(open_questions)
 
+    def _review_question_answer_alignment(
+        self, open_questions: List[OpenQuestion]
+    ) -> List[OpenQuestion]:
+        """Ensure each question and its options make sense together (e.g. no Yes/No for open-ended questions)."""
+        if len(open_questions) == 0:
+            return []
+        questions_payload = [
+            {
+                "id": q.id,
+                "question_text": q.question_text,
+                "context": q.context,
+                "category": q.category,
+                "priority": q.priority,
+                "allow_multiple": q.allow_multiple,
+                "constraint_domain": q.constraint_domain,
+                "constraint_layer": q.constraint_layer,
+                "depends_on": q.depends_on,
+                "blocking": q.blocking,
+                "owner": q.owner,
+                "section_impact": q.section_impact,
+                "due_date": q.due_date,
+                "status": q.status,
+                "asked_via": q.asked_via,
+                "options": [
+                    {
+                        "id": o.id,
+                        "label": o.label,
+                        "is_default": o.is_default,
+                        "rationale": o.rationale,
+                        "confidence": o.confidence,
+                    }
+                    for o in q.options
+                ],
+            }
+            for q in open_questions
+        ]
+        questions_json = json.dumps(questions_payload, indent=2)
+        prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
+        try:
+            raw = self.llm.complete_json(prompt, temperature=0.1)
+            if not isinstance(raw, dict):
+                return list(open_questions)
+            aligned = raw.get("aligned_questions", [])
+            if not isinstance(aligned, list) or len(aligned) == 0:
+                return list(open_questions)
+            result = []
+            for i, q_data in enumerate(aligned):
+                result.append(self._parse_open_question(q_data, i))
+            return result
+        except Exception as e:
+            logger.warning(
+                "Question-answer alignment review failed, using original list: %s",
+                str(e)[:200],
+            )
+            return list(open_questions)
+
+    def _add_recommendations(
+        self, open_questions: List[OpenQuestion], spec_content: str
+    ) -> List[OpenQuestion]:
+        """Add a short recommendation (which option and why) to each question."""
+        if len(open_questions) == 0:
+            return list(open_questions)
+        questions_payload = [
+            {
+                "id": q.id,
+                "question_text": q.question_text,
+                "context": q.context,
+                "options": [
+                    {
+                        "id": o.id,
+                        "label": o.label,
+                        "rationale": o.rationale,
+                    }
+                    for o in q.options
+                ],
+            }
+            for q in open_questions
+        ]
+        questions_json = json.dumps(questions_payload, indent=2)
+        spec_excerpt = (spec_content or "")[:15000]
+        prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
+            spec_excerpt=spec_excerpt,
+            questions_json=questions_json,
+        )
+        try:
+            raw = self.llm.complete_json(prompt, temperature=0.1)
+            if not isinstance(raw, dict):
+                return list(open_questions)
+            recs = raw.get("recommendations", [])
+            if not isinstance(recs, list):
+                return list(open_questions)
+            rec_by_id = {r.get("id"): str(r.get("recommendation", "") or "") for r in recs if isinstance(r, dict) and r.get("id")}
+            result = []
+            for q in open_questions:
+                rec = rec_by_id.get(q.id, "")
+                result.append(
+                    q.model_copy(update={"recommendation": rec})
+                )
+            return result
+        except Exception as e:
+            logger.warning(
+                "Recommendation generation failed, leaving recommendations empty: %s",
+                str(e)[:200],
+            )
+            return list(open_questions)
+
     def _communicate_with_user(
         self,
         job_id: Optional[str],
@@ -1269,11 +1393,13 @@ Previously Answered Questions:
             if not options:
                 options = [{"id": "other", "label": "Provide answer in text field"}]
 
+            rec = getattr(q, "recommendation", None) or ""
+            context_str = q.context + ("\n\nRecommendation: " + rec if rec else "")
             pending.append(
                 {
                     "id": q.id,
                     "question_text": q.question_text,
-                    "context": q.context,
+                    "context": context_str,
                     "options": options,
                     "allow_multiple": q.allow_multiple,
                     "required": True,
@@ -1623,43 +1749,144 @@ Previously Answered Questions:
         
         return clarified_spec
 
+    def _parse_qa_history_blocks(
+        self, qa_history: str
+    ) -> List[Tuple[int, str, str, str]]:
+        """Parse qa_history.md content into blocks for pruning and rewriting.
+
+        Returns:
+            List of (iteration, question_text, answer, full_block_text).
+        """
+        if not qa_history or not qa_history.strip():
+            return []
+        blocks_out: List[Tuple[int, str, str, str]] = []
+        current_iteration = 1
+        lines = qa_history.split("\n")
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            iter_match = re.match(r"^##\s+Iteration\s+(\d+)", line.strip())
+            if iter_match:
+                current_iteration = int(iter_match.group(1))
+                i += 1
+                continue
+            block_match = re.match(r"^###\s+(.*)$", line)
+            if block_match:
+                question_text = block_match.group(1).strip()
+                answer = ""
+                rationale = ""
+                block_lines = [line]
+                i += 1
+                while i < len(lines):
+                    next_line = lines[i]
+                    if next_line.strip().startswith("### ") or re.match(
+                        r"^##\s+Iteration", next_line.strip()
+                    ):
+                        break
+                    block_lines.append(next_line)
+                    if next_line.strip().startswith("**Answer:**"):
+                        answer = next_line.replace("**Answer:**", "").strip()
+                    elif next_line.strip().startswith("**Rationale:**"):
+                        rationale = next_line.replace("**Rationale:**", "").strip()
+                    i += 1
+                full_block_text = "\n".join(block_lines)
+                if question_text or answer:
+                    blocks_out.append(
+                        (current_iteration, question_text, answer, full_block_text)
+                    )
+                continue
+            i += 1
+        return blocks_out
+
+    def _is_same_decision(self, existing_question: str, new_question: str) -> bool:
+        """Return True if the two questions are about the same decision (new answer supersedes old)."""
+        if not existing_question.strip() or not new_question.strip():
+            return False
+        existing_norm = " ".join(existing_question.lower().split())
+        new_norm = " ".join(new_question.lower().split())
+        if existing_norm in new_norm or new_norm in existing_norm:
+            return True
+        # Word overlap ratio
+        def words(t: str) -> set:
+            return set(re.sub(r"[^\w\s]", " ", t.lower()).split()) - {"", "the", "a", "an"}
+
+        existing_w = words(existing_question)
+        new_w = words(new_question)
+        if not existing_w or not new_w:
+            return False
+        overlap = len(existing_w & new_w) / max(len(existing_w), len(new_w))
+        return overlap >= 0.5
+
     def _record_answers(
         self,
         repo_path: Path,
         answered_questions: List[AnsweredQuestion],
         iteration: int,
     ) -> None:
-        """Save answered questions to plan/product_analysis/qa_history.md."""
+        """Save answered questions to plan/product_analysis/qa_history.md.
+
+        Removes any existing qa_history entry that is the same decision as a new
+        answer (new directive replaces old); then writes pruned history + new iteration.
+        """
         plan_dir = repo_path / "plan" / "product_analysis"
         plan_dir.mkdir(parents=True, exist_ok=True)
-
         qa_file = plan_dir / "qa_history.md"
 
-        content = f"\n## Iteration {iteration}\n\n"
+        # New iteration section (same format as before)
+        new_section = f"\n## Iteration {iteration}\n\n"
         for aq in answered_questions:
-            content += f"### {aq.question_text}\n"
-            content += f"**Answer:** {aq.selected_answer}\n"
+            new_section += f"### {aq.question_text}\n"
+            new_section += f"**Answer:** {aq.selected_answer}\n"
             if aq.rationale:
-                content += f"**Rationale:** {aq.rationale}\n"
+                new_section += f"**Rationale:** {aq.rationale}\n"
             if aq.was_auto_answered:
-                content += f"*Auto-answered with {aq.confidence:.0%} confidence*\n"
+                new_section += f"*Auto-answered with {aq.confidence:.0%} confidence*\n"
             elif aq.was_default:
-                content += "*(Default applied)*\n"
+                new_section += "*(Default applied)*\n"
             if aq.other_text:
-                content += f"*Custom text:* {aq.other_text}\n"
-            content += "\n"
+                new_section += f"*Custom text:* {aq.other_text}\n"
+            new_section += "\n"
 
-        mode = "a" if qa_file.exists() else "w"
-        if mode == "w":
+        if not qa_file.exists():
             content = (
                 "# Q&A History\n\n"
                 "This file records all questions and answers from Product Requirements Analysis.\n"
-                + content
+                + new_section
             )
+            with open(qa_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info("Recorded %d answers to %s", len(answered_questions), qa_file)
+            return
 
-        with open(qa_file, mode, encoding="utf-8") as f:
+        existing_content = qa_file.read_text(encoding="utf-8")
+        blocks = self._parse_qa_history_blocks(existing_content)
+        remove_indices: set = set()
+        for aq in answered_questions:
+            for idx, (_, block_question, _, _) in enumerate(blocks):
+                if self._is_same_decision(block_question, aq.question_text):
+                    remove_indices.add(idx)
+        kept_blocks = [
+            (it, qt, ans, full)
+            for idx, (it, qt, ans, full) in enumerate(blocks)
+            if idx not in remove_indices
+        ]
+        header = (
+            "# Q&A History\n\n"
+            "This file records all questions and answers from Product Requirements Analysis.\n"
+        )
+        parts = [header]
+        current_iter: Optional[int] = None
+        for it, _qt, _ans, full_block_text in kept_blocks:
+            if current_iter != it:
+                current_iter = it
+                parts.append(f"\n## Iteration {it}\n\n")
+            parts.append(full_block_text)
+            if not full_block_text.endswith("\n"):
+                parts.append("\n")
+        parts.append(new_section)
+        content = "".join(parts)
+        with open(qa_file, "w", encoding="utf-8") as f:
             f.write(content)
-
         logger.info("Recorded %d answers to %s", len(answered_questions), qa_file)
 
     def _run_spec_cleanup(

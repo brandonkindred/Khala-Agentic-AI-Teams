@@ -302,14 +302,14 @@ Respond with a JSON object only, no markdown:
 }}
 """
 
-CONSOLIDATE_QUESTIONS_PROMPT = """You are a Product Analyst. You have a list of open questions from a product specification review. Some questions are worded differently but ask the same thing (e.g. "Which OAuth provider for the MVP?" and "Should we use GitHub or Google for authentication?").
+CONSOLIDATE_QUESTIONS_PROMPT = """You are a Product Analyst. You have a list of open questions from a product specification review. Some questions are worded differently but ask the same thing (e.g. "Do you want Google only for OAuth?" and "What is the right provider? OAuth or Enterprise?").
 
 Your task: Consolidate the list so there are NO duplicate questions. For each distinct decision or topic, keep exactly ONE question. Produce a single, thorough list with no repeated topics or near-duplicate phrasings.
 
 Rules:
 - Two questions are duplicates if they are asking the same decision (e.g. OAuth provider, token handling, pipeline behavior). Merge them into one.
-- Keep the clearest, most professional question_text. Prefer the one that is concise and specific.
-- Merge options from duplicate questions: combine all unique options (by meaning), deduplicate options that say the same thing. Keep at most 4-5 options per question; drop redundant ones.
+- REPHRASE merged questions: do not just pick the better of two phrasings. Write one new question that gets at the "meat" of the decision so the user answers it once. Example: instead of keeping either "Do you want Google only for OAuth?" or "What is the right provider? OAuth or Enterprise?", ask: "Which authentication approach do you want: single OAuth provider (e.g. Google), multiple OAuth providers, or Enterprise SSO?"
+- MERGE AND REWORD OPTIONS: When merging questions, combine all unique options from the merged questions by meaning; deduplicate options that say the same thing. Reword options so each is a distinct, substantive choice that still captures what the original questions were asking. Keep at most 4-5 options per question; drop redundant ones. Option labels must be clear, standalone choices (e.g. "Single OAuth provider (e.g. Google)" not just "Google" if the question is about approach).
 - For each consolidated question, keep the highest priority among merged questions (high > medium > low) and the most specific category.
 - Preserve allow_multiple if any of the merged questions had it true.
 - Output the same JSON structure so each item preserves metadata fields used by orchestration: id, question_text, context, category, priority, allow_multiple, constraint_domain, constraint_layer, depends_on, blocking, owner, section_impact, due_date, status, asked_via, options (each with id, label, is_default, rationale, confidence). Use short stable ids (e.g. auth_provider, token_handling).
@@ -341,6 +341,69 @@ Respond with a JSON object only, no markdown:
         {{ "id": "opt_google", "label": "Google", "is_default": false, "rationale": "...", "confidence": 0.6 }}
       ]
     }}
+  ]
+}}
+"""
+
+REVIEW_QUESTIONS_ALIGNMENT_PROMPT = """You are a Product Analyst. You have a list of open questions that will be shown to the user. Before presenting them, you must ensure each question and its answer options make sense together.
+
+Rules:
+- For each question, classify whether it is OPEN-ENDED (e.g. "What do you think is the right way to do this?", "How should we handle X?") or CLOSED (e.g. "Should we use X?" with a clear yes/no intent).
+- OPEN-ENDED questions must NOT have only "Yes" / "No" as options. The options must be substantive statements that answer the question (e.g. "Use OAuth with a single provider", "Use Enterprise SSO", "Support both"). If you see an open-ended question with Yes/No-only options, REWORD the option labels (and optionally rationales) so they are concrete, nuanced statements that match the question when read together. Alternatively, reword the question to be specific enough that the given options are appropriate.
+- CLOSED questions (clear yes/no) may keep Yes/No options.
+- Preserve all question ids and the same JSON structure. Output the full list of questions with any question_text or option label/rationale changes applied. Do not drop or add questions; only fix alignment.
+
+Input questions (JSON array):
+{questions_json}
+
+Respond with a JSON object only, no markdown:
+{{
+  "aligned_questions": [
+    {{
+      "id": "auth_provider",
+      "question_text": "Which authentication approach do you want?",
+      "context": "...",
+      "category": "security",
+      "priority": "high",
+      "allow_multiple": false,
+      "constraint_domain": "auth",
+      "constraint_layer": 2,
+      "depends_on": null,
+      "blocking": true,
+      "owner": "user",
+      "section_impact": ["Technical Approach"],
+      "due_date": "2026-03-06",
+      "status": "open",
+      "asked_via": ["web_ui"],
+      "options": [
+        {{ "id": "opt_oauth_single", "label": "Single OAuth provider (e.g. Google)", "is_default": true, "rationale": "...", "confidence": 0.7 }},
+        {{ "id": "opt_enterprise", "label": "Enterprise SSO", "is_default": false, "rationale": "...", "confidence": 0.5 }}
+      ]
+    }}
+  ]
+}}
+"""
+
+GENERATE_QUESTION_RECOMMENDATIONS_PROMPT = """You are a Product Analyst. For each of the following open questions, produce a short recommendation: which option to choose and why. Consider ALL options and trade-offs before recommending; your recommendation must be well-reasoned and consider alternatives.
+
+For each question:
+1. State which option you recommend (by its id or label).
+2. Explain why in 2-4 sentences.
+3. Briefly note alternatives considered and why they were not chosen.
+
+Specification excerpt (for context):
+---
+{spec_excerpt}
+---
+
+Questions with options:
+{questions_json}
+
+Respond with a JSON object only, no markdown:
+{{
+  "recommendations": [
+    {{ "id": "auth_provider", "recommendation": "We recommend Single OAuth provider (opt_oauth_single) because it is simplest to implement and sufficient for most MVPs. Enterprise SSO was considered but adds complexity and is better added later if needed." }},
+    {{ "id": "infra_l1_category", "recommendation": "..." }}
   ]
 }}
 """

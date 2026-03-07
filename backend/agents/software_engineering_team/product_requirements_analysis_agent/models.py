@@ -49,6 +49,10 @@ class OpenQuestion(BaseModel):
     context: str = Field(
         default="", description="Additional context explaining why this matters"
     )
+    recommendation: str = Field(
+        default="",
+        description="Short recommendation: which option to choose and why, considering alternatives.",
+    )
     options: List[QuestionOption] = Field(
         default_factory=list, description="2-3 selectable options with rationale"
     )

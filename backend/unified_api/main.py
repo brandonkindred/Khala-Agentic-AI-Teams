@@ -98,6 +98,7 @@ SHUTDOWN_HOOKS: Dict[str, tuple] = {
     "soc2_compliance": ("soc2_compliance_team.api.main", "mark_all_running_jobs_failed"),
     "social_marketing": ("social_media_marketing_team.api.main", "mark_all_running_jobs_failed"),
     "accessibility_audit": ("accessibility_audit_team.api.main", "mark_all_running_jobs_failed"),
+    "nutrition_meal_planning": ("nutrition_meal_planning_team.shared.job_store", "mark_all_running_jobs_failed"),
 }
 
 
@@ -280,6 +281,20 @@ def _try_mount_investment(app: FastAPI) -> bool:
         return False
 
 
+def _try_mount_nutrition_meal_planning(app: FastAPI) -> bool:
+    """Mount nutrition & meal planning team API."""
+    try:
+        from nutrition_meal_planning_team.api.main import app as nmp_app
+
+        config = TEAM_CONFIGS["nutrition_meal_planning"]
+        app.mount(config.prefix, nmp_app)
+        logger.info("Mounted %s at %s", config.name, config.prefix)
+        return True
+    except ImportError as e:
+        logger.warning("Could not mount Nutrition & Meal Planning API: %s", e)
+        return False
+
+
 def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
     """Mount all enabled team APIs and return mount status."""
     mount_functions = {
@@ -294,6 +309,7 @@ def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
         "accessibility_audit": _try_mount_accessibility_audit,
         "ai_systems": _try_mount_ai_systems,
         "investment": _try_mount_investment,
+        "nutrition_meal_planning": _try_mount_nutrition_meal_planning,
     }
 
     results = {}
@@ -345,6 +361,7 @@ Unified API server providing access to all Strands Agent team capabilities.
 - **Accessibility Audit** (`/api/accessibility-audit`) - WCAG 2.2 and Section 508 auditing
 - **AI Systems** (`/api/ai-systems`) - Spec-driven AI agent system factory
 - **Investment** (`/api/investment`) - Investment analysis and portfolio management
+- **Nutrition & Meal Planning** (`/api/nutrition-meal-planning`) - Personal nutrition and meal planning with learning from feedback
 
 Each team's endpoints are available under their respective prefix.
 Visit the team-specific `/docs` endpoint for detailed API documentation

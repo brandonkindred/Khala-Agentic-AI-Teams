@@ -90,6 +90,12 @@ TEAM_CONFIGS: Dict[str, TeamConfig] = {
         description="Investment analysis and portfolio management",
         tags=["investment", "finance"],
     ),
+    "nutrition_meal_planning": TeamConfig(
+        name="Nutrition & Meal Planning",
+        prefix="/api/nutrition-meal-planning",
+        description="Personal nutrition and meal planning with learning from feedback",
+        tags=["nutrition", "meal-planning", "health"],
+    ),
 }
 
 

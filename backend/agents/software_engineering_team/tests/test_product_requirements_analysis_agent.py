@@ -344,6 +344,41 @@ def test_convert_to_pending_questions_includes_extended_metadata() -> None:
     assert pending[0]["asked_via"] == ["email"]
 
 
+def test_convert_to_pending_questions_appends_recommendation_when_set() -> None:
+    """When OpenQuestion has recommendation set, pending context should include 'Recommendation: ...'."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    open_questions = [
+        OpenQuestion(
+            id="Q-1",
+            question_text="Which auth?",
+            context="Spec does not specify auth.",
+            recommendation="We recommend OAuth with a single provider for the MVP.",
+            options=[QuestionOption(id="opt_oauth", label="OAuth", is_default=True, rationale="", confidence=0.8)],
+        )
+    ]
+    pending = agent._convert_to_pending_questions(open_questions)
+    assert "Recommendation:" in pending[0]["context"]
+    assert "We recommend OAuth with a single provider" in pending[0]["context"]
+
+
+def test_review_question_answer_alignment_returns_empty_when_no_questions() -> None:
+    """_review_question_answer_alignment should return [] when given empty list (no LLM call)."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    result = agent._review_question_answer_alignment([])
+    assert result == []
+    llm.complete_json.assert_not_called()
+
+
+def test_add_recommendations_returns_unchanged_when_no_questions() -> None:
+    """_add_recommendations should return the same list when given empty list (no LLM call)."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    result = agent._add_recommendations([], "# Spec content")
+    assert result == []
+
+
 def test_build_specialist_collaboration_plan_recommends_ui_arch_and_risk_agents() -> None:
     """Specialist plan should include new UI/UX, architecture, and risk-focused agents when relevant."""
     llm = MagicMock()
@@ -367,6 +402,93 @@ def test_build_specialist_collaboration_plan_recommends_ui_arch_and_risk_agents(
     assert "Data and Analytics Agent" in plan
 
 
+def test_consolidate_open_questions_parses_llm_output_into_open_questions() -> None:
+    """_consolidate_open_questions should parse valid LLM JSON into List[OpenQuestion] with expected shape."""
+    llm = MagicMock()
+    llm.complete_json.return_value = {
+        "consolidated_questions": [
+            {
+                "id": "auth_approach",
+                "question_text": "Which authentication approach do you want?",
+                "context": "Spec does not specify auth.",
+                "category": "security",
+                "priority": "high",
+                "allow_multiple": False,
+                "constraint_domain": "auth",
+                "constraint_layer": 2,
+                "depends_on": None,
+                "blocking": True,
+                "owner": "user",
+                "section_impact": ["Technical Approach"],
+                "due_date": "2026-03-06",
+                "status": "open",
+                "asked_via": ["web_ui"],
+                "options": [
+                    {"id": "opt_oauth", "label": "OAuth (e.g. Google)", "is_default": True, "rationale": "Simple", "confidence": 0.8},
+                    {"id": "opt_sso", "label": "Enterprise SSO", "is_default": False, "rationale": "Enterprise", "confidence": 0.5},
+                ],
+            }
+        ]
+    }
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q1 = OpenQuestion(
+        id="q1",
+        question_text="Do you want Google only for OAuth?",
+        options=[QuestionOption(id="o1", label="Yes", is_default=True, rationale="", confidence=0.5)],
+    )
+    q2 = OpenQuestion(
+        id="q2",
+        question_text="What is the right provider? OAuth or Enterprise?",
+        options=[QuestionOption(id="o2", label="OAuth", is_default=True, rationale="", confidence=0.5)],
+    )
+    result = agent._consolidate_open_questions([q1, q2])
+    assert len(result) == 1
+    assert result[0].id == "auth_approach"
+    assert "authentication approach" in result[0].question_text
+    assert len(result[0].options) == 2
+    assert result[0].options[0].id == "opt_oauth"
+    assert result[0].options[1].id == "opt_sso"
+
+
+def test_review_question_answer_alignment_parses_llm_output_and_preserves_ids() -> None:
+    """_review_question_answer_alignment should return List[OpenQuestion] with same ids when LLM returns valid aligned_questions."""
+    llm = MagicMock()
+    llm.complete_json.return_value = {
+        "aligned_questions": [
+            {
+                "id": "infra_q",
+                "question_text": "What platform category for deployment?",
+                "context": "Spec does not specify.",
+                "category": "infrastructure",
+                "priority": "high",
+                "allow_multiple": False,
+                "constraint_domain": "infrastructure",
+                "constraint_layer": 1,
+                "depends_on": None,
+                "blocking": True,
+                "owner": "user",
+                "section_impact": [],
+                "due_date": "",
+                "status": "open",
+                "asked_via": ["web_ui"],
+                "options": [
+                    {"id": "opt_paas", "label": "PaaS (Heroku, Render)", "is_default": True, "rationale": "", "confidence": 0.7},
+                ],
+            }
+        ]
+    }
+    agent = ProductRequirementsAnalysisAgent(llm)
+    q = OpenQuestion(
+        id="infra_q",
+        question_text="What platform category for deployment?",
+        options=[QuestionOption(id="opt_paas", label="PaaS", is_default=True, rationale="", confidence=0.7)],
+    )
+    result = agent._review_question_answer_alignment([q])
+    assert len(result) == 1
+    assert result[0].id == "infra_q"
+    assert result[0].question_text == "What platform category for deployment?"
+
+
 def test_dedupe_questions_by_similarity_keeps_first_and_drops_near_duplicates() -> None:
     """_dedupe_questions_by_similarity drops questions similar to an earlier one, preserves order."""
     llm = MagicMock()
@@ -379,3 +501,62 @@ def test_dedupe_questions_by_similarity_keeps_first_and_drops_near_duplicates() 
     assert len(result) == 2
     assert result[0].id == "a"
     assert result[1].id == "c"
+
+
+def test_record_answers_supersede_removes_old_qa_from_history(tmp_path: Path) -> None:
+    """When a new answer is the same decision as an existing Q&A, the old entry is removed and the new one is recorded."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    qa_file = tmp_path / "plan" / "product_analysis" / "qa_history.md"
+    qa_file.write_text(
+        "# Q&A History\n\n"
+        "This file records all questions and answers from Product Requirements Analysis.\n"
+        "\n## Iteration 1\n\n"
+        "### Which OAuth provider?\n"
+        "**Answer:** GitHub\n\n"
+        "\n## Iteration 2\n\n"
+        "### Use SAML for SSO?\n"
+        "**Answer:** SAML\n\n",
+        encoding="utf-8",
+    )
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    # New answer that supersedes the first (same decision: OAuth / auth method)
+    new_answer = AnsweredQuestion(
+        question_id="q1",
+        question_text="Which OAuth provider for the MVP?",
+        selected_answer="SAML",
+    )
+    agent._record_answers(tmp_path, [new_answer], iteration=3)
+    content = qa_file.read_text(encoding="utf-8")
+    assert "**Answer:** GitHub" not in content
+    assert "Which OAuth provider for the MVP?" in content
+    assert "**Answer:** SAML" in content
+    assert "Iteration 3" in content
+
+
+def test_record_answers_different_topic_keeps_existing_qa(tmp_path: Path) -> None:
+    """When the new answer is unrelated, existing Q&A is kept and the new one is appended."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    qa_file = tmp_path / "plan" / "product_analysis" / "qa_history.md"
+    qa_file.write_text(
+        "# Q&A History\n\n"
+        "This file records all questions and answers from Product Requirements Analysis.\n"
+        "\n## Iteration 1\n\n"
+        "### Which OAuth provider?\n"
+        "**Answer:** GitHub\n\n",
+        encoding="utf-8",
+    )
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    new_answer = AnsweredQuestion(
+        question_id="q2",
+        question_text="Where to deploy?",
+        selected_answer="AWS",
+    )
+    agent._record_answers(tmp_path, [new_answer], iteration=2)
+    content = qa_file.read_text(encoding="utf-8")
+    assert "Which OAuth provider?" in content
+    assert "**Answer:** GitHub" in content
+    assert "Where to deploy?" in content
+    assert "**Answer:** AWS" in content
+    assert "Iteration 2" in content
