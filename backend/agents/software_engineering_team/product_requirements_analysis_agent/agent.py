@@ -1016,10 +1016,12 @@ Previously Answered Questions:
                 options = sorted_opts
 
             raw_depends = q_data.get("depends_on")
-            if isinstance(raw_depends, list):
-                depends_on = raw_depends[0] if raw_depends else None
+            if isinstance(raw_depends, (list, tuple)):
+                depends_on = str(raw_depends[0]) if raw_depends else None
+            elif isinstance(raw_depends, str):
+                depends_on = raw_depends
             else:
-                depends_on = raw_depends if isinstance(raw_depends, str) else None
+                depends_on = None
 
             return OpenQuestion(
                 id=str(q_data.get("id", f"q{index}")),
