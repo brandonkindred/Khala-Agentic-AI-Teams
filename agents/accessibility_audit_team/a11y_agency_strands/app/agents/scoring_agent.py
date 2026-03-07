@@ -1,0 +1,10 @@
+from .base import ToolContext, tool
+from ..models import Scorecard
+from ..tools import persist_artifact
+
+
+@tool(context=True)
+def run_scoring_and_prioritization(engagement_id: str, tool_context: ToolContext) -> dict:
+    scorecard = Scorecard(component_score=88.0, page_score=82.0, site_score=84.5, priority_score=92.0)
+    artifact = persist_artifact(f"{tool_context.invocation_state['artifact_root']}/scorecard.json", scorecard.model_dump())
+    return {"phase": "scoring_prioritization", "artifact": artifact, "site_score": scorecard.site_score}
