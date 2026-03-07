@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Protocol
 
 from .agents import AgentIdentity, PolicyGuardianAgent, PromotionGateAgent
 from .models import (
@@ -14,7 +14,17 @@ from .models import (
     ValidationReport,
     WorkflowMode,
 )
-from .tool_agents.web_interfaces import InvestmentWebInterfaceCoordinator
+
+class WebActionCoordinator(Protocol):
+    """Minimal contract for web action orchestration dependencies."""
+
+    def execute_action(
+        self,
+        action: str,
+        payload: Dict[str, Any] | None = None,
+        workspace_name: str | None = None,
+    ) -> Dict[str, Any]:
+        """Execute a provider-backed web action."""
 
 
 @dataclass
@@ -50,7 +60,7 @@ class InvestmentTeamOrchestrator:
     - Live promotion requires IPS permission and independent approver.
     """
 
-    def __init__(self, web_interface_coordinator: InvestmentWebInterfaceCoordinator | None = None) -> None:
+    def __init__(self, web_interface_coordinator: WebActionCoordinator | None = None) -> None:
         self.policy_guardian = PolicyGuardianAgent()
         self.promotion_gate = PromotionGateAgent()
         self.web_interface_coordinator = web_interface_coordinator
