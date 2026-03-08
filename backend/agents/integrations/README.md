@@ -12,6 +12,7 @@ It is intentionally outside individual teams so integrations are configured once
 - One service entry point (`IntegrationService`) for all agent teams
 - Agent discovery API (`discover_integrations`) so agents can determine what each integration can do
 - Transport-agnostic adapter surface that supports API and MCP-backed providers
+- MCP Tool Gateway for discovering, selecting, adding, and configuring MCP tools per provider
 
 ## Module layout
 
@@ -21,7 +22,7 @@ agents/integrations/
   registry.py                   # provider registration and YAML loading
   router.py                     # capability -> provider resolution
   adapters.py                   # API/MCP adapter abstraction
-  service.py                    # shared integration entry point + discovery
+  service.py                    # shared integration entry point + MCP gateway + discovery
   config/providers.example.yaml # sample provider config
 ```
 
@@ -53,6 +54,7 @@ Each provider can define:
 - `actions` — human-readable action descriptions agents/planners can inspect.
 - `auth` — auth type/scopes needed.
 - `settings` — tenant/workspace/project defaults.
+- `mcp_tools` — tool catalog for MCP providers, including per-tool capabilities and config.
 
 ## Agent discovery flow
 
@@ -101,3 +103,14 @@ response = service.call(
 2. Add policy gates (approval, scope enforcement, DLP) before write actions.
 3. Add auth broker for OAuth/service-account token management.
 4. Add audit logging and reliability controls (retry/circuit breaker/idempotency).
+
+
+## MCP tool gateway
+
+`IntegrationService` exposes MCP tool lifecycle helpers for MCP-backed providers:
+
+- `list_mcp_tools(provider_name=None)`
+- `add_mcp_tool(provider_name, tool)`
+- `configure_mcp_tool(provider_name, tool_name, config)`
+
+This keeps MCP tool interaction behind one interface while still allowing provider-specific tool catalogs in config.

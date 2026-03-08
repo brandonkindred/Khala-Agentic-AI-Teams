@@ -2,10 +2,12 @@ from pathlib import Path
 
 from integrations.adapters import ApiMcpAdapter
 from integrations.contracts import IntegrationOperation, IntegrationRequest
-from integrations.registry import IntegrationRegistry, ProviderConfig
+from integrations.registry import IntegrationRegistry, McpToolConfig, ProviderConfig
 from integrations.router import CapabilityRouter
 from integrations.service import IntegrationService
 
+
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "config/providers.example.yaml"
 
 REQUIRED_PROVIDERS = {
     "figma",
@@ -84,23 +86,21 @@ def test_service_returns_normalized_execution_plan() -> None:
 
 
 def test_registry_loads_yaml_configuration() -> None:
-    config_path = Path("agents/integrations/config/providers.example.yaml")
-
-    registry = IntegrationRegistry.from_yaml(config_path)
+    registry = IntegrationRegistry.from_yaml(CONFIG_PATH)
 
     assert registry.providers_for_capability("cloud.deploy")
     assert registry.providers_for_capability("meeting.transcript.read")
 
 
 def test_registry_yaml_includes_required_enterprise_providers() -> None:
-    registry = IntegrationRegistry.from_yaml("agents/integrations/config/providers.example.yaml")
+    registry = IntegrationRegistry.from_yaml(CONFIG_PATH)
     provider_names = {provider.name for provider in registry.list_enabled()}
 
     assert REQUIRED_PROVIDERS.issubset(provider_names)
 
 
 def test_discover_integrations_returns_capability_index_and_actions() -> None:
-    registry = IntegrationRegistry.from_yaml("agents/integrations/config/providers.example.yaml")
+    registry = IntegrationRegistry.from_yaml(CONFIG_PATH)
     service = IntegrationService(router=CapabilityRouter(registry), adapter=ApiMcpAdapter())
 
     catalog = service.discover_integrations()
@@ -162,3 +162,38 @@ def test_slack_notify_prefers_payload_channel_over_default() -> None:
     )
 
     assert response.result["target"]["channel"] == "#release-alerts"
+
+
+def test_discover_integrations_exposes_mcp_tools() -> None:
+    registry = IntegrationRegistry.from_yaml(CONFIG_PATH)
+    service = IntegrationService(router=CapabilityRouter(registry), adapter=ApiMcpAdapter())
+
+    catalog = service.discover_integrations()
+
+    assert "mcp_tools" in catalog
+    post_message_tool = next(tool for tool in catalog["mcp_tools"] if tool["name"] == "post_message")
+    assert post_message_tool["provider"] == "slack"
+
+
+def test_service_can_add_and_configure_mcp_tool() -> None:
+    registry = IntegrationRegistry(
+        [
+            ProviderConfig(
+                name="slack",
+                transport="mcp",
+                capabilities=["chat.notify"],
+                mcp_tools=[McpToolConfig(name="post_message", capabilities=["chat.notify"])],
+            )
+        ]
+    )
+    service = IntegrationService(router=CapabilityRouter(registry), adapter=ApiMcpAdapter())
+
+    service.add_mcp_tool(
+        "slack",
+        McpToolConfig(name="pin_message", description="Pin a message", capabilities=["chat.pin"]),
+    )
+    updated_tool = service.configure_mcp_tool("slack", "pin_message", {"max_pins": 10})
+
+    assert updated_tool.config["max_pins"] == 10
+    names = {tool["name"] for tool in service.list_mcp_tools("slack")}
+    assert {"post_message", "pin_message"}.issubset(names)
