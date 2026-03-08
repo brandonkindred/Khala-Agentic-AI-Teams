@@ -22,6 +22,10 @@ graph TB
             SMM["/api/social-marketing"]
             Brand["/api/branding"]
             Prov["/api/agent-provisioning"]
+            A11y["/api/accessibility-audit"]
+            AISys["/api/ai-systems"]
+            Invest["/api/investment"]
+            Nutrition["/api/nutrition-meal-planning"]
         end
     end
     
@@ -31,7 +35,8 @@ graph TB
 ## Quick Start
 
 ```bash
-# From project root
+# From repository root
+cd backend
 python run_unified_api.py
 
 # With custom port
@@ -68,6 +73,10 @@ python run_unified_api.py --workers 4 --log-level warning
 | Social Marketing | `/api/social-marketing` | `/api/social-marketing/docs` |
 | Branding | `/api/branding` | `/api/branding/docs` |
 | Agent Provisioning | `/api/agent-provisioning` | `/api/agent-provisioning/docs` |
+| Accessibility Audit | `/api/accessibility-audit` | `/api/accessibility-audit/docs` |
+| AI Systems | `/api/ai-systems` | `/api/ai-systems/docs` |
+| Investment | `/api/investment` | `/api/investment/docs` |
+| Nutrition & Meal Planning | `/api/nutrition-meal-planning` | `/api/nutrition-meal-planning/docs` |
 
 ## Environment Variables
 

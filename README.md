@@ -1,507 +1,94 @@
 # Strands Agents
 
-**Strands Agents** is a monorepo of multi-agent systems built in the Strands style—research, orchestration, and human-in-the-loop workflows. Each team simulates specialized roles (engineers, marketers, auditors, researchers) and produces production-ready artifacts.
+Strands Agents is a monorepo for multi-agent "team" systems. Each team exposes a FastAPI service and the platform also provides a Unified API plus an Angular UI.
 
----
+## Repository layout
 
-## Table of Contents
-
-- [Overview](#overview)
-- [Quick Start](#quick-start)
-- [Project Structure](#project-structure)
-- [Agent Teams](#agent-teams)
-- [User Interface](#user-interface)
-- [Build & Run](#build--run)
-- [Docker Deployment](#docker-deployment)
-- [Configuration & Environment](#configuration--environment)
-- [Testing](#testing)
-- [Deployment](#deployment)
-- [Contributing](#contributing)
-- [License](#license)
-
----
-
-## Overview
-
-This repository provides **multiple Strands-style agent systems** in a unified monorepo:
-
-| Team | Purpose |
-|------|---------|
-| **Software Engineering Team** | Full dev team simulation: architecture, Tech Lead, backend/frontend workers, DevOps, security, QA, code review, accessibility. Reads `initial_spec.md` and produces working code. |
-| **Blogging** | Research, review, draft, copy-edit, and publication agents for content creation (web + arXiv research, title/outline, draft with style guide, copy-editor loop, platform-specific output). |
-| **Personal Assistant** | AI assistant for managing email, calendar, tasks, deals, reservations, and documents. Maintains comprehensive user profile with preferences, goals, and personal details. |
-| **Social Media Marketing** | Campaign planning with collaboration agents, human approval gate, and platform specialists (LinkedIn, Facebook, Instagram, X). Produces execution-ready content plans. |
-| **SOC2 Compliance** | Multi-agent SOC2 audit: Security, Availability, Processing Integrity, Confidentiality, Privacy TSC agents review a repo and produce a compliance report or next-steps document. |
-| **Market Research** | Human-AI collaborative workflow for user discovery and product concept viability; transcript ingestion, UX synthesis, experiment scripts, human approval gates. |
-| **Investment Team** | Multi-asset investment organization with IPS hard constraints, strategy validation, promotion gates, separation-of-duties, risk veto, and monitor-only safety degradation. |
-| **Branding Team** | Brand strategy, codification, moodboard concepts, design/writing standards, and interactive async open-question workflow. |
-| **Agent Provisioning** | Provisions agent environments with databases, git repos, Docker containers, and secure credential management. |
-| **AI Systems Team** | Spec-driven agent factory sub-team that converts structured specs into deployable AI agent systems with orchestration, guardrails, and measurable acceptance criteria. |
-
-The **User Interface** is an Angular 19 application that provides interactive dashboards for all agent APIs.
-
----
-
-## Quick Start
-
-### Option A: Unified API Server (Recommended)
-
-The **Unified API Server** consolidates all agent team APIs under a single entry point on port 8080:
-
-```bash
-# From project root
-python run_unified_api.py
-
-# All teams available at:
-# - http://localhost:8080/api/blogging
-# - http://localhost:8080/api/software-engineering
-# - http://localhost:8080/api/personal-assistant
-# - http://localhost:8080/api/market-research
-# - http://localhost:8080/api/soc2-compliance
-# - http://localhost:8080/api/social-marketing
-# - http://localhost:8080/api/branding
-# - http://localhost:8080/api/agent-provisioning
-
-# Interactive docs
-open http://localhost:8080/docs
-```
-
-See [unified_api/README.md](unified_api/README.md) for full documentation.
-
-### Option B: Docker (All Agent APIs + Tools)
-
-```bash
-# Ensure Ollama is running on the host
-curl http://localhost:11434/api/tags
-
-# From project root
-cd agents
-docker-compose up -d
-
-# Verify APIs
-curl http://localhost:18000/health   # Software Engineering
-curl http://localhost:18001/health   # Blogging
-curl http://localhost:18002/health   # Market Research
-curl http://localhost:18003/health   # SOC2 Compliance
-curl http://localhost:18004/health   # Social Marketing
-curl http://localhost:18005/health   # Blog Research
-```
-
-### Option B: Local Development
-
-**1. Install dependencies**
-
-```bash
-# Python (from repo root)
-pip install -r agents/requirements.txt
-pip install -r agents/software_engineering_team/requirements.txt
-pip install -r agents/blogging/requirements.txt
-
-# Node.js for UI (use NVM - Node 22.12 recommended per .nvmrc)
-cd user-interface
-nvm use          # or: nvm install (if 22.12 not installed)
-npm ci
-```
-
-**2. Start agent APIs** (each in its own terminal)
-
-```bash
-# Software Engineering (port 8000)
-cd agents && python -m uvicorn software_engineering_team.api.main:app --host 0.0.0.0 --port 8000
-
-# Blogging (port 8001)
-cd agents && PYTHONPATH=blogging python -m uvicorn blogging.api.main:app --host 0.0.0.0 --port 8001
-
-# Market Research (port 8011)
-cd agents && python -m uvicorn market_research_team.api.main:app --host 0.0.0.0 --port 8011
-
-# SOC2 Compliance (port 8020)
-cd agents && python -m uvicorn soc2_compliance_team.api.main:app --host 0.0.0.0 --port 8020
-
-# Social Marketing (port 8010)
-cd agents && python -m uvicorn social_media_marketing_team.api.main:app --host 0.0.0.0 --port 8010
-
-# Branding (port 8012)
-cd agents && python -m uvicorn branding_team.api.main:app --host 0.0.0.0 --port 8012
-
-# Personal Assistant (port 8015)
-cd agents/personal_assistant_team && python3 -m agent_implementations.run_api_server
-
-# Agent Provisioning (port 8013)
-cd agents && python -m uvicorn agent_provisioning_team.api.main:app --host 0.0.0.0 --port 8013
-```
-
-**3. Start the User Interface**
-
-```bash
-cd user-interface
-ng serve
-```
-
-Open **http://localhost:4200/**.
-
----
-
-## Project Structure
-
-```
+```text
 strands-agents/
-├── agents/                          # All agent teams (Python)
-│   ├── api/                         # Blog research-and-review HTTP API
-│   ├── blogging/                    # Blogging agent suite
-│   ├── software_engineering_team/   # Full software dev team simulation
-│   ├── personal_assistant_team/     # Personal assistant (email, calendar, tasks, deals)
-│   ├── social_media_marketing_team/ # Campaign planning with platform specialists
-│   ├── soc2_compliance_team/        # SOC2 compliance audit
-│   ├── investment_team/             # Multi-asset investment (IPS-first)
-│   ├── market_research_team/        # Market research and concept viability
-│   ├── branding_team/               # Branding strategy + interactive clarification API
-│   ├── agent_provisioning_team/     # Agent environment provisioning
-│   ├── ai_systems_team/             # Spec-to-agent-system blueprint and build workflow
-│   ├── docker/                      # Docker config, default spec
-│   ├── Dockerfile                   # Multi-stage image (all teams)
-│   ├── docker-compose.yml           # Run all APIs in one container
-│   ├── supervisord.conf             # Process manager for container
-│   ├── entrypoint.sh
-│   └── requirements.txt
-├── unified_api/                     # Unified API server
-│   ├── main.py                      # FastAPI app mounting all teams
-│   ├── config.py                    # Team configurations
-│   └── README.md                    # Unified API documentation
-├── user-interface/                  # Angular 19 UI
-│   ├── src/
-│   │   ├── app/
-│   │   │   ├── components/          # Feature and shared components
-│   │   │   ├── core/                # HTTP interceptor, error handling
-│   │   │   ├── models/              # TypeScript interfaces for API
-│   │   │   ├── services/            # API services
-│   │   │   └── shared/             # Loading spinner, error message
-│   │   └── environments/            # API base URLs
-│   ├── docs/                        # Architecture, API mapping, accessibility
-│   └── angular.json
-├── run_unified_api.py               # Unified API launcher script
-├── README.md                        # This file
-└── CONTRIBUTORS.md                  # Contribution guidelines
+├── backend/
+│   ├── agents/                 # Team implementations + team-specific APIs
+│   ├── unified_api/            # Unified FastAPI app mounting all teams
+│   ├── run_unified_api.py      # Unified API launcher
+│   └── studiogrid/             # Temporal workflows and worker stack
+├── user-interface/             # Angular frontend
+└── docker/                     # Full-stack Docker Compose setup
 ```
 
----
+## Quick start
 
-## Agent Teams
+### 1) Backend dependencies
 
-### Software Engineering Team
+```bash
+cd backend/agents
+pip install -r requirements.txt
+```
 
-Multi-agent dev team: Spec Intake, Project Planning, Architecture, Tech Lead, Backend/Frontend workers, DevOps, Security, QA, Code Review, Accessibility, Integration, Documentation.
+### 2) Run the Unified API (recommended)
 
-- **Spec:** `initial_spec.md` at repo root
-- **Output:** Working code in `backend/` and `frontend/`, CI/CD, docs
-- **Docs:** [agents/software_engineering_team/README.md](agents/software_engineering_team/README.md)
+```bash
+cd backend
+python run_unified_api.py
+```
 
-### Blogging
+Unified API docs: <http://localhost:8080/docs>
 
-Research → Review → Draft → Copy Editor loop → Publication. Web + arXiv research, title/outline, style-guided draft, platform-specific output (Medium, dev.to, Substack).
-
-- **API:** `POST /research-and-review`, `POST /full-pipeline`
-- **Docs:** [agents/blogging/README.md](agents/blogging/README.md)
-
-### Social Media Marketing
-
-Campaign proposal collaboration, human approval gate, concept scoring (≥70% engagement), platform specialists (LinkedIn, Facebook, Instagram, X).
-
-- **API:** `POST /social-marketing/run`, `GET /social-marketing/status/{id}`, `POST /social-marketing/revise/{id}`
-- **Docs:** [agents/social_media_marketing_team/README.md](agents/social_media_marketing_team/README.md)
-
-### SOC2 Compliance
-
-Five TSC agents (Security, Availability, Processing Integrity, Confidentiality, Privacy) + Report Writer. Produces compliance report or next-steps document.
-
-- **API:** `POST /soc2-audit/run`, `GET /soc2-audit/status/{id}`
-- **Docs:** [agents/soc2_compliance_team/README.md](agents/soc2_compliance_team/README.md)
-
-### Market Research
-
-Human-AI workflow: transcript ingestion, UX synthesis, viability recommendation, research scripts, human approval gates.
-
-- **API:** `POST /market-research/run`
-- **Docs:** [agents/market_research_team/README.md](agents/market_research_team/README.md)
-
-### Personal Assistant
-
-AI-powered personal assistant that manages emails, calendar, tasks, deals, reservations, and document generation. Features comprehensive user profile management and robust JSON extraction with automatic recovery.
-
-- **API:** `POST /users/{user_id}/assistant`, `GET /users/{user_id}/profile`
-- **Docs:** [agents/personal_assistant_team/README.md](agents/personal_assistant_team/README.md)
-
-### Investment Team
-
-IPS-first multi-asset organization with PolicyGuardian, Validation, PromotionGate, InvestmentCommittee agents. Separation-of-duties, risk veto, monitor-only safety.
-
-- **Docs:** [agents/investment_team/README.md](agents/investment_team/README.md)
-
-### Agent Provisioning
-
-Provisions agent environments through a 6-phase workflow: request parsing, capability mapping, infrastructure (databases, git repos, Docker), security setup, orchestration configuration, and verification.
-
-- **API:** `POST /provision`, `GET /provision/{request_id}/status`
-- **Docs:** [agents/agent_provisioning_team/README.md](agents/agent_provisioning_team/README.md)
-### AI Systems Team
-
-Spec-driven sub-team for creating AI systems from requirements. Takes a structured spec and outputs an Agent System Blueprint, including role design, orchestration flow, safety gates, evaluation criteria, and rollout guidance.
-
-- **Docs:** [agents/ai_systems_team/README.md](agents/ai_systems_team/README.md)
-
----
-
-## User Interface
-
-Angular 19 standalone app with dashboards for each agent API.
-
-### Routes
-
-| Route | API |
-|-------|-----|
-| `/` | Redirects to `/blogging` |
-| `/blogging` | Blogging (research-and-review, full-pipeline) |
-| `/software-engineering` | Software Engineering Team |
-| `/personal-assistant` | Personal Assistant (chat, profile, tasks, calendar, deals) |
-| `/market-research` | Market Research |
-| `/soc2-compliance` | SOC2 Compliance |
-| `/social-marketing` | Social Media Marketing |
-
-### Features
-
-- Forms for each API's request payload
-- Job status polling for async endpoints
-- SSE stream for Software Engineering execution
-- Health indicators per API
-- WCAG 2.2–oriented accessibility
-
-### Docs
-
-- [user-interface/docs/ARCHITECTURE.md](user-interface/docs/ARCHITECTURE.md)
-- [user-interface/docs/API_MAPPING.md](user-interface/docs/API_MAPPING.md)
-- [user-interface/docs/ACCESSIBILITY.md](user-interface/docs/ACCESSIBILITY.md)
-
----
-
-## Build & Run
-
-### Prerequisites
-
-| Tool | Version | Notes |
-|------|---------|-------|
-| **Python** | 3.10+ | For all agent teams |
-| **Node.js** | 22.12+ or 20.19+ | Use [NVM](https://github.com/nvm-sh/nvm); required for SE team frontend builds and UI |
-| **npm** | 10+ | |
-| **Ollama** | (optional) | For local LLM inference |
-| **Docker** | 20.10+ | For containerized deployment |
-| **Docker Compose** | v2+ | |
-
-### Build User Interface
+### 3) Run the UI
 
 ```bash
 cd user-interface
 npm ci
-ng build
-# Production: ng build --configuration production
-# Output: dist/user-interface/
+npm start
 ```
 
-### Run Individual Agent APIs
+UI: <http://localhost:4200>
 
-| Team | Command | Port |
-|------|---------|------|
-| Software Engineering | `uvicorn software_engineering_team.api.main:app --host 0.0.0.0 --port 8000` | 8000 |
-| Blogging | `PYTHONPATH=blogging uvicorn blogging.api.main:app --host 0.0.0.0 --port 8001` | 8001 |
-| Market Research | `uvicorn market_research_team.api.main:app --host 0.0.0.0 --port 8011` | 8011 |
-| SOC2 Compliance | `uvicorn soc2_compliance_team.api.main:app --host 0.0.0.0 --port 8020` | 8020 |
-| Social Marketing | `uvicorn social_media_marketing_team.api.main:app --host 0.0.0.0 --port 8010` | 8010 |
-| Blog Research | `PYTHONPATH=blogging uvicorn api.main:app --host 0.0.0.0 --port 8005` | 8005 |
+## Unified API team routes
 
-Run from `agents/` directory with `PYTHONPATH` set as needed.
+The Unified API mounts teams under `/api/*` prefixes. Current configured routes:
 
----
+- `/api/blogging`
+- `/api/software-engineering`
+- `/api/personal-assistant`
+- `/api/market-research`
+- `/api/soc2-compliance`
+- `/api/social-marketing`
+- `/api/branding`
+- `/api/agent-provisioning`
+- `/api/accessibility-audit`
+- `/api/ai-systems`
+- `/api/investment`
+- `/api/nutrition-meal-planning`
 
-## Docker Deployment
+## Team documentation
 
-### Full stack (Postgres, Temporal, Ollama, Agents)
+- `backend/agents/README.md` (backend agent monorepo overview)
+- `backend/agents/software_engineering_team/README.md`
+- `backend/agents/blogging/README.md`
+- `backend/agents/personal_assistant_team/README.md`
+- `backend/agents/social_media_marketing_team/README.md`
+- `backend/agents/market_research_team/README.md`
+- `backend/agents/soc2_compliance_team/README.md`
+- `backend/agents/branding_team/README.md`
+- `backend/agents/agent_provisioning_team/README.md`
+- `backend/agents/accessibility_audit_team/README.md`
+- `backend/agents/ai_systems_team/README.md`
+- `backend/agents/investment_team/README.md`
+- `backend/agents/nutrition_meal_planning_team/README.md`
 
-To run **PostgreSQL**, **Temporal**, **Temporal UI**, optional **Ollama**, and **Strands Agents** in one stack (e.g. for integration testing or a full environment):
+## Docker
+
+For the full stack (Postgres, Temporal, optional Ollama, backend APIs, and UI):
 
 ```bash
-# From repo root
-cp docker/.env.example docker/.env
-# Set OLLAMA_API_KEY in docker/.env (from https://ollama.com/settings/keys)
 docker compose -f docker/docker-compose.yml up --build
 ```
 
-- **Agents UI + API:** http://localhost:8888  
-- **Temporal UI:** http://localhost:8080  
-- **Postgres:** localhost:5432 (databases `temporal`, `strands` created by init script)
+See `docker/README.md` for env vars, ports, and deployment notes.
 
-The agents use **Ollama Cloud** by default (`SW_LLM_BASE_URL=https://ollama.com`) with `OLLAMA_API_KEY` for authentication. To view server logs during testing, set `ENABLE_LOG_API=1` in `.env` and use `GET http://localhost:8888/api/software-engineering/logs?service=sw_api&lines=100`.
+## Additional docs
 
-See [docker/README.md](docker/README.md) for required env vars, logs API, and security notes.
-
-### Agents-only container
-
-Run all 6 agent teams in one container with pre-installed tools (Node.js, Angular CLI, Git, Docker-in-Docker).
-
-### Quick Start
-
-```bash
-cd agents
-docker-compose up -d
-```
-
-### Port Mapping (Host → Container)
-
-| Host Port | Container Port | Team |
-|-----------|----------------|------|
-| 18000 | 8000 | Software Engineering |
-| 18001 | 8001 | Blogging |
-| 18002 | 8002 | Market Research |
-| 18003 | 8003 | SOC2 Compliance |
-| 18004 | 8004 | Social Marketing |
-| 18005 | 8005 | Blog Research |
-
-### Using the UI with Docker
-
-When APIs run in Docker, point the UI to host ports 18000–18005. Edit `user-interface/src/environments/environment.ts`:
-
-```typescript
-export const environment = {
-  production: false,
-  bloggingApiUrl: 'http://localhost:18001',
-  softwareEngineeringApiUrl: 'http://localhost:18000',
-  marketResearchApiUrl: 'http://localhost:18002',
-  soc2ComplianceApiUrl: 'http://localhost:18003',
-  socialMarketingApiUrl: 'http://localhost:18004',
-};
-```
-
-Or use the Blog Research API at 18005 for research-and-review.
-
-### Custom Spec (Software Engineering)
-
-Pass a spec file at build time:
-
-```bash
-SPEC_FILE=./my-project/initial_spec.md docker-compose build
-```
-
-Default spec: `docker/default_initial_spec.md` (Task Manager API example).
-
-### Volume Mounts
-
-| Host | Container | Purpose |
-|------|-----------|---------|
-| `./workspace` | `/workspace` | Agent output (repos, specs, artifacts) |
-
-### Full Docker Docs
-
-See [agents/docker/README.md](agents/docker/README.md) for environment variables, troubleshooting, and security notes.
-
----
-
-## Configuration & Environment
-
-### Agent Environment Variables
-
-| Variable | Team | Description | Default |
-|----------|------|-------------|---------|
-| `TAVILY_API_KEY` | Blogging | Web search API key | Required for research |
-| `SW_LLM_PROVIDER` | Software Engineering | `dummy` or `ollama` | `dummy` |
-| `SW_LLM_MODEL` | Software Engineering | Model name | `qwen3.5:397b-cloud` |
-| `SW_LLM_BASE_URL` | Software Engineering | Ollama API URL | `http://127.0.0.1:11434` |
-| `SW_LLM_MODEL_<AGENT>` | Software Engineering | Per-agent model override | - |
-| `SOC2_LLM_PROVIDER` | SOC2 | `ollama` or `dummy` | `ollama` |
-| `SOC2_LLM_MODEL` | SOC2 | Model name | `llama3.1` |
-| `SOC2_LLM_BASE_URL` | SOC2 | Ollama API URL | `http://127.0.0.1:11434` |
-| `PA_LLM_PROVIDER` | Personal Assistant | `ollama` or `dummy` | `ollama` |
-| `PA_LLM_MODEL` | Personal Assistant | Model name | `llama3.1` |
-| `PA_LLM_BASE_URL` | Personal Assistant | Ollama API URL | `http://127.0.0.1:11434` |
-| `PA_CREDENTIAL_KEY` | Personal Assistant | Fernet key for email credentials | Auto-generated |
-| `UNIFIED_API_HOST` | Unified API | Host to bind | `0.0.0.0` |
-| `UNIFIED_API_PORT` | Unified API | Port to bind | `8080` |
-
-### UI Environment Files
-
-- **Development:** `user-interface/src/environments/environment.ts`
-- **Production:** `user-interface/src/environments/environment.prod.ts` (uses `/api/*` proxy paths)
-
----
-
-## Testing
-
-### Python (Agents)
-
-Run tests **per team** (each team has its own `PYTHONPATH` and imports):
-
-```bash
-# From repo root - run each team's tests
-pytest agents/software_engineering_team/tests/ -v
-pytest agents/blogging/tests/ -v
-pytest agents/market_research_team/tests/ -v
-pytest agents/soc2_compliance_team/tests/ -v
-pytest agents/social_media_marketing_team/tests/ -v
-
-# Or from each team directory
-cd agents/software_engineering_team && pytest
-cd agents/blogging && pytest
-# ... etc
-
-# With logs
-pytest agents/<team>/tests/ -v --log-cli-level=INFO
-```
-
-**Note:** Running `pytest` without a path from repo root may fail due to import path differences between teams.
-
-### Angular (UI)
-
-```bash
-cd user-interface
-ng test
-```
-
-With coverage:
-
-```bash
-ng test --no-watch --code-coverage
-# Report: coverage/user-interface/index.html
-```
-
-**Note:** Tests require Chrome or ChromeHeadless. Set `CHROME_BIN` if Chrome is not in PATH.
-
----
-
-## Deployment
-
-### Port Allocation
-
-Default ports: 8000 (SE/Blog), 8010 (social), 8011 (market research), 8020 (SOC2). Override with `--port` when running multiple services.
-
-### Production Checklist
-
-1. Set all required environment variables (e.g. `TAVILY_API_KEY`, `SW_LLM_*`).
-2. Run `uvicorn` without `--reload`.
-3. Use a process manager (systemd, supervisord) or container orchestration.
-4. Put a reverse proxy (TLS, auth, rate limiting) in front of APIs.
-5. For the UI, use production build and configure API proxy or CORS.
-
-### Example Production Command
-
-```bash
-uvicorn software_engineering_team.api.main:app --host 0.0.0.0 --port 8000 --workers 2
-```
-
----
-
-## Contributing
-
-See [CONTRIBUTORS.md](CONTRIBUTORS.md) for contribution guidelines, code standards, and pull request process.
-
----
-
-## License
-
-This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
+- `backend/unified_api/README.md`
+- `backend/studiogrid/README.md`
+- `ARCHITECTURE.md`
+- `CONTRIBUTORS.md`
