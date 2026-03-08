@@ -13,6 +13,9 @@ class IntegrationOperation(str, Enum):
     UPDATE = "update"
     NOTIFY = "notify"
     SCHEDULE = "schedule"
+    TOOL_LIST = "tool_list"
+    TOOL_ADD = "tool_add"
+    TOOL_UPDATE = "tool_update"
 
 
 class IntegrationRequest(BaseModel):

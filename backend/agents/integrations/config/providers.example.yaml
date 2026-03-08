@@ -16,6 +16,17 @@ providers:
       server: slack
       workspace: your-workspace
       default_channel: "#agent-updates"
+    mcp_tools:
+      - name: post_message
+        description: Send a message to a Slack channel.
+        capabilities: ["chat.notify"]
+        config:
+          require_channel: true
+      - name: list_channels
+        description: List visible channels in the configured workspace.
+        capabilities: ["chat.channel.list"]
+        config:
+          include_private: false
 
   - name: fireflies
     display_name: Fireflies.ai
@@ -80,6 +91,13 @@ providers:
     settings:
       server: obsidian
       vault: company-knowledge
+    mcp_tools:
+      - name: read_note
+        description: Read an Obsidian note by path.
+        capabilities: ["knowledge.read"]
+      - name: upsert_note
+        description: Create or update an Obsidian note.
+        capabilities: ["knowledge.write"]
 
   - name: figma
     display_name: Figma
