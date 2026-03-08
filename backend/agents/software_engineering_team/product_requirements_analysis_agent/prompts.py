@@ -622,6 +622,30 @@ The updated spec should make it obvious what the answers are without needing to 
 Respond with the FULL updated specification as plain text (markdown format). Include all original content plus the clarified details.
 """
 
+SPEC_CONSISTENCY_CLARIFICATION_PROMPT = """You are a Product Specification Editor. The specification was found to have many overlapping or duplicate open questions, which suggests it contains ambiguous or conflicting information.
+
+Your task is to update the specification so that:
+1. **Clarity**: Make it clearer what the answers are for decisions that are already implied or stated—so the same questions are not asked again.
+2. **Consistency**: Remove or resolve any conflicting or opposing information within the spec. Where the spec contradicts itself, choose one consistent interpretation.
+3. **Use QA as source of truth**: The following Q&A (from previous rounds with the product owner, or from qa_history) is the canonical source. Where the spec conflicts with these answers, update the spec to match the Q&A. Do not leave conflicting statements.
+
+Current Specification:
+---
+{spec_content}
+---
+
+Canonical Q&A (use this to resolve conflicts and fill gaps):
+---
+{qa_source}
+---
+
+Instructions:
+- Integrate the Q&A answers clearly into the relevant sections of the spec.
+- If two parts of the spec contradict each other, replace with the version that matches the Q&A, or with a single consistent statement.
+- Remove redundant or ambiguous phrasing that could lead to the same question being asked again.
+- Preserve all other valid content. Output the FULL specification as plain text (markdown).
+"""
+
 SPEC_REVIEW_CHUNK_PROMPT = """You are a Product Requirements Analysis expert. Review this SECTION of a product specification.
 
 CRITICAL CONSTRAINTS:

@@ -31,6 +31,7 @@ from .prompts import (
     REVIEW_QUESTIONS_ALIGNMENT_PROMPT,
     SPEC_CLEANUP_CHUNK_PROMPT,
     SPEC_CLEANUP_PROMPT,
+    SPEC_CONSISTENCY_CLARIFICATION_PROMPT,
     SPEC_REVIEW_CHUNK_PROMPT,
     SPEC_REVIEW_PROMPT,
     SPEC_UPDATE_PROMPT,
@@ -52,6 +53,10 @@ MAX_ITERATIONS = 100
 MAX_DECOMPOSITION_DEPTH = 20
 MAX_ISSUES = 10
 MAX_GAPS = 10
+
+# When deduplication reduces question count by this fraction or more, run consistency/clarity update and re-review.
+DEDUP_REDUCTION_THRESHOLD = 0.5
+MAX_CONSISTENCY_LOOPS = 3
 
 # Subdirectory under repo where PRA writes all artifacts (validated_spec, PRD, updated_spec*, qa_history).
 PRODUCT_ANALYSIS_SUBDIR = "plan/product_analysis"
@@ -436,6 +441,7 @@ class ProductRequirementsAnalysisAgent:
                 update={"open_questions": consolidated_questions}
             )
             open_count = len(spec_review_result.open_questions)
+            count_before_dedup = open_count
 
             deduped_questions = self._dedupe_questions_by_similarity(
                 spec_review_result.open_questions
@@ -450,6 +456,73 @@ class ProductRequirementsAnalysisAgent:
                     update={"open_questions": deduped_questions}
                 )
                 open_count = len(spec_review_result.open_questions)
+
+            # If deduplication reduced questions by 50%+, update spec for consistency/clarity and re-review
+            reduction_ratio = (
+                (count_before_dedup - len(deduped_questions)) / count_before_dedup
+                if count_before_dedup > 0
+                else 0.0
+            )
+            consistency_loops = 0
+            while (
+                reduction_ratio >= DEDUP_REDUCTION_THRESHOLD
+                and consistency_loops < MAX_CONSISTENCY_LOOPS
+                and len(spec_review_result.open_questions) > 0
+            ):
+                consistency_loops += 1
+                _update_job(
+                    status_text="Dedup reduced questions significantly - updating spec for consistency and clarity..."
+                )
+                qa_history = self._read_qa_history(repo_path)
+                current_spec = self._update_spec_for_consistency_and_clarity(
+                    current_spec,
+                    repo_path,
+                    qa_history,
+                    all_answered_questions,
+                    base_version + (iteration - 1),
+                    consistency_loops,
+                )
+                _update_job(status_text="Re-analyzing specification after consistency update...")
+                spec_review_result, current_spec = self._run_spec_review(
+                    current_spec,
+                    repo_path,
+                    iteration=iteration,
+                    spec_version=base_version + (iteration - 1),
+                    answered_questions=all_answered_questions,
+                    on_chunk_progress=_on_spec_review_chunk,
+                )
+                result.spec_review_result = spec_review_result
+                # Re-consolidate and re-dedupe
+                consolidated_questions = self._consolidate_open_questions(
+                    spec_review_result.open_questions
+                )
+                spec_review_result = spec_review_result.model_copy(
+                    update={"open_questions": consolidated_questions}
+                )
+                open_count = len(spec_review_result.open_questions)
+                count_before_dedup = open_count
+                deduped_questions = self._dedupe_questions_by_similarity(
+                    spec_review_result.open_questions
+                )
+                if len(deduped_questions) < open_count:
+                    logger.info(
+                        "After consistency loop %d: deduped %d -> %d",
+                        consistency_loops,
+                        open_count,
+                        len(deduped_questions),
+                    )
+                spec_review_result = spec_review_result.model_copy(
+                    update={"open_questions": deduped_questions}
+                )
+                open_count = len(spec_review_result.open_questions)
+                reduction_ratio = (
+                    (count_before_dedup - len(deduped_questions)) / count_before_dedup
+                    if count_before_dedup > 0
+                    else 0.0
+                )
+                if not spec_review_result.open_questions:
+                    logger.info("No open questions after consistency update, proceeding")
+                    break
 
             aligned_questions = self._review_question_answer_alignment(
                 spec_review_result.open_questions
@@ -1748,6 +1821,46 @@ Previously Answered Questions:
         latest_file.write_text(clarified_spec, encoding="utf-8")
         
         return clarified_spec
+
+    def _update_spec_for_consistency_and_clarity(
+        self,
+        current_spec: str,
+        repo_path: Path,
+        qa_history: str,
+        all_answered_questions: List[AnsweredQuestion],
+        version: int,
+        consistency_loop: int,
+    ) -> str:
+        """Update spec for clarity and consistency; use QA as source of truth for conflicts.
+
+        Called when deduplication reduces questions by 50%+ so the spec is edited to
+        clarify answers and resolve conflicting information, then re-reviewed.
+        """
+        qa_source = qa_history.strip() if qa_history else ""
+        if all_answered_questions:
+            formatted = self._format_answered_questions(all_answered_questions)
+            qa_source = (qa_source + "\n\n" + formatted).strip() if qa_source else formatted
+        if not qa_source:
+            qa_source = "(No prior Q&A yet; focus on removing internal conflicts and clarifying ambiguous wording.)"
+
+        prompt = SPEC_CONSISTENCY_CLARIFICATION_PROMPT.format(
+            spec_content=current_spec,
+            qa_source=qa_source,
+        )
+        try:
+            updated_spec = self.llm.complete_text(prompt)
+        except Exception as e:
+            logger.error("Failed to update spec for consistency with LLM: %s", e)
+            return current_spec
+
+        plan_dir = repo_path / "plan" / "product_analysis"
+        plan_dir.mkdir(parents=True, exist_ok=True)
+        spec_file = plan_dir / f"updated_spec_consistency_v{version}_loop{consistency_loop}.md"
+        spec_file.write_text(updated_spec, encoding="utf-8")
+        logger.info("Saved consistency-updated spec to %s", spec_file.name)
+        latest_file = plan_dir / "updated_spec.md"
+        latest_file.write_text(updated_spec, encoding="utf-8")
+        return updated_spec
 
     def _parse_qa_history_blocks(
         self, qa_history: str
