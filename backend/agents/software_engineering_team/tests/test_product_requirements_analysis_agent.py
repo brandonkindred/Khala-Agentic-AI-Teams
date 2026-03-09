@@ -17,6 +17,138 @@ from product_requirements_analysis_agent.models import (
 )
 
 
+def test_format_answered_questions_for_prompt_empty() -> None:
+    """_format_answered_questions_for_prompt returns empty string for empty list."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    assert agent._format_answered_questions_for_prompt([]) == ""
+
+
+def test_format_answered_questions_for_prompt_one_question() -> None:
+    """_format_answered_questions_for_prompt formats one AnsweredQuestion in qa_history style."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    aq = AnsweredQuestion(
+        question_id="q1",
+        question_text="What deployment target?",
+        selected_answer="Cloud (AWS)",
+        rationale="Best for scale",
+    )
+    out = agent._format_answered_questions_for_prompt([aq])
+    assert "### What deployment target?" in out
+    assert "**Answer:** Cloud (AWS)" in out
+    assert "**Rationale:** Best for scale" in out
+
+
+def test_format_answered_questions_for_prompt_multiple_and_optional_fields() -> None:
+    """_format_answered_questions_for_prompt produces multiple ### blocks and handles optional fields."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    aq1 = AnsweredQuestion(
+        question_id="q1",
+        question_text="First question?",
+        selected_answer="Yes",
+        was_auto_answered=True,
+        confidence=0.85,
+    )
+    aq2 = AnsweredQuestion(
+        question_id="q2",
+        question_text="Second question?",
+        selected_answer="No",
+        was_default=True,
+        other_text="Custom note",
+    )
+    out = agent._format_answered_questions_for_prompt([aq1, aq2])
+    assert "### First question?" in out
+    assert "**Answer:** Yes" in out
+    assert "Auto-answered" in out or "85%" in out
+    assert "### Second question?" in out
+    assert "**Answer:** No" in out
+    assert "Default applied" in out
+    assert "Custom text:" in out
+    assert "Custom note" in out
+
+
+def test_run_spec_review_invokes_llm_once(tmp_path: Path) -> None:
+    """_run_spec_review performs a single LLM call (whole-spec review, no chunking)."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    llm = MagicMock()
+    llm.complete_json_with_continuation.return_value = {
+        "issues": [],
+        "gaps": [],
+        "open_questions": [],
+        "summary": "Done",
+    }
+    agent = ProductRequirementsAnalysisAgent(llm)
+    agent._context_files = {}
+    result, updated_spec = agent._run_spec_review(
+        spec_content="# My Spec\n\n## Section\nContent",
+        repo_path=tmp_path,
+        answered_questions=None,
+    )
+    assert llm.complete_json_with_continuation.call_count == 1
+    assert result.summary == "Done"
+    assert updated_spec == "# My Spec\n\n## Section\nContent"
+
+
+def test_run_spec_review_includes_qa_in_prompt(tmp_path: Path) -> None:
+    """When answered_questions is non-empty, the prompt passed to the LLM contains Q&A text."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    llm = MagicMock()
+    llm.complete_json_with_continuation.return_value = {
+        "issues": [],
+        "gaps": [],
+        "open_questions": [],
+        "summary": "Done",
+    }
+    agent = ProductRequirementsAnalysisAgent(llm)
+    agent._context_files = {}
+    answered = [
+        AnsweredQuestion(
+            question_id="aq1",
+            question_text="Where to deploy?",
+            selected_answer="Kubernetes",
+        )
+    ]
+    agent._run_spec_review(
+        spec_content="# Spec",
+        repo_path=tmp_path,
+        answered_questions=answered,
+    )
+    call_args = llm.complete_json_with_continuation.call_args
+    prompt = call_args[0][0]
+    assert "Where to deploy?" in prompt
+    assert "Kubernetes" in prompt
+    assert "Previously Answered" in prompt or "Current session answers" in prompt
+
+
+def test_run_spec_review_includes_qa_file_in_prompt(tmp_path: Path) -> None:
+    """When qa_history.md exists, the prompt passed to the LLM contains its content."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    qa_file = tmp_path / "plan" / "product_analysis" / "qa_history.md"
+    qa_file.write_text(
+        "# Q&A History\n\n## Iteration 1\n\n### OAuth provider?\n**Answer:** GitHub\n\n"
+    )
+    llm = MagicMock()
+    llm.complete_json_with_continuation.return_value = {
+        "issues": [],
+        "gaps": [],
+        "open_questions": [],
+        "summary": "Done",
+    }
+    agent = ProductRequirementsAnalysisAgent(llm)
+    agent._context_files = {}
+    agent._run_spec_review(
+        spec_content="# Spec",
+        repo_path=tmp_path,
+        answered_questions=None,
+    )
+    call_args = llm.complete_json_with_continuation.call_args
+    prompt = call_args[0][0]
+    assert "OAuth provider?" in prompt
+    assert "GitHub" in prompt
+
+
 def test_update_spec_writes_versioned_file(tmp_path: Path) -> None:
     """_update_spec with version=7 writes updated_spec_v7.md and updated_spec.md."""
     (tmp_path / "plan" / "product_analysis").mkdir(parents=True)

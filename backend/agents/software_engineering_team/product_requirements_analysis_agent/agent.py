@@ -33,7 +33,6 @@ from .prompts import (
     SPEC_CLEANUP_CHUNK_PROMPT,
     SPEC_CLEANUP_PROMPT,
     SPEC_CONSISTENCY_CLARIFICATION_PROMPT,
-    SPEC_REVIEW_CHUNK_PROMPT,
     SPEC_REVIEW_PROMPT,
     SPEC_UPDATE_PROMPT,
     PRD_PROMPT,
@@ -519,16 +518,10 @@ class ProductRequirementsAnalysisAgent:
             )
 
             try:
-                _update_job(status_text="Performing gap analysis on the specification")
-                spec_review_chunks = default_decompose_by_sections(current_spec)
-                spec_review_titles = [_section_title_from_chunk(c) for c in spec_review_chunks]
+                _update_job(status_text="Analyzing full specification for gaps and inconsistencies...")
 
-                def _on_spec_review_chunk(chunk_index: int, total_chunks: int) -> None:
-                    if chunk_index < len(spec_review_titles) and spec_review_titles[chunk_index]:
-                        status_text = f"Analyzing: {spec_review_titles[chunk_index]}..."
-                    else:
-                        status_text = f"Analyzing specification (section {chunk_index + 1}/{total_chunks})..."
-                    _update_job(status_text=status_text)
+                def _on_spec_review_progress(_chunk_index: int, _total_chunks: int) -> None:
+                    _update_job(status_text="Analyzing full specification for gaps and inconsistencies...")
 
                 spec_before_review = current_spec
                 spec_review_result, current_spec = self._run_spec_review(
@@ -537,29 +530,19 @@ class ProductRequirementsAnalysisAgent:
                     iteration=iteration,
                     spec_version=base_version + (iteration - 1),
                     answered_questions=all_answered_questions,
-                    on_chunk_progress=_on_spec_review_chunk,
+                    on_chunk_progress=_on_spec_review_progress,
                 )
                 if current_spec != spec_before_review:
                     _update_job(
-                        status_text="Re-analyzing specification after clarification..."
+                        status_text="Re-analyzing full specification after clarification..."
                     )
-                    spec_review_chunks = default_decompose_by_sections(current_spec)
-                    spec_review_titles = [_section_title_from_chunk(c) for c in spec_review_chunks]
-
-                    def _on_spec_review_chunk_rerun(chunk_index: int, total_chunks: int) -> None:
-                        if chunk_index < len(spec_review_titles) and spec_review_titles[chunk_index]:
-                            status_text = f"Analyzing: {spec_review_titles[chunk_index]}..."
-                        else:
-                            status_text = f"Analyzing specification (section {chunk_index + 1}/{total_chunks})..."
-                        _update_job(status_text=status_text)
-
                     spec_review_result, current_spec = self._run_spec_review(
                         current_spec,
                         repo_path,
                         iteration=iteration,
                         spec_version=base_version + (iteration - 1),
                         answered_questions=all_answered_questions,
-                        on_chunk_progress=_on_spec_review_chunk_rerun,
+                        on_chunk_progress=_on_spec_review_progress,
                     )
                     logger.info("Re-ran spec review on clarified spec")
                 result.spec_review_result = spec_review_result
@@ -644,25 +627,15 @@ class ProductRequirementsAnalysisAgent:
                     consistency_loops,
                 )
                 _update_job(
-                    status_text="Spec updated. Re-analyzing specification after consistency update...",
+                    status_text="Spec updated. Re-analyzing full specification after consistency update...",
                 )
-                consistency_chunks = default_decompose_by_sections(current_spec)
-                consistency_titles = [_section_title_from_chunk(c) for c in consistency_chunks]
-
-                def _on_consistency_review_chunk(chunk_index: int, total_chunks: int) -> None:
-                    if chunk_index < len(consistency_titles) and consistency_titles[chunk_index]:
-                        status_text = f"Analyzing: {consistency_titles[chunk_index]}..."
-                    else:
-                        status_text = f"Analyzing specification (section {chunk_index + 1}/{total_chunks})..."
-                    _update_job(status_text=status_text)
-
                 spec_review_result, current_spec = self._run_spec_review(
                     current_spec,
                     repo_path,
                     iteration=iteration,
                     spec_version=base_version + (iteration - 1),
                     answered_questions=all_answered_questions,
-                    on_chunk_progress=_on_consistency_review_chunk,
+                    on_chunk_progress=_on_spec_review_progress,
                 )
                 result.spec_review_result = spec_review_result
                 # Re-consolidate and re-dedupe
@@ -887,6 +860,9 @@ class ProductRequirementsAnalysisAgent:
     ) -> Dict[str, Any]:
         """Combine issues, gaps, and questions from multiple chunk reviews.
 
+        Kept for potential future chunked fallback; spec review currently uses
+        a single whole-spec LLM call and does not call this.
+
         Args:
             results: List of parsed JSON dicts from chunk reviews
 
@@ -994,16 +970,28 @@ The following additional files were provided in the project folder. Review these
         """
         if spec_version is None:
             spec_version = iteration
-        # Read previously answered questions to avoid asking duplicates
-        qa_history = self._read_qa_history(repo_path)
+        # Full Q&A for prompt: file history + in-memory answered_questions (current session)
+        qa_from_file = self._read_qa_history(repo_path)
+        qa_for_prompt = qa_from_file
+        if answered_questions:
+            session_block = self._format_answered_questions_for_prompt(answered_questions)
+            if session_block:
+                if qa_for_prompt:
+                    qa_for_prompt += "\n\n## Current session answers\n\n" + session_block
+                else:
+                    qa_for_prompt = "## Current session answers\n\n" + session_block
+        # Optional cap to leave room for spec + instructions (e.g. last 12k chars)
+        if len(qa_for_prompt) > 12000:
+            qa_for_prompt = qa_for_prompt[-12000:]
+            logger.debug("Capped qa_for_prompt to last 12k chars")
 
         # Analyze constraint status and generate hints for the LLM
         constraint_status = analyze_constraint_status(
-            spec_content, 
+            spec_content,
             answered_questions or []
         )
         constraint_hints = generate_constraint_hints(constraint_status)
-        
+
         logger.info(
             "Constraint status: %s",
             {d: f"L{l}" for d, l in constraint_status.items()}
@@ -1019,18 +1007,19 @@ The following additional files were provided in the project folder. Review these
                 len(self._context_files),
             )
 
-        if qa_history:
+        # Single whole-spec prompt; include full Q&A only when non-empty (edge-empty-qa)
+        if qa_for_prompt:
             prompt = SPEC_REVIEW_PROMPT.format(
                 spec_content=full_spec_content[:20000],
                 constraint_hints=constraint_hints,
             )
-            prompt += f"""
+            prompt += """
 
 IMPORTANT: The following questions have ALREADY been answered. Do NOT ask these questions again or any variations of them. Only ask NEW questions about topics NOT covered below. The spec and this Q&A are the source of truth.
 
 Previously Answered Questions:
 ---
-{qa_history}
+""" + qa_for_prompt + """
 ---
 """
         else:
@@ -1039,33 +1028,17 @@ Previously Answered Questions:
                 constraint_hints=constraint_hints,
             )
 
-        # When chunking, each chunk must also see already-answered Q&A so we don't re-ask
-        chunk_template = SPEC_REVIEW_CHUNK_PROMPT
-        if qa_history:
-            already_block = (
-                "Already answered (do NOT ask again - these are the source of truth):\n---\n"
-                + qa_history[:2500]
-                + "\n---\n\n"
-            )
-            chunk_template = chunk_template.replace(
-                "SECTION TO REVIEW:",
-                already_block + "SECTION TO REVIEW:",
-                1,
-            )
+        if on_chunk_progress is not None:
+            on_chunk_progress(0, 1)
 
+        # Single LLM call for whole-spec review (no decomposition or merge)
         raw = parse_json_with_recovery(
-            llm=self.llm,
-            prompt=prompt,
+            self.llm,
+            prompt,
             agent_name="PRA_spec_review",
-            decompose_fn=default_decompose_by_sections,
-            merge_fn=self._merge_spec_review_results,
-            original_content=spec_content,
-            chunk_prompt_template=chunk_template,
-            on_chunk_progress=on_chunk_progress,
         )
 
         if not raw:
-            # All recovery failed - return a result indicating retry is needed
             logger.warning(
                 "PRA spec_review: No JSON recovered, will retry in next iteration"
             )
@@ -1082,28 +1055,50 @@ Previously Answered Questions:
         result = self._parse_spec_review_response(raw)
         updated_spec = spec_content
 
-        # Filter out any questions that are duplicates of previously answered ones
-        if qa_history and result.open_questions:
+        # Filter duplicates and clarify spec using full qa_for_prompt (file + session)
+        if qa_for_prompt and result.open_questions:
             filtered, duplicates = self._filter_duplicate_questions(
-                result.open_questions, qa_history
+                result.open_questions, qa_for_prompt
             )
             result.open_questions = filtered
-            
-            # If duplicates found, update spec with their existing answers
-            # This fills gaps that caused questions to be re-asked
+
             if duplicates:
                 logger.info(
                     "Found %d duplicate questions - clarifying spec with existing answers",
                     len(duplicates),
                 )
                 updated_spec = self._update_spec_from_duplicates(
-                    duplicates, qa_history, spec_content, repo_path, spec_version
+                    duplicates, qa_for_prompt, spec_content, repo_path, spec_version
                 )
 
         result.open_questions = self._filter_organizational_questions(
             result.open_questions
         )
         return result, updated_spec
+
+    def _format_answered_questions_for_prompt(
+        self, answered_questions: List[AnsweredQuestion]
+    ) -> str:
+        """Format in-memory answered questions in qa_history.md style for inclusion in the LLM prompt.
+
+        Handles empty list and optional fields (rationale, other_text, was_auto_answered, was_default).
+        """
+        if not answered_questions:
+            return ""
+        lines: List[str] = []
+        for aq in answered_questions:
+            lines.append(f"### {aq.question_text}")
+            lines.append(f"**Answer:** {aq.selected_answer}")
+            if aq.rationale:
+                lines.append(f"**Rationale:** {aq.rationale}")
+            if aq.was_auto_answered:
+                lines.append(f"*Auto-answered with {aq.confidence:.0%} confidence*")
+            elif aq.was_default:
+                lines.append("*(Default applied)*")
+            if aq.other_text:
+                lines.append(f"*Custom text:* {aq.other_text}")
+            lines.append("")
+        return "\n".join(lines)
 
     def _read_qa_history(self, repo_path: Path) -> str:
         """Read the QA history file if it exists (from plan/product_analysis)."""
