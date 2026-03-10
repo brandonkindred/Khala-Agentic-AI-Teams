@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from blog_research_agent.agent import ResearchAgent
 from blog_research_agent.agent_cache import AgentCache
-from blog_research_agent.llm import OllamaLLMClient
+from llm_service import get_client
 from blog_research_agent.models import ResearchBriefInput
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
 

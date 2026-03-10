@@ -11,7 +11,7 @@ from . import _path_setup  # noqa: F401  # Add blogging to path when run from pr
 import logging
 from pathlib import Path
 
-from blog_research_agent.llm import OllamaLLMClient  # or DummyLLMClient for quick test
+from llm_service import get_client  # or DummyLLMClient for quick test
 from blog_draft_agent import BlogDraftAgent, DraftInput
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -21,8 +21,8 @@ STYLE_GUIDE_PATH = Path(__file__).resolve().parent.parent / "docs" / "brandon_ki
 
 
 def main() -> None:
-    llm_client = OllamaLLMClient()
-    # Or: from blog_research_agent.llm import DummyLLMClient; llm_client = DummyLLMClient()
+    llm_client = get_client("blog")
+    # Or: from llm_service import DummyLLMClient; llm_client = DummyLLMClient()
 
     agent = BlogDraftAgent(llm_client=llm_client, default_style_guide_path=STYLE_GUIDE_PATH)
 

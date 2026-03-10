@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture
 
 from frontend_team_deprecated.models import (

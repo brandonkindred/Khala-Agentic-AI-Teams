@@ -5,11 +5,11 @@ import logging
 from blog_research_agent.agent import ResearchAgent
 from blog_research_agent.agent_cache import AgentCache
 from blog_research_agent.models import ResearchBriefInput
-from blog_research_agent.llm import OllamaLLMClient  # or your own LLM client
+from llm_service import get_client  # or your own LLM client
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-llm_client = OllamaLLMClient()
+llm_client = get_client("blog")
 
 # Enable caching for checkpoint/resume capability
 cache = AgentCache(cache_dir=".agent_cache")

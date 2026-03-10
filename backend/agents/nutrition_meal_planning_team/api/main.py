@@ -34,7 +34,7 @@ from ..shared.job_store import (
     JOB_STATUS_RUNNING,
 )
 from ..shared.meal_feedback_store import MealFeedbackStore
-from ..shared.llm import get_llm_client
+from llm_service import get_client
 from ..agents.intake_profile_agent import IntakeProfileAgent
 from ..agents.meal_planning_agent import MealPlanningAgent
 from ..agents.nutritionist_agent import NutritionistAgent
@@ -58,7 +58,7 @@ app.add_middleware(
 
 profile_store = ClientProfileStore()
 meal_feedback_store = MealFeedbackStore()
-llm = get_llm_client()
+llm = get_client("nutrition_meal_planning")
 intake_agent = IntakeProfileAgent(llm)
 nutritionist_agent = NutritionistAgent(llm)
 meal_planning_agent = MealPlanningAgent(llm)

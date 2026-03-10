@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from blog_research_agent.llm import LLMClient
+from llm_service import LLMClient
 
 from shared.errors import LLMJsonParseError
 

@@ -10,7 +10,7 @@ from . import _path_setup  # noqa: F401  # Add blogging to path when run from pr
 import logging
 from pathlib import Path
 
-from blog_research_agent.llm import OllamaLLMClient
+from llm_service import get_client
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -41,7 +41,7 @@ Implementing LLM observability is non-negotiable for any serious enterprise AI i
 
 
 def main() -> None:
-    llm_client = OllamaLLMClient()
+    llm_client = get_client("blog")
 
     agent = BlogCopyEditorAgent(llm_client=llm_client, default_style_guide_path=STYLE_GUIDE_PATH)
 

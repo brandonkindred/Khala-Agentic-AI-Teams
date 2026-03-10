@@ -13,7 +13,7 @@ from spec_parser import (
     validate_work_path,
     SPEC_FILENAME,
 )
-from software_engineering_team.shared.llm import DummyLLMClient
+from llm_service import DummyLLMClient
 
 
 def test_parse_spec_with_llm_uses_dummy() -> None:

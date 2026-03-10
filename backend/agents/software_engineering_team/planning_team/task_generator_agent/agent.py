@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 
 from software_engineering_team.shared.context_sizing import (
     compute_task_generator_arch_chars,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 
 from devops_team.models import ReviewFinding
 

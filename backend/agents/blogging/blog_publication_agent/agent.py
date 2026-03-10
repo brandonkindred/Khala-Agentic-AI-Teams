@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from blog_research_agent.llm import LLMClient
+from llm_service import LLMClient
 
 from .models import (
     ApprovalResult,

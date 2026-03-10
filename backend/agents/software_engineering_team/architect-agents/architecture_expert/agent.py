@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from software_engineering_team.shared.llm import LLMClient, LLMPermanentError
+from llm_service import LLMClient, LLMPermanentError
 from software_engineering_team.shared.models import ArchitectureComponent, ProductRequirements, SystemArchitecture
 
 from .models import ArchitectureInput, ArchitectureOutput

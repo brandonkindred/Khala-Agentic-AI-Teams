@@ -69,6 +69,47 @@ def test_format_answered_questions_for_prompt_multiple_and_optional_fields() -> 
     assert "Custom note" in out
 
 
+# --- _has_existing_pra_artifacts ---
+
+
+def test_has_existing_pra_artifacts_true_when_qa_history_substantive(tmp_path: Path) -> None:
+    """_has_existing_pra_artifacts returns True when qa_history.md has length > 200 and contains '## Iteration' and '**Answer:**'."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    qa = tmp_path / "plan" / "product_analysis" / "qa_history.md"
+    content = (
+        "# Q&A History\n\n## Iteration 1\n\n### OAuth provider?\n**Answer:** GitHub\n\n"
+        + "x" * 200
+    )
+    qa.write_text(content)
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    assert agent._has_existing_pra_artifacts(tmp_path) is True
+
+
+def test_has_existing_pra_artifacts_true_when_validated_spec_exists(tmp_path: Path) -> None:
+    """_has_existing_pra_artifacts returns True when plan/product_analysis/validated_spec.md exists."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    (tmp_path / "plan" / "product_analysis" / "validated_spec.md").write_text("# Validated")
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    assert agent._has_existing_pra_artifacts(tmp_path) is True
+
+
+def test_has_existing_pra_artifacts_false_when_dir_empty(tmp_path: Path) -> None:
+    """_has_existing_pra_artifacts returns False when plan/product_analysis exists but has no qa_history/validated_spec/updated_spec*."""
+    (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    assert agent._has_existing_pra_artifacts(tmp_path) is False
+
+
+def test_has_existing_pra_artifacts_false_when_dir_missing(tmp_path: Path) -> None:
+    """_has_existing_pra_artifacts returns False when plan/product_analysis does not exist."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    assert agent._has_existing_pra_artifacts(tmp_path) is False
+
+
 def test_run_spec_review_invokes_llm_once(tmp_path: Path) -> None:
     """_run_spec_review performs a single LLM call (whole-spec review, no chunking)."""
     (tmp_path / "plan" / "product_analysis").mkdir(parents=True)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 
 from .models import SecurityInput, SecurityOutput, SecurityVulnerability
 from .prompts import SECURITY_PROMPT

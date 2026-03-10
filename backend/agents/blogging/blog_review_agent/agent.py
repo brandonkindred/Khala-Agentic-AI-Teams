@@ -10,7 +10,7 @@ import logging
 import re
 from typing import List
 
-from blog_research_agent.llm import LLMClient
+from llm_service import LLMClient
 from blog_research_agent.models import ResearchReference
 
 from .models import BlogReviewInput, BlogReviewOutput, TitleChoice

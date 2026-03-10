@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any, Dict
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 
 from .models import MergedSpecAnalysis, SpecAnalysisMergerInput
 from .prompts import SPEC_ANALYSIS_MERGER_PROMPT

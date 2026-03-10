@@ -64,10 +64,10 @@ class SubmitAnswersRequest(BaseModel):
 
 
 def _get_llm():
-    """Lazy import of LLM client from software_engineering_team."""
+    """Return LLM client from central llm_service (or None if unavailable)."""
     try:
-        from software_engineering_team.shared.llm import LLMClient
-        return LLMClient()
+        from llm_service import get_client
+        return get_client("planning_v3")
     except Exception as e:
         logger.warning("LLM not available: %s", e)
         return None

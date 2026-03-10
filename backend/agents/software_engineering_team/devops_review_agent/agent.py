@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import List
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 
 from .models import DevOpsReviewInput, DevOpsReviewIssue, DevOpsReviewOutput
 from .prompts import DEVOPS_REVIEW_PROMPT

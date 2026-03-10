@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 from blog_research_agent.agent import ResearchAgent
 from blog_research_agent.agent_cache import AgentCache
 from blog_research_agent.models import ResearchBriefInput
-from blog_research_agent.llm import OllamaLLMClient
+from llm_service import get_client
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
 from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
@@ -29,7 +29,7 @@ STYLE_GUIDE_PATH = Path(__file__).resolve().parent.parent / "docs" / "brandon_ki
 # Number of draft-editor loop iterations (1 = draft only, no revisions; 100 = draft + 99 revision cycles)
 DRAFT_EDITOR_ITERATIONS = 100
 
-llm_client = OllamaLLMClient()
+llm_client = get_client("blog")
 
 # 1. Research
 cache = AgentCache(cache_dir=".agent_cache")

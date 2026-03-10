@@ -3,7 +3,7 @@
 import pytest
 
 from blog_draft_agent import BlogDraftAgent, DraftInput, DraftOutput
-from blog_research_agent.llm import DummyLLMClient
+from llm_service import DummyLLMClient
 
 
 def test_blog_draft_agent_run() -> None:

@@ -293,7 +293,7 @@ def test_backend_agent_no_problem_solving_logs_when_no_issues(caplog: pytest.Log
 
 def test_backend_agent_content_only_with_code_block_raises_llm_permanent_error() -> None:
     """When LLM returns only content (no files dict), backend raises LLMPermanentError (fail fast)."""
-    from software_engineering_team.shared.llm import LLMPermanentError
+    from llm_service import LLMPermanentError
 
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {
@@ -306,7 +306,7 @@ def test_backend_agent_content_only_with_code_block_raises_llm_permanent_error()
 
 def test_backend_agent_content_only_raises_llm_permanent_error() -> None:
     """When LLM returns only content with no files/code, agent raises LLMPermanentError (fail fast)."""
-    from software_engineering_team.shared.llm import LLMPermanentError
+    from llm_service import LLMPermanentError
 
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {"content": "no code blocks here at all"}

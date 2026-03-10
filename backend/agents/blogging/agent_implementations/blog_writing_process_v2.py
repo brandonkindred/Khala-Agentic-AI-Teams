@@ -22,7 +22,7 @@ from blog_fact_check_agent import BlogFactCheckAgent
 from blog_research_agent.agent import ResearchAgent
 from blog_research_agent.agent_cache import AgentCache
 from blog_research_agent.allowed_claims import extract_allowed_claims
-from blog_research_agent.llm import OllamaLLMClient
+from llm_service import get_client
 from blog_research_agent.models import ResearchBriefInput
 from blog_publication_agent.models import PublishingPack
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
@@ -113,7 +113,7 @@ def run_pipeline(
                 logger.warning("Failed to update job status: %s", e)
     
     if llm_client is None:
-        llm_client = OllamaLLMClient()
+        llm_client = get_client("blog")
 
     if work_dir is not None:
         work_path = Path(work_dir).resolve()
