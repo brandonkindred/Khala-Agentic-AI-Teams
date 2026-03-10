@@ -101,8 +101,28 @@ describe('SoftwareEngineeringDashboardComponent', () => {
     expect(component.jobStatus?.pending_questions?.length).toBe(1);
   });
 
-  it('isRunTeamJobResumable returns true for running status', () => {
+  it('isRunTeamJobResumable returns false for running status', () => {
     component.jobStatus = { status: 'running' } as any;
+    expect(component.isRunTeamJobResumable()).toBe(false);
+  });
+
+  it('isRunTeamJobResumable returns false for pending status', () => {
+    component.jobStatus = { status: 'pending' } as any;
+    expect(component.isRunTeamJobResumable()).toBe(false);
+  });
+
+  it('isRunTeamJobResumable returns true for failed status', () => {
+    component.jobStatus = { status: 'failed' } as any;
+    expect(component.isRunTeamJobResumable()).toBe(true);
+  });
+
+  it('isRunTeamJobResumable returns true for cancelled status', () => {
+    component.jobStatus = { status: 'cancelled' } as any;
+    expect(component.isRunTeamJobResumable()).toBe(true);
+  });
+
+  it('isRunTeamJobResumable returns true for agent_crash status', () => {
+    component.jobStatus = { status: 'agent_crash' } as any;
     expect(component.isRunTeamJobResumable()).toBe(true);
   });
 

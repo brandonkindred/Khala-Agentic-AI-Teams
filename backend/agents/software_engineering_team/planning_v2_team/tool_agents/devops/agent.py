@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
 from ...output_templates import looks_like_truncated_file_content, parse_devops_planning_output, parse_fix_output
-from ..json_utils import complete_text_with_continuation
+from ..json_utils import attempt_fix_output_continuation, complete_text_with_continuation
 
 if TYPE_CHECKING:
     from llm_service import LLMClient
@@ -350,9 +350,20 @@ class DevOpsToolAgent:
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
-                    logger.warning(
-                        "DevOps: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "DevOps_FixSingleIssue",
                     )
+                    raw = parse_fix_output(continued)
+                    updated_content = raw.get("updated_content", "") or next(
+                        iter((raw.get("file_updates") or {}).values()), ""
+                    )
+                    if updated_content and not looks_like_truncated_file_content(updated_content):
+                        files[planning_asset_path("devops.md")] = updated_content
+                        logger.info("DevOps: fix applied after continuation (single-issue).")
+                    else:
+                        logger.warning(
+                            "DevOps: fix output still truncated after continuation; not writing.",
+                        )
                 else:
                     files[planning_asset_path("devops.md")] = updated_content
                     logger.info("DevOps: fix applied (single-issue) — %s", fix_desc[:120])
@@ -363,10 +374,25 @@ class DevOpsToolAgent:
                         logger.info("DevOps: fix applied (single-issue) — %s", fix_desc[:120])
                         break
                 else:
-                    if file_updates and any(isinstance(c, str) and c.strip() for c in file_updates.values()):
-                        logger.warning(
-                            "DevOps: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
-                        )
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "DevOps_FixSingleIssue",
+                    )
+                    raw = parse_fix_output(continued)
+                    fu = raw.get("file_updates") or {}
+                    uc = raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    if uc and not looks_like_truncated_file_content(uc):
+                        files[planning_asset_path("devops.md")] = uc
+                        logger.info("DevOps: fix applied after continuation (single-issue).")
+                    else:
+                        for p, c in fu.items():
+                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                                files[p] = c
+                                logger.info("DevOps: fix applied after continuation (single-issue).")
+                                break
+                        else:
+                            logger.warning(
+                                "DevOps: fix output still truncated after continuation; not writing.",
+                            )
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"DevOps issue addressed: {issue[:50]}",
@@ -428,9 +454,19 @@ class DevOpsToolAgent:
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
-                    logger.warning(
-                        "DevOps: fix_all_issues output appears truncated; skipping write.",
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "DevOps_FixAllIssues",
                     )
+                    raw = parse_fix_output(continued)
+                    updated_content = raw.get("updated_content", "") or next(
+                        iter((raw.get("file_updates") or {}).values()), ""
+                    )
+                    if updated_content and not looks_like_truncated_file_content(updated_content):
+                        files[planning_asset_path("devops.md")] = updated_content
+                    else:
+                        logger.warning(
+                            "DevOps: fix_all_issues output still truncated after continuation; not writing.",
+                        )
                 else:
                     files[planning_asset_path("devops.md")] = updated_content
             elif file_updates:
@@ -439,10 +475,23 @@ class DevOpsToolAgent:
                         files[path] = content
                         break
                 else:
-                    if file_updates and any(isinstance(c, str) and c.strip() for c in file_updates.values()):
-                        logger.warning(
-                            "DevOps: fix_all_issues output appears truncated; skipping write.",
-                        )
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "DevOps_FixAllIssues",
+                    )
+                    raw = parse_fix_output(continued)
+                    fu = raw.get("file_updates") or {}
+                    uc = raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    if uc and not looks_like_truncated_file_content(uc):
+                        files[planning_asset_path("devops.md")] = uc
+                    else:
+                        for p, c in fu.items():
+                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                                files[p] = c
+                                break
+                        else:
+                            logger.warning(
+                                "DevOps: fix_all_issues output still truncated after continuation; not writing.",
+                            )
 
             summary = fix_desc or f"Addressed {len(issues)} issue(s) in one update."
             if len(issues) > 1:

@@ -91,4 +91,32 @@ describe('JobsDashboardComponent', () => {
     const job = { unified: { source: 'se', jobId: 'j1' } } as any;
     expect(component.trackByJobId(0, job)).toBe('se:j1');
   });
+
+  describe('canResumeJob', () => {
+    const seJob = (status: string) =>
+      ({ unified: { source: 'software_engineering', jobId: 'j1', status }, seDetail: null } as any);
+
+    it('returns true for failed status', () => {
+      expect(component.canResumeJob(seJob('failed'))).toBe(true);
+    });
+    it('returns true for cancelled status', () => {
+      expect(component.canResumeJob(seJob('cancelled'))).toBe(true);
+    });
+    it('returns true for agent_crash status', () => {
+      expect(component.canResumeJob(seJob('agent_crash'))).toBe(true);
+    });
+    it('returns false for running status', () => {
+      expect(component.canResumeJob(seJob('running'))).toBe(false);
+    });
+    it('returns false for pending status', () => {
+      expect(component.canResumeJob(seJob('pending'))).toBe(false);
+    });
+    it('returns false for completed status', () => {
+      expect(component.canResumeJob(seJob('completed'))).toBe(false);
+    });
+    it('returns false for non-software_engineering source', () => {
+      const job = { unified: { source: 'blogging', jobId: 'j1', status: 'failed' }, seDetail: null } as any;
+      expect(component.canResumeJob(job)).toBe(false);
+    });
+  });
 });

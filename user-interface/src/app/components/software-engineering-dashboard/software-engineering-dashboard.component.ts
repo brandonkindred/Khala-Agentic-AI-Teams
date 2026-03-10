@@ -121,7 +121,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
   /** True when the run_team job can be resumed (e.g. after server restart). */
   isRunTeamJobResumable(): boolean {
     const s = this.jobStatus?.status;
-    return s === 'running' || s === 'pending' || s === 'agent_crash';
+    return s === 'failed' || s === 'cancelled' || s === 'agent_crash';
   }
 
   ngOnInit(): void {

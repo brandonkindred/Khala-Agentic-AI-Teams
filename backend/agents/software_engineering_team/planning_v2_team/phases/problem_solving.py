@@ -29,7 +29,7 @@ from ..models import (
     ToolAgentKind,
     ToolAgentPhaseInput,
 )
-from ..output_templates import parse_fix_output
+from ..output_templates import looks_like_truncated_file_content, parse_fix_output
 from ..prompts import PROBLEM_SOLVING_PROMPT, PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 from ..tool_agents.json_utils import complete_with_continuation
 
@@ -350,6 +350,12 @@ def run_problem_solving(
                     if file_updates and isinstance(file_updates, dict):
                         for rel_path, content in file_updates.items():
                             if isinstance(content, str) and content.strip():
+                                if looks_like_truncated_file_content(content):
+                                    logger.warning(
+                                        "Planning-v2 Problem-solving: skipping file %s — content may be truncated",
+                                        rel_path,
+                                    )
+                                    continue
                                 full_path = repo_path / rel_path
                                 full_path.parent.mkdir(parents=True, exist_ok=True)
                                 full_path.write_text(content, encoding="utf-8")

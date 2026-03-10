@@ -19,7 +19,7 @@ from ...output_templates import (
     parse_review_output,
     parse_spec_review_output,
 )
-from ..json_utils import complete_text_with_continuation
+from ..json_utils import attempt_fix_output_continuation, complete_text_with_continuation
 from software_engineering_team.shared.models import ToolRecommendation, PricingTier, LicenseType
 
 if TYPE_CHECKING:
@@ -506,9 +506,20 @@ class ArchitectureToolAgent:
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
-                    logger.warning(
-                        "Architecture: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "Architecture_FixSingleIssue",
                     )
+                    raw = parse_fix_output(continued)
+                    updated_content = raw.get("updated_content", "") or next(
+                        iter((raw.get("file_updates") or {}).values()), ""
+                    )
+                    if updated_content and not looks_like_truncated_file_content(updated_content):
+                        files[planning_asset_path("architecture.md")] = updated_content
+                        logger.info("Architecture: fix applied after continuation (single-issue).")
+                    else:
+                        logger.warning(
+                            "Architecture: fix output still truncated after continuation; not writing.",
+                        )
                 else:
                     files[planning_asset_path("architecture.md")] = updated_content
                     logger.info("Architecture: fix applied (single-issue) — %s", fix_desc[:120])
@@ -519,10 +530,25 @@ class ArchitectureToolAgent:
                         logger.info("Architecture: fix applied (single-issue) — %s", fix_desc[:120])
                         break
                 else:
-                    if file_updates and any(isinstance(c, str) and c.strip() for c in file_updates.values()):
-                        logger.warning(
-                            "Architecture: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
-                        )
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "Architecture_FixSingleIssue",
+                    )
+                    raw = parse_fix_output(continued)
+                    fu = raw.get("file_updates") or {}
+                    uc = raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    if uc and not looks_like_truncated_file_content(uc):
+                        files[planning_asset_path("architecture.md")] = uc
+                        logger.info("Architecture: fix applied after continuation (single-issue).")
+                    else:
+                        for p, c in fu.items():
+                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                                files[p] = c
+                                logger.info("Architecture: fix applied after continuation (single-issue).")
+                                break
+                        else:
+                            logger.warning(
+                                "Architecture: fix output still truncated after continuation; not writing.",
+                            )
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"Architecture issue addressed: {issue[:50]}",
@@ -582,9 +608,19 @@ class ArchitectureToolAgent:
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
-                    logger.warning(
-                        "Architecture: fix_all_issues output appears truncated; skipping write.",
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "Architecture_FixAllIssues",
                     )
+                    raw = parse_fix_output(continued)
+                    updated_content = raw.get("updated_content", "") or next(
+                        iter((raw.get("file_updates") or {}).values()), ""
+                    )
+                    if updated_content and not looks_like_truncated_file_content(updated_content):
+                        files[planning_asset_path("architecture.md")] = updated_content
+                    else:
+                        logger.warning(
+                            "Architecture: fix_all_issues output still truncated after continuation; not writing.",
+                        )
                 else:
                     files[planning_asset_path("architecture.md")] = updated_content
             elif file_updates:
@@ -593,10 +629,23 @@ class ArchitectureToolAgent:
                         files[path] = content
                         break
                 else:
-                    if file_updates and any(isinstance(c, str) and c.strip() for c in file_updates.values()):
-                        logger.warning(
-                            "Architecture: fix_all_issues output appears truncated; skipping write.",
-                        )
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "Architecture_FixAllIssues",
+                    )
+                    raw = parse_fix_output(continued)
+                    fu = raw.get("file_updates") or {}
+                    uc = raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    if uc and not looks_like_truncated_file_content(uc):
+                        files[planning_asset_path("architecture.md")] = uc
+                    else:
+                        for p, c in fu.items():
+                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                                files[p] = c
+                                break
+                        else:
+                            logger.warning(
+                                "Architecture: fix_all_issues output still truncated after continuation; not writing.",
+                            )
 
             summary = fix_desc or f"Addressed {len(issues)} issue(s) in one update."
             if len(issues) > 1:

@@ -1,67 +1,55 @@
 """
-Job store for blogging pipeline: persists job status and progress per job in a cache directory.
+Job store for blogging pipeline: persists job status and progress via CentralJobManager.
 
-Each job is stored as {cache_dir}/blog_jobs/{job_id}.json so state survives process restarts.
-This enables async API endpoints with polling for UI progress tracking.
+Jobs are stored under {cache_dir}/blogging_team/jobs/{job_id}.json so state survives
+process restarts. This enables async API endpoints with polling for UI progress tracking.
 """
 
 from __future__ import annotations
 
 import copy
-import json
 import logging
-import threading
-import time
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from shared_job_management import CentralJobManager, start_stale_job_monitor
+
 logger = logging.getLogger(__name__)
+
+# Stale job monitor: mark PENDING/running jobs with no recent heartbeat as failed
+_blog_stale_monitor_stop: Optional[Any] = None
+
+
+def _start_blog_stale_monitor() -> None:
+    global _blog_stale_monitor_stop
+    if _blog_stale_monitor_stop is not None:
+        return
+    try:
+        _blog_stale_monitor_stop = start_stale_job_monitor(
+            _manager(DEFAULT_CACHE_DIR),
+            interval_seconds=300.0,
+            stale_after_seconds=3600.0,
+            reason="Blog pipeline job heartbeat stale (pending/running too long without progress)",
+        )
+        logger.info("Started blog job stale monitor (stale_after=3600s)")
+    except Exception as e:
+        logger.warning("Could not start blog stale job monitor: %s", e)
 
 # Job status constants
 JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"
 JOB_STATUS_COMPLETED = "completed"
 JOB_STATUS_FAILED = "failed"
+JOB_STATUS_CANCELLED = "cancelled"
 JOB_STATUS_NEEDS_REVIEW = "needs_human_review"
 
-DEFAULT_CACHE_DIR: str | Path = ".agent_cache"
-_lock = threading.Lock()
+DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache")).resolve()
 
 
-def _jobs_dir(cache_dir: str | Path) -> Path:
-    path = Path(cache_dir) / "blog_jobs"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _job_file(job_id: str, cache_dir: str | Path) -> Path:
-    return _jobs_dir(cache_dir) / f"{job_id}.json"
-
-
-def _read_job_file(path: Path) -> Optional[Dict[str, Any]]:
-    """Read job from path (caller must hold _lock if sharing with writers)."""
-    if not path.exists():
-        return None
-    for attempt in range(2):
-        try:
-            raw = path.read_text(encoding="utf-8")
-            if not raw.strip():
-                if attempt == 0:
-                    time.sleep(0.1)
-                    continue
-                return None
-            return json.loads(raw)
-        except (json.JSONDecodeError, ValueError) as e:
-            if attempt == 0:
-                time.sleep(0.1)
-                continue
-            logger.warning("Failed to read job file %s: %s", path, e)
-            return None
-        except Exception as e:
-            logger.warning("Failed to read job file %s: %s", path, e)
-            return None
-    return None
+def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
+    return CentralJobManager(team="blogging_team", cache_dir=cache_dir)
 
 
 def create_blog_job(
@@ -74,6 +62,7 @@ def create_blog_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Create a new blog job with pending status and persist to cache."""
+    now = datetime.now(timezone.utc).isoformat()
     data: Dict[str, Any] = {
         "job_id": job_id,
         "brief": brief,
@@ -92,14 +81,11 @@ def create_blog_job(
         "research_sources_count": 0,
         "draft_iterations": 0,
         "rewrite_iterations": 0,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": now,
         "started_at": None,
         "completed_at": None,
     }
-    with _lock:
-        _job_file(job_id, cache_dir).write_text(
-            json.dumps(data, indent=2), encoding="utf-8"
-        )
+    _manager(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **data)
 
 
 def get_blog_job(
@@ -107,9 +93,8 @@ def get_blog_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> Optional[Dict[str, Any]]:
     """Get job data from cache, or None if not found."""
-    with _lock:
-        data = _read_job_file(_job_file(job_id, cache_dir))
-        return copy.deepcopy(data) if data else None
+    data = _manager(cache_dir).get_job(job_id)
+    return copy.deepcopy(data) if data else None
 
 
 def list_blog_jobs(
@@ -117,44 +102,21 @@ def list_blog_jobs(
     running_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """List blog jobs from cache. If running_only is True, only include pending or running."""
-    running_statuses = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING)
+    statuses: Optional[List[str]] = (
+        [JOB_STATUS_PENDING, JOB_STATUS_RUNNING] if running_only else None
+    )
+    raw = _manager(cache_dir).list_jobs(statuses=statuses)
     result: List[Dict[str, Any]] = []
-    jobs_path = _jobs_dir(cache_dir)
-    if not jobs_path.exists():
-        return result
-    with _lock:
-        for path in jobs_path.glob("*.json"):
-            job_id = path.stem
-            data = _read_job_file(path)
-            if not data:
-                continue
-            status = data.get("status", JOB_STATUS_PENDING)
-            if running_only and status not in running_statuses:
-                continue
-            result.append({
-                "job_id": job_id,
-                "status": status,
-                "brief": data.get("brief", "")[:100],
-                "phase": data.get("phase"),
-                "progress": data.get("progress", 0),
-                "created_at": data.get("created_at"),
-            })
+    for data in raw:
+        result.append({
+            "job_id": data.get("job_id", ""),
+            "status": data.get("status", JOB_STATUS_PENDING),
+            "brief": (data.get("brief") or "")[:100],
+            "phase": data.get("phase"),
+            "progress": data.get("progress", 0),
+            "created_at": data.get("created_at"),
+        })
     return result
-
-
-def mark_all_running_jobs_failed(
-    reason: str,
-    cache_dir: str | Path = DEFAULT_CACHE_DIR,
-) -> None:
-    """Mark all pending or running blog jobs as failed (e.g. on server shutdown)."""
-    try:
-        jobs = list_blog_jobs(cache_dir=cache_dir, running_only=True)
-        for job in jobs:
-            job_id = job.get("job_id")
-            if job_id:
-                fail_blog_job(job_id, error=reason, cache_dir=cache_dir)
-    except Exception as e:
-        logger.warning("mark_all_running_jobs_failed: %s", e)
 
 
 def update_blog_job(
@@ -163,11 +125,7 @@ def update_blog_job(
     **kwargs: Any,
 ) -> None:
     """Update job fields. Merges with existing data and persists to cache."""
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        data = _read_job_file(path) or {}
-        data.update(kwargs)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _manager(cache_dir).update_job(job_id, **kwargs)
 
 
 def start_blog_job(
@@ -227,14 +185,28 @@ def fail_blog_job(
     )
 
 
+def mark_all_running_jobs_failed(
+    reason: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Mark all pending or running blog jobs as failed (e.g. on server shutdown)."""
+    try:
+        jobs = list_blog_jobs(cache_dir=cache_dir, running_only=True)
+        for job in jobs:
+            job_id = job.get("job_id")
+            if job_id:
+                fail_blog_job(job_id, error=reason, cache_dir=cache_dir)
+    except Exception as e:
+        logger.warning("mark_all_running_jobs_failed: %s", e)
+
+
 def delete_blog_job(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Delete a job from the cache. Returns True if deleted, False if not found."""
-    with _lock:
-        path = _job_file(job_id, cache_dir)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
+    return _manager(cache_dir).delete_job(job_id)
+
+
+# Start stale job monitor when module is loaded (e.g. when blogging API is mounted)
+_start_blog_stale_monitor()
