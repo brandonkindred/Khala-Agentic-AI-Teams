@@ -91,6 +91,53 @@ def complete_text_with_continuation(
         ) from e
 
 
+def attempt_fix_output_continuation(
+    llm: "LLMClient",
+    prompt: str,
+    raw_text: str,
+    agent_name: str,
+    *,
+    max_cycles: int = 2,
+) -> str:
+    """When parsed fix output looks truncated (content-level), attempt continuation.
+
+    Treats raw_text as partial response and asks the model to continue. Callers
+    should re-parse the returned content with parse_fix_output and re-check
+    looks_like_truncated_file_content; only write to disk if not truncated.
+
+    If the LLM client does not expose base_url/model/timeout (e.g. test double),
+    returns raw_text unchanged and logs that continuation was skipped.
+
+    Returns:
+        Merged response content (raw_text + continuation chunks), or raw_text if
+        continuation was skipped.
+    """
+    base_url = getattr(llm, "base_url", None)
+    model = getattr(llm, "model", None)
+    timeout = getattr(llm, "timeout", 60)
+    if base_url is None or model is None:
+        logger.warning(
+            "%s: Fix output continuation skipped (llm lacks base_url/model).",
+            agent_name,
+        )
+        return raw_text
+    from software_engineering_team.shared.continuation import ResponseContinuator
+
+    continuator = ResponseContinuator(
+        base_url=base_url,
+        model=model,
+        timeout=timeout,
+        max_cycles=max_cycles,
+    )
+    result = continuator.attempt_continuation(
+        original_prompt=prompt,
+        partial_content=raw_text,
+        json_mode=False,
+        task_id=agent_name,
+    )
+    return result.content
+
+
 def complete_with_continuation(
     llm: "LLMClient",
     prompt: str,

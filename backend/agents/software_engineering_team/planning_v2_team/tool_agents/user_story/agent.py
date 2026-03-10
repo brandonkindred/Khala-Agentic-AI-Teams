@@ -15,7 +15,7 @@ from software_engineering_team.shared.models import Initiative, Epic, StoryPlan,
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
 from ...output_templates import looks_like_truncated_file_content, parse_fix_output, parse_review_output
-from ..json_utils import complete_text_with_continuation
+from ..json_utils import attempt_fix_output_continuation, complete_text_with_continuation
 from software_engineering_team.shared.deduplication import dedupe_by_key
 
 if TYPE_CHECKING:
@@ -62,7 +62,7 @@ def _parse_hierarchy_text_to_data(text: str) -> Dict[str, Any]:
             current_epic["stories"].append(current_story)
         elif kind == "TASK" and len(parts) >= 4 and current_story:
             assignee = parts[3] if len(parts) > 3 else "backend"
-            # Planning V2: complexity_points 2/3/5 correspond to approx 2/3/5 days.
+            # Planning V2: complexity_points 1 = ~1 day exception; 2/3/5 = guideline 2-5 days.
             points = 2
             if len(parts) > 4 and str(parts[4]).strip().isdigit():
                 points = min(13, max(1, int(parts[4])))
@@ -117,9 +117,9 @@ STORY | id | title | description
 TASK | id | title | assignee | complexity_points
 
 Rules:
-- Each task should be a substantial chunk of work estimated at 2-5 days of implementation. Use complexity_points 2, 3, or 5 only (roughly 2 days, 3 days, 5 days). Do not use 1 (sub-day).
+- Guideline: most tasks should be substantial chunks of work estimated at roughly 2-5 days (use complexity_points 2, 3, or 5).
+- Exceptions: a story, set of tasks, or epic that is genuinely ~1 day is acceptable; use complexity_points 1 only for those exceptions. Keep such cases rare—the majority of work should be 2-5 days.
 - Tasks must be high-level and broad in scope. The development team that picks up a task will break it into subtasks and implementation details; the plan should not pre-slice work into small items.
-- Avoid tasks that would take less than two days; prefer fewer, larger tasks over many small ones.
 - assignee is one of: frontend, backend, devops, qa
 - List INIT first, then EPIC under it, then STORY under EPIC, then TASK under STORY. Order matters.
 
@@ -136,7 +136,7 @@ Specification:
 Plan Summary: {plan_summary}
 """
 
-USER_STORY_REVIEW_PROMPT = """You are a Product Planning expert. Review these user stories and tasks for completeness, team assignments, and task granularity. Each task should be 2-5 days and high-level; flag any task that is too small (under two days) or too granular, and recommend merging or broadening so that downstream teams own subtask breakdown. Flag other issues as needed.
+USER_STORY_REVIEW_PROMPT = """You are a Product Planning expert. Review these user stories and tasks for completeness, team assignments, and task granularity. Guideline: most tasks should be 2-5 days and high-level. Exceptions: a few tasks or stories that are ~1 day are acceptable. Flag when many tasks are under two days or too granular (i.e. exceptions become the norm), and recommend merging or broadening so that downstream teams own subtask breakdown. Flag other issues as needed.
 
 Artifacts:
 ---
@@ -600,13 +600,23 @@ class UserStoryToolAgent:
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
-                files[planning_asset_path("user_stories.md")] = updated_content
                 if looks_like_truncated_file_content(updated_content):
-                    logger.warning(
-                        "UserStory: fix output may be truncated; wrote anyway (%d chars)",
-                        len(updated_content),
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "UserStory_FixSingleIssue",
                     )
+                    raw = parse_fix_output(continued)
+                    updated_content = raw.get("updated_content", "") or next(
+                        iter((raw.get("file_updates") or {}).values()), ""
+                    )
+                    if updated_content and not looks_like_truncated_file_content(updated_content):
+                        files[planning_asset_path("user_stories.md")] = updated_content
+                        logger.info("UserStory: fix applied after continuation (single-issue) — %s", (raw.get("fix_description") or "")[:120])
+                    else:
+                        logger.warning(
+                            "UserStory: fix output still truncated after continuation; not writing.",
+                        )
                 else:
+                    files[planning_asset_path("user_stories.md")] = updated_content
                     logger.info("UserStory: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
@@ -616,15 +626,25 @@ class UserStoryToolAgent:
                             logger.info("UserStory: fix applied (single-issue) — %s", fix_desc[:120])
                             break
                 else:
-                    # All content looked truncated; write first non-empty anyway so artifact is updated (Option A)
-                    for path, content in file_updates.items():
-                        if content and isinstance(content, str) and content.strip():
-                            files[path] = content
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "UserStory_FixSingleIssue",
+                    )
+                    raw = parse_fix_output(continued)
+                    fu = raw.get("file_updates") or {}
+                    uc = raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    if uc and not looks_like_truncated_file_content(uc):
+                        files[planning_asset_path("user_stories.md")] = uc
+                        logger.info("UserStory: fix applied after continuation (single-issue).")
+                    else:
+                        for p, c in fu.items():
+                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                                files[p] = c
+                                logger.info("UserStory: fix applied after continuation (single-issue).")
+                                break
+                        else:
                             logger.warning(
-                                "UserStory: fix output may be truncated; wrote anyway (%d chars)",
-                                len(content),
+                                "UserStory: fix output still truncated after continuation; not writing.",
                             )
-                            break
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"User story issue addressed: {issue[:50]}",
@@ -685,9 +705,19 @@ class UserStoryToolAgent:
             hierarchy: Optional[PlanningHierarchy] = None
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
-                    logger.warning(
-                        "UserStory: fix_all_issues output may be truncated; skipping write.",
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "UserStory_FixAllIssues",
                     )
+                    raw = parse_fix_output(continued)
+                    updated_content = raw.get("updated_content", "") or next(
+                        iter((raw.get("file_updates") or {}).values()), ""
+                    )
+                    if updated_content and not looks_like_truncated_file_content(updated_content):
+                        files[planning_asset_path("user_stories.md")] = updated_content
+                    else:
+                        logger.warning(
+                            "UserStory: fix_all_issues output still truncated after continuation; not writing.",
+                        )
                 else:
                     files[planning_asset_path("user_stories.md")] = updated_content
             elif file_updates:
@@ -697,13 +727,23 @@ class UserStoryToolAgent:
                             files[path] = content
                             break
                 else:
-                    for path, content in file_updates.items():
-                        if content and isinstance(content, str) and content.strip():
-                            files[path] = content
+                    continued = attempt_fix_output_continuation(
+                        self.llm, prompt, raw_text, "UserStory_FixAllIssues",
+                    )
+                    raw = parse_fix_output(continued)
+                    fu = raw.get("file_updates") or {}
+                    uc = raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    if uc and not looks_like_truncated_file_content(uc):
+                        files[planning_asset_path("user_stories.md")] = uc
+                    else:
+                        for p, c in fu.items():
+                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                                files[p] = c
+                                break
+                        else:
                             logger.warning(
-                                "UserStory: fix_all_issues output may be truncated; wrote anyway.",
+                                "UserStory: fix_all_issues output still truncated after continuation; not writing.",
                             )
-                            break
 
             summary = fix_desc or f"Addressed {len(issues)} issue(s) in one update."
             if len(issues) > 1:

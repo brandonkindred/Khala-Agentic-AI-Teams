@@ -452,7 +452,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
 
   canResumeJob(job: DashboardRow): boolean {
     if (job.unified.source !== 'software_engineering') return false;
-    return ['pending', 'running', 'agent_crash'].includes(job.unified.status);
+    return ['failed', 'cancelled', 'agent_crash'].includes(job.unified.status);
   }
 
   canRestartJob(job: DashboardRow): boolean {

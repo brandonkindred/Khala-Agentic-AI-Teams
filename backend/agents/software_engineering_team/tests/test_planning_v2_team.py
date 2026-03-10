@@ -509,6 +509,102 @@ class TestCompletenessHelper:
         assert looks_like_truncated_file_content("   \n  ") is False
 
 
+class TestTruncatedFixOutputNoWrite:
+    """When fix output is truncated, agents must not write to result.files."""
+
+    def test_truncated_no_write_system_design(self, mock_llm: MagicMock):
+        """Parsed file content triggers looks_like_truncated -> result.files empty (no continuation or still truncated)."""
+        from planning_v2_team.models import planning_asset_path
+        from planning_v2_team.tool_agents.system_design import SystemDesignToolAgent
+
+        # Content that looks truncated: short last line "Incomplete sen" (< 20 chars)
+        truncated_body = "# System Design\n\nIncomplete sen"
+        mock_fix_response = (
+            "## ROOT_CAUSE ##\nRoot.\n## END ROOT_CAUSE ##\n"
+            "## FIX_DESCRIPTION ##\nFix.\n## END FIX_DESCRIPTION ##\n"
+            "## RESOLVED ##\ntrue\n## END RESOLVED ##\n"
+            "## FILE_UPDATES ##\n"
+            f"### {planning_asset_path('system_design.md')} ###\n"
+            f"{truncated_body}\n"
+            "### END FILE ###\n## END FILE_UPDATES ##"
+        )
+        mock_llm.complete_text.return_value = mock_fix_response
+        # No base_url/model so attempt_fix_output_continuation returns raw_text (still truncated)
+        agent = SystemDesignToolAgent(mock_llm)
+        inp = ToolAgentPhaseInput(
+            spec_content="Spec",
+            current_files={planning_asset_path("system_design.md"): "Old"},
+        )
+        result = agent.fix_all_issues(["issue one"], inp)
+        assert isinstance(result, ToolAgentPhaseOutput)
+        assert not result.files, "must not write truncated content to result.files"
+
+    def test_continuation_then_write_system_design(self, mock_llm: MagicMock):
+        """When first response is truncated, mock continuation returning complete content -> agent writes after re-parse."""
+        from planning_v2_team.models import planning_asset_path
+        from planning_v2_team.tool_agents.system_design import SystemDesignToolAgent
+
+        truncated_body = "# System Design\n\nIncomplete sen"
+        truncated_response = (
+            "## ROOT_CAUSE ##\nRoot.\n## END ROOT_CAUSE ##\n"
+            "## FIX_DESCRIPTION ##\nFix.\n## END FIX_DESCRIPTION ##\n"
+            "## RESOLVED ##\ntrue\n## END RESOLVED ##\n"
+            "## FILE_UPDATES ##\n"
+            f"### {planning_asset_path('system_design.md')} ###\n"
+            f"{truncated_body}\n"
+            "### END FILE ###\n## END FILE_UPDATES ##"
+        )
+        complete_body = "# System Design\n\nUpdated content with complete ending.\n"
+        complete_response = (
+            "## ROOT_CAUSE ##\nRoot.\n## END ROOT_CAUSE ##\n"
+            "## FIX_DESCRIPTION ##\nFix.\n## END FIX_DESCRIPTION ##\n"
+            "## RESOLVED ##\ntrue\n## END RESOLVED ##\n"
+            "## FILE_UPDATES ##\n"
+            f"### {planning_asset_path('system_design.md')} ###\n"
+            f"{complete_body}\n"
+            "### END FILE ###\n## END FILE_UPDATES ##"
+        )
+        mock_llm.complete_text.return_value = truncated_response
+        with patch(
+            "planning_v2_team.tool_agents.system_design.agent.attempt_fix_output_continuation",
+            return_value=complete_response,
+        ):
+            agent = SystemDesignToolAgent(mock_llm)
+            inp = ToolAgentPhaseInput(
+                spec_content="Spec",
+                current_files={planning_asset_path("system_design.md"): "Old"},
+            )
+            result = agent.fix_all_issues(["issue one"], inp)
+        assert result.files
+        assert planning_asset_path("system_design.md") in result.files
+        assert "complete ending" in result.files[planning_asset_path("system_design.md")]
+
+    def test_user_story_truncated_no_wrote_anyway(self, mock_llm: MagicMock):
+        """User story: truncated content and no/truncated continuation -> result.files empty, no 'wrote anyway'."""
+        from planning_v2_team.models import planning_asset_path
+        from planning_v2_team.tool_agents.user_story import UserStoryToolAgent
+
+        truncated_body = "# User Stories\n\nIncomplete sto"
+        mock_fix_response = (
+            "## ROOT_CAUSE ##\nRoot.\n## END ROOT_CAUSE ##\n"
+            "## FIX_DESCRIPTION ##\nFix.\n## END FIX_DESCRIPTION ##\n"
+            "## RESOLVED ##\ntrue\n## END RESOLVED ##\n"
+            "## FILE_UPDATES ##\n"
+            f"### {planning_asset_path('user_stories.md')} ###\n"
+            f"{truncated_body}\n"
+            "### END FILE ###\n## END FILE_UPDATES ##"
+        )
+        mock_llm.complete_text.return_value = mock_fix_response
+        agent = UserStoryToolAgent(mock_llm)
+        inp = ToolAgentPhaseInput(
+            spec_content="Spec",
+            current_files={planning_asset_path("user_stories.md"): "Old"},
+        )
+        result = agent.fix_single_issue("issue", inp)
+        assert isinstance(result, ToolAgentPhaseOutput)
+        assert not result.files, "must not write truncated content; result.files must be empty"
+
+
 # ---------------------------------------------------------------------------
 # Issue classification and status breakdown (problem_solving helpers)
 # ---------------------------------------------------------------------------
