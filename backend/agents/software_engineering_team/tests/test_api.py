@@ -425,3 +425,19 @@ def test_restart_200_when_failed_reuses_same_job(client: TestClient, temp_work_p
     assert job is not None
     assert job.get("status") == "running"
     assert job.get("repo_path") == str(temp_work_path)
+
+
+def test_planning_v2_status_returns_status_text(client: TestClient, temp_work_path: Path) -> None:
+    """GET /planning-v2/status/{job_id} returns status_text when job has it."""
+    from software_engineering_team.shared.job_store import create_job, update_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="planning_v2")
+    update_job(job_id, status="running", status_text="Fixing 3 issues: 2 user story, 1 architecture (iteration 1).")
+
+    r = client.get(f"/planning-v2/status/{job_id}")
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("job_id") == job_id
+    assert "status_text" in data
+    assert data.get("status_text") == "Fixing 3 issues: 2 user story, 1 architecture (iteration 1)."

@@ -402,6 +402,8 @@ export interface PlanningV2StatusResponse {
   pending_questions?: PendingQuestion[];
   /** True when workflow is blocked waiting for user to answer open questions. */
   waiting_for_answers?: boolean;
+  /** Human-readable status message describing current activity. */
+  status_text?: string;
 }
 
 /** Response from GET /planning-v2/result/{job_id}. */

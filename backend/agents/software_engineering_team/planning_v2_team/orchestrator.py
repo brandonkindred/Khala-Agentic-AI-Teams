@@ -55,6 +55,10 @@ from .phases.planning import run_planning
 from .phases.implementation import run_implementation
 from .phases.review import run_review
 from .phases.deliver import run_deliver
+from .phases.problem_solving import (
+    format_issues_breakdown_and_synopsis,
+    group_issues_by_agent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -318,7 +322,7 @@ class PlanningV2PlanningAgent:
             current_phase=Phase.PLANNING.value,
             progress=20,
             active_roles=_active_roles_for_phase(Phase.PLANNING),
-            status_text="Generating system design and project architecture",
+            status_text="Generating system design, architecture, user stories, DevOps plan, and UI design.",
         )
         try:
             planning_result = run_planning(
@@ -386,14 +390,21 @@ class PlanningV2PlanningAgent:
                     "Planning-v2: Next step -> Starting Phase 2: Implementation (iteration %d/%d, fixing %d review issues)",
                     iteration, MAX_REVIEW_ITERATIONS, issue_count,
                 )
-                status_text = f"Fixing {issue_count} review issues (iteration {iteration})"
+                grouped = group_issues_by_agent(review_result.issues)
+                counts_segment, synopsis_segment = format_issues_breakdown_and_synopsis(grouped)
+                status_text = f"Fixing {issue_count} issues: {counts_segment} (iteration {iteration})"
+                if synopsis_segment:
+                    status_text = f"{status_text}. {synopsis_segment}"
             else:
                 logger.info(
                     "Planning-v2: Next step -> Starting Phase 2: Implementation (iteration %d/%d)",
                     iteration, MAX_REVIEW_ITERATIONS,
                 )
-                status_text = f"Creating implementation plan and task breakdown (iteration {iteration})"
-            
+                status_text = (
+                    f"Writing system design, architecture, user stories, DevOps, UI design, "
+                    f"UX design, and task classification (iteration {iteration})."
+                )
+
             result.current_phase = Phase.IMPLEMENTATION
             _update_job(
                 current_phase=Phase.IMPLEMENTATION.value,
@@ -429,7 +440,7 @@ class PlanningV2PlanningAgent:
                 current_phase=Phase.REVIEW.value,
                 progress=55 + (iteration - 1) * 10,
                 active_roles=_active_roles_for_phase(Phase.REVIEW),
-                status_text="Reviewing plan for consistency and completeness",
+                status_text="Reviewing system design, architecture, user stories, and task dependencies for consistency and completeness.",
             )
             try:
                 review_result = run_review(

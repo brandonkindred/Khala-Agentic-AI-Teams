@@ -27,6 +27,12 @@ mat-progress-bar {
   text-align: right;
 }
 
+.status-text {
+  margin: 8px 0 16px 0;
+  font-size: 14px;
+  color: var(--mat-sys-on-surface-variant, #616161);
+}
+
 .phases-row {
   display: flex;
   gap: 24px;

@@ -206,6 +206,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       return this.seApi.getPlanningV2Status(summary.job_id).pipe(
         map((status: PlanningV2StatusResponse) => this.toSEDetail({
           progress: status.progress,
+          statusText: status.status_text,
           currentPhase: status.current_phase,
           waitingForAnswers: status.waiting_for_answers,
           teamProgress: { 'planning': { current_phase: status.current_phase, progress: status.progress } },

@@ -1258,6 +1258,13 @@ class PlanningV2StatusResponse(BaseModel):
         default=False,
         description="True if the workflow is paused waiting for user answers.",
     )
+    status_text: Optional[str] = Field(
+        default=None,
+        description="Human-readable status message describing current activity.",
+    )
+
+
+PlanningV2StatusResponse.model_rebuild()
 
 
 class PlanningV2ResultResponse(BaseModel):
@@ -1546,6 +1553,7 @@ def get_planning_v2_status(job_id: str) -> PlanningV2StatusResponse:
         summary=data.get("summary"),
         pending_questions=pending_questions,
         waiting_for_answers=data.get("waiting_for_answers", False),
+        status_text=data.get("status_text"),
     )
 
 
@@ -1642,6 +1650,7 @@ def submit_planning_v2_answers(job_id: str, request: SubmitAnswersRequest) -> Pl
         summary=updated_data.get("summary"),
         pending_questions=pending_questions_response,
         waiting_for_answers=updated_data.get("waiting_for_answers", False),
+        status_text=updated_data.get("status_text"),
     )
 
 
