@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
 
@@ -51,6 +51,9 @@ def _classify_issue(issue: str) -> ToolAgentKind:
 
     if any(kw in issue_lower for kw in ["architect", "layer", "module", "component", "integration"]):
         return ToolAgentKind.ARCHITECTURE
+    # Check task classification before user story so "task team assignment" maps to classification
+    if any(kw in issue_lower for kw in ["classification", "team assignment", "task team", "frontend", "backend", "devops", "qa"]):
+        return ToolAgentKind.TASK_CLASSIFICATION
     if any(kw in issue_lower for kw in ["story", "task", "epic", "user", "acceptance", "criteria"]):
         return ToolAgentKind.USER_STORY
     if any(kw in issue_lower for kw in ["design", "system", "diagram", "flow", "interface"]):
@@ -63,6 +66,83 @@ def _classify_issue(issue: str) -> ToolAgentKind:
         return ToolAgentKind.UX_DESIGN
 
     return ToolAgentKind.SYSTEM_DESIGN
+
+
+def group_issues_by_agent(issues: List[str]) -> Dict[ToolAgentKind, List[str]]:
+    """Group review issues by the tool agent that would handle them.
+
+    Uses _classify_issue for each issue. Useful for status breakdown and synopsis.
+
+    Returns:
+        Dict mapping each ToolAgentKind to the list of issues classified to that agent.
+    """
+    grouped: Dict[ToolAgentKind, List[str]] = {}
+    for issue in issues:
+        kind = _classify_issue(issue)
+        grouped.setdefault(kind, []).append(issue)
+    return grouped
+
+
+# Human-readable labels for status text (e.g. user_story -> "user story")
+TOOL_AGENT_LABELS: Dict[ToolAgentKind, str] = {
+    ToolAgentKind.SYSTEM_DESIGN: "system design",
+    ToolAgentKind.ARCHITECTURE: "architecture",
+    ToolAgentKind.USER_STORY: "user story",
+    ToolAgentKind.DEVOPS: "DevOps",
+    ToolAgentKind.UI_DESIGN: "UI design",
+    ToolAgentKind.UX_DESIGN: "UX design",
+    ToolAgentKind.TASK_CLASSIFICATION: "task classification",
+    ToolAgentKind.TASK_DEPENDENCY: "task dependency",
+}
+
+# Stable order for breakdown display (Implementation-phase agents first)
+ISSUE_BREAKDOWN_DISPLAY_ORDER: List[ToolAgentKind] = [
+    ToolAgentKind.SYSTEM_DESIGN,
+    ToolAgentKind.ARCHITECTURE,
+    ToolAgentKind.USER_STORY,
+    ToolAgentKind.DEVOPS,
+    ToolAgentKind.UI_DESIGN,
+    ToolAgentKind.UX_DESIGN,
+    ToolAgentKind.TASK_CLASSIFICATION,
+    ToolAgentKind.TASK_DEPENDENCY,
+]
+
+SYNOPSIS_MAX_LEN = 55
+
+
+def format_issues_breakdown_and_synopsis(
+    grouped: Dict[ToolAgentKind, List[str]],
+) -> Tuple[str, str]:
+    """Build counts segment and optional synopsis segment for status text.
+
+    Returns:
+        (counts_segment, synopsis_segment)
+        - counts_segment: e.g. "6 user story, 2 architecture, 1 system design"
+        - synopsis_segment: e.g. "User story: missing acceptance criteria. Architecture: ..."
+    """
+    parts: List[str] = []
+    for kind in ISSUE_BREAKDOWN_DISPLAY_ORDER:
+        issues_list = grouped.get(kind, [])
+        if not issues_list:
+            continue
+        label = TOOL_AGENT_LABELS.get(kind, kind.value.replace("_", " "))
+        parts.append(f"{len(issues_list)} {label}")
+    counts_segment = ", ".join(parts) if parts else "0"
+
+    synopsis_parts: List[str] = []
+    for kind in ISSUE_BREAKDOWN_DISPLAY_ORDER:
+        issues_list = grouped.get(kind, [])
+        if not issues_list:
+            continue
+        label = TOOL_AGENT_LABELS.get(kind, kind.value.replace("_", " "))
+        first_issue = issues_list[0].strip()
+        if len(first_issue) > SYNOPSIS_MAX_LEN:
+            first_issue = first_issue[: SYNOPSIS_MAX_LEN - 3].rstrip() + "..."
+        display_label = label[0].upper() + label[1:] if len(label) > 1 else label.upper()
+        synopsis_parts.append(f"{display_label}: {first_issue}")
+    synopsis_segment = ". ".join(synopsis_parts) if synopsis_parts else ""
+
+    return counts_segment, synopsis_segment
 
 
 def _read_planning_artifacts(repo_path: Path) -> Dict[str, str]:

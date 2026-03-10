@@ -27,6 +27,10 @@
         <span class="progress-label">{{ status.progress }}%</span>
       </div>
 
+      @if (status.status_text) {
+        <p class="status-text">{{ status.status_text }}</p>
+      }
+
       <div class="phases-row">
         @for (phase of phases; track phase) {
           <div class="phase-item" [ngClass]="phaseClass(phase)">
