@@ -19,7 +19,7 @@ from ...output_templates import looks_like_truncated_file_content, parse_fix_out
 from ..json_utils import complete_text_with_continuation
 
 if TYPE_CHECKING:
-    from software_engineering_team.shared.llm import LLMClient
+    from llm_service import LLMClient
 
 logger = logging.getLogger(__name__)
 

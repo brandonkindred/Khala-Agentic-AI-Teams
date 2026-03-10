@@ -9,7 +9,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_chunk_chars,
     compute_code_review_total_chars,
 )
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 
 from .coordinator import run_coordinator
 from .models import CodeReviewInput, CodeReviewIssue, CodeReviewOutput

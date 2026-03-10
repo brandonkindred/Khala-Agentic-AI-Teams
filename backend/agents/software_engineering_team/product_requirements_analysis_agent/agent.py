@@ -48,7 +48,7 @@ from software_engineering_team.shared.context_sizing import (
 )
 
 if TYPE_CHECKING:
-    from software_engineering_team.shared.llm import LLMClient
+    from llm_service import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -422,6 +422,30 @@ class ProductRequirementsAnalysisAgent:
             raise ValueError("llm_client is required")
         self.llm = llm_client
 
+    def _has_existing_pra_artifacts(self, repo_path: Path) -> bool:
+        """Return True if plan/product_analysis has prior PRA output we can resume from."""
+        pa_dir = repo_path / "plan" / "product_analysis"
+        if not pa_dir.is_dir():
+            return False
+        # qa_history.md: substantive only when length > 200 and contains iteration/answer markers
+        qa_path = pa_dir / "qa_history.md"
+        if qa_path.is_file():
+            try:
+                content = qa_path.read_text(encoding="utf-8")
+                if len(content) > 200 and ("## Iteration" in content or "**Answer:**" in content):
+                    return True
+            except OSError:
+                pass
+        if (pa_dir / "validated_spec.md").is_file():
+            return True
+        # Any updated_spec_v*.md or updated_spec.md
+        for p in pa_dir.iterdir():
+            if p.is_file() and p.suffix == ".md":
+                name = p.name
+                if name == "updated_spec.md" or (name.startswith("updated_spec_v") and name.endswith(".md")):
+                    return True
+        return False
+
     def run_workflow(
         self,
         *,
@@ -472,39 +496,81 @@ class ProductRequirementsAnalysisAgent:
         logger.info("Initialized %s for PRA artifacts", PRODUCT_ANALYSIS_SUBDIR)
 
         # One-time context and constraints discovery (before first spec review) when job_id is set
+        skip_context_discovery = False
         if job_id is not None:
-            result.current_phase = AnalysisPhase.CONTEXT_DISCOVERY
-            _update_job(
-                current_phase=AnalysisPhase.CONTEXT_DISCOVERY.value,
-                progress=2,
-                message="Gathering project context and constraints...",
-                status_text="Gathering project context and constraints...",
-            )
-            context_questions = self._run_context_constraints_discovery(
-                current_spec, repo_path
-            )
-            if context_questions:
-                _update_job(
-                    status_text=f"Waiting for answers to {len(context_questions)} context/constraint question(s)",
+            if self._has_existing_pra_artifacts(repo_path):
+                logger.info(
+                    "Skipping context discovery; plan/product_analysis has prior PRA output, picking up from there."
                 )
-                try:
-                    context_answered = self._communicate_with_user(
-                        job_id=job_id,
-                        open_questions=context_questions,
-                        repo_path=repo_path,
-                        iteration=0,
+                skip_context_discovery = True
+                result.current_phase = AnalysisPhase.SPEC_REVIEW
+                _update_job(
+                    current_phase=AnalysisPhase.SPEC_REVIEW.value,
+                    progress=5,
+                    message="Resuming from prior analysis; reviewing specification...",
+                    status_text="Resuming from prior analysis; reviewing specification...",
+                )
+                # Load current_spec from existing artifacts when resuming
+                validated_spec_path = product_analysis_dir / "validated_spec.md"
+                if validated_spec_path.is_file():
+                    current_spec = validated_spec_path.read_text(encoding="utf-8")
+                else:
+                    # Latest updated_spec_v*.md or updated_spec.md by version or mtime
+                    candidates: List[Path] = []
+                    for p in product_analysis_dir.iterdir():
+                        if not p.is_file() or p.suffix != ".md":
+                            continue
+                        name = p.name
+                        if name == "updated_spec.md":
+                            candidates.append(p)
+                        elif name.startswith("updated_spec_v") and name.endswith(".md"):
+                            candidates.append(p)
+                    if candidates:
+                        def _spec_sort_key(path: Path) -> Tuple[int, float]:
+                            # Prefer higher version number; then mtime
+                            name = path.stem
+                            if name.startswith("updated_spec_v"):
+                                try:
+                                    ver = int(name.split("_v")[-1].split("_")[0])
+                                    return (ver, path.stat().st_mtime)
+                                except (ValueError, IndexError):
+                                    pass
+                            return (0, path.stat().st_mtime)
+                        latest_spec_file = max(candidates, key=_spec_sort_key)
+                        current_spec = latest_spec_file.read_text(encoding="utf-8")
+            if not skip_context_discovery:
+                result.current_phase = AnalysisPhase.CONTEXT_DISCOVERY
+                _update_job(
+                    current_phase=AnalysisPhase.CONTEXT_DISCOVERY.value,
+                    progress=2,
+                    message="Gathering project context and constraints...",
+                    status_text="Gathering project context and constraints...",
+                )
+                context_questions = self._run_context_constraints_discovery(
+                    current_spec, repo_path
+                )
+                if context_questions:
+                    _update_job(
+                        status_text=f"Waiting for answers to {len(context_questions)} context/constraint question(s)",
                     )
-                except Exception as exc:
-                    result.failure_reason = f"Context discovery communication failed: {exc}"
-                    logger.error("Product Requirements Analysis: %s", result.failure_reason)
-                    return result
-                if context_answered:
-                    current_spec = self._inject_context_answers_into_spec(
-                        current_spec, context_answered, repo_path
-                    )
-                    all_answered_questions.extend(context_answered)
-                    self._record_answers(repo_path, context_answered, iteration=0)
-            # If no context questions or no answers, proceed with current_spec unchanged
+                    try:
+                        context_answered = self._communicate_with_user(
+                            job_id=job_id,
+                            open_questions=context_questions,
+                            repo_path=repo_path,
+                            iteration=0,
+                        )
+                    except Exception as exc:
+                        result.failure_reason = f"Context discovery communication failed: {exc}"
+                        logger.error("Product Requirements Analysis: %s", result.failure_reason)
+                        return result
+                    if context_answered:
+                        current_spec = self._inject_context_answers_into_spec(
+                            current_spec, context_answered, repo_path
+                        )
+                        all_answered_questions.extend(context_answered)
+                        self._record_answers(repo_path, context_answered, iteration=0)
+                # If no context questions or no answers, proceed with current_spec unchanged
         else:
             logger.info("job_id is None; skipping context discovery")
 

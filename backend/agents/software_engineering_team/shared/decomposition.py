@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from software_engineering_team.shared.llm import LLMClient
+    from llm_service import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -327,7 +327,7 @@ class RecursiveProcessor(Generic[T]):
             LLMTruncatedError: If max decomposition depth is exceeded and
                               response is still truncated.
         """
-        from software_engineering_team.shared.llm import LLMTruncatedError, LLMJsonParseError
+        from llm_service import LLMTruncatedError, LLMJsonParseError
         from software_engineering_team.shared.continuation import ResponseContinuator, ContinuationResult, MAX_CONTINUATION_CYCLES
         from software_engineering_team.shared.post_mortem import write_post_mortem
 

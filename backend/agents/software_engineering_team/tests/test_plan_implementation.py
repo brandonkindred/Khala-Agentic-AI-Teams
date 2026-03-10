@@ -8,7 +8,7 @@ import pytest
 
 from backend_agent.agent import BackendExpertAgent
 from frontend_team.feature_agent.agent import FrontendExpertAgent
-from software_engineering_team.shared.llm import DummyLLMClient
+from llm_service import DummyLLMClient
 
 
 def test_backend_run_workflow_accepts_security_agent() -> None:

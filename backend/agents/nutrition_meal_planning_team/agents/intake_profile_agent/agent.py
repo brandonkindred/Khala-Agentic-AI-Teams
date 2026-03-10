@@ -7,7 +7,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from ...models import ClientProfile, ProfileUpdateRequest
-from ...shared.llm import JSONExtractionFailure, LLMClient
+from llm_service import LLMClient, LLMJsonParseError
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ class IntakeProfileAgent:
                 system_prompt=SYSTEM_PROMPT,
                 expected_keys=["household", "dietary_needs", "allergies_and_intolerances", "lifestyle", "preferences", "goals"],
             )
-        except JSONExtractionFailure as e:
+        except LLMJsonParseError as e:
             logger.warning("Intake profile JSON extraction failed: %s", e)
             if current_profile:
                 return current_profile

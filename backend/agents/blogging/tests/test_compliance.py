@@ -2,7 +2,7 @@
 
 import pytest
 from blog_compliance_agent import BlogComplianceAgent
-from blog_research_agent.llm import DummyLLMClient
+from llm_service import DummyLLMClient
 from shared.brand_spec import BrandSpec, load_brand_spec
 
 

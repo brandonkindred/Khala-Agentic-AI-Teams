@@ -3,7 +3,7 @@
 import pytest
 
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput, CopyEditorOutput
-from blog_research_agent.llm import DummyLLMClient
+from llm_service import DummyLLMClient
 
 
 def test_blog_copy_editor_agent_run() -> None:

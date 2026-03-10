@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 from software_engineering_team.shared.models import PlanningHierarchy
 
 from ..models import PlanningPhaseResult, SpecReviewResult, ToolAgentKind, ToolAgentPhaseInput

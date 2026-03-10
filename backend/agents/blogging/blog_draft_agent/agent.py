@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from blog_research_agent.llm import LLMClient
+from llm_service import LLMClient
 
 from .models import DraftInput, DraftOutput, ReviseDraftInput
 from .prompts import ALLOWED_CLAIMS_INSTRUCTION, DRAFT_SYSTEM_REMINDER, MINIMAL_STYLE_REMINDER, REVISE_DRAFT_PROMPT

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from software_engineering_team.shared.job_store import LLM_UNREACHABLE_AFTER_RETRIES
-from software_engineering_team.shared.llm import LLMClient, LLMUnreachableAfterRetriesError, call_llm_with_retries
+from llm_service import LLMClient, LLMUnreachableAfterRetriesError, call_llm_with_retries
 from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
 from software_engineering_team.shared.frontend_framework import resolve_frontend_framework
 from software_engineering_team.shared.prompt_utils import build_problem_solving_header, log_llm_prompt
@@ -741,7 +741,7 @@ class FrontendExpertAgent:
 
         # Fail fast when LLM produces no valid output
         if not validated_files and not data.get("needs_clarification", False):
-            from software_engineering_team.shared.llm import LLMPermanentError
+            from llm_service import LLMPermanentError
             if raw_files:
                 raise LLMPermanentError(
                     f"Frontend: LLM returned {len(raw_files)} files but all were rejected by validation. "

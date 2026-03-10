@@ -1,6 +1,6 @@
 """Tests for LLM request counting in blog agents."""
 
-from blog_research_agent.llm import DummyLLMClient
+from llm_service import DummyLLMClient
 
 
 def test_dummy_llm_tracks_request_count() -> None:

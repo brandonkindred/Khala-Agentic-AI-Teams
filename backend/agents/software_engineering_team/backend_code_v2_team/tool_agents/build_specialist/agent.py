@@ -24,7 +24,7 @@ from ...prompts import (
 )
 
 if TYPE_CHECKING:
-    from software_engineering_team.shared.llm import LLMClient
+    from llm_service import LLMClient
 
 logger = logging.getLogger(__name__)
 

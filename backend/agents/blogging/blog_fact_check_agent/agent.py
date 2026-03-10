@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from blog_research_agent.llm import LLMClient
+from llm_service import LLMClient
 
 from .models import FactCheckReport
 from .prompts import FACT_CHECK_PROMPT

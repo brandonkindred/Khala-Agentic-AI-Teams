@@ -13,7 +13,7 @@ from .agents import (
     ReportWriterAgent,
     SecurityTSCAgent,
 )
-from .llm_client import LLMClient, get_llm_client
+from llm_service import LLMClient, get_client
 from .models import (
     FindingSeverity,
     NextStepsDocument,
@@ -44,7 +44,7 @@ class SOC2AuditOrchestrator:
     """
 
     def __init__(self, llm_client: LLMClient | None = None) -> None:
-        self.llm = llm_client or get_llm_client()
+        self.llm = llm_client or get_client("soc2")
         self.security_agent = SecurityTSCAgent()
         self.availability_agent = AvailabilityTSCAgent()
         self.processing_integrity_agent = ProcessingIntegrityTSCAgent()

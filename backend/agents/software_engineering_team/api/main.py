@@ -959,7 +959,7 @@ def architect_design(request: ArchitectDesignRequest) -> ArchitectDesignResponse
         from architecture_expert import ArchitectureExpertAgent
         from architecture_expert.models import ArchitectureInput
         from spec_parser import parse_spec_with_llm
-        from software_engineering_team.shared.llm import get_llm_for_agent
+        from llm_service import get_client
     except ImportError as e:
         logger.exception("Failed to import architect dependencies")
         raise HTTPException(status_code=500, detail=f"Architect agent unavailable: {e}") from e
@@ -968,10 +968,10 @@ def architect_design(request: ArchitectDesignRequest) -> ArchitectDesignResponse
         raise HTTPException(status_code=400, detail="Spec text is required")
 
     try:
-        llm = get_llm_for_agent("architecture")
+        llm = get_client("architecture")
         requirements = parse_spec_with_llm(request.spec.strip(), llm)
 
-        arch_agent = ArchitectureExpertAgent(get_llm_for_agent("architecture"))
+        arch_agent = ArchitectureExpertAgent(get_client("architecture"))
         arch_input = ArchitectureInput(requirements=requirements)
         arch_output = arch_agent.run(arch_input)
         architecture = arch_output.architecture
@@ -1101,7 +1101,7 @@ def _run_frontend_code_v2_background(job_id: str, repo_path: str, task_dict: dic
     try:
         from pathlib import Path as _Path
         from frontend_code_v2_team import FrontendCodeV2TeamLead
-        from software_engineering_team.shared.llm import get_llm_for_agent
+        from llm_service import get_client
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType, SystemArchitecture
         import uuid as _uuid
 
@@ -1121,7 +1121,7 @@ def _run_frontend_code_v2_background(job_id: str, repo_path: str, task_dict: dic
 
         arch = SystemArchitecture(overview=architecture_overview) if architecture_overview else None
 
-        team_lead = FrontendCodeV2TeamLead(get_llm_for_agent("frontend"))
+        team_lead = FrontendCodeV2TeamLead(get_client("frontend"))
 
         phase_order = ["setup", "planning", "execution", "review", "problem_solving", "documentation", "deliver"]
 
@@ -1278,7 +1278,7 @@ def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict
     try:
         from pathlib import Path as _Path
         from backend_code_v2_team import BackendCodeV2TeamLead
-        from software_engineering_team.shared.llm import get_llm_for_agent
+        from llm_service import get_client
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType, SystemArchitecture
         import uuid as _uuid
 
@@ -1298,7 +1298,7 @@ def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict
 
         arch = SystemArchitecture(overview=architecture_overview) if architecture_overview else None
 
-        team_lead = BackendCodeV2TeamLead(get_llm_for_agent("backend"))
+        team_lead = BackendCodeV2TeamLead(get_client("backend"))
 
         phase_order = ["setup", "planning", "execution", "review", "problem_solving", "documentation", "deliver"]
 
@@ -1343,7 +1343,7 @@ def _run_planning_v2_background(
         from pathlib import Path as _Path
         from planning_v2_team import PlanningV2TeamLead
         from planning_v2_team.models import Phase
-        from software_engineering_team.shared.llm import get_llm_for_agent
+        from llm_service import get_client
 
         update_job(job_id, status="running")
 
@@ -1358,7 +1358,7 @@ def _run_planning_v2_background(
                 completed_phases.append(p)
             update_job(job_id, completed_phases=completed_phases, **kwargs)
 
-        team_lead = PlanningV2TeamLead(get_llm_for_agent("backend"))
+        team_lead = PlanningV2TeamLead(get_client("backend"))
         result = team_lead.run_workflow(
             spec_content=spec_content,
             repo_path=_Path(repo_path),
@@ -1759,9 +1759,9 @@ def auto_answer_run_team_question(
 
     try:
         from product_requirements_analysis_agent import get_auto_answer_for_job
-        from software_engineering_team.shared.llm import get_llm_for_agent
+        from llm_service import get_client
 
-        llm = get_llm_for_agent("backend")
+        llm = get_client("backend")
         result = get_auto_answer_for_job(
             llm=llm,
             job_id=job_id,
@@ -1836,9 +1836,9 @@ def auto_answer_planning_v2_question(
 
     try:
         from product_requirements_analysis_agent import get_auto_answer_for_job
-        from software_engineering_team.shared.llm import get_llm_for_agent
+        from llm_service import get_client
 
-        llm = get_llm_for_agent("backend")
+        llm = get_client("backend")
         result = get_auto_answer_for_job(
             llm=llm,
             job_id=job_id,
@@ -1958,7 +1958,7 @@ def _run_product_analysis_background(
             AnalysisPhase,
             ProductRequirementsAnalysisAgent,
         )
-        from software_engineering_team.shared.llm import get_llm_for_agent
+        from llm_service import get_client
         from spec_parser import gather_context_files
 
         update_job(job_id, status="running")
@@ -1971,7 +1971,7 @@ def _run_product_analysis_background(
         if context_files:
             logger.info("Product analysis: Gathered %d context files", len(context_files))
 
-        agent = ProductRequirementsAnalysisAgent(get_llm_for_agent("backend"))
+        agent = ProductRequirementsAnalysisAgent(get_client("backend"))
         result = agent.run_workflow(
             spec_content=spec_content,
             repo_path=_Path(repo_path),
@@ -2187,9 +2187,9 @@ def auto_answer_product_analysis_question(
 
     try:
         from product_requirements_analysis_agent import get_auto_answer_for_job
-        from software_engineering_team.shared.llm import get_llm_for_agent
+        from llm_service import get_client
 
-        llm = get_llm_for_agent("backend")
+        llm = get_client("backend")
         result = get_auto_answer_for_job(
             llm=llm,
             job_id=job_id,
