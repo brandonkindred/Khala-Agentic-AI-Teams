@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
-from ...output_templates import parse_fix_output, parse_planning_tool_output
+from ...output_templates import looks_like_truncated_file_content, parse_fix_output, parse_planning_tool_output
 from ..json_utils import complete_text_with_continuation
 
 if TYPE_CHECKING:
@@ -66,6 +66,8 @@ What you are changing to fix it.
 ## RESOLVED ##
 true or false
 ## END RESOLVED ##
+
+Output the complete updated file content; do not truncate. Include every section in full.
 
 ## FILE_UPDATES ##
 ### """ + planning_asset_path("ui_design.md") + """ ###
@@ -301,14 +303,24 @@ class UIDesignToolAgent:
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
-                files[planning_asset_path("ui_design.md")] = updated_content
-                logger.info("UIDesign: fix applied (single-issue) — %s", fix_desc[:120])
+                if looks_like_truncated_file_content(updated_content):
+                    logger.warning(
+                        "UIDesign: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
+                    )
+                else:
+                    files[planning_asset_path("ui_design.md")] = updated_content
+                    logger.info("UIDesign: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip():
+                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
                         files[path] = content
                         logger.info("UIDesign: fix applied (single-issue) — %s", fix_desc[:120])
                         break
+                else:
+                    if file_updates and any(isinstance(c, str) and c.strip() for c in file_updates.values()):
+                        logger.warning(
+                            "UIDesign: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
+                        )
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"UI design issue addressed: {issue[:50]}",

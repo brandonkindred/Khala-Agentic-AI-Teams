@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
 from ...output_templates import (
+    looks_like_truncated_file_content,
     parse_fix_output,
     parse_planning_tool_output,
     parse_review_output,
@@ -143,6 +144,7 @@ SPECIFICATION CONTEXT:
 ---
 
 Analyze and fix this issue. Provide the complete updated file content using the format below.
+Output the complete updated file content; do not truncate. Include every section in full.
 
 Respond using this EXACT format:
 
@@ -415,14 +417,24 @@ class SystemDesignToolAgent:
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
-                files[planning_asset_path("system_design.md")] = updated_content
-                logger.info("SystemDesign: fix applied (single-issue) — %s", fix_desc[:120])
+                if looks_like_truncated_file_content(updated_content):
+                    logger.warning(
+                        "SystemDesign: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
+                    )
+                else:
+                    files[planning_asset_path("system_design.md")] = updated_content
+                    logger.info("SystemDesign: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip():
+                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
                         files[path] = content
                         logger.info("SystemDesign: fix applied (single-issue) — %s", fix_desc[:120])
                         break
+                else:
+                    if file_updates and any(isinstance(c, str) and c.strip() for c in file_updates.values()):
+                        logger.warning(
+                            "SystemDesign: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
+                        )
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"System design issue addressed: {issue[:50]}",

@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 ENV_LLM_ENABLE_THINKING = "SW_LLM_ENABLE_THINKING"
 ENV_LLM_OLLAMA_API_KEY = "SW_LLM_OLLAMA_API_KEY"
+ENV_LLM_MAX_TOKENS = "SW_LLM_MAX_TOKENS"
+DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
 
 def _ollama_auth_headers() -> Dict[str, str]:
@@ -96,6 +98,7 @@ class ResponseContinuator:
         model: str,
         timeout: float = 300.0,
         max_cycles: int = MAX_CONTINUATION_CYCLES,
+        num_predict: Optional[int] = None,
     ):
         """Initialize the continuator.
 
@@ -104,11 +107,18 @@ class ResponseContinuator:
             model: Model name to use.
             timeout: Request timeout in seconds.
             max_cycles: Maximum number of continuation cycles.
+            num_predict: Max tokens to generate per continuation turn. If None, uses
+                SW_LLM_MAX_TOKENS env or DEFAULT_MAX_OUTPUT_TOKENS (32768) to match main LLM client.
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.max_cycles = max_cycles
+        env_max = os.environ.get(ENV_LLM_MAX_TOKENS)
+        self.num_predict = (
+            num_predict if num_predict is not None
+            else (int(env_max) if env_max else DEFAULT_MAX_OUTPUT_TOKENS)
+        )
 
     def attempt_continuation(
         self,
@@ -323,6 +333,7 @@ class ResponseContinuator:
             "model": self.model,
             "messages": messages,
             "stream": False,
+            "options": {"num_predict": self.num_predict},
         }
 
         if json_mode:

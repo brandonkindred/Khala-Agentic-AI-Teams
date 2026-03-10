@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
-from ...output_templates import parse_devops_planning_output, parse_fix_output
+from ...output_templates import looks_like_truncated_file_content, parse_devops_planning_output, parse_fix_output
 from ..json_utils import complete_text_with_continuation
 
 if TYPE_CHECKING:
@@ -69,6 +69,8 @@ SPECIFICATION CONTEXT:
 ---
 {spec_excerpt}
 ---
+
+Output the complete updated file content; do not truncate. Include every section in full.
 
 Respond using this EXACT format:
 
@@ -309,14 +311,24 @@ class DevOpsToolAgent:
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
-                files[planning_asset_path("devops.md")] = updated_content
-                logger.info("DevOps: fix applied (single-issue) — %s", fix_desc[:120])
+                if looks_like_truncated_file_content(updated_content):
+                    logger.warning(
+                        "DevOps: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
+                    )
+                else:
+                    files[planning_asset_path("devops.md")] = updated_content
+                    logger.info("DevOps: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip():
+                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
                         files[path] = content
                         logger.info("DevOps: fix applied (single-issue) — %s", fix_desc[:120])
                         break
+                else:
+                    if file_updates and any(isinstance(c, str) and c.strip() for c in file_updates.values()):
+                        logger.warning(
+                            "DevOps: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
+                        )
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"DevOps issue addressed: {issue[:50]}",
