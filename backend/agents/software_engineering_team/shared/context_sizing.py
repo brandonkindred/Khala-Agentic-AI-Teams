@@ -80,10 +80,10 @@ def compute_spec_chunk_chars(llm: LLMClient) -> int:
     )
 
 
-def _scale_with_context(llm: LLMClient, base_at_16k: int, max_chars: int = 120_000) -> int:
+def _scale_with_context(llm: LLMClient, base_at_16k: int, max_chars: int = 700_000) -> int:
     """
     Scale a 16K-context base value by actual model context.
-    Capped at max_chars to avoid unbounded growth on 256K+ models.
+    Capped at max_chars so 256K models can use full context (~256k * 3.5 chars/token).
     """
     ctx = llm.get_max_context_tokens()
     scaled = max(base_at_16k, int(base_at_16k * ctx / 16384))
@@ -138,6 +138,27 @@ def compute_spec_excerpt_chars(llm: LLMClient) -> int:
         reserved_prompt_tokens=4000,
         reserved_response_tokens=4096,
         min_chars=8_000,
+    )
+
+
+def compute_pra_spec_review_spec_chars(llm: LLMClient) -> int:
+    """Max chars for spec in PRA spec review (large prompt template + response)."""
+    return compute_max_chunk_chars(
+        llm.get_max_context_tokens(),
+        reserved_prompt_tokens=55_000,
+        reserved_response_tokens=8192,
+        min_chars=20_000,
+    )
+
+
+def compute_prd_snippet_chars(llm: LLMClient) -> int:
+    """Max chars per PRD input snippet (cleaned_spec, answered_summary, specialist_plan)."""
+    return compute_max_chunk_chars(
+        llm.get_max_context_tokens(),
+        reserved_prompt_tokens=20_000,
+        reserved_response_tokens=8192,
+        min_chars=20_000,
+        num_chunks=3,
     )
 
 
@@ -203,5 +224,5 @@ def compute_requirement_mapping_chars(llm: LLMClient) -> int:
 
 
 def compute_code_review_total_chars(llm: LLMClient) -> int:
-    """Max total code chars for code review (hard cap to avoid HTTP 400). Kept high but model-aware."""
-    return min(150_000, _scale_with_context(llm, 150_000))
+    """Max total code chars for code review (fits within 256K context when available)."""
+    return _scale_with_context(llm, 150_000)

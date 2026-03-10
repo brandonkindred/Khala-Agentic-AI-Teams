@@ -12,6 +12,9 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
+# Generous cap for artifact body text (planning V2 truncation fix). Allows full documents.
+_ARTIFACT_BODY_CAP = 32_000
+
 # ---------------------------------------------------------------------------
 # Helpers: section extraction
 # ---------------------------------------------------------------------------
@@ -124,10 +127,10 @@ def parse_review_output(text: str) -> Dict[str, Any]:
 
     summary_section = _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY)
     if summary_section:
-        summary = summary_section.strip().split("\n")[0].strip()[:2000]
+        summary = summary_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP]
     elif MARKER_SUMMARY in text:
         idx = text.find(MARKER_SUMMARY) + len(MARKER_SUMMARY)
-        summary = text[idx:].strip().split("\n")[0].strip()[:2000]
+        summary = text[idx:].strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP]
 
     return {
         "passed": passed,
@@ -161,7 +164,7 @@ def parse_planning_output(text: str) -> Dict[str, Any]:
 
     Returns dict compatible with PlanningPhaseResult fields.
     """
-    def get_section(name: str, max_len: int = 5000) -> str:
+    def get_section(name: str, max_len: int = _ARTIFACT_BODY_CAP) -> str:
         start = f"## {name} ##"
         end = f"## END {name} ##"
         return _section_to_str(_section(text, start, end), max_len)
@@ -206,7 +209,7 @@ def parse_planning_output(text: str) -> Dict[str, Any]:
         "dependencies": dependencies,
         "microservices": get_section("MICROSERVICES"),
         "others": get_section("OTHERS"),
-        "summary": get_section("SUMMARY", 2000) or "Planning complete.",
+        "summary": get_section("SUMMARY", _ARTIFACT_BODY_CAP) or "Planning complete.",
     }
 
 
@@ -282,6 +285,37 @@ def parse_fix_output(text: str) -> Dict[str, Any]:
     }
 
 
+def looks_like_truncated_file_content(content: str) -> bool:
+    """Heuristically detect likely truncation of file content from fix_single_issue FILE_UPDATES.
+
+    Returns True if the content appears to be cut off (do not write to disk).
+    - Very short last non-empty line (e.g. < 20 chars) that is not a normal ending.
+    - Content ends mid-word (last token not followed by space or newline).
+    - Last line does not look like a complete sentence or section end (no sentence-ending punctuation).
+    """
+    if not content or not content.strip():
+        return False
+    stripped = content.rstrip()
+    if not stripped:
+        return False
+    lines = [ln for ln in stripped.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    last_line = lines[-1].strip()
+    # Very short last line that is not a normal ending (---, ##, - [ ], etc.)
+    if len(last_line) < 20:
+        normal_endings = ("---", "```", "***", "--- ", "- [ ]", "- [x]", "  ", "")
+        if not any(last_line.startswith(p) or last_line == p for p in normal_endings):
+            if not last_line.startswith("#") and not last_line.startswith("##"):
+                return True
+    # Ends mid-word: last character is alphanumeric (no space/newline/punctuation after last word)
+    if last_line and last_line[-1].isalnum():
+        # Could be end of a word at end of sentence; check if line ends with sentence punctuation
+        if len(last_line) > 1 and last_line[-2].isalnum() and "." not in last_line and "!" not in last_line and "?" not in last_line:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Spec review / component analysis: components, integration_points, gaps, etc.
 # ---------------------------------------------------------------------------
@@ -323,10 +357,10 @@ def parse_spec_review_output(text: str) -> Dict[str, Any]:
         gaps = _parse_bullet_list(rest)
 
     scalability_section = _section(text, "## SCALABILITY_NOTES ##", "## END SCALABILITY_NOTES ##")
-    scalability_notes = scalability_section.strip().split("\n")[0].strip()[:1000] if scalability_section else ""
+    scalability_notes = scalability_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if scalability_section else ""
 
     summary_section = _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY)
-    summary = summary_section.strip().split("\n")[0].strip()[:1000] if summary_section else ""
+    summary = summary_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if summary_section else ""
 
     return {
         "components": components,
@@ -358,13 +392,13 @@ def parse_planning_tool_output(text: str) -> Dict[str, Any]:
         recommendations = _parse_bullet_list(rest)
 
     data_flow_section = _section(text, "## DATA_FLOW ##", "## END DATA_FLOW ##")
-    data_flow = data_flow_section.strip()[:3000] if data_flow_section else ""
+    data_flow = data_flow_section.strip()[: _ARTIFACT_BODY_CAP] if data_flow_section else ""
 
     integration_section = _section(text, "## INTEGRATION_STRATEGY ##", "## END INTEGRATION_STRATEGY ##")
-    integration_strategy = integration_section.strip()[:3000] if integration_section else ""
+    integration_strategy = integration_section.strip()[: _ARTIFACT_BODY_CAP] if integration_section else ""
 
     summary_section = _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY)
-    summary = summary_section.strip().split("\n")[0].strip()[:1000] if summary_section else ""
+    summary = summary_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if summary_section else ""
 
     component_design: List[Dict[str, Any]] = []
     comp_section = _section(text, "## COMPONENT_DESIGN ##", "## END COMPONENT_DESIGN ##")
@@ -380,7 +414,7 @@ def parse_planning_tool_output(text: str) -> Dict[str, Any]:
             if name:
                 component_design.append({
                     "name": name,
-                    "responsibility": rest.strip()[:500] if rest else "",
+                    "responsibility": rest.strip()[: _ARTIFACT_BODY_CAP] if rest else "",
                     "dependencies": [],
                 })
 
@@ -406,13 +440,13 @@ def parse_architecture_planning_output(text: str) -> Dict[str, Any]:
     cross_cutting (list of str), deployment_model, recommendations, summary.
     """
     architecture_style = _section(text, "## ARCHITECTURE_STYLE ##", "## END ARCHITECTURE_STYLE ##")
-    architecture_style = architecture_style.strip().split("\n")[0].strip()[:1000] if architecture_style else ""
+    architecture_style = architecture_style.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if architecture_style else ""
 
     deployment_section = _section(text, "## DEPLOYMENT_MODEL ##", "## END DEPLOYMENT_MODEL ##")
-    deployment_model = deployment_section.strip()[:2000] if deployment_section else ""
+    deployment_model = deployment_section.strip()[: _ARTIFACT_BODY_CAP] if deployment_section else ""
 
     summary_section = _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY)
-    summary = summary_section.strip().split("\n")[0].strip()[:1000] if summary_section else ""
+    summary = summary_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if summary_section else ""
 
     rec_section = _section(text, MARKER_RECOMMENDATIONS, MARKER_END_RECOMMENDATIONS)
     recommendations = _parse_bullet_list(rec_section) if rec_section else []
@@ -465,7 +499,7 @@ def parse_architecture_planning_output(text: str) -> Dict[str, Any]:
 def parse_devops_planning_output(text: str) -> Dict[str, Any]:
     """Parse DevOps planning output."""
     recommendations = _parse_bullet_list(_section(text, MARKER_RECOMMENDATIONS, MARKER_END_RECOMMENDATIONS))
-    summary = _section_to_str(_section(text, MARKER_SUMMARY, MARKER_END_SUMMARY), 1000)
+    summary = _section_to_str(_section(text, MARKER_SUMMARY, MARKER_END_SUMMARY), _ARTIFACT_BODY_CAP)
     needs_section = _section(text, "## NEEDS_CLARIFICATION ##", "## END NEEDS_CLARIFICATION ##")
     needs_clarification = needs_section.strip().lower().startswith("true") or needs_section.strip().lower().startswith("yes")
     q_section = _section(text, "## CLARIFICATION_QUESTIONS ##", "## END CLARIFICATION_QUESTIONS ##")
@@ -499,7 +533,7 @@ def parse_task_classification_output(text: str) -> Dict[str, Any]:
                     "team": parts[1],
                     "reason": parts[2] if len(parts) > 2 else "",
                 })
-    summary = _section_to_str(_section(text, MARKER_SUMMARY, MARKER_END_SUMMARY), 500)
+    summary = _section_to_str(_section(text, MARKER_SUMMARY, MARKER_END_SUMMARY), _ARTIFACT_BODY_CAP)
     return {"classifications": classifications, "summary": summary or "Task classification complete."}
 
 
@@ -531,7 +565,7 @@ def parse_problem_solving_output(text: str) -> Dict[str, Any]:
         resolved = first in ("true", "yes", "1")
 
     summary_section = _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY)
-    summary = summary_section.strip().split("\n")[0].strip()[:1000] if summary_section else ""
+    summary = summary_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if summary_section else ""
 
     return {
         "fixes_applied": fixes_applied,

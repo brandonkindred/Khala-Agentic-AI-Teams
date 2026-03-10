@@ -219,9 +219,9 @@ def test_complete_json_continue_still_invalid_raises() -> None:
 
 
 def test_qwen35_397b_cloud_uses_known_context_size() -> None:
-    """qwen3.5:397b-cloud uses known effective context 242144 (256K - 20K) without /api/show call."""
+    """qwen3.5:397b-cloud uses full 256K context (262144) without /api/show call."""
     client = OllamaLLMClient(model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5)
-    assert client.get_max_context_tokens() == 242144
+    assert client.get_max_context_tokens() == 262144
 
 
 def test_qwen35_397b_uses_known_context_size() -> None:

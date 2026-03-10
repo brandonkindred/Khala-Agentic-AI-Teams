@@ -42,6 +42,10 @@ from planning_v2_team.tool_agents.json_utils import (
     default_decompose_by_sections,
 )
 from software_engineering_team.shared.deduplication import dedupe_strings as _dedupe_items
+from software_engineering_team.shared.context_sizing import (
+    compute_pra_spec_review_spec_chars,
+    compute_prd_snippet_chars,
+)
 
 if TYPE_CHECKING:
     from software_engineering_team.shared.llm import LLMClient
@@ -1008,9 +1012,10 @@ The following additional files were provided in the project folder. Review these
             )
 
         # Single whole-spec prompt; include full Q&A only when non-empty (edge-empty-qa)
+        max_spec_chars = compute_pra_spec_review_spec_chars(self.llm)
         if qa_for_prompt:
             prompt = SPEC_REVIEW_PROMPT.format(
-                spec_content=full_spec_content[:20000],
+                spec_content=full_spec_content[:max_spec_chars],
                 constraint_hints=constraint_hints,
             )
             prompt += """
@@ -1024,7 +1029,7 @@ Previously Answered Questions:
 """
         else:
             prompt = SPEC_REVIEW_PROMPT.format(
-                spec_content=full_spec_content[:20000],
+                spec_content=full_spec_content[:max_spec_chars],
                 constraint_hints=constraint_hints,
             )
 
@@ -2043,8 +2048,8 @@ Previously Answered Questions:
         # Summarize answered questions for the prompt; this may be empty on the first run
         answered_summary = self._format_answered_questions(answered_questions)
 
-        # Keep prompt size reasonable while still providing enough context
-        max_chars = 20000
+        # Keep prompt size reasonable while fitting within model context (e.g. 256K)
+        max_chars = compute_prd_snippet_chars(self.llm)
         cleaned_spec_snippet = cleaned_spec[:max_chars]
         answered_summary_snippet = answered_summary[:max_chars]
         specialist_plan = self._build_specialist_collaboration_plan(

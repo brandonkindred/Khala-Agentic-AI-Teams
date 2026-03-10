@@ -454,5 +454,30 @@ class TestImplementationPhase:
         assert (temp_repo / "plan").exists()
 
 
+class TestCompletenessHelper:
+    """Tests for looks_like_truncated_file_content (Planning V2 truncation fix)."""
+
+    def test_truncated_short_last_line(self):
+        """Content ending with a very short line (e.g. mid-sentence) is detected as truncated."""
+        from planning_v2_team.output_templates import looks_like_truncated_file_content
+
+        content = "# UI Design\n\n## Section\n\n- Item 1\n- Item 2\nI want to create a task with a ti"
+        assert looks_like_truncated_file_content(content) is True
+
+    def test_complete_content_not_truncated(self):
+        """Content with a normal ending is not flagged as truncated."""
+        from planning_v2_team.output_templates import looks_like_truncated_file_content
+
+        content = "# UI Design\n\n## Section\n\n- Item 1\n- Item 2\n\nAcceptance criteria met.\n"
+        assert looks_like_truncated_file_content(content) is False
+
+    def test_empty_content_not_truncated(self):
+        """Empty or whitespace-only content returns False."""
+        from planning_v2_team.output_templates import looks_like_truncated_file_content
+
+        assert looks_like_truncated_file_content("") is False
+        assert looks_like_truncated_file_content("   \n  ") is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

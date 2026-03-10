@@ -33,14 +33,15 @@ ENV_LLM_ENABLE_THINKING = "SW_LLM_ENABLE_THINKING"  # "true"/"false"; enables th
 # Default cap for max_tokens (max output length) in API requests. Many APIs limit output to 32K even when context is 256K.
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
-# Model max context (tokens). Effective context = max - largest agent reservation.
-# 256K = 262144 (qwen models). Largest reservations: coding/review 20K (qwen3.5).
+# Model max context (tokens). Ollama Cloud supports full 256K for Qwen; response space
+# is reserved via max_tokens and context_sizing reserved_response_tokens.
+# 256K = 262144.
 KNOWN_MODEL_CONTEXT: dict[str, int] = {
     "qwen3.5:397b": 262144,
-    "qwen3.5:397b-cloud": 242144,  # 256K - 20K
-    "qwen3.5:cloud": 242144,  # keep for overrides; 256K - 20K
-    "qwen3-coder:480b-cloud": 242144,
-    "qwen3-coder:480b": 242144,
+    "qwen3.5:397b-cloud": 262144,
+    "qwen3.5:cloud": 262144,
+    "qwen3-coder:480b-cloud": 262144,
+    "qwen3-coder:480b": 262144,
 }
 
 # Recommended default model per agent (all :cloud versions). Used when SW_LLM_MODEL_<agent_key> and SW_LLM_MODEL are unset.
