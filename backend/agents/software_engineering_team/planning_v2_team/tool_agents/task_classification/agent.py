@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from software_engineering_team.shared.deduplication import dedupe_by_key
 from software_engineering_team.shared.models import PlanningHierarchy
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
@@ -120,6 +121,37 @@ CURRENT ARTIFACT: --- {current_artifact} ---
 SPEC: --- {spec_excerpt} ---
 """
 
+TASK_CLASSIFICATION_FIX_ALL_ISSUES_PROMPT = """You are a Task Classification expert. Address ALL of the following issues in ONE coherent update. Use this EXACT format:
+
+## ROOT_CAUSE ##
+Brief combined root cause for the issues.
+## END ROOT_CAUSE ##
+
+## FIX_DESCRIPTION ##
+What you are changing to address all issues.
+## END FIX_DESCRIPTION ##
+
+## RESOLVED ##
+true or false
+## END RESOLVED ##
+
+Output the complete updated file content; do not truncate. Include every section in full.
+
+## FILE_UPDATES ##
+### plan/planning_team/task_classification.md ###
+Complete updated file content here.
+### END FILE ###
+## END FILE_UPDATES ##
+
+ISSUES TO FIX (address every one):
+---
+{issues_list}
+---
+
+CURRENT ARTIFACT: --- {current_artifact} ---
+SPEC: --- {spec_excerpt} ---
+"""
+
 
 def _extract_tasks_from_hierarchy(hierarchy: Optional[PlanningHierarchy]) -> List[Dict[str, str]]:
     """Extract all tasks from hierarchy for classification."""
@@ -169,32 +201,29 @@ class TaskClassificationToolAgent:
         
         if classification_issues and self.llm:
             logger.info(
-                "TaskClassification: handling %d review issue(s) (will apply fixes and write updated artifacts to disk).",
+                "TaskClassification: handling %d review issue(s) (will apply fixes in one update and write to disk).",
                 len(classification_issues),
             )
             fix_inp = inp.model_copy(update={"current_files": current_files})
-            for issue in classification_issues:
-                result = self.fix_single_issue(issue, fix_inp)
-                if result.files:
-                    repo = Path(inp.repo_path or ".")
-                    for rel_path, content in result.files.items():
-                        full_path = repo / rel_path
-                        full_path.parent.mkdir(parents=True, exist_ok=True)
-                        full_path.write_text(content, encoding="utf-8")
-                        file_name = full_path.name
-                        logger.info(
-                            "TaskClassification: applied fix — writing to file: %s (%d chars)",
-                            file_name,
-                            len(content),
-                        )
-                        if rel_path not in files_written:
-                            files_written.append(rel_path)
-                        current_files[rel_path] = content
-                    fix_inp = inp.model_copy(update={"current_files": current_files})
-                    fixes_applied.append(result.summary)
+            result = self.fix_all_issues(classification_issues, fix_inp)
+            if result.files:
+                repo = Path(inp.repo_path or ".")
+                for rel_path, content in result.files.items():
+                    full_path = repo / rel_path
+                    full_path.parent.mkdir(parents=True, exist_ok=True)
+                    full_path.write_text(content, encoding="utf-8")
+                    file_name = full_path.name
+                    logger.info(
+                        "TaskClassification: applied fix — writing to file: %s (%d chars)",
+                        file_name,
+                        len(content),
+                    )
+                    if rel_path not in files_written:
+                        files_written.append(rel_path)
+                    current_files[rel_path] = content
+                fixes_applied.append(result.summary)
             logger.info(
-                "TaskClassification: fixed %d out of %d review issue(s) (all fixes written to planning artifacts).",
-                len(fixes_applied),
+                "TaskClassification: fixed %d review issue(s) in one update (all fixes written to planning artifacts).",
                 len(classification_issues),
             )
         
@@ -209,7 +238,7 @@ class TaskClassificationToolAgent:
         if files_written:
             summary = "Task Classification artifacts updated."
             if fixes_applied:
-                summary = f"Task Classification artifacts updated. Fixed {len(fixes_applied)} review issues."
+                summary = f"Task Classification artifacts updated. Fixed {len(classification_issues)} review issue(s) in one update."
             return ToolAgentPhaseOutput(
                 summary=summary,
                 files={},
@@ -356,6 +385,84 @@ class TaskClassificationToolAgent:
 
         except Exception as e:
             logger.warning("TaskClassification fix_single_issue failed: %s", e)
+            return ToolAgentPhaseOutput(
+                summary=f"Fix failed: {str(e)[:50]}",
+                resolved=False,
+            )
+
+    def fix_all_issues(
+        self, issues: List[str], inp: ToolAgentPhaseInput
+    ) -> ToolAgentPhaseOutput:
+        """Fix all listed task classification issues in one LLM call."""
+        if not issues:
+            return ToolAgentPhaseOutput(
+                summary="No task classification issues to fix.",
+                resolved=True,
+            )
+        if not self.llm:
+            return ToolAgentPhaseOutput(
+                summary="Task Classification fix skipped (no LLM).",
+                resolved=False,
+            )
+
+        current_artifact = ""
+        if inp.current_files:
+            current_artifact = inp.current_files.get(planning_asset_path("task_classification.md"), "")
+            if not current_artifact:
+                for path, content in inp.current_files.items():
+                    if "task_classification" in path.lower() or "classification" in path.lower():
+                        current_artifact = content
+                        break
+
+        issues_list = "\n".join(f"{i + 1}. {issue}" for i, issue in enumerate(issues))
+        prompt = TASK_CLASSIFICATION_FIX_ALL_ISSUES_PROMPT.format(
+            issues_list=issues_list,
+            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            spec_excerpt=(inp.spec_content or "")[:3000],
+        )
+
+        try:
+            raw_text = complete_text_with_continuation(
+                self.llm, prompt, agent_name="TaskClassification_FixAllIssues",
+            )
+            raw = parse_fix_output(raw_text)
+            updated_content = raw.get("updated_content", "")
+            fix_desc = raw.get("fix_description", "")
+            resolved = raw.get("resolved", False)
+            file_updates = raw.get("file_updates") or {}
+            if not updated_content and file_updates:
+                updated_content = next(iter(file_updates.values()), "")
+
+            files: Dict[str, str] = {}
+            if updated_content and isinstance(updated_content, str) and updated_content.strip():
+                if looks_like_truncated_file_content(updated_content):
+                    logger.warning(
+                        "TaskClassification: fix_all_issues output appears truncated; skipping write.",
+                    )
+                else:
+                    files[planning_asset_path("task_classification.md")] = updated_content
+            elif file_updates:
+                for path, content in file_updates.items():
+                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                        files[path] = content
+                        break
+                else:
+                    if file_updates and any(isinstance(c, str) and c.strip() for c in file_updates.values()):
+                        logger.warning(
+                            "TaskClassification: fix_all_issues output appears truncated; skipping write.",
+                        )
+
+            summary = fix_desc or f"Addressed {len(issues)} issue(s) in one update."
+            if len(issues) > 1:
+                summary = f"Addressed {len(issues)} issues in one update. {summary[:200]}"
+            return ToolAgentPhaseOutput(
+                summary=summary,
+                files=files,
+                resolved=resolved or bool(files),
+                metadata={"root_cause": raw.get("root_cause", "")},
+            )
+        except Exception as e:
+            logger.warning("TaskClassification fix_all_issues failed: %s", e)
             return ToolAgentPhaseOutput(
                 summary=f"Fix failed: {str(e)[:50]}",
                 resolved=False,

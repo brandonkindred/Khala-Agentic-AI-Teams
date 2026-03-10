@@ -195,6 +195,36 @@ class TestSystemDesignToolAgent:
         result = agent.plan(inp)
         assert isinstance(result, ToolAgentPhaseOutput)
 
+    def test_fix_all_issues_returns_one_output(self, mock_llm: MagicMock):
+        """Test fix_all_issues with multiple issues returns one output with files and summary."""
+        from planning_v2_team.models import planning_asset_path
+        from planning_v2_team.tool_agents.system_design import SystemDesignToolAgent
+
+        mock_fix_response = (
+            "## ROOT_CAUSE ##\nCombined root cause.\n## END ROOT_CAUSE ##\n"
+            "## FIX_DESCRIPTION ##\nAddressed all issues.\n## END FIX_DESCRIPTION ##\n"
+            "## RESOLVED ##\ntrue\n## END RESOLVED ##\n"
+            "## FILE_UPDATES ##\n"
+            f"### {planning_asset_path('system_design.md')} ###\n"
+            "# System Design\n\nUpdated content.\n"
+            "### END FILE ###\n## END FILE_UPDATES ##"
+        )
+        mock_llm.complete_text.return_value = mock_fix_response
+
+        agent = SystemDesignToolAgent(mock_llm)
+        inp = ToolAgentPhaseInput(
+            spec_content="Test spec",
+            current_files={planning_asset_path("system_design.md"): "# System Design\n\nOld content."},
+        )
+        result = agent.fix_all_issues(["design issue one", "design issue two"], inp)
+
+        assert isinstance(result, ToolAgentPhaseOutput)
+        assert result.files
+        assert planning_asset_path("system_design.md") in result.files
+        assert "Updated content" in result.files[planning_asset_path("system_design.md")]
+        assert result.summary
+        assert result.resolved
+
 
 class TestUserStoryToolAgent:
     """Tests for UserStoryToolAgent."""

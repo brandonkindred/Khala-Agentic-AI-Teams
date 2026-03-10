@@ -209,51 +209,36 @@ def run_problem_solving(
     fixes_applied: List[str] = []
 
     current_files = _read_planning_artifacts(repo_path)
+    grouped = group_issues_by_agent(review_issues)
 
     logger.info(
-        "Planning-v2 Problem-solving: starting to fix %d review issue(s) (will process each issue and apply fixes to planning artifacts).",
+        "Planning-v2 Problem-solving: starting to fix %d review issue(s) (grouped by agent; will apply fixes in batch per agent when available).",
         total_issues,
     )
 
-    for issue_idx, issue in enumerate(review_issues):
-        remaining = total_issues - issue_idx - resolved_count
-        issue_short = issue[:80]
+    for agent_kind in ISSUE_BREAKDOWN_DISPLAY_ORDER:
+        agent_issues = grouped.get(agent_kind, [])
+        if not agent_issues:
+            continue
 
-        logger.info(
-            "Planning-v2 Problem-solving: fixing issue %d/%d (%d resolved so far, %d remaining) — current issue: %s",
-            issue_idx + 1,
-            total_issues,
-            resolved_count,
-            remaining,
-            issue_short,
+        agent = tool_agents.get(agent_kind) if tool_agents else None
+        single_issue_input = ToolAgentPhaseInput(
+            spec_content=spec_content,
+            repo_path=str(repo_path),
+            spec_review_result=spec_review_result,
+            planning_result=planning_result,
+            implementation_result=implementation_result,
+            review_result=review_result,
+            review_issues=agent_issues,
+            current_files=current_files,
         )
 
-        if detail_callback:
-            detail_callback(
-                f"Fixing issue {issue_idx + 1}/{total_issues}: {issue_short[:50]}..."
-            )
-
-        agent_kind = _classify_issue(issue)
-        agent = tool_agents.get(agent_kind) if tool_agents else None
-
-        issue_resolved = False
+        batch_resolved = False
         fix_summary = ""
 
-        if agent and hasattr(agent, "fix_single_issue"):
+        if agent and hasattr(agent, "fix_all_issues"):
             try:
-                single_issue_input = ToolAgentPhaseInput(
-                    spec_content=spec_content,
-                    repo_path=str(repo_path),
-                    spec_review_result=spec_review_result,
-                    planning_result=planning_result,
-                    implementation_result=implementation_result,
-                    review_result=review_result,
-                    review_issues=[issue],
-                    current_files=current_files,
-                )
-
-                fix_result = agent.fix_single_issue(issue, single_issue_input)
-
+                fix_result = agent.fix_all_issues(agent_issues, single_issue_input)
                 if fix_result.files:
                     for rel_path, content in fix_result.files.items():
                         full_path = repo_path / rel_path
@@ -262,85 +247,145 @@ def run_problem_solving(
                         current_files[rel_path] = content
                         file_name = Path(rel_path).name
                         logger.info(
-                            "Planning-v2 Problem-solving: applied fix via %s — writing to file: %s (%d chars)",
+                            "Planning-v2 Problem-solving: applied batch fix via %s — writing to file: %s (%d chars)",
                             agent_kind.value,
                             file_name,
                             len(content),
                         )
-
-                issue_resolved = getattr(fix_result, "resolved", False) or bool(fix_result.files)
-                fix_summary = fix_result.summary or f"Fixed by {agent_kind.value}"
-
+                    batch_resolved = getattr(fix_result, "resolved", False) or True
+                    fix_summary = fix_result.summary or f"Addressed {len(agent_issues)} issue(s) via {agent_kind.value}"
             except Exception as e:
                 logger.warning(
-                    "Planning-v2 Problem-solving: %s fix_single_issue failed for issue %d: %s",
+                    "Planning-v2 Problem-solving: %s fix_all_issues failed: %s",
                     agent_kind.value,
-                    issue_idx + 1,
                     e,
                 )
 
-        if not issue_resolved:
-            try:
-                prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT.format(
-                    issue=issue,
-                    spec_excerpt=spec_content[:3000] if spec_content else "",
-                    current_artifacts=_format_artifacts_for_prompt(current_files),
+        if batch_resolved:
+            resolved_count += len(agent_issues)
+            fixes_applied.append(fix_summary)
+            logger.info(
+                "Planning-v2 Problem-solving: %s batch RESOLVED (%d issue(s)) — %s",
+                agent_kind.value,
+                len(agent_issues),
+                fix_summary[:120],
+            )
+            continue
+
+        for issue_idx, issue in enumerate(agent_issues):
+            issue_short = issue[:80]
+
+            logger.info(
+                "Planning-v2 Problem-solving: fixing issue via %s (%d/%d for this agent) — %s",
+                agent_kind.value,
+                issue_idx + 1,
+                len(agent_issues),
+                issue_short,
+            )
+
+            if detail_callback:
+                detail_callback(
+                    f"Fixing issue via {agent_kind.value}: {issue_short[:50]}..."
                 )
 
-                raw_text = complete_with_continuation(
-                    llm=llm,
-                    prompt=prompt,
-                    agent_name=f"PlanningV2_ProblemSolving_Issue{issue_idx + 1}",
-                )
-                raw = parse_fix_output(raw_text)
-                fix_desc = raw.get("fix_description", "")
-                file_updates = raw.get("file_updates") or {}
+            issue_resolved = False
+            fix_summary = ""
 
-                if file_updates and isinstance(file_updates, dict):
-                    for rel_path, content in file_updates.items():
-                        if isinstance(content, str) and content.strip():
+            if agent and hasattr(agent, "fix_single_issue"):
+                try:
+                    single_issue_input = ToolAgentPhaseInput(
+                        spec_content=spec_content,
+                        repo_path=str(repo_path),
+                        spec_review_result=spec_review_result,
+                        planning_result=planning_result,
+                        implementation_result=implementation_result,
+                        review_result=review_result,
+                        review_issues=[issue],
+                        current_files=current_files,
+                    )
+
+                    fix_result = agent.fix_single_issue(issue, single_issue_input)
+
+                    if fix_result.files:
+                        for rel_path, content in fix_result.files.items():
                             full_path = repo_path / rel_path
                             full_path.parent.mkdir(parents=True, exist_ok=True)
                             full_path.write_text(content, encoding="utf-8")
                             current_files[rel_path] = content
                             file_name = Path(rel_path).name
                             logger.info(
-                                "Planning-v2 Problem-solving: applied fix via LLM — writing to file: %s (%d chars)",
+                                "Planning-v2 Problem-solving: applied fix via %s — writing to file: %s (%d chars)",
+                                agent_kind.value,
                                 file_name,
                                 len(content),
                             )
 
-                    issue_resolved = True
-                    fix_summary = fix_desc or f"LLM fix applied for: {issue_short}"
+                        issue_resolved = getattr(fix_result, "resolved", False) or True
+                        fix_summary = fix_result.summary or f"Fixed by {agent_kind.value}"
 
-                elif raw.get("resolved"):
-                    issue_resolved = True
-                    fix_summary = fix_desc or "Issue marked as resolved by LLM"
+                except Exception as e:
+                    logger.warning(
+                        "Planning-v2 Problem-solving: %s fix_single_issue failed: %s",
+                        agent_kind.value,
+                        e,
+                    )
 
-            except Exception as e:
-                logger.warning(
-                    "Planning-v2 Problem-solving: LLM fix failed for issue %d: %s",
-                    issue_idx + 1,
-                    e,
+            if not issue_resolved:
+                try:
+                    prompt = PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT.format(
+                        issue=issue,
+                        spec_excerpt=spec_content[:3000] if spec_content else "",
+                        current_artifacts=_format_artifacts_for_prompt(current_files),
+                    )
+
+                    raw_text = complete_with_continuation(
+                        llm=llm,
+                        prompt=prompt,
+                        agent_name=f"PlanningV2_ProblemSolving_{agent_kind.value}_Issue{issue_idx + 1}",
+                    )
+                    raw = parse_fix_output(raw_text)
+                    fix_desc = raw.get("fix_description", "")
+                    file_updates = raw.get("file_updates") or {}
+
+                    if file_updates and isinstance(file_updates, dict):
+                        for rel_path, content in file_updates.items():
+                            if isinstance(content, str) and content.strip():
+                                full_path = repo_path / rel_path
+                                full_path.parent.mkdir(parents=True, exist_ok=True)
+                                full_path.write_text(content, encoding="utf-8")
+                                current_files[rel_path] = content
+                                file_name = Path(rel_path).name
+                                logger.info(
+                                    "Planning-v2 Problem-solving: applied fix via LLM — writing to file: %s (%d chars)",
+                                    file_name,
+                                    len(content),
+                                )
+                        issue_resolved = True
+                        fix_summary = fix_desc or f"LLM fix applied for: {issue_short}"
+                    elif raw.get("resolved"):
+                        issue_resolved = True
+                        fix_summary = fix_desc or "Issue marked as resolved by LLM"
+
+                except Exception as e:
+                    logger.warning(
+                        "Planning-v2 Problem-solving: LLM fix failed: %s",
+                        e,
+                    )
+
+            if issue_resolved:
+                resolved_count += 1
+                fixes_applied.append(fix_summary)
+                logger.info(
+                    "Planning-v2 Problem-solving: issue RESOLVED via %s — %s",
+                    agent_kind.value,
+                    fix_summary[:120],
                 )
-
-        if issue_resolved:
-            resolved_count += 1
-            fixes_applied.append(fix_summary)
-            logger.info(
-                "Planning-v2 Problem-solving: issue %d/%d RESOLVED (fix applied successfully) — summary: %s",
-                issue_idx + 1,
-                total_issues,
-                fix_summary[:120],
-            )
-        else:
-            unresolved_issues.append(issue)
-            logger.warning(
-                "Planning-v2 Problem-solving: issue %d/%d UNRESOLVED (no fix applied or fix failed) — issue description: %s",
-                issue_idx + 1,
-                total_issues,
-                issue[:160] if len(issue) > 160 else issue,
-            )
+            else:
+                unresolved_issues.append(issue)
+                logger.warning(
+                    "Planning-v2 Problem-solving: issue UNRESOLVED — %s",
+                    issue[:160] if len(issue) > 160 else issue,
+                )
 
     all_resolved = len(unresolved_issues) == 0
 
