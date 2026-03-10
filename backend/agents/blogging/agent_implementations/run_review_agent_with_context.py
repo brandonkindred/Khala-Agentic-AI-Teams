@@ -9,7 +9,7 @@ from . import _path_setup  # noqa: F401  # Add blogging to path when run from pr
 
 import logging
 
-from blog_research_agent.llm import OllamaLLMClient  # or DummyLLMClient for quick test
+from llm_service import get_client  # or DummyLLMClient for quick test
 from blog_research_agent.models import ResearchReference
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
 
@@ -41,9 +41,9 @@ PLACEHOLDER_REF = ResearchReference(
 )
 
 if __name__ == "__main__":
-    llm_client = OllamaLLMClient()
+    llm_client = get_client("blog")
     # Or use DummyLLMClient for a quick run without Ollama:
-    # from blog_research_agent.llm import DummyLLMClient
+    # from llm_service import DummyLLMClient
     # llm_client = DummyLLMClient()
 
     review_agent = BlogReviewAgent(llm_client=llm_client)

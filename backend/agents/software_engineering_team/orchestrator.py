@@ -43,7 +43,7 @@ from software_engineering_team.shared.git_utils import (
     ensure_development_branch,
     merge_branch,
 )
-from software_engineering_team.shared.llm import (
+from llm_service import (
     LLMError,
     LLMJsonParseError,
     LLMPermanentError,
@@ -51,7 +51,7 @@ from software_engineering_team.shared.llm import (
     LLMTemporaryError,
     LLMTruncatedError,
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
-    get_llm_for_agent,
+    get_client,
 )
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_AGENT_CRASH,
@@ -371,7 +371,7 @@ def _log_task_breakdown(
 
 def _get_agents() -> Dict[str, Any]:
     """Lazy init agents including the code review, documentation, and DbC comments agents.
-    Each agent uses get_llm_for_agent(key) for per-agent model configuration.
+    Each agent uses get_client(key) for per-agent model configuration.
     Main pipeline uses planning_v2_team for planning; spec_intake/project_planning/domain planning agents
     are not used in the main flow (clarification_store may still use Spec Intake elsewhere)."""
     from accessibility_agent import AccessibilityExpertAgent, AccessibilityInput
@@ -392,37 +392,37 @@ def _get_agents() -> Dict[str, Any]:
     from build_fix_specialist import BuildFixSpecialistAgent
 
     return {
-        "architecture": ArchitectureExpertAgent(get_llm_for_agent("architecture")),
-        "integration": IntegrationAgent(get_llm_for_agent("integration")),
-        "acceptance_verifier": AcceptanceVerifierAgent(get_llm_for_agent("acceptance_verifier")),
-        "tech_lead": TechLeadAgent(get_llm_for_agent("tech_lead")),
-        "devops": DevOpsTeamLeadAgent(get_llm_for_agent("devops")),
+        "architecture": ArchitectureExpertAgent(get_client("architecture")),
+        "integration": IntegrationAgent(get_client("integration")),
+        "acceptance_verifier": AcceptanceVerifierAgent(get_client("acceptance_verifier")),
+        "tech_lead": TechLeadAgent(get_client("tech_lead")),
+        "devops": DevOpsTeamLeadAgent(get_client("devops")),
         "backend": _lazy_init_backend_code_v2_team(),
-        "frontend": FrontendExpertAgent(get_llm_for_agent("frontend")),
+        "frontend": FrontendExpertAgent(get_client("frontend")),
         "frontend_code_v2": _lazy_init_frontend_code_v2_team(),
-        "security": CybersecurityExpertAgent(get_llm_for_agent("security")),
-        "qa": QAExpertAgent(get_llm_for_agent("qa")),
-        "accessibility": AccessibilityExpertAgent(get_llm_for_agent("accessibility")),
-        "code_review": CodeReviewAgent(get_llm_for_agent("code_review")),
-        "dbc_comments": DbcCommentsAgent(get_llm_for_agent("dbc_comments")),
-        "documentation": DocumentationAgent(get_llm_for_agent("documentation")),
+        "security": CybersecurityExpertAgent(get_client("security")),
+        "qa": QAExpertAgent(get_client("qa")),
+        "accessibility": AccessibilityExpertAgent(get_client("accessibility")),
+        "code_review": CodeReviewAgent(get_client("code_review")),
+        "dbc_comments": DbcCommentsAgent(get_client("dbc_comments")),
+        "documentation": DocumentationAgent(get_client("documentation")),
         "git_setup": GitSetupAgent(),
-        "repair": RepairExpertAgent(get_llm_for_agent("repair")),
-        "linting_tool_agent": LintingToolAgent(get_llm_for_agent("linting_tool_agent")),
-        "build_fix_specialist": BuildFixSpecialistAgent(get_llm_for_agent("build_fix_specialist")),
+        "repair": RepairExpertAgent(get_client("repair")),
+        "linting_tool_agent": LintingToolAgent(get_client("linting_tool_agent")),
+        "build_fix_specialist": BuildFixSpecialistAgent(get_client("build_fix_specialist")),
     }
 
 
 def _lazy_init_backend_code_v2_team():
     """Instantiate the backend team lead (backend_code_v2_team; lazy import)."""
     from backend_code_v2_team import BackendCodeV2TeamLead
-    return BackendCodeV2TeamLead(get_llm_for_agent("backend"))
+    return BackendCodeV2TeamLead(get_client("backend"))
 
 
 def _lazy_init_frontend_code_v2_team():
     """Instantiate the frontend team lead (frontend_code_v2_team; lazy import)."""
     from frontend_code_v2_team import FrontendCodeV2TeamLead
-    return FrontendCodeV2TeamLead(get_llm_for_agent("frontend"))
+    return FrontendCodeV2TeamLead(get_client("frontend"))
 
 
 _task_requirements = task_requirements
@@ -957,7 +957,7 @@ def _try_build_fix_one_at_a_time(
             break
 
     try:
-        llm = get_llm_for_agent("build_fix_specialist")
+        llm = get_client("build_fix_specialist")
     except Exception as e:
         logger.warning("Build fix: could not get LLM: %s", e)
         return False, result.error_summary if agent_type == "frontend" else (result.error_summary if "result" in dir() else "Build failed")
@@ -1791,7 +1791,7 @@ def run_orchestrator(
         if context_files:
             logger.info("Gathered %d context files for PRA agent", len(context_files))
         try:
-            requirements = parse_spec_with_llm(spec_content, get_llm_for_agent("spec_intake"))
+            requirements = parse_spec_with_llm(spec_content, get_client("spec_intake"))
         except LLMRateLimitError:
             logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
             update_job(job_id, status="paused_llm_limit", error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
@@ -1832,7 +1832,7 @@ def run_orchestrator(
 
         update_job(job_id, phase="product_analysis", message="Starting product requirements analysis...", status_text="Starting product requirements analysis")
         logger.info("Next step -> Running Product Requirements Analysis agent to validate spec and gather clarifications")
-        pra_agent = ProductRequirementsAnalysisAgent(get_llm_for_agent("product_analysis"))
+        pra_agent = ProductRequirementsAnalysisAgent(get_client("product_analysis"))
         pra_result = pra_agent.run_workflow(
             spec_content=spec_content,
             repo_path=path,
@@ -1893,7 +1893,7 @@ def run_orchestrator(
             except Exception as e:
                 logger.warning("Could not read PRD from plan/product_analysis: %s", e)
 
-        planning_v2_lead = PlanningV2TeamLead(get_llm_for_agent("project_planning"))
+        planning_v2_lead = PlanningV2TeamLead(get_client("project_planning"))
         p2_result = planning_v2_lead.run_workflow(
             spec_content=validated_spec,
             repo_path=path,

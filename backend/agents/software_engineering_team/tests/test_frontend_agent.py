@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput, FrontendOutput
-from software_engineering_team.shared.llm import DummyLLMClient
+from llm_service import DummyLLMClient
 
 
 def test_frontend_output_has_npm_packages_to_install() -> None:
@@ -530,7 +530,7 @@ def test_frontend_agent_needs_clarification() -> None:
 
 def test_frontend_agent_all_files_rejected_raises_llm_permanent_error() -> None:
     """When all files rejected by validation, agent raises LLMPermanentError (fail fast)."""
-    from software_engineering_team.shared.llm import LLMPermanentError
+    from llm_service import LLMPermanentError
 
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {

@@ -20,7 +20,7 @@ import _path_setup  # noqa: F401
 import logging
 from pathlib import Path
 
-from software_engineering_team.shared.llm import get_llm_for_agent
+from llm_service import get_client
 from software_engineering_team.shared.models import ProductRequirements, TaskType
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 from tech_lead_agent import TechLeadAgent, TechLeadInput
@@ -62,7 +62,7 @@ REQUIREMENTS = ProductRequirements(
 def main() -> None:
     # 1. Architecture Expert designs the system
     logger.info("=== Architecture Expert ===")
-    arch_agent = ArchitectureExpertAgent(llm_client=get_llm_for_agent("architecture"))
+    arch_agent = ArchitectureExpertAgent(llm_client=get_client("architecture"))
     arch_input = ArchitectureInput(
         requirements=REQUIREMENTS,
         technology_preferences=["Python", "FastAPI", "Angular", "PostgreSQL", "Docker"],
@@ -88,11 +88,11 @@ def main() -> None:
 
     # 3. Execute tasks by specialist
     agent_map = {
-        "devops": DevOpsExpertAgent(get_llm_for_agent("devops")),
-        "security": CybersecurityExpertAgent(get_llm_for_agent("security")),
-        "backend": BackendExpertAgent(get_llm_for_agent("backend")),
-        "frontend": FrontendExpertAgent(get_llm_for_agent("frontend")),
-        "qa": QAExpertAgent(get_llm_for_agent("qa")),
+        "devops": DevOpsExpertAgent(get_client("devops")),
+        "security": CybersecurityExpertAgent(get_client("security")),
+        "backend": BackendExpertAgent(get_client("backend")),
+        "frontend": FrontendExpertAgent(get_client("frontend")),
+        "qa": QAExpertAgent(get_client("qa")),
     }
 
     artifacts = {}

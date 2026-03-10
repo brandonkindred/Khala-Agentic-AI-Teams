@@ -31,7 +31,7 @@ sys.path.insert(0, str(_team_dir))
 import logging
 import uvicorn
 
-from software_engineering_team.shared.llm import get_llm_config_summary
+from llm_service import get_llm_config_summary
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

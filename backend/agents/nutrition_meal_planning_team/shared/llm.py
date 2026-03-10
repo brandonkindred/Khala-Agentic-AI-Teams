@@ -1,14 +1,13 @@
-"""LLM client for Nutrition & Meal Planning team. Reuses Personal Assistant LLM (Ollama + JSON extraction)."""
+"""LLM client for Nutrition & Meal Planning team. Uses central llm_service."""
 
 from __future__ import annotations
 
-from personal_assistant_team.shared.llm import (
-    JSONExtractionFailure,
-    LLMClient,
-    get_llm_client as _pa_get_llm_client,
-)
+from llm_service import LLMClient, LLMJsonParseError, get_client
+
+# Backward compat: JSONExtractionFailure used by agents that catch parse failures
+JSONExtractionFailure = LLMJsonParseError
 
 
 def get_llm_client(agent_key: str = "nutrition_meal_planning") -> LLMClient:
-    """Return LLM client for this team. Uses PA team's client with optional agent-specific model."""
-    return _pa_get_llm_client(agent_key)
+    """Return LLM client for this team. Delegates to central llm_service."""
+    return get_client(agent_key)

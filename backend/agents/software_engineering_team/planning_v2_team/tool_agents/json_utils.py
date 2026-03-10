@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Union, TYPE_CHECKING
 from software_engineering_team.shared.deduplication import dedupe_strings
 
 if TYPE_CHECKING:
-    from software_engineering_team.shared.llm import LLMClient
+    from llm_service import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def complete_text_with_continuation(
     Raises:
         RuntimeError: If continuation is exhausted and response is still truncated.
     """
-    from software_engineering_team.shared.llm import LLMTruncatedError
+    from llm_service import LLMTruncatedError
     from software_engineering_team.shared.continuation import ResponseContinuator
     from software_engineering_team.shared.post_mortem import write_post_mortem
 
@@ -135,7 +135,8 @@ def parse_json_with_recovery(
     and merges with merge_fn. Otherwise calls the LLM once for the given prompt and
     returns parsed JSON or None on failure.
     """
-    from software_engineering_team.shared.llm import LLMTruncatedError, LLMJsonParseError
+    from llm_service import LLMJsonParseError, LLMTruncatedError
+    from software_engineering_team.shared.llm import complete_json_with_continuation
 
     if (
         decompose_fn is not None
@@ -146,7 +147,7 @@ def parse_json_with_recovery(
         chunks = decompose_fn(original_content)
         if not chunks:
             try:
-                return llm.complete_json_with_continuation(prompt, task_id=agent_name)
+                return complete_json_with_continuation(llm, prompt, task_id=agent_name)
             except (LLMTruncatedError, LLMJsonParseError, Exception):
                 return None
         results: List[Dict[str, Any]] = []
@@ -155,7 +156,8 @@ def parse_json_with_recovery(
                 on_chunk_progress(i, len(chunks))
             chunk_prompt = chunk_prompt_template.format(chunk_content=chunk)
             try:
-                data = llm.complete_json_with_continuation(
+                data = complete_json_with_continuation(
+                    llm,
                     chunk_prompt,
                     task_id=f"{agent_name}_chunk{i}",
                 )
@@ -171,7 +173,7 @@ def parse_json_with_recovery(
                 return None
         return merge_fn(results) if results else None
     try:
-        return llm.complete_json_with_continuation(prompt, task_id=agent_name)
+        return complete_json_with_continuation(llm, prompt, task_id=agent_name)
     except (LLMTruncatedError, LLMJsonParseError, Exception):
         return None
 

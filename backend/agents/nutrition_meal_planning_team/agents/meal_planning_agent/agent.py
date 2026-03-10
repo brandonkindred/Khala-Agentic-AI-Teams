@@ -12,7 +12,7 @@ from ...models import (
     MealRecommendation,
     NutritionPlan,
 )
-from ...shared.llm import JSONExtractionFailure, LLMClient
+from llm_service import LLMClient, LLMJsonParseError
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ class MealPlanningAgent:
                 system_prompt=SYSTEM_PROMPT,
                 expected_keys=["suggestions"],
             )
-        except JSONExtractionFailure as e:
+        except LLMJsonParseError as e:
             logger.warning("Meal planning JSON extraction failed: %s", e)
             return []
 

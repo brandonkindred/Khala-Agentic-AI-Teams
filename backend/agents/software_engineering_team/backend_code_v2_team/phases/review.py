@@ -12,7 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
 
 from ..models import (

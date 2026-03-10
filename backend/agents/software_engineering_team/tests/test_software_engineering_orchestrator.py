@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from software_engineering_team.shared.command_runner import CommandResult
-from software_engineering_team.shared.llm import LLMJsonParseError, LLMRateLimitError, OLLAMA_WEEKLY_LIMIT_MESSAGE
+from llm_service import LLMJsonParseError, LLMRateLimitError, OLLAMA_WEEKLY_LIMIT_MESSAGE
 from software_engineering_team.shared.models import (
     ProductRequirements,
     SystemArchitecture,

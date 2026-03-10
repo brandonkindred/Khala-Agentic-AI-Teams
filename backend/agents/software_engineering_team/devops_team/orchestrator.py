@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
 
 from .change_review_agent import ChangeReviewAgent, ChangeReviewInput

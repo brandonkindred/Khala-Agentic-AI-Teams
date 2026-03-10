@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from software_engineering_team.shared.context_sizing import compute_existing_code_chars, compute_spec_content_chars
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
 from software_engineering_team.shared.prompt_utils import build_problem_solving_header, log_llm_prompt
 from software_engineering_team.shared.repo_utils import (
@@ -2669,7 +2669,7 @@ class BackendExpertAgent:
                 continue
             # Fail fast when LLM produces no valid output
             if not validated_files and not data.get("needs_clarification", False):
-                from software_engineering_team.shared.llm import LLMPermanentError
+                from llm_service import LLMPermanentError
                 if raw_files:
                     raise LLMPermanentError(
                         f"Backend: LLM returned {len(raw_files)} files but all were rejected by validation. "

@@ -9,7 +9,7 @@ from blog_publication_agent import (
     BlogPublicationAgent,
     SubmitDraftInput,
 )
-from blog_research_agent.llm import DummyLLMClient
+from llm_service import DummyLLMClient
 
 
 @pytest.fixture

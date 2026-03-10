@@ -39,6 +39,9 @@ class LLMError(BloggingError):
     """LLM operation failed.
     
     Raised when the LLM returns an error response or is unreachable.
+    For code that calls llm_service directly, catch llm_service.LLMError (and
+    subclasses such as LLMRateLimitError, LLMJsonParseError) instead; this class
+    remains for backward compatibility in the blogging pipeline.
     """
 
     def __init__(

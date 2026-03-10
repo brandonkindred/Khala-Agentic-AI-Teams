@@ -12,7 +12,7 @@ from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-from blog_research_agent.llm import DummyLLMClient
+from llm_service import DummyLLMClient
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
 from blog_research_agent.models import ResearchReference
 from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput

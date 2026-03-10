@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 from software_engineering_team.shared.prompt_utils import log_llm_prompt
 from software_engineering_team.shared.repo_utils import int_env as _int_env
 from software_engineering_team.shared.task_plan import TaskPlan

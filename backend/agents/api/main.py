@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from blog_research_agent.agent import ResearchAgent
 from blog_research_agent.agent_cache import AgentCache
-from blog_research_agent.llm import OllamaLLMClient
+from llm_service import get_client
 from blog_research_agent.models import ResearchBriefInput
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
 
@@ -118,7 +118,7 @@ def _format_audience(audience: Optional[Union[AudienceDetails, str]]) -> str:
 
 
 # Shared LLM client and agents (initialized on first request or at startup)
-_llm_client: Optional[OllamaLLMClient] = None
+_llm_client = None
 _research_agent: Optional[ResearchAgent] = None
 _review_agent: Optional[BlogReviewAgent] = None
 
@@ -127,7 +127,7 @@ def _get_agents() -> tuple[ResearchAgent, BlogReviewAgent]:
     """Lazily initialize and return research and review agents."""
     global _llm_client, _research_agent, _review_agent
     if _llm_client is None:
-        _llm_client = OllamaLLMClient(model="deepseek-r1", timeout=1800.0)
+        _llm_client = get_client("blog")
     if _research_agent is None:
         cache = AgentCache(cache_dir=".agent_cache")
         _research_agent = ResearchAgent(llm_client=_llm_client, cache=cache)
@@ -155,7 +155,7 @@ def research_and_review(request: ResearchAndReviewRequest) -> ResearchAndReviewR
         logger.exception("Failed to initialize agents")
         raise HTTPException(status_code=500, detail=f"Agent initialization failed: {e}") from e
 
-    llm_requests_before = _llm_client.request_count if _llm_client is not None else 0
+    llm_requests_before = getattr(_llm_client, "request_count", 0) if _llm_client is not None else 0
 
     # Build brief text (include title concept if provided)
     brief_text = request.brief.strip()
@@ -189,7 +189,7 @@ def research_and_review(request: ResearchAndReviewRequest) -> ResearchAndReviewR
         logger.exception("Review agent failed")
         raise HTTPException(status_code=500, detail=f"Review failed: {e}") from e
 
-    llm_requests_after = _llm_client.request_count if _llm_client is not None else llm_requests_before
+    llm_requests_after = getattr(_llm_client, "request_count", llm_requests_before) if _llm_client is not None else llm_requests_before
     logger.info(
         "Completed research-and-review pipeline with %s LLM requests",
         llm_requests_after - llm_requests_before,

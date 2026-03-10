@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from tech_lead_agent import TechLeadAgent, TechLeadInput
-from software_engineering_team.shared.llm import DummyLLMClient
+from llm_service import DummyLLMClient
 from software_engineering_team.shared.models import ProductRequirements, SystemArchitecture
 
 

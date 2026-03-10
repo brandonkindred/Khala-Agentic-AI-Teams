@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from .agent import ResearchAgent
-from .llm import LLMClient
+from llm_service import LLMClient
 from .models import ResearchBriefInput, ResearchAgentOutput
 
 

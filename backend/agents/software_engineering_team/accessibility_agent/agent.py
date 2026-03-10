@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 
 from .models import AccessibilityInput, AccessibilityIssue, AccessibilityOutput
 from .prompts import ACCESSIBILITY_PROMPT

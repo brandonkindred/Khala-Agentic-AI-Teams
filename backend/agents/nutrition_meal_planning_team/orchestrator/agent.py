@@ -21,7 +21,7 @@ from ..models import (
 )
 from ..shared.client_profile_store import ClientProfileStore
 from ..shared.meal_feedback_store import MealFeedbackStore
-from ..shared.llm import get_llm_client
+from llm_service import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class NutritionMealPlanningOrchestrator:
     ) -> None:
         self.profile_store = profile_store or ClientProfileStore()
         self.meal_feedback_store = meal_feedback_store or MealFeedbackStore()
-        llm = get_llm_client()
+        llm = get_client("nutrition_meal_planning")
         self.intake_agent = IntakeProfileAgent(llm)
         self.nutritionist_agent = NutritionistAgent(llm)
         self.meal_planning_agent = MealPlanningAgent(llm)

@@ -111,7 +111,7 @@ soc2_compliance_team/
 ├── __init__.py
 ├── models.py          # RepoContext, TSCFinding, TSCAuditResult, SOC2ComplianceReport, NextStepsDocument
 ├── repo_loader.py     # Load repository into RepoContext for agents
-├── llm_client.py      # Ollama / Dummy LLM client
+├── (uses llm_service for LLM client)
 ├── agents.py          # Security, Availability, PI, Confidentiality, Privacy TSC agents + ReportWriter
 ├── orchestrator.py    # SOC2AuditOrchestrator, run_soc2_audit()
 ├── api/

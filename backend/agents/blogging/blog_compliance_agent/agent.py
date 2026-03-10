@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
-from blog_research_agent.llm import LLMClient
+from llm_service import LLMClient
 
 from .models import ComplianceReport, Violation
 from .prompts import COMPLIANCE_PROMPT

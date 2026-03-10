@@ -19,7 +19,7 @@ from ..json_utils import complete_text_with_continuation
 from software_engineering_team.shared.deduplication import dedupe_by_key
 
 if TYPE_CHECKING:
-    from software_engineering_team.shared.llm import LLMClient
+    from llm_service import LLMClient
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 
 from build_fix_specialist.models import CodeEdit
 

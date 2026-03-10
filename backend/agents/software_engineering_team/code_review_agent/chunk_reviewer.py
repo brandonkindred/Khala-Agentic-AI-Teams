@@ -11,7 +11,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_existing_codebase_chars,
     compute_code_review_spec_excerpt_chars,
 )
-from software_engineering_team.shared.llm import LLMClient
+from llm_service import LLMClient
 
 from .models import ChunkReviewInput, ChunkReviewOutput
 from .prompts import CODE_REVIEW_PROMPT

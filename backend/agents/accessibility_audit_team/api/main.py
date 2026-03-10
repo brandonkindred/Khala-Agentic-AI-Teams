@@ -47,7 +47,8 @@ def get_orchestrator() -> AccessibilityAuditOrchestrator:
     """Get or create the orchestrator singleton."""
     global _orchestrator
     if _orchestrator is None:
-        _orchestrator = AccessibilityAuditOrchestrator()
+        from llm_service import get_client
+        _orchestrator = AccessibilityAuditOrchestrator(llm_client=get_client("accessibility_audit"))
     return _orchestrator
 
 
