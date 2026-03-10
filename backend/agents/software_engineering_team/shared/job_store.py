@@ -93,6 +93,47 @@ def create_job(
     _manager(cache_dir).create_job(**data)
 
 
+def reset_job(
+    job_id: str,
+    repo_path: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+    job_type: Optional[str] = None,
+) -> None:
+    """Reset an existing job to initial state (same job_id). Preserves created_at so job order is unchanged."""
+    existing = get_job(job_id, cache_dir)
+    created_at = (
+        existing.get("created_at")
+        if existing
+        else datetime.now(timezone.utc).isoformat()
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    data: Dict[str, Any] = {
+        "job_id": job_id,
+        "team": "software_engineering_team",
+        "repo_path": repo_path,
+        "status": JOB_STATUS_PENDING,
+        "progress": 0,
+        "current_task": None,
+        "status_text": None,
+        "task_results": [],
+        "execution_order": [],
+        "error": None,
+        "architecture_overview": None,
+        "requirements_title": None,
+        "pending_questions": [],
+        "waiting_for_answers": False,
+        "submitted_answers": [],
+        "cancel_requested": False,
+        "created_at": created_at,
+        "updated_at": now,
+        "last_heartbeat_at": now,
+        "events": [],
+    }
+    if job_type is not None:
+        data["job_type"] = job_type
+    _manager(cache_dir).replace_job(job_id, data)
+
+
 def get_job(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,

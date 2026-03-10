@@ -189,17 +189,17 @@ def run_implementation(
                     full_path.write_text(content, encoding="utf-8")
                     assets_updated.append(rel_path)
                     logger.info(
-                        "Implementation: applied update — writing to file: %s; full contents:\n%s",
+                        "Implementation: applied update — writing to file: %s (%d chars)",
                         file_name,
-                        content,
+                        len(content),
                     )
             else:
                 full_path.write_text(content, encoding="utf-8")
                 assets_created.append(rel_path)
                 logger.info(
-                    "Implementation: wrote new file: %s; full contents:\n%s",
+                    "Implementation: wrote new file: %s (%d chars)",
                     file_name,
-                    content,
+                    len(content),
                 )
         
         parts = ["# Planning (v2) Artifacts\n\n"]
@@ -304,9 +304,9 @@ def run_implementation(
                 if hierarchy_rel_path not in assets_created:
                     assets_created.append(hierarchy_rel_path)
                 logger.info(
-                    "Implementation: wrote full planning hierarchy to file: %s; full contents:\n%s",
+                    "Implementation: wrote full planning hierarchy to file: %s (%d chars)",
                     hierarchy_file.name,
-                    hierarchy_md,
+                    len(hierarchy_md),
                 )
             except Exception as e:
                 logger.warning(
@@ -321,9 +321,9 @@ def run_implementation(
         if rel_path not in assets_created:
             assets_created.append(rel_path)
         logger.info(
-            "Implementation: wrote consolidated planning artifacts to file: %s; full contents:\n%s",
+            "Implementation: wrote consolidated planning artifacts to file: %s (%d chars)",
             out_file.name,
-            artifacts_content,
+            len(artifacts_content),
         )
         
     except Exception as e:

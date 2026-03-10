@@ -409,9 +409,9 @@ class UserStoryToolAgent:
                         full_path.write_text(content, encoding="utf-8")
                         file_name = full_path.name
                         logger.info(
-                            "UserStory: applied fix — writing to file: %s; full contents:\n%s",
+                            "UserStory: applied fix — writing to file: %s (%d chars)",
                             file_name,
-                            content,
+                            len(content),
                         )
                         if rel_path not in files_written:
                             files_written.append(rel_path)
@@ -569,24 +569,31 @@ class UserStoryToolAgent:
 
             files: Dict[str, str] = {}
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
+                files[planning_asset_path("user_stories.md")] = updated_content
                 if looks_like_truncated_file_content(updated_content):
                     logger.warning(
-                        "UserStory: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
+                        "UserStory: fix output may be truncated; wrote anyway (%d chars)",
+                        len(updated_content),
                     )
                 else:
-                    files[planning_asset_path("user_stories.md")] = updated_content
                     logger.info("UserStory: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
-                        files[path] = content
-                        logger.info("UserStory: fix applied (single-issue) — %s", fix_desc[:120])
-                        break
+                    if content and isinstance(content, str) and content.strip():
+                        if not looks_like_truncated_file_content(content):
+                            files[path] = content
+                            logger.info("UserStory: fix applied (single-issue) — %s", fix_desc[:120])
+                            break
                 else:
-                    if file_updates and any(isinstance(c, str) and c.strip() for c in file_updates.values()):
-                        logger.warning(
-                            "UserStory: fix output appears truncated (file content incomplete); skipping write to avoid incomplete artifact.",
-                        )
+                    # All content looked truncated; write first non-empty anyway so artifact is updated (Option A)
+                    for path, content in file_updates.items():
+                        if content and isinstance(content, str) and content.strip():
+                            files[path] = content
+                            logger.warning(
+                                "UserStory: fix output may be truncated; wrote anyway (%d chars)",
+                                len(content),
+                            )
+                            break
 
             return ToolAgentPhaseOutput(
                 summary=fix_desc or f"User story issue addressed: {issue[:50]}",

@@ -182,10 +182,10 @@ def run_problem_solving(
                         current_files[rel_path] = content
                         file_name = Path(rel_path).name
                         logger.info(
-                            "Planning-v2 Problem-solving: applied fix via %s — writing to file: %s; full contents:\n%s",
+                            "Planning-v2 Problem-solving: applied fix via %s — writing to file: %s (%d chars)",
                             agent_kind.value,
                             file_name,
-                            content,
+                            len(content),
                         )
 
                 issue_resolved = getattr(fix_result, "resolved", False) or bool(fix_result.files)
@@ -225,9 +225,9 @@ def run_problem_solving(
                             current_files[rel_path] = content
                             file_name = Path(rel_path).name
                             logger.info(
-                                "Planning-v2 Problem-solving: applied fix via LLM — writing to file: %s; full contents:\n%s",
+                                "Planning-v2 Problem-solving: applied fix via LLM — writing to file: %s (%d chars)",
                                 file_name,
-                                content,
+                                len(content),
                             )
 
                     issue_resolved = True

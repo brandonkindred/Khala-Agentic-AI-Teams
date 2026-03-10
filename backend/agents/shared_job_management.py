@@ -74,6 +74,11 @@ class CentralJobManager:
         with self._lock:
             self._write(self._job_file(job_id), payload)
 
+    def replace_job(self, job_id: str, payload: Dict[str, Any]) -> None:
+        """Overwrite the job file with the given payload. Use for reset (same job_id, fresh state)."""
+        with self._lock:
+            self._write(self._job_file(job_id), payload)
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
             data = self._read(self._job_file(job_id))

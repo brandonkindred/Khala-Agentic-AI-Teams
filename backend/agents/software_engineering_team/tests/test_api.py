@@ -407,8 +407,8 @@ def test_restart_400_when_job_type_not_run_team(client: TestClient, temp_work_pa
     assert r.status_code == 400
 
 
-def test_restart_200_when_failed_creates_new_job(client: TestClient, temp_work_path: Path) -> None:
-    """POST /run-team/{job_id}/restart returns 200 and creates a new running job."""
+def test_restart_200_when_failed_reuses_same_job(client: TestClient, temp_work_path: Path) -> None:
+    """POST /run-team/{job_id}/restart returns 200 and reuses the same job (same job_id), reset and running."""
     from software_engineering_team.shared.job_store import create_job, get_job, update_job
 
     old_job_id = str(uuid.uuid4())
@@ -419,9 +419,9 @@ def test_restart_200_when_failed_creates_new_job(client: TestClient, temp_work_p
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "running"
-    assert data["job_id"] != old_job_id
+    assert data["job_id"] == old_job_id
 
-    new_job = get_job(data["job_id"])
-    assert new_job is not None
-    assert new_job.get("status") == "running"
-    assert new_job.get("repo_path") == str(temp_work_path)
+    job = get_job(old_job_id)
+    assert job is not None
+    assert job.get("status") == "running"
+    assert job.get("repo_path") == str(temp_work_path)

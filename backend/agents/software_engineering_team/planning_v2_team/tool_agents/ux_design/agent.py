@@ -117,9 +117,9 @@ class UXDesignToolAgent:
                         full_path.write_text(content, encoding="utf-8")
                         file_name = full_path.name
                         logger.info(
-                            "UXDesign: applied fix — writing to file: %s; full contents:\n%s",
+                            "UXDesign: applied fix — writing to file: %s (%d chars)",
                             file_name,
-                            content,
+                            len(content),
                         )
                         if rel_path not in files_written:
                             files_written.append(rel_path)

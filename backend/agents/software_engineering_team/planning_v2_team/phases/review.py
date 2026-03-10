@@ -116,10 +116,10 @@ def run_review(
                             full_path.write_text(content, encoding="utf-8")
                             file_name = Path(rel_path).name
                             logger.info(
-                                "Review: %s applied fix — writing to file: %s; full contents:\n%s",
+                                "Review: %s applied fix — writing to file: %s (%d chars)",
                                 agent_kind.value,
                                 file_name,
-                                content,
+                                len(content),
                             )
     
     artifacts_text = "\n".join(

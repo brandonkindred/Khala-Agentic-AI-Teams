@@ -142,7 +142,7 @@
                   <button mat-icon-button
                           class="resume-button"
                           (click)="resumeJob($event, job)"
-                          matTooltip="Resume job">
+                          matTooltip="Resume job (continue from where it left off, e.g. after server restart)">
                     <mat-icon>play_arrow</mat-icon>
                   </button>
                 }
@@ -150,7 +150,7 @@
                   <button mat-icon-button
                           class="restart-button"
                           (click)="restartJob($event, job)"
-                          matTooltip="Restart job">
+                          matTooltip="Restart from scratch (same job, workflow runs again from the start)">
                     <mat-icon>replay</mat-icon>
                   </button>
                 }

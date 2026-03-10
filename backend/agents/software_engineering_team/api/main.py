@@ -48,6 +48,7 @@ from software_engineering_team.shared.job_store import (
     list_jobs,
     mark_stale_jobs_failed,
     request_cancel,
+    reset_job,
     start_job_heartbeat_thread,
     update_job,
     submit_answers as store_submit_answers,
@@ -731,12 +732,12 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
     "/run-team/{job_id}/restart",
     response_model=RunTeamResponse,
     summary="Restart a completed/failed/cancelled run-team job",
-    description="Creates a new run-team job using the same repo_path as the referenced job. "
+    description="Resets the same job (same job_id) to initial state and starts the workflow again. "
     "Only allowed when the existing job is in a terminal state (completed, failed, cancelled, or agent_crash). "
-    "Returns a new job_id.",
+    "Returns the same job_id.",
 )
 def restart_run_team_job(job_id: str) -> RunTeamResponse:
-    """Restart a run_team job by creating a brand-new job for the same repo path."""
+    """Restart a run_team job by resetting the existing job to initial state and re-running the orchestrator."""
     data = get_job(job_id)
     if not data:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -767,21 +768,20 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    new_job_id = str(uuid.uuid4())
-    create_job(new_job_id, str(repo_path), job_type="run_team")
+    reset_job(job_id, str(repo_path), job_type="run_team")
 
     thread = threading.Thread(
         target=_run_orchestrator_background,
-        args=(new_job_id, str(repo_path)),
+        args=(job_id, str(repo_path)),
         daemon=True,
     )
     thread.start()
-    start_job_heartbeat_thread(new_job_id)
+    start_job_heartbeat_thread(job_id)
 
     return RunTeamResponse(
-        job_id=new_job_id,
+        job_id=job_id,
         status="running",
-        message=f"Job restarted from {job_id}. Poll GET /run-team/{{job_id}} for status.",
+        message="Job restarted. Poll GET /run-team/{job_id} for status.",
     )
 
 
