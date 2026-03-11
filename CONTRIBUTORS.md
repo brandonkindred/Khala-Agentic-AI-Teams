@@ -89,8 +89,8 @@ Node 22.12 is recommended (see `.nvmrc`). Angular 19 requires Node >=18.19.1.
 Create a `.env` file in `agents/` (or export in your shell) for local development:
 
 ```bash
-# Blogging (required for research agent)
-TAVILY_API_KEY=your_tavily_key
+# Blogging (research agent uses Ollama web_search; same key as LLM)
+OLLAMA_API_KEY=your_ollama_key
 
 # Software Engineering (for real LLM runs)
 SW_LLM_PROVIDER=ollama

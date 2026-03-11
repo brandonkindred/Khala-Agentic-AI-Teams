@@ -19,21 +19,26 @@ This directory defines a **Docker Compose stack** that runs:
 
 2. **Start the stack** (from repo root)
 
+   The `docker/workspace` directory is used as a bind mount for the agents container; it is created in the repo (with a `.gitkeep`). You can add project repos or files there for the container to use.
+
+   Use `--env-file docker/.env` so variables from `docker/.env` (e.g. `OLLAMA_API_KEY`) are passed into the containers.
+
    **Docker:**
    ```bash
-   docker compose -f docker/docker-compose.yml up --build
+   docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
    ```
 
    **Podman:** Use `podman compose` as a drop-in (requires a running Podman machine; on Windows, install WSL2 then `podman machine init` and `podman machine start`):
    ```bash
-   podman compose -f docker/docker-compose.yml up --build
+   podman compose -f docker/docker-compose.yml --env-file docker/.env up --build
    ```
 
 3. **Access**
 
    | Service        | URL                         |
    |----------------|-----------------------------|
-   | Agents UI + API| http://localhost:8888       |
+   | **Angular UI** | http://localhost:4200       (proxies /api to agents) |
+   | Agents API     | http://localhost:8888       (direct) |
    | Temporal UI    | http://localhost:8080       |
    | Postgres       | localhost:5432 (user `postgres` / `temporal` / `strands`) |
    | Ollama (local) | http://localhost:11434      |
@@ -42,11 +47,13 @@ This directory defines a **Docker Compose stack** that runs:
 
 - **OLLAMA_API_KEY** – Create at [ollama.com/settings/keys](https://ollama.com/settings/keys). Required for Ollama Cloud (Option A). Passed into the agents container so the LLM client can call `https://ollama.com` with `Authorization: Bearer <key>`.
 
-Optional (defaults in `.env.example`):
+Optional (defaults in `docker/.env.example`; copy to `docker/.env` and set as needed):
 
 - **SW_LLM_BASE_URL** – `https://ollama.com` (cloud) or `http://ollama:11434` (local stack)
 - **SW_LLM_MODEL** – e.g. `qwen3.5:397b-cloud`
 - **POSTGRES_USER**, **POSTGRES_PASSWORD**, **POSTGRES_DB** – used for the default Postgres superuser; init scripts create `temporal` and `strands` DBs and users.
+
+Personal Assistant credential encryption uses a key generated at **Docker image build time** (stored in the image), so credentials persist across container restarts without setting any env var.
 
 ## Viewing server logs (testing)
 
@@ -80,7 +87,8 @@ When **ENABLE_LOG_API** is not set or is 0, the endpoint returns **404** so it i
 | 5432  | PostgreSQL     |
 | 7233  | Temporal gRPC  |
 | 8080  | Temporal UI    |
-| 8888  | Agents (nginx) |
+| 4200  | Angular UI (proxies /api to agents) |
+| 8888  | Agents API (direct) |
 | 11434 | Ollama (optional) |
 
 Agents direct ports (when needed): 18000–18005 map to APIs 8000–8005.
@@ -93,7 +101,7 @@ When running in this stack, the **strands-agents** service uses the **stack’s 
 
 After starting the stack:
 
-1. **Compose up** – `docker compose -f docker/docker-compose.yml up -d --build` should bring up all services without errors.
+1. **Compose up** – `docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build` should bring up all services without errors.
 2. **Temporal UI** – Open http://localhost:8080 and confirm the Temporal Web UI loads.
 3. **Agents** – `curl http://localhost:8888/health` should return `{"status":"ok"}` (agents use stack Postgres and Ollama Cloud when configured).
 4. **Logs API** – With `ENABLE_LOG_API=1` in `.env`, `curl "http://localhost:8888/api/software-engineering/logs?service=sw_api&lines=100"` should return 200 and log content. With `ENABLE_LOG_API` unset, the same URL should return 404.

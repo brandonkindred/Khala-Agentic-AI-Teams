@@ -98,19 +98,19 @@
       }
     </div>
   </mat-tab>
-  <mat-tab label="Planning (v2)">
+  <mat-tab label="Planning">
     <div class="tab-content">
-      <app-planning-v2-run-form (submitRequest)="onPlanningV2Submit($event)" />
-      @if (planningV2JobId) {
-        <app-planning-v2-job-status
-          [jobId]="planningV2JobId"
-          (statusChange)="onPlanningV2StatusChange($event)"
+      <app-planning-v3-run-form (submitRequest)="onPlanningV3Submit($event)" />
+      @if (planningV3JobId) {
+        <app-planning-v3-job-status
+          [jobId]="planningV3JobId"
+          (statusChange)="onPlanningV3StatusChange($event)"
         />
         <app-pending-questions
-          [jobId]="planningV2JobId"
-          [questions]="planningV2Status?.pending_questions ?? []"
-          submitEndpoint="planning-v2"
-          (answersSubmitted)="onPlanningV2AnswersSubmitted($event)"
+          [jobId]="planningV3JobId"
+          [questions]="planningV3Status?.pending_questions ?? []"
+          submitEndpoint="planning-v3"
+          (answersSubmitted)="onPlanningV3AnswersSubmitted($event)"
         />
       }
     </div>

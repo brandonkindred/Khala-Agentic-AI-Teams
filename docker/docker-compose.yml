@@ -1,6 +1,6 @@
-# Full stack: Postgres, Temporal, Ollama (optional), and strands-agents (unified API).
-# Run from repo root: docker compose -f docker/docker-compose.yml up --build
-# Ports: 5432 Postgres, 7233 Temporal gRPC, 8080 Temporal UI, 8888 Unified API, 11434 Ollama (optional)
+# Full stack: Postgres, Temporal, Ollama (optional), strands-agents (unified API), and Angular UI.
+# Run from repo root: docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
+# Ports: 5432 Postgres, 7233 Temporal gRPC, 8080 Temporal UI, 4200 Angular UI, 8888 Unified API (direct), 11434 Ollama (optional)
 
 services:
   postgres:
@@ -37,7 +37,6 @@ services:
       POSTGRES_USER: temporal
       POSTGRES_PWD: temporal
       POSTGRES_SEEDS: postgres
-      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
     ports:
       - "7233:7233"
     networks:
@@ -91,13 +90,30 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       ENABLE_LOG_API: ${ENABLE_LOG_API:-0}
     networks:
-      - stack
+      stack:
+        aliases:
+          - unified-api
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+
+  frontend:
+    build:
+      context: ../user-interface
+      dockerfile: Dockerfile
+    image: strands-ui
+    container_name: strands-ui
+    ports:
+      - "4200:80"
+    depends_on:
+      strands-agents:
+        condition: service_healthy
+    networks:
+      - stack
+    restart: unless-stopped
 
 networks:
   stack:

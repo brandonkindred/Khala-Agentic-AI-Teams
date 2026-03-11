@@ -24,7 +24,7 @@ Interactive docs: http://localhost:8000/docs
 
 | Variable | Description |
 |----------|-------------|
-| `TAVILY_API_KEY` | API key for web search (Tavily). Required for research agent. |
+| `OLLAMA_API_KEY` | Ollama API key; used for LLM and for blogging research web search (Ollama web_search API). |
 
 ## Request Example
 

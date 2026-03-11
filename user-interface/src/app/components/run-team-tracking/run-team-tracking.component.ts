@@ -292,7 +292,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   // Subprocess Tracking (Planning and Execution phases)
   // ---------------------------------------------------------------------------
 
-  /** Get all planning-v2 subprocess phases for display. */
+  /** Get all planning-v3 subprocess phases for display. */
   getPlanningSubprocessPhases(): PhaseDefinition[] {
     return PLANNING_V2_PHASES;
   }

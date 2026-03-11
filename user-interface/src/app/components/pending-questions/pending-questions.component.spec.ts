@@ -3,6 +3,7 @@ import { of, throwError } from 'rxjs';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
+import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
 import { PendingQuestionsComponent } from './pending-questions.component';
 
 describe('PendingQuestionsComponent', () => {
@@ -13,6 +14,7 @@ describe('PendingQuestionsComponent', () => {
     submitPlanningV2Answers: ReturnType<typeof vi.fn>;
     submitProductAnalysisAnswers: ReturnType<typeof vi.fn>;
   };
+  let planningV3ApiSpy: { submitAnswers: ReturnType<typeof vi.fn> };
 
   const mockQuestion = {
     id: 'q1',
@@ -27,10 +29,14 @@ describe('PendingQuestionsComponent', () => {
       submitPlanningV2Answers: vi.fn(),
       submitProductAnalysisAnswers: vi.fn(),
     };
+    planningV3ApiSpy = { submitAnswers: vi.fn() };
 
     await TestBed.configureTestingModule({
       imports: [PendingQuestionsComponent, NoopAnimationsModule],
-      providers: [{ provide: SoftwareEngineeringApiService, useValue: apiSpy }],
+      providers: [
+        { provide: SoftwareEngineeringApiService, useValue: apiSpy },
+        { provide: PlanningV3ApiService, useValue: planningV3ApiSpy },
+      ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(PendingQuestionsComponent);
@@ -81,6 +87,19 @@ describe('PendingQuestionsComponent', () => {
     component.submitAnswers();
 
     expect(apiSpy.submitPlanningV2Answers).toHaveBeenCalledWith('job-1', expect.any(Object));
+  });
+
+  it('should call PlanningV3ApiService.submitAnswers when submitEndpoint is planning-v3', () => {
+    component.submitEndpoint = 'planning-v3';
+    component.questions = [{ ...mockQuestion, required: false } as any];
+    component.initializeAnswers();
+    component.getAnswer('q1')!.selectedOptionIds.add('a1');
+    component.answers = new Map(component.answers);
+
+    planningV3ApiSpy.submitAnswers.mockReturnValue(of({ job_id: 'job-1', status: 'completed' } as any));
+    component.submitAnswers();
+
+    expect(planningV3ApiSpy.submitAnswers).toHaveBeenCalledWith('job-1', expect.any(Array));
   });
 
   it('should call submitProductAnalysisAnswers when submitEndpoint is product-analysis', () => {

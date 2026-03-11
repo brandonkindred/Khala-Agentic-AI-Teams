@@ -72,13 +72,6 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-_TAVILY_KEY_PRESENT = bool(os.environ.get("TAVILY_API_KEY"))
-if not _TAVILY_KEY_PRESENT:
-    logger.warning(
-        "TAVILY_API_KEY is not set. The research agent requires this key for "
-        "web search. Set it before calling /research-and-review or /full-pipeline."
-    )
-
 # Base directory for run artifacts (when work_dir is requested)
 RUN_ARTIFACTS_BASE = Path(tempfile.gettempdir()) / "blogging_runs"
 
@@ -475,14 +468,8 @@ def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
 
 @app.get("/health")
 def health() -> dict:
-    """Health check endpoint. Includes a warning when TAVILY_API_KEY is missing."""
-    warnings = []
-    if not _TAVILY_KEY_PRESENT:
-        warnings.append("TAVILY_API_KEY is not set; research agent will fail")
-    result: dict = {"status": "ok"}
-    if warnings:
-        result["warnings"] = warnings
-    return result
+    """Health check endpoint."""
+    return {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -958,6 +945,7 @@ def list_job_artifacts(job_id: str) -> ArtifactListResponse:
     "/job/{job_id}/artifacts/{artifact_name}",
     summary="Get job artifact content or download",
     description="Return the content of a single artifact (JSON body), or with ?download=true return as attachment. Path traversal is blocked; artifact_name must be in the allowed list.",
+    response_model=None,
 )
 def get_job_artifact_content(
     job_id: str,

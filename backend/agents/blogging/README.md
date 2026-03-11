@@ -73,7 +73,7 @@ pip install -r requirements.txt
 
 2. **Configure environment**
 
-- Set a `TAVILY_API_KEY` environment variable (or adapt the `web_search` tool to your preferred search API).
+- Web search uses Ollama's web_search API; set `OLLAMA_API_KEY` (e.g. from https://ollama.com/settings/keys) for the research agent.
 
 3. **Use the agent in Python**
 

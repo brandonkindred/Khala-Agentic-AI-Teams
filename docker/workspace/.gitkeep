@@ -1,0 +1,2 @@
+# Ensures docker/workspace exists for compose bind mount (./workspace:/workspace).
+# Add project repos or files here for the strands-agents container.

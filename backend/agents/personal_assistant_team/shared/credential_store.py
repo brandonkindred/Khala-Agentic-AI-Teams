@@ -56,9 +56,10 @@ class StoredCredentials(BaseModel):
 class CredentialStore:
     """
     Secure credential storage using Fernet symmetric encryption.
-    
+
     Credentials are stored encrypted at rest in the file system.
-    The encryption key must be provided via the PA_CREDENTIAL_KEY environment variable.
+    The encryption key is read from PA_CREDENTIAL_KEY, or from the file path
+    in PA_CREDENTIAL_KEY_FILE (e.g. a key generated at Docker build time).
     """
 
     def __init__(
@@ -78,8 +79,12 @@ class CredentialStore:
             storage_dir or os.getenv("PA_CREDENTIAL_DIR", ".agent_cache/credentials")
         )
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        
+
         key = encryption_key or os.getenv("PA_CREDENTIAL_KEY")
+        if not key:
+            key_file = os.getenv("PA_CREDENTIAL_KEY_FILE")
+            if key_file and Path(key_file).is_file():
+                key = Path(key_file).read_text().strip()
         if not key:
             logger.warning(
                 "PA_CREDENTIAL_KEY not set. Generating temporary key. "

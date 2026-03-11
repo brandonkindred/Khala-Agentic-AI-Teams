@@ -9,9 +9,10 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { CommonModule } from '@angular/common';
-import { Subscription, timer } from 'rxjs';
-import { switchMap } from 'rxjs/operators';
+import { Subscription, timer, forkJoin, of } from 'rxjs';
+import { switchMap, map, catchError } from 'rxjs/operators';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
+import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
 import { ErrorMessageComponent } from '../../shared/error-message/error-message.component';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
@@ -22,8 +23,8 @@ import { BackendCodeV2RunFormComponent } from '../backend-code-v2-run-form/backe
 import { BackendCodeV2JobStatusComponent } from '../backend-code-v2-job-status/backend-code-v2-job-status.component';
 import { FrontendCodeV2RunFormComponent } from '../frontend-code-v2-run-form/frontend-code-v2-run-form.component';
 import { FrontendCodeV2JobStatusComponent } from '../frontend-code-v2-job-status/frontend-code-v2-job-status.component';
-import { PlanningV2RunFormComponent } from '../planning-v2-run-form/planning-v2-run-form.component';
-import { PlanningV2JobStatusComponent } from '../planning-v2-job-status/planning-v2-job-status.component';
+import { PlanningV3RunFormComponent } from '../planning-v3-run-form/planning-v3-run-form.component';
+import { PlanningV3JobStatusComponent } from '../planning-v3-job-status/planning-v3-job-status.component';
 import { RunTeamTrackingComponent } from '../run-team-tracking/run-team-tracking.component';
 import { PendingQuestionsComponent } from '../pending-questions/pending-questions.component';
 import { ProductAnalysisRunFormComponent } from '../product-analysis-run-form/product-analysis-run-form.component';
@@ -34,8 +35,8 @@ import type {
   ArchitectDesignResponse,
   BackendCodeV2RunRequest,
   FrontendCodeV2RunRequest,
-  PlanningV2RunRequest,
-  PlanningV2StatusResponse,
+  PlanningV3RunRequest,
+  PlanningV3StatusResponse,
   ProductAnalysisRunRequest,
   ProductAnalysisStatusResponse,
   RunningJobSummary,
@@ -64,8 +65,8 @@ import type {
     BackendCodeV2JobStatusComponent,
     FrontendCodeV2RunFormComponent,
     FrontendCodeV2JobStatusComponent,
-    PlanningV2RunFormComponent,
-    PlanningV2JobStatusComponent,
+    PlanningV3RunFormComponent,
+    PlanningV3JobStatusComponent,
     RunTeamTrackingComponent,
     PendingQuestionsComponent,
     ProductAnalysisRunFormComponent,
@@ -80,9 +81,10 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     product_analysis: 1,
     backend_code_v2: 2,
     frontend_code_v2: 3,
-    planning_v2: 4,
+    planning_v3: 4,
   };
   private readonly api = inject(SoftwareEngineeringApiService);
+  private readonly planningV3Api = inject(PlanningV3ApiService);
   private readonly route = inject(ActivatedRoute);
   private runningJobsSub: Subscription | null = null;
   private pendingJobId: string | null = null;
@@ -97,7 +99,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
   architectResults: ArchitectDesignResponse | null = null;
   backendCodeV2JobId: string | null = null;
   frontendCodeV2JobId: string | null = null;
-  planningV2JobId: string | null = null;
+  planningV3JobId: string | null = null;
   productAnalysisJobId: string | null = null;
 
   /** Running jobs from GET /run-team/jobs; used by the right-hand panel. */
@@ -108,12 +110,12 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
   selectedRunningJob: RunningJobSummary | null = null;
   /** Status for the selected run_team job in the panel (from JobStatusComponent). */
   panelRunTeamStatus: JobStatusResponse | null = null;
-  /** Status for planning-v2 job in the main tab. */
-  planningV2Status: PlanningV2StatusResponse | null = null;
+  /** Status for planning-v3 job in the main tab. */
+  planningV3Status: PlanningV3StatusResponse | null = null;
   /** Status for product-analysis job in the main tab. */
   productAnalysisStatus: ProductAnalysisStatusResponse | null = null;
-  /** Status for the selected planning_v2 job in the panel. */
-  panelPlanningV2Status: PlanningV2StatusResponse | null = null;
+  /** Status for the selected planning_v3 job in the panel. */
+  panelPlanningV3Status: PlanningV3StatusResponse | null = null;
 
   healthCheck = (): ReturnType<SoftwareEngineeringApiService['health']> =>
     this.api.health();
@@ -137,7 +139,17 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     });
 
     this.runningJobsSub = timer(0, 30000).pipe(
-      switchMap(() => this.api.getRunningJobs(false))
+      switchMap(() =>
+        forkJoin({
+          se: this.api.getRunningJobs(false),
+          planningV3: this.planningV3Api.getJobs().pipe(
+            map((r) => r.jobs.map((j) => ({ job_id: j.job_id, status: j.status, repo_path: j.repo_path, job_type: 'planning_v3' as const }))),
+            catchError(() => of([] as RunningJobSummary[]))
+          ),
+        }).pipe(
+          map(({ se, planningV3 }) => ({ jobs: [...se.jobs, ...planningV3] }))
+        )
+      )
     ).subscribe({
       next: (res) => {
         this.runningJobsError = null;
@@ -145,9 +157,11 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
         if (this.runningJobs.length === 0) {
           this.selectedRunningJob = null;
           this.panelRunTeamStatus = null;
+          this.panelPlanningV3Status = null;
         } else if (this.selectedRunningJob && !this.runningJobs.find(j => j.job_id === this.selectedRunningJob!.job_id)) {
           this.selectedRunningJob = null;
           this.panelRunTeamStatus = null;
+          this.panelPlanningV3Status = null;
         }
 
         if (this.pendingJobId) {
@@ -181,6 +195,9 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     if (job.job_type !== 'run_team') {
       this.panelRunTeamStatus = null;
     }
+    if (job.job_type !== 'planning_v3') {
+      this.panelPlanningV3Status = null;
+    }
 
     const tabIndex = SoftwareEngineeringDashboardComponent.JOB_TYPE_TAB_MAP[job.job_type];
     if (tabIndex !== undefined) {
@@ -200,8 +217,8 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
       case 'frontend_code_v2':
         this.frontendCodeV2JobId = job.job_id;
         break;
-      case 'planning_v2':
-        this.planningV2JobId = job.job_id;
+      case 'planning_v3':
+        this.planningV3JobId = job.job_id;
         break;
     }
   }
@@ -225,7 +242,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
         this.frontendCodeV2JobId = jobId;
         break;
       case 4:
-        this.planningV2JobId = jobId;
+        this.planningV3JobId = jobId;
         break;
       default:
         this.jobId = jobId;
@@ -239,7 +256,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
       product_analysis: 'Product Analysis',
       backend_code_v2: 'Backend (v2)',
       frontend_code_v2: 'Frontend (v2)',
-      planning_v2: 'Planning (v2)',
+      planning_v3: 'Planning',
     };
     return labels[jobType] ?? jobType;
   }
@@ -341,17 +358,17 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     });
   }
 
-  onPlanningV2Submit(request: PlanningV2RunRequest): void {
+  onPlanningV3Submit(request: PlanningV3RunRequest): void {
     this.loading = true;
     this.error = null;
-    this.planningV2JobId = null;
-    this.api.runPlanningV2(request).subscribe({
+    this.planningV3JobId = null;
+    this.planningV3Api.run(request).subscribe({
       next: (res) => {
-        this.planningV2JobId = res.job_id;
+        this.planningV3JobId = res.job_id;
         this.loading = false;
       },
       error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Planning-V2 request failed';
+        this.error = err?.error?.detail ?? err?.message ?? 'Planning request failed';
         this.loading = false;
       },
     });
@@ -374,28 +391,28 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     });
   }
 
-  onAnswersSubmitted(response: JobStatusResponse | PlanningV2StatusResponse): void {
+  onAnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse): void {
     this.jobStatus = response as JobStatusResponse;
   }
 
-  onPlanningV2StatusChange(status: PlanningV2StatusResponse): void {
-    this.planningV2Status = status;
+  onPlanningV3StatusChange(status: PlanningV3StatusResponse): void {
+    this.planningV3Status = status;
   }
 
-  onPlanningV2AnswersSubmitted(response: JobStatusResponse | PlanningV2StatusResponse): void {
-    this.planningV2Status = response as PlanningV2StatusResponse;
+  onPlanningV3AnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse): void {
+    this.planningV3Status = response as PlanningV3StatusResponse;
   }
 
-  onPanelRunTeamAnswersSubmitted(response: JobStatusResponse | PlanningV2StatusResponse): void {
+  onPanelRunTeamAnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse): void {
     this.panelRunTeamStatus = response as JobStatusResponse;
   }
 
-  onPanelPlanningV2StatusChange(status: PlanningV2StatusResponse): void {
-    this.panelPlanningV2Status = status;
+  onPanelPlanningV3StatusChange(status: PlanningV3StatusResponse): void {
+    this.panelPlanningV3Status = status;
   }
 
-  onPanelPlanningV2AnswersSubmitted(response: JobStatusResponse | PlanningV2StatusResponse): void {
-    this.panelPlanningV2Status = response as PlanningV2StatusResponse;
+  onPanelPlanningV3AnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse): void {
+    this.panelPlanningV3Status = response as PlanningV3StatusResponse;
   }
 
   onProductAnalysisSubmit(request: ProductAnalysisRunRequest): void {

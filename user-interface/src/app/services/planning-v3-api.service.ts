@@ -40,6 +40,11 @@ export class PlanningV3ApiService {
     return this.http.get<PlanningV3JobsResponse>(`${this.baseUrl}/jobs`);
   }
 
+  /** POST /{job_id}/answers - submit answers to open questions */
+  submitAnswers(jobId: string, answers: Array<{ question_id: string; selected_option_id?: string; selected_option_ids?: string[]; other_text?: string | null }>): Observable<PlanningV3StatusResponse> {
+    return this.http.post<PlanningV3StatusResponse>(`${this.baseUrl}/${jobId}/answers`, { answers });
+  }
+
   /** GET /health */
   health(): Observable<HealthResponse> {
     return this.http.get<HealthResponse>(`${this.baseUrl}/health`);

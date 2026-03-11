@@ -26,7 +26,7 @@ from .prompts import (
     FINAL_SYNTHESIS_PROMPT,
     SIMILAR_TOPICS_PROMPT,
 )
-from .tools.web_search import TavilyWebSearch
+from .tools.web_search import OllamaWebSearch
 from .tools.web_fetch import SimpleWebFetcher
 from .tools.arxiv_search import search_arxiv
 from .agent_cache import AgentCache
@@ -60,7 +60,7 @@ class ResearchAgent:
         assert llm_client is not None, "llm_client is required"
         assert max_fetch_documents >= 1, "max_fetch_documents must be at least 1"
         self.llm = llm_client
-        self.web_search = web_search or TavilyWebSearch()
+        self.web_search = web_search or OllamaWebSearch()
         self.web_fetcher = web_fetcher or SimpleWebFetcher()
         self.max_fetch_documents = max_fetch_documents
         self.cache = cache

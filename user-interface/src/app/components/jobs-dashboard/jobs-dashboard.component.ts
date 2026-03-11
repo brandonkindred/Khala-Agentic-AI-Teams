@@ -42,7 +42,7 @@ interface JobTypeInfo {
 
 const JOB_TYPE_INFO: Record<string, JobTypeInfo> = {
   'run_team': { label: 'Run Team', icon: 'groups', route: '/software-engineering', tabIndex: 0 },
-  'planning_v2': { label: 'Planning V2', icon: 'architecture', route: '/software-engineering/planning-v2' },
+  'planning_v3': { label: 'Planning', icon: 'description', route: '/software-engineering/planning-v3' },
   'backend_code_v2': { label: 'Backend Code V2', icon: 'dns', route: '/software-engineering', tabIndex: 2 },
   'frontend_code_v2': { label: 'Frontend Code V2', icon: 'web', route: '/software-engineering', tabIndex: 3 },
   'product_analysis': { label: 'Product Analysis', icon: 'analytics', route: '/software-engineering', tabIndex: 1 },
