@@ -73,3 +73,14 @@ Safety defaults:
 
 - `spec_models.py` now includes codex-friendly Pydantic representations for the full v1 spec entities, including `IPSV1`, `StrategySpecV1`, `ValidationReportV1`, `PromotionDecisionV1`, deal underwriting, diligence, and IC memo artifacts.
 - `agent_catalog.py` defines the core cross-asset agent catalog and specialist desk lineup (equities, bonds/treasuries, options, crypto, FX, real estate) for orchestration and UI introspection.
+
+
+## Backtesting workflow
+
+The Investment Team API includes first-class backtesting endpoints so trading agents can submit strategy specs for evaluation and persist outcomes for future learning:
+
+- `POST /strategies` creates a strategy specification.
+- `POST /backtests` runs a deterministic backtest simulation for a strategy and records the result alongside configuration, timestamps, and submitter identity.
+- `GET /backtests` returns recorded backtests (optionally filter with `?strategy_id=<id>`).
+
+Stored `BacktestRecord` objects include strategy details, run configuration, and performance metrics (`total_return_pct`, `annualized_return_pct`, `volatility_pct`, `sharpe_ratio`, `max_drawdown_pct`, `win_rate_pct`, and `profit_factor`) so agents can compare what has been tried over time.
