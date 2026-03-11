@@ -14,11 +14,11 @@ import { MatChipsModule } from '@angular/material/chips';
 import { Observable } from 'rxjs';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
-import type { PendingQuestion, AnswerSubmission, JobStatusResponse, PlanningV2StatusResponse, PlanningV3StatusResponse, AutoAnswerResponse } from '../../models';
+import type { PendingQuestion, AnswerSubmission, JobStatusResponse, PlanningV3StatusResponse, ProductAnalysisStatusResponse, AutoAnswerResponse } from '../../models';
 import { QuestionCardComponent } from './question-card/question-card.component';
 
 /** Endpoint type determines which API to call for submitting answers. */
-export type SubmitEndpointType = 'run-team' | 'planning-v2' | 'planning-v3' | 'product-analysis';
+export type SubmitEndpointType = 'run-team' | 'planning-v3' | 'product-analysis';
 
 interface QuestionAnswer {
   questionId: string;
@@ -58,9 +58,9 @@ export class PendingQuestionsComponent implements OnChanges {
 
   @Input() jobId: string | null = null;
   @Input() questions: PendingQuestion[] = [];
-  /** Which endpoint to call: 'run-team' (default), 'planning-v2', 'planning-v3', or 'product-analysis'. */
+  /** Which endpoint to call: 'run-team' (default), 'planning-v3', or 'product-analysis'. */
   @Input() submitEndpoint: SubmitEndpointType = 'run-team';
-  @Output() answersSubmitted = new EventEmitter<JobStatusResponse | PlanningV2StatusResponse | PlanningV3StatusResponse>();
+  @Output() answersSubmitted = new EventEmitter<JobStatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse>();
 
   answers: Map<string, QuestionAnswer> = new Map();
   submitting = false;
@@ -187,12 +187,7 @@ export class PendingQuestionsComponent implements OnChanges {
       this.error = `Auto-answer failed for Q${this.questions.indexOf(question) + 1}: ${err?.error?.detail ?? err?.message ?? 'Unknown error'}`;
     };
 
-    if (this.submitEndpoint === 'planning-v2') {
-      this.api.autoAnswerPlanningV2(this.jobId, question.id).subscribe({
-        next: handleSuccess,
-        error: handleError,
-      });
-    } else if (this.submitEndpoint === 'planning-v3') {
+    if (this.submitEndpoint === 'planning-v3') {
       // Planning V3 API does not expose auto-answer; skip or use a future endpoint
       this.autoAnsweringQuestions.delete(question.id);
     } else if (this.submitEndpoint === 'product-analysis') {
@@ -241,10 +236,8 @@ export class PendingQuestionsComponent implements OnChanges {
 
   private getSubmitObservable(
     request: { answers: AnswerSubmission[] }
-  ): Observable<JobStatusResponse | PlanningV2StatusResponse | PlanningV3StatusResponse> {
-    if (this.submitEndpoint === 'planning-v2') {
-      return this.api.submitPlanningV2Answers(this.jobId!, request);
-    } else if (this.submitEndpoint === 'planning-v3') {
+  ): Observable<JobStatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse> {
+    if (this.submitEndpoint === 'planning-v3') {
       const body = request.answers.map((a) => ({
         question_id: a.question_id,
         selected_option_id: a.selected_option_id ?? undefined,
@@ -253,7 +246,7 @@ export class PendingQuestionsComponent implements OnChanges {
       }));
       return this.planningV3Api.submitAnswers(this.jobId!, body);
     } else if (this.submitEndpoint === 'product-analysis') {
-      return this.api.submitProductAnalysisAnswers(this.jobId!, request) as unknown as Observable<JobStatusResponse>;
+      return this.api.submitProductAnalysisAnswers(this.jobId!, request) as Observable<ProductAnalysisStatusResponse>;
     } else {
       return this.api.submitAnswers(this.jobId!, request);
     }
@@ -288,7 +281,7 @@ export class PendingQuestionsComponent implements OnChanges {
 
     const request = { answers: submissions };
 
-    const handleSuccess = (response: JobStatusResponse | PlanningV2StatusResponse | PlanningV3StatusResponse): void => {
+    const handleSuccess = (response: JobStatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse): void => {
       this.submitting = false;
       this.answersSubmitted.emit(response);
     };
@@ -298,12 +291,7 @@ export class PendingQuestionsComponent implements OnChanges {
       this.error = err?.error?.detail ?? err?.message ?? 'Failed to submit answers';
     };
 
-    if (this.submitEndpoint === 'planning-v2') {
-      this.api.submitPlanningV2Answers(this.jobId, request).subscribe({
-        next: handleSuccess,
-        error: handleError,
-      });
-    } else if (this.submitEndpoint === 'planning-v3') {
+    if (this.submitEndpoint === 'planning-v3') {
       const body = request.answers.map((a) => ({
         question_id: a.question_id,
         selected_option_id: a.selected_option_id ?? undefined,
@@ -316,7 +304,7 @@ export class PendingQuestionsComponent implements OnChanges {
       });
     } else if (this.submitEndpoint === 'product-analysis') {
       this.api.submitProductAnalysisAnswers(this.jobId, request).subscribe({
-        next: (res) => handleSuccess(res as unknown as JobStatusResponse),
+        next: (res) => handleSuccess(res as ProductAnalysisStatusResponse),
         error: handleError,
       });
     } else {

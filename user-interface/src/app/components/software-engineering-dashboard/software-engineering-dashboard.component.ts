@@ -391,7 +391,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     });
   }
 
-  onAnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse): void {
+  onAnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse): void {
     this.jobStatus = response as JobStatusResponse;
   }
 
@@ -399,11 +399,11 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     this.planningV3Status = status;
   }
 
-  onPlanningV3AnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse): void {
+  onPlanningV3AnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse): void {
     this.planningV3Status = response as PlanningV3StatusResponse;
   }
 
-  onPanelRunTeamAnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse): void {
+  onPanelRunTeamAnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse): void {
     this.panelRunTeamStatus = response as JobStatusResponse;
   }
 
@@ -411,7 +411,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     this.panelPlanningV3Status = status;
   }
 
-  onPanelPlanningV3AnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse): void {
+  onPanelPlanningV3AnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse): void {
     this.panelPlanningV3Status = response as PlanningV3StatusResponse;
   }
 
@@ -435,7 +435,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     this.productAnalysisStatus = status;
   }
 
-  onProductAnalysisAnswersSubmitted(response: JobStatusResponse | PlanningV2StatusResponse): void {
-    this.productAnalysisStatus = response as unknown as ProductAnalysisStatusResponse;
+  onProductAnalysisAnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse): void {
+    this.productAnalysisStatus = response as ProductAnalysisStatusResponse;
   }
 }

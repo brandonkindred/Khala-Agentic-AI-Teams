@@ -1,5 +1,7 @@
 /** Planning V3 Team API models (client-facing discovery / PRD). */
 
+import type { PendingQuestion } from './software-engineering.model';
+
 /** Request for POST /run */
 export interface PlanningV3RunRequest {
   repo_path: string;
@@ -26,7 +28,7 @@ export interface PlanningV3StatusResponse {
   current_phase?: string;
   status_text?: string;
   progress: number;
-  pending_questions: Array<Record<string, unknown>>;
+  pending_questions: PendingQuestion[];
   waiting_for_answers: boolean;
   error?: string;
   summary?: string;
