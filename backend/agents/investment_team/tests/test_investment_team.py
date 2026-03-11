@@ -2,6 +2,9 @@ import pytest
 from agents.investment_team.agents import AgentIdentity, PolicyGuardianAgent, PromotionGateAgent
 from agents.investment_team.models import (
     IPS,
+    BacktestConfig,
+    BacktestRecord,
+    BacktestResult,
     IncomeProfile,
     InvestmentProfile,
     LiquidityNeeds,
@@ -309,3 +312,38 @@ def test_spec_models_parse_minimal_promotion_decision() -> None:
 
     assert decision.subject_type.value == "strategy"
     assert decision.decision.value == "promote_to_live_candidate"
+
+
+def test_backtest_record_captures_strategy_and_metrics() -> None:
+    strategy = StrategySpec(
+        strategy_id="s-backtest",
+        authored_by="research",
+        asset_class="equities",
+        hypothesis="mean reversion",
+        signal_definition="z-score",
+        entry_rules=["z < -2"],
+        exit_rules=["z > -0.5"],
+    )
+
+    record = BacktestRecord(
+        backtest_id="bt-1",
+        strategy_id=strategy.strategy_id,
+        strategy=strategy,
+        config=BacktestConfig(start_date="2020-01-01", end_date="2024-12-31"),
+        submitted_by="trading-agent-1",
+        submitted_at="2026-01-01T00:00:00Z",
+        completed_at="2026-01-01T00:05:00Z",
+        result=BacktestResult(
+            total_return_pct=12.5,
+            annualized_return_pct=3.0,
+            volatility_pct=8.4,
+            sharpe_ratio=0.36,
+            max_drawdown_pct=7.1,
+            win_rate_pct=54.2,
+            profit_factor=1.24,
+        ),
+    )
+
+    assert record.strategy.strategy_id == "s-backtest"
+    assert record.result.sharpe_ratio == 0.36
+    assert record.config.initial_capital == 100000.0

@@ -196,6 +196,39 @@ class ValidationReport(BaseModel):
     audit: AuditContext = Field(default_factory=AuditContext)
 
 
+class BacktestConfig(BaseModel):
+    start_date: str
+    end_date: str
+    initial_capital: float = Field(default=100000.0, gt=0)
+    benchmark_symbol: str = "SPY"
+    rebalance_frequency: str = "monthly"
+    transaction_cost_bps: float = Field(default=5.0, ge=0)
+    slippage_bps: float = Field(default=2.0, ge=0)
+
+
+class BacktestResult(BaseModel):
+    total_return_pct: float
+    annualized_return_pct: float
+    volatility_pct: float
+    sharpe_ratio: float
+    max_drawdown_pct: float
+    win_rate_pct: float
+    profit_factor: float
+
+
+class BacktestRecord(BaseModel):
+    backtest_id: str
+    strategy_id: str
+    strategy: StrategySpec
+    config: BacktestConfig
+    submitted_by: str
+    submitted_at: str
+    completed_at: str
+    status: str = "completed"
+    result: BacktestResult
+    notes: List[str] = Field(default_factory=list)
+
+
 class GateCheckResult(BaseModel):
     gate: PromotionGate
     result: GateResult

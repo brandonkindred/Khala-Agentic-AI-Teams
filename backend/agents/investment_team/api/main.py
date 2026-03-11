@@ -28,6 +28,9 @@ from investment_team.models import (
     RiskTolerance,
     SavingsRate,
     StrategySpec,
+    BacktestConfig,
+    BacktestRecord,
+    BacktestResult,
     TaxProfile,
     UserGoal,
     UserPreferences,
@@ -51,6 +54,7 @@ _profiles: Dict[str, IPS] = {}
 _proposals: Dict[str, PortfolioProposal] = {}
 _strategies: Dict[str, StrategySpec] = {}
 _validations: Dict[str, ValidationReport] = {}
+_backtests: Dict[str, BacktestRecord] = {}
 _workflow_state = WorkflowState()
 _lock = threading.Lock()
 
@@ -165,6 +169,31 @@ class ValidateStrategyResponse(BaseModel):
     validation: ValidationReport
     passed: bool
     failures: List[str] = Field(default_factory=list)
+
+
+
+
+class RunBacktestRequest(BaseModel):
+    strategy_id: str = Field(..., description="Strategy ID to back test")
+    submitted_by: str = Field(..., description="Agent or user ID submitting the back test")
+    start_date: str = Field(..., description="Backtest start date, ISO format")
+    end_date: str = Field(..., description="Backtest end date, ISO format")
+    initial_capital: float = Field(default=100000.0, gt=0)
+    benchmark_symbol: str = Field(default="SPY")
+    rebalance_frequency: str = Field(default="monthly")
+    transaction_cost_bps: float = Field(default=5.0, ge=0)
+    slippage_bps: float = Field(default=2.0, ge=0)
+    notes: List[str] = Field(default_factory=list)
+
+
+class RunBacktestResponse(BaseModel):
+    backtest: BacktestRecord
+    message: str = "Backtest completed and recorded successfully."
+
+
+class ListBacktestsResponse(BaseModel):
+    items: List[BacktestRecord] = Field(default_factory=list)
+    count: int = 0
 
 
 class PromotionDecisionRequest(BaseModel):
@@ -446,6 +475,88 @@ def validate_strategy(strategy_id: str, request: ValidateStrategyRequest) -> Val
         passed=len(failures) == 0,
         failures=failures,
     )
+
+
+
+
+@app.post("/backtests", response_model=RunBacktestResponse)
+def run_backtest(request: RunBacktestRequest) -> RunBacktestResponse:
+    """Run a deterministic backtest simulation and store the result."""
+    with _lock:
+        strategy = _strategies.get(request.strategy_id)
+
+    if not strategy:
+        raise HTTPException(status_code=404, detail=f"Strategy {request.strategy_id} not found")
+
+    def _calc(base: float, factor: float, floor: float = 0.0) -> float:
+        value = round(base + factor, 2)
+        return value if value >= floor else floor
+
+    strategy_signal_score = (
+        len(strategy.entry_rules)
+        + len(strategy.exit_rules)
+        + len(strategy.sizing_rules)
+        + (1 if strategy.speculative else 0)
+    )
+    period_span = max(len(request.start_date) + len(request.end_date), 1)
+
+    total_return = _calc(6.0, (strategy_signal_score % 11) * 0.9 - request.transaction_cost_bps * 0.03, -95.0)
+    annualized_return = _calc(4.0, total_return * 0.35 - request.slippage_bps * 0.02, -95.0)
+    volatility = _calc(10.0, (strategy_signal_score % 7) * 1.4 + (period_span % 5) * 0.7, 0.1)
+    sharpe = round(annualized_return / volatility if volatility else 0.0, 2)
+    max_drawdown = _calc(8.0, (strategy_signal_score % 5) * 1.8 + request.slippage_bps * 0.1, 0.0)
+    win_rate = _calc(45.0, (strategy_signal_score % 9) * 2.2 - request.transaction_cost_bps * 0.1, 1.0)
+    profit_factor = round(max(1.01, 1.05 + (strategy_signal_score % 6) * 0.08 - request.slippage_bps * 0.01), 2)
+
+    backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
+    config = BacktestConfig(
+        start_date=request.start_date,
+        end_date=request.end_date,
+        initial_capital=request.initial_capital,
+        benchmark_symbol=request.benchmark_symbol,
+        rebalance_frequency=request.rebalance_frequency,
+        transaction_cost_bps=request.transaction_cost_bps,
+        slippage_bps=request.slippage_bps,
+    )
+    result = BacktestResult(
+        total_return_pct=total_return,
+        annualized_return_pct=annualized_return,
+        volatility_pct=volatility,
+        sharpe_ratio=sharpe,
+        max_drawdown_pct=max_drawdown,
+        win_rate_pct=win_rate,
+        profit_factor=profit_factor,
+    )
+    now = _now()
+    record = BacktestRecord(
+        backtest_id=backtest_id,
+        strategy_id=strategy.strategy_id,
+        strategy=strategy,
+        config=config,
+        submitted_by=request.submitted_by,
+        submitted_at=now,
+        completed_at=now,
+        result=result,
+        notes=request.notes,
+    )
+
+    with _lock:
+        _backtests[backtest_id] = record
+
+    return RunBacktestResponse(backtest=record)
+
+
+@app.get("/backtests", response_model=ListBacktestsResponse)
+def list_backtests(strategy_id: Optional[str] = None) -> ListBacktestsResponse:
+    """List recorded backtests, optionally filtered by strategy ID."""
+    with _lock:
+        items = list(_backtests.values())
+
+    if strategy_id:
+        items = [item for item in items if item.strategy_id == strategy_id]
+
+    items.sort(key=lambda item: item.completed_at, reverse=True)
+    return ListBacktestsResponse(items=items, count=len(items))
 
 
 @app.post("/promotions/decide", response_model=PromotionDecisionResponse)
