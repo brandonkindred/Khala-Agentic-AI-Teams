@@ -1,0 +1,30 @@
+<div class="artifact-viewer-page">
+  <header class="artifact-viewer-header">
+    <a routerLink="/blogging" class="back-link">
+      <mat-icon>arrow_back</mat-icon>
+      Back to Blogging
+    </a>
+    @if (artifactName) {
+      <h1>{{ artifactLabel(artifactName) }}</h1>
+      <p class="meta">Job: {{ jobId }} · {{ artifactName }}</p>
+      <a [href]="getDownloadUrl()" target="_blank" rel="noopener" mat-stroked-button download [attr.download]="artifactName" class="download-btn">
+        <mat-icon>download</mat-icon>
+        Download
+      </a>
+    }
+  </header>
+
+  @if (loading) {
+    <app-loading-spinner message="Loading artifact…" />
+  } @else if (error) {
+    <app-error-message [message]="error" />
+  } @else if (content !== null) {
+    <div class="artifact-viewer-body" [class.artifact-json]="isJson()">
+      @if (isMarkdown()) {
+        <div class="markdown-content" [innerHTML]="getMarkdownHtml()"></div>
+      } @else {
+        <pre>{{ getDisplayContent() }}</pre>
+      }
+    </div>
+  }
+</div>

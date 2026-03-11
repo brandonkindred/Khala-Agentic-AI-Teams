@@ -78,6 +78,15 @@ export interface BlogJobStatusResponse {
   created_at?: string;
   started_at?: string;
   completed_at?: string;
+  approved_at?: string;
+  approved_by?: string;
+}
+
+/** Metadata for a single artifact (from GET /job/{id}/artifacts). */
+export interface ArtifactMeta {
+  name: string;
+  producer_phase?: string;
+  producer_agent?: string;
 }
 
 /** Response from POST /full-pipeline-async or POST /research-and-review-async. */
@@ -86,9 +95,9 @@ export interface StartJobResponse {
   message?: string;
 }
 
-/** Response from GET /job/{job_id}/artifacts (list of artifact filenames). */
+/** Response from GET /job/{job_id}/artifacts (list of artifacts with metadata). */
 export interface BlogJobArtifactsResponse {
-  artifacts: string[];
+  artifacts: ArtifactMeta[];
 }
 
 /** Response from GET /job/{job_id}/artifacts/{name} (single artifact content). */

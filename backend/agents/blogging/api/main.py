@@ -19,7 +19,9 @@ _blogging_root = Path(__file__).resolve().parent.parent
 if str(_blogging_root) not in sys.path:
     sys.path.insert(0, str(_blogging_root))
 
-from fastapi import FastAPI, HTTPException
+import json as json_module
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from blog_research_agent.agent import ResearchAgent
@@ -29,9 +31,10 @@ from blog_research_agent.models import ResearchBriefInput
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
 
 try:
-    from shared.artifacts import ARTIFACT_NAMES, read_artifact, write_artifact
+    from shared.artifacts import ARTIFACT_NAMES, ARTIFACT_PRODUCER, read_artifact, write_artifact
 except ImportError:
     ARTIFACT_NAMES = ()
+    ARTIFACT_PRODUCER = {}
     read_artifact = None
     write_artifact = None
 
@@ -45,6 +48,8 @@ try:
         start_blog_job,
         complete_blog_job,
         fail_blog_job,
+        approve_blog_job,
+        unapprove_blog_job,
         JOB_STATUS_COMPLETED,
         JOB_STATUS_NEEDS_REVIEW,
     )
@@ -58,6 +63,8 @@ except ImportError:
     start_blog_job = None
     complete_blog_job = None
     fail_blog_job = None
+    approve_blog_job = None
+    unapprove_blog_job = None
     JOB_STATUS_COMPLETED = "completed"
     JOB_STATUS_NEEDS_REVIEW = "needs_human_review"
     BloggingError = Exception
@@ -316,6 +323,11 @@ def _run_research_review_with_tracking(job_id: str, request: ResearchAndReviewRe
 
     work_dir = RUN_ARTIFACTS_BASE / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
+    if update_blog_job is not None:
+        try:
+            update_blog_job(job_id, work_dir=str(work_dir))
+        except Exception as e:
+            logger.warning("Failed to set work_dir for job %s: %s", job_id, e)
 
     brief_input = ResearchBriefInput(
         brief=brief_text,
@@ -498,6 +510,8 @@ class BlogJobStatusResponse(BaseModel):
     created_at: Optional[str] = Field(None, description="Job creation timestamp")
     started_at: Optional[str] = Field(None, description="Job start timestamp")
     completed_at: Optional[str] = Field(None, description="Job completion timestamp")
+    approved_at: Optional[str] = Field(None, description="When the job was approved (ISO timestamp)")
+    approved_by: Optional[str] = Field(None, description="Who approved the job (optional)")
 
 
 class BlogJobListItem(BaseModel):
@@ -511,10 +525,18 @@ class BlogJobListItem(BaseModel):
     created_at: Optional[str] = None
 
 
-class ArtifactListResponse(BaseModel):
-    """Response listing artifact names that exist for a job."""
+class ArtifactMeta(BaseModel):
+    """Metadata for a single artifact (name and optional producer phase/agent)."""
 
-    artifacts: List[str] = Field(..., description="Names of existing artifact files")
+    name: str = Field(..., description="Artifact filename")
+    producer_phase: Optional[str] = Field(None, description="Pipeline phase that produced this artifact")
+    producer_agent: Optional[str] = Field(None, description="Agent or component that produced this artifact")
+
+
+class ArtifactListResponse(BaseModel):
+    """Response listing artifact names that exist for a job, with optional producer metadata."""
+
+    artifacts: List[ArtifactMeta] = Field(..., description="Existing artifacts with name and producer metadata")
 
 
 class ArtifactContentResponse(BaseModel):
@@ -535,73 +557,78 @@ class StartPipelineResponse(BaseModel):
 
 def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> None:
     """Run the full pipeline in a background thread with job tracking."""
-    import sys
-    from pathlib import Path
-    _blogging_root = Path(__file__).resolve().parent.parent
-    if str(_blogging_root) not in sys.path:
-        sys.path.insert(0, str(_blogging_root))
-    from agent_implementations.blog_writing_process_v2 import run_pipeline
-
-    work_dir = RUN_ARTIFACTS_BASE / job_id
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    brief_text = request.brief.strip()
-    if request.title_concept:
-        brief_text = f"{brief_text}. Title concept: {request.title_concept.strip()}"
-    audience_str = _format_audience(request.audience)
-
-    brief_input = ResearchBriefInput(
-        brief=brief_text,
-        audience=audience_str or None,
-        tone_or_purpose=request.tone_or_purpose,
-        max_results=request.max_results,
-    )
-
-    def job_updater(**kwargs: Any) -> None:
-        """Update job status in the job store."""
-        if update_blog_job is not None:
-            try:
-                update_blog_job(job_id, **kwargs)
-            except Exception as e:
-                logger.warning("Failed to update job %s: %s", job_id, e)
-
-    # Mark job as started
-    if start_blog_job is not None:
-        start_blog_job(job_id)
-    job_updater(work_dir=str(work_dir))
-
     try:
-        research_result, review_result, draft_result, status = run_pipeline(
-            brief_input,
-            work_dir=work_dir,
-            run_gates=request.run_gates,
-            max_rewrite_iterations=request.max_rewrite_iterations,
-            job_updater=job_updater,
+        import sys
+        from pathlib import Path
+        _blogging_root = Path(__file__).resolve().parent.parent
+        if str(_blogging_root) not in sys.path:
+            sys.path.insert(0, str(_blogging_root))
+        from agent_implementations.blog_writing_process_v2 import run_pipeline
+
+        work_dir = RUN_ARTIFACTS_BASE / job_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        brief_text = request.brief.strip()
+        if request.title_concept:
+            brief_text = f"{brief_text}. Title concept: {request.title_concept.strip()}"
+        audience_str = _format_audience(request.audience)
+
+        brief_input = ResearchBriefInput(
+            brief=brief_text,
+            audience=audience_str or None,
+            tone_or_purpose=request.tone_or_purpose,
+            max_results=request.max_results,
         )
 
-        # Mark job as completed
-        title_choices = [
-            {"title": tc.title, "probability_of_success": tc.probability_of_success}
-            for tc in review_result.title_choices
-        ]
-        draft_preview = draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else "")
+        def job_updater(**kwargs: Any) -> None:
+            """Update job status in the job store."""
+            if update_blog_job is not None:
+                try:
+                    update_blog_job(job_id, **kwargs)
+                except Exception as e:
+                    logger.warning("Failed to update job %s: %s", job_id, e)
 
-        final_status = JOB_STATUS_COMPLETED if status == "PASS" else JOB_STATUS_NEEDS_REVIEW
-        if complete_blog_job is not None:
-            complete_blog_job(
-                job_id,
-                status=final_status,
-                title_choices=title_choices,
-                outline=review_result.outline,
-                draft_preview=draft_preview,
+        # Mark job as started
+        if start_blog_job is not None:
+            start_blog_job(job_id)
+        job_updater(work_dir=str(work_dir))
+
+        try:
+            research_result, review_result, draft_result, status = run_pipeline(
+                brief_input,
+                work_dir=work_dir,
+                run_gates=request.run_gates,
+                max_rewrite_iterations=request.max_rewrite_iterations,
+                job_updater=job_updater,
             )
 
-    except BloggingError as e:
-        logger.exception("Pipeline failed for job %s", job_id)
-        if fail_blog_job is not None:
-            fail_blog_job(job_id, error=str(e), failed_phase=getattr(e, "phase", None))
+            # Mark job as completed
+            title_choices = [
+                {"title": tc.title, "probability_of_success": tc.probability_of_success}
+                for tc in review_result.title_choices
+            ]
+            draft_preview = draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else "")
+
+            final_status = JOB_STATUS_COMPLETED if status == "PASS" else JOB_STATUS_NEEDS_REVIEW
+            if complete_blog_job is not None:
+                complete_blog_job(
+                    job_id,
+                    status=final_status,
+                    title_choices=title_choices,
+                    outline=review_result.outline,
+                    draft_preview=draft_preview,
+                )
+
+        except BloggingError as e:
+            logger.exception("Pipeline failed for job %s", job_id)
+            if fail_blog_job is not None:
+                fail_blog_job(job_id, error=str(e), failed_phase=getattr(e, "phase", None))
+        except Exception as e:
+            logger.exception("Unexpected error in pipeline for job %s", job_id)
+            if fail_blog_job is not None:
+                fail_blog_job(job_id, error=str(e))
     except Exception as e:
-        logger.exception("Unexpected error in pipeline for job %s", job_id)
+        logger.exception("Pipeline failed for job %s", job_id)
         if fail_blog_job is not None:
             fail_blog_job(job_id, error=str(e))
 
@@ -723,6 +750,8 @@ def get_job_status(job_id: str) -> BlogJobStatusResponse:
         created_at=job.get("created_at"),
         started_at=job.get("started_at"),
         completed_at=job.get("completed_at"),
+        approved_at=job.get("approved_at"),
+        approved_by=job.get("approved_by"),
     )
 
 
@@ -784,6 +813,113 @@ def delete_job(job_id: str) -> DeleteJobResponse:
     return DeleteJobResponse(job_id=job_id, message="Job deleted.")
 
 
+@app.post(
+    "/job/{job_id}/approve",
+    response_model=BlogJobStatusResponse,
+    summary="Approve a completed job",
+    description="Mark the job as approved. Only allowed when status is completed or needs_human_review. Returns 400 for other statuses.",
+)
+def approve_job(job_id: str) -> BlogJobStatusResponse:
+    """Approve a pipeline job (only for completed or needs_human_review)."""
+    if get_blog_job is None or approve_blog_job is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Job store not available",
+        )
+    job = get_blog_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    status = job.get("status", "")
+    if status not in (JOB_STATUS_COMPLETED, JOB_STATUS_NEEDS_REVIEW):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job cannot be approved: status is {status!r}. Only completed or needs_human_review jobs can be approved.",
+        )
+    approve_blog_job(job_id)
+    updated = get_blog_job(job_id)
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Job not found after approve")
+    # Build response same as get_job_status
+    title_choices = []
+    for tc in updated.get("title_choices", []):
+        if isinstance(tc, dict):
+            title_choices.append(TitleChoiceResponse(
+                title=tc.get("title", ""),
+                probability_of_success=tc.get("probability_of_success", 0.0),
+            ))
+    return BlogJobStatusResponse(
+        job_id=updated.get("job_id", job_id),
+        status=updated.get("status", "pending"),
+        phase=updated.get("phase"),
+        progress=updated.get("progress", 0),
+        status_text=updated.get("status_text"),
+        error=updated.get("error"),
+        failed_phase=updated.get("failed_phase"),
+        title_choices=title_choices,
+        outline=updated.get("outline"),
+        draft_preview=updated.get("draft_preview"),
+        work_dir=updated.get("work_dir"),
+        research_sources_count=updated.get("research_sources_count", 0),
+        draft_iterations=updated.get("draft_iterations", 0),
+        rewrite_iterations=updated.get("rewrite_iterations", 0),
+        created_at=updated.get("created_at"),
+        started_at=updated.get("started_at"),
+        completed_at=updated.get("completed_at"),
+        approved_at=updated.get("approved_at"),
+        approved_by=updated.get("approved_by"),
+    )
+
+
+@app.post(
+    "/job/{job_id}/unapprove",
+    response_model=BlogJobStatusResponse,
+    summary="Unapprove a job",
+    description="Clear the approval for a job. Returns updated job status.",
+)
+def unapprove_job(job_id: str) -> BlogJobStatusResponse:
+    """Clear approval for a pipeline job."""
+    if get_blog_job is None or unapprove_blog_job is None:
+        raise HTTPException(
+            status_code=501,
+            detail="Job store not available",
+        )
+    job = get_blog_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    unapprove_blog_job(job_id)
+    updated = get_blog_job(job_id)
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Job not found after unapprove")
+    title_choices = []
+    for tc in updated.get("title_choices", []):
+        if isinstance(tc, dict):
+            title_choices.append(TitleChoiceResponse(
+                title=tc.get("title", ""),
+                probability_of_success=tc.get("probability_of_success", 0.0),
+            ))
+    return BlogJobStatusResponse(
+        job_id=updated.get("job_id", job_id),
+        status=updated.get("status", "pending"),
+        phase=updated.get("phase"),
+        progress=updated.get("progress", 0),
+        status_text=updated.get("status_text"),
+        error=updated.get("error"),
+        failed_phase=updated.get("failed_phase"),
+        title_choices=title_choices,
+        outline=updated.get("outline"),
+        draft_preview=updated.get("draft_preview"),
+        work_dir=updated.get("work_dir"),
+        research_sources_count=updated.get("research_sources_count", 0),
+        draft_iterations=updated.get("draft_iterations", 0),
+        rewrite_iterations=updated.get("rewrite_iterations", 0),
+        created_at=updated.get("created_at"),
+        started_at=updated.get("started_at"),
+        completed_at=updated.get("completed_at"),
+        approved_at=updated.get("approved_at"),
+        approved_by=updated.get("approved_by"),
+    )
+
+
 @app.get(
     "/job/{job_id}/artifacts",
     response_model=ArtifactListResponse,
@@ -804,18 +940,31 @@ def list_job_artifacts(job_id: str) -> ArtifactListResponse:
     if not work_dir:
         raise HTTPException(status_code=404, detail="Job has no artifact directory")
     work_path = Path(work_dir)
-    existing = [name for name in ARTIFACT_NAMES if (work_path / name).exists()]
-    return ArtifactListResponse(artifacts=existing)
+    existing_names = [name for name in ARTIFACT_NAMES if (work_path / name).exists()]
+    meta_list = []
+    for name in existing_names:
+        producer = ARTIFACT_PRODUCER.get(name, {}) if ARTIFACT_PRODUCER else {}
+        meta_list.append(
+            ArtifactMeta(
+                name=name,
+                producer_phase=producer.get("producer_phase"),
+                producer_agent=producer.get("producer_agent"),
+            )
+        )
+    return ArtifactListResponse(artifacts=meta_list)
 
 
 @app.get(
     "/job/{job_id}/artifacts/{artifact_name}",
-    response_model=ArtifactContentResponse,
-    summary="Get job artifact content",
-    description="Return the content of a single artifact. Path traversal is blocked; artifact_name must be in the allowed list.",
+    summary="Get job artifact content or download",
+    description="Return the content of a single artifact (JSON body), or with ?download=true return as attachment. Path traversal is blocked; artifact_name must be in the allowed list.",
 )
-def get_job_artifact_content(job_id: str, artifact_name: str) -> ArtifactContentResponse:
-    """Return content of one artifact for a job."""
+def get_job_artifact_content(
+    job_id: str,
+    artifact_name: str,
+    download: bool = Query(False, description="If true, return content as attachment with Content-Disposition"),
+) -> ArtifactContentResponse | Response:
+    """Return content of one artifact for a job, or as download attachment."""
     if get_blog_job is None or read_artifact is None:
         raise HTTPException(
             status_code=501,
@@ -833,6 +982,24 @@ def get_job_artifact_content(job_id: str, artifact_name: str) -> ArtifactContent
     content = read_artifact(work_dir, artifact_name, default=None, parse_json=parse_json)
     if content is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_name!r} not found")
+
+    if download:
+        if isinstance(content, (dict, list)):
+            raw = json_module.dumps(content, indent=2)
+            media_type = "application/json"
+        else:
+            raw = content if isinstance(content, str) else str(content)
+            if artifact_name.endswith(".json"):
+                media_type = "application/json"
+            elif artifact_name.endswith(".yaml") or artifact_name.endswith(".yml"):
+                media_type = "text/yaml"
+            else:
+                media_type = "text/plain; charset=utf-8"
+        return Response(
+            content=raw.encode("utf-8"),
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{artifact_name}"'},
+        )
     return ArtifactContentResponse(name=artifact_name, content=content)
 
 

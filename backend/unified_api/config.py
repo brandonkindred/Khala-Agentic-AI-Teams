@@ -22,6 +22,9 @@ class TeamConfig:
 DEFAULT_PORT = int(os.getenv("UNIFIED_API_PORT", "8080"))
 DEFAULT_HOST = os.getenv("UNIFIED_API_HOST", "0.0.0.0")
 
+# Security gateway: when True (default), scan requests to team APIs before forwarding.
+SECURITY_GATEWAY_ENABLED = os.getenv("SECURITY_GATEWAY_ENABLED", "true").lower() in ("true", "1", "yes")
+
 # Team configurations with route prefixes
 TEAM_CONFIGS: Dict[str, TeamConfig] = {
     "blogging": TeamConfig(

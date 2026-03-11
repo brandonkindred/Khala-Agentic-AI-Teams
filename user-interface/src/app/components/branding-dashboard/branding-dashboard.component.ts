@@ -5,18 +5,26 @@ import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatButtonModule } from '@angular/material/button';
+import { MatTabsModule } from '@angular/material/tabs';
+import { MatIconModule } from '@angular/material/icon';
+import { MatOption, MatSelectModule } from '@angular/material/select';
 import { BrandingApiService } from '../../services/branding-api.service';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
 import { ErrorMessageComponent } from '../../shared/error-message/error-message.component';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
+import { BrandingChatComponent } from '../branding-chat/branding-chat.component';
+import { BrandPreviewComponent } from '../brand-preview/brand-preview.component';
 import type {
   Brand,
+  BrandingMissionSnapshot,
   BrandingQuestion,
   BrandingSessionResponse,
+  BrandingTeamOutput,
   Client,
   CreateBrandRequest,
   RunBrandingTeamRequest,
 } from '../../models';
+import type { BrandingChatState } from '../branding-chat/branding-chat.component';
 
 @Component({
   selector: 'app-branding-dashboard',
@@ -28,9 +36,15 @@ import type {
     MatFormFieldModule,
     MatInputModule,
     MatButtonModule,
+    MatTabsModule,
+    MatIconModule,
+    MatSelectModule,
+    MatOption,
     LoadingSpinnerComponent,
     ErrorMessageComponent,
     HealthIndicatorComponent,
+    BrandingChatComponent,
+    BrandPreviewComponent,
   ],
   templateUrl: './branding-dashboard.component.html',
   styleUrl: './branding-dashboard.component.scss',
@@ -38,6 +52,9 @@ import type {
 export class BrandingDashboardComponent implements OnDestroy {
   private readonly api = inject(BrandingApiService);
   private readonly fb = inject(FormBuilder);
+
+  conversationMission: BrandingMissionSnapshot | null = null;
+  conversationLatestOutput: BrandingTeamOutput | null = null;
 
   loading = false;
   error: string | null = null;
@@ -70,6 +87,92 @@ export class BrandingDashboardComponent implements OnDestroy {
   });
 
   healthCheck = (): ReturnType<BrandingApiService['health']> => this.api.health();
+
+  onChatStateChange(state: BrandingChatState): void {
+    this.conversationMission = state.mission;
+    this.conversationLatestOutput = state.latest_output;
+  }
+
+  onSaveToAgency(): void {
+    this.showSaveToAgencyFlow = true;
+    this.loadClients();
+  }
+
+  showSaveToAgencyFlow = false;
+  saveToAgencyClientId: string | null = null;
+  saveToAgencyBrandName = '';
+  saveToAgencyNewClientName = '';
+  saveToAgencyError: string | null = null;
+  saveToAgencySuccess: string | null = null;
+
+  closeSaveToAgency(): void {
+    this.showSaveToAgencyFlow = false;
+    this.saveToAgencyClientId = null;
+    this.saveToAgencyBrandName = '';
+    this.saveToAgencyNewClientName = '';
+    this.saveToAgencyError = null;
+    this.saveToAgencySuccess = null;
+  }
+
+  createClientForSave(): void {
+    const name = this.saveToAgencyNewClientName.trim();
+    if (!name) return;
+    this.api.createClient({ name }).subscribe({
+      next: (client) => {
+        this.clients = [...this.clients, client];
+        this.saveToAgencyClientId = client.id;
+        this.saveToAgencyNewClientName = '';
+        this.loadClients();
+      },
+      error: (err) => {
+        this.saveToAgencyError = err?.error?.detail ?? err?.message ?? 'Failed to create client';
+      },
+    });
+  }
+
+  saveConversationToAgency(): void {
+    const mission = this.conversationMission;
+    if (!mission) {
+      this.saveToAgencyError = 'No mission to save.';
+      return;
+    }
+    const clientId = this.saveToAgencyClientId ?? this.selectedClient?.id;
+    if (!clientId) {
+      this.saveToAgencyError = 'Select or create a client first.';
+      return;
+    }
+    const brandName = this.saveToAgencyBrandName.trim() || mission.company_name;
+    const request: CreateBrandRequest = {
+      company_name: mission.company_name,
+      company_description: mission.company_description,
+      target_audience: mission.target_audience,
+      name: brandName,
+      values: mission.values,
+      differentiators: mission.differentiators,
+      desired_voice: mission.desired_voice,
+      existing_brand_material: mission.existing_brand_material,
+    };
+    this.saveToAgencyError = null;
+    this.api.createBrand(clientId, request).subscribe({
+      next: (brand) => {
+        this.api.runBrand(clientId, brand.id).subscribe({
+          next: () => {
+            this.saveToAgencySuccess = `Brand "${brand.name}" saved and run completed.`;
+            this.closeSaveToAgency();
+            if (this.selectedClient?.id === clientId) {
+              this.api.listBrands(clientId).subscribe({ next: (list) => (this.brands = list) });
+            }
+          },
+          error: (err) => {
+            this.saveToAgencySuccess = `Brand "${brand.name}" created. Run failed: ${err?.error?.detail ?? err?.message}`;
+          },
+        });
+      },
+      error: (err) => {
+        this.saveToAgencyError = err?.error?.detail ?? err?.message ?? 'Failed to create brand';
+      },
+    });
+  }
 
   loadClients(): void {
     this.clientLoadError = null;

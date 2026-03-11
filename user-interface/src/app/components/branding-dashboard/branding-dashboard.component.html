@@ -1,5 +1,5 @@
-<h1>Branding Team API</h1>
-<p>Interactive async branding workflow with a live open-question feed. Manage clients and brands (agency model), or start a one-off session below.</p>
+<h1>Branding Team</h1>
+<p>Chat with the branding assistant to build your brand, or use the form-based workflow (Expert mode).</p>
 
 <div class="header-row">
   <app-health-indicator [healthCheck]="healthCheck" label="Branding API" />
@@ -13,154 +13,230 @@
   <app-error-message [message]="error" />
 }
 
-<mat-card>
-  <mat-card-header>
-    <mat-card-title>Clients &amp; Brands (Agency)</mat-card-title>
-    <mat-card-subtitle>One client, many brands. Run or evolve a brand, request market research or design assets.</mat-card-subtitle>
-  </mat-card-header>
-  <mat-card-content>
-    <div class="agency-actions">
-      <button mat-stroked-button color="primary" (click)="loadClients()">Load Clients</button>
-      <span class="new-client-row">
-        <input type="text" [(ngModel)]="newClientName" placeholder="New client name" class="client-name-input" />
-        <button mat-stroked-button (click)="createClient()" [disabled]="!newClientName.trim()">Add Client</button>
-      </span>
-    </div>
-    @if (clientLoadError) {
-      <app-error-message [message]="clientLoadError" />
-    }
-    @if (clients.length > 0) {
-      <p class="client-list-label">Select client:</p>
-      <div class="client-list">
-        @for (c of clients; track c.id) {
-          <button mat-stroked-button [color]="selectedClient?.id === c.id ? 'primary' : null" (click)="selectClient(c)">{{ c.name }}</button>
-        }
+<mat-tab-group class="branding-tabs" animationDuration="200ms" [selectedIndex]="0">
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>chat</mat-icon>
+      <span class="tab-label">Chat</span>
+    </ng-template>
+    <div class="chat-view">
+      <div class="split-panel">
+        <div class="panel chat-panel">
+          <app-branding-chat (stateChange)="onChatStateChange($event)" />
+        </div>
+        <div class="panel preview-panel">
+          <app-brand-preview
+            [mission]="conversationMission"
+            [latestOutput]="conversationLatestOutput"
+            (saveToAgency)="onSaveToAgency()"
+          />
+        </div>
       </div>
-      @if (selectedClient) {
-        <p class="brands-label">Brands for {{ selectedClient.name }}:</p>
-        <button mat-stroked-button (click)="showCreateBrand = !showCreateBrand">Create Brand</button>
-        @if (showCreateBrand) {
-          <form [formGroup]="newBrandForm" (ngSubmit)="createBrand()" class="new-brand-form">
+    </div>
+  </mat-tab>
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>edit_note</mat-icon>
+      <span class="tab-label">Form (Expert)</span>
+    </ng-template>
+    <div class="form-view">
+      <mat-card>
+        <mat-card-header>
+          <mat-card-title>Clients &amp; Brands (Agency)</mat-card-title>
+          <mat-card-subtitle>One client, many brands. Run or evolve a brand, request market research or design assets.</mat-card-subtitle>
+        </mat-card-header>
+        <mat-card-content>
+          <div class="agency-actions">
+            <button mat-stroked-button color="primary" (click)="loadClients()">Load Clients</button>
+            <span class="new-client-row">
+              <input type="text" [(ngModel)]="newClientName" placeholder="New client name" class="client-name-input" />
+              <button mat-stroked-button (click)="createClient()" [disabled]="!newClientName.trim()">Add Client</button>
+            </span>
+          </div>
+          @if (clientLoadError) {
+            <app-error-message [message]="clientLoadError" />
+          }
+          @if (clients.length > 0) {
+            <p class="client-list-label">Select client:</p>
+            <div class="client-list">
+              @for (c of clients; track c.id) {
+                <button mat-stroked-button [color]="selectedClient?.id === c.id ? 'primary' : null" (click)="selectClient(c)">{{ c.name }}</button>
+              }
+            </div>
+            @if (selectedClient) {
+              <p class="brands-label">Brands for {{ selectedClient.name }}:</p>
+              <button mat-stroked-button (click)="showCreateBrand = !showCreateBrand">Create Brand</button>
+              @if (showCreateBrand) {
+                <form [formGroup]="newBrandForm" (ngSubmit)="createBrand()" class="new-brand-form">
+                  <mat-form-field appearance="outline">
+                    <mat-label>Company name</mat-label>
+                    <input matInput formControlName="company_name" />
+                  </mat-form-field>
+                  <mat-form-field appearance="outline">
+                    <mat-label>Company description</mat-label>
+                    <textarea matInput rows="2" formControlName="company_description"></textarea>
+                  </mat-form-field>
+                  <mat-form-field appearance="outline">
+                    <mat-label>Target audience</mat-label>
+                    <input matInput formControlName="target_audience" />
+                  </mat-form-field>
+                  <mat-form-field appearance="outline">
+                    <mat-label>Brand name (optional)</mat-label>
+                    <input matInput formControlName="name" />
+                  </mat-form-field>
+                  <button mat-raised-button color="primary" type="submit">Create Brand</button>
+                </form>
+              }
+              <ul class="brand-list">
+                @for (b of brands; track b.id) {
+                  <li class="brand-item">
+                    <strong>{{ b.name }}</strong> ({{ b.status }}, v{{ b.version }})
+                    <span class="brand-actions">
+                      <button mat-stroked-button (click)="runBrand(b)">Run</button>
+                      <button mat-stroked-button (click)="requestMarketResearchForBrand(b)">Market Research</button>
+                      <button mat-stroked-button (click)="requestDesignAssetsForBrand(b)">Design Assets</button>
+                    </span>
+                  </li>
+                }
+              </ul>
+              @if (brands.length === 0 && !showCreateBrand) {
+                <p>No brands yet. Create a brand to run the workflow, request market research, or design assets.</p>
+              }
+              @if (brandActionMessage) {
+                <p class="action-message">{{ brandActionMessage }}</p>
+              }
+            }
+          }
+        </mat-card-content>
+      </mat-card>
+
+      <mat-card>
+        <mat-card-header>
+          <mat-card-title>Start Branding Session (one-off)</mat-card-title>
+          <mat-card-subtitle>No client/brand required. Answer open questions to refine output.</mat-card-subtitle>
+        </mat-card-header>
+        <mat-card-content>
+          <form [formGroup]="form" (ngSubmit)="startSession()" class="session-form">
             <mat-form-field appearance="outline">
               <mat-label>Company name</mat-label>
               <input matInput formControlName="company_name" />
             </mat-form-field>
+
             <mat-form-field appearance="outline">
               <mat-label>Company description</mat-label>
-              <textarea matInput rows="2" formControlName="company_description"></textarea>
+              <textarea matInput rows="3" formControlName="company_description"></textarea>
             </mat-form-field>
+
             <mat-form-field appearance="outline">
               <mat-label>Target audience</mat-label>
               <input matInput formControlName="target_audience" />
             </mat-form-field>
+
             <mat-form-field appearance="outline">
-              <mat-label>Brand name (optional)</mat-label>
-              <input matInput formControlName="name" />
+              <mat-label>Desired voice</mat-label>
+              <input matInput formControlName="desired_voice" />
             </mat-form-field>
-            <button mat-raised-button color="primary" type="submit">Create Brand</button>
+
+            <mat-form-field appearance="outline">
+              <mat-label>Values (comma-separated)</mat-label>
+              <input matInput formControlName="values_csv" />
+            </mat-form-field>
+
+            <mat-form-field appearance="outline">
+              <mat-label>Differentiators (comma-separated)</mat-label>
+              <input matInput formControlName="differentiators_csv" />
+            </mat-form-field>
+
+            <button mat-raised-button color="primary" type="submit">Start Session</button>
           </form>
-        }
-        <ul class="brand-list">
-          @for (b of brands; track b.id) {
-            <li class="brand-item">
-              <strong>{{ b.name }}</strong> ({{ b.status }}, v{{ b.version }})
-              <span class="brand-actions">
-                <button mat-stroked-button (click)="runBrand(b)">Run</button>
-                <button mat-stroked-button (click)="requestMarketResearchForBrand(b)">Market Research</button>
-                <button mat-stroked-button (click)="requestDesignAssetsForBrand(b)">Design Assets</button>
-              </span>
-            </li>
-          }
-        </ul>
-        @if (brands.length === 0 && !showCreateBrand) {
-          <p>No brands yet. Create a brand to run the workflow, request market research, or design assets.</p>
-        }
-        @if (brandActionMessage) {
-          <p class="action-message">{{ brandActionMessage }}</p>
-        }
+        </mat-card-content>
+      </mat-card>
+
+      @if (session) {
+        <mat-card>
+          <mat-card-header>
+            <mat-card-title>Open Questions Feed</mat-card-title>
+            <mat-card-subtitle>Status: {{ session.status }}</mat-card-subtitle>
+          </mat-card-header>
+          <mat-card-content>
+            @if (session.open_questions.length === 0) {
+              <p>All open questions answered. Branding output is refreshed and ready.</p>
+            } @else {
+              @for (question of session.open_questions; track question.id) {
+                <div class="question-item">
+                  <h3>{{ question.question }}</h3>
+                  <p>{{ question.context }}</p>
+                  <mat-form-field appearance="outline" class="answer-field">
+                    <mat-label>Your answer</mat-label>
+                    <textarea matInput rows="2" [(ngModel)]="answers[question.id]" [ngModelOptions]="{standalone: true}"></textarea>
+                  </mat-form-field>
+                  <button mat-stroked-button color="primary" (click)="submitAnswer(question)">Submit Answer</button>
+                </div>
+              }
+            }
+          </mat-card-content>
+        </mat-card>
+
+        <mat-card>
+          <mat-card-header>
+            <mat-card-title>Updated Branding Guidelines</mat-card-title>
+          </mat-card-header>
+          <mat-card-content>
+            <p>{{ session.latest_output.mission_summary }}</p>
+            <ul>
+              @for (item of session.latest_output.brand_guidelines; track item) {
+                <li>{{ item }}</li>
+              }
+            </ul>
+          </mat-card-content>
+        </mat-card>
       }
-    }
-  </mat-card-content>
-</mat-card>
+    </div>
+  </mat-tab>
+</mat-tab-group>
 
-<mat-card>
-  <mat-card-header>
-    <mat-card-title>Start Branding Session (one-off)</mat-card-title>
-    <mat-card-subtitle>No client/brand required. Answer open questions to refine output.</mat-card-subtitle>
-  </mat-card-header>
-  <mat-card-content>
-    <form [formGroup]="form" (ngSubmit)="startSession()" class="session-form">
-      <mat-form-field appearance="outline">
-        <mat-label>Company name</mat-label>
-        <input matInput formControlName="company_name" />
-      </mat-form-field>
-
-      <mat-form-field appearance="outline">
-        <mat-label>Company description</mat-label>
-        <textarea matInput rows="3" formControlName="company_description"></textarea>
-      </mat-form-field>
-
-      <mat-form-field appearance="outline">
-        <mat-label>Target audience</mat-label>
-        <input matInput formControlName="target_audience" />
-      </mat-form-field>
-
-      <mat-form-field appearance="outline">
-        <mat-label>Desired voice</mat-label>
-        <input matInput formControlName="desired_voice" />
-      </mat-form-field>
-
-      <mat-form-field appearance="outline">
-        <mat-label>Values (comma-separated)</mat-label>
-        <input matInput formControlName="values_csv" />
-      </mat-form-field>
-
-      <mat-form-field appearance="outline">
-        <mat-label>Differentiators (comma-separated)</mat-label>
-        <input matInput formControlName="differentiators_csv" />
-      </mat-form-field>
-
-      <button mat-raised-button color="primary" type="submit">Start Session</button>
-    </form>
-  </mat-card-content>
-</mat-card>
-
-@if (session) {
-  <mat-card>
+@if (showSaveToAgencyFlow) {
+  <mat-card class="save-to-agency-overlay">
     <mat-card-header>
-      <mat-card-title>Open Questions Feed</mat-card-title>
-      <mat-card-subtitle>Status: {{ session.status }}</mat-card-subtitle>
+      <mat-card-title>Save to agency</mat-card-title>
+      <button mat-icon-button (click)="closeSaveToAgency()">
+        <mat-icon>close</mat-icon>
+      </button>
     </mat-card-header>
     <mat-card-content>
-      @if (session.open_questions.length === 0) {
-        <p>All open questions answered. Branding output is refreshed and ready.</p>
-      } @else {
-        @for (question of session.open_questions; track question.id) {
-          <div class="question-item">
-            <h3>{{ question.question }}</h3>
-            <p>{{ question.context }}</p>
-            <mat-form-field appearance="outline" class="answer-field">
-              <mat-label>Your answer</mat-label>
-              <textarea matInput rows="2" [(ngModel)]="answers[question.id]" [ngModelOptions]="{standalone: true}"></textarea>
-            </mat-form-field>
-            <button mat-stroked-button color="primary" (click)="submitAnswer(question)">Submit Answer</button>
-          </div>
-        }
+      @if (saveToAgencySuccess) {
+        <p class="success-message">{{ saveToAgencySuccess }}</p>
       }
-    </mat-card-content>
-  </mat-card>
-
-  <mat-card>
-    <mat-card-header>
-      <mat-card-title>Updated Branding Guidelines</mat-card-title>
-    </mat-card-header>
-    <mat-card-content>
-      <p>{{ session.latest_output.mission_summary }}</p>
-      <ul>
-        @for (item of session.latest_output.brand_guidelines; track item) {
-          <li>{{ item }}</li>
+      @if (saveToAgencyError) {
+        <app-error-message [message]="saveToAgencyError" />
+      }
+      <p>Select a client or create one, then enter a brand name to save the current conversation as a brand.</p>
+      <div class="agency-actions">
+        <button mat-stroked-button (click)="loadClients()">Load Clients</button>
+        @if (clients.length > 0) {
+          <mat-form-field appearance="outline">
+            <mat-label>Client</mat-label>
+            <mat-select [(ngModel)]="saveToAgencyClientId" name="saveClient">
+              <mat-option [value]="null">-- Select client --</mat-option>
+              @for (c of clients; track c.id) {
+                <mat-option [value]="c.id">{{ c.name }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
         }
-      </ul>
+      </div>
+      <p class="new-client-row">
+        <input type="text" [(ngModel)]="saveToAgencyNewClientName" placeholder="Or new client name" class="client-name-input" />
+        <button mat-stroked-button (click)="createClientForSave()" [disabled]="!saveToAgencyNewClientName.trim()">Create client</button>
+      </p>
+      <mat-form-field appearance="outline">
+        <mat-label>Brand name</mat-label>
+        <input matInput [(ngModel)]="saveToAgencyBrandName" [placeholder]="conversationMission?.company_name ?? 'Brand name'" />
+      </mat-form-field>
+      <div class="save-actions">
+        <button mat-raised-button color="primary" (click)="saveConversationToAgency()">Save brand</button>
+        <button mat-stroked-button (click)="closeSaveToAgency()">Cancel</button>
+      </div>
     </mat-card-content>
   </mat-card>
 }

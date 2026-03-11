@@ -11,7 +11,10 @@
 
 <div class="dashboard-layout">
   <div class="main-content">
-    <mat-tab-group>
+    @if (selectedBlogJob && selectedJobStatus) {
+      <app-blog-pipeline-flow [status]="selectedJobStatus" />
+    }
+    <mat-tab-group [(selectedIndex)]="activeTabIndex">
       <mat-tab label="Research and Review">
         <div class="tab-content">
           <app-research-review-form (submitRequest)="onResearchReviewSubmit($event)" />
@@ -25,6 +28,61 @@
           <app-full-pipeline-form (submitRequest)="onFullPipelineSubmit($event)" />
           @if (fullPipelineResult) {
             <app-full-pipeline-results [data]="fullPipelineResult" />
+          }
+        </div>
+      </mat-tab>
+      <mat-tab label="Assets">
+        <div class="tab-content assets-tab">
+          @if (!selectedBlogJob) {
+            <p class="assets-empty-state">Select a job from the list to view produced assets.</p>
+          } @else if (!selectedJobStatus || !isTerminalStatus(selectedJobStatus.status)) {
+            <p class="assets-empty-state">Complete or select a completed job to view assets.</p>
+          } @else {
+            @if (artifactsLoading) {
+              <p class="assets-loading">Loading artifacts…</p>
+            } @else if (artifactsError) {
+              <p class="assets-error">{{ artifactsError }}</p>
+            } @else if (selectedJobArtifacts.length === 0) {
+              <p class="assets-empty-state">No artifacts found for this job.</p>
+            } @else {
+              <div class="assets-table-wrapper">
+                <table class="assets-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Produced by</th>
+                      <th>Status</th>
+                      <th>Approved</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (artifact of selectedJobArtifacts; track artifact.name) {
+                      <tr>
+                        <td>{{ artifactLabel(artifact.name) }}</td>
+                        <td>{{ artifact.producer_agent ?? artifact.producer_phase ?? '—' }}</td>
+                        <td>Completed</td>
+                        <td>{{ jobApprovedLabel() }}</td>
+                        <td class="actions-cell">
+                          <button mat-stroked-button (click)="openViewModal(artifact.name)" matTooltip="View content">
+                            <mat-icon>visibility</mat-icon>
+                            View
+                          </button>
+                          <button mat-stroked-button (click)="openAssetInNewTab(artifact.name)" matTooltip="Open in new tab">
+                            <mat-icon>open_in_new</mat-icon>
+                            Open
+                          </button>
+                          <a [href]="getArtifactDownloadUrl(artifact.name)" target="_blank" rel="noopener" mat-stroked-button matTooltip="Download file" download [attr.download]="artifact.name">
+                            <mat-icon>download</mat-icon>
+                            Download
+                          </a>
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            }
           }
         </div>
       </mat-tab>
@@ -89,7 +147,34 @@
                   Delete
                 </button>
               </div>
+              <div class="job-detail-actions approval-actions">
+                <button
+                  mat-stroked-button
+                  (click)="approveSelectedJob()"
+                  [disabled]="!canApproveJob()"
+                  matTooltip="Mark this job as approved"
+                >
+                  <mat-icon>check_circle</mat-icon>
+                  Approve
+                </button>
+                <button
+                  mat-stroked-button
+                  (click)="unapproveSelectedJob()"
+                  [disabled]="!canUnapproveJob()"
+                  matTooltip="Clear approval"
+                >
+                  <mat-icon>cancel</mat-icon>
+                  Unapprove
+                </button>
+              </div>
               <h3>Job details</h3>
+              <p class="detail-row"><strong>Approved:</strong> {{ jobApprovedLabel() }}</p>
+              @if (selectedJobStatus.approved_at) {
+                <p class="detail-row"><strong>Approved at:</strong> {{ selectedJobStatus.approved_at }}</p>
+              }
+              @if (selectedJobStatus.approved_by) {
+                <p class="detail-row"><strong>Approved by:</strong> {{ selectedJobStatus.approved_by }}</p>
+              }
               <p class="detail-row"><strong>Phase:</strong> {{ selectedJobStatus.phase ?? '—' }}</p>
               <p class="detail-row"><strong>Progress:</strong> {{ selectedJobStatus.progress }}%</p>
               @if (selectedJobStatus.status_text) {
@@ -135,17 +220,24 @@
                 } @else if (selectedJobArtifacts.length === 0) {
                   <p class="assets-empty">No artifacts found for this job.</p>
                 } @else {
+                  <p class="detail-row"><strong>Approved:</strong> {{ jobApprovedLabel() }}</p>
+                  @if (selectedJobStatus.approved_at) {
+                    <p class="detail-row"><strong>Approved at:</strong> {{ selectedJobStatus.approved_at }}</p>
+                  }
                   <mat-accordion>
-                    @for (name of selectedJobArtifacts; track name) {
-                      <mat-expansion-panel (openedChange)="$event && loadArtifactContent(name)">
+                    @for (artifact of selectedJobArtifacts; track artifact.name) {
+                      <mat-expansion-panel (openedChange)="$event && loadArtifactContent(artifact.name)">
                         <mat-expansion-panel-header>
-                          <mat-panel-title>{{ artifactLabel(name) }}</mat-panel-title>
-                          @if (artifactContentLoading[name]) {
+                          <mat-panel-title>{{ artifactLabel(artifact.name) }}</mat-panel-title>
+                          @if (artifact.producer_agent) {
+                            <mat-panel-description>{{ artifact.producer_agent }}</mat-panel-description>
+                          }
+                          @if (artifactContentLoading[artifact.name]) {
                             <mat-panel-description>Loading…</mat-panel-description>
                           }
                         </mat-expansion-panel-header>
-                        <div class="artifact-body" [class.artifact-json]="isArtifactJson(name)">
-                          <pre>{{ getArtifactContentDisplay(name) }}</pre>
+                        <div class="artifact-body" [class.artifact-json]="isArtifactJson(artifact.name)">
+                          <pre>{{ getArtifactContentDisplay(artifact.name) }}</pre>
                         </div>
                       </mat-expansion-panel>
                     }
@@ -159,3 +251,29 @@
     </mat-card>
   </aside>
 </div>
+
+@if (viewArtifactModal !== null || viewArtifactLoading || viewArtifactError) {
+  <div class="artifact-view-overlay" (click)="closeViewModal()" role="button" tabindex="0" (keydown.escape)="closeViewModal()">
+    <div class="artifact-view-modal" (click)="$event.stopPropagation()" role="dialog" aria-label="View artifact">
+      <div class="artifact-view-header">
+        <h2>{{ viewArtifactModal ? artifactLabel(viewArtifactModal.name) : 'Artifact' }}</h2>
+        <button mat-icon-button (click)="closeViewModal()" aria-label="Close">
+          <mat-icon>close</mat-icon>
+        </button>
+      </div>
+      @if (viewArtifactLoading) {
+        <app-loading-spinner message="Loading…" />
+      } @else if (viewArtifactError) {
+        <app-error-message [message]="viewArtifactError" />
+      } @else if (viewArtifactModal) {
+        <div class="artifact-view-body" [class.artifact-json]="isArtifactJson(viewArtifactModal.name)">
+          @if (isArtifactMarkdown(viewArtifactModal.name)) {
+            <div class="markdown-content artifact-view-markdown" [innerHTML]="getViewModalMarkdownHtml()"></div>
+          } @else {
+            <pre>{{ getViewModalDisplayContent() }}</pre>
+          }
+        </div>
+      }
+    </div>
+  </div>
+}

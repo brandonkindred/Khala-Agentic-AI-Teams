@@ -25,9 +25,26 @@ ARTIFACT_NAMES = (
     "draft_v2.md",
     "final.md",
     "compliance_report.json",
+    "fact_check_report.json",
     "validator_report.json",
     "publishing_pack.json",
 )
+
+# Static metadata: which pipeline phase/agent produces each artifact (for API list response)
+ARTIFACT_PRODUCER: dict[str, dict[str, str]] = {
+    "brand_spec.yaml": {"producer_phase": "draft_initial", "producer_agent": "Pipeline (brand load)"},
+    "content_brief.md": {"producer_phase": "review", "producer_agent": "BlogReviewAgent"},
+    "research_packet.md": {"producer_phase": "research", "producer_agent": "ResearchAgent"},
+    "allowed_claims.json": {"producer_phase": "research", "producer_agent": "ResearchAgent"},
+    "outline.md": {"producer_phase": "review", "producer_agent": "BlogReviewAgent"},
+    "draft_v1.md": {"producer_phase": "draft_initial", "producer_agent": "BlogDraftAgent"},
+    "draft_v2.md": {"producer_phase": "copy_edit", "producer_agent": "BlogCopyEditorAgent"},
+    "final.md": {"producer_phase": "finalize", "producer_agent": "BlogCopyEditorAgent"},
+    "compliance_report.json": {"producer_phase": "compliance", "producer_agent": "BlogComplianceAgent"},
+    "fact_check_report.json": {"producer_phase": "fact_check", "producer_agent": "BlogFactCheckAgent"},
+    "validator_report.json": {"producer_phase": "compliance", "producer_agent": "Validators"},
+    "publishing_pack.json": {"producer_phase": "finalize", "producer_agent": "Pipeline"},
+}
 
 
 def _resolve_work_dir(work_dir: Union[str, Path]) -> Path:

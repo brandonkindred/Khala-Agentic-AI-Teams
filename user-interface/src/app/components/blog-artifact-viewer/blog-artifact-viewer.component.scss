@@ -1,0 +1,76 @@
+.artifact-viewer-page {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+}
+
+.artifact-viewer-header {
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+
+  .back-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-bottom: 0.75rem;
+    color: var(--mat-sys-primary, #1976d2);
+    text-decoration: none;
+    font-size: 0.875rem;
+
+    &:hover {
+      text-decoration: underline;
+    }
+    mat-icon {
+      font-size: 1.25rem;
+      width: 1.25rem;
+      height: 1.25rem;
+    }
+  }
+
+  h1 {
+    margin: 0 0 0.25rem 0;
+    font-size: 1.5rem;
+    font-weight: 600;
+  }
+  .meta {
+    margin: 0 0 0.75rem 0;
+    font-size: 0.8125rem;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+  }
+  .download-btn {
+    mat-icon {
+      margin-right: 0.25rem;
+      vertical-align: middle;
+    }
+  }
+}
+
+.artifact-viewer-body {
+  pre {
+    margin: 0;
+    padding: 1rem;
+    font-size: 0.875rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
+    border-radius: 8px;
+    overflow-x: auto;
+    font-family: ui-monospace, monospace;
+  }
+  &.artifact-json pre {
+    font-family: ui-monospace, monospace;
+  }
+  .markdown-content {
+    font-size: 0.9375rem;
+    line-height: 1.6;
+
+    :deep(h1) { font-size: 1.5rem; margin: 1rem 0 0.5rem 0; }
+    :deep(h2) { font-size: 1.25rem; margin: 0.75rem 0 0.5rem 0; }
+    :deep(h3) { font-size: 1.1rem; margin: 0.5rem 0 0.25rem 0; }
+    :deep(p) { margin: 0.5rem 0; }
+    :deep(ul), :deep(ol) { margin: 0.5rem 0; padding-left: 1.5rem; }
+    :deep(code) { background: var(--mat-sys-surface-container, rgba(0,0,0,0.04)); padding: 0.1em 0.3em; border-radius: 4px; font-size: 0.9em; }
+    :deep(pre) { background: var(--mat-sys-surface-container, rgba(0,0,0,0.04)); padding: 0.75rem; border-radius: 4px; overflow-x: auto; margin: 0.5rem 0; }
+  }
+}

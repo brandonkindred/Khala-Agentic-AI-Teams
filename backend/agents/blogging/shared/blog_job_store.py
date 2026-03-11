@@ -204,6 +204,37 @@ def mark_all_running_jobs_failed(
         logger.warning("mark_all_running_jobs_failed: %s", e)
 
 
+def approve_blog_job(
+    job_id: str,
+    *,
+    approved_at: Optional[str] = None,
+    approved_by: Optional[str] = None,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Mark a job as approved. Sets approved_at to now (ISO) if not provided."""
+    if approved_at is None:
+        approved_at = datetime.now(timezone.utc).isoformat()
+    update_blog_job(
+        job_id,
+        cache_dir=cache_dir,
+        approved_at=approved_at,
+        approved_by=approved_by,
+    )
+
+
+def unapprove_blog_job(
+    job_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Clear approval for a job (set approved_at and approved_by to None)."""
+    update_blog_job(
+        job_id,
+        cache_dir=cache_dir,
+        approved_at=None,
+        approved_by=None,
+    )
+
+
 def delete_blog_job(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,

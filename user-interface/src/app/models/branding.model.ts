@@ -110,22 +110,69 @@ export interface RunBrandRequest {
   brand_checks?: BrandCheckRequest[];
 }
 
+// Full TeamOutput types for brand preview
+export interface BrandCodification {
+  positioning_statement: string;
+  brand_promise: string;
+  brand_personality_traits: string[];
+  narrative_pillars: string[];
+}
+
+export interface MoodBoardConcept {
+  title: string;
+  visual_direction: string;
+  color_story: string[];
+  typography_direction: string;
+  image_style: string[];
+}
+
+export interface CreativeRefinementPlan {
+  phases: string[];
+  workshop_prompts: string[];
+  decision_criteria: string[];
+}
+
+export interface WritingGuidelines {
+  voice_principles: string[];
+  style_dos: string[];
+  style_donts: string[];
+  editorial_quality_bar: string[];
+}
+
+export interface DesignSystemDefinition {
+  design_principles: string[];
+  foundation_tokens: string[];
+  component_standards: string[];
+}
+
+export interface WikiEntry {
+  title: string;
+  summary: string;
+  owners: string[];
+  update_cadence: string;
+}
+
+export interface BrandBook {
+  content: string;
+  sections?: Record<string, unknown>;
+}
+
 /** Response from running the branding team for a brand. */
 export interface BrandingTeamOutput {
   status: string;
   mission_summary: string;
-  codification?: unknown;
-  mood_boards?: unknown[];
-  creative_refinement?: unknown;
-  writing_guidelines?: unknown;
+  codification?: BrandCodification | null;
+  mood_boards?: MoodBoardConcept[];
+  creative_refinement?: CreativeRefinementPlan | null;
+  writing_guidelines?: WritingGuidelines | null;
   brand_guidelines: string[];
-  design_system?: unknown;
-  wiki_backlog?: unknown[];
+  design_system?: DesignSystemDefinition | null;
+  wiki_backlog?: WikiEntry[];
   brand_checks?: unknown[];
   human_feedback?: string | null;
   competitive_snapshot?: CompetitiveSnapshot | null;
   design_asset_result?: DesignAssetRequestResult | null;
-  brand_book?: { content: string; sections?: Record<string, unknown> } | null;
+  brand_book?: BrandBook | null;
 }
 
 export interface BrandingQuestion {
@@ -151,4 +198,27 @@ export interface BrandingSessionResponse {
   };
   open_questions: BrandingQuestion[];
   answered_questions: BrandingQuestion[];
+}
+
+// Conversation (chat) API types
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
+export interface CreateConversationRequest {
+  initial_message?: string | null;
+}
+
+export interface SendMessageRequest {
+  message: string;
+}
+
+export interface ConversationStateResponse {
+  conversation_id: string;
+  messages: ConversationMessage[];
+  mission: BrandingMissionSnapshot;
+  latest_output: BrandingTeamOutput | null;
+  suggested_questions: string[];
 }

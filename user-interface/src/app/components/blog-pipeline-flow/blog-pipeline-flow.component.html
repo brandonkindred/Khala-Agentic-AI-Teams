@@ -1,0 +1,37 @@
+@if (status) {
+  <mat-card class="pipeline-flow-card">
+    <mat-card-header class="header-with-status">
+      <div class="header-left">
+        <mat-card-title>Pipeline progress</mat-card-title>
+      </div>
+      <span class="status-badge" [ngClass]="getStatusBadgeClass()">{{ getStatusBadge() }}</span>
+    </mat-card-header>
+    <mat-card-content>
+      <div class="phase-stepper">
+        @for (phase of BLOG_PHASES; track phase.id; let i = $index; let last = $last) {
+          <div class="phase-step"
+               [class.completed]="isPhaseCompleted(phase.id)"
+               [class.current]="isCurrentPhase(phase.id)"
+               [class.pending]="isPhasePending(phase.id)"
+               [class.has-connector]="!last"
+               [class.next-completed]="!last && isPhaseCompleted(BLOG_PHASES[i + 1].id)">
+            <div class="phase-node">
+              <mat-icon>{{ phase.icon }}</mat-icon>
+            </div>
+            <span class="phase-label">{{ phase.label }}</span>
+          </div>
+        }
+      </div>
+      <div class="progress-section">
+        <mat-progress-bar
+          mode="determinate"
+          [value]="status.progress"
+        ></mat-progress-bar>
+        <span class="progress-text">{{ status.progress }}%</span>
+      </div>
+      @if (status.status_text) {
+        <p class="status-text">{{ status.status_text }}</p>
+      }
+    </mat-card-content>
+  </mat-card>
+}

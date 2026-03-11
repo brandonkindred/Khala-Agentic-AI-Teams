@@ -1,6 +1,8 @@
 import { Component, inject, OnDestroy, OnInit } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { CommonModule, SlicePipe } from '@angular/common';
+import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
+import { marked } from 'marked';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatCardModule } from '@angular/material/card';
 import { Subscription, timer } from 'rxjs';
@@ -19,6 +21,8 @@ import { ResearchReviewFormComponent } from '../research-review-form/research-re
 import { ResearchReviewResultsComponent } from '../research-review-results/research-review-results.component';
 import { FullPipelineFormComponent } from '../full-pipeline-form/full-pipeline-form.component';
 import { FullPipelineResultsComponent } from '../full-pipeline-results/full-pipeline-results.component';
+import { BlogPipelineFlowComponent } from '../blog-pipeline-flow/blog-pipeline-flow.component';
+import { Router } from '@angular/router';
 import type {
   ResearchAndReviewRequest,
   ResearchAndReviewResponse,
@@ -26,6 +30,7 @@ import type {
   FullPipelineResponse,
   BlogJobListItem,
   BlogJobStatusResponse,
+  ArtifactMeta,
 } from '../../models';
 
 /**
@@ -47,6 +52,7 @@ export function artifactLabel(name: string): string {
     'draft_v2.md': 'Draft v2',
     'final.md': 'Final draft',
     'compliance_report.json': 'Compliance report',
+    'fact_check_report.json': 'Fact check report',
     'validator_report.json': 'Validator report',
     'publishing_pack.json': 'Publishing pack',
   };
@@ -74,6 +80,7 @@ export function artifactLabel(name: string): string {
     ResearchReviewResultsComponent,
     FullPipelineFormComponent,
     FullPipelineResultsComponent,
+    BlogPipelineFlowComponent,
   ],
   templateUrl: './blogging-dashboard.component.html',
   styleUrl: './blogging-dashboard.component.scss',
@@ -82,6 +89,8 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   readonly artifactLabel = artifactLabel;
   private readonly api = inject(BloggingApiService);
   private readonly route = inject(ActivatedRoute);
+  private readonly router = inject(Router);
+  private readonly sanitizer = inject(DomSanitizer);
   private jobsSub: Subscription | null = null;
   private statusPollSub: Subscription | null = null;
   private queryParamsSub: Subscription | null = null;
@@ -97,11 +106,15 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   completedJobs: BlogJobListItem[] = [];
   selectedBlogJob: BlogJobListItem | null = null;
   selectedJobStatus: BlogJobStatusResponse | null = null;
-  selectedJobArtifacts: string[] = [];
+  selectedJobArtifacts: ArtifactMeta[] = [];
   artifactsLoading = false;
   artifactsError: string | null = null;
   artifactContent: Record<string, string | object> = {};
   artifactContentLoading: Record<string, boolean> = {};
+  activeTabIndex = 0;
+  viewArtifactModal: { name: string; content: string | object } | null = null;
+  viewArtifactLoading = false;
+  viewArtifactError: string | null = null;
 
   isTerminalStatus(status: string): boolean {
     return (TERMINAL_STATUSES as readonly string[]).includes(status);
@@ -253,6 +266,119 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
 
   isArtifactJson(name: string): boolean {
     return name.endsWith('.json');
+  }
+
+  isArtifactMarkdown(name: string): boolean {
+    return name.endsWith('.md');
+  }
+
+  isArtifactYaml(name: string): boolean {
+    return name.endsWith('.yaml') || name.endsWith('.yml');
+  }
+
+  openAssetInNewTab(artifactName: string): void {
+    const jobId = this.selectedBlogJob?.job_id;
+    if (!jobId) return;
+    const url = this.router.serializeUrl(
+      this.router.createUrlTree(['/blogging/jobs', jobId, 'artifacts', artifactName])
+    );
+    window.open(url, '_blank', 'noopener');
+  }
+
+  getArtifactDownloadUrl(artifactName: string): string {
+    const jobId = this.selectedBlogJob?.job_id;
+    if (!jobId) return '#';
+    return this.api.getJobArtifactDownloadUrl(jobId, artifactName);
+  }
+
+  openViewModal(artifactName: string): void {
+    const jobId = this.selectedBlogJob?.job_id;
+    if (!jobId) return;
+    this.viewArtifactModal = null;
+    this.viewArtifactError = null;
+    this.viewArtifactLoading = true;
+    this.api.getJobArtifactContent(jobId, artifactName).subscribe({
+      next: (res) => {
+        this.viewArtifactModal = { name: res.name, content: res.content };
+        this.viewArtifactLoading = false;
+      },
+      error: (err) => {
+        this.viewArtifactError = err?.error?.detail ?? err?.message ?? 'Failed to load artifact';
+        this.viewArtifactLoading = false;
+      },
+    });
+  }
+
+  closeViewModal(): void {
+    this.viewArtifactModal = null;
+    this.viewArtifactError = null;
+  }
+
+  getViewModalDisplayContent(): string {
+    if (!this.viewArtifactModal) return '';
+    const content = this.viewArtifactModal.content;
+    if (typeof content === 'string') return content;
+    return JSON.stringify(content, null, 2);
+  }
+
+  getViewModalMarkdownHtml(): SafeHtml {
+    if (!this.viewArtifactModal || !this.isArtifactMarkdown(this.viewArtifactModal.name)) return '';
+    const content = this.viewArtifactModal.content;
+    const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+    if (!text?.trim()) return this.sanitizer.bypassSecurityTrustHtml('');
+    try {
+      const result = marked.parse(text);
+      const html = typeof result === 'string' ? result : '';
+      return this.sanitizer.bypassSecurityTrustHtml(html || `<pre>${this.escapeHtml(text)}</pre>`);
+    } catch {
+      return this.sanitizer.bypassSecurityTrustHtml(`<pre>${this.escapeHtml(text)}</pre>`);
+    }
+  }
+
+  private escapeHtml(text: string): string {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  jobApprovedLabel(): string {
+    if (!this.selectedJobStatus?.approved_at) return 'No';
+    return 'Yes';
+  }
+
+  canApproveJob(): boolean {
+    const status = this.selectedJobStatus?.status ?? this.selectedBlogJob?.status;
+    return status === 'completed' || status === 'needs_human_review';
+  }
+
+  canUnapproveJob(): boolean {
+    return !!this.selectedJobStatus?.approved_at;
+  }
+
+  approveSelectedJob(): void {
+    if (!this.selectedBlogJob) return;
+    this.api.approveJob(this.selectedBlogJob.job_id).subscribe({
+      next: (status) => {
+        this.selectedJobStatus = status;
+        this.error = null;
+      },
+      error: (err) => {
+        this.error = err?.error?.detail ?? err?.message ?? 'Failed to approve job';
+      },
+    });
+  }
+
+  unapproveSelectedJob(): void {
+    if (!this.selectedBlogJob) return;
+    this.api.unapproveJob(this.selectedBlogJob.job_id).subscribe({
+      next: (status) => {
+        this.selectedJobStatus = status;
+        this.error = null;
+      },
+      error: (err) => {
+        this.error = err?.error?.detail ?? err?.message ?? 'Failed to unapprove job';
+      },
+    });
   }
 
   onResearchReviewSubmit(request: ResearchAndReviewRequest): void {

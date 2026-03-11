@@ -120,8 +120,30 @@ export class BloggingApiService {
   }
 
   /**
+   * POST /job/{job_id}/approve
+   * Mark a completed or needs_human_review job as approved.
+   */
+  approveJob(jobId: string): Observable<BlogJobStatusResponse> {
+    return this.http.post<BlogJobStatusResponse>(
+      `${this.baseUrl}/job/${jobId}/approve`,
+      {}
+    );
+  }
+
+  /**
+   * POST /job/{job_id}/unapprove
+   * Clear approval for a job.
+   */
+  unapproveJob(jobId: string): Observable<BlogJobStatusResponse> {
+    return this.http.post<BlogJobStatusResponse>(
+      `${this.baseUrl}/job/${jobId}/unapprove`,
+      {}
+    );
+  }
+
+  /**
    * GET /job/{job_id}/artifacts
-   * List artifact filenames that exist for a pipeline job.
+   * List artifacts that exist for a pipeline job (with producer metadata).
    */
   getJobArtifacts(jobId: string): Observable<BlogJobArtifactsResponse> {
     return this.http.get<BlogJobArtifactsResponse>(`${this.baseUrl}/job/${jobId}/artifacts`);
@@ -135,5 +157,13 @@ export class BloggingApiService {
     return this.http.get<BlogJobArtifactContentResponse>(
       `${this.baseUrl}/job/${jobId}/artifacts/${encodeURIComponent(artifactName)}`
     );
+  }
+
+  /**
+   * URL for downloading an artifact (GET with ?download=true).
+   * Open in new window or use as href with download attribute to trigger save.
+   */
+  getJobArtifactDownloadUrl(jobId: string, artifactName: string): string {
+    return `${this.baseUrl}/job/${jobId}/artifacts/${encodeURIComponent(artifactName)}?download=true`;
   }
 }

@@ -1,0 +1,66 @@
+<mat-card class="chat-card">
+  <mat-card-header>
+    <mat-card-title>
+      <mat-icon>palette</mat-icon>
+      Branding Assistant
+    </mat-card-title>
+  </mat-card-header>
+
+  <mat-card-content>
+    @if (error) {
+      <p class="error-text">{{ error }}</p>
+      <button mat-stroked-button (click)="retryStartConversation()" [disabled]="loading">
+        Retry
+      </button>
+    }
+    <div class="messages-container" #messagesContainer>
+      @for (msg of messages; track msg.timestamp + msg.content) {
+        <div class="message" [class.user]="msg.role === 'user'" [class.assistant]="msg.role === 'assistant'">
+          <div class="message-content">{{ msg.content }}</div>
+          <div class="message-time">{{ formatTime(msg.timestamp) }}</div>
+        </div>
+      }
+
+      @if (loading) {
+        <div class="message assistant">
+          <div class="typing-indicator">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+      }
+    </div>
+
+    <form [formGroup]="form" (ngSubmit)="onSubmit()" class="input-form">
+      <mat-form-field appearance="outline" class="message-input">
+        <mat-label>Tell me about your brand...</mat-label>
+        <input
+          matInput
+          formControlName="message"
+          [attr.aria-label]="'Message input'"
+          (keydown.enter)="$event.preventDefault(); onSubmit()"
+        />
+      </mat-form-field>
+      <button
+        mat-fab
+        color="primary"
+        type="submit"
+        [disabled]="form.invalid || loading"
+        [attr.aria-label]="'Send message'"
+      >
+        <mat-icon>send</mat-icon>
+      </button>
+    </form>
+
+    @if (suggestedQuestions.length > 0) {
+      <div class="suggested-questions">
+        @for (q of suggestedQuestions; track q) {
+          <button mat-stroked-button (click)="onSuggestedQuestion(q)" [disabled]="loading">
+            {{ q }}
+          </button>
+        }
+      </div>
+    }
+  </mat-card-content>
+</mat-card>

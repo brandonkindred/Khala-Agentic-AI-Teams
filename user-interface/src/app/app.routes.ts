@@ -2,6 +2,7 @@ import { Routes } from '@angular/router';
 import { AppShellComponent } from './components/app-shell/app-shell.component';
 import { JobsDashboardComponent } from './components/jobs-dashboard/jobs-dashboard.component';
 import { BloggingDashboardComponent } from './components/blogging-dashboard/blogging-dashboard.component';
+import { BlogArtifactViewerComponent } from './components/blog-artifact-viewer/blog-artifact-viewer.component';
 import { MarketResearchDashboardComponent } from './components/market-research-dashboard/market-research-dashboard.component';
 import { Soc2ComplianceDashboardComponent } from './components/soc2-compliance-dashboard/soc2-compliance-dashboard.component';
 import { SocialMarketingDashboardComponent } from './components/social-marketing-dashboard/social-marketing-dashboard.component';
@@ -24,6 +25,7 @@ export const routes: Routes = [
       { path: '', redirectTo: '/dashboard', pathMatch: 'full' },
       { path: 'dashboard', component: JobsDashboardComponent },
       { path: 'blogging', component: BloggingDashboardComponent },
+      { path: 'blogging/jobs/:jobId/artifacts/:artifactName', component: BlogArtifactViewerComponent },
       { path: 'software-engineering', component: SoftwareEngineeringDashboardComponent },
       { path: 'software-engineering/planning-v2', component: PlanningV2PageComponent },
       { path: 'software-engineering/planning-v3', component: PlanningV3PageComponent },

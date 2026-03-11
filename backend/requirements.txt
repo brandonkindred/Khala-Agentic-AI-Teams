@@ -6,3 +6,4 @@ fastapi>=0.115,<1.0
 uvicorn[standard]>=0.32,<1.0
 slack-sdk>=3.27,<4
 cryptography>=41.0.0
+pytest>=8.0,<9.0

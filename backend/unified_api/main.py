@@ -84,6 +84,13 @@ class ApiInfoResponse(BaseModel):
     docs_url: str
 
 
+class SecurityErrorResponse(BaseModel):
+    """Response body when the security gateway rejects a request (403)."""
+
+    detail: str
+    security_findings: List[str]
+
+
 # Track mounted routers for health checks
 _mounted_teams: Dict[str, bool] = {}
 
@@ -397,6 +404,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Security gateway: scan requests to team APIs before forwarding (when SECURITY_GATEWAY_ENABLED is true)
+from unified_api.middleware import SecurityGatewayMiddleware
+app.add_middleware(SecurityGatewayMiddleware)
 
 # Integrations API (Slack config)
 from unified_api.routes.integrations import router as integrations_router

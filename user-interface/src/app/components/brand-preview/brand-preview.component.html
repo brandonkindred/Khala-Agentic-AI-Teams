@@ -1,0 +1,146 @@
+<mat-card class="preview-card">
+  <mat-card-header>
+    <mat-card-title>Brand preview</mat-card-title>
+    @if (hasOutput) {
+      <button mat-stroked-button color="primary" (click)="saveToAgency.emit()" class="save-btn">
+        <mat-icon>save</mat-icon>
+        Save to agency
+      </button>
+    }
+  </mat-card-header>
+  <mat-card-content>
+    @if (!hasOutput) {
+      <div class="empty-state">
+        <mat-icon>palette</mat-icon>
+        <p>Your brand will appear here as we talk.</p>
+        <p class="empty-hint">Answer a few questions in the chat and the branding team will build mood boards, guidelines, and more.</p>
+      </div>
+    } @else {
+      <mat-tab-group class="preview-tabs" animationDuration="200ms">
+        <mat-tab label="Summary">
+          <div class="tab-content">
+            <p class="mission-summary">{{ latestOutput!.mission_summary }}</p>
+          </div>
+        </mat-tab>
+        <mat-tab label="Codification">
+          @if (latestOutput?.codification; as cod) {
+            <div class="tab-content">
+              <h4>Positioning</h4>
+              <p>{{ cod.positioning_statement }}</p>
+              <h4>Brand promise</h4>
+              <p>{{ cod.brand_promise }}</p>
+              <h4>Narrative pillars</h4>
+              <ul>
+                @for (p of cod.narrative_pillars; track p) {
+                  <li>{{ p }}</li>
+                }
+              </ul>
+            </div>
+          }
+        </mat-tab>
+        <mat-tab label="Mood boards">
+          <div class="tab-content">
+            @if (latestOutput?.mood_boards?.length) {
+              @for (mb of latestOutput!.mood_boards!; track mb.title) {
+                <mat-expansion-panel class="mood-card">
+                  <mat-expansion-panel-header>
+                    <mat-panel-title>{{ mb.title }}</mat-panel-title>
+                  </mat-expansion-panel-header>
+                  <p><strong>Visual direction:</strong> {{ mb.visual_direction }}</p>
+                  @if (mb.color_story.length) {
+                    <p><strong>Color story:</strong> {{ mb.color_story.join(', ') }}</p>
+                  }
+                  <p><strong>Typography:</strong> {{ mb.typography_direction }}</p>
+                  @if (mb.image_style.length) {
+                    <p><strong>Image style:</strong> {{ mb.image_style.join(', ') }}</p>
+                  }
+                </mat-expansion-panel>
+              }
+            } @else {
+              <p>No mood boards yet.</p>
+            }
+          </div>
+        </mat-tab>
+        <mat-tab label="Color palette">
+          <div class="tab-content">
+            @if (colorStories.length) {
+              <div class="color-swatches">
+                @for (c of colorStories; track c) {
+                  <div class="swatch" [style.background]="parseColor(c)" [title]="c">{{ c }}</div>
+                }
+              </div>
+            } @else {
+              <p>Colors will appear from mood boards and design system.</p>
+            }
+          </div>
+        </mat-tab>
+        <mat-tab label="Writing guidelines">
+          @if (latestOutput?.writing_guidelines; as wg) {
+            <div class="tab-content">
+              <h4>Voice principles</h4>
+              <ul>
+                @for (v of wg.voice_principles; track v) {
+                  <li>{{ v }}</li>
+                }
+              </ul>
+              <h4>Do</h4>
+              <ul>
+                @for (d of wg.style_dos; track d) {
+                  <li>{{ d }}</li>
+                }
+              </ul>
+              <h4>Don't</h4>
+              <ul>
+                @for (d of wg.style_donts; track d) {
+                  <li>{{ d }}</li>
+                }
+              </ul>
+            </div>
+          }
+        </mat-tab>
+        <mat-tab label="Design system">
+          @if (latestOutput?.design_system; as ds) {
+            <div class="tab-content">
+            <h4>Design principles</h4>
+            <ul>
+              @for (p of ds.design_principles; track p) {
+                <li>{{ p }}</li>
+              }
+            </ul>
+            <h4>Foundation tokens</h4>
+            <ul>
+              @for (t of ds.foundation_tokens; track t) {
+                <li>{{ t }}</li>
+              }
+            </ul>
+            <h4>Component standards</h4>
+            <ul>
+              @for (c of ds.component_standards; track c) {
+                <li>{{ c }}</li>
+              }
+            </ul>
+            </div>
+          }
+        </mat-tab>
+        <mat-tab label="Brand guidelines">
+          <div class="tab-content">
+            <ul class="guidelines-list">
+              @for (g of latestOutput?.brand_guidelines ?? []; track g) {
+                <li>{{ g }}</li>
+              }
+            </ul>
+          </div>
+        </mat-tab>
+        <mat-tab label="Brand book">
+          @if (latestOutput?.brand_book?.content; as content) {
+            <div class="tab-content">
+              <div class="brand-book-content">{{ content }}</div>
+            </div>
+          } @else {
+            <div class="tab-content"><p>No brand book content yet.</p></div>
+          }
+        </mat-tab>
+      </mat-tab-group>
+    }
+  </mat-card-content>
+</mat-card>

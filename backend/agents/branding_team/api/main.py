@@ -7,7 +7,7 @@ from threading import Lock
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from branding_team.models import (
@@ -23,8 +23,30 @@ from branding_team.models import (
 from branding_team.orchestrator import BrandingTeamOrchestrator
 from branding_team.store import get_default_store
 
+from branding_team.assistant import get_conversation_store
+from branding_team.assistant.agent import BrandingAssistantAgent
+from branding_team.assistant.store import _default_mission
+
 app = FastAPI(title="Branding Team API", version="1.0.0")
 branding_store = get_default_store()
+orchestrator = BrandingTeamOrchestrator()
+conversation_store = get_conversation_store()
+
+_assistant_agent: Optional[BrandingAssistantAgent] = None
+
+
+def _get_assistant_agent() -> BrandingAssistantAgent:
+    """Lazy-init the branding assistant so the app mounts even if llm_service is unavailable."""
+    global _assistant_agent
+    if _assistant_agent is None:
+        try:
+            _assistant_agent = BrandingAssistantAgent()
+        except Exception:
+            raise HTTPException(
+                status_code=503,
+                detail="Branding assistant is temporarily unavailable. LLM service may not be configured.",
+            )
+    return _assistant_agent
 
 
 class CreateClientRequest(BaseModel):
@@ -104,6 +126,29 @@ class AnswerBrandingQuestionRequest(BaseModel):
     answer: str = Field(..., min_length=1)
 
 
+# Conversation (chat) API models
+class CreateConversationRequest(BaseModel):
+    initial_message: Optional[str] = None
+
+
+class SendMessageRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+
+
+class ConversationMessage(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str
+    timestamp: str = ""
+
+
+class ConversationStateResponse(BaseModel):
+    conversation_id: str
+    messages: List[ConversationMessage] = Field(default_factory=list)
+    mission: BrandingMission
+    latest_output: Optional[TeamOutput] = None
+    suggested_questions: List[str] = Field(default_factory=list)
+
+
 @dataclass
 class BrandingSession:
     mission: BrandingMission
@@ -129,8 +174,26 @@ class BrandingSessionStore:
             return self._sessions.get(session_id)
 
 
-orchestrator = BrandingTeamOrchestrator()
 session_store = BrandingSessionStore()
+
+
+def _mission_has_minimal_required_fields(mission: BrandingMission) -> bool:
+    """True if we have real company name, description, and target audience (not placeholders)."""
+    placeholders = ("TBD", "To be discussed.", "—", "")
+    name_ok = (mission.company_name or "").strip() not in placeholders
+    desc_ok = (mission.company_description or "").strip() not in placeholders
+    audience_ok = (mission.target_audience or "").strip() not in placeholders
+    return name_ok and desc_ok and audience_ok
+
+
+def _run_orchestrator_if_ready(mission: BrandingMission) -> Optional[TeamOutput]:
+    """If mission has minimal required fields, run orchestrator and return TeamOutput; else return None."""
+    if not _mission_has_minimal_required_fields(mission):
+        return None
+    return orchestrator.run(
+        mission=mission,
+        human_review=HumanReview(approved=False, feedback="Building brand from conversation."),
+    )
 
 
 def _build_open_questions(mission: BrandingMission) -> List[BrandingQuestion]:
@@ -190,7 +253,7 @@ def _apply_answer(mission: BrandingMission, question: BrandingQuestion, answer: 
     return mission
 
 
-@app.post("/branding/clients", response_model=Client, status_code=201)
+@app.post("/clients", response_model=Client, status_code=201)
 def create_client(payload: CreateClientRequest) -> Client:
     return branding_store.create_client(
         name=payload.name,
@@ -199,12 +262,12 @@ def create_client(payload: CreateClientRequest) -> Client:
     )
 
 
-@app.get("/branding/clients", response_model=List[Client])
+@app.get("/clients", response_model=List[Client])
 def list_clients() -> List[Client]:
     return branding_store.list_clients()
 
 
-@app.get("/branding/clients/{client_id}", response_model=Client)
+@app.get("/clients/{client_id}", response_model=Client)
 def get_client(client_id: str) -> Client:
     client = branding_store.get_client(client_id)
     if not client:
@@ -212,14 +275,14 @@ def get_client(client_id: str) -> Client:
     return client
 
 
-@app.get("/branding/clients/{client_id}/brands", response_model=List[Brand])
+@app.get("/clients/{client_id}/brands", response_model=List[Brand])
 def list_brands(client_id: str) -> List[Brand]:
     if not branding_store.get_client(client_id):
         raise HTTPException(status_code=404, detail="Client not found")
     return branding_store.list_brands_for_client(client_id)
 
 
-@app.post("/branding/clients/{client_id}/brands", response_model=Brand, status_code=201)
+@app.post("/clients/{client_id}/brands", response_model=Brand, status_code=201)
 def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     mission = BrandingMission(
         company_name=payload.company_name,
@@ -237,7 +300,7 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     return brand
 
 
-@app.get("/branding/clients/{client_id}/brands/{brand_id}", response_model=Brand)
+@app.get("/clients/{client_id}/brands/{brand_id}", response_model=Brand)
 def get_brand(client_id: str, brand_id: str) -> Brand:
     brand = branding_store.get_brand(client_id, brand_id)
     if not brand:
@@ -245,7 +308,7 @@ def get_brand(client_id: str, brand_id: str) -> Brand:
     return brand
 
 
-@app.put("/branding/clients/{client_id}/brands/{brand_id}", response_model=Brand)
+@app.put("/clients/{client_id}/brands/{brand_id}", response_model=Brand)
 def update_brand(client_id: str, brand_id: str, payload: UpdateBrandRequest) -> Brand:
     brand = branding_store.get_brand(client_id, brand_id)
     if not brand:
@@ -299,7 +362,7 @@ def update_brand(client_id: str, brand_id: str, payload: UpdateBrandRequest) -> 
     return updated
 
 
-@app.post("/branding/clients/{client_id}/brands/{brand_id}/run", response_model=TeamOutput)
+@app.post("/clients/{client_id}/brands/{brand_id}/run", response_model=TeamOutput)
 def run_brand(client_id: str, brand_id: str, payload: RunBrandRequest) -> TeamOutput:
     brand = branding_store.get_brand(client_id, brand_id)
     if not brand:
@@ -317,7 +380,7 @@ def run_brand(client_id: str, brand_id: str, payload: RunBrandRequest) -> TeamOu
     )
 
 
-@app.post("/branding/clients/{client_id}/brands/{brand_id}/request-market-research", response_model=CompetitiveSnapshot)
+@app.post("/clients/{client_id}/brands/{brand_id}/request-market-research", response_model=CompetitiveSnapshot)
 def request_market_research_for_brand(client_id: str, brand_id: str) -> CompetitiveSnapshot:
     brand = branding_store.get_brand(client_id, brand_id)
     if not brand:
@@ -333,7 +396,7 @@ def request_market_research_for_brand(client_id: str, brand_id: str) -> Competit
     return snapshot
 
 
-@app.post("/branding/clients/{client_id}/brands/{brand_id}/request-design-assets", response_model=DesignAssetRequestResult)
+@app.post("/clients/{client_id}/brands/{brand_id}/request-design-assets", response_model=DesignAssetRequestResult)
 def request_design_assets_for_brand(client_id: str, brand_id: str) -> DesignAssetRequestResult:
     brand = branding_store.get_brand(client_id, brand_id)
     if not brand:
@@ -344,7 +407,7 @@ def request_design_assets_for_brand(client_id: str, brand_id: str) -> DesignAsse
     return request_design_assets(codification, brand.mission.company_name)
 
 
-@app.post("/branding/run", response_model=TeamOutput)
+@app.post("/run", response_model=TeamOutput)
 def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
     mission = BrandingMission(
         company_name=payload.company_name,
@@ -368,7 +431,7 @@ def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
     )
 
 
-@app.post("/branding/sessions", response_model=BrandingSessionResponse)
+@app.post("/sessions", response_model=BrandingSessionResponse)
 def create_branding_session(payload: RunBrandingTeamRequest) -> BrandingSessionResponse:
     mission = BrandingMission(
         company_name=payload.company_name,
@@ -389,7 +452,7 @@ def create_branding_session(payload: RunBrandingTeamRequest) -> BrandingSessionR
     return _session_response(session_id, session)
 
 
-@app.get("/branding/sessions/{session_id}", response_model=BrandingSessionResponse)
+@app.get("/sessions/{session_id}", response_model=BrandingSessionResponse)
 def get_branding_session(session_id: str) -> BrandingSessionResponse:
     session = session_store.get(session_id)
     if not session:
@@ -397,7 +460,7 @@ def get_branding_session(session_id: str) -> BrandingSessionResponse:
     return _session_response(session_id, session)
 
 
-@app.get("/branding/sessions/{session_id}/questions", response_model=List[BrandingQuestion])
+@app.get("/sessions/{session_id}/questions", response_model=List[BrandingQuestion])
 def get_branding_questions(session_id: str) -> List[BrandingQuestion]:
     session = session_store.get(session_id)
     if not session:
@@ -405,7 +468,7 @@ def get_branding_questions(session_id: str) -> List[BrandingQuestion]:
     return [q for q in session.questions if q.status == "open"]
 
 
-@app.post("/branding/sessions/{session_id}/questions/{question_id}/answer", response_model=BrandingSessionResponse)
+@app.post("/sessions/{session_id}/questions/{question_id}/answer", response_model=BrandingSessionResponse)
 def answer_branding_question(
     session_id: str,
     question_id: str,
@@ -430,6 +493,96 @@ def answer_branding_question(
     )
     session.latest_output = orchestrator.run(mission=session.mission, human_review=human_review)
     return _session_response(session_id, session)
+
+
+def _conversation_to_response(
+    conversation_id: str,
+    messages: list,
+    mission: BrandingMission,
+    latest_output: Optional[TeamOutput],
+    suggested_questions: List[str],
+) -> ConversationStateResponse:
+    msg_list = [
+        ConversationMessage(role=m.role, content=m.content, timestamp=m.timestamp)
+        for m in messages
+    ]
+    return ConversationStateResponse(
+        conversation_id=conversation_id,
+        messages=msg_list,
+        mission=mission,
+        latest_output=latest_output,
+        suggested_questions=suggested_questions or [],
+    )
+
+
+@app.post("/conversations", response_model=ConversationStateResponse)
+def create_branding_conversation(
+    body: Optional[CreateConversationRequest] = Body(default=None),
+) -> ConversationStateResponse:
+    req = body or CreateConversationRequest()
+    conversation_id = conversation_store.create()
+    initial_message = (req.initial_message or "").strip()
+    suggested_questions: List[str] = []
+
+    if initial_message:
+        conversation_store.append_message(conversation_id, "user", initial_message)
+        messages, mission, _ = conversation_store.get(conversation_id) or ([], _default_mission(), None)
+        msg_pairs = [(m.role, m.content) for m in messages]
+        reply, updated_mission, suggested_questions = _get_assistant_agent().respond(
+            msg_pairs[:-1], mission, initial_message
+        )
+        conversation_store.update_mission(conversation_id, updated_mission)
+        conversation_store.append_message(conversation_id, "assistant", reply)
+        output = _run_orchestrator_if_ready(updated_mission)
+        if output is not None:
+            conversation_store.update_output(conversation_id, output)
+        messages, mission, latest_output = conversation_store.get(conversation_id) or ([], updated_mission, output)
+    else:
+        reply = (
+            "Hi! I'm your branding lead. Let's build your brand step by step. "
+            "What's your company or product name?"
+        )
+        conversation_store.append_message(conversation_id, "assistant", reply)
+        suggested_questions = [
+            "What's your company name?",
+            "Who is your target audience?",
+            "What does your company do?",
+        ]
+        messages, mission, latest_output = conversation_store.get(conversation_id) or ([], _default_mission(), None)
+
+    return _conversation_to_response(conversation_id, messages, mission, latest_output, suggested_questions)
+
+
+@app.post("/conversations/{conversation_id}/messages", response_model=ConversationStateResponse)
+def send_branding_conversation_message(conversation_id: str, payload: SendMessageRequest) -> ConversationStateResponse:
+    state = conversation_store.get(conversation_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    messages, mission, _ = state
+    conversation_store.append_message(conversation_id, "user", payload.message)
+    msg_pairs = [(m.role, m.content) for m in messages]
+    msg_pairs.append(("user", payload.message))
+    reply, updated_mission, suggested_questions = _get_assistant_agent().respond(
+        msg_pairs[:-1], mission, payload.message
+    )
+    conversation_store.update_mission(conversation_id, updated_mission)
+    conversation_store.append_message(conversation_id, "assistant", reply)
+    output = _run_orchestrator_if_ready(updated_mission)
+    if output is not None:
+        conversation_store.update_output(conversation_id, output)
+    messages, mission, latest_output = conversation_store.get(conversation_id) or ([], updated_mission, output)
+    return _conversation_to_response(conversation_id, messages, mission, latest_output, suggested_questions)
+
+
+@app.get("/conversations/{conversation_id}", response_model=ConversationStateResponse)
+def get_branding_conversation(conversation_id: str) -> ConversationStateResponse:
+    state = conversation_store.get(conversation_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    messages, mission, latest_output = state
+    return _conversation_to_response(
+        conversation_id, messages, mission, latest_output, []
+    )
 
 
 @app.get("/health")

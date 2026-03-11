@@ -1,6 +1,9 @@
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
 
 from branding_team.api.main import app
+from branding_team.models import BrandingMission
 
 client = TestClient(app)
 
@@ -14,26 +17,26 @@ def _payload() -> dict:
 
 
 def test_create_session_and_get_questions() -> None:
-    create = client.post('/branding/sessions', json=_payload())
+    create = client.post('/sessions', json=_payload())
     assert create.status_code == 200
     data = create.json()
     assert data['session_id']
     assert data['status'] == 'awaiting_user_answers'
     assert len(data['open_questions']) >= 1
 
-    questions = client.get(f"/branding/sessions/{data['session_id']}/questions")
+    questions = client.get(f"/sessions/{data['session_id']}/questions")
     assert questions.status_code == 200
     assert questions.json()
 
 
 def test_answer_question_updates_session_and_output() -> None:
-    create = client.post('/branding/sessions', json=_payload())
+    create = client.post('/sessions', json=_payload())
     session = create.json()
     session_id = session['session_id']
     question_id = session['open_questions'][0]['id']
 
     answer = client.post(
-        f'/branding/sessions/{session_id}/questions/{question_id}/answer',
+        f'/sessions/{session_id}/questions/{question_id}/answer',
         json={'answer': 'clarity, trust, craft'},
     )
     assert answer.status_code == 200
@@ -43,37 +46,37 @@ def test_answer_question_updates_session_and_output() -> None:
 
 
 def test_unknown_session_404() -> None:
-    resp = client.get('/branding/sessions/not-found')
+    resp = client.get('/sessions/not-found')
     assert resp.status_code == 404
 
 
 def test_post_and_get_clients() -> None:
-    create = client.post('/branding/clients', json={"name": "Acme Corp"})
+    create = client.post('/clients', json={"name": "Acme Corp"})
     assert create.status_code == 201
     data = create.json()
     assert data['id'].startswith('client_')
     assert data['name'] == 'Acme Corp'
-    list_resp = client.get('/branding/clients')
+    list_resp = client.get('/clients')
     assert list_resp.status_code == 200
     clients = list_resp.json()
     assert isinstance(clients, list)
     assert any(c['id'] == data['id'] for c in clients)
-    get_one = client.get(f"/branding/clients/{data['id']}")
+    get_one = client.get(f"/clients/{data['id']}")
     assert get_one.status_code == 200
     assert get_one.json()['name'] == 'Acme Corp'
 
 
 def test_get_client_404() -> None:
-    resp = client.get('/branding/clients/nonexistent-id')
+    resp = client.get('/clients/nonexistent-id')
     assert resp.status_code == 404
 
 
 def test_post_and_get_brands() -> None:
-    create_c = client.post('/branding/clients', json={"name": "Brand Test Client"})
+    create_c = client.post('/clients', json={"name": "Brand Test Client"})
     assert create_c.status_code == 201
     client_id = create_c.json()['id']
     create_b = client.post(
-        f'/branding/clients/{client_id}/brands',
+        f'/clients/{client_id}/brands',
         json={
             'company_name': 'BrandCo',
             'company_description': 'A company for brand tests',
@@ -84,26 +87,26 @@ def test_post_and_get_brands() -> None:
     brand_data = create_b.json()
     assert brand_data['id'].startswith('brand_')
     assert brand_data['client_id'] == client_id
-    list_b = client.get(f'/branding/clients/{client_id}/brands')
+    list_b = client.get(f'/clients/{client_id}/brands')
     assert list_b.status_code == 200
     assert len(list_b.json()) >= 1
-    get_b = client.get(f'/branding/clients/{client_id}/brands/{brand_data["id"]}')
+    get_b = client.get(f'/clients/{client_id}/brands/{brand_data["id"]}')
     assert get_b.status_code == 200
     assert get_b.json()['mission']['company_name'] == 'BrandCo'
 
 
 def test_get_brand_404() -> None:
-    create_c = client.post('/branding/clients', json={"name": "For 404"})
+    create_c = client.post('/clients', json={"name": "For 404"})
     client_id = create_c.json()['id']
-    resp = client.get(f'/branding/clients/{client_id}/brands/nonexistent-brand-id')
+    resp = client.get(f'/clients/{client_id}/brands/nonexistent-brand-id')
     assert resp.status_code == 404
 
 
 def test_put_brand_update() -> None:
-    create_c = client.post('/branding/clients', json={"name": "Update Test"})
+    create_c = client.post('/clients', json={"name": "Update Test"})
     client_id = create_c.json()['id']
     create_b = client.post(
-        f'/branding/clients/{client_id}/brands',
+        f'/clients/{client_id}/brands',
         json={
             'company_name': 'Original',
             'company_description': 'Original description here',
@@ -112,7 +115,7 @@ def test_put_brand_update() -> None:
     )
     brand_id = create_b.json()['id']
     put_resp = client.put(
-        f'/branding/clients/{client_id}/brands/{brand_id}',
+        f'/clients/{client_id}/brands/{brand_id}',
         json={'company_description': 'Updated description here'},
     )
     assert put_resp.status_code == 200
@@ -120,10 +123,10 @@ def test_put_brand_update() -> None:
 
 
 def test_post_brands_run_returns_team_output() -> None:
-    create_c = client.post('/branding/clients', json={"name": "Run Test Client"})
+    create_c = client.post('/clients', json={"name": "Run Test Client"})
     client_id = create_c.json()['id']
     create_b = client.post(
-        f'/branding/clients/{client_id}/brands',
+        f'/clients/{client_id}/brands',
         json={
             'company_name': 'RunCo',
             'company_description': 'Company for run test',
@@ -132,7 +135,7 @@ def test_post_brands_run_returns_team_output() -> None:
     )
     brand_id = create_b.json()['id']
     run_resp = client.post(
-        f'/branding/clients/{client_id}/brands/{brand_id}/run',
+        f'/clients/{client_id}/brands/{brand_id}/run',
         json={'human_approved': True},
     )
     assert run_resp.status_code == 200
@@ -144,10 +147,10 @@ def test_post_brands_run_returns_team_output() -> None:
 
 
 def test_request_market_research_returns_503_without_service() -> None:
-    create_c = client.post('/branding/clients', json={"name": "MR Client"})
+    create_c = client.post('/clients', json={"name": "MR Client"})
     client_id = create_c.json()['id']
     create_b = client.post(
-        f'/branding/clients/{client_id}/brands',
+        f'/clients/{client_id}/brands',
         json={
             'company_name': 'MRCo',
             'company_description': 'Company for market research test',
@@ -155,15 +158,15 @@ def test_request_market_research_returns_503_without_service() -> None:
         },
     )
     brand_id = create_b.json()['id']
-    resp = client.post(f'/branding/clients/{client_id}/brands/{brand_id}/request-market-research')
+    resp = client.post(f'/clients/{client_id}/brands/{brand_id}/request-market-research')
     assert resp.status_code in (200, 503)
 
 
 def test_request_design_assets_returns_stub() -> None:
-    create_c = client.post('/branding/clients', json={"name": "Design Client"})
+    create_c = client.post('/clients', json={"name": "Design Client"})
     client_id = create_c.json()['id']
     create_b = client.post(
-        f'/branding/clients/{client_id}/brands',
+        f'/clients/{client_id}/brands',
         json={
             'company_name': 'DesignCo',
             'company_description': 'Company for design assets test',
@@ -171,9 +174,91 @@ def test_request_design_assets_returns_stub() -> None:
         },
     )
     brand_id = create_b.json()['id']
-    resp = client.post(f'/branding/clients/{client_id}/brands/{brand_id}/request-design-assets')
+    resp = client.post(f'/clients/{client_id}/brands/{brand_id}/request-design-assets')
     assert resp.status_code == 200
     data = resp.json()
     assert 'request_id' in data
     assert data['status'] == 'pending'
     assert 'artifacts' in data
+
+
+# --- Conversation (chat) API tests ---
+
+
+def test_post_conversations_returns_conversation_id_and_initial_state() -> None:
+    resp = client.post('/conversations', json={})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert 'conversation_id' in data
+    assert data['conversation_id']
+    assert 'messages' in data
+    assert 'mission' in data
+    assert 'suggested_questions' in data
+    assert len(data['messages']) >= 1
+    assert data['mission']['company_name'] in ('TBD', '') or data['mission']['company_name']
+
+
+def test_post_conversations_with_initial_message_calls_assistant() -> None:
+    with patch('branding_team.api.main.assistant_agent') as mock_agent:
+        mock_agent.respond.return_value = (
+            "Got it, Acme it is!",
+            BrandingMission(
+                company_name="Acme",
+                company_description="We build software.",
+                target_audience="Developers",
+            ),
+            ["What are your values?", "Who are your competitors?"],
+        )
+        resp = client.post(
+            '/conversations',
+            json={"initial_message": "We're Acme, we build software for developers."},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data['conversation_id']
+        assert len(data['messages']) >= 2
+        assert data['suggested_questions']
+
+
+def test_post_conversation_messages_updates_state_and_returns_reply() -> None:
+    create_resp = client.post('/conversations', json={})
+    assert create_resp.status_code == 200
+    conversation_id = create_resp.json()['conversation_id']
+
+    with patch('branding_team.api.main.assistant_agent') as mock_agent:
+        mock_agent.respond.return_value = (
+            "Thanks, I've noted that.",
+            BrandingMission(
+                company_name="TestCo",
+                company_description="To be discussed.",
+                target_audience="TBD",
+            ),
+            ["Next question?"],
+        )
+        msg_resp = client.post(
+            f'/conversations/{conversation_id}/messages',
+            json={"message": "Our company is TestCo."},
+        )
+        assert msg_resp.status_code == 200
+        data = msg_resp.json()
+        assert len(data['messages']) >= 2
+        assert data['mission']
+        assert 'suggested_questions' in data
+
+
+def test_get_conversation_returns_stored_state() -> None:
+    create_resp = client.post('/conversations', json={})
+    assert create_resp.status_code == 200
+    conversation_id = create_resp.json()['conversation_id']
+
+    get_resp = client.get(f'/conversations/{conversation_id}')
+    assert get_resp.status_code == 200
+    data = get_resp.json()
+    assert data['conversation_id'] == conversation_id
+    assert 'messages' in data
+    assert 'mission' in data
+
+
+def test_get_conversation_404_for_unknown_id() -> None:
+    resp = client.get('/conversations/unknown-conversation-id')
+    assert resp.status_code == 404

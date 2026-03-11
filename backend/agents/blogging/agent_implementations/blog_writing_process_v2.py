@@ -22,7 +22,7 @@ from blog_fact_check_agent import BlogFactCheckAgent
 from blog_research_agent.agent import ResearchAgent
 from blog_research_agent.agent_cache import AgentCache
 from blog_research_agent.allowed_claims import extract_allowed_claims
-from llm_service import get_client
+from llm_service import get_client, OllamaLLMClient
 from blog_research_agent.models import ResearchBriefInput
 from blog_publication_agent.models import PublishingPack
 from blog_review_agent import BlogReviewAgent, BlogReviewInput

@@ -1,3 +1,72 @@
+.branding-tabs {
+  .tab-label {
+    margin-left: 6px;
+  }
+}
+
+.chat-view {
+  padding: 0;
+}
+
+.split-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  min-height: 500px;
+  align-items: stretch;
+
+  .panel {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .chat-panel {
+    min-height: 450px;
+  }
+
+  .preview-panel {
+    min-height: 450px;
+  }
+}
+
+@media (max-width: 900px) {
+  .split-panel {
+    grid-template-columns: 1fr;
+    min-height: auto;
+  }
+}
+
+.save-to-agency-overlay {
+  position: relative;
+  margin-top: 16px;
+  border: 2px solid #58a6ff;
+  max-width: 480px;
+
+  mat-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .success-message {
+    color: #3fb950;
+    margin-bottom: 8px;
+  }
+
+  .client-select,
+  .save-actions {
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+}
+
+.form-view {
+  padding-top: 8px;
+}
+
 .session-form {
   display: grid;
   gap: 12px;
