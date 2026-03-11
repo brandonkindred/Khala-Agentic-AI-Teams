@@ -64,7 +64,12 @@ class Orchestrator:
 
     def create_run(self, *, project_id: str, idempotency_key: str) -> RunContext:
         result = self._idempotent(idempotency_key, lambda: self._create_run(project_id))
-        return RunContext(**result)
+        return RunContext(
+            project_id=result["project_id"],
+            run_id=result["run_id"],
+            phase=result["phase"],
+            contract_version=result["contract_version"],
+        )
 
     def _create_run(self, project_id: str) -> dict:
         run_id = f"run_{uuid.uuid4().hex[:10]}"
