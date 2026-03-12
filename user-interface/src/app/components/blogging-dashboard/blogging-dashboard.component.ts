@@ -111,7 +111,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   artifactsError: string | null = null;
   artifactContent: Record<string, string | object> = {};
   artifactContentLoading: Record<string, boolean> = {};
-  activeTabIndex = 0;
+  activeTabIndex = 1; // 0 Research and Review, 1 Full Pipeline, 2 Assets — default to Full Pipeline
   viewArtifactModal: { name: string; content: string | object } | null = null;
   viewArtifactLoading = false;
   viewArtifactError: string | null = null;
