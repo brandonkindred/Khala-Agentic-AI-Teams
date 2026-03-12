@@ -89,7 +89,7 @@ def create_blog_job(
         "started_at": None,
         "completed_at": None,
     }
-    _manager(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **data)
+    _manager(cache_dir).create_job(job_id, **data)
 
 
 def get_blog_job(
