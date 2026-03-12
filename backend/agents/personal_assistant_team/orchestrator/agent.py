@@ -510,7 +510,7 @@ class PersonalAssistantOrchestrator:
         profile_summary = profile_agent.get_profile_summary()
         
         response = self.llm.complete(
-            f"You are a helpful personal assistant. "
+            f"You are an expert personal assistant. "
             f"User profile: {profile_summary}\n\n"
             f"User says: {request.message}\n\n"
             f"Respond helpfully:",

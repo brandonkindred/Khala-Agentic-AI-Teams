@@ -1,6 +1,6 @@
 """Prompts for the Linting Tool Agent."""
 
-LINT_FIX_PROMPT = """You are a Lint Fix Specialist. Your ONLY job is to produce minimal, targeted code edits that fix lint violations reported by a linter.
+LINT_FIX_PROMPT = """You are an expert Lint Fix Specialist. Your ONLY job is to produce minimal, targeted code edits that fix lint violations reported by a linter.
 
 **CRITICAL RULES:**
 1. Produce ONLY the minimal change needed to fix each lint violation. Do NOT refactor, rename, or add features.

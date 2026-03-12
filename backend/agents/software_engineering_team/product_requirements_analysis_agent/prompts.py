@@ -8,7 +8,7 @@ Prompts for spec review, auto-answer generation, spec update, and spec cleanup p
 # Context and Constraints Discovery (pre-review)
 # ---------------------------------------------------------------------------
 
-CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT = """You are a Product Analyst. Before diving into detailed spec review, we need to uncover high-level project context and constraints that shape how the spec should be interpreted.
+CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT = """You are an expert Product Analyst. Before diving into detailed spec review, we need to uncover high-level project context and constraints that shape how the spec should be interpreted.
 
 Generate 1-2 focused questions per category below. These are NOT feature-level details—they are outside constraints and mandates (who is this for, where will it run, what principles must the build follow, what organizational mandates apply).
 
@@ -364,7 +364,7 @@ Respond with a JSON object only, no markdown:
 }}
 """
 
-CONSOLIDATE_QUESTIONS_PROMPT = """You are a Product Analyst. You have a list of open questions from a product specification review. Some questions are worded differently but ask the same thing (e.g. "Do you want Google only for OAuth?" and "What is the right provider? OAuth or Enterprise?").
+CONSOLIDATE_QUESTIONS_PROMPT = """You are an expert Product Analyst. You have a list of open questions from a product specification review. Some questions are worded differently but ask the same thing (e.g. "Do you want Google only for OAuth?" and "What is the right provider? OAuth or Enterprise?").
 
 Your task: Consolidate the list so there are NO duplicate questions. For each distinct decision or topic, keep exactly ONE question. Produce a single, thorough list with no repeated topics or near-duplicate phrasings.
 
@@ -407,7 +407,7 @@ Respond with a JSON object only, no markdown:
 }}
 """
 
-REVIEW_QUESTIONS_ALIGNMENT_PROMPT = """You are a Product Analyst. You have a list of open questions that will be shown to the user. Before presenting them, you must ensure each question and its answer options make sense together.
+REVIEW_QUESTIONS_ALIGNMENT_PROMPT = """You are an expert Product Analyst. You have a list of open questions that will be shown to the user. Before presenting them, you must ensure each question and its answer options make sense together.
 
 Rules:
 - For each question, classify whether it is OPEN-ENDED (e.g. "What do you think is the right way to do this?", "How should we handle X?") or CLOSED (e.g. "Should we use X?" with a clear yes/no intent).
@@ -446,7 +446,7 @@ Respond with a JSON object only, no markdown:
 }}
 """
 
-GENERATE_QUESTION_RECOMMENDATIONS_PROMPT = """You are a Product Analyst. For each of the following open questions, produce a short recommendation: which option to choose and why. Consider ALL options and trade-offs before recommending; your recommendation must be well-reasoned and consider alternatives.
+GENERATE_QUESTION_RECOMMENDATIONS_PROMPT = """You are an expert Product Analyst. For each of the following open questions, produce a short recommendation: which option to choose and why. Consider ALL options and trade-offs before recommending; your recommendation must be well-reasoned and consider alternatives.
 
 For each question:
 1. State which option you recommend (by its id or label).
@@ -470,7 +470,7 @@ Respond with a JSON object only, no markdown:
 }}
 """
 
-SPEC_UPDATE_PROMPT = """You are a Product Specification Writer. Update the product specification to incorporate the answers to open questions.
+SPEC_UPDATE_PROMPT = """You are an expert Product Specification Writer. Update the product specification to incorporate the answers to open questions.
 
 For each answered question:
 1. Integrate the answer naturally into the specification
@@ -499,7 +499,7 @@ Answered Questions:
 Respond with the FULL updated specification as plain text (markdown format). Include all original content plus the new details from the answered questions. Do not include any JSON or code blocks - just the specification content.
 """
 
-SPEC_CLEANUP_PROMPT = """You are a Product Specification Validator. Review and clean up the specification to ensure it is complete, consistent, and ready for the planning phase.
+SPEC_CLEANUP_PROMPT = """You are an expert Product Specification Validator. Review and clean up the specification to ensure it is complete, consistent, and ready for the planning phase.
 
 Perform the following checks:
 1. **Completeness** - All features have clear requirements
@@ -524,7 +524,7 @@ Respond with a JSON object only, no markdown:
 }}
 """
 
-PRD_PROMPT = """You are the PRD Orchestrator for a hub-and-spoke PRD Factory.
+PRD_PROMPT = """You are an expert PRD Orchestrator for a hub-and-spoke PRD Factory.
 
 You will be given:
 - A **cleaned and validated product specification**
@@ -657,7 +657,7 @@ Respond with JSON only:
 }}
 """
 
-SPEC_CLARIFICATION_PROMPT = """You are a Product Specification Writer. The specification has gaps that caused the same questions to be asked again during review. This indicates the previous answers were not integrated clearly enough.
+SPEC_CLARIFICATION_PROMPT = """You are an expert Product Specification Writer. The specification has gaps that caused the same questions to be asked again during review. This indicates the previous answers were not integrated clearly enough.
 
 Update the specification to make the following previously-answered information clearer and more explicit. The goal is to ensure these answers are prominently integrated so the same questions don't arise again.
 
@@ -688,7 +688,7 @@ The updated spec should make it obvious what the answers are without needing to 
 Respond with the FULL updated specification as plain text (markdown format). Include all original content plus the clarified details.
 """
 
-SPEC_CONSISTENCY_CLARIFICATION_PROMPT = """You are a Product Specification Editor. The specification was found to have many overlapping or duplicate open questions, which suggests it contains ambiguous or conflicting information.
+SPEC_CONSISTENCY_CLARIFICATION_PROMPT = """You are an expert Product Specification Editor. The specification was found to have many overlapping or duplicate open questions, which suggests it contains ambiguous or conflicting information.
 
 Your task is to update the specification so that:
 1. **Clarity**: Make it clearer what the answers are for decisions that are already implied or stated—so the same questions are not asked again.
@@ -767,7 +767,7 @@ Keep your response under 2000 tokens.
 }}
 """
 
-SPEC_CLEANUP_CHUNK_PROMPT = """You are a Product Specification Validator. Review and clean up this SECTION of a specification.
+SPEC_CLEANUP_CHUNK_PROMPT = """You are an expert Product Specification Validator. Review and clean up this SECTION of a specification.
 
 Perform these checks:
 1. **Completeness** - Features have clear requirements

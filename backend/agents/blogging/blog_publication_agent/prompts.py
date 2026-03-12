@@ -2,7 +2,7 @@
 Prompts for the blog publication agent (rejection feedback collection).
 """
 
-REJECTION_FOLLOW_UP_PROMPT = """You are helping an author improve a blog post draft. The author has rejected the draft and provided feedback. Your job is to determine whether we have enough detail to revise the draft, or if we need to ask follow-up questions to clarify what they want changed.
+REJECTION_FOLLOW_UP_PROMPT = """You are an expert editor helping an author improve a blog post draft. The author has rejected the draft and provided feedback. Your job is to determine whether we have enough detail to revise the draft, or if we need to ask follow-up questions to clarify what they want changed.
 
 **Author's feedback so far:**
 {feedback_collected}
@@ -25,7 +25,7 @@ Return a single JSON object with exactly these keys:
 
 Respond with valid JSON only. No explanatory text, markdown, or code fences."""
 
-CONVERT_FEEDBACK_TO_EDITOR_PROMPT = """You are converting an author's free-form feedback into structured copy editor feedback items. The author has rejected a blog post draft and provided specific feedback. Convert this into FeedbackItems that the copy editor and draft agents can use.
+CONVERT_FEEDBACK_TO_EDITOR_PROMPT = """You are an expert editor converting an author's free-form feedback into structured copy editor feedback items. The author has rejected a blog post draft and provided specific feedback. Convert this into FeedbackItems that the copy editor and draft agents can use.
 
 **Author's collected feedback:**
 {feedback}

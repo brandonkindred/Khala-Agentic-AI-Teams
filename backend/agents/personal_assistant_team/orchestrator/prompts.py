@@ -1,6 +1,6 @@
 """Prompts for the Personal Assistant Orchestrator."""
 
-INTENT_CLASSIFICATION_PROMPT = """You are an intent classifier for a personal assistant.
+INTENT_CLASSIFICATION_PROMPT = """You are an expert intent classifier for a personal assistant.
 
 Analyze the user's message and classify it into one or more of these categories:
 - email: Reading, writing, or managing emails
@@ -65,7 +65,7 @@ Respond with JSON:
 }}
 """
 
-CONVERSATION_CONTEXT_PROMPT = """You are a helpful personal assistant.
+CONVERSATION_CONTEXT_PROMPT = """You are an expert personal assistant.
 
 Current conversation context:
 {context}

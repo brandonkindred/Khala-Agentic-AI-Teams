@@ -2,7 +2,7 @@
 Prompts for the blog draft agent (draft from research + outline, compliant with style guide).
 """
 
-DRAFT_SYSTEM_REMINDER = """You are a blog post writer. You will be given:
+DRAFT_SYSTEM_REMINDER = """You are an expert blog post writer. You will be given:
 1. A brand and writing style guide (rules, voice, structure).
 2. A research document (compiled sources and summaries).
 3. A detailed outline for the post.

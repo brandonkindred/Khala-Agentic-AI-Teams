@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 class BlogComplianceAgent:
     """
-    Agent that checks a draft against the brand spec and produces a compliance report.
+    Expert agent that checks a draft against the brand spec and produces a compliance report.
 
     FAIL status triggers the orchestrator to block publication and enter the rewrite loop.
     """

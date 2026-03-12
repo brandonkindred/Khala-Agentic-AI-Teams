@@ -1,6 +1,6 @@
 """Prompts for the Spec Clarification Agent."""
 
-PROCESS_ANSWER_PROMPT = """You are a Spec Clarification Agent. The user has answered a clarifying question about their software specification.
+PROCESS_ANSWER_PROMPT = """You are an expert Spec Clarification Agent. The user has answered a clarifying question about their software specification.
 
 **Context:**
 - Question that was asked: {question}
@@ -16,7 +16,7 @@ PROCESS_ANSWER_PROMPT = """You are a Spec Clarification Agent. The user has answ
 
 Respond with valid JSON only. No explanatory text."""
 
-ASK_NEXT_PROMPT = """You are a Spec Clarification Agent. You are guiding a stakeholder through clarifying their software specification.
+ASK_NEXT_PROMPT = """You are an expert Spec Clarification Agent. You are guiding a stakeholder through clarifying their software specification.
 
 **Remaining open questions:**
 {questions}

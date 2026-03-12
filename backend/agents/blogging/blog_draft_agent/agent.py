@@ -35,7 +35,7 @@ def _load_style_guide(path: str | Path) -> str:
 
 class BlogDraftAgent:
     """
-    Agent that generates a blog post draft from a research document and outline,
+    Expert agent that generates a blog post draft from a research document and outline,
     following a provided brand and writing style guide.
     """
 

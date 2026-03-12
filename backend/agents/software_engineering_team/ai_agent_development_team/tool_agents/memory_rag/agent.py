@@ -6,7 +6,7 @@ from llm_service import LLMClient
 
 from ...models import ToolAgentInput, ToolAgentOutput
 
-PROMPT = """You are a memory/RAG specialist.
+PROMPT = """You are an expert memory/RAG specialist.
 Design retrieval index strategy, memory layers, and context assembly contracts.
 Microtask: {microtask}
 Spec context: {spec}

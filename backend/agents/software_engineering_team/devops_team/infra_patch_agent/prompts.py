@@ -1,6 +1,6 @@
 """Prompts for the Infrastructure Patch agent."""
 
-INFRA_PATCH_PROMPT = """You are an Infrastructure Patch Specialist. Given classified IaC errors and the current artifact files, produce minimal fixes.
+INFRA_PATCH_PROMPT = """You are an expert Infrastructure Patch Specialist. Given classified IaC errors and the current artifact files, produce minimal fixes.
 
 Rules:
 1. Only fix errors that are classified as "syntax" or "validation".

@@ -1,6 +1,6 @@
 """Prompts for the Acceptance Criteria Verifier agent."""
 
-ACCEPTANCE_VERIFIER_PROMPT = """You are an Acceptance Criteria Verifier. Your job is to check whether the delivered code satisfies EACH acceptance criterion for the task.
+ACCEPTANCE_VERIFIER_PROMPT = """You are an expert Acceptance Criteria Verifier. Your job is to check whether the delivered code satisfies EACH acceptance criterion for the task.
 
 **Input:**
 - Code that was delivered

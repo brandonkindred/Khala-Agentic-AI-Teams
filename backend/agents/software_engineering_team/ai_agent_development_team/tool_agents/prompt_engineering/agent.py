@@ -6,7 +6,7 @@ from llm_service import LLMClient
 
 from ...models import ToolAgentInput, ToolAgentOutput
 
-PROMPT = """You are a prompt engineering specialist for multi-agent systems.
+PROMPT = """You are an expert prompt engineering specialist for multi-agent systems.
 Create prompt artifacts for this microtask.
 Microtask: {microtask}
 Spec context: {spec}

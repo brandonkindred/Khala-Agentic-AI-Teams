@@ -1,4 +1,4 @@
-BRIEF_PARSING_PROMPT = """You are a research planning assistant.
+BRIEF_PARSING_PROMPT = """You are an expert research planning assistant.
 
 You will be given a short content brief, optional audience, and optional tone/purpose.
 Extract the following as concise bullet points:
@@ -33,7 +33,7 @@ Return JSON with a list under the key "queries", where each item has:
 - "intent": short label like "overview", "how-to", "stats", "risks", "case-studies", etc."""
 
 
-DOC_RELEVANCE_SCORING_PROMPT = """You are an assistant that scores relevance, authority, accuracy, and tags for a web document.
+DOC_RELEVANCE_SCORING_PROMPT = """You are an expert assistant that scores relevance, authority, accuracy, and tags for a web document.
 
 You are given:
 - a research brief
@@ -55,7 +55,7 @@ Return JSON with keys:
 Keep the analysis brief; do not include the full document text in the response."""
 
 
-DOC_SUMMARIZATION_PROMPT = """You are a helpful research summarizer.
+DOC_SUMMARIZATION_PROMPT = """You are an expert research summarizer.
 
 You will receive:
 - a research brief (with audience and purpose if provided)
@@ -73,7 +73,7 @@ Return JSON with keys:
 Do not include the full original text in the response."""
 
 
-FINAL_SYNTHESIS_PROMPT = """You are a senior research analyst.
+FINAL_SYNTHESIS_PROMPT = """You are an expert senior research analyst.
 
 You will receive:
 - the original research brief
@@ -92,7 +92,7 @@ Return a single JSON object with:
 No other text or markdown."""
 
 
-SIMILAR_TOPICS_PROMPT = """You are a research assistant.
+SIMILAR_TOPICS_PROMPT = """You are an expert research assistant.
 
 You will receive:
 - the original research brief

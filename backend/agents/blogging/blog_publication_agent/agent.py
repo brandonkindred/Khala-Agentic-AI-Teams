@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 class BlogPublicationAgent:
     """
-    Agent that receives final drafts, writes them to blog_posts, waits for human
+    Expert agent that receives final drafts, writes them to blog_posts, waits for human
     approval, and on approval creates platform-specific versions (Medium, dev.to,
     Substack). On rejection, collects feedback and runs the draft-editor loop.
     """

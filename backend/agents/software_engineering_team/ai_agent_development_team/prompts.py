@@ -1,6 +1,6 @@
 """Prompt templates for AI Agent Development Team phases."""
 
-INTAKE_PROMPT = """You are a spec intake specialist for building AI agent systems.
+INTAKE_PROMPT = """You are an expert spec intake specialist for building AI agent systems.
 Extract a normalized mission brief from the task and spec.
 Respond with JSON:
 {
@@ -22,7 +22,7 @@ Respond with JSON:
 }
 """
 
-DELIVER_PROMPT = """You are a delivery coordinator.
+DELIVER_PROMPT = """You are an expert delivery coordinator.
 Given generated artifacts and review findings, produce final delivery notes.
 Respond JSON:
 {

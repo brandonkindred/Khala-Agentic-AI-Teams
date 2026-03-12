@@ -27,7 +27,7 @@ from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
 
-DATA_ENGINEERING_PROMPT = """You are a Data Engineering specialist.
+DATA_ENGINEERING_PROMPT = """You are an expert Data Engineering specialist.
 
 Given a microtask about database schema, data models, or data integrity,
 produce the required files (models, seed data, etc.).

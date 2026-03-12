@@ -34,7 +34,7 @@ TYPESCRIPT_CONVENTIONS = """
 # Planning phase
 # ---------------------------------------------------------------------------
 
-PLANNING_PROMPT = """You are the Planning Agent for a frontend development team.
+PLANNING_PROMPT = """You are an expert Planning Agent for a frontend development team.
 
 **Context:** You receive a single **task** (assigned to the frontend team from the Tech Lead's plan). Your job is to produce **subtasks** (microtasks) that together implement this task. Each subtask should be small enough that a single specialist tool-agent (or a general code-generation step) can handle it. The task's acceptance criteria and detailed description define what "done" means; your subtasks must collectively satisfy them.
 
@@ -87,7 +87,7 @@ Rules:
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
 
-PLANNING_FIXES_FOR_ISSUES_PROMPT = """You are the Planning Agent for a frontend team. Create microtasks that implement fixes for the following unresolved review issues.
+PLANNING_FIXES_FOR_ISSUES_PROMPT = """You are an expert Planning Agent for a frontend team. Create microtasks that implement fixes for the following unresolved review issues.
 
 **Unresolved issues:**
 {issues_text}
@@ -122,7 +122,7 @@ depends_on:
 # Execution phase
 # ---------------------------------------------------------------------------
 
-EXECUTION_PROMPT = """You are a Senior Frontend Engineer implementing production-quality UI code.
+EXECUTION_PROMPT = """You are an expert Senior Frontend Engineer implementing production-quality UI code.
 
 """ + FRONTEND_CODING_STANDARDS + """
 
@@ -167,7 +167,7 @@ what you implemented
 # Review phase
 # ---------------------------------------------------------------------------
 
-REVIEW_PROMPT = """You are a Code Review Agent for a frontend project.
+REVIEW_PROMPT = """You are an expert Code Review Agent for a frontend project.
 
 Review the code below for:
 1. Correctness — does it satisfy the stated requirements and acceptance criteria?
@@ -212,7 +212,7 @@ overall assessment
 # Problem-solving phase
 # ---------------------------------------------------------------------------
 
-PROBLEM_SOLVING_PROMPT = """You are a Problem-Solving Specialist for a frontend project.
+PROBLEM_SOLVING_PROMPT = """You are an expert Problem-Solving Specialist for a frontend project.
 
 Given the issues found during review, produce fixes. Each fix should be a complete
 updated file that resolves the issue.
@@ -249,7 +249,7 @@ overview of all fixes
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
 
-PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = """You are a Problem-Solving Specialist. Fix exactly ONE issue.
+PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = """You are an expert Problem-Solving Specialist. Fix exactly ONE issue.
 
 """ + FRONTEND_CODING_STANDARDS + """
 
@@ -289,7 +289,7 @@ one sentence: what you changed
 # QA tool agent: review (find issues from testing/QA perspective)
 # ---------------------------------------------------------------------------
 
-QA_TOOL_AGENT_REVIEW_PROMPT = """You are a QA/Testing specialist. Review the code from a testing and quality perspective only.
+QA_TOOL_AGENT_REVIEW_PROMPT = """You are an expert QA/Testing specialist. Review the code from a testing and quality perspective only.
 
 Focus on:
 1. Missing or weak unit tests, e2e tests, or test coverage.
@@ -330,7 +330,7 @@ brief QA assessment
 # Security tool agent: review (find issues from security perspective)
 # ---------------------------------------------------------------------------
 
-SECURITY_TOOL_AGENT_REVIEW_PROMPT = """You are a Security specialist. Review the code from a security perspective only.
+SECURITY_TOOL_AGENT_REVIEW_PROMPT = """You are an expert Security specialist. Review the code from a security perspective only.
 
 Focus on:
 1. XSS — unescaped user input in DOM, innerHTML, or template interpolation.
@@ -371,7 +371,7 @@ brief security assessment
 # Documentation tool agent
 # ---------------------------------------------------------------------------
 
-DOCUMENTATION_MICROTASK_PROMPT = """You are a Documentation Specialist reviewing code changes for a completed microtask.
+DOCUMENTATION_MICROTASK_PROMPT = """You are an expert Documentation Specialist reviewing code changes for a completed microtask.
 
 **Your task:** Update inline documentation (JSDoc/TSDoc comments) for the code that was just added or modified. Ensure all public functions, components, and interfaces have proper documentation.
 
@@ -402,7 +402,7 @@ what documentation you added or improved
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
 
-DOCUMENTATION_REVIEW_PROMPT = """You are a Documentation Reviewer assessing the completeness and quality of frontend documentation.
+DOCUMENTATION_REVIEW_PROMPT = """You are an expert Documentation Reviewer assessing the completeness and quality of frontend documentation.
 
 **Task:** {task_title}
 **Task Description:** {task_description}
@@ -445,7 +445,7 @@ brief documentation assessment
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
 
-DOCUMENTATION_PROBLEM_SOLVE_PROMPT = """You are a Documentation Specialist fixing a specific documentation issue.
+DOCUMENTATION_PROBLEM_SOLVE_PROMPT = """You are an expert Documentation Specialist fixing a specific documentation issue.
 
 {language_conventions}
 
@@ -476,7 +476,7 @@ what documentation you fixed
 # Batch fix prompt: all issues from a review phase at once
 # ---------------------------------------------------------------------------
 
-BATCH_FIX_PROMPT = """You are a Senior Frontend Software Engineer responsible for fixing all issues identified by the review team.
+BATCH_FIX_PROMPT = """You are an expert Senior Frontend Software Engineer responsible for fixing all issues identified by the review team.
 
 """ + FRONTEND_CODING_STANDARDS + """
 
@@ -533,7 +533,7 @@ Overview of all fixes applied
 # Documentation self-review prompt: iterative refinement
 # ---------------------------------------------------------------------------
 
-DOCUMENTATION_SELF_REVIEW_PROMPT = """You are a Documentation Quality Specialist performing a self-review pass on frontend documentation.
+DOCUMENTATION_SELF_REVIEW_PROMPT = """You are an expert Documentation Quality Specialist performing a self-review pass on frontend documentation.
 
 **Iteration:** {iteration} of {max_iterations}
 

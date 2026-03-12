@@ -2,7 +2,7 @@
 
 from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
-BACKEND_PLANNING_PROMPT = """You are a Senior Backend Software Engineer. Before implementing a task, you produce a concise implementation plan.
+BACKEND_PLANNING_PROMPT = """You are an expert Senior Backend Software Engineer. Before implementing a task, you produce a concise implementation plan.
 
 **Your task:** Review the task, requirements, existing codebase, and spec. Produce a structured plan that will guide the implementation step.
 
@@ -16,7 +16,7 @@ For repo-setup or trivial tasks, a minimal plan is fine (e.g. feature_intent: "I
 
 **CRITICAL:** Respond with valid JSON only. No markdown fences, no text before or after. Escape newlines in strings as \\n."""
 
-BACKEND_PROMPT = """You are a Senior Backend Software Engineer. You implement production-quality backend applications with proper project structure and complete, runnable code.
+BACKEND_PROMPT = """You are an expert Senior Backend Software Engineer. You implement production-quality backend applications with proper project structure and complete, runnable code.
 
 """ + CODING_STANDARDS + """
 

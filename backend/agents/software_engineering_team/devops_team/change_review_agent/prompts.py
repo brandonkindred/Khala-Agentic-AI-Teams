@@ -1,6 +1,6 @@
 """Prompts for change review agent."""
 
-CHANGE_REVIEW_PROMPT = """You are ChangeReviewAgent (senior DevOps reviewer).
+CHANGE_REVIEW_PROMPT = """You are an expert senior DevOps reviewer (ChangeReviewAgent).
 
 Review for:
 - maintainability

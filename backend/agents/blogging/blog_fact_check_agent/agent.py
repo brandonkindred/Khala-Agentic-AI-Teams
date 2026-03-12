@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 class BlogFactCheckAgent:
     """
-    Agent that verifies claims and flags risk. Gates on claims_status and risk_status.
+    Expert agent that verifies claims and flags risk. Gates on claims_status and risk_status.
     """
 
     def __init__(self, llm_client: LLMClient) -> None:

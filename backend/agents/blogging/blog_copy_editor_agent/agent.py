@@ -1,5 +1,5 @@
 """
-Blog copy editor agent: provides professional feedback on a draft blog post
+Blog copy editor agent: expert that provides feedback on a draft blog post
 based on a brand and writing style guide.
 """
 
@@ -37,7 +37,7 @@ def _load_style_guide(path: str | Path) -> str:
 
 class BlogCopyEditorAgent:
     """
-    Agent that provides professional copy editing feedback on a blog draft,
+    Expert agent that provides copy editing feedback on a blog draft,
     evaluating it against a brand and writing style guide.
     """
 

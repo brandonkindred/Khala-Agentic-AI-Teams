@@ -2,7 +2,7 @@
 Prompts for the Fact-Checker and Risk Officer.
 """
 
-FACT_CHECK_PROMPT = """You are a Fact-Checker and Risk Officer for blog content. Your job is to:
+FACT_CHECK_PROMPT = """You are an expert Fact-Checker and Risk Officer for blog content. Your job is to:
 1. Verify that factual claims in the draft are supported by the allowed_claims list (with [CLAIM:id] tags).
 2. Flag legal, medical, financial, or security hazards.
 3. Identify where disclaimers are required.

@@ -89,7 +89,7 @@ def _merge_task_dependency_results(results: List[Dict[str, Any]]) -> Dict[str, A
         merged["issues"] = dedupe_strings(merged["issues"])[:DEFAULT_MAX_ISSUES]
     return merged
 
-TASK_DEPENDENCY_REVIEW_PROMPT = """You are a Task Dependency Analyzer. Review these tasks and identify dependency issues, circular risks, and a brief summary.
+TASK_DEPENDENCY_REVIEW_PROMPT = """You are an expert Task Dependency Analyzer. Review these tasks and identify dependency issues, circular risks, and a brief summary.
 
 Tasks:
 ---

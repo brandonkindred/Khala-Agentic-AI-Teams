@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 RiskLevel = Literal["low", "medium", "high"]
 
-EXTRACT_CLAIMS_PROMPT = """You are extracting evidence-backed factual claims from research material for a blog post.
+EXTRACT_CLAIMS_PROMPT = """You are an expert research analyst extracting evidence-backed factual claims from research material for a blog post.
 
 Given the research document and source references below, extract 5-15 factual claims that are:
 - Explicitly supported by the sources (with citations)

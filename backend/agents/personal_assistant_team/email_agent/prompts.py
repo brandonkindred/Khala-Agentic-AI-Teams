@@ -33,7 +33,7 @@ Respond with JSON:
 }}
 """
 
-EMAIL_DRAFT_PROMPT = """You are drafting an email on behalf of a user.
+EMAIL_DRAFT_PROMPT = """You are an expert at drafting an email on behalf of a user.
 
 User profile:
 {profile_summary}

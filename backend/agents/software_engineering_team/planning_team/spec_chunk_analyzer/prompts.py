@@ -1,6 +1,6 @@
 """Prompts for the Spec Chunk Analyzer agent."""
 
-SPEC_CHUNK_ANALYZER_PROMPT = """You are a Staff-level Tech Lead performing a deep analysis of a product specification FRAGMENT. This is chunk {chunk_index} of {total_chunks}. Your goal is to extract EVERY requirement, feature, and deliverable from THIS FRAGMENT ONLY. Other chunks will be analyzed separately and merged later.
+SPEC_CHUNK_ANALYZER_PROMPT = """You are an expert Staff-level Tech Lead performing a deep analysis of a product specification FRAGMENT. This is chunk {chunk_index} of {total_chunks}. Your goal is to extract EVERY requirement, feature, and deliverable from THIS FRAGMENT ONLY. Other chunks will be analyzed separately and merged later.
 
 **Input:** Normalized spec (Goal, Requirements with REQ-IDs, Constraints). Keep summaries concise; avoid long prose.
 

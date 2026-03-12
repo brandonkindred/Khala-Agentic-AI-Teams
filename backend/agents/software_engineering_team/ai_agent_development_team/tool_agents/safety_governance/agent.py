@@ -6,7 +6,7 @@ from llm_service import LLMClient
 
 from ...models import ToolAgentInput, ToolAgentOutput
 
-PROMPT = """You are an AI safety and governance specialist.
+PROMPT = """You are an expert AI safety and governance specialist.
 Generate policy guards, approval gates, and risk controls.
 Microtask: {microtask}
 Spec context: {spec}

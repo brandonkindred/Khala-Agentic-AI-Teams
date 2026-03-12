@@ -1,6 +1,6 @@
 """Prompts for the Spec Analysis Merger agent."""
 
-SPEC_ANALYSIS_MERGER_PROMPT = """You are a Staff-level Tech Lead merging analyses from multiple spec fragments into one consolidated analysis. Each fragment was analyzed separately; your job is to produce a single merged result.
+SPEC_ANALYSIS_MERGER_PROMPT = """You are an expert Staff-level Tech Lead merging analyses from multiple spec fragments into one consolidated analysis. Each fragment was analyzed separately; your job is to produce a single merged result.
 
 ============================================================
 MERGE RULES

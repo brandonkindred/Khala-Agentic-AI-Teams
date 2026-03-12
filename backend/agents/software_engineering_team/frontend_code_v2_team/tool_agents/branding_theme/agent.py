@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DESIGN_SYSTEM_PLAN_PROMPT = """You are a Design System & UI Engineering Agent. Your job is to translate design into a reusable component library plan. You prevent copy-pasted UI entropy.
+DESIGN_SYSTEM_PLAN_PROMPT = """You are an expert Design System & UI Engineering Agent. Your job is to translate design into a reusable component library plan. You prevent copy-pasted UI entropy.
 
 **Your expertise:**
 - Component library planning (shared vs app-specific components)

@@ -11,7 +11,7 @@ from llm_service import LLMClient, LLMJsonParseError
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are an intake specialist for a personal nutrition and meal planning service.
+SYSTEM_PROMPT = """You are an expert intake specialist for a personal nutrition and meal planning service.
 Your job is to take partial or full client information and produce a complete, consistent client profile as JSON.
 
 The profile must include:

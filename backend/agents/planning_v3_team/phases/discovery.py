@@ -14,7 +14,7 @@ from planning_v3_team.models import ClientContext
 
 logger = logging.getLogger(__name__)
 
-DISCOVERY_PROMPT = """You are a product owner doing discovery for a software engagement.
+DISCOVERY_PROMPT = """You are an expert product owner doing discovery for a software engagement.
 
 Given the following client brief and/or spec, extract and structure:
 

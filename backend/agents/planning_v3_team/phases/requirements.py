@@ -51,7 +51,7 @@ def _default_requirements_questions() -> List[OpenQuestion]:
     ]
 
 
-REQUIREMENTS_PROMPT = """You are a product owner capturing requirements for a software engagement.
+REQUIREMENTS_PROMPT = """You are an expert product owner capturing requirements for a software engagement.
 
 From the problem summary and opportunity below, generate 3-6 short clarification questions that a client PO would need to answer so that dev/UI/UX teams can align. Include:
 - RTO/RPO or disaster recovery (if relevant)

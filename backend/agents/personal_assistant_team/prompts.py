@@ -1,6 +1,6 @@
 """Shared prompt templates for Personal Assistant team."""
 
-INTENT_CLASSIFICATION_PROMPT = """You are an intent classifier for a personal assistant.
+INTENT_CLASSIFICATION_PROMPT = """You are an expert intent classifier for a personal assistant.
 
 Analyze the user's message and classify it into one or more of these categories:
 - email: Reading, writing, or managing emails
@@ -29,7 +29,7 @@ Respond with JSON:
 User message: {message}
 """
 
-PROFILE_EXTRACTION_PROMPT = """You are analyzing text to extract information about a user's preferences, likes, dislikes, goals, and personal details.
+PROFILE_EXTRACTION_PROMPT = """You are an expert at analyzing text to extract information about a user's preferences, likes, dislikes, goals, and personal details.
 
 Extract any relevant information that could be added to a user profile. Look for:
 - Food preferences (likes, dislikes, dietary restrictions)
@@ -61,7 +61,7 @@ Text to analyze:
 {text}
 """
 
-EVENT_EXTRACTION_PROMPT = """You are analyzing text (such as an email or message) to extract calendar events.
+EVENT_EXTRACTION_PROMPT = """You are an expert at analyzing text (such as an email or message) to extract calendar events.
 
 Look for any mentions of:
 - Meetings, appointments, or scheduled events
@@ -89,7 +89,7 @@ Text to analyze:
 {text}
 """
 
-EMAIL_DRAFT_PROMPT = """You are helping compose an email on behalf of a user.
+EMAIL_DRAFT_PROMPT = """You are an expert assistant helping compose an email on behalf of a user.
 
 User profile summary:
 {profile_summary}
@@ -113,7 +113,7 @@ Respond with JSON:
 }
 """
 
-DEAL_RELEVANCE_PROMPT = """You are scoring how relevant a deal is to a user based on their profile.
+DEAL_RELEVANCE_PROMPT = """You are an expert at scoring how relevant a deal is to a user based on their profile.
 
 User preferences:
 {preferences}
@@ -136,7 +136,7 @@ Respond with JSON:
 }
 """
 
-TASK_PARSING_PROMPT = """You are parsing a user's request to add items to a task list or grocery list.
+TASK_PARSING_PROMPT = """You are an expert at parsing a user's request to add items to a task list or grocery list.
 
 Request: {request}
 
@@ -161,7 +161,7 @@ Respond with JSON:
 }
 """
 
-RESERVATION_PROMPT = """You are helping make a reservation based on the user's request.
+RESERVATION_PROMPT = """You are an expert assistant helping make a reservation based on the user's request.
 
 User profile:
 {profile_summary}

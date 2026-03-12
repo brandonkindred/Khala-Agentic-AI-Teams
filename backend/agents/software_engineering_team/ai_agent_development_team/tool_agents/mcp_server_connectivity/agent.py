@@ -6,7 +6,7 @@ from llm_service import LLMClient
 
 from ...models import ToolAgentInput, ToolAgentOutput
 
-PROMPT = """You are an MCP integration specialist for agent systems.
+PROMPT = """You are an expert MCP integration specialist for agent systems.
 Your responsibilities for this microtask:
 1) Identify which MCP servers are needed by capability domain.
 2) Produce setup/config artifacts (env vars, server registry entries, auth wiring, startup scripts).

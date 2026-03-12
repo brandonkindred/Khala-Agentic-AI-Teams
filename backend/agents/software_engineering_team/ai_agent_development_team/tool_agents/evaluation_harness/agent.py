@@ -6,7 +6,7 @@ from llm_service import LLMClient
 
 from ...models import ToolAgentInput, ToolAgentOutput
 
-PROMPT = """You are an evaluation specialist for AI agent systems.
+PROMPT = """You are an expert evaluation specialist for AI agent systems.
 Create acceptance tests, adversarial tests, and KPI measurement artifacts.
 Microtask: {microtask}
 Spec context: {spec}

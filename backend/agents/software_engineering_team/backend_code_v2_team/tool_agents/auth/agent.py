@@ -22,7 +22,7 @@ from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
 
-AUTH_PROMPT = """You are an Authentication and Authorization specialist.
+AUTH_PROMPT = """You are an expert Authentication and Authorization specialist.
 
 Given a microtask about login, JWT, RBAC, permission gates, or secure defaults,
 produce the required files (auth modules, middleware, permission models, etc.).
