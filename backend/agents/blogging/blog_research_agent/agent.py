@@ -446,6 +446,7 @@ class ResearchAgent:
             url=doc.url,
             domain=doc.domain,
             summary=summary,
+            content=doc.content.strip() or None,
             key_points=key_points,
             type=type_label,
             recency=None,
@@ -621,12 +622,13 @@ class ResearchAgent:
         """
         Build the compiled document in Blog Post Research format.
 
+        Uses full document content (ref.content) when available, else ref.summary.
         Format:
         # Blog Post Research
         - summary of the sources that were found
         ## Sources
         1. URL
-        -- Summary
+        -- Full document text (or summary if content not set)
         ...
         ## Academic sources (a list of links to research papers on arxiv.org)
         1. Paper URL
@@ -653,7 +655,8 @@ class ResearchAgent:
         if references:
             for i, ref in enumerate(references, start=1):
                 lines.append(f"{i}. {ref.url}")
-                lines.append(f"-- {ref.summary.strip()}")
+                body = (ref.content if ref.content else ref.summary).strip()
+                lines.append(f"-- {body}")
                 lines.append("")
         else:
             lines.append("(No web sources found.)")
