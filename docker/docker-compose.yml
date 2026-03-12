@@ -1,6 +1,8 @@
 # Full stack: Postgres, Temporal, Ollama (optional), strands-agents (unified API), and Angular UI.
 # Run from repo root: docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
 # Ports: 5432 Postgres, 7233 Temporal gRPC, 8080 Temporal UI, 4200 Angular UI, 8888 Unified API (direct), 11434 Ollama (optional)
+#
+# Static IPs and extra_hosts avoid reliance on Podman's embedded DNS (which can timeout resolving service names).
 
 services:
   postgres:
@@ -21,7 +23,8 @@ services:
       timeout: 3s
       retries: 20
     networks:
-      - stack
+      stack:
+        ipv4_address: 172.28.0.2
 
   temporal:
     image: temporalio/auto-setup:1.24.2
@@ -37,10 +40,13 @@ services:
       POSTGRES_USER: temporal
       POSTGRES_PWD: temporal
       POSTGRES_SEEDS: postgres
+    extra_hosts:
+      - "postgres:172.28.0.2"
     ports:
       - "7233:7233"
     networks:
-      - stack
+      stack:
+        ipv4_address: 172.28.0.3
 
   temporal-ui:
     image: temporalio/ui:2.28.0
@@ -50,10 +56,13 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_CORS_ORIGINS: "http://localhost:3000"
+    extra_hosts:
+      - "temporal:172.28.0.3"
     ports:
       - "8080:8080"
     networks:
-      - stack
+      stack:
+        ipv4_address: 172.28.0.4
 
   ollama:
     image: ollama/ollama
@@ -64,7 +73,8 @@ services:
     environment:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
     networks:
-      - stack
+      stack:
+        ipv4_address: 172.28.0.5
 
   strands-agents:
     build:
@@ -90,8 +100,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       ENABLE_LOG_API: ${ENABLE_LOG_API:-0}
+    extra_hosts:
+      - "postgres:172.28.0.2"
+      - "ollama:172.28.0.5"
     networks:
       stack:
+        ipv4_address: 172.28.0.6
         aliases:
           - unified-api
     restart: unless-stopped
@@ -112,13 +126,21 @@ services:
     depends_on:
       strands-agents:
         condition: service_healthy
+    extra_hosts:
+      - "unified-api:172.28.0.6"
     networks:
-      - stack
+      stack:
+        ipv4_address: 172.28.0.7
     restart: unless-stopped
 
 networks:
   stack:
     name: strands-stack
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/24
 
 volumes:
   postgres_data:
