@@ -26,11 +26,11 @@ class FeedbackItem(BaseModel):
     )
     issue: str = Field(
         ...,
-        description="Description of the issue or deviation from the style guide.",
+        description="Detailed description of the issue: what is wrong, which rule or principle it violates, and why it matters.",
     )
     suggestion: Optional[str] = Field(
         None,
-        description="Suggested fix or revision.",
+        description="Concrete revision: how to change the text so the writer knows what to do and why it fixes the issue.",
     )
 
 
@@ -72,9 +72,9 @@ class CopyEditorOutput(BaseModel):
 
     summary: str = Field(
         ...,
-        description="Overall assessment of the draft and how well it aligns with the style guide.",
+        description="Short note to the writer: overall context or priority (e.g. focus areas), not a summary of findings.",
     )
     feedback_items: List[FeedbackItem] = Field(
         default_factory=list,
-        description="Specific feedback items with issues and suggestions.",
+        description="Detailed feedback items: each explains what is wrong, why it matters, and how to fix it.",
     )

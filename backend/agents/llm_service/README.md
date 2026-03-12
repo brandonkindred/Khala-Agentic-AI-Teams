@@ -38,6 +38,14 @@ max_ctx = client.get_max_context_tokens()
 | `LLM_ENABLE_THINKING` | Enable thinking for qwen3.5 | `SW_LLM_ENABLE_THINKING` |
 | `OLLAMA_API_KEY` | **Required for Ollama Cloud.** API key from https://ollama.com/settings/keys. All LLM requests use this when set. | `LLM_OLLAMA_API_KEY`, `SW_LLM_OLLAMA_API_KEY` (overrides) |
 
+### Docker and name resolution
+
+If the app runs inside Docker, the default `LLM_BASE_URL` (`https://ollama.com`) may be unreachable (e.g. "Temporary failure in name resolution") if the container has no outbound DNS or network. Set `LLM_BASE_URL` (or `SW_LLM_BASE_URL`) to a reachable endpoint:
+
+- **Local Ollama on the host:** `http://host.docker.internal:11434` (Mac/Windows Docker Desktop) or the host’s LAN IP and port (e.g. `http://192.168.1.2:11434`).
+- **Ollama in another container:** Use the Docker service name and port (e.g. `http://ollama:11434`) and ensure both containers share a network.
+- **Ollama Cloud:** Use `https://ollama.com` only if the container has outbound HTTPS and DNS; otherwise run Ollama locally and point `LLM_BASE_URL` at it as above.
+
 **Legacy mapping (same behavior via central config):**
 
 - `SW_LLM_*` → read when `LLM_*` unset (software engineering / shared)

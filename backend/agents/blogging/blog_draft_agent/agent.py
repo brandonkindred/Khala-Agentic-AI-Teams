@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from llm_service import LLMClient
 
@@ -87,7 +87,12 @@ class BlogDraftAgent:
                 logger.warning("Could not load default style guide: %s", e)
         return MINIMAL_STYLE_REMINDER
 
-    def run(self, draft_input: DraftInput) -> DraftOutput:
+    def run(
+        self,
+        draft_input: DraftInput,
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+    ) -> DraftOutput:
         """
         Generate a blog post draft from the research document and outline.
 
@@ -154,6 +159,8 @@ class BlogDraftAgent:
         prompt_parts.append('Use this format: first line {"draft": 0}, then ---DRAFT---, then the full blog post in Markdown.')
         prompt = "\n".join(prompt_parts)
 
+        if on_llm_request:
+            on_llm_request("Generating draft...")
         data = self.llm.complete_json(prompt, temperature=0.3)
         raw_draft = data.get("draft")
         if isinstance(raw_draft, str):
@@ -168,7 +175,12 @@ class BlogDraftAgent:
         logger.info("Draft generated: length=%s", len(draft))
         return DraftOutput(draft=draft)
 
-    def revise(self, revise_input: ReviseDraftInput) -> DraftOutput:
+    def revise(
+        self,
+        revise_input: ReviseDraftInput,
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+    ) -> DraftOutput:
         """
         Revise a draft based on copy editor feedback.
 
@@ -195,7 +207,7 @@ class BlogDraftAgent:
         # Format feedback for prompt
         feedback_lines = []
         if revise_input.feedback_summary:
-            feedback_lines.append(f"Overall summary: {revise_input.feedback_summary}\n")
+            feedback_lines.append(f"Note from editor: {revise_input.feedback_summary}\n")
         for i, item in enumerate(revise_input.feedback_items, 1):
             loc = f" [{item.location}]" if item.location else ""
             feedback_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
@@ -256,6 +268,8 @@ class BlogDraftAgent:
         ])
         prompt = "\n".join(prompt_parts)
 
+        if on_llm_request:
+            on_llm_request("Revising draft...")
         data = self.llm.complete_json(prompt, temperature=0.2)
         raw_draft = data.get("draft")
         if isinstance(raw_draft, str):

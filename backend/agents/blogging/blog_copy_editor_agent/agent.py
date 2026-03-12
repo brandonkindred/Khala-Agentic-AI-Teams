@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from llm_service import LLMClient
 
@@ -89,7 +89,12 @@ class BlogCopyEditorAgent:
                 logger.warning("Could not load default style guide: %s", e)
         return MINIMAL_STYLE_CHECKLIST
 
-    def run(self, copy_editor_input: CopyEditorInput) -> CopyEditorOutput:
+    def run(
+        self,
+        copy_editor_input: CopyEditorInput,
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+    ) -> CopyEditorOutput:
         """
         Provide copy editing feedback on the draft based on the style guide.
 
@@ -145,6 +150,8 @@ class BlogCopyEditorAgent:
 
         prompt = COPY_EDITOR_PROMPT + "\n\n" + "\n".join(context_parts)
 
+        if on_llm_request:
+            on_llm_request("Reviewing draft for style and clarity...")
         data = None
         for attempt in range(2):
             try:
