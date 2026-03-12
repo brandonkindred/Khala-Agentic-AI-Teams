@@ -89,7 +89,9 @@ def create_blog_job(
         "started_at": None,
         "completed_at": None,
     }
-    _manager(cache_dir).create_job(job_id, **data)
+    # create_job(job_id, **fields) expects job_id as first arg; omit job_id from **data to avoid duplicate
+    fields = {k: v for k, v in data.items() if k != "job_id"}
+    _manager(cache_dir).create_job(job_id, **fields)
 
 
 def get_blog_job(
