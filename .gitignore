@@ -68,3 +68,4 @@ agents/software_engineering_team/test_repo/
 .agent_cache/
 .cursor/
 commit_msg.txt
+backend/continuation_logs/*
