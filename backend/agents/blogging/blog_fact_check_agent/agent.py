@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from llm_service import LLMClient
 
@@ -53,6 +53,7 @@ class BlogFactCheckAgent:
         require_disclaimer_for: Optional[List[str]] = None,
         *,
         work_dir: Optional[Union[str, Path]] = None,
+        on_llm_request: Optional[Callable[[str], None]] = None,
     ) -> FactCheckReport:
         """
         Run fact-check and risk assessment.
@@ -79,6 +80,8 @@ class BlogFactCheckAgent:
             require_disclaimer_for=", ".join(require_disclaimer_for),
         )
 
+        if on_llm_request:
+            on_llm_request("Checking facts and claims...")
         try:
             data = self.llm.complete_json(prompt, temperature=0.1)
         except LLMError:

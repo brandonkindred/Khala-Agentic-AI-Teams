@@ -337,7 +337,17 @@ class OllamaLLMClient(LLMClient):
                     raise LLMPermanentError(str(e), status_code=status or 0, cause=e)
                 raise LLMPermanentError(str(e), status_code=status or 0, cause=e)
             except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadTimeout) as e:
-                last_error = LLMTemporaryError(f"LLM connection/timeout error: {e}", cause=e)
+                hint = ""
+                if "name resolution" in str(e).lower() or "temporary failure" in str(e).lower():
+                    hint = (
+                        f" Cannot reach LLM at {self.base_url}. "
+                        "If running in Docker, set LLM_BASE_URL to a reachable endpoint "
+                        "(e.g. http://host.docker.internal:11434 for local Ollama, or ensure the container has DNS/outbound access)."
+                    )
+                last_error = LLMTemporaryError(
+                    f"LLM connection/timeout error: {e}.{hint}",
+                    cause=e,
+                )
                 if attempt < max_retries:
                     wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
                     logger.warning("LLM connection error (attempt %d/%d): %s. Retrying in %.1fs", attempt + 1, max_retries + 1, type(e).__name__, wait)

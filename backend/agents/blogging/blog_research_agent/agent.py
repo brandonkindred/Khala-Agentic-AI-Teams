@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Tuple
 
 from pydantic import HttpUrl
@@ -91,136 +92,146 @@ class ResearchAgent:
             if progress_callback:
                 progress_callback(status, sub)
 
-        brief_preview = (
-            (brief_input.brief[:77] + "...") if len(brief_input.brief) > 80 else brief_input.brief
-        )
-        logger.info(
-            "Starting research: brief=%s, max_results=%s",
-            brief_preview,
-            brief_input.max_results,
-        )
-
-        _report("Starting research...", 0.0)
-
-        # Try to load checkpoint
-        cached_state = None
-        if self.cache:
-            cached_state = self.cache.load_checkpoint(brief_input)
-            if cached_state:
-                logger.info("Resuming from checkpoint: last_step=%s", cached_state.last_completed_step)
-
-        # Step 1: Parse brief
-        _report("Parsing brief...", 0.05)
-        if cached_state and cached_state.normalized:
-            logger.info("Using cached normalized brief")
-            normalized = cached_state.normalized
-        else:
-            normalized = self._parse_brief(brief_input)
-            if self.cache:
-                self.cache.save_checkpoint(brief_input, "normalized", normalized=normalized)
-
-        # Step 2: Generate queries
-        _report("Generating search queries...", 0.10)
-        if cached_state and cached_state.queries:
-            logger.info("Using cached queries (%s)", len(cached_state.queries))
-            queries = [SearchQuery(**q) for q in cached_state.queries]
-        else:
-            queries = self._generate_queries(brief_input, normalized)
-            if self.cache:
-                self.cache.save_checkpoint(brief_input, "queries", queries=queries)
-
-        # Step 3: Run searches
-        if cached_state and cached_state.candidates:
-            logger.info("Using cached candidates (%s)", len(cached_state.candidates))
-            candidates = [CandidateResult(**c) for c in cached_state.candidates]
-        else:
-            _report("Running web searches...", 0.15)
-            candidates = self._run_searches(
-                queries,
-                brief_input,
-                on_search_progress=lambda i, n: _report(f"Running web search {i + 1}/{n}...", 0.15 + 0.20 * (i + 1) / max(1, n)),
+        self._progress_callback = progress_callback
+        try:
+            brief_preview = (
+                (brief_input.brief[:77] + "...") if len(brief_input.brief) > 80 else brief_input.brief
             )
-        _report("Fetching and reading web pages...", 0.38)
+            logger.info(
+                "Starting research: brief=%s, max_results=%s",
+                brief_preview,
+                brief_input.max_results,
+            )
 
-        # Step 4: Fetch documents
-        if cached_state and cached_state.documents:
-            logger.info("Using cached documents (%s)", len(cached_state.documents))
-            documents = [SourceDocument(**d) for d in cached_state.documents]
-        else:
-            documents = self._fetch_documents(candidates, brief_input)
+            _report("Starting research...", 0.0)
+
+            # Try to load checkpoint
+            cached_state = None
             if self.cache:
-                self.cache.save_checkpoint(brief_input, "documents", documents=documents)
+                cached_state = self.cache.load_checkpoint(brief_input)
+                if cached_state:
+                    logger.info("Resuming from checkpoint: last_step=%s", cached_state.last_completed_step)
 
-        # Step 5: Score documents
-        _report("Scoring documents for relevance...", 0.50)
-        if cached_state and cached_state.scored_docs:
-            logger.info("Using cached scored documents (%s)", len(cached_state.scored_docs))
-            scored_docs = []
-            for item in cached_state.scored_docs:
-                # Support old format [doc, score, type] and new [doc, relevance, authority, accuracy, type]
-                if len(item) >= 5:
-                    scored_docs.append((
-                        SourceDocument(**item[0]), item[1], item[2], item[3], item[4]
-                    ))
-                else:
-                    scored_docs.append((
-                        SourceDocument(**item[0]), item[1], 0.5, 0.5, item[2] if len(item) > 2 else None
-                    ))
-        else:
-            scored_docs = self._score_documents(documents, brief_input)
-            if self.cache:
-                self.cache.save_checkpoint(brief_input, "scored_docs", scored_docs=scored_docs)
+            # Step 1: Parse brief
+            _report("Parsing brief...", 0.05)
+            if cached_state and cached_state.normalized:
+                logger.info("Using cached normalized brief")
+                normalized = cached_state.normalized
+            else:
+                normalized = self._parse_brief(brief_input)
+                if self.cache:
+                    self.cache.save_checkpoint(brief_input, "normalized", normalized=normalized)
 
-        # Step 6: Summarize documents
-        _report("Summarizing references...", 0.65)
-        if cached_state and cached_state.references:
-            logger.info("Using cached references (%s)", len(cached_state.references))
-            references = [ResearchReference(**r) for r in cached_state.references]
-        else:
-            references = self._summarize_documents(scored_docs, brief_input)
-            if self.cache:
-                self.cache.save_checkpoint(brief_input, "references", references=references)
+            # Step 2: Generate queries
+            _report("Generating search queries...", 0.10)
+            if cached_state and cached_state.queries:
+                logger.info("Using cached queries (%s)", len(cached_state.queries))
+                queries = [SearchQuery(**q) for q in cached_state.queries]
+            else:
+                queries = self._generate_queries(brief_input, normalized)
+                if self.cache:
+                    self.cache.save_checkpoint(brief_input, "queries", queries=queries)
 
-        # Step 7: Synthesize overview
-        _report("Synthesizing overview...", 0.78)
-        if cached_state and cached_state.notes is not None:
-            logger.info("Using cached notes")
-            notes = cached_state.notes
-        else:
-            notes = self._synthesize_overview(brief_input, references)
-            if self.cache:
-                self.cache.save_checkpoint(brief_input, "notes", notes=notes)
+            # Step 3: Run searches
+            if cached_state and cached_state.candidates:
+                logger.info("Using cached candidates (%s)", len(cached_state.candidates))
+                candidates = [CandidateResult(**c) for c in cached_state.candidates]
+            else:
+                _report("Running web searches...", 0.15)
+                candidates = self._run_searches(
+                    queries,
+                    brief_input,
+                    on_search_progress=lambda i, n: _report(f"Running web search {i + 1}/{n}...", 0.15 + 0.20 * (i + 1) / max(1, n)),
+                )
+            _report("Fetching and reading web pages...", 0.38)
 
-        # Step 8: Fetch academic sources (arXiv)
-        _report("Searching arXiv for papers...", 0.85)
-        academic_papers = self._fetch_academic_papers(brief_input)
+            # Step 4: Fetch documents
+            if cached_state and cached_state.documents:
+                logger.info("Using cached documents (%s)", len(cached_state.documents))
+                documents = [SourceDocument(**d) for d in cached_state.documents]
+            else:
+                documents = self._fetch_documents(candidates, brief_input)
+                if self.cache:
+                    self.cache.save_checkpoint(brief_input, "documents", documents=documents)
 
-        # Step 9: Similar topics (score > 70%)
-        _report("Finding similar topics...", 0.90)
-        similar_topics = self._get_similar_topics(brief_input, references)
+            # Step 5: Score documents
+            _report("Scoring documents for relevance...", 0.50)
+            if cached_state and cached_state.scored_docs:
+                logger.info("Using cached scored documents (%s)", len(cached_state.scored_docs))
+                scored_docs = []
+                for item in cached_state.scored_docs:
+                    # Support old format [doc, score, type] and new [doc, relevance, authority, accuracy, type]
+                    if len(item) >= 5:
+                        scored_docs.append((
+                            SourceDocument(**item[0]), item[1], item[2], item[3], item[4]
+                        ))
+                    else:
+                        scored_docs.append((
+                            SourceDocument(**item[0]), item[1], 0.5, 0.5, item[2] if len(item) > 2 else None
+                        ))
+            else:
+                scored_docs = self._score_documents(documents, brief_input)
+                if self.cache:
+                    self.cache.save_checkpoint(brief_input, "scored_docs", scored_docs=scored_docs)
 
-        # Step 10: Compile document (Blog Post Research format)
-        _report("Compiling research document...", 0.95)
-        compiled_document = self._compile_document(
-            brief_input, references, notes, academic_papers, similar_topics
-        )
+            # Step 6: Summarize documents
+            _report("Summarizing references...", 0.65)
+            if cached_state and cached_state.references:
+                logger.info("Using cached references (%s)", len(cached_state.references))
+                references = [ResearchReference(**r) for r in cached_state.references]
+            else:
+                references = self._summarize_documents(scored_docs, brief_input)
+                if self.cache:
+                    self.cache.save_checkpoint(brief_input, "references", references=references)
 
-        _report("Research complete", 1.0)
-        logger.info(
-            "Research complete: %s references, %s academic papers, %s similar topics, compiled_document=%s",
-            len(references),
-            len(academic_papers),
-            len(similar_topics),
-            len(compiled_document) if compiled_document else 0,
-        )
-        return ResearchAgentOutput(
-            query_plan=queries,
-            references=references,
-            notes=notes,
-            compiled_document=compiled_document,
-            academic_papers=academic_papers,
-            similar_topics=similar_topics,
-        )
+            # Step 7: Synthesize overview
+            _report("Synthesizing overview...", 0.78)
+            if cached_state and cached_state.notes is not None:
+                logger.info("Using cached notes")
+                notes = cached_state.notes
+            else:
+                notes = self._synthesize_overview(brief_input, references)
+                if self.cache:
+                    self.cache.save_checkpoint(brief_input, "notes", notes=notes)
+
+            # Step 8: Fetch academic sources (arXiv)
+            _report("Searching arXiv for papers...", 0.85)
+            academic_papers = self._fetch_academic_papers(brief_input)
+
+            # Step 9: Similar topics (score > 70%)
+            _report("Finding similar topics...", 0.90)
+            similar_topics = self._get_similar_topics(brief_input, references)
+
+            # Step 10: Compile document (Blog Post Research format)
+            _report("Compiling research document...", 0.95)
+            compiled_document = self._compile_document(
+                brief_input, references, notes, academic_papers, similar_topics
+            )
+
+            _report("Research complete", 1.0)
+            logger.info(
+                "Research complete: %s references, %s academic papers, %s similar topics, compiled_document=%s",
+                len(references),
+                len(academic_papers),
+                len(similar_topics),
+                len(compiled_document) if compiled_document else 0,
+            )
+            self._progress_callback = None
+            return ResearchAgentOutput(
+                query_plan=queries,
+                references=references,
+                notes=notes,
+                compiled_document=compiled_document,
+                academic_papers=academic_papers,
+                similar_topics=similar_topics,
+            )
+        finally:
+            self._progress_callback = None
+
+    def _report_llm(self, status: str, sub: float) -> None:
+        """Report status to UI before an LLM request (if progress_callback is set)."""
+        if getattr(self, "_progress_callback", None):
+            self._progress_callback(status, sub)
 
     # Steps --------------------------------------------------------------
 
@@ -236,6 +247,7 @@ class ResearchAgent:
         if brief_input.tone_or_purpose:
             prompt += f"Tone/Purpose: {brief_input.tone_or_purpose}\n"
 
+        self._report_llm("Parsing brief...", 0.05)
         parsed = self.llm.complete_json(prompt, temperature=0.0)
 
         return {
@@ -257,6 +269,7 @@ class ResearchAgent:
             audience=brief_input.audience or "",
             tone_or_purpose=brief_input.tone_or_purpose or "",
         )
+        self._report_llm("Generating search queries...", 0.10)
         data = self.llm.complete_json(prompt, temperature=0.3)
         queries_data = data.get("queries") or []
 
@@ -341,6 +354,37 @@ class ResearchAgent:
         logger.info("Fetched %s documents", len(documents))
         return documents
 
+    def _score_one_document(
+        self,
+        doc: SourceDocument,
+        brief_input: ResearchBriefInput,
+    ) -> Tuple[SourceDocument, float, float, float, str]:
+        """Score a single document for relevance, authority, accuracy, and type. Used by _score_documents."""
+        prompt = DOC_RELEVANCE_SCORING_PROMPT + "\n\n" + (
+            f"Brief:\n{brief_input.brief}\n\n"
+            f"Document title: {doc.title or ''}\n"
+            f"Document content (full text):\n{doc.content}\n"
+        )
+        data = self.llm.complete_json(prompt, temperature=0.0)
+        rel = data.get("relevance_score")
+        auth = data.get("authority_score")
+        acc = data.get("accuracy_score")
+        if not isinstance(rel, (int, float)):
+            rel = 0.0
+        if not isinstance(auth, (int, float)):
+            auth = 0.5
+        if not isinstance(acc, (int, float)):
+            acc = 0.5
+        relevance = max(0.0, min(1.0, float(rel)))
+        authority = max(0.0, min(1.0, float(auth)))
+        accuracy = max(0.0, min(1.0, float(acc)))
+        type_label = data.get("type") or None
+        logger.debug(
+            "Scored doc: title=%s, relevance=%s, authority=%s, accuracy=%s, type=%s",
+            doc.title, relevance, authority, accuracy, type_label,
+        )
+        return (doc, relevance, authority, accuracy, type_label)
+
     def _score_documents(
         self,
         documents: List[SourceDocument],
@@ -348,44 +392,67 @@ class ResearchAgent:
     ) -> List[Tuple[SourceDocument, float, float, float, str]]:
         """
         Use the LLM to produce relevance, authority, accuracy scores and type for each document.
+        Documents are scored in parallel; results are sorted by relevance descending.
 
         Preconditions: documents and brief_input valid.
         Postconditions: Returns list of (document, relevance, authority, accuracy, type_label) sorted by relevance descending.
         """
-        logger.info("Scoring documents for relevance, authority, and accuracy...")
-        scored: List[Tuple[SourceDocument, float, float, float, str]] = []
+        n_docs = len(documents)
+        if n_docs == 0:
+            logger.info("No documents to score")
+            return []
 
-        for doc in documents:
-            excerpt = doc.content[:4000]
-            prompt = DOC_RELEVANCE_SCORING_PROMPT + "\n\n" + (
-                f"Brief:\n{brief_input.brief}\n\n"
-                f"Document title: {doc.title or ''}\n"
-                f"Document excerpt:\n{excerpt}\n"
-            )
-            data = self.llm.complete_json(prompt, temperature=0.0)
-            rel = data.get("relevance_score")
-            auth = data.get("authority_score")
-            acc = data.get("accuracy_score")
-            if not isinstance(rel, (int, float)):
-                rel = 0.0
-            if not isinstance(auth, (int, float)):
-                auth = 0.5
-            if not isinstance(acc, (int, float)):
-                acc = 0.5
-            relevance = max(0.0, min(1.0, float(rel)))
-            authority = max(0.0, min(1.0, float(auth)))
-            accuracy = max(0.0, min(1.0, float(acc)))
-            type_label = data.get("type") or None
-            scored.append((doc, relevance, authority, accuracy, type_label))
-            logger.debug(
-                "Scored doc: title=%s, relevance=%s, authority=%s, accuracy=%s, type=%s",
-                doc.title, relevance, authority, accuracy, type_label,
-            )
+        logger.info("Scoring %s documents for relevance, authority, and accuracy (parallel)...", n_docs)
+        self._report_llm("Scoring documents for relevance...", 0.50)
 
-        # Sort by relevance descending.
+        max_workers = min(n_docs, 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(self._score_one_document, doc, brief_input)
+                for doc in documents
+            ]
+            scored = [fut.result() for fut in futures]
+
         scored.sort(key=lambda t: t[1], reverse=True)
+        self._report_llm("Document scoring complete.", 0.65)
         logger.info("Scored %s documents", len(scored))
         return scored
+
+    def _summarize_one_document(
+        self,
+        item: Tuple[SourceDocument, float, float, float, str],
+        brief_input: ResearchBriefInput,
+    ) -> ResearchReference:
+        """Summarize a single document into a ResearchReference. Used by _summarize_documents."""
+        doc, relevance, authority, accuracy, type_label = item
+        excerpt = doc.content[:8000]
+        prompt = DOC_SUMMARIZATION_PROMPT + "\n\n" + (
+            f"Brief:\n{brief_input.brief}\n"
+        )
+        if brief_input.audience:
+            prompt += f"Audience: {brief_input.audience}\n"
+        if brief_input.tone_or_purpose:
+            prompt += f"Tone/Purpose: {brief_input.tone_or_purpose}\n"
+        prompt += (
+            f"\nDocument title: {doc.title or ''}\n"
+            f"Document URL: {doc.url}\n"
+            f"Document excerpt:\n{excerpt}\n"
+        )
+        data = self.llm.complete_json(prompt, temperature=0.2)
+        summary = data.get("summary") or ""
+        key_points = data.get("key_points") or []
+        return ResearchReference(
+            title=doc.title or str(doc.url),
+            url=doc.url,
+            domain=doc.domain,
+            summary=summary,
+            key_points=key_points,
+            type=type_label,
+            recency=None,
+            relevance_score=relevance,
+            authority_score=authority,
+            accuracy_score=accuracy,
+        )
 
     def _summarize_documents(
         self,
@@ -396,45 +463,24 @@ class ResearchAgent:
         Preconditions: scored_docs and brief_input valid.
         Postconditions: Returns list of ResearchReference, length <= brief_input.max_results.
         """
-        logger.info("Summarizing references...")
-        references: List[ResearchReference] = []
         cap = min(len(scored_docs), brief_input.max_results)
+        if cap == 0:
+            logger.info("No documents to summarize")
+            return []
 
-        for idx, (doc, relevance, authority, accuracy, type_label) in enumerate(scored_docs[: brief_input.max_results]):
-            logger.debug("Summarizing reference %s/%s", idx + 1, cap)
-            excerpt = doc.content[:8000]
-            prompt = DOC_SUMMARIZATION_PROMPT + "\n\n" + (
-                f"Brief:\n{brief_input.brief}\n"
-            )
-            if brief_input.audience:
-                prompt += f"Audience: {brief_input.audience}\n"
-            if brief_input.tone_or_purpose:
-                prompt += f"Tone/Purpose: {brief_input.tone_or_purpose}\n"
-            prompt += (
-                f"\nDocument title: {doc.title or ''}\n"
-                f"Document URL: {doc.url}\n"
-                f"Document excerpt:\n{excerpt}\n"
-            )
+        logger.info("Summarizing %s references (parallel)...", cap)
+        self._report_llm("Summarizing references...", 0.65)
 
-            data = self.llm.complete_json(prompt, temperature=0.2)
-            summary = data.get("summary") or ""
-            key_points = data.get("key_points") or []
+        items = scored_docs[: brief_input.max_results]
+        max_workers = min(cap, 8)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(self._summarize_one_document, item, brief_input)
+                for item in items
+            ]
+            references = [fut.result() for fut in futures]
 
-            references.append(
-                ResearchReference(
-                    title=doc.title or str(doc.url),
-                    url=doc.url,
-                    domain=doc.domain,
-                    summary=summary,
-                    key_points=key_points,
-                    type=type_label,
-                    recency=None,  # Could be set from publish_date/metadata in the future
-                    relevance_score=relevance,
-                    authority_score=authority,
-                    accuracy_score=accuracy,
-                )
-            )
-
+        self._report_llm("Summarization complete.", 0.78)
         logger.info("Produced %s references", len(references))
         return references
 
@@ -468,6 +514,7 @@ class ResearchAgent:
             f"Brief:\n{brief_input.brief}\n\n"
             f"References (JSON):\n{refs_for_prompt}\n"
         )
+        self._report_llm("Synthesizing overview...", 0.78)
         try:
             data = self.llm.complete_json(prompt, temperature=0.3)
         except ValueError as e:
@@ -542,6 +589,7 @@ class ResearchAgent:
             f"Brief:\n{brief_input.brief}\n\n"
             f"References found:\n{refs_preview}\n"
         )
+        self._report_llm("Finding similar topics...", 0.90)
         try:
             data = self.llm.complete_json(prompt, temperature=0.2)
             items = data.get("similar_topics") or []

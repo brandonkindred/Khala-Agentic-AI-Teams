@@ -8,7 +8,7 @@ from __future__ import annotations
 import ast
 import logging
 import re
-from typing import List
+from typing import Callable, List, Optional
 
 from llm_service import LLMClient
 from blog_research_agent.models import ResearchReference
@@ -49,7 +49,12 @@ class BlogReviewAgent:
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
 
-    def run(self, review_input: BlogReviewInput) -> BlogReviewOutput:
+    def run(
+        self,
+        review_input: BlogReviewInput,
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+    ) -> BlogReviewOutput:
         """
         Produce title choices and blog outline from the brief and sources.
 
@@ -78,6 +83,8 @@ class BlogReviewAgent:
         context.append(refs_text)
 
         prompt = BLOG_REVIEW_PROMPT + "\n\n" + "\n".join(context)
+        if on_llm_request:
+            on_llm_request("Generating title choices and outline...")
         try:
             data = self.llm.complete_json(prompt, temperature=0.4)
         except ValueError as e:

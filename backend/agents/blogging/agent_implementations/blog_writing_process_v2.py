@@ -181,7 +181,10 @@ def run_pipeline(
             tone_or_purpose=brief.tone_or_purpose,
             references=research_result.references,
         )
-        review_result = review_agent.run(review_input)
+        review_result = review_agent.run(
+            review_input,
+            on_llm_request=lambda msg: _update(BlogPhase.REVIEW, status_text=msg),
+        )
     except BloggingError:
         raise
     except Exception as e:
@@ -242,7 +245,10 @@ def run_pipeline(
                     brand_spec_path=str(brand_spec_path) if brand_spec_path.exists() else None,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
-                draft_result = draft_agent.run(draft_input)
+                draft_result = draft_agent.run(
+                    draft_input,
+                    on_llm_request=lambda msg: _update(BlogPhase.DRAFT_INITIAL, status_text=msg),
+                )
             except BloggingError:
                 raise
             except Exception as e:
@@ -274,7 +280,10 @@ def run_pipeline(
                     tone_or_purpose=brief.tone_or_purpose,
                     style_guide=style_guide_text,
                 )
-                copy_editor_result = copy_editor_agent.run(copy_editor_input)
+                copy_editor_result = copy_editor_agent.run(
+                    copy_editor_input,
+                    on_llm_request=lambda msg: _update(BlogPhase.COPY_EDIT_LOOP, status_text=msg),
+                )
                 logger.info(
                     "Copy editor iteration %s: %s feedback items",
                     iteration,
@@ -292,7 +301,10 @@ def run_pipeline(
                     brand_spec_path=str(brand_spec_path) if brand_spec_path.exists() else None,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
-                draft_result = draft_agent.revise(revise_input)
+                draft_result = draft_agent.revise(
+                    revise_input,
+                    on_llm_request=lambda msg: _update(BlogPhase.COPY_EDIT_LOOP, status_text=msg),
+                )
             except BloggingError:
                 raise
             except Exception as e:
@@ -335,6 +347,7 @@ def run_pipeline(
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                     require_disclaimer_for=brand_spec.content_rules.safety.require_disclaimer_for,
                     work_dir=work_dir,
+                    on_llm_request=lambda msg: _update(BlogPhase.FACT_CHECK, status_text=msg),
                 )
             except BloggingError:
                 raise
@@ -355,6 +368,7 @@ def run_pipeline(
                     brand_spec=brand_spec,
                     validator_report=validator_report.model_dump() if hasattr(validator_report, "model_dump") else None,
                     work_dir=work_dir,
+                    on_llm_request=lambda msg: _update(BlogPhase.COMPLIANCE, status_text=msg),
                 )
             except BloggingError:
                 raise
@@ -447,7 +461,10 @@ def run_pipeline(
                     brand_spec_path=str(brand_spec_path) if brand_spec_path.exists() else None,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
-                draft_result = draft_agent.revise(revise_input)
+                draft_result = draft_agent.revise(
+                    revise_input,
+                    on_llm_request=lambda msg: _update(BlogPhase.REWRITE_LOOP, status_text=msg),
+                )
             except BloggingError:
                 raise
             except Exception as e:

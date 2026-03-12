@@ -17,14 +17,14 @@ To avoid JSON escaping errors, use this format exactly:
 2. Next line: ---DRAFT---
 3. Then output the complete blog post in Markdown (headings, paragraphs, lists, code blocks as needed). Do not truncate. Everything after ---DRAFT--- is the draft."""
 
-REVISE_DRAFT_PROMPT = """You are a blog post writer revising a draft based on copy editor feedback.
+REVISE_DRAFT_PROMPT = """You are an expert blog writer revising a draft based on copy editor feedback.
 
 You will be given:
 1. A brand and writing style guide.
 2. The current draft (Markdown).
-3. Copy editor feedback: a list of issues with locations, descriptions, and suggested fixes.
+3. Copy editor feedback from an expert editor: a list of issues with locations, detailed descriptions of what is wrong and why, and concrete suggested fixes. Each item is written so you can understand exactly what to change and why.
 
-Your task: Revise the draft to address the feedback. Apply every must_fix and should_fix item. Consider the consider items where they improve the piece. Preserve the draft's structure, facts, and substance. Do not remove content unless the feedback explicitly asks for it. Output the complete revised draft.
+Your task: Revise the draft to address the feedback. Apply every must_fix and should_fix item. Consider the consider items where they improve the piece. Use the detailed issue descriptions and suggestions to make precise changes. Preserve the draft's structure, facts, and substance. Do not remove content unless the feedback explicitly asks for it. Output the complete revised draft.
 
 To avoid JSON escaping errors, use this format exactly:
 1. First line: {"draft": 0}
