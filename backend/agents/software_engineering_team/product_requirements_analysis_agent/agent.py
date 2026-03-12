@@ -1188,9 +1188,9 @@ Previously Answered Questions:
     ) -> tuple[List[OpenQuestion], List[OpenQuestion]]:
         """Filter out questions that appear to be duplicates of answered ones.
         
-        Uses normalized word stems (e.g. token/tokens, store/stored) and a lower
-        match threshold so semantic duplicates are not re-asked. Treats spec + Q&A
-        as source of truth.
+        Uses normalized word stems (e.g. token/tokens, store/stored). Only filters
+        as duplicate when match to qa_history is >= 95%; 50–95% similar questions
+        are kept and may be consolidated elsewhere. Treats spec + Q&A as source of truth.
         
         Returns:
             Tuple of (filtered_questions, duplicate_questions).
@@ -1229,8 +1229,9 @@ Previously Answered Questions:
                 or (stem + "ed") in qa_history_lower
             )
             match_ratio = matches / len(key_stems)
-            # Lower threshold (0.45) so we catch more semantic duplicates
-            if match_ratio >= 0.45:
+            # Only treat as duplicate of an answered question when match >= 95%.
+            # Lower similarity (50–95%) may be consolidated but should not be filtered out.
+            if match_ratio >= 0.95:
                 logger.info(
                     "Filtering duplicate question (%.0f%% match): %s",
                     match_ratio * 100,
@@ -1569,11 +1570,12 @@ Previously Answered Questions:
     def _dedupe_questions_by_similarity(
         self, questions: List[OpenQuestion]
     ) -> List[OpenQuestion]:
-        """Drop questions whose question_text is too similar to an earlier one.
+        """Drop questions whose question_text is nearly identical to an earlier one.
 
-        Keeps the first of each similar group; preserves order. Uses normalized
-        text (lowercase, collapsed whitespace) and treats two questions as
-        similar if one is a substring of the other or word-set overlap is high.
+        Only questions with >= 95% similarity are treated as duplicates and dropped.
+        Questions with 50–95% similarity are kept so they can be consolidated
+        (e.g. by _consolidate_open_questions) into a single question instead of
+        being filtered out. Keeps the first of each duplicate group; preserves order.
         """
         if len(questions) <= 1:
             return list(questions)
@@ -1584,7 +1586,8 @@ Previously Answered Questions:
         def words(t: str) -> set:
             return set(norm(t).split())
 
-        SIMILARITY_THRESHOLD = 0.75
+        # Only drop as duplicate when >= 95% match; 50–95% similar stay for consolidation
+        SIMILARITY_THRESHOLD = 0.95
         kept: List[OpenQuestion] = []
         kept_norm: List[str] = []
         kept_words: List[set] = []

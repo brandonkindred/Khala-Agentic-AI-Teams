@@ -156,17 +156,13 @@ def test_run_failed_tasks_pauses_on_llm_rate_limit(tmp_path: Path) -> None:
 
 
 def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: Path) -> None:
-    """When planning-v2 workflow fails (success=False), job fails with planning error."""
+    """When Planning V3 workflow fails (success=False), job fails with planning error."""
     (tmp_path / "initial_spec.md").write_text("# Test App\n\nBuild a todo app.", encoding="utf-8")
     job_id = "test-planning-fail"
     update_job_calls = []
 
     def capture_update_job(jid, **kwargs):
         update_job_calls.append((jid, kwargs))
-
-    mock_p2_result = MagicMock()
-    mock_p2_result.success = False
-    mock_p2_result.failure_reason = "Planning-v2 workflow did not complete."
 
     mock_arch = MagicMock()
     arch_inputs_received = []
@@ -209,6 +205,13 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
         "documentation": MagicMock(),
     }
 
+    mock_pra_result = MagicMock()
+    mock_pra_result.success = True
+    mock_pra_result.final_spec_content = "# Test App\n\nBuild a todo app."
+    mock_pra_result.iterations = 1
+    mock_pra_agent = MagicMock()
+    mock_pra_agent.run_workflow.return_value = mock_pra_result
+
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch("orchestrator._get_agents", return_value=mock_agents):
             with patch(
@@ -220,11 +223,10 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
                     constraints=[],
                 ),
             ):
-                with patch("planning_v2_team.PlanningV2TeamLead") as MockP2Lead:
-                    mock_lead_instance = MagicMock()
-                    mock_lead_instance.run_workflow.return_value = mock_p2_result
-                    MockP2Lead.return_value = mock_lead_instance
-                    orchestrator.run_orchestrator(job_id, str(tmp_path))
+                with patch("product_requirements_analysis_agent.ProductRequirementsAnalysisAgent", return_value=mock_pra_agent):
+                    with patch("planning_v3_team.orchestrator.run_workflow") as mock_run_v3:
+                        mock_run_v3.return_value = {"success": False, "failure_reason": "Planning failed"}
+                        orchestrator.run_orchestrator(job_id, str(tmp_path))
 
     failed_calls = [(jid, kw) for jid, kw in update_job_calls if kw.get("status") == "failed"]
     assert len(failed_calls) >= 1
@@ -233,17 +235,13 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
 
 
 def test_run_orchestrator_fails_job_when_project_planning_raises(tmp_path: Path) -> None:
-    """When planning-v2 workflow fails (success=False), job is marked failed."""
+    """When Planning V3 workflow fails (success=False), job is marked failed."""
     (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
     job_id = "test-planning-total-fail"
     update_job_calls = []
 
     def capture_update_job(jid, **kwargs):
         update_job_calls.append((jid, kwargs))
-
-    mock_p2_result = MagicMock()
-    mock_p2_result.success = False
-    mock_p2_result.failure_reason = "Planning failed"
 
     mock_agents = {
         "architecture": MagicMock(),
@@ -262,6 +260,13 @@ def test_run_orchestrator_fails_job_when_project_planning_raises(tmp_path: Path)
         "documentation": MagicMock(),
     }
 
+    mock_pra_result = MagicMock()
+    mock_pra_result.success = True
+    mock_pra_result.final_spec_content = "# Test\n\nSpec."
+    mock_pra_result.iterations = 1
+    mock_pra_agent = MagicMock()
+    mock_pra_agent.run_workflow.return_value = mock_pra_result
+
     with patch("orchestrator.update_job", side_effect=capture_update_job):
         with patch("orchestrator._get_agents", return_value=mock_agents):
             with patch(
@@ -273,11 +278,10 @@ def test_run_orchestrator_fails_job_when_project_planning_raises(tmp_path: Path)
                     constraints=[],
                 ),
             ):
-                with patch("planning_v2_team.PlanningV2TeamLead") as MockP2Lead:
-                    mock_lead_instance = MagicMock()
-                    mock_lead_instance.run_workflow.return_value = mock_p2_result
-                    MockP2Lead.return_value = mock_lead_instance
-                    orchestrator.run_orchestrator(job_id, str(tmp_path))
+                with patch("product_requirements_analysis_agent.ProductRequirementsAnalysisAgent", return_value=mock_pra_agent):
+                    with patch("planning_v3_team.orchestrator.run_workflow") as mock_run_v3:
+                        mock_run_v3.return_value = {"success": False, "failure_reason": "Planning failed"}
+                        orchestrator.run_orchestrator(job_id, str(tmp_path))
 
     failed_calls = [
         (jid, kw) for jid, kw in update_job_calls

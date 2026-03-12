@@ -372,7 +372,7 @@ def _log_task_breakdown(
 def _get_agents() -> Dict[str, Any]:
     """Lazy init agents including the code review, documentation, and DbC comments agents.
     Each agent uses get_client(key) for per-agent model configuration.
-    Main pipeline uses planning_v2_team for planning; spec_intake/project_planning/domain planning agents
+    Main pipeline uses planning_v3_team for planning; spec_intake/project_planning/domain planning agents
     are not used in the main flow (clarification_store may still use Spec Intake elsewhere)."""
     from accessibility_agent import AccessibilityExpertAgent, AccessibilityInput
     from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
@@ -1857,25 +1857,25 @@ def run_orchestrator(
         # Check for cancellation after PRA
         _check_cancellation(job_id)
 
-        # ── Step 2: Planning V2 Team ──────────────────────────────────────────
-        # Receives validated spec, performs planning (skips spec review)
+        # ── Step 2: Planning V3 Team ──────────────────────────────────────────
+        # Receives validated spec, performs planning (intake → discovery → requirements → synthesis → document production)
         update_job(job_id, phase="planning", message="Starting planning workflow...", status_text="Starting planning workflow")
-        logger.info("Next step -> Running Planning V2 team to generate architecture and task breakdown")
+        logger.info("Next step -> Running Planning V3 team to generate handoff and context")
 
-        from planning_v2_team import PlanningV2TeamLead
-        from planning_v2_adapter import adapt_planning_v2_result, PlanningV2AdapterResult
+        from planning_v3_team.orchestrator import run_workflow as run_planning_v3_workflow
+        from planning_v3_adapter import adapt_planning_v3_result, PlanningV2AdapterResult
 
-        PLANNING_V2_PHASE_ORDER = [
-            "intake", "planning", "implementation", "review", "problem_solving", "deliver"
+        PLANNING_V3_PHASE_ORDER = [
+            "intake", "discovery", "requirements", "synthesis", "document_production", "sub_agent_provisioning"
         ]
 
-        def _planning_v2_job_updater(**kwargs: Any) -> None:
+        def _planning_v3_job_updater(**kwargs: Any) -> None:
             try:
                 planning_phase = kwargs.pop("current_phase", None)
                 if planning_phase:
                     kwargs["planning_subprocess"] = planning_phase
                     completed_phases = []
-                    for p in PLANNING_V2_PHASE_ORDER:
+                    for p in PLANNING_V3_PHASE_ORDER:
                         if p == planning_phase:
                             break
                         completed_phases.append(p)
@@ -1884,34 +1884,26 @@ def run_orchestrator(
             except Exception:
                 pass
 
-        # Optionally pass PRD from PRA output so Planning V2 does not need to read from disk
-        prd_content: Optional[str] = None
-        prd_file = path / "plan" / "product_analysis" / "product_requirements_document.md"
-        if prd_file.exists():
-            try:
-                prd_content = prd_file.read_text(encoding="utf-8")
-            except Exception as e:
-                logger.warning("Could not read PRD from plan/product_analysis: %s", e)
-
-        planning_v2_lead = PlanningV2TeamLead(get_client("project_planning"))
-        p2_result = planning_v2_lead.run_workflow(
+        p3_result = run_planning_v3_workflow(
+            repo_path=str(path),
             spec_content=validated_spec,
-            repo_path=path,
-            inspiration_content=None,
-            job_updater=_planning_v2_job_updater,
-            validated_spec_content=validated_spec,
-            prd_content=prd_content,
+            use_product_analysis=False,
+            use_planning_v2=False,
+            llm=get_client("project_planning"),
+            job_updater=_planning_v3_job_updater,
         )
-        if not p2_result.success:
-            err = p2_result.failure_reason or "Planning-v2 workflow did not complete successfully."
-            logger.error("Planning-v2 failed: %s", err)
+        if not p3_result.get("success"):
+            err = p3_result.get("failure_reason") or "Planning V3 workflow did not complete successfully."
+            logger.error("Planning V3 failed: %s", err)
             update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
             return
 
         try:
-            adapter_result: PlanningV2AdapterResult = adapt_planning_v2_result(p2_result, spec_title=requirements.title)
+            adapter_result: PlanningV2AdapterResult = adapt_planning_v3_result(
+                p3_result, spec_title=requirements.title, repo_path=str(path)
+            )
         except ValueError as e:
-            logger.error("Planning-v2 adapter failed: %s", e)
+            logger.error("Planning V3 adapter failed: %s", e)
             update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
             return
 
@@ -1919,14 +1911,14 @@ def run_orchestrator(
         project_overview = adapter_result.project_overview
         spec_intake_open_questions = adapter_result.open_questions
         spec_intake_assumptions = adapter_result.assumptions
-        # Use the final approved product spec from Planning V2 if available
+        # Use the final approved product spec from Planning V3 handoff if available
         spec_content_for_planning = adapter_result.final_spec_content or spec_content
         update_job(job_id, requirements_title=requirements.title)
 
-        # Check for cancellation after Planning V2
+        # Check for cancellation after Planning V3
         _check_cancellation(job_id)
 
-        # Planning process: (1) features doc from planning-v2 adapter; (2) tasks from Tech Lead; (3) architecture from Architecture Expert;
+        # Planning process: (1) features doc from planning-v3 adapter; (2) tasks from Tech Lead; (3) architecture from Architecture Expert;
         # (4) consolidation; (5) execution.
         features_and_functionality_doc = (project_overview.get("features_and_functionality_doc") or "").strip()
 
@@ -1962,7 +1954,7 @@ def run_orchestrator(
         existing_code = _truncate_for_context(_read_repo_code(path), max_code_chars)
 
         # Single-pass planning: Tech Lead produces Initiative/Epic/Story hierarchy
-        # If Planning V2 produced a hierarchy, pass it to Tech Lead to use directly
+        # If Planning V3 adapter produced a hierarchy, pass it to Tech Lead to use directly (V3 handoff typically has hierarchy=None)
         planning_v2_hierarchy = adapter_result.hierarchy
         tech_lead_output = None
         assignment = None

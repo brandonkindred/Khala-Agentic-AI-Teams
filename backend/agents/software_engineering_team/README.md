@@ -45,7 +45,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 
 | Phase | Sub-team | Agents |
 |-------|----------|--------|
-| **Discovery / Design (planning)** | planning_v2_team | Planning (v2) 6-phase workflow; planning_v2_adapter maps result to ProductRequirements and project_overview for Tech Lead and Architecture |
+| **Discovery / Design (planning)** | planning_v3_team | Planning V3 workflow (intake → discovery → requirements → synthesis → document production); planning_v3_adapter maps handoff to ProductRequirements and project_overview for Tech Lead and Architecture |
 | **Design (post-planning)** | top-level | Architecture Expert, Tech Lead, planning consolidation |
 | **Setup** | top-level | Git Setup |
 | **Implementation** | backend | Backend Expert |
@@ -54,7 +54,7 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 | **Quality** | quality gates (cross-cutting) | Code Review, QA Expert, Cybersecurity Expert, Accessibility Expert, Acceptance Verifier, DbC Comments |
 | **Integration / release** | top-level | Integration Agent, DevOps Team (sub-orchestrator), Documentation Agent |
 
-**Planning:** The main pipeline uses `planning_v2_team` (PlanningV2TeamLead) for discovery and planning; its output is adapted by `planning_v2_adapter` into ProductRequirements and project_overview for Tech Lead and Architecture Expert. The legacy `planning_team` (Spec Intake, Project Planning, domain planning agents) is no longer used in the main flow; clarification sessions still use `planning_team.spec_intake_agent` and `spec_clarification_agent` for open questions and assumptions.
+**Planning:** The main pipeline uses `planning_v3_team` for discovery and planning; its handoff is adapted by `planning_v3_adapter` into ProductRequirements and project_overview for Tech Lead and Architecture Expert. The legacy `planning_team` (Spec Intake, Project Planning, domain planning agents) is no longer used in the main flow; clarification sessions still use `planning_team.spec_intake_agent` and `spec_clarification_agent` for open questions and assumptions.
 
 **Accessibility:** Lives under `frontend_team/` but is conceptually part of the **Quality** phase—it reviews frontend code for WCAG 2.2 compliance and is invoked per frontend task.
 
@@ -63,8 +63,8 @@ Agents are grouped by **SDLC phase** and **who consumes whose output**. Executio
 ```mermaid
 flowchart LR
   subgraph discovery [Discovery and planning]
-    PlanningV2[Planning v2\n6-phase workflow]
-    Adapter[planning_v2_adapter]
+    PlanningV3[Planning V3\nhandoff workflow]
+    Adapter[planning_v3_adapter]
   end
 
   subgraph design [Design and planning]
@@ -113,9 +113,10 @@ flowchart LR
 
 ## Plan folder
 
-All planning artifacts are written to a `plan/` folder at the project root (work path). The folder is created when the spec is first ingested successfully. Planning (v2) also writes to `planning_v2/` under the repo path. Artifacts include:
+All planning artifacts are written to a `plan/` folder at the project root (work path). The folder is created when the spec is first ingested successfully. The main pipeline uses Planning V3, which writes context and handoff artifacts under `plan/`. The standalone Planning V2 API (if used) writes to `planning_v2/`. Artifacts include:
 
-- `planning_v2/planning_artifacts.md` (Planning v2 Implementation phase)
+- `plan/` (Planning V3 handoff: client context, validated spec, PRD)
+- `planning_v2/planning_artifacts.md` (Planning v2 Implementation phase, when using standalone Planning V2 API)
 - `plan/architecture.md` (Architecture Expert)
 - `plan/tech_lead.md` (Tech Lead task plan)
 - `plan/master_plan.md` (Consolidated master plan, risk register, ship checklist)
