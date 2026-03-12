@@ -92,7 +92,14 @@ class ResearchReference(BaseModel):
     title: str
     url: HttpUrl
     domain: Optional[str] = None
-    summary: str
+    summary: str = Field(
+        ...,
+        description="Short summary or teaser (e.g. from LLM). When content is set, use content for full document.",
+    )
+    content: Optional[str] = Field(
+        None,
+        description="Full document text when available. Passed through to compiled_document and downstream.",
+    )
     key_points: List[str] = Field(default_factory=list)
     type: Optional[str] = Field(
         None,
