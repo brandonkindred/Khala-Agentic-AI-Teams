@@ -59,7 +59,8 @@ services:
     image: ollama/ollama
     container_name: strands-stack-ollama
     ports:
-      - "11434:11434"
+      # Use 11435 on host to avoid conflict with host-installed Ollama (11434)
+      - "11435:11434"
     environment:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
     networks:
