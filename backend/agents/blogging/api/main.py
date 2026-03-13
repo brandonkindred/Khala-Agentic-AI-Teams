@@ -648,6 +648,19 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
         tone_or_purpose=request.tone_or_purpose,
     )
 
+    # When Temporal is enabled, start workflow for resumable state; otherwise run in thread
+    try:
+        from blogging.temporal.client import is_temporal_enabled
+        from blogging.temporal.start_workflow import start_full_pipeline_workflow
+        if is_temporal_enabled():
+            request_dict = request.model_dump(mode="json")
+            request_dict["audience"] = audience_str or request_dict.get("audience")
+            start_full_pipeline_workflow(job_id, request_dict)
+            logger.info("Started async pipeline job %s via Temporal", job_id)
+            return StartPipelineResponse(job_id=job_id, message="Pipeline started (Temporal)")
+    except ImportError:
+        pass
+
     # Start pipeline in background thread
     thread = threading.Thread(
         target=_run_pipeline_with_tracking,
