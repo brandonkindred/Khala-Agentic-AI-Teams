@@ -374,25 +374,27 @@ async def lifespan(app: FastAPI):
     total_count = len(get_enabled_teams())
     logger.info("Mounted %d/%d team APIs", mounted_count, total_count)
 
-    # Start SE Temporal worker when SE team is mounted and TEMPORAL_ADDRESS is set
-    if _mounted_teams.get("software_engineering"):
+    # Start each team's Temporal worker when mounted and TEMPORAL_ADDRESS is set.
+    # Map: team_key -> (module_path, start_function_name)
+    _temporal_worker_starters: Dict[str, tuple] = {
+        "software_engineering": ("software_engineering_team.temporal.worker", "start_se_temporal_worker_thread"),
+        "blogging": ("blogging.temporal.worker", "start_blogging_temporal_worker_thread"),
+        "personal_assistant": ("personal_assistant_team.temporal.worker", "start_pa_temporal_worker_thread"),
+        "ai_systems": ("ai_systems_team.temporal.worker", "start_ai_systems_temporal_worker_thread"),
+        "planning_v3": ("planning_v3_team.temporal.worker", "start_planning_v3_temporal_worker_thread"),
+        "agent_provisioning": ("agent_provisioning_team.temporal.worker", "start_agent_provisioning_temporal_worker_thread"),
+        "nutrition_meal_planning": ("nutrition_meal_planning_team.temporal.worker", "start_nutrition_temporal_worker_thread"),
+    }
+    for team_key, (mod_path, func_name) in _temporal_worker_starters.items():
+        if not _mounted_teams.get(team_key):
+            continue
         try:
-            from software_engineering_team.temporal.worker import start_se_temporal_worker_thread
-
-            if start_se_temporal_worker_thread():
-                logger.info("SE Temporal worker thread started")
+            mod = importlib.import_module(mod_path)
+            start_fn = getattr(mod, func_name)
+            if start_fn():
+                logger.info("Temporal worker started for team %s", team_key)
         except Exception as e:
-            logger.warning("Could not start SE Temporal worker: %s", e)
-
-    # Start Blogging Temporal worker when blogging team is mounted and TEMPORAL_ADDRESS is set
-    if _mounted_teams.get("blogging"):
-        try:
-            from blogging.temporal.worker import start_blogging_temporal_worker_thread
-
-            if start_blogging_temporal_worker_thread():
-                logger.info("Blogging Temporal worker thread started")
-        except Exception as e:
-            logger.warning("Could not start Blogging Temporal worker: %s", e)
+            logger.warning("Could not start Temporal worker for %s: %s", team_key, e)
 
     yield
 

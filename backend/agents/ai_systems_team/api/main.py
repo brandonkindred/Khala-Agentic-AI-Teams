@@ -119,7 +119,26 @@ def start_build(request: AISystemRequest) -> AISystemJobResponse:
         constraints=request.constraints,
         output_dir=request.output_dir,
     )
-    
+
+    try:
+        from ai_systems_team.temporal.client import is_temporal_enabled
+        from ai_systems_team.temporal.start_workflow import start_build_workflow
+        if is_temporal_enabled():
+            start_build_workflow(
+                job_id,
+                request.project_name,
+                request.spec_path,
+                request.constraints,
+                request.output_dir,
+            )
+            return AISystemJobResponse(
+                job_id=job_id,
+                status=JOB_STATUS_RUNNING,
+                message="Build started (Temporal). Poll GET /build/status/{job_id} for progress.",
+            )
+    except ImportError:
+        pass
+
     thread = threading.Thread(
         target=_run_build_background,
         args=(
@@ -132,7 +151,7 @@ def start_build(request: AISystemRequest) -> AISystemJobResponse:
         daemon=True,
     )
     thread.start()
-    
+
     return AISystemJobResponse(
         job_id=job_id,
         status=JOB_STATUS_RUNNING,

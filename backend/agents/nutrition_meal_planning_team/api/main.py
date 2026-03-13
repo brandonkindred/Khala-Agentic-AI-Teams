@@ -161,6 +161,14 @@ async def post_plan_meals_async_route(body: MealPlanRequest):
     """Start async meal plan generation. Returns job_id; poll GET /jobs/{job_id} for result."""
     job_id = str(uuid4())
     create_job(job_id, status=JOB_STATUS_PENDING, request=body.model_dump())
+    try:
+        from nutrition_meal_planning_team.temporal.client import is_temporal_enabled
+        from nutrition_meal_planning_team.temporal.start_workflow import start_meal_plan_workflow
+        if is_temporal_enabled():
+            start_meal_plan_workflow(job_id, body.model_dump())
+            return {"job_id": job_id}
+    except ImportError:
+        pass
     thread = threading.Thread(target=_run_meal_plan_job, args=(job_id, body), daemon=True)
     thread.start()
     return {"job_id": job_id}

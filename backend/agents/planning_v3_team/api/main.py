@@ -132,6 +132,27 @@ def run_planning_v3(request: PlanningV3RunRequest) -> PlanningV3RunResponse:
         raise HTTPException(status_code=400, detail=f"repo_path is not a directory: {request.repo_path}")
     job_id = str(uuid.uuid4())
     create_job(job_id, request.repo_path)
+    try:
+        from planning_v3_team.temporal.client import is_temporal_enabled
+        from planning_v3_team.temporal.start_workflow import start_planning_v3_workflow
+        if is_temporal_enabled():
+            start_planning_v3_workflow(
+                job_id,
+                request.repo_path,
+                request.client_name,
+                request.initial_brief,
+                request.spec_content,
+                request.use_product_analysis,
+                request.use_planning_v2,
+                request.use_market_research,
+            )
+            return PlanningV3RunResponse(
+                job_id=job_id,
+                status="running",
+                message="Planning V3 started (Temporal). Poll GET /status/{job_id} for progress.",
+            )
+    except ImportError:
+        pass
     thread = threading.Thread(
         target=_run_workflow_background,
         args=(
