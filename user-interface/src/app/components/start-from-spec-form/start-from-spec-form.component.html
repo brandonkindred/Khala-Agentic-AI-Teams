@@ -1,0 +1,57 @@
+<mat-card>
+  <mat-card-header>
+    <mat-icon mat-card-avatar class="header-icon">upload_file</mat-icon>
+    <mat-card-title>Start from spec</mat-card-title>
+    <mat-card-subtitle>
+      Create a new project from an uploaded spec file and run Product Requirements Analysis
+    </mat-card-subtitle>
+  </mat-card-header>
+
+  <mat-card-content>
+    <mat-form-field appearance="outline" class="full-width">
+      <mat-label>Project name</mat-label>
+      <input
+        matInput
+        [(ngModel)]="projectName"
+        (blur)="onProjectNameBlur()"
+        (input)="onProjectNameInput()"
+        placeholder="my-project"
+        [attr.aria-label]="'Project name'"
+      />
+      <mat-hint>No spaces; use letters, numbers, hyphens, underscores.</mat-hint>
+      @if (projectNameError) {
+        <mat-error>{{ projectNameError }}</mat-error>
+      }
+    </mat-form-field>
+
+    <div class="file-field">
+      <label class="file-label">
+        <span class="file-label-text">Spec file (.txt or .md)</span>
+        <input
+          type="file"
+          accept=".txt,.md"
+          (change)="onFileChange($event)"
+          [attr.aria-label]="'Choose spec file'"
+        />
+      </label>
+      @if (selectedFile) {
+        <span class="file-name">{{ selectedFile.name }}</span>
+      }
+      @if (fileError) {
+        <span class="file-error">{{ fileError }}</span>
+      }
+    </div>
+  </mat-card-content>
+
+  <mat-card-actions align="end">
+    <button
+      mat-raised-button
+      color="primary"
+      (click)="submit()"
+      [disabled]="!isFormValid"
+    >
+      <mat-icon>play_arrow</mat-icon>
+      Create project and start analysis
+    </button>
+  </mat-card-actions>
+</mat-card>
