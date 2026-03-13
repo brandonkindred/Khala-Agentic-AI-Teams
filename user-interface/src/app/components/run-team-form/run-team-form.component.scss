@@ -97,3 +97,42 @@
   flex-shrink: 0;
   color: var(--mat-sys-primary, #1976d2);
 }
+
+.file-upload-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+.hidden-file-input { display: none; }
+
+.selected-filename {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.875rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
+
+.file-icon { font-size: 18px; width: 18px; height: 18px; flex-shrink: 0; }
+
+.no-file-hint { font-size: 0.875rem; font-style: italic; opacity: 0.6; }
+
+.upload-error {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--mat-sys-error, #d32f2f);
+  font-size: 0.875rem;
+  padding: 0.5rem;
+  border-radius: 4px;
+  background: var(--mat-sys-error-container, #fde8e8);
+  width: 100%;
+
+  mat-icon { font-size: 18px; width: 18px; height: 18px; flex-shrink: 0; }
+}

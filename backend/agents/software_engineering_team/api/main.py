@@ -15,10 +15,11 @@ import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -85,6 +86,43 @@ def _start_stale_job_monitor_once() -> None:
         thread = threading.Thread(target=_monitor, name="se-team-stale-job-monitor", daemon=True)
         thread.start()
         _stale_monitor_started = True
+
+def _get_workspace_base_dir() -> Path:
+    """Base dir for auto-created project workspaces.
+    Fallback: SE_WORKSPACE_DIR -> ENV_WORKSPACE_ROOT -> ./se_workspaces
+    """
+    for var in ("SE_WORKSPACE_DIR", "ENV_WORKSPACE_ROOT"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            return Path(val)
+    return Path.cwd() / "se_workspaces"
+
+
+_SAFE_NAME_RE = re.compile(r"[^a-z0-9\-]")
+
+
+def create_project_workspace(project_name: str, spec_content: bytes) -> Path:
+    """Sanitize name, create timestamped folder, write initial_spec.md. Returns workspace Path."""
+    name = project_name.strip().lower().replace(" ", "-")
+    name = _SAFE_NAME_RE.sub("", name)
+    name = re.sub(r"-{2,}", "-", name).strip("-")
+    if not name:
+        raise ValueError("project_name is empty after sanitization")
+    spec_text = spec_content.decode("utf-8")
+    if not spec_text.strip():
+        raise ValueError("spec_file content is empty")
+    folder = f"{name}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    base = _get_workspace_base_dir().resolve()
+    workspace = (base / folder).resolve()
+    try:
+        workspace.relative_to(base)  # path-traversal guard
+    except ValueError:
+        raise ValueError(f"Workspace path escapes base dir: {workspace}")
+    workspace.mkdir(parents=True, exist_ok=False)
+    (workspace / "initial_spec.md").write_text(spec_text, encoding="utf-8")
+    logger.info("Created workspace %s for project %r", workspace, project_name)
+    return workspace
+
 
 app = FastAPI(
     title="Software Engineering Team API",
@@ -420,6 +458,62 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
         job_id=job_id,
         status="running",
         message="Orchestrator started. Poll GET /run-team/{job_id} for status.",
+    )
+
+
+@app.post(
+    "/run-team/upload",
+    response_model=RunTeamResponse,
+    summary="Start SE team from uploaded spec file",
+    description=(
+        "Multipart: project_name (text) + spec_file (.md/.txt). "
+        "Creates workspace under SE_WORKSPACE_DIR, writes initial_spec.md, starts job. "
+        "Returns same RunTeamResponse as POST /run-team."
+    ),
+)
+async def run_team_upload(
+    project_name: str = Form(..., min_length=1, max_length=200),
+    spec_file: UploadFile = File(...),
+) -> RunTeamResponse:
+    """Start the SE team from an uploaded spec file, creating the workspace automatically."""
+    MAX_BYTES = 5 * 1024 * 1024  # 5 MB
+    raw = await spec_file.read(MAX_BYTES + 1)
+    if len(raw) > MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Spec file exceeds 5 MB limit.")
+    try:
+        workspace = create_project_workspace(project_name, raw)
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"File must be UTF-8: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _start_stale_job_monitor_once()
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(workspace), job_type="run_team")
+
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.start_workflow import start_run_team_workflow
+
+        if is_temporal_enabled():
+            start_run_team_workflow(job_id, str(workspace))
+        else:
+            thread = threading.Thread(
+                target=_run_orchestrator_background,
+                args=(job_id, str(workspace)),
+            )
+            thread.daemon = True
+            thread.start()
+    except Exception as e:
+        logger.exception("Failed to start run-team/upload execution")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=f"Failed to start workflow: {e}") from e
+
+    start_job_heartbeat_thread(job_id)
+    return RunTeamResponse(
+        job_id=job_id,
+        status="running",
+        message="Workspace created. Poll GET /run-team/{job_id} for status.",
     )
 
 

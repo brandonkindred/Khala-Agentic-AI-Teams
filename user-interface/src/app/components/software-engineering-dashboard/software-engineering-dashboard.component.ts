@@ -31,7 +31,7 @@ import { ProductAnalysisRunFormComponent } from '../product-analysis-run-form/pr
 import { ProductAnalysisJobStatusComponent } from '../product-analysis-job-status/product-analysis-job-status.component';
 import { StartFromSpecFormComponent } from '../start-from-spec-form/start-from-spec-form.component';
 import type {
-  RunTeamRequest,
+  RunTeamResponse,
   JobStatusResponse,
   ArchitectDesignResponse,
   BackendCodeV2RunRequest,
@@ -263,20 +263,8 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     return labels[jobType] ?? jobType;
   }
 
-  onRunTeamSubmit(request: RunTeamRequest): void {
-    this.loading = true;
-    this.error = null;
-    this.jobId = null;
-    this.api.runTeam(request).subscribe({
-      next: (res) => {
-        this.jobId = res.job_id;
-        this.loading = false;
-      },
-      error: (err) => {
-        this.error = err?.error?.detail ?? err?.message ?? 'Request failed';
-        this.loading = false;
-      },
-    });
+  onRunTeamSubmit(response: RunTeamResponse): void {
+    this.jobId = response.job_id;
   }
 
   onRetryFailed(): void {
@@ -420,6 +408,13 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
   onStartFromSpecSuccess(res: { job_id: string }): void {
     this.error = null;
     this.productAnalysisJobId = res.job_id;
+  }
+
+  /** When started from Run Team tab: set job id and switch to Product Analysis to show progress. */
+  onStartFromSpecSuccessFromRunTeam(res: { job_id: string }): void {
+    this.error = null;
+    this.productAnalysisJobId = res.job_id;
+    this.selectedTabIndex = SoftwareEngineeringDashboardComponent.JOB_TYPE_TAB_MAP['product_analysis'] ?? 1;
   }
 
   onStartFromSpecError(message: string): void {
