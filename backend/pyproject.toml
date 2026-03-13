@@ -28,3 +28,15 @@ known-first-party = ["shared", "backend_agent", "frontend_team", "devops_agent",
 [tool.ruff.lint.per-file-ignores]
 "agents/**/tests/**" = ["N", "B"]
 "agents/**/agent_implementations/**" = ["E", "F"]
+
+[tool.pytest.ini_options]
+addopts = "--cov=agents --cov=unified_api --cov-report=term-missing --cov-fail-under=85"
+
+[tool.coverage.run]
+source = ["agents", "unified_api"]
+omit = ["*/tests/*", "*/conftest.py", "*/__init__.py"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = false

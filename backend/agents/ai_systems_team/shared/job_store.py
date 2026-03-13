@@ -41,12 +41,10 @@ def create_job(
     """Create a new AI system build job with initial state."""
     now = datetime.now(timezone.utc).isoformat()
     data: Dict[str, Any] = {
-        "job_id": job_id,
         "project_name": project_name,
         "spec_path": spec_path,
         "constraints": constraints or {},
         "output_dir": output_dir,
-        "status": JOB_STATUS_PENDING,
         "progress": 0,
         "current_phase": None,
         "completed_phases": [],
