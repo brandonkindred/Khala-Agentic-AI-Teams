@@ -70,6 +70,17 @@ export class SoftwareEngineeringApiService {
   }
 
   /**
+   * POST /run-team/upload  (multipart/form-data)
+   * Do NOT set Content-Type header — browser sets it with multipart boundary automatically.
+   */
+  runTeamFromUpload(projectName: string, file: File): Observable<RunTeamResponse> {
+    const formData = new FormData();
+    formData.append('project_name', projectName);
+    formData.append('spec_file', file, file.name);
+    return this.http.post<RunTeamResponse>(`${this.baseUrl}/run-team/upload`, formData);
+  }
+
+  /**
    * POST /run-team/{job_id}/retry-failed
    */
   retryFailed(jobId: string): Observable<RetryResponse> {

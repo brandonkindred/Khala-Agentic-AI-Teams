@@ -1,6 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ActivatedRoute } from '@angular/router';
-import { of, throwError } from 'rxjs';
+import { of } from 'rxjs';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
@@ -57,19 +57,14 @@ describe('SoftwareEngineeringDashboardComponent', () => {
     expect(component.selectedTabIndex).toBe(1);
   });
 
-  it('should call runTeam and set jobId on run-team submit success', () => {
-    apiSpy.runTeam.mockReturnValue(of({ job_id: 'job-1', status: 'running', message: 'OK' }));
-    component.onRunTeamSubmit({ repo_path: '/tmp/repo' });
-    expect(apiSpy.runTeam).toHaveBeenCalledWith({ repo_path: '/tmp/repo' });
+  it('should set jobId on run-team submit', () => {
+    component.onRunTeamSubmit({ job_id: 'job-1', status: 'running', message: 'started' });
     expect(component.jobId).toBe('job-1');
-    expect(component.loading).toBe(false);
   });
 
-  it('should set error on runTeam failure', () => {
-    apiSpy.runTeam.mockReturnValue(throwError(() => ({ error: { detail: 'Server error' } })));
-    component.onRunTeamSubmit({ repo_path: '/tmp' });
-    expect(component.error).toBeTruthy();
-    expect(component.loading).toBe(false);
+  it('should set jobId on run-team submit with different job id', () => {
+    component.onRunTeamSubmit({ job_id: 'test-job-id', status: 'running', message: 'Workspace created.' });
+    expect(component.jobId).toBe('test-job-id');
   });
 
   it('should call runProductAnalysis and set productAnalysisJobId on success', () => {
