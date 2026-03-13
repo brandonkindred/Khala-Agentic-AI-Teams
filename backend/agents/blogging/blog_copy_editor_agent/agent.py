@@ -5,9 +5,10 @@ based on a brand and writing style guide.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 from llm_service import LLMClient
 
@@ -32,7 +33,7 @@ _DEFAULT_STYLE_GUIDE_PATH = (
 
 def _load_style_guide(path: str | Path) -> str:
     """Load style guide text from a file. Raises OSError if file cannot be read."""
-    return Path(path).read_text().strip()
+    return Path(path).read_text(encoding="utf-8").strip()
 
 
 class BlogCopyEditorAgent:
@@ -89,11 +90,22 @@ class BlogCopyEditorAgent:
                 logger.warning("Could not load default style guide: %s", e)
         return MINIMAL_STYLE_CHECKLIST
 
+    def _write_feedback_to_path(self, output: CopyEditorOutput, path: Union[str, Path]) -> None:
+        """Serialize CopyEditorOutput to JSON and write to path. On failure log warning and do not raise."""
+        try:
+            p = Path(path).resolve()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            data = output.model_dump() if hasattr(output, "model_dump") else output.dict()
+            p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning("Failed to write editor feedback to %s: %s", path, e)
+
     def run(
         self,
         copy_editor_input: CopyEditorInput,
         *,
         on_llm_request: Optional[Callable[[str], None]] = None,
+        feedback_output_path: Optional[Union[str, Path]] = None,
     ) -> CopyEditorOutput:
         """
         Provide copy editing feedback on the draft based on the style guide.
@@ -102,14 +114,18 @@ class BlogCopyEditorAgent:
             - copy_editor_input is a valid CopyEditorInput (draft non-empty).
         Postconditions:
             - Returns CopyEditorOutput with summary and feedback_items.
+            - If feedback_output_path is set, writes the same output to that path before returning.
         """
         draft = copy_editor_input.draft.strip()
         if not draft:
             logger.warning("Empty draft; returning minimal feedback.")
-            return CopyEditorOutput(
+            output = CopyEditorOutput(
                 summary="No draft provided. Please supply a blog post draft to review.",
                 feedback_items=[],
             )
+            if feedback_output_path:
+                self._write_feedback_to_path(output, feedback_output_path)
+            return output
 
         # Resolve style guide text (brand_spec takes precedence when provided)
         style_guide_text = self._resolve_style_guide(
@@ -209,4 +225,7 @@ class BlogCopyEditorAgent:
             len(summary),
             len(feedback_items),
         )
-        return CopyEditorOutput(summary=summary, feedback_items=feedback_items)
+        output = CopyEditorOutput(summary=summary, feedback_items=feedback_items)
+        if feedback_output_path:
+            self._write_feedback_to_path(output, feedback_output_path)
+        return output
