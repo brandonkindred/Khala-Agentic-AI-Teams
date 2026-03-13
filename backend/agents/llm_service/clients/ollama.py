@@ -523,9 +523,8 @@ class OllamaLLMClient(LLMClient):
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt},
             ],
+            "think": self._should_enable_thinking(),
         }
-        if self._should_enable_thinking():
-            payload["think"] = True
         try:
             content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
             return self._extract_json(content)
@@ -597,9 +596,9 @@ class OllamaLLMClient(LLMClient):
                 "max_tokens": max_tokens,
                 "response_format": {"type": "json_object"},
                 "messages": messages,
+                "think": self._should_enable_thinking(),
             }
-            if self._should_enable_thinking():
-                payload["think"] = True
+
             try:
                 next_content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
                 accumulated = self._merge_continuation(accumulated, next_content)
@@ -644,11 +643,10 @@ class OllamaLLMClient(LLMClient):
             "temperature": temperature,
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
+            "think": self._should_enable_thinking(),
         }
         if system_prompt:
             payload["messages"] = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
-        if self._should_enable_thinking():
-            payload["think"] = True
         try:
             return self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
         except LLMTruncatedError as e:
@@ -697,9 +695,8 @@ class OllamaLLMClient(LLMClient):
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "messages": messages,
+                "think": self._should_enable_thinking(),
             }
-            if self._should_enable_thinking():
-                payload["think"] = True
             try:
                 next_content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
                 accumulated = self._merge_continuation(accumulated, next_content)
