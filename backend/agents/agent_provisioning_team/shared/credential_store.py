@@ -27,23 +27,39 @@ class CredentialStore:
     ) -> None:
         self.storage_dir = storage_dir or DEFAULT_CREDENTIALS_DIR
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        
-        key = encryption_key or os.environ.get("PROVISION_CREDENTIAL_KEY")
-        if key is None:
-            key = self._load_or_generate_key()
-        
+
+        key = encryption_key or os.environ.get("PROVISION_CREDENTIAL_KEY") or None
+        if key:
+            key = key.strip() if isinstance(key, str) else key
+        if not key:
+            key = self._load_key_from_file() or self._load_or_generate_key()
         if isinstance(key, str):
             key = key.encode()
-        
-        self.fernet = Fernet(key)
+        try:
+            self.fernet = Fernet(key)
+        except ValueError:
+            key = self._load_or_generate_key()
+            self.fernet = Fernet(key)
+
+    def _load_key_from_file(self) -> Optional[bytes]:
+        """Load key from PA_CREDENTIAL_KEY_FILE if set (e.g. Docker build-time key)."""
+        key_file_path = os.environ.get("PA_CREDENTIAL_KEY_FILE")
+        if not key_file_path:
+            return None
+        path = Path(key_file_path)
+        if not path.exists():
+            return None
+        raw = path.read_bytes()
+        return raw.strip()
 
     def _load_or_generate_key(self) -> bytes:
         """Load existing key or generate a new one."""
         key_file = self.storage_dir / ".encryption_key"
-        
+
         if key_file.exists():
-            return key_file.read_bytes()
-        
+            raw = key_file.read_bytes()
+            return raw.strip()
+
         key = Fernet.generate_key()
         key_file.write_bytes(key)
         key_file.chmod(0o600)
