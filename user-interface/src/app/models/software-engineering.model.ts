@@ -324,6 +324,8 @@ export interface BackendCodeV2StatusResponse {
   completed_phases: string[];
   error?: string;
   summary?: string;
+  /** Short human-readable status (e.g. what is being worked on right now). */
+  status_text?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +369,8 @@ export interface FrontendCodeV2StatusResponse {
   completed_phases: string[];
   error?: string;
   summary?: string;
+  /** Short human-readable status (e.g. what is being worked on right now). */
+  status_text?: string;
 }
 
 // ---------------------------------------------------------------------------

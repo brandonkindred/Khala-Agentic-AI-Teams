@@ -163,7 +163,7 @@ class FrontendDevelopmentAgent:
 
         logger.info("[%s] Next step -> Starting Phase: Planning", task_id)
         result.current_phase = Phase.PLANNING
-        _update_job(current_phase="planning", progress=5)
+        _update_job(current_phase="planning", progress=5, status_text="Analyzing task and creating implementation plan...")
 
         try:
             planning_result = run_planning(
@@ -181,7 +181,13 @@ class FrontendDevelopmentAgent:
             return result
 
         total_microtasks = len(planning_result.microtasks)
-        _update_job(current_phase="planning", progress=10, microtasks_total=total_microtasks, microtasks_completed=0)
+        _update_job(
+            current_phase="planning",
+            progress=10,
+            microtasks_total=total_microtasks,
+            microtasks_completed=0,
+            status_text=f"Plan created with {total_microtasks} microtask(s)",
+        )
 
         feature_branch_name: Optional[str] = None
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
@@ -195,9 +201,23 @@ class FrontendDevelopmentAgent:
 
         logger.info("[%s] Next step -> Starting Phase: Execution", task_id)
         result.current_phase = Phase.EXECUTION
-        _update_job(current_phase="execution", current_microtask="", progress=15)
+        _update_job(current_phase="execution", current_microtask="", progress=15, status_text="Starting code implementation...")
 
         def _progress_cb(current_index: int, done: int, total: int, title: str, microtask_phase: str = "coding", phase_detail: str = "") -> None:
+            phase_labels = {
+                "coding": "Writing code",
+                "code_review": "Code review",
+                "qa_testing": "QA testing",
+                "security_testing": "Security testing",
+                "documentation": "Documentation",
+                "review": "Reviewing",
+                "problem_solving": "Fixing issues",
+                "completed": "Completed",
+            }
+            phase_label = phase_labels.get(microtask_phase, microtask_phase.replace("_", " ").title())
+            status = f"{phase_label}: {title} ({current_index}/{total})"
+            if phase_detail:
+                status = f"{status} — {phase_detail}"
             _update_job(
                 current_phase="execution",
                 current_microtask=title,
@@ -207,6 +227,7 @@ class FrontendDevelopmentAgent:
                 microtasks_completed=done,
                 microtasks_total=total,
                 progress=min(15 + int(done / max(total, 1) * 60), 75),
+                status_text=status,
             )
 
         review_deps = ReviewDependencies(
@@ -263,7 +284,7 @@ class FrontendDevelopmentAgent:
         # ── Phase: Documentation ────────────────────────────────────────
         logger.info("[%s] Next step -> Starting Phase: Documentation", task_id)
         result.current_phase = Phase.DOCUMENTATION
-        _update_job(current_phase="documentation", progress=80)
+        _update_job(current_phase="documentation", progress=80, status_text="Generating documentation and API docs...")
 
         from .phases.documentation import run_documentation_phase
 
@@ -290,7 +311,7 @@ class FrontendDevelopmentAgent:
         # ── Phase: Deliver ───────────────────────────────────────────
         logger.info("[%s] Next step -> Starting Phase: Deliver", task_id)
         result.current_phase = Phase.DELIVER
-        _update_job(current_phase="deliver", progress=90)
+        _update_job(current_phase="deliver", progress=90, status_text="Committing changes and preparing delivery...")
 
         try:
             deliver_result = run_deliver(
@@ -314,7 +335,8 @@ class FrontendDevelopmentAgent:
             logger.error("[%s] %s", task_id, result.failure_reason)
             return result
 
-        _update_job(current_phase="deliver", progress=100 if result.success else 95)
+        final_status = "Frontend task complete" if result.success else "Frontend task completed with issues"
+        _update_job(current_phase="deliver", progress=100 if result.success else 95, status_text=final_status)
         elapsed = time.monotonic() - start_time
         logger.info("[%s] WORKFLOW %s in %.1fs (%d microtasks completed, %d failed review)",
                     task_id, "SUCCEEDED" if result.success else "PARTIAL", elapsed, completed_count, failed_count)

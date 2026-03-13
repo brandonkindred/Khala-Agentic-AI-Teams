@@ -192,6 +192,7 @@ class BackendDevelopmentAgent:
         feature_branch_name: Optional[str] = None
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
         if git_agent is not None and hasattr(git_agent, "create_feature_branch"):
+            _update_job(current_phase="planning", progress=12, status_text="Creating feature branch...")
             try:
                 ok, branch_name = git_agent.create_feature_branch(
                     repo_path, task_id, task.title or ""
@@ -199,6 +200,7 @@ class BackendDevelopmentAgent:
                 if ok and branch_name:
                     feature_branch_name = branch_name
                     logger.info("[%s] Created feature branch: %s", task_id, feature_branch_name)
+                    _update_job(current_phase="planning", progress=14, status_text=f"Branch {feature_branch_name} ready")
                 else:
                     logger.warning("[%s] Git agent create_feature_branch failed, deliver will create branch", task_id)
             except Exception as exc:
@@ -212,9 +214,9 @@ class BackendDevelopmentAgent:
         def _progress_cb(current_index: int, done: int, total: int, title: str, microtask_phase: str = "coding", phase_detail: str = "") -> None:
             phase_labels = {
                 "coding": "Writing code",
-                "code_review": "Code Review",
-                "qa_testing": "QA Testing",
-                "security_testing": "Security Testing",
+                "code_review": "Code review",
+                "qa_testing": "QA testing",
+                "security_testing": "Security testing",
                 "documentation": "Documentation",
                 "review": "Reviewing code",
                 "problem_solving": "Fixing issues",
@@ -222,6 +224,8 @@ class BackendDevelopmentAgent:
             }
             phase_label = phase_labels.get(microtask_phase, microtask_phase.replace("_", " ").title())
             status = f"{phase_label}: {title} ({current_index}/{total})"
+            if phase_detail:
+                status = f"{status} — {phase_detail}"
             _update_job(
                 current_phase="execution",
                 current_microtask=title,

@@ -25,6 +25,11 @@ DEFAULT_HOST = os.getenv("UNIFIED_API_HOST", "0.0.0.0")
 # Security gateway: when True (default), scan requests to team APIs before forwarding.
 SECURITY_GATEWAY_ENABLED = os.getenv("SECURITY_GATEWAY_ENABLED", "true").lower() in ("true", "1", "yes")
 
+# Temporal (software engineering team workflows). When TEMPORAL_ADDRESS is set, SE team uses Temporal instead of threads.
+TEMPORAL_ADDRESS = os.getenv("TEMPORAL_ADDRESS", "").strip() or None
+TEMPORAL_NAMESPACE = os.getenv("TEMPORAL_NAMESPACE", "default").strip()
+TEMPORAL_TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "software-engineering").strip()
+
 # Team configurations with route prefixes
 TEAM_CONFIGS: Dict[str, TeamConfig] = {
     "blogging": TeamConfig(

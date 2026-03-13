@@ -230,6 +230,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       return this.seApi.getBackendCodeV2Status(summary.job_id).pipe(
         map((status) => this.toSEDetail({
           progress: status.progress,
+          statusText: status.status_text,
           currentPhase: status.current_phase,
           teamProgress: { 'backend-code-v2': { current_phase: status.current_phase, progress: status.progress } },
         })),
@@ -240,6 +241,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       return this.seApi.getFrontendCodeV2Status(summary.job_id).pipe(
         map((status) => this.toSEDetail({
           progress: status.progress,
+          statusText: status.status_text,
           currentPhase: status.current_phase,
           teamProgress: { 'frontend-code-v2': { current_phase: status.current_phase, progress: status.progress } },
         })),

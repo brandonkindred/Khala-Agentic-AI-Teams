@@ -100,6 +100,17 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def _startup_se_temporal_worker() -> None:
+    """When SE API runs standalone, start Temporal worker if TEMPORAL_ADDRESS is set."""
+    try:
+        from software_engineering_team.temporal.worker import start_se_temporal_worker_thread
+
+        start_se_temporal_worker_thread()
+    except Exception as e:
+        logger.warning("Could not start SE Temporal worker: %s", e)
+
+
 class RunTeamRequest(BaseModel):
     """Request body for the run-team endpoint."""
 
@@ -383,12 +394,24 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
     job_id = str(uuid.uuid4())
     create_job(job_id, str(repo_path), job_type="run_team")
 
-    thread = threading.Thread(
-        target=_run_orchestrator_background,
-        args=(job_id, str(repo_path)),
-    )
-    thread.daemon = True
-    thread.start()
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.start_workflow import start_run_team_workflow
+
+        if is_temporal_enabled():
+            start_run_team_workflow(job_id, str(repo_path))
+        else:
+            thread = threading.Thread(
+                target=_run_orchestrator_background,
+                args=(job_id, str(repo_path)),
+            )
+            thread.daemon = True
+            thread.start()
+    except Exception as e:
+        logger.exception("Failed to start run-team execution")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=f"Failed to start workflow: {e}") from e
+
     start_job_heartbeat_thread(job_id)
 
     return RunTeamResponse(
@@ -579,9 +602,21 @@ def retry_failed_tasks(job_id: str) -> RetryResponse:
 
     failed_ids = [ft.get("task_id", "") for ft in failed_tasks]
 
-    thread = threading.Thread(target=_run_retry_background, args=(job_id,))
-    thread.daemon = True
-    thread.start()
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.start_workflow import start_retry_failed_workflow
+
+        if is_temporal_enabled():
+            start_retry_failed_workflow(job_id)
+        else:
+            thread = threading.Thread(target=_run_retry_background, args=(job_id,))
+            thread.daemon = True
+            thread.start()
+    except Exception as e:
+        logger.exception("Failed to start retry-failed workflow")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
     start_job_heartbeat_thread(job_id)
 
     return RetryResponse(
@@ -636,6 +671,16 @@ def cancel_job(job_id: str) -> CancelJobResponse:
             detail="Failed to request cancellation. Job may have changed state.",
         )
 
+    # When Temporal is enabled, also cancel the workflow so the worker stops
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.start_workflow import cancel_run_team_workflow
+
+        if is_temporal_enabled():
+            cancel_run_team_workflow(job_id)
+    except Exception as e:
+        logger.debug("Temporal workflow cancel (non-fatal): %s", e)
+
     return CancelJobResponse(
         job_id=job_id,
         status="cancelled",
@@ -660,7 +705,8 @@ def delete_run_team_job(job_id: str) -> DeleteJobResponse:
     return DeleteJobResponse(job_id=job_id, message="Job deleted")
 
 
-RESUMABLE_STATUSES = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING, JOB_STATUS_AGENT_CRASH)
+# Include JOB_STATUS_FAILED so users can resume after server down or stale heartbeat
+RESUMABLE_STATUSES = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING, JOB_STATUS_AGENT_CRASH, JOB_STATUS_FAILED)
 RESTARTABLE_STATUSES = (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -674,7 +720,7 @@ RESTARTABLE_STATUSES = (
     response_model=RunTeamResponse,
     summary="Resume an interrupted job",
     description="Re-start the orchestrator for a run_team job that was interrupted (e.g. server halt or runtime error). "
-    "Allowed when status is pending, running, or agent_crash. Use after server restart to re-initiate the job; "
+    "Allowed when status is pending, running, agent_crash, or failed. Use after server restart to re-initiate the job; "
     "poll GET /run-team/{job_id} for status.",
 )
 def resume_run_team_job(job_id: str) -> RunTeamResponse:
@@ -694,7 +740,7 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
     if status not in RESUMABLE_STATUSES:
         raise HTTPException(
             status_code=400,
-            detail=f"Job cannot be resumed (status={status}). Resume is only allowed for pending, running, or agent_crash.",
+            detail=f"Job cannot be resumed (status={status}). Resume is only allowed for pending, running, agent_crash, or failed.",
         )
 
     repo_path = data.get("repo_path")
@@ -713,12 +759,24 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
         agent_crash_details=None,
     )
 
-    thread = threading.Thread(
-        target=_run_orchestrator_background,
-        args=(job_id, str(repo_path)),
-        daemon=True,
-    )
-    thread.start()
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.start_workflow import start_run_team_workflow
+
+        if is_temporal_enabled():
+            start_run_team_workflow(job_id, str(repo_path))
+        else:
+            thread = threading.Thread(
+                target=_run_orchestrator_background,
+                args=(job_id, str(repo_path)),
+                daemon=True,
+            )
+            thread.start()
+    except Exception as e:
+        logger.exception("Failed to start resume workflow")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
     start_job_heartbeat_thread(job_id)
 
     return RunTeamResponse(
@@ -770,12 +828,24 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
 
     reset_job(job_id, str(repo_path), job_type="run_team")
 
-    thread = threading.Thread(
-        target=_run_orchestrator_background,
-        args=(job_id, str(repo_path)),
-        daemon=True,
-    )
-    thread.start()
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.start_workflow import start_run_team_workflow
+
+        if is_temporal_enabled():
+            start_run_team_workflow(job_id, str(repo_path))
+        else:
+            thread = threading.Thread(
+                target=_run_orchestrator_background,
+                args=(job_id, str(repo_path)),
+                daemon=True,
+            )
+            thread.start()
+    except Exception as e:
+        logger.exception("Failed to start restart workflow")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
     start_job_heartbeat_thread(job_id)
 
     return RunTeamResponse(
@@ -811,9 +881,21 @@ def resume_after_llm_check(job_id: str) -> RetryResponse:
 
     update_job(job_id, status="running", error=None)
 
-    thread = threading.Thread(target=_run_retry_background, args=(job_id,))
-    thread.daemon = True
-    thread.start()
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.start_workflow import start_retry_failed_workflow
+
+        if is_temporal_enabled():
+            start_retry_failed_workflow(job_id)
+        else:
+            thread = threading.Thread(target=_run_retry_background, args=(job_id,))
+            thread.daemon = True
+            thread.start()
+    except Exception as e:
+        logger.exception("Failed to start resume-after-llm-check workflow")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
     start_job_heartbeat_thread(job_id)
 
     return RetryResponse(
@@ -1048,6 +1130,10 @@ class BackendCodeV2StatusResponse(BaseModel):
     completed_phases: List[str] = Field(default_factory=list)
     error: Optional[str] = None
     summary: Optional[str] = None
+    status_text: Optional[str] = Field(
+        None,
+        description="Short human-readable status (e.g. what is being worked on right now).",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1094,6 +1180,10 @@ class FrontendCodeV2StatusResponse(BaseModel):
     completed_phases: List[str] = Field(default_factory=list)
     error: Optional[str] = None
     summary: Optional[str] = None
+    status_text: Optional[str] = Field(
+        None,
+        description="Short human-readable status (e.g. what is being worked on right now).",
+    )
 
 
 def _run_frontend_code_v2_background(job_id: str, repo_path: str, task_dict: dict, architecture_overview: str) -> None:
@@ -1171,17 +1261,36 @@ def run_frontend_code_v2(request: FrontendCodeV2RunRequest) -> FrontendCodeV2Run
     job_id = str(uuid.uuid4())
     create_job(job_id, request.repo_path, job_type="frontend_code_v2")
 
-    thread = threading.Thread(
-        target=_run_frontend_code_v2_background,
-        args=(
-            job_id,
-            request.repo_path,
-            request.task.model_dump(),
-            request.architecture or "",
-        ),
-    )
-    thread.daemon = True
-    thread.start()
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.constants import STANDALONE_TYPE_FRONTEND
+        from software_engineering_team.temporal.start_workflow import start_standalone_workflow
+
+        if is_temporal_enabled():
+            start_standalone_workflow(
+                STANDALONE_TYPE_FRONTEND,
+                job_id,
+                request.repo_path,
+                task_dict=request.task.model_dump(),
+                architecture_overview=request.architecture or "",
+            )
+        else:
+            thread = threading.Thread(
+                target=_run_frontend_code_v2_background,
+                args=(
+                    job_id,
+                    request.repo_path,
+                    request.task.model_dump(),
+                    request.architecture or "",
+                ),
+            )
+            thread.daemon = True
+            thread.start()
+    except Exception as e:
+        logger.exception("Failed to start frontend-code-v2 workflow")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
     start_job_heartbeat_thread(job_id)
 
     return FrontendCodeV2RunResponse(
@@ -1215,6 +1324,7 @@ def get_frontend_code_v2_status(job_id: str) -> FrontendCodeV2StatusResponse:
         completed_phases=data.get("completed_phases", []),
         error=data.get("error"),
         summary=data.get("summary"),
+        status_text=data.get("status_text"),
     )
 
 
@@ -1428,17 +1538,36 @@ def run_backend_code_v2(request: BackendCodeV2RunRequest) -> BackendCodeV2RunRes
     job_id = str(uuid.uuid4())
     create_job(job_id, request.repo_path, job_type="backend_code_v2")
 
-    thread = threading.Thread(
-        target=_run_backend_code_v2_background,
-        args=(
-            job_id,
-            request.repo_path,
-            request.task.model_dump(),
-            request.architecture or "",
-        ),
-    )
-    thread.daemon = True
-    thread.start()
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.constants import STANDALONE_TYPE_BACKEND
+        from software_engineering_team.temporal.start_workflow import start_standalone_workflow
+
+        if is_temporal_enabled():
+            start_standalone_workflow(
+                STANDALONE_TYPE_BACKEND,
+                job_id,
+                request.repo_path,
+                task_dict=request.task.model_dump(),
+                architecture_overview=request.architecture or "",
+            )
+        else:
+            thread = threading.Thread(
+                target=_run_backend_code_v2_background,
+                args=(
+                    job_id,
+                    request.repo_path,
+                    request.task.model_dump(),
+                    request.architecture or "",
+                ),
+            )
+            thread.daemon = True
+            thread.start()
+    except Exception as e:
+        logger.exception("Failed to start backend-code-v2 workflow")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
     start_job_heartbeat_thread(job_id)
 
     return BackendCodeV2RunResponse(
@@ -1472,6 +1601,7 @@ def get_backend_code_v2_status(job_id: str) -> BackendCodeV2StatusResponse:
         completed_phases=data.get("completed_phases", []),
         error=data.get("error"),
         summary=data.get("summary"),
+        status_text=data.get("status_text"),
     )
 
 
@@ -1494,17 +1624,36 @@ def run_planning_v2(request: PlanningV2RunRequest) -> PlanningV2RunResponse:
     job_id = str(uuid.uuid4())
     create_job(job_id, request.repo_path, job_type="planning_v2")
 
-    thread = threading.Thread(
-        target=_run_planning_v2_background,
-        args=(
-            job_id,
-            request.repo_path,
-            request.spec_content,
-            request.inspiration_content or "",
-        ),
-    )
-    thread.daemon = True
-    thread.start()
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.constants import STANDALONE_TYPE_PLANNING
+        from software_engineering_team.temporal.start_workflow import start_standalone_workflow
+
+        if is_temporal_enabled():
+            start_standalone_workflow(
+                STANDALONE_TYPE_PLANNING,
+                job_id,
+                request.repo_path,
+                spec_content=request.spec_content,
+                inspiration_content=request.inspiration_content,
+            )
+        else:
+            thread = threading.Thread(
+                target=_run_planning_v2_background,
+                args=(
+                    job_id,
+                    request.repo_path,
+                    request.spec_content,
+                    request.inspiration_content or "",
+                ),
+            )
+            thread.daemon = True
+            thread.start()
+    except Exception as e:
+        logger.exception("Failed to start planning-v2 workflow")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
     start_job_heartbeat_thread(job_id)
 
     return PlanningV2RunResponse(
@@ -2041,12 +2190,32 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
     job_id = str(uuid.uuid4())
     create_job(job_id, request.repo_path, job_type="product_analysis")
 
-    thread = threading.Thread(
-        target=_run_product_analysis_background,
-        args=(job_id, request.repo_path, spec_content, initial_spec_path),
-    )
-    thread.daemon = True
-    thread.start()
+    initial_spec_path_str = str(initial_spec_path) if initial_spec_path else None
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.constants import STANDALONE_TYPE_PRODUCT_ANALYSIS
+        from software_engineering_team.temporal.start_workflow import start_standalone_workflow
+
+        if is_temporal_enabled():
+            start_standalone_workflow(
+                STANDALONE_TYPE_PRODUCT_ANALYSIS,
+                job_id,
+                request.repo_path,
+                spec_content=spec_content,
+                initial_spec_path=initial_spec_path_str,
+            )
+        else:
+            thread = threading.Thread(
+                target=_run_product_analysis_background,
+                args=(job_id, request.repo_path, spec_content, initial_spec_path),
+            )
+            thread.daemon = True
+            thread.start()
+    except Exception as e:
+        logger.exception("Failed to start product-analysis workflow")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
     start_job_heartbeat_thread(job_id)
 
     return ProductAnalysisRunResponse(
