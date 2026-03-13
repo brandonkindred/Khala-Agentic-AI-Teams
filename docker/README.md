@@ -23,13 +23,15 @@ This directory defines a **Docker Compose stack** that runs:
 
    Use `--env-file docker/.env` so variables from `docker/.env` (e.g. `OLLAMA_API_KEY`) are passed into the containers.
 
-   **Docker:**
+   **Docker:** One-time, ensure the network exists: `./docker/ensure-network.sh` (uses `docker network create` if you have Docker).
    ```bash
+   ./docker/ensure-network.sh
    docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
    ```
 
-   **Podman:** Use `podman compose` as a drop-in (requires a running Podman machine; on Windows, install WSL2 then `podman machine init` and `podman machine start`):
+   **Podman:** Use `podman compose` as a drop-in (requires a running Podman machine; on Windows, install WSL2 then `podman machine init` and `podman machine start`). **One-time:** create the external network so Compose doesn't try to manage it (avoids repeated "IPAM option driver has changed" errors):
    ```bash
+   ./docker/ensure-network.sh
    podman compose -f docker/docker-compose.yml --env-file docker/.env up --build
    ```
 
