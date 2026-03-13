@@ -42,3 +42,23 @@ Do NOT introduce new factual claims not in this list. Opinions and recommendatio
 {claims_text}
 ---
 """
+
+# Per-document extraction: output JSON with "notes" and "citations" for use when drafting from references.
+EXTRACT_NOTES_PROMPT = """You are extracting notes and citations from a single source for a blog post.
+
+You will be given:
+1. The blog post outline (so you know what is relevant).
+2. Optional audience and tone.
+3. One source document (title, URL, and text).
+
+Your task: From this single source only, extract facts, quotes, and citations that are relevant to writing the blog post. Do not invent information. Do not include information from other sources.
+
+Output valid JSON only, with exactly these keys:
+- "notes": A string containing concise bullet-point or paragraph notes of relevant facts and ideas from the source. Preserve key statistics, quotes, and attributions.
+- "citations": A list of objects, each with "fact_or_quote" (string) and "source_ref" (string, e.g. "Title (url)").
+
+If the source has nothing relevant to the outline, set "notes" to a short line saying so and "citations" to [].
+
+Example format:
+{"notes": "...", "citations": [{"fact_or_quote": "...", "source_ref": "Article Title (https://example.com)"}]}
+"""

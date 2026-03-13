@@ -46,7 +46,7 @@ RESEARCH_DOC = "## Sources\n- LLM Observability Guide: Best practices for monito
 
 def main() -> None:
     llm = DummyLLMClient()
-    style_guide = STYLE_GUIDE_PATH.read_text().strip() if STYLE_GUIDE_PATH.exists() else None
+    style_guide = STYLE_GUIDE_PATH.read_text(encoding="utf-8").strip() if STYLE_GUIDE_PATH.exists() else None
 
     # Get outline from review agent
     review_agent = BlogReviewAgent(llm_client=llm)
