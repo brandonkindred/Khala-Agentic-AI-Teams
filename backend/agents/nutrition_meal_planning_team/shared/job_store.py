@@ -20,7 +20,7 @@ JOB_STATUS_COMPLETED = "completed"
 JOB_STATUS_FAILED = "failed"
 JOB_STATUS_CANCELLED = "cancelled"
 
-DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache")).resolve()
+DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
 
 _manager_instance: Optional[CentralJobManager] = None
 
