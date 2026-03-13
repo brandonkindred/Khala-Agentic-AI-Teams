@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
@@ -649,17 +650,18 @@ class ProductRequirementsAnalysisAgent:
             count_before_dedup = open_count
 
             _update_job(
-                status_text="Deduplicating similar questions...",
+                status_text="Deduplicating questions whose answers we already have...",
             )
-            deduped_questions = self._dedupe_questions_by_similarity(
-                spec_review_result.open_questions
+            deduped_questions = self._dedupe_questions_by_answer_similarity(
+                spec_review_result.open_questions,
+                all_answered_questions,
             )
             if len(deduped_questions) < open_count:
                 _update_job(
-                    status_text=f"Reduced to {len(deduped_questions)} questions after removing similar ones",
+                    status_text=f"Reduced to {len(deduped_questions)} questions (already have answers for the rest)",
                 )
                 logger.info(
-                    "Deduped open questions by similarity: %d -> %d",
+                    "Deduped open questions by answer similarity: %d -> %d",
                     open_count,
                     len(deduped_questions),
                 )
@@ -720,8 +722,9 @@ class ProductRequirementsAnalysisAgent:
                 )
                 open_count = len(spec_review_result.open_questions)
                 count_before_dedup = open_count
-                deduped_questions = self._dedupe_questions_by_similarity(
-                    spec_review_result.open_questions
+                deduped_questions = self._dedupe_questions_by_answer_similarity(
+                    spec_review_result.open_questions,
+                    all_answered_questions,
                 )
                 if len(deduped_questions) < open_count:
                     logger.info(
@@ -1567,52 +1570,70 @@ Previously Answered Questions:
             confidence=0.5,
         )
 
-    def _dedupe_questions_by_similarity(
-        self, questions: List[OpenQuestion]
+    def _dedupe_questions_by_answer_similarity(
+        self,
+        open_questions: List[OpenQuestion],
+        answered_questions: List[AnsweredQuestion],
     ) -> List[OpenQuestion]:
-        """Drop questions whose question_text is nearly identical to an earlier one.
+        """Drop open questions whose answer we already have.
 
-        Only questions with >= 95% similarity are treated as duplicates and dropped.
-        Questions with 50–95% similarity are kept so they can be consolidated
-        (e.g. by _consolidate_open_questions) into a single question instead of
-        being filtered out. Keeps the first of each duplicate group; preserves order.
+        Compares answers (selected_answer from answered_questions) to the option
+        labels of each open question. If any option of an open question is
+        semantically the same as an answer we already have, we do not ask that
+        question again. Preserves order of open_questions.
         """
-        if len(questions) <= 1:
-            return list(questions)
+        if not open_questions:
+            return list(open_questions)
 
         def norm(t: str) -> str:
-            return " ".join(t.lower().split())
+            return " ".join((t or "").lower().split()).strip()
 
-        def words(t: str) -> set:
-            return set(norm(t).split())
+        # Build set of existing answers (normalized) we already have
+        existing_answers: List[str] = []
+        for aq in answered_questions:
+            s = norm(aq.selected_answer)
+            if s:
+                existing_answers.append(s)
+            if getattr(aq, "other_text", None) and aq.other_text.strip():
+                o = norm(aq.other_text)
+                if o and o not in existing_answers:
+                    existing_answers.append(o)
 
-        # Only drop as duplicate when >= 95% match; 50–95% similar stay for consolidation
-        SIMILARITY_THRESHOLD = 0.95
+        if not existing_answers:
+            return list(open_questions)
+
+        # Same threshold as shared deduplication for "same meaning"
+        SIMILARITY_THRESHOLD = 0.85
         kept: List[OpenQuestion] = []
-        kept_norm: List[str] = []
-        kept_words: List[set] = []
 
-        for q in questions:
-            n = norm(q.question_text)
-            w = words(q.question_text)
-            if not n.strip():
+        for q in open_questions:
+            if not q.options:
+                # No options: we cannot know what answer this would get; keep it
                 kept.append(q)
-                kept_norm.append(n)
-                kept_words.append(w)
                 continue
-            is_dupe = False
-            for i, (kn, kw) in enumerate(zip(kept_norm, kept_words)):
-                if n in kn or kn in n:
-                    is_dupe = True
-                    break
-                overlap = len(w & kw) / max(len(w), len(kw), 1)
-                if overlap >= SIMILARITY_THRESHOLD:
-                    is_dupe = True
-                    break
-            if not is_dupe:
+            option_labels = [norm(opt.label) for opt in q.options if opt.label]
+            if not option_labels:
                 kept.append(q)
-                kept_norm.append(n)
-                kept_words.append(w)
+                continue
+            # If any option is the same as an answer we already have, skip this question
+            already_covered = False
+            for opt_label in option_labels:
+                if not opt_label:
+                    continue
+                for existing in existing_answers:
+                    if SequenceMatcher(None, opt_label, existing).ratio() >= SIMILARITY_THRESHOLD:
+                        logger.info(
+                            "Skipping open question (answer already have): question_id=%s option=%r ~ existing=%r",
+                            q.id,
+                            opt_label[:50],
+                            existing[:50],
+                        )
+                        already_covered = True
+                        break
+                if already_covered:
+                    break
+            if not already_covered:
+                kept.append(q)
 
         return kept
 

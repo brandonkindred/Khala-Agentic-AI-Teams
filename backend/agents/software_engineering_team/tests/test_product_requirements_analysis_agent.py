@@ -665,18 +665,65 @@ def test_review_question_answer_alignment_parses_llm_output_and_preserves_ids() 
     assert result[0].question_text == "What platform category for deployment?"
 
 
-def test_dedupe_questions_by_similarity_keeps_first_and_drops_near_duplicates() -> None:
-    """_dedupe_questions_by_similarity drops questions similar to an earlier one, preserves order."""
+def test_dedupe_questions_by_answer_similarity_drops_question_when_we_already_have_that_answer() -> None:
+    """_dedupe_questions_by_answer_similarity drops open questions whose option matches an existing answer."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    answered = [
+        AnsweredQuestion(
+            question_id="prev",
+            question_text="Where to deploy?",
+            selected_answer="PaaS",
+        )
+    ]
+    opt_paas = QuestionOption(id="o1", label="PaaS", is_default=True, rationale="", confidence=0.9)
+    opt_k8s = QuestionOption(id="o2", label="Kubernetes", is_default=False, rationale="", confidence=0.5)
+    q_already_answered = OpenQuestion(
+        id="a",
+        question_text="Which deployment target?",
+        options=[opt_paas, opt_k8s],
+    )
+    q_new = OpenQuestion(
+        id="b",
+        question_text="Which OAuth provider?",
+        options=[
+            QuestionOption(id="o3", label="GitHub", is_default=True, rationale="", confidence=0.8),
+            QuestionOption(id="o4", label="Google", is_default=False, rationale="", confidence=0.5),
+        ],
+    )
+    result = agent._dedupe_questions_by_answer_similarity(
+        [q_already_answered, q_new],
+        answered,
+    )
+    assert len(result) == 1
+    assert result[0].id == "b"
+    assert result[0].question_text == "Which OAuth provider?"
+
+
+def test_dedupe_questions_by_answer_similarity_keeps_all_when_no_answers() -> None:
+    """When there are no answered questions, all open questions are kept."""
     llm = MagicMock()
     agent = ProductRequirementsAnalysisAgent(llm)
     opt = QuestionOption(id="o1", label="Yes", is_default=True, rationale="", confidence=0.9)
     q1 = OpenQuestion(id="a", question_text="Which OAuth provider?", options=[opt])
-    q2 = OpenQuestion(id="b", question_text="Which oauth provider?", options=[opt])
-    q3 = OpenQuestion(id="c", question_text="Where to deploy?", options=[opt])
-    result = agent._dedupe_questions_by_similarity([q1, q2, q3])
+    q2 = OpenQuestion(id="b", question_text="Where to deploy?", options=[opt])
+    result = agent._dedupe_questions_by_answer_similarity([q1, q2], [])
     assert len(result) == 2
     assert result[0].id == "a"
-    assert result[1].id == "c"
+    assert result[1].id == "b"
+
+
+def test_dedupe_questions_by_answer_similarity_keeps_questions_with_no_options() -> None:
+    """Open questions with no options are kept (we cannot infer answer overlap)."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    answered = [
+        AnsweredQuestion(question_id="x", question_text="Something?", selected_answer="Yes"),
+    ]
+    q_no_opts = OpenQuestion(id="n", question_text="Free-form question?", options=[])
+    result = agent._dedupe_questions_by_answer_similarity([q_no_opts], answered)
+    assert len(result) == 1
+    assert result[0].id == "n"
 
 
 def test_filter_organizational_questions_removes_org_keeps_technical() -> None:
