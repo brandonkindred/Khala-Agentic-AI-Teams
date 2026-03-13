@@ -132,14 +132,32 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
         manifest_path=request.manifest_path,
         access_tier=request.access_tier.value,
     )
-    
+
+    try:
+        from agent_provisioning_team.temporal.client import is_temporal_enabled
+        from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
+        if is_temporal_enabled():
+            start_provisioning_workflow(
+                job_id,
+                request.agent_id,
+                request.manifest_path,
+                request.access_tier.value,
+            )
+            return ProvisionJobResponse(
+                job_id=job_id,
+                status=JOB_STATUS_RUNNING,
+                message="Provisioning started (Temporal). Poll GET /provision/status/{job_id} for progress.",
+            )
+    except ImportError:
+        pass
+
     thread = threading.Thread(
         target=_run_provisioning_background,
         args=(job_id, request.agent_id, request.manifest_path, request.access_tier),
         daemon=True,
     )
     thread.start()
-    
+
     return ProvisionJobResponse(
         job_id=job_id,
         status=JOB_STATUS_RUNNING,

@@ -411,6 +411,18 @@ async def start_assistant_job(user_id: str, body: AssistantJobRequest):
         context=body.context,
     )
 
+    try:
+        from personal_assistant_team.temporal.client import is_temporal_enabled
+        from personal_assistant_team.temporal.start_workflow import start_assistant_workflow
+        if is_temporal_enabled():
+            start_assistant_workflow(
+                job_id, user_id, body.message,
+                body.context if isinstance(body.context, dict) else (body.context or {}),
+            )
+            return AssistantJobResponse(job_id=job_id, status=PA_JOB_STATUS_RUNNING)
+    except ImportError:
+        pass
+
     thread = threading.Thread(
         target=_run_assistant_job,
         args=(job_id, user_id, body.message, body.context),
