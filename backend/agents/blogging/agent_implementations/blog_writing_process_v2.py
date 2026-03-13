@@ -238,6 +238,7 @@ def run_pipeline(
             try:
                 draft_input = DraftInput(
                     research_document=research_document,
+                    research_references=research_result.references if research_result.references else None,
                     outline=review_result.outline,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,

@@ -6,17 +6,22 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from blog_copy_editor_agent.models import FeedbackItem
+from blog_research_agent.models import ResearchReference
 
 
 class DraftInput(BaseModel):
-    """Input for the blog draft agent: research document, outline, and optional style guide."""
+    """Input for the blog draft agent: research document and/or references, outline, and optional style guide."""
 
-    research_document: str = Field(
-        ...,
-        description="Compiled research document (sources, summaries, key points) to base the draft on.",
+    research_document: Optional[str] = Field(
+        None,
+        description="Compiled research document (fallback when research_references not used).",
+    )
+    research_references: Optional[List[ResearchReference]] = Field(
+        None,
+        description="Individual research sources; when non-empty, agent extracts notes/citations per source in parallel then drafts from combined notes.",
     )
     outline: str = Field(
         ...,
@@ -46,6 +51,14 @@ class DraftInput(BaseModel):
         None,
         description="Pre-loaded allowed_claims.json. When set, writer must use only these claims and tag as [CLAIM:id].",
     )
+
+    @model_validator(mode="after")
+    def require_research_source(self) -> "DraftInput":
+        has_doc = self.research_document and self.research_document.strip()
+        has_refs = self.research_references and len(self.research_references) > 0
+        if not has_doc and not has_refs:
+            raise ValueError("DraftInput requires either research_document or non-empty research_references")
+        return self
 
 
 class DraftOutput(BaseModel):

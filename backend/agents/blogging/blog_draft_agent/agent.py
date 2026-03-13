@@ -6,13 +6,22 @@ a blog post draft that complies with a brand and writing style guide.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from llm_service import LLMClient
 
+from blog_research_agent.models import ResearchReference
+
 from .models import DraftInput, DraftOutput, ReviseDraftInput
-from .prompts import ALLOWED_CLAIMS_INSTRUCTION, DRAFT_SYSTEM_REMINDER, MINIMAL_STYLE_REMINDER, REVISE_DRAFT_PROMPT
+from .prompts import (
+    ALLOWED_CLAIMS_INSTRUCTION,
+    DRAFT_SYSTEM_REMINDER,
+    EXTRACT_NOTES_PROMPT,
+    MINIMAL_STYLE_REMINDER,
+    REVISE_DRAFT_PROMPT,
+)
 
 try:
     from shared.brand_spec import BrandSpec, load_brand_spec
@@ -22,6 +31,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Caps for prompt inputs so the combined prompt fits within model context (e.g. 262K tokens for qwen3.5:397b-cloud).
+# Exceeding these can cause "prompt too long; exceeded max context length" (400).
+MAX_RESEARCH_CHARS_FOR_DRAFT = 100_000
+MAX_OUTLINE_CHARS_FOR_DRAFT = 20_000
+MAX_CLAIMS_CHARS_FOR_DRAFT = 15_000
+# Per-source cap for extraction calls (each document sent to one LLM call).
+MAX_CHARS_PER_SOURCE = 12_000
+
 # Default style guide path (Brandon Kindred brand and writing guide) relative to project root
 _DEFAULT_STYLE_GUIDE_PATH = (
     Path(__file__).resolve().parent.parent / "docs" / "brandon_kindred_brand_and_writing_style_guide.md"
@@ -30,7 +47,7 @@ _DEFAULT_STYLE_GUIDE_PATH = (
 
 def _load_style_guide(path: str | Path) -> str:
     """Load style guide text from a file. Raises OSError if file cannot be read."""
-    return Path(path).read_text().strip()
+    return Path(path).read_text(encoding="utf-8").strip()
 
 
 class BlogDraftAgent:
@@ -87,6 +104,49 @@ class BlogDraftAgent:
                 logger.warning("Could not load default style guide: %s", e)
         return MINIMAL_STYLE_REMINDER
 
+    def _extract_notes_from_source(
+        self,
+        ref: ResearchReference,
+        outline: str,
+        audience: Optional[str],
+        tone: Optional[str],
+    ) -> dict[str, Any]:
+        """
+        Extract notes and citations from a single source for use when drafting.
+        Returns dict with "notes" (str) and "citations" (list). On failure, returns safe default.
+        """
+        doc_text = (ref.content or ref.summary or "").strip()
+        if ref.key_points:
+            doc_text = doc_text + "\n\nKey points:\n" + "\n".join(f"- {p}" for p in ref.key_points)
+        if len(doc_text) > MAX_CHARS_PER_SOURCE:
+            doc_text = doc_text[:MAX_CHARS_PER_SOURCE] + "\n\n[... truncated for context ...]"
+        source_ref_str = f"{ref.title} ({ref.url})"
+        prompt = (
+            EXTRACT_NOTES_PROMPT
+            + "\n\n---\nOUTLINE:\n"
+            + outline[:4000]
+            + "\n\n---\n"
+        )
+        if audience:
+            prompt += f"Audience: {audience}\n"
+        if tone:
+            prompt += f"Tone/Purpose: {tone}\n"
+        prompt += f"\n---\nSOURCE: {ref.title}\nURL: {ref.url}\n---\nDocument text:\n{doc_text}"
+        try:
+            data = self.llm.complete_json(prompt, temperature=0.2)
+            notes = data.get("notes") or ""
+            citations = data.get("citations")
+            if not isinstance(citations, list):
+                citations = []
+            return {"notes": notes, "citations": citations, "source_ref": source_ref_str}
+        except Exception as e:
+            logger.warning("Extraction failed for source %s: %s", ref.title, e)
+            return {
+                "notes": ref.summary or "(No summary)",
+                "citations": [],
+                "source_ref": source_ref_str,
+            }
+
     def run(
         self,
         draft_input: DraftInput,
@@ -94,18 +154,68 @@ class BlogDraftAgent:
         on_llm_request: Optional[Callable[[str], None]] = None,
     ) -> DraftOutput:
         """
-        Generate a blog post draft from the research document and outline.
+        Generate a blog post draft from the research document and/or references and outline.
 
-        Preconditions:
-            - draft_input is a valid DraftInput (research_document and outline non-empty).
-        Postconditions:
-            - Returns DraftOutput with draft (Markdown string) compliant with the style guide.
+        When research_references is non-empty, extracts notes/citations from each source in parallel,
+        combines them, then drafts from the combined notes. Otherwise uses research_document (with truncation).
         """
-        research = draft_input.research_document.strip()
         outline = draft_input.outline.strip()
-        if not research or not outline:
-            logger.warning("Empty research_document or outline; returning minimal draft.")
-            return DraftOutput(draft="# Draft\n\nAdd research document and outline to generate a draft.")
+        if len(outline) > MAX_OUTLINE_CHARS_FOR_DRAFT:
+            logger.warning(
+                "Truncating outline from %s to %s chars to fit context",
+                len(outline),
+                MAX_OUTLINE_CHARS_FOR_DRAFT,
+            )
+            outline = outline[:MAX_OUTLINE_CHARS_FOR_DRAFT] + "\n\n[... outline truncated for context ...]"
+        if not outline:
+            logger.warning("Empty outline; returning minimal draft.")
+            return DraftOutput(draft="# Draft\n\nAdd outline to generate a draft.")
+
+        refs = draft_input.research_references if draft_input.research_references else []
+        if refs:
+            if on_llm_request:
+                on_llm_request("Extracting notes from sources...")
+            max_workers = min(len(refs), 8)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        self._extract_notes_from_source,
+                        ref,
+                        outline,
+                        draft_input.audience,
+                        draft_input.tone_or_purpose,
+                    )
+                    for ref in refs
+                ]
+                extractions = [fut.result() for fut in futures]
+            combined_parts = []
+            for ext in extractions:
+                section = f"## Source: {ext['source_ref']}\n\n{ext['notes']}"
+                if ext.get("citations"):
+                    cit_lines = [
+                        f"- {c.get('fact_or_quote', '')} (source: {c.get('source_ref', ext['source_ref'])})"
+                        for c in ext["citations"]
+                    ]
+                    section += "\n\nCitations:\n" + "\n".join(cit_lines)
+                combined_parts.append(section)
+            research = "\n\n".join(combined_parts)
+            logger.info(
+                "Combined notes from %s sources, total len=%s",
+                len(refs),
+                len(research),
+            )
+        else:
+            research = (draft_input.research_document or "").strip()
+            if len(research) > MAX_RESEARCH_CHARS_FOR_DRAFT:
+                logger.warning(
+                    "Truncating research_document from %s to %s chars to fit context",
+                    len(research),
+                    MAX_RESEARCH_CHARS_FOR_DRAFT,
+                )
+                research = research[:MAX_RESEARCH_CHARS_FOR_DRAFT] + "\n\n[... research truncated for context ...]"
+            if not research:
+                logger.warning("Empty research_document; returning minimal draft.")
+                return DraftOutput(draft="# Draft\n\nAdd research document and outline to generate a draft.")
 
         # Resolve style guide text (brand_spec takes precedence when provided)
         style_guide_text = self._resolve_style_guide(
@@ -136,6 +246,13 @@ class BlogDraftAgent:
                 f"- [CLAIM:{c.get('id','')}] {c.get('text','')} (sources: {', '.join(c.get('citations',[]))})"
                 for c in claims_list
             )
+            if len(claims_text) > MAX_CLAIMS_CHARS_FOR_DRAFT:
+                logger.warning(
+                    "Truncating allowed_claims from %s to %s chars to fit context",
+                    len(claims_text),
+                    MAX_CLAIMS_CHARS_FOR_DRAFT,
+                )
+                claims_text = claims_text[:MAX_CLAIMS_CHARS_FOR_DRAFT] + "\n... [claims truncated for context]"
             prompt_parts.append(ALLOWED_CLAIMS_INSTRUCTION.format(claims_text=claims_text))
             prompt_parts.append("")
         prompt_parts.extend([
