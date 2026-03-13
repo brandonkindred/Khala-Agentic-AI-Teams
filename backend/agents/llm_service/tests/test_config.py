@@ -51,7 +51,7 @@ def test_resolve_base_url_default(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_resolve_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_TIMEOUT", raising=False)
     monkeypatch.delenv("SW_LLM_TIMEOUT", raising=False)
-    assert config.resolve_timeout() == 120.0
+    assert config.resolve_timeout() == 300.0
 
 
 def test_resolve_context_size_for_model_known(monkeypatch: pytest.MonkeyPatch) -> None:
