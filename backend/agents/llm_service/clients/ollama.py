@@ -102,10 +102,10 @@ class OllamaLLMClient(LLMClient):
     def _ollama_auth_headers(self) -> dict[str, str]:
         """Return Authorization Bearer header for Ollama Cloud. Uses OLLAMA_API_KEY (or LLM_* overrides)."""
         key = (
-            os.environ.get("OLLAMA_API_KEY")
-            or os.environ.get(llm_config.ENV_LLM_OLLAMA_API_KEY)
-            or os.environ.get(llm_config.ENV_LLM_OLLAMA_API_KEY_SW)
-        )
+            (os.environ.get("OLLAMA_API_KEY") or "")
+            or (os.environ.get(llm_config.ENV_LLM_OLLAMA_API_KEY) or "")
+            or (os.environ.get(llm_config.ENV_LLM_OLLAMA_API_KEY_SW) or "")
+        ).strip()
         if not key:
             return {}
         return {"Authorization": f"Bearer {key}"}
@@ -289,36 +289,45 @@ class OllamaLLMClient(LLMClient):
                         except json.JSONDecodeError as e:
                             raise LLMPermanentError(f"Malformed LLM response (invalid JSON): {e}") from e
                         return self._parse_response_content(data)
-                        if status == 429:
-                            last_error = LLMRateLimitError(
-                                f"LLM rate limited (429) after {attempt + 1} attempt(s)",
-                                status_code=429,
-                            )
-                            if attempt < max_retries:
-                                wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
-                                logger.warning("LLM 429 (attempt %d/%d). Retrying in %.1fs", attempt + 1, max_retries + 1, wait)
-                                time.sleep(wait)
-                                continue
-                            raise last_error
-                        if 500 <= status < 600:
-                            last_error = LLMTemporaryError(
-                                f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}",
+                    if status == 429:
+                        last_error = LLMRateLimitError(
+                            f"LLM rate limited (429) after {attempt + 1} attempt(s)",
+                            status_code=429,
+                        )
+                        if attempt < max_retries:
+                            wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                            logger.warning("LLM 429 (attempt %d/%d). Retrying in %.1fs", attempt + 1, max_retries + 1, wait)
+                            time.sleep(wait)
+                            continue
+                        raise last_error
+                    if 500 <= status < 600:
+                        last_error = LLMTemporaryError(
+                            f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}",
+                            status_code=status,
+                        )
+                        if attempt < max_retries:
+                            wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                            time.sleep(wait)
+                            continue
+                        raise last_error
+                    if 400 <= status < 500:
+                        err_text = response.text[:500]
+                        if status == 404 and ("not found" in err_text.lower() or "model" in err_text.lower()):
+                            raise LLMPermanentError(
+                                f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text[:200]}",
                                 status_code=status,
                             )
-                            if attempt < max_retries:
-                                wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
-                                time.sleep(wait)
-                                continue
-                            raise last_error
-                        if 400 <= status < 500:
-                            err_text = response.text[:500]
-                            if status == 404 and ("not found" in err_text.lower() or "model" in err_text.lower()):
-                                raise LLMPermanentError(
-                                    f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text[:200]}",
-                                    status_code=status,
-                                )
-                            raise LLMPermanentError(f"LLM client error {status}: {err_text}", status_code=status)
-                        raise LLMPermanentError(f"Unexpected LLM response status {status}: {response.text[:200]}", status_code=status)
+                        if status == 401:
+                            auth_hint = (
+                                " Set OLLAMA_API_KEY (or LLM_OLLAMA_API_KEY / SW_LLM_OLLAMA_API_KEY) for Ollama Cloud."
+                                if not headers else " Check that the key is valid and not expired."
+                            )
+                            raise LLMPermanentError(
+                                f"LLM unauthorized (401): {err_text[:200]}.{auth_hint}",
+                                status_code=status,
+                            )
+                        raise LLMPermanentError(f"LLM client error {status}: {err_text}", status_code=status)
+                    raise LLMPermanentError(f"Unexpected LLM response status {status}: {response.text[:200]}", status_code=status)
             except (LLMPermanentError, LLMRateLimitError, LLMTemporaryError, LLMTruncatedError):
                 raise
             except httpx.HTTPStatusError as e:
