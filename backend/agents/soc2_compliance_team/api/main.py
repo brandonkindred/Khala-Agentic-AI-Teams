@@ -132,6 +132,19 @@ def run_audit(request: RunAuditRequest) -> RunAuditResponse:
             "result": None,
         }
 
+    try:
+        from soc2_compliance_team.temporal.client import is_temporal_enabled
+        from soc2_compliance_team.temporal.start_workflow import start_audit_workflow
+        if is_temporal_enabled():
+            start_audit_workflow(job_id, str(repo_path))
+            return RunAuditResponse(
+                job_id=job_id,
+                status="running",
+                message=f"Audit started (Temporal). Poll GET /soc2-audit/status/{job_id} for results.",
+            )
+    except ImportError:
+        pass
+
     thread = threading.Thread(target=_run_audit_job, args=(job_id, str(repo_path)))
     thread.daemon = True
     thread.start()
