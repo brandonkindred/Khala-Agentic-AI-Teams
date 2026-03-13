@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import tempfile
 import threading
 import time
 import uuid
@@ -30,7 +32,7 @@ _arch_dir = _team_dir / "architect-agents"
 if _arch_dir.exists() and str(_arch_dir) not in sys.path:
     sys.path.insert(0, str(_arch_dir))
 
-from spec_parser import validate_work_path
+from spec_parser import SPEC_FILENAME, validate_work_path
 from software_engineering_team.shared.execution_tracker import execution_tracker
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_AGENT_CRASH,
@@ -2072,6 +2074,23 @@ class ProductAnalysisRunRequest(BaseModel):
     )
 
 
+class StartFromSpecRequest(BaseModel):
+    """Request body for creating a project from an uploaded spec and starting PRA."""
+
+    project_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=256,
+        description="Project name (no spaces; only letters, numbers, hyphens, underscores).",
+    )
+    spec_content: str = Field(
+        ...,
+        min_length=1,
+        max_length=500_000,
+        description="Full content of the spec file (text or markdown).",
+    )
+
+
 class ProductAnalysisRunResponse(BaseModel):
     """Response from POST /product-analysis/run."""
 
@@ -2222,6 +2241,88 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
         job_id=job_id,
         status="running",
         message="Product analysis started. Poll GET /product-analysis/status/{job_id} for progress.",
+    )
+
+
+# Project name: no spaces, only letters, numbers, hyphen, underscore
+PROJECT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+ENV_WORKSPACE_ROOT = "WORKSPACE_ROOT"
+DEFAULT_PROJECTS_DIR_NAME = "strands_projects"
+
+
+def _get_projects_root() -> Path:
+    """Resolve the root directory for created projects. When WORKSPACE_ROOT is set, use it/projects; else tempdir/strands_projects."""
+    workspace_root_str = os.environ.get(ENV_WORKSPACE_ROOT)
+    if workspace_root_str:
+        root = Path(workspace_root_str).resolve() / "projects"
+    else:
+        root = Path(tempfile.gettempdir()) / DEFAULT_PROJECTS_DIR_NAME
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+@app.post(
+    "/product-analysis/start-from-spec",
+    response_model=ProductAnalysisRunResponse,
+    summary="Create project from spec and start PRA",
+    description="Create a new project directory with the given name, write the spec content as initial_spec.md, "
+    "then start the Product Requirements Analysis workflow. Returns job_id; poll GET /product-analysis/status/{job_id}. "
+    "project_name must contain no spaces and only letters, numbers, hyphens, and underscores.",
+)
+def start_product_analysis_from_spec(request: StartFromSpecRequest) -> ProductAnalysisRunResponse:
+    """Create a project from uploaded spec content and start PRA."""
+    if not PROJECT_NAME_PATTERN.match(request.project_name):
+        raise HTTPException(
+            status_code=400,
+            detail="project_name must contain no spaces and only letters, numbers, hyphens, and underscores.",
+        )
+
+    projects_root = _get_projects_root()
+    project_dir = projects_root / request.project_name
+    if project_dir.exists():
+        raise HTTPException(status_code=400, detail="Project already exists.")
+
+    project_dir.mkdir(parents=True, exist_ok=False)
+    spec_path = project_dir / SPEC_FILENAME
+    spec_path.write_text(request.spec_content, encoding="utf-8")
+    initial_spec_path_str = str(spec_path)
+    repo_path_str = str(project_dir)
+    spec_content = request.spec_content
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, repo_path_str, job_type="product_analysis")
+
+    try:
+        from software_engineering_team.temporal.client import is_temporal_enabled
+        from software_engineering_team.temporal.constants import STANDALONE_TYPE_PRODUCT_ANALYSIS
+        from software_engineering_team.temporal.start_workflow import start_standalone_workflow
+
+        if is_temporal_enabled():
+            start_standalone_workflow(
+                STANDALONE_TYPE_PRODUCT_ANALYSIS,
+                job_id,
+                repo_path_str,
+                spec_content=spec_content,
+                initial_spec_path=initial_spec_path_str,
+            )
+        else:
+            thread = threading.Thread(
+                target=_run_product_analysis_background,
+                args=(job_id, repo_path_str, spec_content, initial_spec_path_str),
+            )
+            thread.daemon = True
+            thread.start()
+    except Exception as e:
+        logger.exception("Failed to start product-analysis workflow from spec")
+        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+    start_job_heartbeat_thread(job_id)
+
+    return ProductAnalysisRunResponse(
+        job_id=job_id,
+        status="running",
+        message="Project created and product analysis started. Poll GET /product-analysis/status/{job_id} for progress.",
     )
 
 

@@ -346,6 +346,20 @@ export class SoftwareEngineeringApiService {
   }
 
   /**
+   * POST /product-analysis/start-from-spec
+   * Create a project from spec content and start Product Requirements Analysis.
+   */
+  startProductAnalysisFromSpec(
+    projectName: string,
+    specContent: string
+  ): Observable<ProductAnalysisRunResponse> {
+    return this.http.post<ProductAnalysisRunResponse>(
+      `${this.baseUrl}/product-analysis/start-from-spec`,
+      { project_name: projectName, spec_content: specContent }
+    );
+  }
+
+  /**
    * GET /product-analysis/status/{job_id}
    */
   getProductAnalysisStatus(
