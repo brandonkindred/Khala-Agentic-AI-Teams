@@ -26,69 +26,13 @@ def complete_text_with_continuation(
     agent_name: str = "PlanningV2",
     max_continuation_cycles: int = MAX_CONTINUATION_CYCLES,
 ) -> str:
-    """Call LLM with text mode; on truncation, continue until complete.
+    """Call LLM with text mode; truncation is handled by the client (llm_service).
 
     Does not require or parse JSON. Callers should use output_templates to parse
-    the returned text. Matches the truncated-response approach used by backend_code_v2
-    and frontend_code_v2 teams.
-
-    Returns:
-        Full response text (possibly concatenated from continuation cycles).
-
-    Raises:
-        RuntimeError: If continuation is exhausted and response is still truncated.
+    the returned text. Continuation on truncation is performed inside the
+    Ollama client (same as complete_json); this wrapper delegates to llm.complete_text.
     """
-    from llm_service import LLMTruncatedError
-    from software_engineering_team.shared.continuation import ResponseContinuator
-    from software_engineering_team.shared.post_mortem import write_post_mortem
-
-    try:
-        return llm.complete_text(prompt)
-    except LLMTruncatedError as e:
-        logger.info(
-            "%s: Response truncated (%d chars). Starting continuation loop...",
-            agent_name,
-            len(e.partial_content),
-        )
-        continuator = ResponseContinuator(
-            base_url=llm.base_url,
-            model=llm.model,
-            timeout=llm.timeout,
-            max_cycles=max_continuation_cycles,
-        )
-        result = continuator.attempt_continuation(
-            original_prompt=prompt,
-            partial_content=e.partial_content,
-            json_mode=False,
-            task_id=agent_name,
-        )
-        if result.success:
-            logger.info(
-                "%s: Continuation successful after %d cycles (%d chars total)",
-                agent_name,
-                result.cycles_used,
-                len(result.content),
-            )
-            return result.content
-        logger.warning(
-            "%s: Continuation exhausted after %d cycles (%d chars accumulated).",
-            agent_name,
-            result.cycles_used,
-            len(result.content),
-        )
-        write_post_mortem(
-            agent_name=agent_name,
-            task_description=f"Planning V2 - {agent_name}",
-            original_prompt=prompt,
-            partial_responses=result.partial_responses,
-            continuation_attempts=result.cycles_used,
-            decomposition_depth=0,
-            error=e,
-        )
-        raise RuntimeError(
-            f"{agent_name}: Response truncated and continuation exhausted after {result.cycles_used} cycles. "
-            "See post_mortems/POST_MORTEMS.md for details."
-        ) from e
+    return llm.complete_text(prompt)
 
 
 def attempt_fix_output_continuation(

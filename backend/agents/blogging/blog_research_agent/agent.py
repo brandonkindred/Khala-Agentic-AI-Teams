@@ -354,16 +354,24 @@ class ResearchAgent:
         logger.info("Fetched %s documents", len(documents))
         return documents
 
+    # Max chars of document content to send for scoring (avoids context overflow; response truncation handled by LLM client)
+    _SCORE_DOC_CONTENT_MAX_CHARS = 6000
+
     def _score_one_document(
         self,
         doc: SourceDocument,
         brief_input: ResearchBriefInput,
     ) -> Tuple[SourceDocument, float, float, float, str]:
         """Score a single document for relevance, authority, accuracy, and type. Used by _score_documents."""
-        prompt = DOC_RELEVANCE_SCORING_PROMPT + "\n\n" + (
-            f"Brief:\n{brief_input.brief}\n\n"
-            f"Document title: {doc.title or ''}\n"
-            f"Document content (full text):\n{doc.content}\n"
+        excerpt = doc.content[: self._SCORE_DOC_CONTENT_MAX_CHARS]
+        prompt = (
+            DOC_RELEVANCE_SCORING_PROMPT
+            + "\n\n"
+            + (
+                f"Brief:\n{brief_input.brief}\n\n"
+                f"Document title: {doc.title or ''}\n"
+                f"Document content (excerpt):\n{excerpt}\n"
+            )
         )
         data = self.llm.complete_json(prompt, temperature=0.0)
         rel = data.get("relevance_score")

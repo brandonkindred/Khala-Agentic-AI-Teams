@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # Default cap for max_tokens
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
+# Continuation on truncation (same behavior as software_engineering_team)
+MAX_CONTINUATION_CYCLES = 10
+CONTINUATION_CONTEXT_CHARS = 150
+
 # Expected keys for "try every code block" fallback
 _EXPECTED_KEYS = frozenset({
     "files", "summary", "code", "overview", "issues", "approved", "components",
@@ -375,14 +379,16 @@ class OllamaLLMClient(LLMClient):
             "no explanatory text, no Markdown, no code fences. "
             "If you use a code block, put only the JSON object inside it with no surrounding text."
         )
-        env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS) or os.environ.get(llm_config.ENV_LLM_MAX_TOKENS_SW)
-        if env_max:
-            try:
-                max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
-            except ValueError:
+        max_tokens = kwargs.pop("max_tokens", None)
+        if max_tokens is None:
+            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS) or os.environ.get(llm_config.ENV_LLM_MAX_TOKENS_SW)
+            if env_max:
+                try:
+                    max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
+                except ValueError:
+                    max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
+            else:
                 max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-        else:
-            max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
         max_tokens = min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
         payload = {
             "model": self.model,
@@ -396,8 +402,96 @@ class OllamaLLMClient(LLMClient):
         }
         if self._should_enable_thinking():
             payload["think"] = True
-        content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
-        return self._extract_json(content)
+        try:
+            content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+            return self._extract_json(content)
+        except LLMTruncatedError as e:
+            return self._complete_json_with_continuation(
+                initial_partial=e.partial_content,
+                prompt=prompt,
+                system_message=system_message,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_retries=max_retries,
+                backoff_base=backoff_base,
+                backoff_max=backoff_max,
+                sem=sem,
+            )
+
+    def _merge_continuation(self, accumulated: str, next_chunk: str, min_overlap: int = 10) -> str:
+        """Append next_chunk to accumulated, stripping overlap at boundary."""
+        if not next_chunk:
+            return accumulated
+        if not accumulated:
+            return next_chunk
+        max_check = min(len(accumulated), len(next_chunk), 500)
+        for overlap_len in range(max_check, min_overlap - 1, -1):
+            if accumulated[-overlap_len:] == next_chunk[:overlap_len]:
+                return accumulated + next_chunk[overlap_len:]
+        return accumulated + next_chunk
+
+    def _continuation_user_message(self, partial_content: str) -> str:
+        """Prompt for the model to continue from where it left off."""
+        last_chars = partial_content[-CONTINUATION_CONTEXT_CHARS:] if partial_content else ""
+        last_escaped = last_chars.replace("\n", "\\n")
+        return (
+            f"Please continue exactly from where you left off. "
+            f"Your previous response ended with: '{last_escaped}'. "
+            f"Continue the response seamlessly without repeating what you already wrote."
+        )
+
+    def _complete_json_with_continuation(
+        self,
+        initial_partial: str,
+        prompt: str,
+        system_message: str,
+        temperature: float,
+        max_tokens: int,
+        max_retries: int,
+        backoff_base: float,
+        backoff_max: float,
+        sem: threading.BoundedSemaphore,
+    ) -> Dict[str, Any]:
+        """On truncation: continue via multi-turn conversation, then parse JSON (same as SE team)."""
+        accumulated = initial_partial
+        for cycle in range(MAX_CONTINUATION_CYCLES):
+            logger.info(
+                "Continuation cycle %d/%d (accumulated %d chars)",
+                cycle + 1,
+                MAX_CONTINUATION_CYCLES,
+                len(accumulated),
+            )
+            messages = [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": accumulated},
+                {"role": "user", "content": self._continuation_user_message(accumulated)},
+            ]
+            payload = {
+                "model": self.model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+                "messages": messages,
+            }
+            if self._should_enable_thinking():
+                payload["think"] = True
+            try:
+                next_content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+                accumulated = self._merge_continuation(accumulated, next_content)
+                return self._extract_json(accumulated)
+            except LLMTruncatedError as e2:
+                accumulated = self._merge_continuation(accumulated, e2.partial_content)
+        logger.warning(
+            "Continuation exhausted after %d cycles (%d chars). Re-raising truncation.",
+            MAX_CONTINUATION_CYCLES,
+            len(accumulated),
+        )
+        raise LLMTruncatedError(
+            f"Response still truncated after {MAX_CONTINUATION_CYCLES} continuation cycles",
+            partial_content=accumulated,
+            finish_reason="length",
+        )
 
     def complete(
         self,
@@ -431,4 +525,70 @@ class OllamaLLMClient(LLMClient):
             payload["messages"] = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
         if self._should_enable_thinking():
             payload["think"] = True
-        return self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+        try:
+            return self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+        except LLMTruncatedError as e:
+            return self._complete_text_with_continuation(
+                initial_partial=e.partial_content,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                max_retries=max_retries,
+                backoff_base=backoff_base,
+                backoff_max=backoff_max,
+                sem=sem,
+            )
+
+    def _complete_text_with_continuation(
+        self,
+        initial_partial: str,
+        prompt: str,
+        system_prompt: Optional[str],
+        temperature: float,
+        max_tokens: int,
+        max_retries: int,
+        backoff_base: float,
+        backoff_max: float,
+        sem: threading.BoundedSemaphore,
+    ) -> str:
+        """On truncation: continue via multi-turn conversation, return merged text."""
+        accumulated = initial_partial
+        system_message = system_prompt or ""
+        for cycle in range(MAX_CONTINUATION_CYCLES):
+            logger.info(
+                "Continuation cycle %d/%d (text, accumulated %d chars)",
+                cycle + 1,
+                MAX_CONTINUATION_CYCLES,
+                len(accumulated),
+            )
+            messages: list = []
+            if system_message:
+                messages.append({"role": "system", "content": system_message})
+            messages.append({"role": "user", "content": prompt})
+            messages.append({"role": "assistant", "content": accumulated})
+            messages.append({"role": "user", "content": self._continuation_user_message(accumulated)})
+            payload = {
+                "model": self.model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "messages": messages,
+            }
+            if self._should_enable_thinking():
+                payload["think"] = True
+            try:
+                next_content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+                accumulated = self._merge_continuation(accumulated, next_content)
+                return accumulated
+            except LLMTruncatedError as e2:
+                accumulated = self._merge_continuation(accumulated, e2.partial_content)
+        logger.warning(
+            "Continuation exhausted after %d cycles (text, %d chars). Re-raising truncation.",
+            MAX_CONTINUATION_CYCLES,
+            len(accumulated),
+        )
+        raise LLMTruncatedError(
+            f"Response still truncated after {MAX_CONTINUATION_CYCLES} continuation cycles",
+            partial_content=accumulated,
+            finish_reason="length",
+        )

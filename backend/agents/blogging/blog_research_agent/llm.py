@@ -12,6 +12,7 @@ from llm_service import (
     LLMClient,
     LLMError,
     LLMJsonParseError,
+    LLMTruncatedError,
     OllamaLLMClient,
     get_client,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "LLMClient",
     "LLMError",
     "LLMJsonParseError",
+    "LLMTruncatedError",
     "OllamaLLMClient",
     "get_client",
 ]

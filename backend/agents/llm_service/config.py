@@ -106,11 +106,6 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
 
 DEFAULT_FALLBACK_MODEL = "qwen3.5:397b-cloud"
 
-# Per-agent default timeout (seconds) when LLM_TIMEOUT not set; blog uses longer for draft/revision
-AGENT_DEFAULT_TIMEOUTS: dict[str, float] = {
-    "blog": 300.0,
-}
-
 # ---------------------------------------------------------------------------
 # Resolvers (env + agent defaults)
 # ---------------------------------------------------------------------------
@@ -142,16 +137,12 @@ def resolve_base_url() -> str:
 
 
 def resolve_timeout(agent_key: Optional[str] = None) -> float:
-    """Return timeout in seconds. Env override, then per-agent default (e.g. blog 300), else 120."""
-    raw = os.environ.get(ENV_LLM_TIMEOUT) or os.environ.get(ENV_LLM_TIMEOUT_SW)
-    if raw:
-        try:
-            return float(raw)
-        except ValueError:
-            pass
-    if agent_key and agent_key in AGENT_DEFAULT_TIMEOUTS:
-        return AGENT_DEFAULT_TIMEOUTS[agent_key]
-    return 120.0
+    """Return timeout in seconds (default 120)."""
+    raw = os.environ.get(ENV_LLM_TIMEOUT) or os.environ.get(ENV_LLM_TIMEOUT_SW) or "120"
+    try:
+        return float(raw)
+    except ValueError:
+        return 120.0
 
 
 def resolve_context_size_for_model(model: str) -> Optional[int]:

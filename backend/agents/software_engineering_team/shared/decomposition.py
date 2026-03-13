@@ -304,12 +304,12 @@ class RecursiveProcessor(Generic[T]):
         process_fn: Optional[Callable[[str], T]] = None,
         context: Optional[DecompositionContext] = None,
     ) -> T:
-        """Process content with 3-step recovery flow.
+        """Process content with recovery on truncation.
 
-        Recovery flow:
-        1. On truncation: Attempt continuation via multi-turn conversation (5 cycles max)
-        2. If continuation fails: Decompose task into smaller chunks (up to max_depth)
-        3. If decomposition fails: Write post-mortem and raise error
+        Truncation is handled by the LLM client (continuation in llm_service).
+        If the client still raises LLMTruncatedError after its continuation:
+        1. Decompose task into smaller chunks (up to max_depth)
+        2. If decomposition fails: Write post-mortem and raise error
 
         Args:
             llm: LLM client for making requests.
@@ -327,8 +327,8 @@ class RecursiveProcessor(Generic[T]):
             LLMTruncatedError: If max decomposition depth is exceeded and
                               response is still truncated.
         """
-        from llm_service import LLMTruncatedError, LLMJsonParseError
-        from software_engineering_team.shared.continuation import ResponseContinuator, ContinuationResult, MAX_CONTINUATION_CYCLES
+        from llm_service import LLMTruncatedError
+        from software_engineering_team.shared.continuation import MAX_CONTINUATION_CYCLES
         from software_engineering_team.shared.post_mortem import write_post_mortem
 
         if context is None:
@@ -344,40 +344,13 @@ class RecursiveProcessor(Generic[T]):
             return llm.complete_json(prompt)
         except LLMTruncatedError as e:
             context.add_partial_response(e.partial_content)
-
             if not context.continuation_attempted:
-                logger.info(
-                    "%s: Response truncated (%d chars). Step 1 -> Attempting continuation",
-                    agent_name,
-                    len(e.partial_content),
-                )
-
-                continued_content = self._attempt_continuation(
-                    llm, prompt, e.partial_content, agent_name
-                )
-
-                if continued_content:
-                    context.add_partial_response(continued_content)
-                    try:
-                        return llm._extract_json(continued_content)
-                    except (LLMJsonParseError, Exception):
-                        logger.warning(
-                            "%s: Continuation produced content but JSON parse failed. "
-                            "Step 2 -> Decomposing task",
-                            agent_name,
-                        )
-
                 context.mark_continuation_attempted()
-                logger.warning(
-                    "%s: Continuation exhausted. Step 2 -> Decomposing task",
-                    agent_name,
-                )
-            else:
-                logger.warning(
-                    "%s: Response truncated (%d chars). Decomposing task",
-                    agent_name,
-                    len(e.partial_content),
-                )
+            logger.warning(
+                "%s: Response truncated (%d chars). Client already attempted continuation; decomposing task",
+                agent_name,
+                len(e.partial_content),
+            )
 
             if not context.can_decompose():
                 logger.error(
@@ -403,75 +376,6 @@ class RecursiveProcessor(Generic[T]):
             return self._decompose_and_process(
                 llm, prompt, content, agent_name, process_fn, context
             )
-
-    def _attempt_continuation(
-        self,
-        llm: "LLMClient",
-        prompt: str,
-        partial_content: str,
-        agent_name: str,
-        project_root: Optional[Path] = None,
-    ) -> Optional[str]:
-        """Attempt to continue a truncated response.
-
-        Args:
-            llm: LLM client.
-            prompt: The original prompt.
-            partial_content: The truncated response content.
-            agent_name: Agent name for logging and log file naming.
-            project_root: Optional root directory for continuation logs.
-
-        Returns:
-            Complete content if successful, None if continuation fails.
-        """
-        from software_engineering_team.shared.continuation import ResponseContinuator, ContinuationResult, MAX_CONTINUATION_CYCLES
-
-        system_message = (
-            "You are a strict JSON generator. Respond with a single valid JSON object only, "
-            "no explanatory text, no Markdown, no code fences."
-        )
-
-        try:
-            continuator = ResponseContinuator(
-                base_url=llm.base_url,
-                model=llm.model,
-                timeout=llm.timeout,
-                max_cycles=MAX_CONTINUATION_CYCLES,
-            )
-
-            result: ContinuationResult = continuator.attempt_continuation(
-                original_prompt=prompt,
-                partial_content=partial_content,
-                system_prompt=system_message,
-                json_mode=True,
-                task_id=agent_name,
-                project_root=project_root,
-            )
-
-            if result.success:
-                logger.info(
-                    "%s: Continuation succeeded after %d cycles (%d chars total)",
-                    agent_name,
-                    result.cycles_used,
-                    len(result.content),
-                )
-                return result.content
-
-            logger.warning(
-                "%s: Continuation exhausted after %d cycles (%d chars accumulated)",
-                agent_name,
-                result.cycles_used,
-                len(result.content),
-            )
-            return None
-
-        except Exception as e:
-            logger.warning(
-                "%s: Continuation failed with error: %s",
-                agent_name,
-                str(e)[:100],
-            )
-            return None
 
     def _decompose_and_process(
         self,
