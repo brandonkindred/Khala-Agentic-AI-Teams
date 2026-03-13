@@ -429,6 +429,12 @@ export interface ProductAnalysisRunRequest {
   spec_content?: string;
 }
 
+/** Request for POST /product-analysis/start-from-spec (create project from spec and start PRA). */
+export interface StartFromSpecRequest {
+  project_name: string;
+  spec_content: string;
+}
+
 /** Response from POST /product-analysis/run. */
 export interface ProductAnalysisRunResponse {
   job_id: string;

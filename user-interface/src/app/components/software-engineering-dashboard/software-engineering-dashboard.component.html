@@ -67,6 +67,10 @@
   </mat-tab>
   <mat-tab label="Product Analysis">
     <div class="tab-content">
+      <app-start-from-spec-form
+        (submitSuccess)="onStartFromSpecSuccess($event)"
+        (submitError)="onStartFromSpecError($event)"
+      />
       <app-product-analysis-run-form (submitRequest)="onProductAnalysisSubmit($event)" />
       @if (productAnalysisJobId) {
         <app-product-analysis-job-status

@@ -29,6 +29,7 @@ import { RunTeamTrackingComponent } from '../run-team-tracking/run-team-tracking
 import { PendingQuestionsComponent } from '../pending-questions/pending-questions.component';
 import { ProductAnalysisRunFormComponent } from '../product-analysis-run-form/product-analysis-run-form.component';
 import { ProductAnalysisJobStatusComponent } from '../product-analysis-job-status/product-analysis-job-status.component';
+import { StartFromSpecFormComponent } from '../start-from-spec-form/start-from-spec-form.component';
 import type {
   RunTeamRequest,
   JobStatusResponse,
@@ -71,6 +72,7 @@ import type {
     PendingQuestionsComponent,
     ProductAnalysisRunFormComponent,
     ProductAnalysisJobStatusComponent,
+    StartFromSpecFormComponent,
   ],
   templateUrl: './software-engineering-dashboard.component.html',
   styleUrl: './software-engineering-dashboard.component.scss',
@@ -413,6 +415,15 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
 
   onPanelPlanningV3AnswersSubmitted(response: JobStatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse): void {
     this.panelPlanningV3Status = response as PlanningV3StatusResponse;
+  }
+
+  onStartFromSpecSuccess(res: { job_id: string }): void {
+    this.error = null;
+    this.productAnalysisJobId = res.job_id;
+  }
+
+  onStartFromSpecError(message: string): void {
+    this.error = message || 'Failed to create project and start analysis.';
   }
 
   onProductAnalysisSubmit(request: ProductAnalysisRunRequest): void {
