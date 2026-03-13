@@ -42,7 +42,7 @@ LLM_UNREACHABLE_AFTER_RETRIES = (
     "LLM unreachable after 3 attempts with exponential backoff. Check connectivity and resume when ready."
 )
 
-DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache")).resolve()
+DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache"))
 
 # Seconds after which a pending/running job with no recent heartbeat is marked failed.
 # Set via env JOB_STALE_AFTER_SECONDS (default 1800).
