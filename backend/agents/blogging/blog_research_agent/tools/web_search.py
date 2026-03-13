@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import logging
 import os
+import time
 from typing import List
 
 import httpx
 from pydantic import HttpUrl
 
 from ..models import SearchQuery, CandidateResult
+
+logger = logging.getLogger(__name__)
 
 
 class WebSearchError(RuntimeError):
@@ -15,6 +19,10 @@ class WebSearchError(RuntimeError):
 
 # Ollama web search allows max 10 results per request
 OLLAMA_WEB_SEARCH_MAX_RESULTS = 10
+
+# Retries for transient connection/SSL errors
+WEB_SEARCH_MAX_RETRIES = 3
+WEB_SEARCH_BACKOFF_BASE = 2.0
 
 
 class OllamaWebSearch:
@@ -73,12 +81,32 @@ class OllamaWebSearch:
         payload = {"query": query.query_text, "max_results": limit}
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
-        try:
-            with httpx.Client(timeout=self.timeout) as client:
-                resp = client.post(url, json=payload, headers=headers)
-        except httpx.HTTPError as exc:
-            raise WebSearchError(f"HTTP error during Ollama web search: {exc}") from exc
+        resp: httpx.Response | None = None
+        for attempt in range(WEB_SEARCH_MAX_RETRIES + 1):
+            try:
+                with httpx.Client(timeout=self.timeout) as client:
+                    resp = client.post(url, json=payload, headers=headers)
+                break
+            except (httpx.ConnectError, httpx.ReadTimeout) as exc:
+                if attempt < WEB_SEARCH_MAX_RETRIES:
+                    wait = WEB_SEARCH_BACKOFF_BASE ** attempt
+                    logger.warning(
+                        "Web search connection error (attempt %d/%d): %s. Retrying in %.1fs",
+                        attempt + 1,
+                        WEB_SEARCH_MAX_RETRIES + 1,
+                        type(exc).__name__,
+                        wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    raise WebSearchError(
+                        f"HTTP error during Ollama web search after {WEB_SEARCH_MAX_RETRIES + 1} attempts: {exc}"
+                    ) from exc
+            except httpx.HTTPError as exc:
+                raise WebSearchError(f"HTTP error during Ollama web search: {exc}") from exc
 
+        if resp is None:
+            raise WebSearchError("Ollama web search failed: no response after retries")
         if resp.status_code != 200:
             raise WebSearchError(
                 f"Ollama web search failed with status {resp.status_code}: {resp.text}"

@@ -34,7 +34,7 @@ def get_client(agent_key: Optional[str] = None) -> Union[DummyLLMClient, OllamaL
 
     model = llm_config.resolve_model(agent_key)
     base_url = llm_config.resolve_base_url()
-    timeout = llm_config.resolve_timeout()
+    timeout = llm_config.resolve_timeout(agent_key)
     cache_key = (model, base_url, timeout)
 
     with _cache_lock:

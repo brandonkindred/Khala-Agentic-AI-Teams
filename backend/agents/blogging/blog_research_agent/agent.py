@@ -9,7 +9,7 @@ from pydantic import HttpUrl
 
 logger = logging.getLogger(__name__)
 
-from .llm import LLMClient
+from .llm import LLMClient, LLMJsonParseError
 from .models import (
     ResearchBriefInput,
     ResearchAgentOutput,
@@ -518,6 +518,12 @@ class ResearchAgent:
         self._report_llm("Synthesizing overview...", 0.78)
         try:
             data = self.llm.complete_json(prompt, temperature=0.3)
+        except LLMJsonParseError as e:
+            logger.warning(
+                "Overview synthesis: LLM returned invalid or empty JSON (%s). Using fallback.",
+                getattr(e, "response_preview", str(e))[:200],
+            )
+            return None
         except ValueError as e:
             # LLM may return prose/markdown instead of JSON; treat as analysis
             msg = str(e)
