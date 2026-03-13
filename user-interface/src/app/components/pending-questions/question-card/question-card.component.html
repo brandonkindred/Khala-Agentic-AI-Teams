@@ -24,6 +24,16 @@
     <p class="question-context">{{ question.context }}</p>
   }
 
+  @if (question.recommendation) {
+    <div class="agent-recommendation">
+      <mat-icon>lightbulb</mat-icon>
+      <div class="agent-recommendation-body">
+        <span class="agent-recommendation-label">Agent Recommendation</span>
+        <p class="agent-recommendation-text">{{ question.recommendation }}</p>
+      </div>
+    </div>
+  }
+
   <!-- Auto-answer result panel -->
   @if (autoAnswerResult) {
     <div class="auto-answer-result">

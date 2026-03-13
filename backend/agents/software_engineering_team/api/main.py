@@ -236,6 +236,9 @@ class QuestionOption(BaseModel):
 
     id: str = Field(..., description="Unique identifier for this option.")
     label: str = Field(..., description="Display text for this option.")
+    is_default: bool = Field(default=False, description="Whether this option is the recommended default.")
+    rationale: Optional[str] = Field(None, description="Why this option is suggested.")
+    confidence: Optional[float] = Field(None, description="Agent confidence in this option (0–1).")
 
 
 class PendingQuestion(BaseModel):
@@ -244,6 +247,10 @@ class PendingQuestion(BaseModel):
     id: str = Field(..., description="Unique identifier for this question.")
     question_text: str = Field(..., description="The question to display to the user.")
     context: Optional[str] = Field(None, description="Additional context or explanation.")
+    recommendation: Optional[str] = Field(
+        None,
+        description="Agent recommendation: which option to choose and why.",
+    )
     options: List[QuestionOption] = Field(
         default_factory=list,
         description="Selectable answer options. Always includes an 'other' option automatically.",
@@ -2438,8 +2445,15 @@ def get_product_analysis_status(job_id: str) -> ProductAnalysisStatusResponse:
             id=q.get("id", ""),
             question_text=q.get("question_text", ""),
             context=q.get("context"),
+            recommendation=q.get("recommendation"),
             options=[
-                QuestionOption(id=opt.get("id", ""), label=opt.get("label", ""))
+                QuestionOption(
+                    id=opt.get("id", ""),
+                    label=opt.get("label", ""),
+                    is_default=opt.get("is_default", False),
+                    rationale=opt.get("rationale"),
+                    confidence=opt.get("confidence"),
+                )
                 for opt in q.get("options", [])
             ],
             required=q.get("required", False),
