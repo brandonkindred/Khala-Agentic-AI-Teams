@@ -8,6 +8,8 @@ CentralJobManager so state survives process restarts.
 
 Stale jobs: JOB_STALE_AFTER_SECONDS (env JOB_STALE_AFTER_SECONDS, default 1800) is the
 age in seconds after which a pending/running job with no recent heartbeat is marked failed.
+When Temporal is enabled, jobs marked failed by the stale monitor can still be resumed via
+POST /run-team/{job_id}/resume (the workflow may still be running or can be restarted).
 """
 
 from __future__ import annotations

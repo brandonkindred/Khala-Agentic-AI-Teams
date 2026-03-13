@@ -73,6 +73,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      temporal:
+        condition: service_started
     volumes:
       - ./workspace:/workspace
     ports:
@@ -89,8 +91,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       ENABLE_LOG_API: ${ENABLE_LOG_API:-0}
+      TEMPORAL_ADDRESS: temporal:7233
     extra_hosts:
       - "postgres:172.28.0.2"
+      - "temporal:172.28.0.3"
     networks:
       stack:
         ipv4_address: 172.28.0.6

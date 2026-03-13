@@ -5,6 +5,7 @@ This document describes the architecture of the Software Engineering Team — a 
 ## Table of Contents
 
 - [1. System Context and Entry Points](#1-system-context-and-entry-points)
+  - [Temporal (durable execution)](#temporal-durable-execution)
 - [2. End-to-End Pipeline](#2-end-to-end-pipeline)
 - [3. Agent Registry and Roles](#3-agent-registry-and-roles)
 - [4. Task Execution Model](#4-task-execution-model)
@@ -22,7 +23,7 @@ This document describes the architecture of the Software Engineering Team — a 
 
 ## 1. System Context and Entry Points
 
-Users invoke the system through either a FastAPI HTTP API or a CLI script. Both ultimately call `run_orchestrator` in a background thread. The orchestrator reads `initial_spec.md` from the provided work path and writes planning artifacts to `plan/`, backend code to `backend/`, and frontend code to `frontend/`.
+Users invoke the system through either a FastAPI HTTP API or a CLI script. When Temporal is not configured, the API starts `run_orchestrator` in a background thread; when `TEMPORAL_ADDRESS` is set, it starts a Temporal workflow that runs the same logic via activities. The orchestrator reads `initial_spec.md` from the provided work path and writes planning artifacts to `plan/`, backend code to `backend/`, and frontend code to `frontend/`.
 
 ```mermaid
 flowchart LR
@@ -55,6 +56,16 @@ flowchart LR
 ```
 
 The API also exposes `GET /run-team/{job_id}` for polling job status, `POST /run-team/{job_id}/retry-failed` for retrying failed tasks, and clarification endpoints for interactive spec refinement.
+
+### Temporal (durable execution)
+
+When `TEMPORAL_ADDRESS` is set (e.g. in Docker), the SE team uses **Temporal** instead of background threads:
+
+- **Workflows**: `RunTeamWorkflow`, `RetryFailedWorkflow`, `StandaloneJobWorkflow` (for frontend-code-v2, backend-code-v2, planning-v2, product-analysis).
+- **Activities**: Each workflow runs activities that call the same logic as the former thread targets (`run_orchestrator`, `run_failed_tasks`, and the standalone runners). Activities update the **job store** so the API and UI continue to poll status from the store.
+- **Worker**: A Temporal worker runs in-process (started from the unified API lifespan or when the SE API runs standalone), using task queue `software-engineering` (override with `TEMPORAL_TASK_QUEUE`).
+- **Resilience**: Progress is durable in Temporal; after a server restart, the worker reconnects and in-progress workflows continue. **Resume** is allowed for `failed` jobs as well as `pending`, `running`, and `agent_crash`, so jobs marked failed (e.g. by the stale-heartbeat monitor) can be resumed via `POST /run-team/{job_id}/resume`.
+- **Env**: `TEMPORAL_ADDRESS` (required for Temporal), optional `TEMPORAL_NAMESPACE` (default `default`), `TEMPORAL_TASK_QUEUE` (default `software-engineering`). When `TEMPORAL_ADDRESS` is unset, the API falls back to thread-based execution for local development.
 
 ---
 

@@ -359,6 +359,16 @@ async def lifespan(app: FastAPI):
     total_count = len(get_enabled_teams())
     logger.info("Mounted %d/%d team APIs", mounted_count, total_count)
 
+    # Start SE Temporal worker when SE team is mounted and TEMPORAL_ADDRESS is set
+    if _mounted_teams.get("software_engineering"):
+        try:
+            from software_engineering_team.temporal.worker import start_se_temporal_worker_thread
+
+            if start_se_temporal_worker_thread():
+                logger.info("SE Temporal worker thread started")
+        except Exception as e:
+            logger.warning("Could not start SE Temporal worker: %s", e)
+
     yield
 
     logger.info("Shutting down Unified API Server...")
