@@ -384,6 +384,8 @@ async def lifespan(app: FastAPI):
         "planning_v3": ("planning_v3_team.temporal.worker", "start_planning_v3_temporal_worker_thread"),
         "agent_provisioning": ("agent_provisioning_team.temporal.worker", "start_agent_provisioning_temporal_worker_thread"),
         "nutrition_meal_planning": ("nutrition_meal_planning_team.temporal.worker", "start_nutrition_temporal_worker_thread"),
+        "soc2_compliance": ("soc2_compliance_team.temporal.worker", "start_soc2_temporal_worker_thread"),
+        "social_marketing": ("social_media_marketing_team.temporal.worker", "start_social_marketing_temporal_worker_thread"),
     }
     for team_key, (mod_path, func_name) in _temporal_worker_starters.items():
         if not _mounted_teams.get(team_key):

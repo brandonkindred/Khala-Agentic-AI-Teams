@@ -206,6 +206,19 @@ def run_marketing_team(request: RunMarketingTeamRequest) -> RunMarketingTeamResp
         request_payload=request.model_dump(),
     )
 
+    try:
+        from social_media_marketing_team.temporal.client import is_temporal_enabled
+        from social_media_marketing_team.temporal.start_workflow import start_team_job_workflow
+        if is_temporal_enabled():
+            start_team_job_workflow(job_id, request.model_dump())
+            return RunMarketingTeamResponse(
+                job_id=job_id,
+                status="running",
+                message=f"Social marketing team started (Temporal). Poll GET /social-marketing/status/{job_id} for updates.",
+            )
+    except ImportError:
+        pass
+
     thread = threading.Thread(target=_run_team_job, args=(job_id, request), daemon=True)
     thread.start()
 
@@ -264,6 +277,19 @@ def revise_marketing_team(job_id: str, request: ReviseMarketingTeamRequest) -> R
         request_payload=revised.model_dump(),
         last_updated_at=_now(),
     )
+
+    try:
+        from social_media_marketing_team.temporal.client import is_temporal_enabled
+        from social_media_marketing_team.temporal.start_workflow import start_team_job_workflow
+        if is_temporal_enabled():
+            start_team_job_workflow(job_id, revised.model_dump())
+            return RunMarketingTeamResponse(
+                job_id=job_id,
+                status="running",
+                message=f"Revision started for {job_id} (Temporal). Poll GET /social-marketing/status/{job_id} for updates.",
+            )
+    except ImportError:
+        pass
 
     thread = threading.Thread(target=_run_team_job, args=(job_id, revised), daemon=True)
     thread.start()
