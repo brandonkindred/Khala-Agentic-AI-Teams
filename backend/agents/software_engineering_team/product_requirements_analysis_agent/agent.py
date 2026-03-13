@@ -1232,9 +1232,9 @@ Previously Answered Questions:
                 or (stem + "ed") in qa_history_lower
             )
             match_ratio = matches / len(key_stems)
-            # Only treat as duplicate of an answered question when match >= 95%.
-            # Lower similarity (50–95%) may be consolidated but should not be filtered out.
-            if match_ratio >= 0.95:
+            # Only treat as duplicate of an answered question when match >= 90%.
+            # Lower similarity (50–90%) may be consolidated but should not be filtered out.
+            if match_ratio >= 0.90:
                 logger.info(
                     "Filtering duplicate question (%.0f%% match): %s",
                     match_ratio * 100,
