@@ -3,6 +3,8 @@
 # Ports: 5432 Postgres, 7233 Temporal gRPC, 8080 Temporal UI, 4201 Angular UI, 8888 Unified API (direct)
 #
 # Static IPs and extra_hosts avoid reliance on Podman's embedded DNS (which can timeout resolving service names).
+# Network "strands-stack" is external: create once with docker/ensure-network.sh (or see README) to avoid
+# repeated "IPAM option driver has changed" errors when using Podman with docker-compose.
 
 services:
   postgres:
@@ -128,10 +130,7 @@ services:
 networks:
   stack:
     name: strands-stack
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/24
+    external: true
 
 volumes:
   postgres_data:
