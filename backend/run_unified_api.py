@@ -34,6 +34,18 @@ _this_file = Path(__file__).resolve()
 _project_root = _this_file.parent
 _agents_dir = _project_root / "agents"
 
+# Load .env so OLLAMA_API_KEY etc. are available when running via make run (e.g. backend/.env or docker/.env)
+try:
+    from dotenv import load_dotenv
+    _backend_env = _project_root / ".env"
+    _docker_env = _project_root.parent / "docker" / ".env"
+    if _backend_env.exists():
+        load_dotenv(_backend_env)
+    if _docker_env.exists():
+        load_dotenv(_docker_env)
+except ImportError:
+    pass
+
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 if str(_agents_dir) not in sys.path:

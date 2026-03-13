@@ -137,12 +137,12 @@ def resolve_base_url() -> str:
 
 
 def resolve_timeout(agent_key: Optional[str] = None) -> float:
-    """Return timeout in seconds (default 120)."""
-    raw = os.environ.get(ENV_LLM_TIMEOUT) or os.environ.get(ENV_LLM_TIMEOUT_SW) or "120"
+    """Return timeout in seconds (default 300)."""
+    raw = os.environ.get(ENV_LLM_TIMEOUT) or os.environ.get(ENV_LLM_TIMEOUT_SW) or "300"
     try:
         return float(raw)
     except ValueError:
-        return 120.0
+        return 300.0
 
 
 def resolve_context_size_for_model(model: str) -> Optional[int]:
