@@ -496,6 +496,30 @@ class ProductRequirementsAnalysisAgent:
         product_analysis_dir.mkdir(parents=True, exist_ok=True)
         logger.info("Initialized %s for PRA artifacts", PRODUCT_ANALYSIS_SUBDIR)
 
+        # If the product requirements document already exists, skip PRA and proceed to planning.
+        prd_path = product_analysis_dir / "product_requirements_document.md"
+        if prd_path.is_file():
+            logger.info(
+                "Product requirements document already present at %s; skipping PRA and proceeding to planning.",
+                prd_path.name,
+            )
+            result.success = True
+            result.summary = "PRD already present; skipping PRA and proceeding to planning."
+            validated_spec_path = product_analysis_dir / "validated_spec.md"
+            if validated_spec_path.is_file():
+                result.validated_spec_path = str(validated_spec_path)
+                try:
+                    result.final_spec_content = validated_spec_path.read_text(encoding="utf-8")
+                except OSError:
+                    pass
+            _update_job(
+                current_phase=AnalysisPhase.SPEC_CLEANUP.value,
+                progress=100,
+                message=result.summary,
+                status_text="PRD already present - skipping PRA, proceeding to planning",
+            )
+            return result
+
         # One-time context and constraints discovery (before first spec review) when job_id is set
         skip_context_discovery = False
         if job_id is not None:
