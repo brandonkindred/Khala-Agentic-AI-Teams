@@ -26,6 +26,7 @@ class PlanningV2AdapterResult:
     assumptions: List[str]
     hierarchy: Optional[PlanningHierarchy] = field(default=None)
     final_spec_content: Optional[str] = field(default=None)
+    architecture_overview: Optional[str] = field(default=None)
 
 
 def adapt_planning_v2_result(
@@ -139,4 +140,5 @@ def adapt_planning_v2_result(
         assumptions=assumptions,
         hierarchy=hierarchy,
         final_spec_content=final_spec_content,
+        architecture_overview=None,
     )

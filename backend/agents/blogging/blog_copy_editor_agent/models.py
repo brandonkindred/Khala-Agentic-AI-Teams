@@ -65,11 +65,19 @@ class CopyEditorInput(BaseModel):
         None,
         description="Pre-loaded brand spec as dict. When set, used instead of brand_spec_path.",
     )
+    previous_feedback_items: Optional[List[FeedbackItem]] = Field(
+        None,
+        description="Feedback items from the previous iteration, so the editor knows what was already addressed.",
+    )
 
 
 class CopyEditorOutput(BaseModel):
     """Output from the blog copy editor agent."""
 
+    approved: bool = Field(
+        default=False,
+        description="True when the draft has no must_fix or should_fix issues and is ready to move forward.",
+    )
     summary: str = Field(
         ...,
         description="Short note to the writer: overall context or priority (e.g. focus areas), not a summary of findings.",

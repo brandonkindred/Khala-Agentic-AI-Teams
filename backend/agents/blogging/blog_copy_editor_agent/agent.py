@@ -149,6 +149,14 @@ class BlogCopyEditorAgent:
             context_parts.append("")
             context_parts.append("**AUTHOR'S REQUESTED CHANGES (must address these):**")
             context_parts.append(copy_editor_input.human_feedback.strip())
+        if copy_editor_input.previous_feedback_items:
+            context_parts.append("")
+            context_parts.append("---")
+            context_parts.append("PREVIOUS PASS FEEDBACK (already sent to writer — do not re-raise resolved issues):")
+            context_parts.append("---")
+            for i, item in enumerate(copy_editor_input.previous_feedback_items, 1):
+                loc = f" [{item.location}]" if item.location else ""
+                context_parts.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
         if context_parts:
             context_parts.append("")
 
@@ -179,7 +187,7 @@ class BlogCopyEditorAgent:
                         "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
                         e,
                     )
-                    prompt = prompt + "\n\nRespond with a single JSON object only (no markdown, no code fence). Keys: summary (string), feedback_items (array of objects with category, severity, location?, issue, suggestion?)."
+                    prompt = prompt + "\n\nRespond with a single JSON object only (no markdown, no code fence). Keys: approved (boolean), summary (string), feedback_items (array of objects with category, severity, location?, issue, suggestion?)."
                 else:
                     logger.warning(
                         "Copy editor JSON parse failed after retry; using fallback output: %s",
@@ -220,12 +228,19 @@ class BlogCopyEditorAgent:
                     )
                 )
 
+        # Derive approved: true when the LLM says so and there are no blocking items.
+        # Fall back to checking severity counts when the model omits the field.
+        has_blocking = any(f.severity in ("must_fix", "should_fix") for f in feedback_items)
+        llm_approved = bool(data.get("approved", False))
+        approved = llm_approved and not has_blocking
+
         logger.info(
-            "Copy edit complete: summary len=%s, %s feedback items",
+            "Copy edit complete: approved=%s, summary len=%s, %s feedback items",
+            approved,
             len(summary),
             len(feedback_items),
         )
-        output = CopyEditorOutput(summary=summary, feedback_items=feedback_items)
+        output = CopyEditorOutput(approved=approved, summary=summary, feedback_items=feedback_items)
         if feedback_output_path:
             self._write_feedback_to_path(output, feedback_output_path)
         return output

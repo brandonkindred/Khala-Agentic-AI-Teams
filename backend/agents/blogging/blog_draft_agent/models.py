@@ -82,6 +82,10 @@ class ReviseDraftInput(BaseModel):
         None,
         description="Overall copy editor summary (for context).",
     )
+    previous_feedback_items: Optional[List[FeedbackItem]] = Field(
+        None,
+        description="Feedback from the prior iteration, so the writer knows what was already addressed.",
+    )
     research_document: Optional[str] = Field(
         None,
         description="Original research document (for context when revising).",

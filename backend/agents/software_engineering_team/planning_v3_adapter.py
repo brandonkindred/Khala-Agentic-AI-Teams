@@ -143,6 +143,7 @@ def adapt_planning_v3_result(
 
     hierarchy = None
     final_spec_content = validated_spec or None
+    architecture_overview = handoff.get("architecture_overview") or None
 
     return PlanningV2AdapterResult(
         requirements=requirements,
@@ -151,4 +152,5 @@ def adapt_planning_v3_result(
         assumptions=assumptions,
         hierarchy=hierarchy,
         final_spec_content=final_spec_content,
+        architecture_overview=architecture_overview,
     )

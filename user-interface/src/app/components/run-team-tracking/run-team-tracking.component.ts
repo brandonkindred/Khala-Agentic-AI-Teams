@@ -159,11 +159,18 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
       });
   }
 
+  /** Normalize phase for stepper: coding_team uses task_graph, coding, execution. */
+  private normalizedPhaseForStepper(): string {
+    const p = this.status?.phase ?? '';
+    if (p === 'task_graph' || p === 'coding') return 'execution';
+    return p;
+  }
+
   /** Check if a phase has been completed (current phase is past it). */
   isPhaseCompleted(phaseId: string): boolean {
-    const currentPhase = this.status?.phase ?? '';
+    const currentPhase = this.normalizedPhaseForStepper();
     if (currentPhase === 'completed') return true;
-    const order = this.ALL_PHASES.map(p => p.id);
+    const order = this.ALL_PHASES.map(px => px.id);
     const currentIdx = order.indexOf(currentPhase);
     const targetIdx = order.indexOf(phaseId);
     return currentIdx > targetIdx && targetIdx >= 0;
@@ -171,7 +178,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
 
   /** Check if this is the current active phase. */
   isCurrentPhase(phaseId: string): boolean {
-    return this.status?.phase === phaseId;
+    return this.normalizedPhaseForStepper() === phaseId;
   }
 
   /** Check if a phase is still pending (not started yet). */
@@ -339,7 +346,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
     return !this.isCodeTeamPhaseCompleted(teamId, phaseId) && !this.isCodeTeamPhaseCurrent(teamId, phaseId);
   }
 
-  /** Get execution teams that have progress info (for subprocess display). */
+  /** Get execution teams that have progress info (for subprocess display). When using coding_team, team_progress may be empty; progress is shown via status_text. */
   getExecutionTeams(): { teamId: string; label: string; progress: TeamProgressEntry }[] {
     const teamProgress = this.status?.team_progress;
     if (!teamProgress) return [];
@@ -356,6 +363,12 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
       }
     }
     return result;
+  }
+
+  /** True when execution phase is driven by coding_team (task graph, Senior SWE assignments, merge state) and progress is in status_text. */
+  isCodingTeamExecution(): boolean {
+    const p = this.status?.phase ?? '';
+    return p === 'task_graph' || p === 'coding' || (p === 'execution' && !this.getExecutionTeams().length);
   }
 
   /** Check if we should show the planning subprocess section. */

@@ -340,8 +340,24 @@ class BlogDraftAgent:
             "---",
             style_guide_text,
             "",
+        ]
+
+        if revise_input.previous_feedback_items:
+            prev_lines = []
+            for i, item in enumerate(revise_input.previous_feedback_items, 1):
+                loc = f" [{item.location}]" if item.location else ""
+                prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
+            prompt_parts.extend([
+                "---",
+                "PREVIOUS PASS FEEDBACK (already addressed — do not revert these fixes):",
+                "---",
+                "\n".join(prev_lines).strip(),
+                "",
+            ])
+
+        prompt_parts.extend([
             "---",
-            "COPY EDITOR FEEDBACK:",
+            "COPY EDITOR FEEDBACK (apply all must_fix and should_fix items):",
             "---",
             "\n".join(feedback_lines).strip(),
             "",
@@ -349,7 +365,7 @@ class BlogDraftAgent:
             "CURRENT DRAFT:",
             "---",
             draft,
-        ]
+        ])
         if revise_input.audience:
             prompt_parts.insert(0, f"Audience: {revise_input.audience}\n")
         if revise_input.tone_or_purpose:

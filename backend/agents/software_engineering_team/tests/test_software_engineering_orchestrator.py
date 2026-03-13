@@ -395,3 +395,102 @@ def test_frontend_json_parse_failure_triggers_tech_lead_review_for_task_breakdow
     assert task_update.status == "failed"
     assert task_update.failure_class == "json_parse"
     assert "parse" in (task_update.failure_reason or "").lower() or "json" in (task_update.failure_reason or "").lower()
+
+
+def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers(tmp_path: Path) -> None:
+    """Main path: after Planning V3 and adapter, run_coding_team_orchestrator is called; Tech Lead and v2 workers are not."""
+    from planning_v3_adapter import PlanningV2AdapterResult
+
+    (tmp_path / "initial_spec.md").write_text("# Test\n\nSpec.", encoding="utf-8")
+    job_id = "test-coding-team-path"
+    update_job_calls = []
+
+    def capture_update_job(jid, **kwargs):
+        update_job_calls.append((jid, kwargs))
+
+    mock_pra_result = MagicMock()
+    mock_pra_result.success = True
+    mock_pra_result.final_spec_content = "# Test\n\nSpec."
+    mock_pra_result.iterations = 1
+    mock_pra_agent = MagicMock()
+    mock_pra_agent.run_workflow.return_value = mock_pra_result
+
+    adapter_result = PlanningV2AdapterResult(
+        requirements=ProductRequirements(
+            title="Test",
+            description="Desc",
+            acceptance_criteria=[],
+            constraints=[],
+        ),
+        project_overview={"goals": "Ship", "features_and_functionality_doc": "API"},
+        open_questions=[],
+        assumptions=[],
+        hierarchy=None,
+        final_spec_content="# Test\n\nSpec.",
+        architecture_overview="Backend FastAPI; frontend Angular.",
+    )
+
+    coding_team_calls = []
+
+    def capture_run_coding_team(jid, repo_path, plan_input, **kwargs):
+        coding_team_calls.append({"job_id": jid, "repo_path": repo_path, "plan_input": plan_input, **kwargs})
+        if kwargs.get("update_job_fn"):
+            kwargs["update_job_fn"](status="completed", phase="completed")
+
+    mock_agents = {
+        "architecture": MagicMock(),
+        "tech_lead": MagicMock(),
+        "devops": MagicMock(),
+        "backend": MagicMock(),
+        "frontend": MagicMock(),
+        "frontend_code_v2": MagicMock(),
+        "git_setup": MagicMock(),
+        "integration": MagicMock(),
+        "acceptance_verifier": MagicMock(),
+        "qa": MagicMock(),
+        "security": MagicMock(),
+        "accessibility": MagicMock(),
+        "code_review": MagicMock(),
+        "dbc_comments": MagicMock(),
+        "documentation": MagicMock(),
+    }
+
+    with patch("orchestrator.update_job", side_effect=capture_update_job):
+        with patch("orchestrator._get_agents", return_value=mock_agents):
+            with patch(
+                "spec_parser.parse_spec_with_llm",
+                return_value=ProductRequirements(
+                    title="Test",
+                    description="Desc",
+                    acceptance_criteria=[],
+                    constraints=[],
+                ),
+            ):
+                with patch(
+                    "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
+                    return_value=mock_pra_agent,
+                ):
+                    with patch("planning_v3_team.orchestrator.run_workflow") as mock_run_v3:
+                        mock_run_v3.return_value = {
+                            "success": True,
+                            "handoff_package": {"architecture_overview": "Backend FastAPI; frontend Angular."},
+                            "failure_reason": None,
+                        }
+                        with patch(
+                            "planning_v3_adapter.adapt_planning_v3_result",
+                            return_value=adapter_result,
+                        ):
+                            with patch(
+                                "coding_team.orchestrator.run_coding_team_orchestrator",
+                                side_effect=capture_run_coding_team,
+                            ):
+                                orchestrator.run_orchestrator(job_id, str(tmp_path))
+
+    assert len(coding_team_calls) == 1
+    call = coding_team_calls[0]
+    assert call["job_id"] == job_id
+    assert call["repo_path"] == str(tmp_path)
+    assert hasattr(call["plan_input"], "architecture_overview")
+    assert call["plan_input"].architecture_overview == "Backend FastAPI; frontend Angular."
+    mock_agents["tech_lead"].run.assert_not_called()
+    mock_agents["architecture"].run.assert_not_called()

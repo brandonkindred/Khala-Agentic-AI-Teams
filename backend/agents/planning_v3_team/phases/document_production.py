@@ -74,6 +74,7 @@ def run_document_production(
     wait_planning_v2_fn: Callable[..., Dict[str, Any]] | None = None,
     get_planning_v2_result_fn: Callable[..., Optional[Dict[str, Any]]] | None = None,
     answer_callback: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
+    run_architecture_fn: Optional[Callable[..., Optional[str]]] = None,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Run document production: write context doc and spec; optionally call PRA and Planning V2.
@@ -150,6 +151,32 @@ def run_document_production(
         path = Path(p)
         return path.read_text(encoding="utf-8") if path.exists() else None
 
+    architecture_overview: Optional[str] = None
+    arch_path = planning_v2_artifact_paths.get("architecture.md")
+    if arch_path:
+        architecture_overview = _read_if_exists(arch_path)
+        if architecture_overview and len(architecture_overview) > 8000:
+            architecture_overview = architecture_overview[:8000] + "\n\n(truncated)"
+    if architecture_overview is None and run_architecture_fn:
+        try:
+            spec_content_for_arch = _read_if_exists(validated_spec_path) or spec_to_use
+            prd_content_for_arch = _read_if_exists(prd_path)
+            cc_dict: Optional[Dict[str, Any]] = None
+            if client_context and hasattr(client_context, "model_dump"):
+                cc_dict = client_context.model_dump()
+            elif isinstance(context.get("client_context"), dict):
+                cc_dict = context["client_context"]
+            architecture_overview = run_architecture_fn(
+                spec_content=spec_content_for_arch or "",
+                prd_content=prd_content_for_arch,
+                repo_path=repo_path,
+                client_context=cc_dict,
+            )
+            if architecture_overview and len(architecture_overview) > 8000:
+                architecture_overview = architecture_overview[:8000] + "\n\n(truncated)"
+        except Exception as e:
+            logger.warning("Architecture step failed: %s", e)
+
     handoff = HandoffPackage(
         client_context=client_context,
         client_context_document_path=client_context_doc_path,
@@ -158,6 +185,7 @@ def run_document_production(
         prd_path=prd_path,
         prd_content=_read_if_exists(prd_path),
         planning_v2_artifact_paths=planning_v2_artifact_paths,
+        architecture_overview=architecture_overview,
         summary="Handoff package produced by Planning V3.",
     )
     context_update["handoff_package"] = handoff

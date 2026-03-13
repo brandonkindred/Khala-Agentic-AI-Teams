@@ -110,6 +110,12 @@ TEAM_CONFIGS: Dict[str, TeamConfig] = {
         description="Client-facing discovery and requirements; PRD and handoff for dev/UI/UX",
         tags=["planning", "discovery", "prd"],
     ),
+    "coding_team": TeamConfig(
+        name="Coding Team",
+        prefix="/api/coding-team",
+        description="Tech Lead and stack-specialist Senior Software Engineers with Task Graph",
+        tags=["coding", "development"],
+    ),
 }
 
 

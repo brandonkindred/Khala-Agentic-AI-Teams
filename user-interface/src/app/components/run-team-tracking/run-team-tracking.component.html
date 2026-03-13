@@ -69,7 +69,24 @@
         </div>
       }
 
-      <!-- Execution Subprocess Details (per-team progress) -->
+      <!-- Coding Team progress (task graph, Senior SWE assignments, merge state) when not using legacy backend/frontend v2 teams -->
+      @if (isCodingTeamExecution()) {
+        <div class="subprocess-section subprocess-execution coding-team-progress">
+          <div class="execution-teams">
+            <div class="team-subprocess-card">
+              <div class="team-subprocess-header">
+                <span class="team-subprocess-name">Coding Team</span>
+              </div>
+              <div class="phase-detail-status">
+                <mat-icon class="spinning">sync</mat-icon>
+                <span>{{ status?.status_text || (status?.phase === 'task_graph' ? 'Building task graph' : (status?.phase === 'coding' ? 'Coding in progress' : 'Execution')) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- Execution Subprocess Details (per-team progress: legacy backend-code-v2, frontend-code-v2) -->
       @if (showExecutionSubprocess()) {
         <div class="subprocess-section subprocess-execution">
           <div class="execution-teams">

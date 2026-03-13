@@ -317,6 +317,20 @@ def _try_mount_planning_v3(app: FastAPI) -> bool:
         return False
 
 
+def _try_mount_coding_team(app: FastAPI) -> bool:
+    """Mount Coding Team API."""
+    try:
+        from coding_team.api.main import app as coding_team_app
+
+        config = TEAM_CONFIGS["coding_team"]
+        app.mount(config.prefix, coding_team_app)
+        logger.info("Mounted %s at %s", config.name, config.prefix)
+        return True
+    except ImportError as e:
+        logger.warning("Could not mount Coding Team API: %s", e)
+        return False
+
+
 def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
     """Mount all enabled team APIs and return mount status."""
     mount_functions = {
@@ -333,6 +347,7 @@ def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
         "investment": _try_mount_investment,
         "nutrition_meal_planning": _try_mount_nutrition_meal_planning,
         "planning_v3": _try_mount_planning_v3,
+        "coding_team": _try_mount_coding_team,
     }
 
     results = {}

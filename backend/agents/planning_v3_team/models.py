@@ -148,6 +148,10 @@ class HandoffPackage(BaseModel):
         default_factory=dict,
         description="e.g. architecture.md, task_breakdown.md from Planning V2.",
     )
+    architecture_overview: Optional[str] = Field(
+        None,
+        description="Software architecture overview (from Planning V2 or merged architecture step).",
+    )
     sub_agent_blueprint: Optional[Dict[str, Any]] = Field(
         None,
         description="Optional blueprint or runnable from AI Systems Team.",

@@ -1,0 +1,1 @@
+"""Coding team FastAPI app."""

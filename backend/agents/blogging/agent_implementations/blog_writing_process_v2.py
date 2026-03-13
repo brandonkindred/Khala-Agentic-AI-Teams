@@ -225,6 +225,8 @@ def run_pipeline(
     )
 
     draft_result = None
+    previous_feedback_items: list[FeedbackItem] = []
+    brand_spec_path_str = str(brand_spec_path) if brand_spec_path.exists() else None
     for iteration in range(1, draft_editor_iterations + 1):
         if iteration == 1:
             # Initial draft
@@ -234,7 +236,7 @@ def run_pipeline(
                 status_text="Generating initial draft...",
                 draft_iterations=iteration,
             )
-            
+
             try:
                 draft_input = DraftInput(
                     research_document=research_document,
@@ -243,7 +245,7 @@ def run_pipeline(
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     style_guide=style_guide_text,
-                    brand_spec_path=str(brand_spec_path) if brand_spec_path.exists() else None,
+                    brand_spec_path=brand_spec_path_str,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
                 draft_result = draft_agent.run(
@@ -254,7 +256,7 @@ def run_pipeline(
                 raise
             except Exception as e:
                 raise DraftError(f"Initial draft generation failed: {e}", iteration=iteration, cause=e) from e
-            
+
             logger.info("Draft iteration %s: initial draft, length=%s", iteration, len(draft_result.draft))
             _update(
                 BlogPhase.DRAFT_INITIAL,
@@ -266,44 +268,61 @@ def run_pipeline(
                 write_artifact(work_dir, "draft_v1.md", draft_result.draft)
         else:
             # Copy edit loop
-            sub_progress = (iteration - 1) / draft_editor_iterations
+            copy_edit_num = iteration - 1
+            sub_progress = copy_edit_num / draft_editor_iterations
             _update(
                 BlogPhase.COPY_EDIT_LOOP,
                 sub_progress=sub_progress,
-                status_text=f"Copy edit iteration {iteration - 1}/{draft_editor_iterations - 1}...",
+                status_text=f"Copy edit iteration {copy_edit_num}/{draft_editor_iterations - 1}...",
                 draft_iterations=iteration,
             )
-            
+
             try:
                 copy_editor_input = CopyEditorInput(
                     draft=draft_result.draft,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     style_guide=style_guide_text,
+                    brand_spec_path=brand_spec_path_str,
+                    previous_feedback_items=previous_feedback_items if previous_feedback_items else None,
                 )
-                feedback_path = (Path(work_dir) / f"editor_feedback_iter_{iteration}.json") if work_dir is not None else None
+                feedback_path = (Path(work_dir) / f"editor_feedback_iter_{copy_edit_num}.json") if work_dir is not None else None
                 copy_editor_result = copy_editor_agent.run(
                     copy_editor_input,
                     on_llm_request=lambda msg: _update(BlogPhase.COPY_EDIT_LOOP, status_text=msg),
                     feedback_output_path=feedback_path,
                 )
                 logger.info(
-                    "Copy editor iteration %s: %s feedback items",
-                    iteration,
+                    "Copy editor iteration %s: approved=%s, %s feedback items",
+                    copy_edit_num,
+                    copy_editor_result.approved,
                     len(copy_editor_result.feedback_items),
                 )
+
+                if copy_editor_result.approved:
+                    logger.info("Copy editor approved draft at iteration %s, stopping loop.", copy_edit_num)
+                    _update(
+                        BlogPhase.COPY_EDIT_LOOP,
+                        sub_progress=1.0,
+                        status_text=f"Draft approved by editor after {copy_edit_num} pass(es)",
+                        draft_iterations=iteration,
+                    )
+                    break
+
                 revise_input = ReviseDraftInput(
                     draft=draft_result.draft,
                     feedback_items=copy_editor_result.feedback_items,
                     feedback_summary=copy_editor_result.summary,
+                    previous_feedback_items=previous_feedback_items if previous_feedback_items else None,
                     research_document=research_document,
                     outline=review_result.outline,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     style_guide=style_guide_text,
-                    brand_spec_path=str(brand_spec_path) if brand_spec_path.exists() else None,
+                    brand_spec_path=brand_spec_path_str,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
+                previous_feedback_items = copy_editor_result.feedback_items
                 draft_result = draft_agent.revise(
                     revise_input,
                     on_llm_request=lambda msg: _update(BlogPhase.COPY_EDIT_LOOP, status_text=msg),
@@ -312,17 +331,17 @@ def run_pipeline(
                 raise
             except Exception as e:
                 raise DraftError(f"Draft revision failed: {e}", iteration=iteration, cause=e) from e
-            
+
             logger.info("Draft iteration %s: revised, length=%s", iteration, len(draft_result.draft))
             if work_dir is not None:
                 write_artifact(work_dir, "draft_v2.md", draft_result.draft)
-    
-    _update(
-        BlogPhase.COPY_EDIT_LOOP,
-        sub_progress=1.0,
-        status_text="Draft editing complete",
-        draft_iterations=draft_editor_iterations,
-    )
+    else:
+        _update(
+            BlogPhase.COPY_EDIT_LOOP,
+            sub_progress=1.0,
+            status_text=f"Draft editing complete after {draft_editor_iterations} iteration(s)",
+            draft_iterations=draft_editor_iterations,
+        )
 
     status: PipelineStatus = "PASS"
     if work_dir is not None:

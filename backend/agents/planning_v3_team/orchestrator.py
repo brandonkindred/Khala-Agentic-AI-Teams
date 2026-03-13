@@ -36,6 +36,7 @@ def run_workflow(
     llm: Optional[Any] = None,
     job_updater: Optional[Callable[..., None]] = None,
     answer_callback: Optional[Callable[[list], list]] = None,
+    run_architecture_fn: Optional[Callable[..., Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """
     Run the full Planning V3 workflow.
@@ -139,6 +140,7 @@ def run_workflow(
             wait_planning_v2_fn=wait_for_planning_v2_completion,
             get_planning_v2_result_fn=get_planning_v2_result,
             answer_callback=_pra_answer_cb,
+            run_architecture_fn=run_architecture_fn,
         )
         context.update(ctx_update)
         result["handoff_package"] = context.get("handoff_package")

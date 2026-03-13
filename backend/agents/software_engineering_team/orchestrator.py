@@ -444,6 +444,35 @@ _read_repo_code = read_repo_code
 _truncate_for_context = truncate_for_context
 
 
+def _build_coding_team_plan_input(
+    adapter_result: Any,
+    repo_path: str,
+    existing_code_summary: Optional[str] = None,
+    resolved_questions: Optional[List[Dict[str, Any]]] = None,
+) -> Any:
+    """Build CodingTeamPlanInput from PlanningV2AdapterResult for coding_team orchestrator."""
+    from coding_team.models import CodingTeamPlanInput
+    req = adapter_result.requirements
+    open_q = getattr(adapter_result, "open_questions", None) or []
+    open_questions = [
+        getattr(q, "question_text", str(q)) if hasattr(q, "question_text") else str(q)
+        for q in open_q
+    ]
+    return CodingTeamPlanInput(
+        requirements_title=getattr(req, "title", "Project"),
+        requirements_description=getattr(req, "description", "") or "",
+        project_overview=getattr(adapter_result, "project_overview", {}) or {},
+        hierarchy=getattr(adapter_result, "hierarchy", None),
+        final_spec_content=getattr(adapter_result, "final_spec_content", None),
+        repo_path=repo_path,
+        architecture_overview=getattr(adapter_result, "architecture_overview", None),
+        existing_code_summary=existing_code_summary,
+        resolved_questions=resolved_questions,
+        open_questions=open_questions,
+        assumptions=getattr(adapter_result, "assumptions", None) or [],
+    )
+
+
 def _build_task_update(task_id: str, agent_type: str, result: Any, status: str = "completed") -> TaskUpdate:
     """Construct a TaskUpdate from a specialist agent's output."""
     summary = getattr(result, "summary", "") or ""
@@ -1884,6 +1913,57 @@ def run_orchestrator(
             except Exception:
                 pass
 
+        def _run_architecture_for_planning_v3(
+            spec_content: str,
+            prd_content: Optional[str],
+            repo_path: str,
+            client_context: Optional[Dict[str, Any]],
+        ) -> Optional[str]:
+            """Produce architecture overview during Planning V3 document production (merged Architecture Expert)."""
+            from software_engineering_team.shared.models import ProductRequirements
+            from architecture_expert.models import ArchitectureInput
+            req_desc = (spec_content or "").strip()
+            if (prd_content or "").strip():
+                req_desc = (req_desc + "\n\n" + prd_content.strip()).strip()
+            if not req_desc:
+                req_desc = "See Planning V3 handoff artifacts."
+            acceptance = ["Deliver according to spec and planning artifacts."]
+            if client_context and client_context.get("success_criteria"):
+                acceptance = list(client_context["success_criteria"])
+            requirements = ProductRequirements(
+                title="Project",
+                description=req_desc,
+                acceptance_criteria=acceptance,
+                constraints=[],
+                priority="medium",
+                metadata={},
+            )
+            features_parts = []
+            if prd_content:
+                features_parts.append(prd_content)
+            if client_context:
+                if client_context.get("problem_summary"):
+                    features_parts.append("## Problem summary\n" + (client_context["problem_summary"] or ""))
+                if client_context.get("opportunity_statement"):
+                    features_parts.append("## Opportunity\n" + (client_context["opportunity_statement"] or ""))
+            features_doc = "\n\n".join(features_parts) if features_parts else ""
+            goals = ""
+            if client_context and (client_context.get("problem_summary") or client_context.get("opportunity_statement")):
+                goals = (client_context.get("problem_summary") or "") + "\n" + (client_context.get("opportunity_statement") or "")
+            project_overview = {"features_and_functionality_doc": features_doc, "goals": goals.strip()}
+            arch_agent = agents["architecture"]
+            arch_input = ArchitectureInput(
+                requirements=requirements,
+                technology_preferences=["Python", "FastAPI", "PostgreSQL", "Docker"],
+                project_overview=project_overview,
+                features_and_functionality_doc=features_doc or None,
+            )
+            try:
+                arch_output = arch_agent.run(arch_input)
+                return (arch_output.architecture.overview or "") if arch_output and arch_output.architecture else None
+            except Exception:
+                return None
+
         p3_result = run_planning_v3_workflow(
             repo_path=str(path),
             spec_content=validated_spec,
@@ -1891,6 +1971,7 @@ def run_orchestrator(
             use_planning_v2=False,
             llm=get_client("project_planning"),
             job_updater=_planning_v3_job_updater,
+            run_architecture_fn=_run_architecture_for_planning_v3,
         )
         if not p3_result.get("success"):
             err = p3_result.get("failure_reason") or "Planning V3 workflow did not complete successfully."
@@ -1918,6 +1999,30 @@ def run_orchestrator(
         # Check for cancellation after Planning V3
         _check_cancellation(job_id)
 
+        # Main path: coding_team (replaces Tech Lead + Architecture Expert + backend_code_v2/frontend_code_v2 workers).
+        # Legacy path (tech_lead_agent, backend_code_v2_team, frontend_code_v2_team) retained below for alternate flows.
+        use_coding_team = True
+        if use_coding_team:
+            existing_code_summary = _truncate_for_context(_read_repo_code(path), 8000)
+            if existing_code_summary == "# No code files found":
+                existing_code_summary = None
+            plan_input = _build_coding_team_plan_input(
+                adapter_result, str(path), existing_code_summary, resolved_questions_override
+            )
+            from coding_team.orchestrator import run_coding_team_orchestrator
+            run_coding_team_orchestrator(
+                job_id,
+                str(path),
+                plan_input,
+                update_job_fn=lambda **kw: update_job(job_id, **kw),
+                get_job_fn=lambda jid: get_job(jid),
+                get_llm=get_client,
+            )
+            update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
+            return
+
+        # Legacy path (deprecated for main path): tech_lead_agent, backend_code_v2_team, frontend_code_v2_team,
+        # and standalone Architecture Expert are retained for legacy/alternate flows only.
         # Planning process: (1) features doc from planning-v3 adapter; (2) tasks from Tech Lead; (3) architecture from Architecture Expert;
         # (4) consolidation; (5) execution.
         features_and_functionality_doc = (project_overview.get("features_and_functionality_doc") or "").strip()
