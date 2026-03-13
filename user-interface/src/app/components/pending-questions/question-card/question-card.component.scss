@@ -64,6 +64,47 @@
   font-style: italic;
 }
 
+.agent-recommendation {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem 40px;
+  padding: 0.625rem 0.875rem;
+  background-color: var(--mat-sys-secondary-container);
+  border-left: 3px solid var(--mat-sys-secondary);
+  border-radius: 0 6px 6px 0;
+
+  mat-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    margin-top: 1px;
+    color: var(--mat-sys-secondary);
+  }
+
+  .agent-recommendation-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .agent-recommendation-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--mat-sys-secondary);
+  }
+
+  .agent-recommendation-text {
+    margin: 0;
+    font-size: 0.875rem;
+    color: var(--mat-sys-on-secondary-container);
+    line-height: 1.5;
+  }
+}
+
 .auto-answer-result {
   margin: 0.75rem 0;
   margin-left: 40px;
