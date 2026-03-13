@@ -1907,12 +1907,12 @@ Previously Answered Questions:
                 options = [{"id": "other", "label": "Provide answer in text field"}]
 
             rec = getattr(q, "recommendation", None) or ""
-            context_str = q.context + ("\n\nRecommendation: " + rec if rec else "")
             pending.append(
                 {
                     "id": q.id,
                     "question_text": q.question_text,
-                    "context": context_str,
+                    "context": q.context,
+                    "recommendation": rec if rec else None,
                     "options": options,
                     "allow_multiple": q.allow_multiple,
                     "required": True,

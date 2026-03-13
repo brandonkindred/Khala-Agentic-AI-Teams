@@ -209,6 +209,8 @@ export interface PendingQuestion {
   id: string;
   question_text: string;
   context?: string;
+  /** Agent recommendation: which option to choose and why. */
+  recommendation?: string;
   options: QuestionOption[];
   required: boolean;
   source: string;
