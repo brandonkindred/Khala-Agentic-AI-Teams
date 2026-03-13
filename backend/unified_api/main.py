@@ -369,6 +369,16 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Could not start SE Temporal worker: %s", e)
 
+    # Start Blogging Temporal worker when blogging team is mounted and TEMPORAL_ADDRESS is set
+    if _mounted_teams.get("blogging"):
+        try:
+            from blogging.temporal.worker import start_blogging_temporal_worker_thread
+
+            if start_blogging_temporal_worker_thread():
+                logger.info("Blogging Temporal worker thread started")
+        except Exception as e:
+            logger.warning("Could not start Blogging Temporal worker: %s", e)
+
     yield
 
     logger.info("Shutting down Unified API Server...")
