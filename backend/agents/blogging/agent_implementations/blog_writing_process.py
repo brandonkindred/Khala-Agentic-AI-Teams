@@ -92,6 +92,7 @@ for iteration in range(1, DRAFT_EDITOR_ITERATIONS + 1):
             tone_or_purpose=brief.tone_or_purpose,
             style_guide=style_guide_text,
         )
+        # Pass feedback_output_path to persist editor feedback to a file when running with work_dir.
         copy_editor_result = copy_editor_agent.run(copy_editor_input)
         logger.info(
             "Copy editor iteration %s: %s feedback items",

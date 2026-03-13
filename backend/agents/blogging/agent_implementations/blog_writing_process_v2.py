@@ -280,9 +280,11 @@ def run_pipeline(
                     tone_or_purpose=brief.tone_or_purpose,
                     style_guide=style_guide_text,
                 )
+                feedback_path = (Path(work_dir) / f"editor_feedback_iter_{iteration}.json") if work_dir is not None else None
                 copy_editor_result = copy_editor_agent.run(
                     copy_editor_input,
                     on_llm_request=lambda msg: _update(BlogPhase.COPY_EDIT_LOOP, status_text=msg),
+                    feedback_output_path=feedback_path,
                 )
                 logger.info(
                     "Copy editor iteration %s: %s feedback items",
