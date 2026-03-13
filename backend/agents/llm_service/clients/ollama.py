@@ -37,6 +37,9 @@ DEFAULT_MAX_OUTPUT_TOKENS = 32768
 MAX_CONTINUATION_CYCLES = 10
 CONTINUATION_CONTEXT_CHARS = 150
 
+# Max response/body length to log (avoid huge logs)
+_MAX_LOG_BODY = 2000
+
 # Expected keys for "try every code block" fallback
 _EXPECTED_KEYS = frozenset({
     "files", "summary", "code", "overview", "issues", "approved", "components",
@@ -151,6 +154,43 @@ class OllamaLLMClient(LLMClient):
         """Return model's num_ctx (cached)."""
         return self._fetch_model_num_ctx()
 
+    def _log_llm_server_error(
+        self,
+        status_code: int,
+        response_text: Optional[str],
+        response_headers: Optional[Any],
+        attempt: int,
+        reason: str = "",
+    ) -> None:
+        """Log full server error details (status, body, useful headers) at ERROR level."""
+        body = (response_text or "")[:_MAX_LOG_BODY]
+        if len(response_text or "") > _MAX_LOG_BODY:
+            body += "... [truncated]"
+        extra_headers = ""
+        if response_headers is not None:
+            useful = ["content-type", "retry-after", "x-request-id"]
+            parts = []
+            for name in useful:
+                try:
+                    v = response_headers.get(name)
+                    if v is not None:
+                        parts.append(f"{name}={v!r}")
+                except (TypeError, AttributeError):
+                    pass
+            if parts:
+                extra_headers = " headers=" + ", ".join(parts)
+        reason_str = f" reason={reason}" if reason else ""
+        logger.error(
+            "LLM server error response: status=%s model=%s base_url=%s attempt=%s%s.%s Response body: %s",
+            status_code,
+            self.model,
+            self.base_url,
+            attempt,
+            reason_str,
+            extra_headers,
+            body,
+        )
+
     def _repair_json(self, s: str) -> str:
         """Attempt tolerant JSON repair for common LLM output issues."""
         s = re.sub(r",\s*([}\]])", r"\1", s)
@@ -221,6 +261,12 @@ class OllamaLLMClient(LLMClient):
                         return parsed
                 except (json.JSONDecodeError, ValueError):
                     continue
+        logger.error(
+            "LLM JSON parse failed. model=%s base_url=%s. Raw content (truncated): %s",
+            self.model,
+            self.base_url,
+            text[:_MAX_LOG_BODY] + ("... [truncated]" if len(text) > _MAX_LOG_BODY else ""),
+        )
         raise LLMJsonParseError(
             "Could not parse structured JSON from LLM response. Model returned invalid or non-JSON output. "
             f"Response preview: {text[:500]!r}...",
@@ -287,8 +333,29 @@ class OllamaLLMClient(LLMClient):
                         try:
                             data = response.json()
                         except json.JSONDecodeError as e:
+                            body = response.text[:_MAX_LOG_BODY]
+                            if len(response.text) > _MAX_LOG_BODY:
+                                body += "... [truncated]"
+                            logger.error(
+                                "LLM returned 200 but body is not valid JSON. model=%s base_url=%s. Raw body: %s",
+                                self.model,
+                                self.base_url,
+                                body,
+                            )
                             raise LLMPermanentError(f"Malformed LLM response (invalid JSON): {e}") from e
-                        return self._parse_response_content(data)
+                        try:
+                            return self._parse_response_content(data)
+                        except LLMPermanentError:
+                            body = response.text[:_MAX_LOG_BODY]
+                            if len(response.text) > _MAX_LOG_BODY:
+                                body += "... [truncated]"
+                            logger.error(
+                                "LLM returned 200 but unexpected response structure. model=%s base_url=%s. Raw body: %s",
+                                self.model,
+                                self.base_url,
+                                body,
+                            )
+                            raise
                     if status == 429:
                         last_error = LLMRateLimitError(
                             f"LLM rate limited (429) after {attempt + 1} attempt(s)",
@@ -299,6 +366,13 @@ class OllamaLLMClient(LLMClient):
                             logger.warning("LLM 429 (attempt %d/%d). Retrying in %.1fs", attempt + 1, max_retries + 1, wait)
                             time.sleep(wait)
                             continue
+                        self._log_llm_server_error(
+                            429,
+                            response.text,
+                            response.headers,
+                            attempt + 1,
+                            reason="rate limited",
+                        )
                         raise last_error
                     if 500 <= status < 600:
                         hint = ""
@@ -312,9 +386,23 @@ class OllamaLLMClient(LLMClient):
                             wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
                             time.sleep(wait)
                             continue
+                        self._log_llm_server_error(
+                            status,
+                            response.text,
+                            response.headers,
+                            attempt + 1,
+                            reason="server error",
+                        )
                         raise last_error
                     if 400 <= status < 500:
                         err_text = response.text[:500]
+                        self._log_llm_server_error(
+                            status,
+                            response.text,
+                            response.headers,
+                            attempt + 1,
+                            reason="client error",
+                        )
                         if status == 404 and ("not found" in err_text.lower() or "model" in err_text.lower()):
                             raise LLMPermanentError(
                                 f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text[:200]}",
@@ -330,11 +418,27 @@ class OllamaLLMClient(LLMClient):
                                 status_code=status,
                             )
                         raise LLMPermanentError(f"LLM client error {status}: {err_text}", status_code=status)
+                    self._log_llm_server_error(
+                        status,
+                        response.text,
+                        response.headers,
+                        attempt + 1,
+                        reason="unexpected status",
+                    )
                     raise LLMPermanentError(f"Unexpected LLM response status {status}: {response.text[:200]}", status_code=status)
             except (LLMPermanentError, LLMRateLimitError, LLMTemporaryError, LLMTruncatedError):
                 raise
             except httpx.HTTPStatusError as e:
-                status = e.response.status_code if e.response else None
+                resp = e.response
+                status = resp.status_code if resp else None
+                if resp is not None:
+                    self._log_llm_server_error(
+                        resp.status_code,
+                        resp.text,
+                        resp.headers,
+                        attempt + 1,
+                        reason="HTTPStatusError",
+                    )
                 if status == 429:
                     last_error = LLMRateLimitError(str(e), status_code=429, cause=e)
                     if attempt < max_retries:
@@ -369,6 +473,14 @@ class OllamaLLMClient(LLMClient):
                     logger.warning("LLM connection error (attempt %d/%d): %s. Retrying in %.1fs", attempt + 1, max_retries + 1, type(e).__name__, wait)
                     time.sleep(wait)
                     continue
+                logger.error(
+                    "LLM connection/timeout failed after all retries. model=%s base_url=%s attempt=%s error=%s%s",
+                    self.model,
+                    self.base_url,
+                    attempt + 1,
+                    type(e).__name__,
+                    hint,
+                )
                 raise last_error
         if last_error:
             raise last_error
