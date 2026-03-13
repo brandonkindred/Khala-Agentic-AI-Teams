@@ -101,7 +101,12 @@
               "coverage": true,
               "coverageReporters": ["html", "text-summary"],
               "coverageInclude": ["src/app/**/*.ts"],
-              "coverageExclude": ["**/*.spec.ts", "**/*.model.ts", "**/environments/*.ts"]
+              "coverageExclude": ["**/*.spec.ts", "**/*.model.ts", "**/environments/*.ts", "**/index.ts", "**/*.module.ts"],
+              "coverageThreshold": {
+                "global": {
+                  "lines": 85
+                }
+              }
             }
           }
         }

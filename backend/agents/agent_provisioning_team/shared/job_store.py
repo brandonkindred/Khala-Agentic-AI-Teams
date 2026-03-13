@@ -40,11 +40,9 @@ def create_job(
     """Create a new provisioning job with initial state."""
     now = datetime.now(timezone.utc).isoformat()
     data: Dict[str, Any] = {
-        "job_id": job_id,
         "agent_id": agent_id,
         "manifest_path": manifest_path,
         "access_tier": access_tier,
-        "status": JOB_STATUS_PENDING,
         "progress": 0,
         "current_phase": None,
         "current_tool": None,

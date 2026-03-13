@@ -18,7 +18,7 @@ PORT ?= 8080
 HOST ?= 0.0.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help install install-dev lint lint-fix test build run deploy clean
+.PHONY: help install install-dev lint lint-fix test coverage coverage-html build run deploy clean
 
 help:
 	@echo "Backend targets:"
@@ -38,7 +38,7 @@ install: $(REQUIREMENTS)
 	$(VENV_PIP) install -r $(REQUIREMENTS)
 
 install-dev: install
-	$(VENV_PIP) install pytest ruff
+	$(VENV_PIP) install pytest pytest-cov ruff
 
 lint:
 	$(VENV_PYTHON) -m ruff check .
@@ -50,6 +50,13 @@ lint-fix:
 
 test:
 	$(VENV_PYTHON) -m pytest -v
+
+coverage:
+	$(VENV_PYTHON) -m pytest --cov=agents --cov=unified_api --cov-report=term-missing --cov-fail-under=85
+
+coverage-html:
+	$(VENV_PYTHON) -m pytest --cov=agents --cov=unified_api --cov-report=html --cov-report=term-missing
+	@echo "HTML report: htmlcov/index.html"
 
 build: install-dev lint test
 
