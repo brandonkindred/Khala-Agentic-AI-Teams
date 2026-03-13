@@ -334,15 +334,13 @@ class ResponseContinuator:
             "messages": messages,
             "stream": False,
             "options": {"num_predict": self.num_predict},
+            "think": self._should_enable_thinking(),
         }
 
         if json_mode:
             payload["format"] = "json"
 
-        # Enable thinking mode for qwen3.5 models
-        if self._should_enable_thinking():
-            payload["think"] = True
-            logger.debug("Thinking mode enabled for continuation with model %s", self.model)
+        logger.debug("Thinking mode enabled for continuation with model %s", self.model)
 
         logger.debug(
             "Sending chat request: %d messages, json_mode=%s",
