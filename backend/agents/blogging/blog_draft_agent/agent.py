@@ -5,10 +5,11 @@ a blog post draft that complies with a brand and writing style guide.
 
 from __future__ import annotations
 
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Union
 
 from llm_service import LLMClient, LLMJsonParseError, LLMTruncatedError
 
@@ -49,6 +50,39 @@ _DEFAULT_STYLE_GUIDE_PATH = (
 def _load_style_guide(path: str | Path) -> str:
     """Load style guide text from a file. Raises OSError if file cannot be read."""
     return Path(path).read_text(encoding="utf-8").strip()
+
+
+def _extract_draft_after_marker(raw_response: str) -> str:
+    """
+    Extract draft content from model output that uses the hybrid format:
+    first line {\"draft\": 0}, then ---DRAFT---, then the full blog post in Markdown.
+    Falls back to parsing the whole response as JSON with a \"draft\" key.
+    """
+    if not raw_response or not isinstance(raw_response, str):
+        return ""
+    text = raw_response.strip()
+    for marker in ("\n---DRAFT---\n", "\n---DRAFT---", "---DRAFT---\n", "---DRAFT---"):
+        if marker in text:
+            after = text.split(marker, 1)[1].strip()
+            if after:
+                return after
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            d = data.get("draft")
+            if isinstance(d, str) and d.strip():
+                return d.strip()
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return ""
+
+
+def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
+    """Write draft content to path; create parent dirs if needed. Log the saved path."""
+    p = Path(path).resolve()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(draft, encoding="utf-8")
+    logger.info("Draft written to %s", p)
 
 
 class BlogDraftAgent:
@@ -153,12 +187,15 @@ class BlogDraftAgent:
         draft_input: DraftInput,
         *,
         on_llm_request: Optional[Callable[[str], None]] = None,
+        draft_output_path: Optional[Union[str, Path]] = None,
     ) -> DraftOutput:
         """
         Generate a blog post draft from the research document and/or references and outline.
 
         When research_references is non-empty, extracts notes/citations from each source in parallel,
         combines them, then drafts from the combined notes. Otherwise uses research_document (with truncation).
+
+        When draft_output_path is set, writes the draft to that path and logs the path.
         """
         outline = draft_input.outline.strip()
         if len(outline) > MAX_OUTLINE_CHARS_FOR_DRAFT:
@@ -279,18 +316,36 @@ class BlogDraftAgent:
 
         if on_llm_request:
             on_llm_request("Generating draft...")
-        data = self.llm.complete_json(prompt, temperature=0.3)
-        raw_draft = data.get("draft")
-        if isinstance(raw_draft, str):
-            draft = raw_draft.strip()
-        else:
-            draft = ""
+
+        # Use raw-text completion so the model can output the hybrid format (---DRAFT--- then markdown).
+        # complete_json() forces a single JSON object, so the model would output only {"draft": 0} and we'd get no content.
+        draft = ""
+        draft_max_tokens = 32768
+        try:
+            raw_response = self.llm.complete(
+                prompt,
+                temperature=0.3,
+                max_tokens=draft_max_tokens,
+                system_prompt=DRAFT_SYSTEM_REMINDER,
+            )
+            draft = _extract_draft_after_marker(raw_response)
+        except (LLMJsonParseError, LLMTruncatedError) as e:
+            logger.warning("Draft complete() failed: %s; trying complete_json fallback.", e)
+            try:
+                data = self.llm.complete_json(prompt, temperature=0.3, max_tokens=draft_max_tokens)
+                raw_draft = data.get("draft")
+                if isinstance(raw_draft, str) and raw_draft.strip():
+                    draft = raw_draft.strip()
+            except (LLMJsonParseError, LLMTruncatedError):
+                pass
 
         if not draft:
             logger.warning("LLM returned no draft content; returning placeholder.")
             draft = "# Draft\n\nNo draft was generated. Check the model response or try again."
 
         logger.info("Draft generated: length=%s", len(draft))
+        if draft_output_path:
+            _write_draft_to_path(draft, draft_output_path)
         return DraftOutput(draft=draft)
 
     # Maximum number of self-review/revise iterations before returning the draft to the editor.
@@ -426,6 +481,7 @@ class BlogDraftAgent:
         revise_input: ReviseDraftInput,
         *,
         on_llm_request: Optional[Callable[[str], None]] = None,
+        draft_output_path: Optional[Union[str, Path]] = None,
     ) -> DraftOutput:
         """
         Revise a draft based on copy editor feedback, with self-review.
@@ -434,6 +490,8 @@ class BlogDraftAgent:
         editor feedback has been addressed. If unresolved issues remain, the agent
         revises again, up to MAX_SELF_REVIEW_ITERATIONS times. The final full draft
         is always returned.
+
+        When draft_output_path is set, writes the final revised draft to that path and logs the path.
 
         Preconditions:
             - revise_input has non-empty draft and feedback_items.
@@ -550,4 +608,6 @@ class BlogDraftAgent:
                 )
 
         logger.info("Final revised draft: length=%s", len(current_draft))
+        if draft_output_path:
+            _write_draft_to_path(current_draft, draft_output_path)
         return DraftOutput(draft=current_draft)
