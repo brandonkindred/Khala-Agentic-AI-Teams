@@ -59,7 +59,7 @@ export interface AgentInfo {
   actions?: string[];
 }
 
-export interface AgentListResponse {
+export interface StudioGridAgentListResponse {
   agents: AgentInfo[];
 }
 

@@ -8,7 +8,7 @@ import type {
   RunStatus,
   DecisionListResponse,
   Decision,
-  AgentListResponse,
+  StudioGridAgentListResponse,
   FindAgentsRequest,
   FindAgentsResponse,
   HealthResponse,
@@ -43,8 +43,8 @@ export class StudioGridApiService {
   }
 
   /** GET /studio-grid/registry/agents — list all agents */
-  listAgents(): Observable<AgentListResponse> {
-    return this.http.get<AgentListResponse>(`${this.baseUrl}/studio-grid/registry/agents`);
+  listAgents(): Observable<StudioGridAgentListResponse> {
+    return this.http.get<StudioGridAgentListResponse>(`${this.baseUrl}/studio-grid/registry/agents`);
   }
 
   /** POST /studio-grid/registry/find — find agents by problem + skills */

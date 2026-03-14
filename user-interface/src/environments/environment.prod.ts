@@ -18,4 +18,6 @@ export const environment = {
   aiSystemsApiUrl: `${apiBase}/api/ai-systems`,
   investmentApiUrl: `${apiBase}/api/investment`,
   integrationsApiUrl: `${apiBase}/api/integrations`,
+  /** StudioGrid design-system workflow API */
+  studioGridApiUrl: `${apiBase}/api/studio-grid`,
 };
