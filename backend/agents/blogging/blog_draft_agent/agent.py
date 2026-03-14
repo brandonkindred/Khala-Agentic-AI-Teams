@@ -21,6 +21,7 @@ from .prompts import (
     EXTRACT_NOTES_PROMPT,
     MINIMAL_STYLE_REMINDER,
     REVISE_DRAFT_PROMPT,
+    SELF_REVIEW_PROMPT,
 )
 
 try:
@@ -292,46 +293,17 @@ class BlogDraftAgent:
         logger.info("Draft generated: length=%s", len(draft))
         return DraftOutput(draft=draft)
 
-    def revise(
+    # Maximum number of self-review/revise iterations before returning the draft to the editor.
+    MAX_SELF_REVIEW_ITERATIONS = 5
+
+    def _build_revise_prompt(
         self,
+        draft: str,
+        feedback_lines: list[str],
+        style_guide_text: str,
         revise_input: ReviseDraftInput,
-        *,
-        on_llm_request: Optional[Callable[[str], None]] = None,
-    ) -> DraftOutput:
-        """
-        Revise a draft based on copy editor feedback.
-
-        Preconditions:
-            - revise_input has non-empty draft and feedback_items.
-        Postconditions:
-            - Returns DraftOutput with the revised draft.
-        """
-        draft = revise_input.draft.strip()
-        if not draft:
-            logger.warning("Empty draft in revise; returning as-is.")
-            return DraftOutput(draft=revise_input.draft)
-        if not revise_input.feedback_items:
-            logger.info("No feedback items; returning draft unchanged.")
-            return DraftOutput(draft=draft)
-
-        # Resolve style guide (brand_spec takes precedence when provided)
-        style_guide_text = self._resolve_style_guide(
-            revise_input.style_guide,
-            revise_input.brand_spec_path,
-            revise_input.brand_spec,
-        )
-
-        # Format feedback for prompt
-        feedback_lines = []
-        if revise_input.feedback_summary:
-            feedback_lines.append(f"Note from editor: {revise_input.feedback_summary}\n")
-        for i, item in enumerate(revise_input.feedback_items, 1):
-            loc = f" [{item.location}]" if item.location else ""
-            feedback_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
-            if item.suggestion:
-                feedback_lines.append(f"   Suggestion: {item.suggestion}")
-            feedback_lines.append("")
-
+    ) -> str:
+        """Build the revision prompt from the current draft and feedback."""
         prompt_parts = [
             REVISE_DRAFT_PROMPT,
             "",
@@ -399,20 +371,155 @@ class BlogDraftAgent:
             "---",
             'Use this format: first line {"draft": 0}, then ---DRAFT---, then the full revised blog post in Markdown.',
         ])
+        return "\n".join(prompt_parts)
+
+    def _self_review(
+        self,
+        revised_draft: str,
+        feedback_items: list,
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+    ) -> dict:
+        """
+        Self-review a revised draft against the editor's feedback.
+
+        Returns a dict with "all_addressed" (bool) and "unresolved_items" (list).
+        """
+        feedback_lines = []
+        for i, item in enumerate(feedback_items, 1):
+            loc = f" [{item.location}]" if item.location else ""
+            feedback_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
+            if item.suggestion:
+                feedback_lines.append(f"   Suggestion: {item.suggestion}")
+            feedback_lines.append("")
+
+        prompt_parts = [
+            SELF_REVIEW_PROMPT,
+            "",
+            "---",
+            "EDITOR FEEDBACK TO VERIFY:",
+            "---",
+            "\n".join(feedback_lines).strip(),
+            "",
+            "---",
+            "REVISED DRAFT:",
+            "---",
+            revised_draft,
+        ]
         prompt = "\n".join(prompt_parts)
 
         if on_llm_request:
-            on_llm_request("Revising draft...")
-        data = self.llm.complete_json(prompt, temperature=0.2)
-        raw_draft = data.get("draft")
-        if isinstance(raw_draft, str):
-            revised = raw_draft.strip()
-        else:
-            revised = draft
+            on_llm_request("Self-reviewing revised draft...")
+        try:
+            data = self.llm.complete_json(prompt, temperature=0.1)
+            all_addressed = data.get("all_addressed", True)
+            unresolved = data.get("unresolved_items", [])
+            if not isinstance(unresolved, list):
+                unresolved = []
+            return {"all_addressed": bool(all_addressed), "unresolved_items": unresolved}
+        except Exception as e:
+            logger.warning("Self-review failed: %s; treating feedback as addressed.", e)
+            return {"all_addressed": True, "unresolved_items": []}
 
-        if not revised:
-            logger.warning("LLM returned no revised content; keeping original draft.")
-            revised = draft
+    def revise(
+        self,
+        revise_input: ReviseDraftInput,
+        *,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+    ) -> DraftOutput:
+        """
+        Revise a draft based on copy editor feedback, with self-review.
 
-        logger.info("Draft revised: length=%s", len(revised))
-        return DraftOutput(draft=revised)
+        After producing each revised draft, the agent self-reviews to verify that all
+        editor feedback has been addressed. If unresolved issues remain, the agent
+        revises again, up to MAX_SELF_REVIEW_ITERATIONS times. The final full draft
+        is always returned.
+
+        Preconditions:
+            - revise_input has non-empty draft and feedback_items.
+        Postconditions:
+            - Returns DraftOutput with the complete revised draft (never partial).
+        """
+        draft = revise_input.draft.strip()
+        if not draft:
+            logger.warning("Empty draft in revise; returning as-is.")
+            return DraftOutput(draft=revise_input.draft)
+        if not revise_input.feedback_items:
+            logger.info("No feedback items; returning draft unchanged.")
+            return DraftOutput(draft=draft)
+
+        # Resolve style guide (brand_spec takes precedence when provided)
+        style_guide_text = self._resolve_style_guide(
+            revise_input.style_guide,
+            revise_input.brand_spec_path,
+            revise_input.brand_spec,
+        )
+
+        # Format feedback for prompt
+        feedback_lines = []
+        if revise_input.feedback_summary:
+            feedback_lines.append(f"Note from editor: {revise_input.feedback_summary}\n")
+        for i, item in enumerate(revise_input.feedback_items, 1):
+            loc = f" [{item.location}]" if item.location else ""
+            feedback_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
+            if item.suggestion:
+                feedback_lines.append(f"   Suggestion: {item.suggestion}")
+            feedback_lines.append("")
+
+        current_draft = draft
+
+        for iteration in range(1, self.MAX_SELF_REVIEW_ITERATIONS + 1):
+            logger.info("Revise iteration %s/%s", iteration, self.MAX_SELF_REVIEW_ITERATIONS)
+
+            # Build and execute the revision prompt
+            prompt = self._build_revise_prompt(current_draft, feedback_lines, style_guide_text, revise_input)
+
+            if on_llm_request:
+                on_llm_request(f"Revising draft (iteration {iteration}/{self.MAX_SELF_REVIEW_ITERATIONS})...")
+            data = self.llm.complete_json(prompt, temperature=0.2)
+            raw_draft = data.get("draft")
+            if isinstance(raw_draft, str) and raw_draft.strip():
+                current_draft = raw_draft.strip()
+            else:
+                logger.warning("LLM returned no revised content on iteration %s; keeping previous draft.", iteration)
+
+            logger.info("Draft revised (iteration %s): length=%s", iteration, len(current_draft))
+
+            # Self-review: check if all feedback has been addressed
+            if iteration < self.MAX_SELF_REVIEW_ITERATIONS:
+                review_result = self._self_review(
+                    current_draft,
+                    revise_input.feedback_items,
+                    on_llm_request=on_llm_request,
+                )
+
+                if review_result["all_addressed"]:
+                    logger.info("Self-review passed on iteration %s; all feedback addressed.", iteration)
+                    break
+
+                unresolved = review_result["unresolved_items"]
+                logger.info(
+                    "Self-review found %s unresolved items on iteration %s; revising again.",
+                    len(unresolved),
+                    iteration,
+                )
+
+                # Augment the feedback lines with self-review findings for the next revision
+                feedback_lines.append("")
+                feedback_lines.append("--- SELF-REVIEW FINDINGS (still unresolved from previous revision) ---")
+                for j, ur in enumerate(unresolved, 1):
+                    feedback_lines.append(
+                        f"{j}. UNRESOLVED: {ur.get('original_issue', 'Unknown issue')}"
+                    )
+                    feedback_lines.append(f"   Reason: {ur.get('reason', 'Not specified')}")
+                    if ur.get("suggestion"):
+                        feedback_lines.append(f"   Fix: {ur.get('suggestion')}")
+                    feedback_lines.append("")
+            else:
+                logger.info(
+                    "Reached max self-review iterations (%s); returning current draft.",
+                    self.MAX_SELF_REVIEW_ITERATIONS,
+                )
+
+        logger.info("Final revised draft: length=%s", len(current_draft))
+        return DraftOutput(draft=current_draft)
