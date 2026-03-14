@@ -49,9 +49,11 @@
       <button mat-raised-button color="primary" type="submit"
               class="start-button" [disabled]="!canSubmit">
         @if (isSubmitting()) {
-          <mat-icon>hourglass_top</mat-icon> Starting...
+          <ng-container matButtonIcon><mat-icon>hourglass_top</mat-icon></ng-container>
+          Starting...
         } @else {
-          <mat-icon>play_arrow</mat-icon> Start Team
+          <ng-container matButtonIcon><mat-icon>play_arrow</mat-icon></ng-container>
+          Start Team
         }
       </button>
     </form>
