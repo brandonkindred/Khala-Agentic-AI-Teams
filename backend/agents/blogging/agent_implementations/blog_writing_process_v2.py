@@ -248,9 +248,11 @@ def run_pipeline(
                     brand_spec_path=brand_spec_path_str,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
+                draft_output_path = (Path(work_dir) / "draft_v1.md") if work_dir is not None else None
                 draft_result = draft_agent.run(
                     draft_input,
                     on_llm_request=lambda msg: _update(BlogPhase.DRAFT_INITIAL, status_text=msg),
+                    draft_output_path=draft_output_path,
                 )
             except BloggingError:
                 raise
@@ -264,8 +266,6 @@ def run_pipeline(
                 status_text=f"Initial draft complete ({len(draft_result.draft)} chars)",
                 draft_iterations=iteration,
             )
-            if work_dir is not None:
-                write_artifact(work_dir, "draft_v1.md", draft_result.draft)
         else:
             # Copy edit loop
             copy_edit_num = iteration - 1
@@ -323,9 +323,11 @@ def run_pipeline(
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
                 previous_feedback_items = copy_editor_result.feedback_items
+                draft_output_path = (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
                 draft_result = draft_agent.revise(
                     revise_input,
                     on_llm_request=lambda msg: _update(BlogPhase.COPY_EDIT_LOOP, status_text=msg),
+                    draft_output_path=draft_output_path,
                 )
             except BloggingError:
                 raise
@@ -333,8 +335,6 @@ def run_pipeline(
                 raise DraftError(f"Draft revision failed: {e}", iteration=iteration, cause=e) from e
 
             logger.info("Draft iteration %s: revised, length=%s", iteration, len(draft_result.draft))
-            if work_dir is not None:
-                write_artifact(work_dir, "draft_v2.md", draft_result.draft)
     else:
         _update(
             BlogPhase.COPY_EDIT_LOOP,
@@ -483,15 +483,17 @@ def run_pipeline(
                     brand_spec_path=str(brand_spec_path) if brand_spec_path.exists() else None,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
+                draft_output_path = work_dir / f"draft_rewrite_{rewrite_iter + 1}.md"
                 draft_result = draft_agent.revise(
                     revise_input,
                     on_llm_request=lambda msg: _update(BlogPhase.REWRITE_LOOP, status_text=msg),
+                    draft_output_path=draft_output_path,
                 )
             except BloggingError:
                 raise
             except Exception as e:
                 raise DraftError(f"Rewrite revision failed: {e}", iteration=rewrite_iter + 1, cause=e) from e
-            
+
             write_artifact(work_dir, "final.md", draft_result.draft)
             logger.info("Rewrite iteration %s: applied fixes, re-running gates", rewrite_iter + 1)
     else:
