@@ -78,7 +78,7 @@ services:
       temporal:
         condition: service_started
     volumes:
-      - ./workspace:/workspace
+      - agents_workspace:/workspace
     ports:
       - "8888:8080"
     # All agents use central LLM; default Ollama Cloud. Set OLLAMA_API_KEY in docker/.env (https://ollama.com/settings/keys).
@@ -134,3 +134,4 @@ networks:
 
 volumes:
   postgres_data:
+  agents_workspace:
