@@ -9,6 +9,7 @@ venv/
 ENV/
 .pytest_cache/
 .mypy_cache/
+**/integration_draft_output.md
 .ruff_cache/
 .cache/
 .coverage
