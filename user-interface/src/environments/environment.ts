@@ -30,4 +30,6 @@ export const environment = {
   investmentApiUrl: 'http://localhost:8080/api/investment',
   /** Integrations API (Slack, etc.) - unified API */
   integrationsApiUrl: 'http://localhost:8080/api/integrations',
+  /** StudioGrid design-system workflow API */
+  studioGridApiUrl: 'http://localhost:8080/api/studio-grid',
 };

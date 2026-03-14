@@ -38,6 +38,11 @@ if str(_agents_dir) not in sys.path:
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+# Add StudioGrid src directory to path (it lives outside the agents/ tree)
+_studiogrid_src = _project_root / "studiogrid" / "src"
+if str(_studiogrid_src) not in sys.path:
+    sys.path.insert(0, str(_studiogrid_src))
+
 from unified_api.config import TEAM_CONFIGS, get_enabled_teams
 
 logging.basicConfig(
@@ -331,6 +336,20 @@ def _try_mount_coding_team(app: FastAPI) -> bool:
         return False
 
 
+def _try_mount_studio_grid(app: FastAPI) -> bool:
+    """Mount StudioGrid design-system workflow API."""
+    try:
+        from studiogrid.api.main import app as studio_grid_app
+
+        config = TEAM_CONFIGS["studio_grid"]
+        app.mount(config.prefix, studio_grid_app)
+        logger.info("Mounted %s at %s", config.name, config.prefix)
+        return True
+    except ImportError as e:
+        logger.warning("Could not mount StudioGrid API: %s", e)
+        return False
+
+
 def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
     """Mount all enabled team APIs and return mount status."""
     mount_functions = {
@@ -348,6 +367,7 @@ def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
         "nutrition_meal_planning": _try_mount_nutrition_meal_planning,
         "planning_v3": _try_mount_planning_v3,
         "coding_team": _try_mount_coding_team,
+        "studio_grid": _try_mount_studio_grid,
     }
 
     results = {}
