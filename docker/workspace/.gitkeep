@@ -1,2 +1,2 @@
-# Ensures docker/workspace exists for compose bind mount (./workspace:/workspace).
+# Optional: host directory for workspace. Compose uses named volume agents_workspace by default for persistence.
 # Add project repos or files here for the strands-agents container.

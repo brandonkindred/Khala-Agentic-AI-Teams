@@ -19,7 +19,7 @@ This directory defines a **Docker Compose stack** that runs:
 
 2. **Start the stack** (from repo root)
 
-   The `docker/workspace` directory is used as a bind mount for the agents container; it is created in the repo (with a `.gitkeep`). You can add project repos or files there for the container to use.
+   Agent output and project data are stored in the **`agents_workspace`** Docker volume (mounted at `/workspace` in the agents container). This data persists when containers are stopped or recreated. Postgres data is stored in the **`postgres_data`** volume. To remove all persisted data, use `docker compose down -v` (the `-v` flag removes named volumes).
 
    Use `--env-file docker/.env` so variables from `docker/.env` (e.g. `OLLAMA_API_KEY`) are passed into the containers.
 
@@ -81,6 +81,15 @@ Query params:
 - **stderr** – set to `1` to include `*_err.log` files
 
 When **ENABLE_LOG_API** is not set or is 0, the endpoint returns **404** so it is not exposed in production.
+
+## Data persistence
+
+| Volume            | Service        | Purpose |
+|-------------------|----------------|---------|
+| `postgres_data`   | PostgreSQL     | Database files (Temporal + app DBs). |
+| `agents_workspace`| strands-agents | Agent workspace at `/workspace` (repos, generated code, artifacts). |
+
+Data in these volumes survives `docker compose down` and container restarts. To wipe persisted data, run `docker compose down -v`.
 
 ## Port summary
 
