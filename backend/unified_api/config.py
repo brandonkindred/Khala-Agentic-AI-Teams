@@ -116,6 +116,12 @@ TEAM_CONFIGS: Dict[str, TeamConfig] = {
         description="Tech Lead and stack-specialist Senior Software Engineers with Task Graph",
         tags=["coding", "development"],
     ),
+    "studio_grid": TeamConfig(
+        name="StudioGrid",
+        prefix="/api/studio-grid",
+        description="Design-system multi-agent workflow: wireframes, design system, hi-fi, handoff",
+        tags=["design", "ux"],
+    ),
 }
 
 

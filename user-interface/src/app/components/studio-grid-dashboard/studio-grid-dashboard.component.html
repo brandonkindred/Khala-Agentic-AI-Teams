@@ -1,0 +1,152 @@
+<h1>StudioGrid</h1>
+<p>Design-system multi-agent workflow: wireframes, design system, hi-fi, and handoff.</p>
+
+<div class="header-row">
+  <app-health-indicator [healthCheck]="healthCheck" label="StudioGrid API" />
+</div>
+
+@if (loading) {
+  <app-loading-spinner message="Starting design run..." />
+}
+
+@if (error) {
+  <app-error-message [message]="error" />
+}
+
+<!-- Start Run Form -->
+@if (!run) {
+  <mat-card class="section-card">
+    <mat-card-header>
+      <mat-card-title>
+        <mat-icon>play_circle</mat-icon>
+        Start a Design Run
+      </mat-card-title>
+    </mat-card-header>
+    <mat-card-content>
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>Project Name</mat-label>
+        <input matInput [(ngModel)]="projectName" placeholder="My Design Project" />
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>Intake (JSON)</mat-label>
+        <textarea
+          matInput
+          [(ngModel)]="intakeJson"
+          rows="6"
+          placeholder='{ "brief": "Design a mobile dashboard..." }'
+        ></textarea>
+        <mat-hint>Describe the design brief, target users, constraints, etc.</mat-hint>
+      </mat-form-field>
+
+      @if (intakeError) {
+        <p class="field-error">{{ intakeError }}</p>
+      }
+    </mat-card-content>
+    <mat-card-actions>
+      <button mat-raised-button color="primary" [disabled]="!projectName.trim() || loading" (click)="onStartRun()">
+        <mat-icon>rocket_launch</mat-icon>
+        Start Run
+      </button>
+    </mat-card-actions>
+  </mat-card>
+}
+
+<!-- Active Run -->
+@if (run) {
+  <mat-card class="section-card">
+    <mat-card-header>
+      <mat-card-title>
+        <mat-icon>design_services</mat-icon>
+        Run: {{ run.run_id }}
+      </mat-card-title>
+      <mat-card-subtitle>Project: {{ run.project_id }}</mat-card-subtitle>
+    </mat-card-header>
+    <mat-card-content>
+
+      <!-- Status badges -->
+      <div class="status-row">
+        <span class="status-badge" [class]="'status-' + run.status.toLowerCase()">{{ run.status }}</span>
+        <span class="phase-badge">Phase: {{ run.phase }}</span>
+      </div>
+
+      <!-- Phase progress -->
+      <div class="phase-track">
+        @for (phase of phases; track phase) {
+          <div
+            class="phase-step"
+            [class.done]="phases.indexOf(phase) < currentPhaseIndex"
+            [class.active]="phase === run.phase"
+          >
+            <div class="phase-dot">
+              @if (phases.indexOf(phase) < currentPhaseIndex) {
+                <mat-icon class="step-icon done-icon">check_circle</mat-icon>
+              } @else if (phase === run.phase) {
+                <mat-icon class="step-icon active-icon">radio_button_checked</mat-icon>
+              } @else {
+                <mat-icon class="step-icon pending-icon">radio_button_unchecked</mat-icon>
+              }
+            </div>
+            <span class="phase-label">{{ phase }}</span>
+          </div>
+        }
+      </div>
+    </mat-card-content>
+    <mat-card-actions>
+      <button mat-stroked-button (click)="onRefreshStatus()">
+        <mat-icon>refresh</mat-icon>
+        Refresh
+      </button>
+      <button mat-stroked-button (click)="run = null; decisions = []">
+        <mat-icon>add</mat-icon>
+        New Run
+      </button>
+    </mat-card-actions>
+  </mat-card>
+
+  <!-- Decisions -->
+  @if (decisions.length > 0) {
+    <mat-card class="section-card">
+      <mat-card-header>
+        <mat-card-title>
+          <mat-icon>pending_actions</mat-icon>
+          Decisions Requiring Input
+        </mat-card-title>
+      </mat-card-header>
+      <mat-card-content>
+        @if (resolveError) {
+          <app-error-message [message]="resolveError" />
+        }
+        @for (decision of decisions; track decision.decision_id) {
+          <div class="decision-card">
+            <div class="decision-header">
+              <strong>{{ decision.title }}</strong>
+              <span class="status-badge" [class]="'status-' + decision.status.toLowerCase()">{{ decision.status }}</span>
+            </div>
+            <p class="decision-context">{{ decision.context }}</p>
+            @if (decision.status === 'OPEN') {
+              <div class="option-list">
+                @for (opt of decision.options; track opt.key) {
+                  <button
+                    mat-stroked-button
+                    color="primary"
+                    [disabled]="resolvingDecisionId === decision.decision_id"
+                    (click)="onResolveDecision(decision.decision_id, opt.key)"
+                  >
+                    {{ opt.label ?? opt.key }}
+                  </button>
+                }
+              </div>
+            } @else {
+              <p class="chosen-option">
+                <mat-icon>check</mat-icon>
+                Chosen: <strong>{{ decision.selected_option_key }}</strong>
+              </p>
+            }
+          </div>
+          <mat-divider />
+        }
+      </mat-card-content>
+    </mat-card>
+  }
+}
