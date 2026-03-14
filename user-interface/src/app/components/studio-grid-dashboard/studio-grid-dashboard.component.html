@@ -133,7 +133,7 @@
                     [disabled]="resolvingDecisionId === decision.decision_id"
                     (click)="onResolveDecision(decision.decision_id, opt.key)"
                   >
-                    {{ opt.label ?? opt.key }}
+                    {{ opt.label || opt.key }}
                   </button>
                 }
               </div>

@@ -8,9 +8,9 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
-from llm_service import LLMClient
+from llm_service import LLMClient, LLMJsonParseError, LLMTruncatedError
 
 from blog_research_agent.models import ResearchReference
 
@@ -468,6 +468,9 @@ class BlogDraftAgent:
 
         current_draft = draft
 
+        # Allow long output so revised drafts are not truncated (avoids LLMTruncatedError / JSON parse failure)
+        revise_max_tokens = 32768
+
         for iteration in range(1, self.MAX_SELF_REVIEW_ITERATIONS + 1):
             logger.info("Revise iteration %s/%s", iteration, self.MAX_SELF_REVIEW_ITERATIONS)
 
@@ -476,12 +479,37 @@ class BlogDraftAgent:
 
             if on_llm_request:
                 on_llm_request(f"Revising draft (iteration {iteration}/{self.MAX_SELF_REVIEW_ITERATIONS})...")
-            data = self.llm.complete_json(prompt, temperature=0.2)
-            raw_draft = data.get("draft")
-            if isinstance(raw_draft, str) and raw_draft.strip():
-                current_draft = raw_draft.strip()
+            data: Optional[Dict[str, Any]] = None
+            for attempt in range(2):
+                try:
+                    data = self.llm.complete_json(
+                        prompt, temperature=0.2, max_tokens=revise_max_tokens
+                    )
+                    break
+                except (LLMJsonParseError, LLMTruncatedError) as e:
+                    if attempt == 0:
+                        logger.warning(
+                            "Revise LLM error (attempt 1/2): %s; retrying with max_tokens=%s.",
+                            e,
+                            revise_max_tokens,
+                        )
+                    else:
+                        logger.warning(
+                            "Revise LLM error (attempt 2/2): %s; keeping current draft for this iteration.",
+                            e,
+                        )
+                        break
+            if data is not None:
+                raw_draft = data.get("draft")
+                if isinstance(raw_draft, str) and raw_draft.strip():
+                    current_draft = raw_draft.strip()
+                else:
+                    logger.warning("LLM returned no revised content on iteration %s; keeping previous draft.", iteration)
             else:
-                logger.warning("LLM returned no revised content on iteration %s; keeping previous draft.", iteration)
+                logger.warning(
+                    "Revise failed after retries on iteration %s; keeping previous draft.",
+                    iteration,
+                )
 
             logger.info("Draft revised (iteration %s): length=%s", iteration, len(current_draft))
 

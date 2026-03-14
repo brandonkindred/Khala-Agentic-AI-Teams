@@ -79,7 +79,7 @@
               </div>
               <div class="phase-detail-status">
                 <mat-icon class="spinning">sync</mat-icon>
-                <span>{{ status?.status_text || (status?.phase === 'task_graph' ? 'Building task graph' : (status?.phase === 'coding' ? 'Coding in progress' : 'Execution')) }}</span>
+                <span>{{ status.status_text || (status.phase === 'task_graph' ? 'Building task graph' : (status.phase === 'coding' ? 'Coding in progress' : 'Execution')) }}</span>
               </div>
             </div>
           </div>
