@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(xargs wc:*)",
-      "Bash(find /c/Users/shann/OneDrive/Documents/GitHub/strands-agents/.claude/worktrees/determined-dhawan/backend/agents -type d -name *market* -o -type d -name *social* -o -type d -name *branding*)",
-      "Bash(find /c/Users/shann/OneDrive/Documents/GitHub/strands-agents/.claude/worktrees/determined-dhawan/user-interface/src/app -name *route* -o -name *routing*)"
-    ]
-  }
-}
