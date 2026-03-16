@@ -20,7 +20,7 @@ Research → Review → Draft → (optional) Draft ↔ Copy Editor revision loop
 
 - **Research** fetches and ranks sources from the web and arXiv.
 - **Review** produces title choices and a detailed outline.
-- **Draft** writes the initial draft from research + outline; uses `docs/brandon_kindred_brand_and_writing_style_guide.md` as the style guide.
+- **Draft** writes the initial draft from research + outline. Style and brand content are loaded by the caller before agent creation and passed in as full file contents (see Style guide below).
 - **Copy Editor** reviews the draft and returns feedback; the **Draft** agent revises based on feedback. This loop runs a configurable number of times (e.g. 3).
 - **Publication** receives the final draft: submit → human approve/reject. On approve: write to `blog_posts/`, generate platform-specific versions. On reject: optional revision loop with Draft + Copy Editor.
 
@@ -141,9 +141,14 @@ Optional: `work_dir` or `run_id` – when set, persists `research_packet.md` and
 
 Interactive docs: http://localhost:8000/docs
 
-## Style guide
+## Style guide and brand spec
 
-The Draft and Copy Editor agents use `docs/brandon_kindred_brand_and_writing_style_guide.md` as the style guide. Pass a custom path via `default_style_guide_path` when instantiating the agents.
+The Draft and Copy Editor agents do **not** accept file paths. Callers must load the writing style guide and brand spec **before** instantiating the agents, then pass the **full file contents** as strings:
+
+- **Writing style guide**: typically `docs/brandon_kindred_brand_and_writing_style_guide.md` (read as UTF-8 text).
+- **Brand spec**: typically `docs/brand_spec.yaml` (read as raw text for draft/editor; validators and compliance may still load it as structured YAML via `load_brand_spec`).
+
+Use `shared.load_style_file(path, label)` to load a file: on success it returns the stripped content; on failure (missing file, read error) it **logs an error** and returns an empty string. Then instantiate the agents with `writing_style_guide_content=...` and `brand_spec_content=...`. If both contents are empty, the agents use a minimal built-in fallback.
 
 ## Logging
 

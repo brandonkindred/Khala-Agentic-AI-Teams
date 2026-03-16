@@ -12,19 +12,27 @@ import logging
 from pathlib import Path
 
 from llm_service import get_client  # or DummyLLMClient for quick test
+from shared.style_loader import load_style_file
 from blog_draft_agent import BlogDraftAgent, DraftInput
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-# Path to the style guide (relative to project root when run from repo)
-STYLE_GUIDE_PATH = Path(__file__).resolve().parent.parent / "docs" / "brandon_kindred_brand_and_writing_style_guide.md"
+_blogging_docs = Path(__file__).resolve().parent.parent / "docs"
+STYLE_GUIDE_PATH = _blogging_docs / "brandon_kindred_brand_and_writing_style_guide.md"
+BRAND_SPEC_PATH = _blogging_docs / "brand_spec.yaml"
 
 
 def main() -> None:
     llm_client = get_client("blog")
     # Or: from llm_service import DummyLLMClient; llm_client = DummyLLMClient()
 
-    agent = BlogDraftAgent(llm_client=llm_client, default_style_guide_path=STYLE_GUIDE_PATH)
+    writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
+    brand_spec_content = load_style_file(BRAND_SPEC_PATH, "brand spec")
+    agent = BlogDraftAgent(
+        llm_client=llm_client,
+        writing_style_guide_content=writing_style_content,
+        brand_spec_content=brand_spec_content,
+    )
 
     # Example: use your research document and outline (e.g. from research + review agents)
     research_document = """
@@ -53,7 +61,6 @@ Recap and one practical next step.
         outline=outline.strip(),
         audience="Beginners to AI Agents",
         tone_or_purpose="Educational",
-        style_guide=STYLE_GUIDE_PATH.read_text().strip() if STYLE_GUIDE_PATH.exists() else None,
     )
 
     result = agent.run(draft_input)

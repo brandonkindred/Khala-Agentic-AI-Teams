@@ -11,11 +11,14 @@ import logging
 from pathlib import Path
 
 from llm_service import get_client
+from shared.style_loader import load_style_file
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-STYLE_GUIDE_PATH = Path(__file__).resolve().parent.parent / "docs" / "brandon_kindred_brand_and_writing_style_guide.md"
+_blogging_docs = Path(__file__).resolve().parent.parent / "docs"
+STYLE_GUIDE_PATH = _blogging_docs / "brandon_kindred_brand_and_writing_style_guide.md"
+BRAND_SPEC_PATH = _blogging_docs / "brand_spec.yaml"
 
 # Example draft to review (replace with your own or load from file)
 EXAMPLE_DRAFT = """
@@ -43,13 +46,18 @@ Implementing LLM observability is non-negotiable for any serious enterprise AI i
 def main() -> None:
     llm_client = get_client("blog")
 
-    agent = BlogCopyEditorAgent(llm_client=llm_client, default_style_guide_path=STYLE_GUIDE_PATH)
+    writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
+    brand_spec_content = load_style_file(BRAND_SPEC_PATH, "brand spec")
+    agent = BlogCopyEditorAgent(
+        llm_client=llm_client,
+        writing_style_guide_content=writing_style_content,
+        brand_spec_content=brand_spec_content,
+    )
 
     copy_editor_input = CopyEditorInput(
         draft=EXAMPLE_DRAFT.strip(),
         audience="CTOs and platform teams",
         tone_or_purpose="technical deep-dive",
-        style_guide=STYLE_GUIDE_PATH.read_text().strip() if STYLE_GUIDE_PATH.exists() else None,
     )
 
     result = agent.run(copy_editor_input)

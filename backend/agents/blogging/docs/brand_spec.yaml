@@ -68,14 +68,3 @@ examples:
   off_brand:
     - "In today's fast-paced world, we must delve into unlocking the power of scalable solutions."
     - "Smash that like button and subscribe for more content!"
-
-definition_of_done:
-  - "Has a clear thesis in the intro"
-  - "Each section has a purpose"
-  - "No banned phrases"
-  - "Reading level within target (grade 8-10)"
-  - "No em dashes or en dashes"
-  - "Paragraphs are 2-5 sentences"
-  - "Lists used intentionally, not every section as bullets"
-  - "Code is runnable when included"
-  - "Security caveats included when relevant"

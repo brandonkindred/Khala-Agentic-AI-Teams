@@ -286,3 +286,16 @@ Show real examples.
 Keep it practical.
 No em dashes. No hype.
 
+## Definition of done
+
+Before considering a draft finished, check:
+
+- [ ] Clear thesis in the intro
+- [ ] Each section has a clear purpose
+- [ ] No banned phrases
+- [ ] Reading level within grade 8–10
+- [ ] No em dashes or en dashes
+- [ ] Paragraphs are 2–5 sentences
+- [ ] Lists used intentionally, not every section as bullets
+- [ ] Code is runnable when included
+- [ ] Security caveats included when relevant

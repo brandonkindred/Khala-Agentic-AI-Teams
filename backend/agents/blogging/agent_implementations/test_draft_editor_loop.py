@@ -13,12 +13,15 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 from llm_service import DummyLLMClient
+from shared.style_loader import load_style_file
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
 from blog_research_agent.models import ResearchReference
 from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 
-STYLE_GUIDE_PATH = Path(__file__).resolve().parent.parent / "docs" / "brandon_kindred_brand_and_writing_style_guide.md"
+_blogging_docs = Path(__file__).resolve().parent.parent / "docs"
+STYLE_GUIDE_PATH = _blogging_docs / "brandon_kindred_brand_and_writing_style_guide.md"
+BRAND_SPEC_PATH = _blogging_docs / "brand_spec.yaml"
 DRAFT_EDITOR_ITERATIONS = 100
 
 # Fixed context (no research pipeline)
@@ -46,7 +49,8 @@ RESEARCH_DOC = "## Sources\n- LLM Observability Guide: Best practices for monito
 
 def main() -> None:
     llm = DummyLLMClient()
-    style_guide = STYLE_GUIDE_PATH.read_text(encoding="utf-8").strip() if STYLE_GUIDE_PATH.exists() else None
+    writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
+    brand_spec_content = load_style_file(BRAND_SPEC_PATH, "brand spec")
 
     # Get outline from review agent
     review_agent = BlogReviewAgent(llm_client=llm)
@@ -59,8 +63,16 @@ def main() -> None:
     review_result = review_agent.run(review_input)
     outline = review_result.outline
 
-    draft_agent = BlogDraftAgent(llm_client=llm, default_style_guide_path=STYLE_GUIDE_PATH)
-    copy_editor_agent = BlogCopyEditorAgent(llm_client=llm, default_style_guide_path=STYLE_GUIDE_PATH)
+    draft_agent = BlogDraftAgent(
+        llm_client=llm,
+        writing_style_guide_content=writing_style_content,
+        brand_spec_content=brand_spec_content,
+    )
+    copy_editor_agent = BlogCopyEditorAgent(
+        llm_client=llm,
+        writing_style_guide_content=writing_style_content,
+        brand_spec_content=brand_spec_content,
+    )
 
     draft_result = None
     for iteration in range(1, DRAFT_EDITOR_ITERATIONS + 1):
@@ -70,7 +82,6 @@ def main() -> None:
                 outline=outline,
                 audience="CTOs and platform teams",
                 tone_or_purpose="technical deep-dive",
-                style_guide=style_guide,
             )
             draft_result = draft_agent.run(draft_input)
             print(f"\n--- Iteration {iteration}: Initial draft ({len(draft_result.draft)} chars) ---")
@@ -79,7 +90,6 @@ def main() -> None:
                 draft=draft_result.draft,
                 audience="CTOs and platform teams",
                 tone_or_purpose="technical deep-dive",
-                style_guide=style_guide,
             )
             copy_editor_result = copy_editor_agent.run(copy_editor_input)
             print(f"\n--- Iteration {iteration}: Copy editor found {len(copy_editor_result.feedback_items)} feedback items ---")
@@ -92,7 +102,6 @@ def main() -> None:
                 outline=outline,
                 audience="CTOs and platform teams",
                 tone_or_purpose="technical deep-dive",
-                style_guide=style_guide,
             )
             draft_result = draft_agent.revise(revise_input)
             print(f"--- Iteration {iteration}: Revised draft ({len(draft_result.draft)} chars) ---")

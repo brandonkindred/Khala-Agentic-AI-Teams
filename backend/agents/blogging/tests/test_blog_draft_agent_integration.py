@@ -84,7 +84,11 @@ def test_draft_agent_with_ollama_produces_real_content() -> None:
     if not isinstance(client, OllamaLLMClient):
         pytest.skip("LLM client is not Ollama; integration test expects Ollama")
 
-    agent = BlogDraftAgent(llm_client=client)
+    agent = BlogDraftAgent(
+        llm_client=client,
+        writing_style_guide_content="Use short sentences. No em dashes. Define terms on first use.",
+        brand_spec_content="",
+    )
     draft_input = DraftInput(
         research_document=(
             "Observability helps teams understand system behavior in production. "
@@ -99,7 +103,6 @@ def test_draft_agent_with_ollama_produces_real_content() -> None:
         ),
         audience="Platform and SRE teams",
         tone_or_purpose="technical overview",
-        style_guide="Use short sentences. No em dashes. Define terms on first use.",
     )
 
     try:

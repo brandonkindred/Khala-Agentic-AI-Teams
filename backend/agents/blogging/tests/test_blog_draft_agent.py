@@ -41,14 +41,17 @@ def test_blog_draft_agent_run() -> None:
 
 
 def test_blog_draft_agent_with_style_guide() -> None:
-    """BlogDraftAgent accepts optional style_guide in input."""
+    """BlogDraftAgent uses writing_style_guide_content passed at init."""
     llm = DummyLLMClient()
-    agent = BlogDraftAgent(llm_client=llm)
+    agent = BlogDraftAgent(
+        llm_client=llm,
+        writing_style_guide_content="Write like a mentor. Short sentences. No em dashes.",
+        brand_spec_content="",
+    )
 
     draft_input = DraftInput(
         research_document="Research here.",
         outline="Outline here.",
-        style_guide="Write like a mentor. Short sentences. No em dashes.",
     )
 
     result = agent.run(draft_input)

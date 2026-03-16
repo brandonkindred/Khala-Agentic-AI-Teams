@@ -28,6 +28,7 @@ from blog_publication_agent.models import PublishingPack
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
 from shared.artifacts import read_artifact, write_artifact
 from shared.brand_spec import load_brand_spec
+from shared.style_loader import load_style_file
 from shared.errors import (
     BloggingError,
     ComplianceError,
@@ -41,7 +42,9 @@ from validators.runner import run_validators_from_work_dir
 
 logger = logging.getLogger(__name__)
 
-STYLE_GUIDE_PATH = Path(__file__).resolve().parent.parent / "docs" / "brandon_kindred_brand_and_writing_style_guide.md"
+_blogging_docs = Path(__file__).resolve().parent.parent / "docs"
+STYLE_GUIDE_PATH = _blogging_docs / "brandon_kindred_brand_and_writing_style_guide.md"
+BRAND_SPEC_PATH = _blogging_docs / "brand_spec.yaml"
 DRAFT_EDITOR_ITERATIONS = 100
 MAX_REWRITE_ITERATIONS = 100
 
@@ -207,23 +210,21 @@ def run_pipeline(
         write_artifact(work_dir, "content_brief.md", content_brief)
         logger.info("Persisted outline.md and content_brief.md")
 
-    # 3. Draft + Copy Editor loop
-    style_guide_text = STYLE_GUIDE_PATH.read_text().strip() if STYLE_GUIDE_PATH.exists() else None
-    brand_spec_path = Path(__file__).resolve().parent.parent / "docs" / "brand_spec.yaml"
-    brand_spec_dict: Optional[dict] = None
-    if brand_spec_path.exists():
-        _spec = load_brand_spec(brand_spec_path)
-        brand_spec_dict = _spec.model_dump() if hasattr(_spec, "model_dump") else _spec.dict()
+    # 3. Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
+    writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
+    brand_spec_content = load_style_file(BRAND_SPEC_PATH, "brand spec")
     allowed_claims_data = (
         read_artifact(work_dir, "allowed_claims.json") if work_dir is not None else None
     )
     draft_agent = BlogDraftAgent(
         llm_client=llm_client,
-        default_style_guide_path=STYLE_GUIDE_PATH,
+        writing_style_guide_content=writing_style_content,
+        brand_spec_content=brand_spec_content,
     )
     copy_editor_agent = BlogCopyEditorAgent(
         llm_client=llm_client,
-        default_style_guide_path=STYLE_GUIDE_PATH,
+        writing_style_guide_content=writing_style_content,
+        brand_spec_content=brand_spec_content,
     )
 
     draft_result = None
@@ -245,8 +246,6 @@ def run_pipeline(
                     outline=review_result.outline,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
-                    style_guide=style_guide_text,
-                    brand_spec=brand_spec_dict,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
                 draft_output_path = (Path(work_dir) / "draft_v1.md") if work_dir is not None else None
@@ -283,8 +282,6 @@ def run_pipeline(
                     draft=draft_result.draft,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
-                    style_guide=style_guide_text,
-                    brand_spec=brand_spec_dict,
                     previous_feedback_items=previous_feedback_items if previous_feedback_items else None,
                 )
                 feedback_path = (Path(work_dir) / f"editor_feedback_iter_{copy_edit_num}.json") if work_dir is not None else None
@@ -319,8 +316,6 @@ def run_pipeline(
                     outline=review_result.outline,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
-                    style_guide=style_guide_text,
-                    brand_spec=brand_spec_dict,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
                 previous_feedback_items = copy_editor_result.feedback_items
@@ -350,7 +345,7 @@ def run_pipeline(
         logger.info("Persisted final.md")
         
     if work_dir is not None and run_gates:
-        brand_spec = load_brand_spec(brand_spec_path)
+        brand_spec = load_brand_spec(BRAND_SPEC_PATH)
         compliance_agent = BlogComplianceAgent(llm_client=llm_client)
         fact_check_agent = BlogFactCheckAgent(llm_client=llm_client)
 
@@ -480,8 +475,6 @@ def run_pipeline(
                     outline=review_result.outline,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
-                    style_guide=style_guide_text,
-                    brand_spec=brand_spec_dict,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
                 draft_output_path = work_dir / f"draft_rewrite_{rewrite_iter + 1}.md"

@@ -12,6 +12,8 @@ from . import _path_setup  # noqa: F401  # Add blogging to path when run from pr
 import logging
 from pathlib import Path
 
+from shared.style_loader import load_style_file
+
 logger = logging.getLogger(__name__)
 
 from blog_research_agent.agent import ResearchAgent
@@ -24,7 +26,9 @@ from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-STYLE_GUIDE_PATH = Path(__file__).resolve().parent.parent / "docs" / "brandon_kindred_brand_and_writing_style_guide.md"
+_blogging_docs = Path(__file__).resolve().parent.parent / "docs"
+STYLE_GUIDE_PATH = _blogging_docs / "brandon_kindred_brand_and_writing_style_guide.md"
+BRAND_SPEC_PATH = _blogging_docs / "brand_spec.yaml"
 
 # Number of draft-editor loop iterations (1 = draft only, no revisions; 100 = draft + 99 revision cycles)
 DRAFT_EDITOR_ITERATIONS = 100
@@ -65,10 +69,19 @@ if not research_document and research_result.references:
             parts.append("  Key points: " + "; ".join(ref.key_points[:3]))
     research_document = "\n".join(parts)
 
-style_guide_text = STYLE_GUIDE_PATH.read_text().strip() if STYLE_GUIDE_PATH.exists() else None
+writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
+brand_spec_content = load_style_file(BRAND_SPEC_PATH, "brand spec")
 
-draft_agent = BlogDraftAgent(llm_client=llm_client, default_style_guide_path=STYLE_GUIDE_PATH)
-copy_editor_agent = BlogCopyEditorAgent(llm_client=llm_client, default_style_guide_path=STYLE_GUIDE_PATH)
+draft_agent = BlogDraftAgent(
+    llm_client=llm_client,
+    writing_style_guide_content=writing_style_content,
+    brand_spec_content=brand_spec_content,
+)
+copy_editor_agent = BlogCopyEditorAgent(
+    llm_client=llm_client,
+    writing_style_guide_content=writing_style_content,
+    brand_spec_content=brand_spec_content,
+)
 
 # Draft-editor loop: draft -> editor feedback -> revise (repeat)
 draft_result = None
@@ -80,7 +93,6 @@ for iteration in range(1, DRAFT_EDITOR_ITERATIONS + 1):
             outline=review_result.outline,
             audience=brief.audience,
             tone_or_purpose=brief.tone_or_purpose,
-            style_guide=style_guide_text,
         )
         draft_result = draft_agent.run(draft_input)
         logger.info("Draft iteration %s: initial draft, length=%s", iteration, len(draft_result.draft))
@@ -90,7 +102,6 @@ for iteration in range(1, DRAFT_EDITOR_ITERATIONS + 1):
             draft=draft_result.draft,
             audience=brief.audience,
             tone_or_purpose=brief.tone_or_purpose,
-            style_guide=style_guide_text,
         )
         # Pass feedback_output_path to persist editor feedback to a file when running with work_dir.
         copy_editor_result = copy_editor_agent.run(copy_editor_input)
@@ -108,7 +119,6 @@ for iteration in range(1, DRAFT_EDITOR_ITERATIONS + 1):
             outline=review_result.outline,
             audience=brief.audience,
             tone_or_purpose=brief.tone_or_purpose,
-            style_guide=style_guide_text,
         )
         draft_result = draft_agent.revise(revise_input)
         logger.info("Draft iteration %s: revised, length=%s", iteration, len(draft_result.draft))
