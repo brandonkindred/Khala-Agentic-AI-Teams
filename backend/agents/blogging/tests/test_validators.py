@@ -1,7 +1,8 @@
 """Unit tests for deterministic validators."""
 
 import pytest
-from shared.brand_spec import BrandSpec, load_brand_spec
+from pathlib import Path
+from shared.brand_spec import BrandSpec, VoiceConfig, FormattingConfig, ReadabilityConfig
 from validators.checks import (
     check_banned_phrases,
     check_banned_patterns,
@@ -14,12 +15,7 @@ from validators.runner import run_validators
 
 @pytest.fixture
 def brand_spec():
-    """Load default brand spec or create minimal one."""
-    from pathlib import Path
-    from shared.brand_spec import VoiceConfig, FormattingConfig, ReadabilityConfig
-    path = Path(__file__).resolve().parent.parent / "docs" / "brand_spec.yaml"
-    if path.exists():
-        return load_brand_spec(path)
+    """Minimal brand spec for validator tests (no YAML; prompt file is text-only)."""
     return BrandSpec(
         voice=VoiceConfig(
             banned_phrases=["delve into", "unlock the power of"],
@@ -102,11 +98,15 @@ def test_check_required_sections_fail(brand_spec):
 
 
 def test_run_validators(tmp_path):
-    from pathlib import Path
-    spec_path = Path(__file__).resolve().parent.parent / "docs" / "brand_spec.yaml"
-    if not spec_path.exists():
-        pytest.skip("brand_spec.yaml not found")
-    brand_spec = load_brand_spec(spec_path)
+    """Run validators with default BrandSpec (no structured file)."""
+    brand_spec = BrandSpec(
+        formatting=FormattingConfig(
+            min_paragraph_sentences=2,
+            max_paragraph_sentences=5,
+            require_sections=True,
+            required_section_headings=["Hook", "Wrap up"],
+        ),
+    )
     draft = """# Hook
 
 This is a good opening. It has two sentences at least.

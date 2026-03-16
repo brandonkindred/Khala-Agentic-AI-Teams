@@ -17,8 +17,8 @@ from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
-STYLE_GUIDE_PATH = _blogging_docs / "brandon_kindred_brand_and_writing_style_guide.md"
-BRAND_SPEC_PATH = _blogging_docs / "brand_spec.yaml"
+STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
+BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 
 # Example draft to review (replace with your own or load from file)
 EXAMPLE_DRAFT = """
@@ -47,7 +47,7 @@ def main() -> None:
     llm_client = get_client("blog")
 
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
-    brand_spec_content = load_style_file(BRAND_SPEC_PATH, "brand spec")
+    brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
     agent = BlogCopyEditorAgent(
         llm_client=llm_client,
         writing_style_guide_content=writing_style_content,

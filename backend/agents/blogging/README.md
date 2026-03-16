@@ -34,7 +34,7 @@ Research → Review → Draft → (optional) Draft ↔ Copy Editor revision loop
 When `work_dir` is provided, the pipeline persists all outputs as versioned artifacts and runs hard gates:
 
 **Artifacts** (in `work_dir`):
-- `brand_spec.yaml` – Brand and style rules (single source of truth)
+- `brand_spec_prompt.md` – Brand and style rules (single source of truth)
 - `content_brief.md` – Audience model, title choices, outline
 - `research_packet.md` – Compiled research document
 - `allowed_claims.json` – Evidence-backed factual claims (writer must tag as `[CLAIM:id]`)
@@ -145,8 +145,8 @@ Interactive docs: http://localhost:8000/docs
 
 The Draft and Copy Editor agents do **not** accept file paths. Callers must load the writing style guide and brand spec **before** instantiating the agents, then pass the **full file contents** as strings:
 
-- **Writing style guide**: typically `docs/brandon_kindred_brand_and_writing_style_guide.md` (read as UTF-8 text).
-- **Brand spec**: typically `docs/brand_spec.yaml` (read as raw text for draft/editor; validators and compliance may still load it as structured YAML via `load_brand_spec`).
+- **Writing style guide**: typically `docs/writing_guidelines.md` (read as UTF-8 text).
+- **Brand spec prompt**: typically `docs/brand_spec_prompt.md` (read as full text via `load_brand_spec_prompt` for draft/editor and compliance; validators use a default in-memory spec).
 
 Use `shared.load_style_file(path, label)` to load a file: on success it returns the stripped content; on failure (missing file, read error) it **logs an error** and returns an empty string. Then instantiate the agents with `writing_style_guide_content=...` and `brand_spec_content=...`. If both contents are empty, the agents use a minimal built-in fallback.
 
@@ -189,7 +189,7 @@ blogging/
 ├── blog_compliance_agent/   # Brand/style enforcer (veto on FAIL)
 ├── blog_fact_check_agent/   # Claims and risk officer
 ├── blog_publication_agent/  # Submit, approve/reject, platform versions
-├── shared/                  # Artifacts, brand_spec loader
+├── shared/                  # Artifacts, brand_spec_prompt loader
 ├── validators/              # Deterministic checks (banned phrases, reading level, etc.)
 ├── agent_implementations/
 │   ├── run_api_server.py
@@ -197,8 +197,8 @@ blogging/
 │   ├── blog_writing_process_v2.py   # Brand-aligned pipeline with gates
 │   └── ...
 ├── docs/
-│   ├── brandon_kindred_brand_and_writing_style_guide.md
-│   └── brand_spec.yaml
+│   ├── writing_guidelines.md
+│   └── brand_spec_prompt.md
 └── requirements.txt
 ```
 

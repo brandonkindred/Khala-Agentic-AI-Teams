@@ -20,11 +20,8 @@ from .prompts import FACT_CHECK_PROMPT
 
 try:
     from shared.artifacts import write_artifact
-    from shared.brand_spec import BrandSpec, load_brand_spec
 except ImportError:
     write_artifact = None
-    load_brand_spec = None
-    BrandSpec = None
 
 try:
     from shared.errors import FactCheckError, LLMError
@@ -140,17 +137,6 @@ def run_fact_check_from_work_dir(
         allowed_claims = None
 
     require_disclaimer = ["medical", "legal", "financial"]
-    work_path = Path(work_dir).resolve()
-    brand_path = work_path / "brand_spec.yaml"
-    if not brand_path.exists():
-        _blogging_root = Path(__file__).resolve().parent.parent
-        brand_path = _blogging_root / "docs" / "brand_spec.yaml"
-    if brand_path.exists() and load_brand_spec:
-        try:
-            spec = load_brand_spec(brand_path)
-            require_disclaimer = spec.content_rules.safety.require_disclaimer_for or require_disclaimer
-        except Exception:
-            pass
 
     agent = BlogFactCheckAgent(llm_client=llm_client)
     return agent.run(

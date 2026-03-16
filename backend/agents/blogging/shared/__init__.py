@@ -9,7 +9,7 @@ from .artifacts import (
     read_artifact,
     write_artifact,
 )
-from .brand_spec import BrandSpec, load_brand_spec
+from .brand_spec import BrandSpec, load_brand_spec_prompt
 from .errors import (
     BloggingError,
     ComplianceError,
@@ -85,7 +85,7 @@ __all__ = [
     "PHASE_ORDER",
     "get_phase_progress",
     "get_completed_phases",
-    "load_brand_spec",
+    "load_brand_spec_prompt",
     "load_style_file",
     "read_artifact",
     "write_artifact",

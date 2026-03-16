@@ -27,8 +27,8 @@ from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
-STYLE_GUIDE_PATH = _blogging_docs / "brandon_kindred_brand_and_writing_style_guide.md"
-BRAND_SPEC_PATH = _blogging_docs / "brand_spec.yaml"
+STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
+BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 
 # Number of draft-editor loop iterations (1 = draft only, no revisions; 100 = draft + 99 revision cycles)
 DRAFT_EDITOR_ITERATIONS = 100
@@ -70,7 +70,7 @@ if not research_document and research_result.references:
     research_document = "\n".join(parts)
 
 writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
-brand_spec_content = load_style_file(BRAND_SPEC_PATH, "brand spec")
+brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
 
 draft_agent = BlogDraftAgent(
     llm_client=llm_client,

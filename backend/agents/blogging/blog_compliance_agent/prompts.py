@@ -26,7 +26,7 @@ Also provide required_fixes: an ordered list of specific, actionable patch instr
 If there are NO violations, set status to "PASS" and leave violations and required_fixes empty.
 
 Output JSON only, in this exact format:
-{"status": "PASS" or "FAIL", "violations": [{"rule_id": "...", "description": "...", "evidence_quotes": ["..."], "location_hint": "..."}], "required_fixes": ["...", "..."], "notes": "..."}
+{{"status": "PASS" or "FAIL", "violations": [{{"rule_id": "...", "description": "...", "evidence_quotes": ["..."], "location_hint": "..."}}], "required_fixes": ["...", "..."], "notes": "..."}}
 
 BRAND SPEC:
 ---

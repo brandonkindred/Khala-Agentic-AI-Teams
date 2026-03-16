@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Canonical artifact filenames (per spec)
 ARTIFACT_NAMES = (
-    "brand_spec.yaml",
+    "brand_spec_prompt.md",
     "content_brief.md",
     "research_packet.md",
     "allowed_claims.json",
@@ -33,7 +33,7 @@ ARTIFACT_NAMES = (
 
 # Static metadata: which pipeline phase/agent produces each artifact (for API list response)
 ARTIFACT_PRODUCER: dict[str, dict[str, str]] = {
-    "brand_spec.yaml": {"producer_phase": "draft_initial", "producer_agent": "Pipeline (brand load)"},
+    "brand_spec_prompt.md": {"producer_phase": "draft_initial", "producer_agent": "Pipeline (brand load)"},
     "content_brief.md": {"producer_phase": "review", "producer_agent": "BlogReviewAgent"},
     "research_packet.md": {"producer_phase": "research", "producer_agent": "ResearchAgent"},
     "allowed_claims.json": {"producer_phase": "research", "producer_agent": "ResearchAgent"},

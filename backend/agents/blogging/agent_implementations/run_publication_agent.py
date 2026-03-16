@@ -28,8 +28,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 logger = logging.getLogger(__name__)
 
 _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
-STYLE_GUIDE_PATH = _blogging_docs / "brandon_kindred_brand_and_writing_style_guide.md"
-BRAND_SPEC_PATH = _blogging_docs / "brand_spec.yaml"
+STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
+BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 
 EXAMPLE_DRAFT = """# Why LLM Observability Matters for Enterprise AI
 
@@ -56,7 +56,7 @@ Implementing LLM observability is non-negotiable for any serious enterprise AI i
 def main() -> None:
     llm = get_client("blog")
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
-    brand_spec_content = load_style_file(BRAND_SPEC_PATH, "brand spec")
+    brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
 
     publication_agent = BlogPublicationAgent(
         llm_client=llm,

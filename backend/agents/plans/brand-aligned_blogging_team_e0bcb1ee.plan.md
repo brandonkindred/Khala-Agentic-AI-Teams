@@ -6,7 +6,7 @@ todos:
     content: Create blogging/shared/ directory and __init__.py
     status: completed
   - id: artifacts-module
-    content: Add blogging/shared/artifacts.py with write_artifact(work_dir, name, content) and read_artifact(work_dir, name); support all standard artifact names (brand_spec.yaml, content_brief.md, research_packet.md, allowed_claims.json, outline.md, draft_v1.md, draft_v2.md, final.md, compliance_report.json, validator_report.json, publishing_pack.json)
+    content: Add blogging/shared/artifacts.py with write_artifact(work_dir, name, content) and read_artifact(work_dir, name); support all standard artifact names (brand_spec_prompt.md, content_brief.md, research_packet.md, allowed_claims.json, outline.md, draft_v1.md, draft_v2.md, final.md, compliance_report.json, validator_report.json, publishing_pack.json)
     status: completed
   - id: artifact-constants
     content: Define ARTIFACT_NAMES or constants for canonical artifact filenames in artifacts.py
@@ -24,13 +24,13 @@ todos:
     content: After each Draft/Copy Editor iteration, persist draft to work_dir/draft_v1.md, draft_v2.md, and final candidate to work_dir/final.md as appropriate
     status: completed
   - id: brand-spec-schema
-    content: Add Pydantic/dataclass schema in blogging/shared/brand_spec.py for brand_spec.yaml (brand, voice, readability, formatting, content_rules, examples, definition_of_done)
+    content: Add Pydantic/dataclass schema in blogging/shared/brand_spec.py for brand_spec_prompt / brand_spec.yaml (brand, voice, readability, formatting, content_rules, examples, definition_of_done)
     status: completed
   - id: brand-spec-loader
     content: Implement load_brand_spec(path) in brand_spec.py that reads YAML and returns validated schema; handle missing optional fields
     status: completed
   - id: brand-spec-yaml
-    content: "Create initial blogging/brand_spec.yaml (or docs/brand_spec.yaml) by extracting from brandon_kindred style guide: banned_phrases, paragraph rules (min/max sentences), disallow_em_dash, target_grade_level 8, definition_of_done list"
+    content: "Create initial blogging/brand_spec_prompt.md (or docs/brand_spec_prompt.md) by extracting from writing_guidelines: banned_phrases, paragraph rules (min/max sentences), disallow_em_dash, target_grade_level 8, definition_of_done list"
     status: completed
   - id: draft-agent-brand-spec
     content: Update BlogDraftAgent to accept optional brand_spec_path or brand_spec dict; when set, load YAML and inject structured rules into prompt alongside or instead of raw style guide
@@ -178,7 +178,7 @@ isProject: false
 
 **Pipeline** ([blogging/agent_implementations/blog_writing_process.py](blogging/agent_implementations/blog_writing_process.py)): linear Research → Review → Draft ↔ Copy Editor loop (fixed iterations). No artifact persistence, no gates, no validators.
 
-**Style guide**: Single markdown file ([blogging/docs/brandon_kindred_brand_and_writing_style_guide.md](blogging/docs/brandon_kindred_brand_and_writing_style_guide.md)); spec requires structured `brand_spec.yaml` with banned phrases, formatting rules, definition of done, etc.
+**Style guide**: Single markdown file ([blogging/docs/writing_guidelines.md](blogging/docs/writing_guidelines.md)); spec requires structured `brand_spec_prompt.md` with banned phrases, formatting rules, definition of done, etc.
 
 ---
 
@@ -188,7 +188,7 @@ isProject: false
 flowchart LR
   subgraph inputs [Inputs]
     Brief[Industry/Brief]
-    Brand[brand_spec.yaml]
+    Brand[brand_spec_prompt.md]
   end
 
   subgraph orchestration [Orchestration]
@@ -258,7 +258,7 @@ flowchart LR
 ### 1. Artifact layer and run directory
 
 - **Add a run-scoped artifact directory** (e.g. `blogging/agent_implementations/run_dir/` or caller-provided `work_dir`). Every run writes all outputs as named files so the pipeline is auditable and repeatable.
-- **Standard artifact names** (as per spec): `brand_spec.yaml`, `content_brief.md`, `research_packet.md`, `allowed_claims.json`, `outline.md`, `draft_v1.md`, `draft_v2.md`, `final.md`, `compliance_report.json`, `validator_report.json`, `publishing_pack.json`.
+- **Standard artifact names** (as per spec): `brand_spec_prompt.md`, `content_brief.md`, `research_packet.md`, `allowed_claims.json`, `outline.md`, `draft_v1.md`, `draft_v2.md`, `final.md`, `compliance_report.json`, `validator_report.json`, `publishing_pack.json`.
 - **Helper**: e.g. `blogging/shared/artifacts.py` with `write_artifact(work_dir, name, content)` and `read_artifact(work_dir, name)` (and optional path return for downstream agents). Reuse the same pattern as [software_engineering_team/planning_team/api_contract_planning_agent/agent.py](software_engineering_team/planning_team/api_contract_planning_agent/agent.py) `_write_artifact`.
 - **Pipeline entrypoint**: Accept `work_dir` (and optional `brand_spec_path`). Ensure each agent reads/writes from `work_dir` where applicable.
 
@@ -271,21 +271,21 @@ flowchart LR
 
 ### 2. Brand Spec (single source of truth)
 
-- **Introduce `brand_spec.yaml**` as the canonical brand and style source. Minimum fields (per spec): `brand` (name, audience, purpose), `voice` (tone, style_notes, banned_phrases, banned_patterns), `readability` (target_grade_level, max_grade_level), `formatting` (require_sections, min/max paragraph sentences, prefer_short_paragraphs, disallow_em_dash, avoid_excessive_bullets), `content_rules` (claims_policy, safety disclaimers), `examples` (on_brand, off_brand), `definition_of_done`.
-- **Create an initial `brand_spec.yaml**` derived from [blogging/docs/brandon_kindred_brand_and_writing_style_guide.md](blogging/docs/brandon_kindred_brand_and_writing_style_guide.md): extract banned phrases (e.g. “corporate buzzword soup”, “crushing it”), paragraph rules (e.g. 2–4 sentences), no em dash, reading level 8, etc. Keep the markdown as optional supplementary reading; agents and validators load only the YAML.
-- **Loader**: Add `blogging/shared/brand_spec.py` (or under `blogging/`) to load and validate `brand_spec.yaml` (Pydantic model or dataclass) and expose it to validators, compliance agent, and draft/copy-editor agents.
-- **Draft and Copy Editor agents**: When a brand spec path (or `work_dir` with `brand_spec.yaml`) is provided, load YAML and inject structured rules (and optionally the full YAML or a summary) into prompts; keep fallback to existing style guide path for backward compatibility during migration.
+- **Introduce `brand_spec_prompt.md**` as the canonical brand and style source. Minimum fields (per spec): `brand` (name, audience, purpose), `voice` (tone, style_notes, banned_phrases, banned_patterns), `readability` (target_grade_level, max_grade_level), `formatting` (require_sections, min/max paragraph sentences, prefer_short_paragraphs, disallow_em_dash, avoid_excessive_bullets), `content_rules` (claims_policy, safety disclaimers), `examples` (on_brand, off_brand), `definition_of_done`.
+- **Create an initial `brand_spec_prompt.md**` derived from [blogging/docs/writing_guidelines.md](blogging/docs/writing_guidelines.md): extract banned phrases (e.g. “corporate buzzword soup”, “crushing it”), paragraph rules (e.g. 2–4 sentences), no em dash, reading level 8, etc. Keep the markdown as optional supplementary reading; agents and validators load only the YAML.
+- **Loader**: Add `blogging/shared/brand_spec.py` (or under `blogging/`) to load and validate `brand_spec_prompt.md` / `brand_spec.yaml` (Pydantic model or dataclass) and expose it to validators, compliance agent, and draft/copy-editor agents.
+- **Draft and Copy Editor agents**: When a brand spec path (or `work_dir` with `brand_spec_prompt.md`) is provided, load YAML and inject structured rules (and optionally the full YAML or a summary) into prompts; keep fallback to existing style guide path for backward compatibility during migration.
 
 **Files to add/change**:
 
-- New: `blogging/brand_spec.yaml` (or `blogging/docs/brand_spec.yaml`), `blogging/shared/brand_spec.py` (loader + schema).
+- New: `blogging/brand_spec_prompt.md` (or `blogging/docs/brand_spec_prompt.md`), `blogging/shared/brand_spec.py` (loader + schema).
 - Update: `blog_draft_agent`, `blog_copy_editor_agent` to accept `brand_spec_path` or `brand_spec` dict and use it when present.
 
 ---
 
 ### 3. Deterministic validators (mandatory)
 
-- **New module**: `blogging/validators/` (or `blogging/blog_validators/`) producing a single `validator_report.json` from inputs: `final.md` (or latest draft), `brand_spec.yaml`, and (when required) `allowed_claims.json`.
+- **New module**: `blogging/validators/` (or `blogging/blog_validators/`) producing a single `validator_report.json` from inputs: `final.md` (or latest draft), `brand_spec_prompt.md`, and (when required) `allowed_claims.json`.
 - **Checks to implement**:
   1. **Banned phrases**: Exact and case-insensitive match against `brand_spec.voice.banned_phrases`.
   2. **Banned patterns**: e.g. em dash scan, excessive exclamation (regex or simple heuristics from `banned_patterns`).
@@ -318,7 +318,7 @@ flowchart LR
 
 ### 5. Brand and Style Enforcer (compliance agent with veto)
 
-- **New agent**: `blogging/blog_compliance_agent/` (or `blog_style_enforcer_agent/`). **Inputs**: `brand_spec.yaml`, draft candidate (e.g. `final.md`), `validator_report.json`. **Output**: `compliance_report.json` with:
+- **New agent**: `blogging/blog_compliance_agent/` (or `blog_style_enforcer_agent/`). **Inputs**: `brand_spec_prompt.md`, draft candidate (e.g. `final.md`), `validator_report.json`. **Output**: `compliance_report.json` with:
   - `status`: PASS | FAIL
   - `violations`: list of `{ rule_id, description, evidence_quotes, location_hint }`
   - `required_fixes`: ordered list of patch instructions
@@ -334,7 +334,7 @@ flowchart LR
 
 ### 6. Fact-Checker and Risk Officer
 
-- **New agent**: `blogging/blog_fact_check_agent/` (or combined with compliance). **Inputs**: draft, `allowed_claims.json`, `brand_spec.yaml` (safety.require_disclaimer_for). **Output**: extend `compliance_report.json` or separate `risk_report` section: claims verified, legal/medical/financial/security flags, disclaimers required. Status PASS/FAIL for “claims policy” and “risk policy”.
+- **New agent**: `blogging/blog_fact_check_agent/` (or combined with compliance). **Inputs**: draft, `allowed_claims.json`, `brand_spec_prompt.md` (safety.require_disclaimer_for). **Output**: extend `compliance_report.json` or separate `risk_report` section: claims verified, legal/medical/financial/security flags, disclaimers required. Status PASS/FAIL for “claims policy” and “risk policy”.
 - **Integration**: Either (a) same report file as compliance (e.g. `compliance_report.json` has `claims_status`, `risk_status`, `required_disclaimers`) or (b) separate report that the orchestrator also gates on. Spec says “Risk and fact-check returns PASS for claims policy” as a gate.
 
 **Files to add**:

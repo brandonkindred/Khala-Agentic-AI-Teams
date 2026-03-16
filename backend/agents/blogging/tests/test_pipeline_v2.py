@@ -21,11 +21,11 @@ def test_artifacts_write_read(tmp_path):
 
 
 def test_brand_spec_load():
-    """Verify brand_spec can be loaded."""
-    from shared.brand_spec import load_brand_spec
-    path = Path(__file__).resolve().parent.parent / "docs" / "brand_spec.yaml"
+    """Verify brand_spec_prompt.md can be loaded as full prompt text."""
+    from shared.brand_spec import load_brand_spec_prompt
+    path = Path(__file__).resolve().parent.parent / "docs" / "brand_spec_prompt.md"
     if not path.exists():
-        pytest.skip("brand_spec.yaml not found")
-    spec = load_brand_spec(path)
-    assert spec.voice.banned_phrases
-    assert spec.formatting.min_paragraph_sentences >= 1
+        pytest.skip("brand_spec_prompt.md not found")
+    content = load_brand_spec_prompt(path)
+    assert isinstance(content, str)
+    assert len(content.strip()) > 0

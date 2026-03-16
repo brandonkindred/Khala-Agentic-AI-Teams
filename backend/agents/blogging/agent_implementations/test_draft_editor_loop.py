@@ -20,8 +20,8 @@ from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 
 _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
-STYLE_GUIDE_PATH = _blogging_docs / "brandon_kindred_brand_and_writing_style_guide.md"
-BRAND_SPEC_PATH = _blogging_docs / "brand_spec.yaml"
+STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
+BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 DRAFT_EDITOR_ITERATIONS = 100
 
 # Fixed context (no research pipeline)
@@ -50,7 +50,7 @@ RESEARCH_DOC = "## Sources\n- LLM Observability Guide: Best practices for monito
 def main() -> None:
     llm = DummyLLMClient()
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
-    brand_spec_content = load_style_file(BRAND_SPEC_PATH, "brand spec")
+    brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
 
     # Get outline from review agent
     review_agent = BlogReviewAgent(llm_client=llm)

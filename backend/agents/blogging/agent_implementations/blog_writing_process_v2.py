@@ -27,7 +27,7 @@ from blog_research_agent.models import ResearchBriefInput
 from blog_publication_agent.models import PublishingPack
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
 from shared.artifacts import read_artifact, write_artifact
-from shared.brand_spec import load_brand_spec
+from shared.brand_spec import load_brand_spec_prompt
 from shared.style_loader import load_style_file
 from shared.errors import (
     BloggingError,
@@ -43,8 +43,8 @@ from validators.runner import run_validators_from_work_dir
 logger = logging.getLogger(__name__)
 
 _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
-STYLE_GUIDE_PATH = _blogging_docs / "brandon_kindred_brand_and_writing_style_guide.md"
-BRAND_SPEC_PATH = _blogging_docs / "brand_spec.yaml"
+STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
+BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 DRAFT_EDITOR_ITERATIONS = 100
 MAX_REWRITE_ITERATIONS = 100
 
@@ -212,7 +212,7 @@ def run_pipeline(
 
     # 3. Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
-    brand_spec_content = load_style_file(BRAND_SPEC_PATH, "brand spec")
+    brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
     allowed_claims_data = (
         read_artifact(work_dir, "allowed_claims.json") if work_dir is not None else None
     )
@@ -345,9 +345,10 @@ def run_pipeline(
         logger.info("Persisted final.md")
         
     if work_dir is not None and run_gates:
-        brand_spec = load_brand_spec(BRAND_SPEC_PATH)
+        brand_spec_prompt_text = load_brand_spec_prompt(BRAND_SPEC_PROMPT_PATH)
         compliance_agent = BlogComplianceAgent(llm_client=llm_client)
         fact_check_agent = BlogFactCheckAgent(llm_client=llm_client)
+        require_disclaimer_for = ["medical", "legal", "financial"]
 
         for rewrite_iter in range(max_rewrite_iterations):
             # Fact check phase
@@ -363,7 +364,7 @@ def run_pipeline(
                 fact_report = fact_check_agent.run(
                     draft_result.draft,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
-                    require_disclaimer_for=brand_spec.content_rules.safety.require_disclaimer_for,
+                    require_disclaimer_for=require_disclaimer_for,
                     work_dir=work_dir,
                     on_llm_request=lambda msg: _update(BlogPhase.FACT_CHECK, status_text=msg),
                 )
@@ -383,7 +384,7 @@ def run_pipeline(
             try:
                 compliance_report = compliance_agent.run(
                     draft_result.draft,
-                    brand_spec=brand_spec,
+                    brand_spec_prompt=brand_spec_prompt_text,
                     validator_report=validator_report.model_dump() if hasattr(validator_report, "model_dump") else None,
                     work_dir=work_dir,
                     on_llm_request=lambda msg: _update(BlogPhase.COMPLIANCE, status_text=msg),

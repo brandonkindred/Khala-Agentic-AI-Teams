@@ -40,7 +40,7 @@ const POLL_STATUS_MS = 2000; // Poll selected job status every 2s for frequent s
 
 export function artifactLabel(name: string): string {
   const labels: Record<string, string> = {
-    'brand_spec.yaml': 'Brand spec',
+    'brand_spec_prompt.md': 'Brand spec prompt',
     'content_brief.md': 'Content brief',
     'research_packet.md': 'Research packet',
     'allowed_claims.json': 'Allowed claims',

@@ -1,8 +1,8 @@
 """
-Brand spec schema and loader for the blogging pipeline.
+Brand spec for the blogging pipeline.
 
-Loads and validates brand_spec.yaml as the single source of truth for
-voice, formatting, readability, and content rules.
+Loads the full brand prompt from brand_spec_prompt.md (plain text). No YAML;
+the prompt file is read as-is and passed to draft/editor and compliance agents.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import yaml
 from pydantic import BaseModel, Field
 
 
@@ -78,7 +77,7 @@ class ExamplesConfig(BaseModel):
 
 
 class BrandSpec(BaseModel):
-    """Full brand spec schema."""
+    """In-memory brand spec (e.g. default/empty for validators when using prompt file only)."""
 
     brand: BrandIdentity = Field(default_factory=BrandIdentity)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
@@ -89,7 +88,7 @@ class BrandSpec(BaseModel):
     definition_of_done: List[str] = Field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Export as dict for YAML or JSON serialization."""
+        """Export as dict for JSON serialization."""
         if hasattr(self, "model_dump"):
             return self.model_dump(exclude_none=True)
         return self.dict(exclude_none=True)  # Pydantic v1
@@ -136,29 +135,24 @@ class BrandSpec(BaseModel):
         return "\n".join(parts)
 
 
-def load_brand_spec(path: str | Path) -> BrandSpec:
+def load_brand_spec_prompt(path: str | Path) -> str:
     """
-    Load and validate brand_spec.yaml from the given path.
+    Load the full brand spec prompt from brand_spec_prompt.md.
+
+    Reads the file as UTF-8 and returns its contents. Use this for draft/editor
+    and compliance agents; validators use a default BrandSpec when only the
+    prompt file is available.
 
     Args:
-        path: Path to brand_spec.yaml file.
+        path: Path to brand_spec_prompt.md.
 
     Returns:
-        Validated BrandSpec instance.
+        File contents as string (stripped).
 
     Raises:
         FileNotFoundError: If the file does not exist.
-        ValueError: If the YAML is invalid or fails validation.
     """
     p = Path(path).resolve()
     if not p.exists():
-        raise FileNotFoundError(f"Brand spec not found: {p}")
-
-    raw = p.read_text(encoding="utf-8")
-    data = yaml.safe_load(raw)
-    if data is None:
-        data = {}
-
-    if hasattr(BrandSpec, "model_validate"):
-        return BrandSpec.model_validate(data)
-    return BrandSpec.parse_obj(data)  # Pydantic v1
+        raise FileNotFoundError(f"Brand spec prompt not found: {p}")
+    return p.read_text(encoding="utf-8").strip()

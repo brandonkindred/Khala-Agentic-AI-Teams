@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from shared.artifacts import read_artifact, write_artifact
-from shared.brand_spec import BrandSpec, load_brand_spec
+from shared.brand_spec import BrandSpec
 
 from .checks import (
     check_banned_phrases,
@@ -108,7 +108,7 @@ def run_validators_from_work_dir(
     """
     Run validators using artifacts from work_dir.
 
-    Reads draft from work_dir/draft_artifact, brand_spec from work_dir/brand_spec.yaml
+    Reads draft from work_dir/draft_artifact, brand spec from work_dir/brand_spec_prompt.md
     or brand_spec_path, allowed_claims from work_dir/allowed_claims.json.
     Writes validator_report.json to work_dir.
     """
@@ -119,17 +119,13 @@ def run_validators_from_work_dir(
             work_dir, "draft_v1.md", default=""
         )
 
-    brand_path = brand_spec_path or (work_path / "brand_spec.yaml")
-    if Path(brand_path).exists():
-        brand_spec = load_brand_spec(brand_path)
-    else:
-        # Fallback: default blogging docs path (relative to validators package)
-        _blogging_root = Path(__file__).resolve().parent.parent
-        default_spec = _blogging_root / "docs" / "brand_spec.yaml"
-        if default_spec.exists():
-            brand_spec = load_brand_spec(default_spec)
-        else:
-            raise FileNotFoundError(f"No brand_spec.yaml found at {brand_path} or {default_spec}")
+    brand_path = brand_spec_path or (work_path / "brand_spec_prompt.md")
+    _blogging_root = Path(__file__).resolve().parent.parent
+    default_path = _blogging_root / "docs" / "brand_spec_prompt.md"
+    if not Path(brand_path).exists() and not default_path.exists():
+        raise FileNotFoundError(f"No brand_spec_prompt.md found at {brand_path} or {default_path}")
+    # Validators use default BrandSpec; brand rules come from prompt file (no structured YAML)
+    brand_spec = BrandSpec()
 
     allowed_claims = read_artifact(work_dir, "allowed_claims.json", default=None)
     if isinstance(allowed_claims, dict):

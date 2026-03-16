@@ -1,7 +1,7 @@
 """
 Blog compliance agent: Brand and Style Enforcer with veto power.
 
-Evaluates drafts against brand_spec and produces compliance_report.json.
+Evaluates drafts against the brand spec prompt and produces compliance_report.json.
 FAIL status blocks publication and triggers the rewrite loop.
 
 All errors are raised explicitly - no silent failures.
@@ -21,11 +21,10 @@ from .prompts import COMPLIANCE_PROMPT
 
 try:
     from shared.artifacts import write_artifact
-    from shared.brand_spec import BrandSpec, load_brand_spec
+    from shared.brand_spec import load_brand_spec_prompt
 except ImportError:
     write_artifact = None
-    load_brand_spec = None
-    BrandSpec = None
+    load_brand_spec_prompt = None
 
 try:
     from shared.errors import ComplianceError, LLMError
@@ -52,7 +51,7 @@ class BlogComplianceAgent:
     def run(
         self,
         draft: str,
-        brand_spec: BrandSpec,
+        brand_spec_prompt: str,
         validator_report: Optional[Dict[str, Any]] = None,
         *,
         work_dir: Optional[Union[str, Path]] = None,
@@ -63,14 +62,14 @@ class BlogComplianceAgent:
 
         Args:
             draft: The draft text to evaluate.
-            brand_spec: Loaded brand spec.
+            brand_spec_prompt: Full brand spec prompt text (e.g. from brand_spec_prompt.md).
             validator_report: Optional validator_report.json content.
             work_dir: If provided, write compliance_report.json here.
 
         Returns:
             ComplianceReport with status PASS or FAIL.
         """
-        brand_summary = brand_spec.to_prompt_summary() if brand_spec else ""
+        brand_summary = (brand_spec_prompt or "").strip()
         validator_str = json.dumps(validator_report, indent=2) if validator_report else "{}"
 
         prompt = COMPLIANCE_PROMPT.format(
@@ -154,13 +153,13 @@ def run_compliance_from_work_dir(
 
     validator_report = read_artifact(work_dir, "validator_report.json", default=None)
 
-    brand_path = brand_spec_path or (work_path / "brand_spec.yaml")
+    brand_path = brand_spec_path or (work_path / "brand_spec_prompt.md")
     if not Path(brand_path).exists():
         _blogging_root = Path(__file__).resolve().parent.parent
-        brand_path = _blogging_root / "docs" / "brand_spec.yaml"
-    if not load_brand_spec:
+        brand_path = _blogging_root / "docs" / "brand_spec_prompt.md"
+    if not load_brand_spec_prompt:
         raise ImportError("shared.brand_spec required")
-    brand_spec = load_brand_spec(brand_path)
+    brand_spec_prompt = load_brand_spec_prompt(brand_path)
 
     agent = BlogComplianceAgent(llm_client=llm_client)
-    return agent.run(draft, brand_spec, validator_report, work_dir=work_dir)
+    return agent.run(draft, brand_spec_prompt, validator_report, work_dir=work_dir)
