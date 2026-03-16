@@ -93,48 +93,6 @@ class BrandSpec(BaseModel):
             return self.model_dump(exclude_none=True)
         return self.dict(exclude_none=True)  # Pydantic v1
 
-    def to_prompt_summary(self) -> str:
-        """Format brand spec as text for injection into agent prompts."""
-        parts = [
-            f"Brand: {self.brand.name}",
-            f"Audience: {self.brand.audience}",
-            f"Purpose: {self.brand.purpose}",
-            "",
-            "Voice and tone: " + ", ".join(self.voice.tone),
-        ]
-        if self.voice.style_notes:
-            parts.append("Style notes:")
-            for n in self.voice.style_notes:
-                parts.append(f"  - {n}")
-        if self.voice.banned_phrases:
-            parts.append("")
-            parts.append("Banned phrases (never use): " + ", ".join(f'"{p}"' for p in self.voice.banned_phrases))
-        if self.voice.banned_patterns:
-            parts.append("Banned patterns: " + ", ".join(self.voice.banned_patterns))
-        parts.extend([
-            "",
-            f"Readability: target grade level {self.readability.target_grade_level}, max {self.readability.max_grade_level}",
-            "",
-            "Formatting:",
-            f"  - Paragraphs: {self.formatting.min_paragraph_sentences}-{self.formatting.max_paragraph_sentences} sentences",
-            f"  - No em dashes: {self.formatting.disallow_em_dash}",
-            f"  - Avoid excessive bullets: {self.formatting.avoid_excessive_bullets}",
-        ])
-        if self.definition_of_done:
-            parts.append("")
-            parts.append("Definition of done:")
-            for item in self.definition_of_done:
-                parts.append(f"  - {item}")
-        if self.examples.on_brand or self.examples.off_brand:
-            parts.append("")
-            parts.append("Examples (match on-brand; avoid off-brand):")
-            for s in self.examples.on_brand:
-                parts.append(f"  On-brand: \"{s}\"")
-            for s in self.examples.off_brand:
-                parts.append(f"  Off-brand (do not write like this): \"{s}\"")
-        return "\n".join(parts)
-
-
 def load_brand_spec_prompt(path: str | Path) -> str:
     """
     Load the full brand spec prompt from brand_spec_prompt.md.
