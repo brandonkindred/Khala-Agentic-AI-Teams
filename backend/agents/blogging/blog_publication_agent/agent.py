@@ -226,7 +226,6 @@ class BlogPublicationAgent:
         outline: Optional[str] = None,
         audience: Optional[str] = None,
         tone_or_purpose: Optional[str] = None,
-        style_guide: Optional[str] = None,
     ) -> RevisionLoopResult:
         """
         After rejection feedback is collected, run the draft-editor loop to revise
@@ -277,7 +276,6 @@ class BlogPublicationAgent:
                 draft=draft,
                 audience=aud,
                 tone_or_purpose=tone,
-                style_guide=style_guide,
                 human_feedback=human_feedback_text if iteration == 0 else None,
             )
             feedback_path = self.pending_dir / f"{submission_id}_editor_feedback_iter_{iteration + 1}.json"
@@ -297,7 +295,6 @@ class BlogPublicationAgent:
                 outline=outline_text or None,
                 audience=aud,
                 tone_or_purpose=tone,
-                style_guide=style_guide,
             )
             draft_result = draft_agent.revise(revise_input)
             draft = draft_result.draft

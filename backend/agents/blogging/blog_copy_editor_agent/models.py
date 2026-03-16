@@ -41,10 +41,6 @@ class CopyEditorInput(BaseModel):
         ...,
         description="The blog post draft to review.",
     )
-    style_guide: Optional[str] = Field(
-        None,
-        description="Full brand and writing style guide. If omitted, a default style checklist is used.",
-    )
     audience: Optional[str] = Field(
         None,
         description="Intended audience (for context when evaluating tone and clarity).",
@@ -56,10 +52,6 @@ class CopyEditorInput(BaseModel):
     human_feedback: Optional[str] = Field(
         None,
         description="Author's explicit feedback or requested changes (e.g. from rejection). Incorporate into review.",
-    )
-    brand_spec: Optional[dict] = Field(
-        None,
-        description="Pre-loaded brand spec as dict. When set, structured rules are used for evaluation.",
     )
     previous_feedback_items: Optional[List[FeedbackItem]] = Field(
         None,

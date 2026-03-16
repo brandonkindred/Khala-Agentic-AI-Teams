@@ -28,12 +28,6 @@ from .prompts import (
     SELF_REVIEW_PROMPT,
 )
 
-try:
-    from shared.brand_spec import BrandSpec, load_brand_spec
-except ImportError:
-    BrandSpec = None
-    load_brand_spec = None
-
 logger = logging.getLogger(__name__)
 
 # Caps for prompt inputs so the combined prompt fits within model context (e.g. 262K tokens for qwen3.5:397b-cloud).
@@ -43,15 +37,6 @@ MAX_OUTLINE_CHARS_FOR_DRAFT = 20_000
 MAX_CLAIMS_CHARS_FOR_DRAFT = 15_000
 # Per-source cap for extraction calls (each document sent to one LLM call).
 MAX_CHARS_PER_SOURCE = 12_000
-
-# Default paths for writing guidelines (blogging/docs/)
-_DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
-_DEFAULT_WRITING_STYLE_GUIDE_PATH = _DOCS_DIR / "brandon_kindred_brand_and_writing_style_guide.md"
-
-
-def _load_style_guide(path: str | Path) -> str:
-    """Load style guide text from a file. Raises OSError if file cannot be read."""
-    return Path(path).read_text(encoding="utf-8").strip()
 
 
 def _extract_draft_after_marker(raw_response: str) -> str:
@@ -97,55 +82,24 @@ class BlogDraftAgent:
         self,
         llm_client: LLMClient,
         *,
-        default_style_guide_path: Optional[str | Path] = None,
+        writing_style_guide_content: str = "",
+        brand_spec_content: str = "",
     ) -> None:
         """
         Preconditions:
             - llm_client is not None.
+        Callers load writing style and brand spec files before instantiation and pass full contents here.
         """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
-        if default_style_guide_path is not None:
-            self.default_style_guide_path = Path(default_style_guide_path)
-        else:
-            self.default_style_guide_path = _DEFAULT_WRITING_STYLE_GUIDE_PATH if _DEFAULT_WRITING_STYLE_GUIDE_PATH.exists() else None
-
-    def _resolve_style_guide(
-        self,
-        style_guide: Optional[str],
-        brand_spec: Optional[dict],
-    ) -> str:
-        """
-        Resolve combined brand and writing guidelines from style_guide and brand_spec dict.
-        """
+        self._writing_style_prompt = (writing_style_guide_content or "").strip()
+        self._brand_spec_prompt = (brand_spec_content or "").strip()
         parts: list[str] = []
-
-        # 1. Brand spec (from dict)
-        brand_text: Optional[str] = None
-        if brand_spec and load_brand_spec:
-            try:
-                spec = BrandSpec.model_validate(brand_spec) if hasattr(BrandSpec, "model_validate") else BrandSpec.parse_obj(brand_spec)
-                brand_text = spec.to_prompt_summary()
-            except Exception:
-                pass
-        if brand_text:
-            parts.append("--- BRAND SPEC (voice, formatting, content rules) ---\n" + brand_text.strip())
-
-        # 2. Writing style guide (explicit string, or from default .md file)
-        writing_text: Optional[str] = None
-        if style_guide and style_guide.strip():
-            writing_text = style_guide.strip()
-        elif self.default_style_guide_path and self.default_style_guide_path.exists():
-            try:
-                writing_text = _load_style_guide(self.default_style_guide_path)
-            except OSError as e:
-                logger.warning("Could not load default writing style guide from %s: %s", self.default_style_guide_path, e)
-        if writing_text:
-            parts.append("--- WRITING STYLE GUIDE ---\n" + writing_text)
-
-        if not parts:
-            return MINIMAL_STYLE_REMINDER
-        return "\n\n".join(parts)
+        if self._brand_spec_prompt:
+            parts.append("--- BRAND SPEC ---\n" + self._brand_spec_prompt)
+        if self._writing_style_prompt:
+            parts.append("--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt)
+        self._style_prompt = "\n\n".join(parts) if parts else MINIMAL_STYLE_REMINDER
 
     def _extract_notes_from_source(
         self,
@@ -263,11 +217,7 @@ class BlogDraftAgent:
                 logger.warning("Empty research_document; returning minimal draft.")
                 return DraftOutput(draft="# Draft\n\nAdd research document and outline to generate a draft.")
 
-        # Resolve style guide text
-        style_guide_text = self._resolve_style_guide(
-            draft_input.style_guide,
-            draft_input.brand_spec,
-        )
+        style_guide_text = self._style_prompt
 
         logger.info(
             "Generating draft: research len=%s, outline len=%s, style_guide len=%s",
@@ -520,10 +470,7 @@ class BlogDraftAgent:
             logger.info("No feedback items; returning draft unchanged.")
             return DraftOutput(draft=draft)
 
-        style_guide_text = self._resolve_style_guide(
-            revise_input.style_guide,
-            revise_input.brand_spec,
-        )
+        style_guide_text = self._style_prompt
 
         current_draft = draft
         revise_max_tokens = 32768

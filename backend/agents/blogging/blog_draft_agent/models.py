@@ -13,7 +13,7 @@ from blog_research_agent.models import ResearchReference
 
 
 class DraftInput(BaseModel):
-    """Input for the blog draft agent: research document and/or references, outline, and optional style guide."""
+    """Input for the blog draft agent: research document and/or references, outline, and optional audience/tone/claims."""
 
     research_document: Optional[str] = Field(
         None,
@@ -34,14 +34,6 @@ class DraftInput(BaseModel):
     tone_or_purpose: Optional[str] = Field(
         None,
         description="Desired tone or purpose, e.g. 'educational', 'technical deep-dive'.",
-    )
-    style_guide: Optional[str] = Field(
-        None,
-        description="Full brand and writing style guide text. If omitted, a minimal style reminder is used.",
-    )
-    brand_spec: Optional[dict] = Field(
-        None,
-        description="Pre-loaded brand spec as dict. When set, structured rules are injected into the prompt.",
     )
     allowed_claims: Optional[dict] = Field(
         None,
@@ -92,8 +84,6 @@ class ReviseDraftInput(BaseModel):
     )
     audience: Optional[str] = Field(None, description="Intended audience.")
     tone_or_purpose: Optional[str] = Field(None, description="Desired tone or purpose.")
-    style_guide: Optional[str] = Field(None, description="Full brand and writing style guide.")
-    brand_spec: Optional[dict] = Field(None, description="Pre-loaded brand spec as dict.")
     allowed_claims: Optional[dict] = Field(
         None,
         description="Pre-loaded allowed_claims.json. When set, preserve claim tags [CLAIM:id] and do not add new factual claims.",

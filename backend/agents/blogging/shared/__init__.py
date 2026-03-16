@@ -41,6 +41,7 @@ from .blog_job_store import (
     fail_blog_job,
     delete_blog_job,
 )
+from .style_loader import load_style_file
 from .models import (
     BlogPhase,
     PHASE_PROGRESS_RANGES,
@@ -85,6 +86,7 @@ __all__ = [
     "get_phase_progress",
     "get_completed_phases",
     "load_brand_spec",
+    "load_style_file",
     "read_artifact",
     "write_artifact",
 ]

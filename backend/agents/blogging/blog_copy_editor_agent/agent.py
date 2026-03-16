@@ -17,23 +17,7 @@ from shared.errors import LLMJsonParseError
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
 from .prompts import COPY_EDITOR_PROMPT, MINIMAL_STYLE_CHECKLIST
 
-try:
-    from shared.brand_spec import BrandSpec, load_brand_spec
-except ImportError:
-    BrandSpec = None
-    load_brand_spec = None
-
 logger = logging.getLogger(__name__)
-
-# Default style guide path (Brandon Kindred brand and writing guide) relative to project root
-_DEFAULT_STYLE_GUIDE_PATH = (
-    Path(__file__).resolve().parent.parent / "docs" / "brandon_kindred_brand_and_writing_style_guide.md"
-)
-
-
-def _load_style_guide(path: str | Path) -> str:
-    """Load style guide text from a file. Raises OSError if file cannot be read."""
-    return Path(path).read_text(encoding="utf-8").strip()
 
 
 class BlogCopyEditorAgent:
@@ -46,39 +30,24 @@ class BlogCopyEditorAgent:
         self,
         llm_client: LLMClient,
         *,
-        default_style_guide_path: Optional[str | Path] = None,
+        writing_style_guide_content: str = "",
+        brand_spec_content: str = "",
     ) -> None:
         """
         Preconditions:
             - llm_client is not None.
+        Callers load writing style and brand spec files before instantiation and pass full contents here.
         """
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
-        if default_style_guide_path is not None:
-            self.default_style_guide_path = Path(default_style_guide_path)
-        else:
-            self.default_style_guide_path = _DEFAULT_STYLE_GUIDE_PATH if _DEFAULT_STYLE_GUIDE_PATH.exists() else None
-
-    def _resolve_style_guide(
-        self,
-        style_guide: Optional[str],
-        brand_spec: Optional[dict],
-    ) -> str:
-        """Resolve style guide text from brand_spec dict or style_guide string, else default."""
-        if brand_spec and load_brand_spec:
-            try:
-                spec = BrandSpec.model_validate(brand_spec) if hasattr(BrandSpec, "model_validate") else BrandSpec.parse_obj(brand_spec)
-                return spec.to_prompt_summary()
-            except Exception:
-                pass
-        if style_guide:
-            return style_guide.strip()
-        if self.default_style_guide_path and self.default_style_guide_path.exists():
-            try:
-                return _load_style_guide(self.default_style_guide_path)
-            except OSError as e:
-                logger.warning("Could not load default style guide: %s", e)
-        return MINIMAL_STYLE_CHECKLIST
+        writing = (writing_style_guide_content or "").strip()
+        brand = (brand_spec_content or "").strip()
+        parts: list[str] = []
+        if brand:
+            parts.append("--- BRAND SPEC ---\n" + brand)
+        if writing:
+            parts.append("--- WRITING STYLE GUIDE ---\n" + writing)
+        self._style_prompt = "\n\n".join(parts) if parts else MINIMAL_STYLE_CHECKLIST
 
     def _write_feedback_to_path(self, output: CopyEditorOutput, path: Union[str, Path]) -> None:
         """Serialize CopyEditorOutput to JSON and write to path. On failure log warning and do not raise."""
@@ -117,11 +86,7 @@ class BlogCopyEditorAgent:
                 self._write_feedback_to_path(output, feedback_output_path)
             return output
 
-        # Resolve style guide text
-        style_guide_text = self._resolve_style_guide(
-            copy_editor_input.style_guide,
-            copy_editor_input.brand_spec,
-        )
+        style_guide_text = self._style_prompt
 
         logger.info(
             "Copy editing: draft len=%s, style_guide len=%s",

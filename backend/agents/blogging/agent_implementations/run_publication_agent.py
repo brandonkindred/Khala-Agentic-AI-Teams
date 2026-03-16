@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 
 from llm_service import get_client
+from shared.style_loader import load_style_file
 from blog_copy_editor_agent import BlogCopyEditorAgent
 from blog_draft_agent import BlogDraftAgent
 from blog_publication_agent import (
@@ -26,7 +27,9 @@ from blog_publication_agent import (
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-STYLE_GUIDE_PATH = Path(__file__).resolve().parent.parent / "docs" / "brandon_kindred_brand_and_writing_style_guide.md"
+_blogging_docs = Path(__file__).resolve().parent.parent / "docs"
+STYLE_GUIDE_PATH = _blogging_docs / "brandon_kindred_brand_and_writing_style_guide.md"
+BRAND_SPEC_PATH = _blogging_docs / "brand_spec.yaml"
 
 EXAMPLE_DRAFT = """# Why LLM Observability Matters for Enterprise AI
 
@@ -52,7 +55,8 @@ Implementing LLM observability is non-negotiable for any serious enterprise AI i
 
 def main() -> None:
     llm = get_client("blog")
-    style_guide = STYLE_GUIDE_PATH.read_text().strip() if STYLE_GUIDE_PATH.exists() else None
+    writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
+    brand_spec_content = load_style_file(BRAND_SPEC_PATH, "brand spec")
 
     publication_agent = BlogPublicationAgent(
         llm_client=llm,
@@ -60,8 +64,16 @@ def main() -> None:
         max_revision_loops=3,
     )
 
-    draft_agent = BlogDraftAgent(llm_client=llm, default_style_guide_path=STYLE_GUIDE_PATH)
-    copy_editor_agent = BlogCopyEditorAgent(llm_client=llm, default_style_guide_path=STYLE_GUIDE_PATH)
+    draft_agent = BlogDraftAgent(
+        llm_client=llm,
+        writing_style_guide_content=writing_style_content,
+        brand_spec_content=brand_spec_content,
+    )
+    copy_editor_agent = BlogCopyEditorAgent(
+        llm_client=llm,
+        writing_style_guide_content=writing_style_content,
+        brand_spec_content=brand_spec_content,
+    )
 
     # 1. Submit draft
     result = publication_agent.submit_draft(
@@ -95,7 +107,6 @@ def main() -> None:
     #         copy_editor_agent=copy_editor_agent,
     #         audience="CTOs and platform teams",
     #         tone_or_purpose="technical deep-dive",
-    #         style_guide=style_guide,
     #     )
     #     print(f"\n--- Revised ---\n{revision.message}")
     #     print(f"Draft updated ({revision.iterations_completed} iterations).")

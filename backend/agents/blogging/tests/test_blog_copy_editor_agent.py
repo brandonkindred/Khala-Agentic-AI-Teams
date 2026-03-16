@@ -9,20 +9,23 @@ from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput, CopyEdi
 from llm_service import DummyLLMClient
 
 
-# Inline style guide so tests do not load the default file (avoids encoding issues on Windows).
+# Inline style guide passed at agent init so tests do not load the default file.
 _TEST_STYLE_GUIDE = "Use short sentences. No em dashes."
 
 
 def test_blog_copy_editor_agent_run() -> None:
     """BlogCopyEditorAgent returns summary and feedback_items."""
     llm = DummyLLMClient()
-    agent = BlogCopyEditorAgent(llm_client=llm)
+    agent = BlogCopyEditorAgent(
+        llm_client=llm,
+        writing_style_guide_content=_TEST_STYLE_GUIDE,
+        brand_spec_content="",
+    )
 
     copy_editor_input = CopyEditorInput(
         draft="# Test Post\n\nThis is a draft with an em dash—here.",
         audience="CTOs",
         tone_or_purpose="technical",
-        style_guide=_TEST_STYLE_GUIDE,
     )
 
     result = agent.run(copy_editor_input)
@@ -42,7 +45,7 @@ def test_blog_copy_editor_agent_run() -> None:
 def test_blog_copy_editor_agent_empty_draft() -> None:
     """BlogCopyEditorAgent returns minimal feedback for empty draft."""
     llm = DummyLLMClient()
-    agent = BlogCopyEditorAgent(llm_client=llm)
+    agent = BlogCopyEditorAgent(llm_client=llm, writing_style_guide_content="", brand_spec_content="")
 
     result = agent.run(CopyEditorInput(draft=""))
 
@@ -53,11 +56,15 @@ def test_blog_copy_editor_agent_empty_draft() -> None:
 def test_blog_copy_editor_agent_writes_feedback_file(tmp_path: Path) -> None:
     """When feedback_output_path is set, run() writes the output to that file."""
     llm = DummyLLMClient()
-    agent = BlogCopyEditorAgent(llm_client=llm)
+    agent = BlogCopyEditorAgent(
+        llm_client=llm,
+        writing_style_guide_content=_TEST_STYLE_GUIDE,
+        brand_spec_content="",
+    )
     feedback_file = tmp_path / "editor_feedback.json"
 
     result = agent.run(
-        CopyEditorInput(draft="# Test\n\nShort draft.", style_guide=_TEST_STYLE_GUIDE),
+        CopyEditorInput(draft="# Test\n\nShort draft."),
         feedback_output_path=str(feedback_file),
     )
 
@@ -73,11 +80,15 @@ def test_blog_copy_editor_agent_writes_feedback_file(tmp_path: Path) -> None:
 def test_blog_copy_editor_agent_feedback_file_roundtrip(tmp_path: pytest.TempPathFactory) -> None:
     """Written JSON matches the returned CopyEditorOutput."""
     llm = DummyLLMClient()
-    agent = BlogCopyEditorAgent(llm_client=llm)
+    agent = BlogCopyEditorAgent(
+        llm_client=llm,
+        writing_style_guide_content=_TEST_STYLE_GUIDE,
+        brand_spec_content="",
+    )
     feedback_file = tmp_path / "editor_feedback.json"
 
     result = agent.run(
-        CopyEditorInput(draft="# Test\n\nDraft with content.", style_guide=_TEST_STYLE_GUIDE),
+        CopyEditorInput(draft="# Test\n\nDraft with content."),
         feedback_output_path=str(feedback_file),
     )
 
@@ -90,9 +101,13 @@ def test_blog_copy_editor_agent_feedback_file_roundtrip(tmp_path: pytest.TempPat
 def test_blog_copy_editor_agent_no_path_no_file(tmp_path: Path) -> None:
     """When feedback_output_path is not passed, no file is created in the given dir."""
     llm = DummyLLMClient()
-    agent = BlogCopyEditorAgent(llm_client=llm)
+    agent = BlogCopyEditorAgent(
+        llm_client=llm,
+        writing_style_guide_content=_TEST_STYLE_GUIDE,
+        brand_spec_content="",
+    )
 
-    result = agent.run(CopyEditorInput(draft="# Test\n\nDraft.", style_guide=_TEST_STYLE_GUIDE))
+    result = agent.run(CopyEditorInput(draft="# Test\n\nDraft."))
 
     assert result.summary is not None
     assert (tmp_path / "editor_feedback.json").exists() is False
@@ -101,7 +116,7 @@ def test_blog_copy_editor_agent_no_path_no_file(tmp_path: Path) -> None:
 def test_blog_copy_editor_agent_empty_draft_writes_file(tmp_path: Path) -> None:
     """Empty draft with feedback_output_path set still writes a file with summary and empty feedback_items."""
     llm = DummyLLMClient()
-    agent = BlogCopyEditorAgent(llm_client=llm)
+    agent = BlogCopyEditorAgent(llm_client=llm, writing_style_guide_content="", brand_spec_content="")
     feedback_file = tmp_path / "empty_feedback.json"
 
     result = agent.run(CopyEditorInput(draft=""), feedback_output_path=str(feedback_file))
