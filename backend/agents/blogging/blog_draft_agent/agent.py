@@ -44,10 +44,9 @@ MAX_CLAIMS_CHARS_FOR_DRAFT = 15_000
 # Per-source cap for extraction calls (each document sent to one LLM call).
 MAX_CHARS_PER_SOURCE = 12_000
 
-# Default paths for brand and writing guidelines (blogging/docs/)
+# Default paths for writing guidelines (blogging/docs/)
 _DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
 _DEFAULT_WRITING_STYLE_GUIDE_PATH = _DOCS_DIR / "brandon_kindred_brand_and_writing_style_guide.md"
-_DEFAULT_BRAND_SPEC_PATH = _DOCS_DIR / "brand_spec.yaml"
 
 
 def _load_style_guide(path: str | Path) -> str:
@@ -99,7 +98,6 @@ class BlogDraftAgent:
         llm_client: LLMClient,
         *,
         default_style_guide_path: Optional[str | Path] = None,
-        brand_spec_path: Optional[str | Path] = None,
     ) -> None:
         """
         Preconditions:
@@ -111,23 +109,18 @@ class BlogDraftAgent:
             self.default_style_guide_path = Path(default_style_guide_path)
         else:
             self.default_style_guide_path = _DEFAULT_WRITING_STYLE_GUIDE_PATH if _DEFAULT_WRITING_STYLE_GUIDE_PATH.exists() else None
-        self.brand_spec_path = Path(brand_spec_path) if brand_spec_path else None
-        if self.brand_spec_path is None and _DEFAULT_BRAND_SPEC_PATH.exists():
-            self.brand_spec_path = _DEFAULT_BRAND_SPEC_PATH
 
     def _resolve_style_guide(
         self,
         style_guide: Optional[str],
-        brand_spec_path: Optional[str],
         brand_spec: Optional[dict],
     ) -> str:
         """
-        Resolve combined brand and writing guidelines: use both brand_spec.yaml and
-        brandon_kindred_brand_and_writing_style_guide.md when available.
+        Resolve combined brand and writing guidelines from style_guide and brand_spec dict.
         """
         parts: list[str] = []
 
-        # 1. Brand spec (from dict, or from path)
+        # 1. Brand spec (from dict)
         brand_text: Optional[str] = None
         if brand_spec and load_brand_spec:
             try:
@@ -135,14 +128,6 @@ class BlogDraftAgent:
                 brand_text = spec.to_prompt_summary()
             except Exception:
                 pass
-        if not brand_text:
-            path = brand_spec_path or (self.brand_spec_path if self.brand_spec_path and self.brand_spec_path.exists() else None)
-            if path and load_brand_spec:
-                try:
-                    spec = load_brand_spec(path)
-                    brand_text = spec.to_prompt_summary()
-                except Exception as e:
-                    logger.warning("Could not load brand spec from %s: %s", path, e)
         if brand_text:
             parts.append("--- BRAND SPEC (voice, formatting, content rules) ---\n" + brand_text.strip())
 
@@ -278,10 +263,9 @@ class BlogDraftAgent:
                 logger.warning("Empty research_document; returning minimal draft.")
                 return DraftOutput(draft="# Draft\n\nAdd research document and outline to generate a draft.")
 
-        # Resolve style guide text (brand_spec takes precedence when provided)
+        # Resolve style guide text
         style_guide_text = self._resolve_style_guide(
             draft_input.style_guide,
-            draft_input.brand_spec_path,
             draft_input.brand_spec,
         )
 
@@ -538,7 +522,6 @@ class BlogDraftAgent:
 
         style_guide_text = self._resolve_style_guide(
             revise_input.style_guide,
-            revise_input.brand_spec_path,
             revise_input.brand_spec,
         )
 

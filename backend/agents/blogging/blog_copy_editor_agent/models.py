@@ -57,13 +57,9 @@ class CopyEditorInput(BaseModel):
         None,
         description="Author's explicit feedback or requested changes (e.g. from rejection). Incorporate into review.",
     )
-    brand_spec_path: Optional[str] = Field(
-        None,
-        description="Path to brand_spec.yaml. When set, structured rules are used for evaluation.",
-    )
     brand_spec: Optional[dict] = Field(
         None,
-        description="Pre-loaded brand spec as dict. When set, used instead of brand_spec_path.",
+        description="Pre-loaded brand spec as dict. When set, structured rules are used for evaluation.",
     )
     previous_feedback_items: Optional[List[FeedbackItem]] = Field(
         None,

@@ -47,7 +47,6 @@ class BlogCopyEditorAgent:
         llm_client: LLMClient,
         *,
         default_style_guide_path: Optional[str | Path] = None,
-        brand_spec_path: Optional[str | Path] = None,
     ) -> None:
         """
         Preconditions:
@@ -59,28 +58,19 @@ class BlogCopyEditorAgent:
             self.default_style_guide_path = Path(default_style_guide_path)
         else:
             self.default_style_guide_path = _DEFAULT_STYLE_GUIDE_PATH if _DEFAULT_STYLE_GUIDE_PATH.exists() else None
-        self.brand_spec_path = Path(brand_spec_path) if brand_spec_path else None
 
     def _resolve_style_guide(
         self,
         style_guide: Optional[str],
-        brand_spec_path: Optional[str],
         brand_spec: Optional[dict],
     ) -> str:
-        """Resolve style guide text: prefer brand_spec when provided, else style_guide or default."""
+        """Resolve style guide text from brand_spec dict or style_guide string, else default."""
         if brand_spec and load_brand_spec:
             try:
                 spec = BrandSpec.model_validate(brand_spec) if hasattr(BrandSpec, "model_validate") else BrandSpec.parse_obj(brand_spec)
                 return spec.to_prompt_summary()
             except Exception:
                 pass
-        path = brand_spec_path or (self.brand_spec_path if self.brand_spec_path and self.brand_spec_path.exists() else None)
-        if path and load_brand_spec:
-            try:
-                spec = load_brand_spec(path)
-                return spec.to_prompt_summary()
-            except Exception as e:
-                logger.warning("Could not load brand spec from %s: %s", path, e)
         if style_guide:
             return style_guide.strip()
         if self.default_style_guide_path and self.default_style_guide_path.exists():
@@ -127,10 +117,9 @@ class BlogCopyEditorAgent:
                 self._write_feedback_to_path(output, feedback_output_path)
             return output
 
-        # Resolve style guide text (brand_spec takes precedence when provided)
+        # Resolve style guide text
         style_guide_text = self._resolve_style_guide(
             copy_editor_input.style_guide,
-            copy_editor_input.brand_spec_path,
             copy_editor_input.brand_spec,
         )
 

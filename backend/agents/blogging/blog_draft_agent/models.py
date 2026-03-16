@@ -39,13 +39,9 @@ class DraftInput(BaseModel):
         None,
         description="Full brand and writing style guide text. If omitted, a minimal style reminder is used.",
     )
-    brand_spec_path: Optional[str] = Field(
-        None,
-        description="Path to brand_spec.yaml. When set, structured rules are injected into the prompt.",
-    )
     brand_spec: Optional[dict] = Field(
         None,
-        description="Pre-loaded brand spec as dict. When set, used instead of brand_spec_path.",
+        description="Pre-loaded brand spec as dict. When set, structured rules are injected into the prompt.",
     )
     allowed_claims: Optional[dict] = Field(
         None,
@@ -97,7 +93,6 @@ class ReviseDraftInput(BaseModel):
     audience: Optional[str] = Field(None, description="Intended audience.")
     tone_or_purpose: Optional[str] = Field(None, description="Desired tone or purpose.")
     style_guide: Optional[str] = Field(None, description="Full brand and writing style guide.")
-    brand_spec_path: Optional[str] = Field(None, description="Path to brand_spec.yaml.")
     brand_spec: Optional[dict] = Field(None, description="Pre-loaded brand spec as dict.")
     allowed_claims: Optional[dict] = Field(
         None,
