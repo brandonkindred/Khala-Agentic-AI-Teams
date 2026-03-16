@@ -81,6 +81,16 @@ services:
       - agents_workspace:/workspace
     ports:
       - "8888:8080"
+    # Resource limits (used by Podman Compose via deploy; Docker may use cpus/mem_limit)
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 2G
+        reservations:
+          memory: 2G
+    cpus: "8"
+    mem_limit: 2g
     # All agents use central LLM; default Ollama Cloud. Set OLLAMA_API_KEY in docker/.env (https://ollama.com/settings/keys).
     environment:
       SW_LLM_PROVIDER: ${SW_LLM_PROVIDER:-ollama}

@@ -106,6 +106,17 @@ Data in these volumes survives `docker compose down` and container restarts. To 
 
 Agents direct ports (when needed): 18000–18005 map to APIs 8000–8005.
 
+## Resource limits (strands-agents / Podman)
+
+The **strands-agents** service is configured for 8 vCPUs and 2G memory (`deploy.resources` plus legacy `cpus` / `mem_limit`). After changing these in `docker-compose.yml`, recreate the container so limits apply:
+
+```bash
+podman compose -f docker/docker-compose.yml down strands-agents
+podman compose -f docker/docker-compose.yml --env-file docker/.env up -d strands-agents
+```
+
+On **macOS** with Podman Machine, container memory is capped by the machine’s memory. If 2G is not applied, increase it and recreate the machine: `podman machine stop; podman machine set --memory 8192; podman machine start` (then recreate the container).
+
 ## Agents and Postgres
 
 When running in this stack, the **strands-agents** service uses the **stack’s Postgres** (database `strands`, user `strands`) via **POSTGRES_HOST=postgres**. The container does not start its own PostgreSQL. The init script in `docker/postgres/init/` creates the `strands` database and user on first run.
