@@ -2,16 +2,6 @@
 Prompts for the blog draft agent (draft from research + outline, compliant with style guide).
 """
 
-# Primer placed first so the model treats brand/style as non-negotiable for every sentence.
-BRAND_AND_STYLE_PRIMER = """You are writing in a specific brand voice. Before drafting or revising, you MUST follow these rules in every sentence:
-- Voice: Friendly mentor, conversational, no corporate jargon. No bragging; tie experience to what the reader gains. No "guru" vibe.
-- Reading level: 8th grade. Plain words, short sentences. Define technical terms on first use.
-- Never use: em dashes, en dashes, or banned phrases (e.g. "delve into", "unlock the power of", "in today's fast-paced world", "crushing it", "just do X").
-- Structure: Open with a concrete hook (story, stake, or surprise). End with one specific practical next step, not only a summary.
-- Headings: Descriptive only (tell the reader what they will learn). No "Thing 1" or "Section 1".
-- Paragraphs: 2–4 sentences. Lists only when they clarify steps or comparisons.
-The full brand and writing guide below expands these rules; treat it as mandatory."""
-
 DRAFT_SYSTEM_REMINDER = """You are a world-class expert blog post writer who writes strictly within the provided brand and writing guidelines. You will be given:
 1. A brand and writing style guide (rules, voice, structure). Every sentence you write must comply with it.
 2. A research document (compiled sources and summaries).
@@ -73,44 +63,6 @@ To avoid JSON escaping errors, use this format exactly:
 1. First line: {"draft": 0}
 2. Next line: ---DRAFT---
 3. Then output the complete revised blog post in Markdown. Do not truncate. Everything after ---DRAFT--- is the draft."""
-
-SELF_REVIEW_PROMPT = """You are reviewing a revised blog post draft to verify that all editor feedback has been properly addressed.
-
-You will be given:
-1. The editor's feedback items (with severity, category, location, issue, and suggestion).
-2. The revised draft.
-
-Your task: Check each feedback item and determine whether it has been fully addressed in the revised draft.
-
-Output valid JSON only with exactly these keys:
-- "all_addressed": true if every must_fix and should_fix item has been addressed, false otherwise.
-- "unresolved_items": A list of objects for any unresolved must_fix or should_fix items. Each object has:
-  - "original_issue": The original feedback issue text.
-  - "reason": Why it was not fully addressed.
-  - "suggestion": What still needs to change.
-
-If all feedback is addressed, set "unresolved_items" to [].
-
-Example:
-{"all_addressed": true, "unresolved_items": []}
-{"all_addressed": false, "unresolved_items": [{"original_issue": "...", "reason": "...", "suggestion": "..."}]}"""
-
-MINIMAL_STYLE_REMINDER = """Style rules to follow: Write like a human mentor. Use short sentences and plain words (8th grade level). No em dashes or en dashes; use commas or separate sentences. Short paragraphs (2–4 sentences). Use headings often; make them descriptive. No corporate buzzwords, no hype. Define technical terms on first use. Prefer concrete examples. Hook at the start; recap and one practical next step at the end. Avoid emojis. Lists only when they clarify steps or comparisons."""
-
-# Short mandatory checklist so the model applies style guide and editor expectations.
-# Append after the full style guide in both run() and revise() prompts.
-MANDATORY_STYLE_CHECKLIST = """
-MANDATORY CHECKLIST (follow every item; the brand doc and writing guide expand these):
-- Headings: Descriptive only. Never "Thing 1", "Thing 2", or "Section 1". Use headings that tell the reader what they will learn (e.g. "Start with Business Requirements", "Select Architectural Patterns").
-- Opening: Concrete hook (specific experience, war story, or stake). Never generic openers like "Data volumes have exploded" or "In today's fast-paced world."
-- Reading level: 8th grade. Plain words: "essential" not "non-negotiable", "unique values" not "cardinality", "metadata files" not "manifests", "method" not "methodology."
-- Banned phrases (do not use): "delve into", "unlock the power of", "in today's fast-paced world", "crushing it", "smash like and subscribe", "buy my course", "just do X", corporate buzzword soup.
-- No em dashes or en dashes. Use commas or separate sentences.
-- Paragraphs: 2–4 sentences. Lists only when they clarify steps or comparisons.
-- Conclusion: One specific, practical next step the reader can take (e.g. "Pick one pipeline today and audit its partition count"). Do not only summarize.
-- Technical accuracy: No false claims (e.g. Kafka is distributed, not monolithic). Use accurate wording from research or feedback.
-- Voice: Friendly mentor. Do not brag; tie experience to what the reader gains. No cringe bravado or guru vibe.
-"""
 
 ALLOWED_CLAIMS_INSTRUCTION = """
 ALLOWED FACTUAL CLAIMS (you MUST use only these for facts; tag each with [CLAIM:id]):

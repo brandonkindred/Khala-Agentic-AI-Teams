@@ -15,7 +15,7 @@ from llm_service import LLMClient
 from shared.errors import LLMJsonParseError
 
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
-from .prompts import COPY_EDITOR_PROMPT, MINIMAL_STYLE_CHECKLIST
+from .prompts import COPY_EDITOR_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class BlogCopyEditorAgent:
             parts.append("--- BRAND SPEC ---\n" + brand)
         if writing:
             parts.append("--- WRITING STYLE GUIDE ---\n" + writing)
-        self._style_prompt = "\n\n".join(parts) if parts else MINIMAL_STYLE_CHECKLIST
+        self._style_prompt = "\n\n".join(parts)
 
     def _write_feedback_to_path(self, output: CopyEditorOutput, path: Union[str, Path]) -> None:
         """Serialize CopyEditorOutput to JSON and write to path. On failure log warning and do not raise."""
@@ -114,12 +114,29 @@ class BlogCopyEditorAgent:
         if context_parts:
             context_parts.append("")
 
+        if style_guide_text:
+            context_parts.extend([
+                "---",
+                "EVALUATION INSTRUCTION:",
+                "---",
+                "Evaluate the draft against the style guide below. Apply every rule in that guide.",
+                "",
+                "---",
+                "STYLE GUIDE (evaluate the draft against these rules):",
+                "---",
+                style_guide_text,
+                "",
+            ])
+        else:
+            context_parts.extend([
+                "---",
+                "EVALUATION INSTRUCTION:",
+                "---",
+                "No style guidelines were provided. There is nothing to evaluate against; approve the draft or provide only optional high-level feedback if you wish.",
+                "",
+            ])
+
         context_parts.extend([
-            "---",
-            "STYLE GUIDE (evaluate the draft against these rules):",
-            "---",
-            style_guide_text,
-            "",
             "---",
             "DRAFT TO REVIEW:",
             "---",

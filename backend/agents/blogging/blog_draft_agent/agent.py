@@ -19,13 +19,9 @@ from blog_research_agent.models import ResearchReference
 from .models import DraftInput, DraftOutput, ReviseDraftInput
 from .prompts import (
     ALLOWED_CLAIMS_INSTRUCTION,
-    BRAND_AND_STYLE_PRIMER,
     DRAFT_SYSTEM_REMINDER,
     EXTRACT_NOTES_PROMPT,
-    MANDATORY_STYLE_CHECKLIST,
-    MINIMAL_STYLE_REMINDER,
     REVISE_SINGLE_ITEM_PROMPT,
-    SELF_REVIEW_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,7 +95,7 @@ class BlogDraftAgent:
             parts.append("--- BRAND SPEC ---\n" + self._brand_spec_prompt)
         if self._writing_style_prompt:
             parts.append("--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt)
-        self._style_prompt = "\n\n".join(parts) if parts else MINIMAL_STYLE_REMINDER
+        self._style_prompt = "\n\n".join(parts)
 
     def _extract_notes_from_source(
         self,
@@ -226,21 +222,23 @@ class BlogDraftAgent:
             len(style_guide_text),
         )
 
+        brand_section = (
+            self._brand_spec_prompt
+            if self._brand_spec_prompt
+            else "No brand specification was provided. Follow the style guide below."
+        )
         prompt_parts = [
             DRAFT_SYSTEM_REMINDER,
             "",
             "---",
             "BRAND AND STYLE (mandatory for every sentence):",
             "---",
-            BRAND_AND_STYLE_PRIMER.strip(),
+            brand_section,
             "",
             "---",
             "STYLE GUIDE (you must follow every applicable rule):",
             "---",
             style_guide_text,
-            "",
-            "---",
-            MANDATORY_STYLE_CHECKLIST.strip(),
             "",
         ]
         if draft_input.allowed_claims and draft_input.allowed_claims.get("claims"):
@@ -331,21 +329,23 @@ class BlogDraftAgent:
         if getattr(item, "suggestion", None):
             line += f"\n   Suggestion: {item.suggestion}"
 
+        brand_section = (
+            self._brand_spec_prompt
+            if self._brand_spec_prompt
+            else "No brand specification was provided. Follow the style guide below."
+        )
         prompt_parts = [
             REVISE_SINGLE_ITEM_PROMPT,
             "",
             "---",
             "BRAND AND STYLE (mandatory for every sentence):",
             "---",
-            BRAND_AND_STYLE_PRIMER.strip(),
+            brand_section,
             "",
             "---",
             "STYLE GUIDE (follow in the revised draft):",
             "---",
             style_guide_text,
-            "",
-            "---",
-            MANDATORY_STYLE_CHECKLIST.strip(),
             "",
             "---",
             f"SINGLE FEEDBACK ITEM TO APPLY (item {item_index}):",
@@ -391,54 +391,6 @@ class BlogDraftAgent:
             'Use this format: first line {"draft": 0}, then ---DRAFT---, then the full revised blog post in Markdown.',
         ])
         return "\n".join(prompt_parts)
-
-    def _self_review(
-        self,
-        revised_draft: str,
-        feedback_items: list,
-        *,
-        on_llm_request: Optional[Callable[[str], None]] = None,
-    ) -> dict:
-        """
-        Self-review a revised draft against the editor's feedback.
-
-        Returns a dict with "all_addressed" (bool) and "unresolved_items" (list).
-        """
-        feedback_lines = []
-        for i, item in enumerate(feedback_items, 1):
-            loc = f" [{item.location}]" if item.location else ""
-            feedback_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
-            if item.suggestion:
-                feedback_lines.append(f"   Suggestion: {item.suggestion}")
-            feedback_lines.append("")
-
-        prompt_parts = [
-            SELF_REVIEW_PROMPT,
-            "",
-            "---",
-            "EDITOR FEEDBACK TO VERIFY:",
-            "---",
-            "\n".join(feedback_lines).strip(),
-            "",
-            "---",
-            "REVISED DRAFT:",
-            "---",
-            revised_draft,
-        ]
-        prompt = "\n".join(prompt_parts)
-
-        if on_llm_request:
-            on_llm_request("Self-reviewing revised draft...")
-        try:
-            data = self.llm.complete_json(prompt, temperature=0.1)
-            all_addressed = data.get("all_addressed", True)
-            unresolved = data.get("unresolved_items", [])
-            if not isinstance(unresolved, list):
-                unresolved = []
-            return {"all_addressed": bool(all_addressed), "unresolved_items": unresolved}
-        except Exception as e:
-            logger.warning("Self-review failed: %s; treating feedback as addressed.", e)
-            return {"all_addressed": True, "unresolved_items": []}
 
     def revise(
         self,

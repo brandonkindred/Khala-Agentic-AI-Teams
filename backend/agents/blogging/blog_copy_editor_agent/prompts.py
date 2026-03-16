@@ -11,25 +11,7 @@ Your task: Provide detailed, actionable feedback so an expert blog writer can un
 
 If previous feedback is provided, do not re-raise issues that have already been resolved. Focus only on problems that remain or are newly introduced.
 
-**What to evaluate**
-
-1. **Voice and tone** – Does it sound like the brand? Helpful mentor vs lecturer? Any corporate buzzwords, hype, or tone traps?
-
-2. **Style rules** – Check every rule in the style guide:
-   - No em dashes or en dashes (use commas or separate sentences)
-   - Short paragraphs (2–4 sentences)
-   - Short sentences, plain words (8th grade level)
-   - Lists only when they clarify steps or comparisons
-   - Descriptive headings, not clever ones
-   - Minimal emojis
-
-3. **Structure** – Does it follow the preferred flow (hook, stakes, explain, example, checklist, wrap up)? Strong hook? Practical wrap up with one next step?
-
-4. **Clarity** – Are technical terms defined on first use? Concrete examples? Any vague advice without steps?
-
-5. **Technical** – If there is code: runnable, clear variable names? Security caveats where relevant?
-
-6. **Formatting** – Markdown usage, code fences with language labels, front matter if applicable.
+You will be given an evaluation instruction below: either a style guide to evaluate against, or a statement that no guidelines were provided. Follow that instruction.
 
 **Output format**
 
@@ -46,15 +28,3 @@ Return a single JSON object with exactly these keys:
 Include every issue you find in feedback_items; do not cap the number. For each item, be thorough: the writer should never have to infer what you mean.
 
 Respond with valid JSON only. No explanatory text, markdown, or code fences."""
-
-MINIMAL_STYLE_CHECKLIST = """Style rules to evaluate against:
-- 8th grade reading level, short sentences, plain words
-- No em dashes or en dashes; use commas or separate sentences
-- Short paragraphs (2–4 sentences)
-- Lists only when they clarify steps or comparisons
-- Descriptive headings, not clever ones
-- Minimal emojis
-- Hook at the start; recap and one practical next step at the end
-- Define technical terms on first use; use concrete examples
-- No corporate buzzwords, no hype
-- Helpful mentor voice, not lecturer"""

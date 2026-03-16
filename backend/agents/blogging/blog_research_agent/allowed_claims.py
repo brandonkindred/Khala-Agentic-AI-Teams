@@ -101,23 +101,36 @@ def extract_allowed_claims(
         logger.warning("Claims extraction failed: %s; returning empty claims", e)
         return AllowedClaims(topic=topic, claims=[])
 
-    raw_claims = data.get("claims") or []
+    if not isinstance(data, dict):
+        logger.warning("Claims extraction: LLM returned non-dict (type=%s); returning empty claims", type(data).__name__)
+        return AllowedClaims(topic=topic, claims=[])
+
+    try:
+        raw_claims = data.get("claims") if isinstance(data.get("claims"), list) else []
+    except (KeyError, AttributeError, TypeError) as e:
+        logger.warning("Claims extraction: could not read 'claims' from response: %s; returning empty claims", e)
+        return AllowedClaims(topic=topic, claims=[])
+
     claims = []
     for c in raw_claims:
         if not isinstance(c, dict):
             continue
-        cid = str(c.get("id", len(claims) + 1))
-        text = (c.get("text") or "").strip()
-        if not text:
+        try:
+            cid = str(c.get("id", len(claims) + 1))
+            text = (c.get("text") or "").strip()
+            if not text:
+                continue
+            citations = c.get("citations") or []
+            if isinstance(citations, str):
+                citations = [citations]
+            risk = (c.get("risk_level") or "low").lower()
+            if risk not in ("low", "medium", "high"):
+                risk = "low"
+            claims.append(
+                ClaimEntry(id=cid, text=text, citations=list(citations), risk_level=risk)
+            )
+        except (KeyError, TypeError, ValueError, Exception) as _e:
+            logger.debug("Skipping invalid claim entry: %s", _e)
             continue
-        citations = c.get("citations") or []
-        if isinstance(citations, str):
-            citations = [citations]
-        risk = (c.get("risk_level") or "low").lower()
-        if risk not in ("low", "medium", "high"):
-            risk = "low"
-        claims.append(
-            ClaimEntry(id=cid, text=text, citations=list(citations), risk_level=risk)
-        )
 
     return AllowedClaims(topic=topic, claims=claims)
