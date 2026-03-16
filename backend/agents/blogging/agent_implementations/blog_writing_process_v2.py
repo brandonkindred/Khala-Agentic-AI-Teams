@@ -475,7 +475,7 @@ def run_pipeline(
                     tone_or_purpose=brief.tone_or_purpose,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
-                draft_output_path = work_dir / f"draft_rewrite_{rewrite_iter + 1}.md"
+                draft_output_path = Path(work_dir) / f"draft_rewrite_{rewrite_iter + 1}.md"
                 draft_result = draft_agent.revise(
                     revise_input,
                     on_llm_request=lambda msg: _update(BlogPhase.REWRITE_LOOP, status_text=msg),

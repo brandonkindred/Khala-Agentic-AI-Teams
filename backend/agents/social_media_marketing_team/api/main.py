@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import pytz
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -21,6 +24,8 @@ from shared_job_management import (
     start_stale_job_monitor,
 )
 
+from blog_research_agent.tools.web_search import OllamaWebSearch
+from llm_service import get_client
 from social_media_marketing_team.models import (
     BrandGoals,
     CampaignPerformanceSnapshot,
@@ -29,6 +34,8 @@ from social_media_marketing_team.models import (
     TeamOutput,
 )
 from social_media_marketing_team.orchestrator import SocialMediaMarketingOrchestrator
+from social_media_marketing_team.trend_discovery_agent import TrendDiscoveryAgent
+from social_media_marketing_team.trend_models import TrendDigest
 
 app = FastAPI(title="Social Media Marketing Team API", version="1.0.0")
 
@@ -40,6 +47,12 @@ _stale_monitor_stop = start_stale_job_monitor(
     stale_after_seconds=300.0,
     reason="Job heartbeat stale while pending/running",
 )
+
+# Latest trend digest — updated by the daily cron and the manual trigger endpoint.
+# Each worker process maintains its own copy; for multi-worker deployments the last
+# worker to complete will serve the most recent digest.
+_latest_digest: Optional[TrendDigest] = None
+_scheduler: Optional[BackgroundScheduler] = None
 
 
 class RunMarketingTeamRequest(BaseModel):
@@ -367,6 +380,75 @@ def delete_marketing_job(job_id: str) -> DeleteMarketingJobResponse:
     if not _job_manager.delete_job(job_id):
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     return DeleteMarketingJobResponse(job_id=job_id, message="Job deleted.")
+
+
+def _run_trend_job() -> None:
+    """Run trend discovery and update _latest_digest. Safe to call from any thread."""
+    global _latest_digest
+    logger.info("TrendDiscovery: starting run")
+    try:
+        llm = get_client("trend_discovery")
+        searcher = OllamaWebSearch()
+        agent = TrendDiscoveryAgent(llm_client=llm, web_search=searcher)
+        digest = agent.run()
+        _latest_digest = digest
+        logger.info(
+            "TrendDiscovery: completed — %d topics, generated_at=%s",
+            len(digest.topics),
+            digest.generated_at,
+        )
+    except Exception as exc:
+        logger.error("TrendDiscovery: run failed: %s", exc, exc_info=True)
+
+
+@app.on_event("startup")
+def _start_scheduler() -> None:
+    global _scheduler
+    et = pytz.timezone("America/New_York")
+    _scheduler = BackgroundScheduler(timezone=et)
+    _scheduler.add_job(
+        _run_trend_job,
+        CronTrigger(hour=8, minute=0, timezone=et),
+        id="trend_discovery_daily",
+        name="Daily social media trend discovery",
+        replace_existing=True,
+    )
+    _scheduler.start()
+    logger.info("TrendDiscovery: scheduler started — daily job at 08:00 America/New_York")
+
+
+@app.on_event("shutdown")
+def _stop_scheduler() -> None:
+    if _scheduler and _scheduler.running:
+        _scheduler.shutdown(wait=False)
+        logger.info("TrendDiscovery: scheduler stopped")
+
+
+class TrendRunResponse(BaseModel):
+    message: str
+
+
+class TrendLatestResponse(BaseModel):
+    digest: TrendDigest
+
+
+@app.post("/social-marketing/trends/run", response_model=TrendRunResponse)
+def run_trend_discovery() -> TrendRunResponse:
+    """Trigger trend discovery immediately (runs in background, returns at once)."""
+    thread = threading.Thread(target=_run_trend_job, daemon=True, name="trend_discovery_manual")
+    thread.start()
+    return TrendRunResponse(message="Trend discovery started. Poll GET /social-marketing/trends/latest for results.")
+
+
+@app.get("/social-marketing/trends/latest", response_model=TrendLatestResponse)
+def get_latest_trends() -> TrendLatestResponse:
+    """Return the most recent trend digest. 404 if the job has not run yet."""
+    if _latest_digest is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No trend digest available yet. Trigger one via POST /social-marketing/trends/run.",
+        )
+    return TrendLatestResponse(digest=_latest_digest)
 
 
 @app.get("/health")

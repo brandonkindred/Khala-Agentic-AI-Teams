@@ -13,7 +13,7 @@ You will be given:
 - Safety categories that require disclaimers (e.g. medical, legal, financial)
 
 Output JSON only:
-{"claims_status": "PASS" or "FAIL", "risk_status": "PASS" or "FAIL", "claims_verified": ["..."], "risk_flags": ["..."], "required_disclaimers": ["..."], "notes": "..."}
+{{"claims_status": "PASS" or "FAIL", "risk_status": "PASS" or "FAIL", "claims_verified": ["..."], "risk_flags": ["..."], "required_disclaimers": ["..."], "notes": "..."}}
 
 Set claims_status to FAIL if: the draft contains factual claims not tagged with [CLAIM:id], or references unknown claim IDs.
 Set risk_status to FAIL if: the content touches medical, legal, financial, or security topics and needs a disclaimer.
