@@ -126,6 +126,13 @@ class BrandSpec(BaseModel):
             parts.append("Definition of done:")
             for item in self.definition_of_done:
                 parts.append(f"  - {item}")
+        if self.examples.on_brand or self.examples.off_brand:
+            parts.append("")
+            parts.append("Examples (match on-brand; avoid off-brand):")
+            for s in self.examples.on_brand:
+                parts.append(f"  On-brand: \"{s}\"")
+            for s in self.examples.off_brand:
+                parts.append(f"  Off-brand (do not write like this): \"{s}\"")
         return "\n".join(parts)
 
 

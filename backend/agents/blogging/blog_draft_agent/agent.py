@@ -7,21 +7,24 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
-from llm_service import LLMClient, LLMJsonParseError, LLMTruncatedError
+from llm_service import LLMClient, LLMJsonParseError, LLMTemporaryError, LLMTruncatedError
 
 from blog_research_agent.models import ResearchReference
 
 from .models import DraftInput, DraftOutput, ReviseDraftInput
 from .prompts import (
     ALLOWED_CLAIMS_INSTRUCTION,
+    BRAND_AND_STYLE_PRIMER,
     DRAFT_SYSTEM_REMINDER,
     EXTRACT_NOTES_PROMPT,
+    MANDATORY_STYLE_CHECKLIST,
     MINIMAL_STYLE_REMINDER,
-    REVISE_DRAFT_PROMPT,
+    REVISE_SINGLE_ITEM_PROMPT,
     SELF_REVIEW_PROMPT,
 )
 
@@ -41,10 +44,10 @@ MAX_CLAIMS_CHARS_FOR_DRAFT = 15_000
 # Per-source cap for extraction calls (each document sent to one LLM call).
 MAX_CHARS_PER_SOURCE = 12_000
 
-# Default style guide path (Brandon Kindred brand and writing guide) relative to project root
-_DEFAULT_STYLE_GUIDE_PATH = (
-    Path(__file__).resolve().parent.parent / "docs" / "brandon_kindred_brand_and_writing_style_guide.md"
-)
+# Default paths for brand and writing guidelines (blogging/docs/)
+_DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
+_DEFAULT_WRITING_STYLE_GUIDE_PATH = _DOCS_DIR / "brandon_kindred_brand_and_writing_style_guide.md"
+_DEFAULT_BRAND_SPEC_PATH = _DOCS_DIR / "brand_spec.yaml"
 
 
 def _load_style_guide(path: str | Path) -> str:
@@ -107,8 +110,10 @@ class BlogDraftAgent:
         if default_style_guide_path is not None:
             self.default_style_guide_path = Path(default_style_guide_path)
         else:
-            self.default_style_guide_path = _DEFAULT_STYLE_GUIDE_PATH if _DEFAULT_STYLE_GUIDE_PATH.exists() else None
+            self.default_style_guide_path = _DEFAULT_WRITING_STYLE_GUIDE_PATH if _DEFAULT_WRITING_STYLE_GUIDE_PATH.exists() else None
         self.brand_spec_path = Path(brand_spec_path) if brand_spec_path else None
+        if self.brand_spec_path is None and _DEFAULT_BRAND_SPEC_PATH.exists():
+            self.brand_spec_path = _DEFAULT_BRAND_SPEC_PATH
 
     def _resolve_style_guide(
         self,
@@ -116,28 +121,46 @@ class BlogDraftAgent:
         brand_spec_path: Optional[str],
         brand_spec: Optional[dict],
     ) -> str:
-        """Resolve style guide text: prefer brand_spec when provided, else style_guide or default."""
+        """
+        Resolve combined brand and writing guidelines: use both brand_spec.yaml and
+        brandon_kindred_brand_and_writing_style_guide.md when available.
+        """
+        parts: list[str] = []
+
+        # 1. Brand spec (from dict, or from path)
+        brand_text: Optional[str] = None
         if brand_spec and load_brand_spec:
             try:
                 spec = BrandSpec.model_validate(brand_spec) if hasattr(BrandSpec, "model_validate") else BrandSpec.parse_obj(brand_spec)
-                return spec.to_prompt_summary()
+                brand_text = spec.to_prompt_summary()
             except Exception:
                 pass
-        path = brand_spec_path or (self.brand_spec_path if self.brand_spec_path and self.brand_spec_path.exists() else None)
-        if path and load_brand_spec:
+        if not brand_text:
+            path = brand_spec_path or (self.brand_spec_path if self.brand_spec_path and self.brand_spec_path.exists() else None)
+            if path and load_brand_spec:
+                try:
+                    spec = load_brand_spec(path)
+                    brand_text = spec.to_prompt_summary()
+                except Exception as e:
+                    logger.warning("Could not load brand spec from %s: %s", path, e)
+        if brand_text:
+            parts.append("--- BRAND SPEC (voice, formatting, content rules) ---\n" + brand_text.strip())
+
+        # 2. Writing style guide (explicit string, or from default .md file)
+        writing_text: Optional[str] = None
+        if style_guide and style_guide.strip():
+            writing_text = style_guide.strip()
+        elif self.default_style_guide_path and self.default_style_guide_path.exists():
             try:
-                spec = load_brand_spec(path)
-                return spec.to_prompt_summary()
-            except Exception as e:
-                logger.warning("Could not load brand spec from %s: %s", path, e)
-        if style_guide:
-            return style_guide.strip()
-        if self.default_style_guide_path and self.default_style_guide_path.exists():
-            try:
-                return _load_style_guide(self.default_style_guide_path)
+                writing_text = _load_style_guide(self.default_style_guide_path)
             except OSError as e:
-                logger.warning("Could not load default style guide: %s", e)
-        return MINIMAL_STYLE_REMINDER
+                logger.warning("Could not load default writing style guide from %s: %s", self.default_style_guide_path, e)
+        if writing_text:
+            parts.append("--- WRITING STYLE GUIDE ---\n" + writing_text)
+
+        if not parts:
+            return MINIMAL_STYLE_REMINDER
+        return "\n\n".join(parts)
 
     def _extract_notes_from_source(
         self,
@@ -273,9 +296,17 @@ class BlogDraftAgent:
             DRAFT_SYSTEM_REMINDER,
             "",
             "---",
+            "BRAND AND STYLE (mandatory for every sentence):",
+            "---",
+            BRAND_AND_STYLE_PRIMER.strip(),
+            "",
+            "---",
             "STYLE GUIDE (you must follow every applicable rule):",
             "---",
             style_guide_text,
+            "",
+            "---",
+            MANDATORY_STYLE_CHECKLIST.strip(),
             "",
         ]
         if draft_input.allowed_claims and draft_input.allowed_claims.get("claims"):
@@ -311,6 +342,10 @@ class BlogDraftAgent:
             prompt_parts.append(f"Tone/Purpose: {draft_input.tone_or_purpose}")
         prompt_parts.append("")
         prompt_parts.append("---")
+        prompt_parts.append(
+            "Before outputting, ensure: no banned phrases; 8th grade reading level; descriptive headings; concrete opening hook; one practical next step in the conclusion."
+        )
+        prompt_parts.append("")
         prompt_parts.append('Use this format: first line {"draft": 0}, then ---DRAFT---, then the full blog post in Markdown.')
         prompt = "\n".join(prompt_parts)
 
@@ -348,51 +383,46 @@ class BlogDraftAgent:
             _write_draft_to_path(draft, draft_output_path)
         return DraftOutput(draft=draft)
 
-    # Maximum number of self-review/revise iterations before returning the draft to the editor.
-    MAX_SELF_REVIEW_ITERATIONS = 5
-
-    def _build_revise_prompt(
+    def _build_revise_single_item_prompt(
         self,
         draft: str,
-        feedback_lines: list[str],
+        item: Any,
+        item_index: int,
         style_guide_text: str,
         revise_input: ReviseDraftInput,
     ) -> str:
-        """Build the revision prompt from the current draft and feedback."""
+        """Build the revision prompt for a single feedback item."""
+        loc = f" [{item.location}]" if getattr(item, "location", None) else ""
+        line = f"[{item.severity}] {item.category}{loc}: {item.issue}"
+        if getattr(item, "suggestion", None):
+            line += f"\n   Suggestion: {item.suggestion}"
+
         prompt_parts = [
-            REVISE_DRAFT_PROMPT,
+            REVISE_SINGLE_ITEM_PROMPT,
             "",
             "---",
-            "STYLE GUIDE:",
+            "BRAND AND STYLE (mandatory for every sentence):",
+            "---",
+            BRAND_AND_STYLE_PRIMER.strip(),
+            "",
+            "---",
+            "STYLE GUIDE (follow in the revised draft):",
             "---",
             style_guide_text,
             "",
-        ]
-
-        if revise_input.previous_feedback_items:
-            prev_lines = []
-            for i, item in enumerate(revise_input.previous_feedback_items, 1):
-                loc = f" [{item.location}]" if item.location else ""
-                prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
-            prompt_parts.extend([
-                "---",
-                "PREVIOUS PASS FEEDBACK (already addressed — do not revert these fixes):",
-                "---",
-                "\n".join(prev_lines).strip(),
-                "",
-            ])
-
-        prompt_parts.extend([
             "---",
-            "COPY EDITOR FEEDBACK (apply all must_fix and should_fix items):",
+            MANDATORY_STYLE_CHECKLIST.strip(),
+            "",
             "---",
-            "\n".join(feedback_lines).strip(),
+            f"SINGLE FEEDBACK ITEM TO APPLY (item {item_index}):",
+            "---",
+            line,
             "",
             "---",
             "CURRENT DRAFT:",
             "---",
             draft,
-        ])
+        ]
         if revise_input.audience:
             prompt_parts.insert(0, f"Audience: {revise_input.audience}\n")
         if revise_input.tone_or_purpose:
@@ -484,12 +514,12 @@ class BlogDraftAgent:
         draft_output_path: Optional[Union[str, Path]] = None,
     ) -> DraftOutput:
         """
-        Revise a draft based on copy editor feedback, with self-review.
+        Revise a draft by addressing each copy editor feedback item individually.
 
-        After producing each revised draft, the agent self-reviews to verify that all
-        editor feedback has been addressed. If unresolved issues remain, the agent
-        revises again, up to MAX_SELF_REVIEW_ITERATIONS times. The final full draft
-        is always returned.
+        For each of the N feedback items, the agent revises the draft once (addressing
+        only that item), then passes the updated draft to the next item. No self-review
+        or compliance check is performed; the full revised draft is returned after all
+        items have been addressed. The pipeline sends the result back to the editor.
 
         When draft_output_path is set, writes the final revised draft to that path and logs the path.
 
@@ -506,108 +536,73 @@ class BlogDraftAgent:
             logger.info("No feedback items; returning draft unchanged.")
             return DraftOutput(draft=draft)
 
-        # Resolve style guide (brand_spec takes precedence when provided)
         style_guide_text = self._resolve_style_guide(
             revise_input.style_guide,
             revise_input.brand_spec_path,
             revise_input.brand_spec,
         )
 
-        # Format feedback for prompt
-        feedback_lines = []
-        if revise_input.feedback_summary:
-            feedback_lines.append(f"Note from editor: {revise_input.feedback_summary}\n")
-        for i, item in enumerate(revise_input.feedback_items, 1):
-            loc = f" [{item.location}]" if item.location else ""
-            feedback_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
-            if item.suggestion:
-                feedback_lines.append(f"   Suggestion: {item.suggestion}")
-            feedback_lines.append("")
-
         current_draft = draft
-
-        # Allow long output so revised drafts are not truncated (avoids LLMTruncatedError / JSON parse failure)
         revise_max_tokens = 32768
+        num_items = len(revise_input.feedback_items)
 
-        for iteration in range(1, self.MAX_SELF_REVIEW_ITERATIONS + 1):
-            logger.info("Revise iteration %s/%s", iteration, self.MAX_SELF_REVIEW_ITERATIONS)
-
-            # Build and execute the revision prompt
-            prompt = self._build_revise_prompt(current_draft, feedback_lines, style_guide_text, revise_input)
-
+        for item_index, item in enumerate(revise_input.feedback_items, 1):
+            logger.info("Revising for feedback item %s/%s", item_index, num_items)
             if on_llm_request:
-                on_llm_request(f"Revising draft (iteration {iteration}/{self.MAX_SELF_REVIEW_ITERATIONS})...")
-            data: Optional[Dict[str, Any]] = None
-            for attempt in range(2):
+                on_llm_request(f"Addressing feedback item {item_index}/{num_items}...")
+
+            prompt = self._build_revise_single_item_prompt(
+                current_draft, item, item_index, style_guide_text, revise_input
+            )
+
+            revised: Optional[str] = None
+            for attempt in range(3):
                 try:
-                    data = self.llm.complete_json(
-                        prompt, temperature=0.2, max_tokens=revise_max_tokens
+                    raw_response = self.llm.complete(
+                        prompt,
+                        temperature=0.2,
+                        max_tokens=revise_max_tokens,
+                        system_prompt=REVISE_SINGLE_ITEM_PROMPT,
                     )
-                    break
-                except (LLMJsonParseError, LLMTruncatedError) as e:
-                    if attempt == 0:
+                    revised = _extract_draft_after_marker(raw_response)
+                    if revised and revised.strip():
+                        break
+                except LLMTemporaryError as e:
+                    if attempt < 2:
                         logger.warning(
-                            "Revise LLM error (attempt 1/2): %s; retrying with max_tokens=%s.",
-                            e,
-                            revise_max_tokens,
+                            "Revise for item %s: empty/transient LLM response (attempt %s/3); retrying.",
+                            item_index,
+                            attempt + 1,
                         )
+                        time.sleep(2.0 + attempt)
                     else:
                         logger.warning(
-                            "Revise LLM error (attempt 2/2): %s; keeping current draft for this iteration.",
-                            e,
+                            "Revise for item %s: empty/transient after 3 attempts; keeping previous draft.",
+                            item_index,
                         )
                         break
-            if data is not None:
-                raw_draft = data.get("draft")
-                if isinstance(raw_draft, str) and raw_draft.strip():
-                    current_draft = raw_draft.strip()
-                else:
-                    logger.warning("LLM returned no revised content on iteration %s; keeping previous draft.", iteration)
+                except (LLMJsonParseError, LLMTruncatedError) as e:
+                    if attempt == 0:
+                        logger.warning("Revise for item %s failed: %s; retrying with complete_json.", item_index, e)
+                    else:
+                        logger.warning("Revise for item %s failed after retry; keeping previous draft.", item_index)
+                        break
+            if not revised or not revised.strip():
+                try:
+                    data = self.llm.complete_json(prompt, temperature=0.2, max_tokens=revise_max_tokens)
+                    raw_draft = data.get("draft") if data else None
+                    if isinstance(raw_draft, str) and raw_draft.strip():
+                        revised = raw_draft.strip()
+                except (LLMJsonParseError, LLMTruncatedError):
+                    pass
+
+            if revised and revised.strip():
+                current_draft = revised.strip()
+                logger.info("Draft revised for item %s/%s: length=%s", item_index, num_items, len(current_draft))
             else:
-                logger.warning(
-                    "Revise failed after retries on iteration %s; keeping previous draft.",
-                    iteration,
-                )
+                logger.warning("Revise for item %s/%s produced no content; keeping previous draft.", item_index, num_items)
 
-            logger.info("Draft revised (iteration %s): length=%s", iteration, len(current_draft))
-
-            # Self-review: check if all feedback has been addressed
-            if iteration < self.MAX_SELF_REVIEW_ITERATIONS:
-                review_result = self._self_review(
-                    current_draft,
-                    revise_input.feedback_items,
-                    on_llm_request=on_llm_request,
-                )
-
-                if review_result["all_addressed"]:
-                    logger.info("Self-review passed on iteration %s; all feedback addressed.", iteration)
-                    break
-
-                unresolved = review_result["unresolved_items"]
-                logger.info(
-                    "Self-review found %s unresolved items on iteration %s; revising again.",
-                    len(unresolved),
-                    iteration,
-                )
-
-                # Augment the feedback lines with self-review findings for the next revision
-                feedback_lines.append("")
-                feedback_lines.append("--- SELF-REVIEW FINDINGS (still unresolved from previous revision) ---")
-                for j, ur in enumerate(unresolved, 1):
-                    feedback_lines.append(
-                        f"{j}. UNRESOLVED: {ur.get('original_issue', 'Unknown issue')}"
-                    )
-                    feedback_lines.append(f"   Reason: {ur.get('reason', 'Not specified')}")
-                    if ur.get("suggestion"):
-                        feedback_lines.append(f"   Fix: {ur.get('suggestion')}")
-                    feedback_lines.append("")
-            else:
-                logger.info(
-                    "Reached max self-review iterations (%s); returning current draft.",
-                    self.MAX_SELF_REVIEW_ITERATIONS,
-                )
-
-        logger.info("Final revised draft: length=%s", len(current_draft))
+        logger.info("Final revised draft: length=%s (%s items addressed)", len(current_draft), num_items)
         if draft_output_path:
             _write_draft_to_path(current_draft, draft_output_path)
         return DraftOutput(draft=current_draft)

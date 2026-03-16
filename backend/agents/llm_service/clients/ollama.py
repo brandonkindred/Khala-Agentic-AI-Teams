@@ -295,10 +295,18 @@ class OllamaLLMClient(LLMClient):
         if finish_reason == "length":
             msg = first.get("message", {})
             partial_content = msg.get("content", "") if isinstance(msg, dict) else ""
+            partial_content = str(partial_content) if partial_content else ""
+            if not partial_content.strip():
+                logger.warning(
+                    "LLM returned empty response (finish_reason=length). Treating as transient error for retry."
+                )
+                raise LLMTemporaryError(
+                    "Empty response (finish_reason=length); treating as transient for retry",
+                )
             logger.warning("LLM response truncated (finish_reason=length). Partial content: %d chars", len(partial_content))
             raise LLMTruncatedError(
                 "Response truncated due to token limit (finish_reason=length)",
-                partial_content=str(partial_content) if partial_content else "",
+                partial_content=partial_content,
                 finish_reason=finish_reason,
             )
         msg = first.get("message")
@@ -307,7 +315,15 @@ class OllamaLLMClient(LLMClient):
         content = msg.get("content")
         if content is None:
             raise LLMPermanentError("Unexpected response format from LLM: missing 'content'")
-        return str(content)
+        content_str = str(content)
+        if not content_str.strip():
+            logger.warning(
+                "LLM returned empty response (200). Treating as transient error for retry."
+            )
+            raise LLMTemporaryError(
+                "Empty response from LLM; treating as transient for retry",
+            )
+        return content_str
 
     def _ollama_post(self, payload: dict, max_retries: int, backoff_base: float, backoff_max: float, sem: threading.BoundedSemaphore) -> str:
         """POST to /v1/chat/completions; return raw content. Raises LLM* on non-200 or malformed."""
@@ -426,8 +442,22 @@ class OllamaLLMClient(LLMClient):
                         reason="unexpected status",
                     )
                     raise LLMPermanentError(f"Unexpected LLM response status {status}: {response.text[:200]}", status_code=status)
-            except (LLMPermanentError, LLMRateLimitError, LLMTemporaryError, LLMTruncatedError):
+            except (LLMPermanentError, LLMRateLimitError, LLMTruncatedError):
                 raise
+            except LLMTemporaryError as e:
+                last_error = e
+                if attempt < max_retries:
+                    wait = min(backoff_base**attempt + random.uniform(0, 1), backoff_max)
+                    logger.warning(
+                        "LLM temporary error (attempt %d/%d): %s. Retrying in %.1fs",
+                        attempt + 1,
+                        max_retries + 1,
+                        e,
+                        wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise last_error
             except httpx.HTTPStatusError as e:
                 resp = e.response
                 status = resp.status_code if resp else None
@@ -527,6 +557,21 @@ class OllamaLLMClient(LLMClient):
         }
         try:
             content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+            # Defensive: retry on empty content (e.g. thinking model or API quirk)
+            for empty_attempt in range(2):
+                if (content or "").strip():
+                    break
+                logger.warning(
+                    "Empty JSON response (attempt %d/2). Retrying in %.1fs...",
+                    empty_attempt + 1,
+                    backoff_base + random.uniform(0, 1),
+                )
+                time.sleep(backoff_base + random.uniform(0, 1))
+                content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+            if not (content or "").strip():
+                raise LLMTemporaryError(
+                    "Empty response from LLM after retries; try again or set LLM_ENABLE_THINKING=false for qwen3.5."
+                )
             return self._extract_json(content)
         except LLMTruncatedError as e:
             return self._complete_json_with_continuation(
