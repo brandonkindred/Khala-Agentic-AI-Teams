@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from backend.agents.blogging.blog_research_agent.models import ResearchReference
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Tuple
@@ -667,10 +668,13 @@ class ResearchAgent:
         lines.append("## Sources")
         lines.append("")
         if references:
-            for i, ref in enumerate(references, start=1):
+            for i, ref in enumerate[ResearchReference](references, start=1):
                 lines.append(f"{i}. {ref.url}")
-                body = (ref.content if ref.content else ref.summary).strip()
+                body = ref.summary.strip()
                 lines.append(f"-- {body}")
+                lines.append(f"Key points:")
+                for key_point in ref.key_points:
+                    lines.append(f"  - {key_point}")
                 lines.append("")
         else:
             lines.append("(No web sources found.)")

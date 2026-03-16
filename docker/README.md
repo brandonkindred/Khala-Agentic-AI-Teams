@@ -45,6 +45,8 @@ This directory defines a **Docker Compose stack** that runs:
    | Postgres       | localhost:5432 (user `postgres` / `temporal` / `strands`) |
    | Ollama (local) | http://localhost:11434      |
 
+   Use the **Angular UI at 4201** so API requests go through the same origin and nginx proxies them to the backend. If you run only the API container and use the UI with `ng serve`, point the dev API base to `http://localhost:8888` in `user-interface/src/environments/environment.ts`.
+
 ## Required environment variables
 
 - **OLLAMA_API_KEY** – Create at [ollama.com/settings/keys](https://ollama.com/settings/keys). Required for Ollama Cloud (Option A). Passed into the agents container so the LLM client can call `https://ollama.com` with `Authorization: Bearer <key>`.

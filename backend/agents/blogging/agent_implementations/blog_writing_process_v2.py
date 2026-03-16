@@ -143,14 +143,12 @@ def run_pipeline(
         research_sources_count=len(research_result.references),
     )
 
-    research_document = research_result.compiled_document or ""
-    if not research_document and research_result.references:
-        parts = ["## Sources\n"]
-        for ref in research_result.references:
-            parts.append(f"- **{ref.title}** ({ref.url}): {ref.summary}")
-            if ref.key_points:
-                parts.append("  Key points: " + "; ".join(ref.key_points[:3]))
-        research_document = "\n".join(parts)
+    parts = ["## Sources\n"]
+    for ref in research_result.references:
+        parts.append(f"- **{ref.title}** ({ref.url}): {ref.summary}")
+        if ref.key_points:
+            parts.append("  Key points: " + "; ".join(ref.key_points))
+    research_document = "\n".join(parts)
 
     if work_dir is not None:
         write_artifact(work_dir, "research_packet.md", research_document)
@@ -247,7 +245,7 @@ def run_pipeline(
                     tone_or_purpose=brief.tone_or_purpose,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
-                draft_output_path = (Path(work_dir) / "draft_v1.md") if work_dir is not None else None
+                draft_output_path = (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
                 draft_result = draft_agent.run(
                     draft_input,
                     on_llm_request=lambda msg: _update(BlogPhase.DRAFT_INITIAL, status_text=msg),

@@ -1,6 +1,6 @@
 /**
  * Production environment configuration.
- * API base is the strands-agents Docker container (port 8888); override via build-time replacement if needed.
+ * All API requests go directly to the unified API at port 8888 (no proxy).
  */
 const apiBase = 'http://localhost:8888';
 export const environment = {
