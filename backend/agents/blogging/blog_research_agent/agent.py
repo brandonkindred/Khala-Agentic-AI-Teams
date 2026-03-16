@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-from backend.agents.blogging.blog_research_agent.models import ResearchReference
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Tuple
