@@ -50,9 +50,12 @@
               class="start-button" [disabled]="!canSubmit">
         @if (isSubmitting()) {
           <ng-container matButtonIcon><mat-icon>hourglass_top</mat-icon></ng-container>
-          Starting...
         } @else {
           <ng-container matButtonIcon><mat-icon>play_arrow</mat-icon></ng-container>
+        }
+        @if (isSubmitting()) {
+          Starting...
+        } @else {
           Start Team
         }
       </button>
