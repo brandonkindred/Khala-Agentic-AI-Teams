@@ -210,23 +210,24 @@ def run_pipeline(
     # 3. Draft + Copy Editor loop
     style_guide_text = STYLE_GUIDE_PATH.read_text().strip() if STYLE_GUIDE_PATH.exists() else None
     brand_spec_path = Path(__file__).resolve().parent.parent / "docs" / "brand_spec.yaml"
+    brand_spec_dict: Optional[dict] = None
+    if brand_spec_path.exists():
+        _spec = load_brand_spec(brand_spec_path)
+        brand_spec_dict = _spec.model_dump() if hasattr(_spec, "model_dump") else _spec.dict()
     allowed_claims_data = (
         read_artifact(work_dir, "allowed_claims.json") if work_dir is not None else None
     )
     draft_agent = BlogDraftAgent(
         llm_client=llm_client,
         default_style_guide_path=STYLE_GUIDE_PATH,
-        brand_spec_path=brand_spec_path if brand_spec_path.exists() else None,
     )
     copy_editor_agent = BlogCopyEditorAgent(
         llm_client=llm_client,
         default_style_guide_path=STYLE_GUIDE_PATH,
-        brand_spec_path=brand_spec_path if brand_spec_path.exists() else None,
     )
 
     draft_result = None
     previous_feedback_items: list[FeedbackItem] = []
-    brand_spec_path_str = str(brand_spec_path) if brand_spec_path.exists() else None
     for iteration in range(1, draft_editor_iterations + 1):
         if iteration == 1:
             # Initial draft
@@ -245,7 +246,7 @@ def run_pipeline(
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     style_guide=style_guide_text,
-                    brand_spec_path=brand_spec_path_str,
+                    brand_spec=brand_spec_dict,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
                 draft_output_path = (Path(work_dir) / "draft_v1.md") if work_dir is not None else None
@@ -283,7 +284,7 @@ def run_pipeline(
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     style_guide=style_guide_text,
-                    brand_spec_path=brand_spec_path_str,
+                    brand_spec=brand_spec_dict,
                     previous_feedback_items=previous_feedback_items if previous_feedback_items else None,
                 )
                 feedback_path = (Path(work_dir) / f"editor_feedback_iter_{copy_edit_num}.json") if work_dir is not None else None
@@ -319,7 +320,7 @@ def run_pipeline(
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     style_guide=style_guide_text,
-                    brand_spec_path=brand_spec_path_str,
+                    brand_spec=brand_spec_dict,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
                 previous_feedback_items = copy_editor_result.feedback_items
@@ -480,7 +481,7 @@ def run_pipeline(
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     style_guide=style_guide_text,
-                    brand_spec_path=str(brand_spec_path) if brand_spec_path.exists() else None,
+                    brand_spec=brand_spec_dict,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                 )
                 draft_output_path = work_dir / f"draft_rewrite_{rewrite_iter + 1}.md"
