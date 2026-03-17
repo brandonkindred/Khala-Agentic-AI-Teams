@@ -612,6 +612,28 @@ class OllamaLLMClient(LLMClient):
                 backoff_max=backoff_max,
                 sem=sem,
             )
+        except LLMJsonParseError:
+            # If content starts with '{' but is unparseable, the server likely cut off the
+            # response before the JSON was complete (finish_reason="stop" despite truncation).
+            # Attempt continuation to recover the rest of the JSON.
+            stripped = (content or "").strip()
+            if stripped.startswith(("{", "[")):
+                logger.warning(
+                    "JSON parse failed on content starting with '%s'; treating as implicit truncation and attempting continuation.",
+                    stripped[0],
+                )
+                return self._complete_json_with_continuation(
+                    initial_partial=content,
+                    prompt=prompt,
+                    system_message=system_message,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    max_retries=max_retries,
+                    backoff_base=backoff_base,
+                    backoff_max=backoff_max,
+                    sem=sem,
+                )
+            raise
 
     def _merge_continuation(self, accumulated: str, next_chunk: str, min_overlap: int = 10) -> str:
         """Append next_chunk to accumulated, stripping overlap at boundary."""

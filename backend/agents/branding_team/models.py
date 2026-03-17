@@ -73,6 +73,27 @@ class ColorPalette(BaseModel):
     sentiment: str = ""  # e.g. "warm and energetic", "cool and professional"
 
 
+class BrandPhase(str, Enum):
+    """Which phase the brand is currently in."""
+
+    STRATEGIC_CORE = "strategic_core"
+    NARRATIVE_MESSAGING = "narrative_messaging"
+    VISUAL_IDENTITY = "visual_identity"
+    CHANNEL_ACTIVATION = "channel_activation"
+    GOVERNANCE = "governance"
+    COMPLETE = "complete"
+
+
+class PhaseGateStatus(str, Enum):
+    """Gate status for phase transitions."""
+
+    NOT_STARTED = "not_started"
+    IN_PROGRESS = "in_progress"
+    PENDING_REVIEW = "pending_review"
+    APPROVED = "approved"
+    REVISION_REQUESTED = "revision_requested"
+
+
 class BrandingMission(BaseModel):
     company_name: str = Field(..., min_length=2)
     company_description: str = Field(..., min_length=10)
