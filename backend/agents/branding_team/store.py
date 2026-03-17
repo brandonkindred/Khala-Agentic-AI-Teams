@@ -236,6 +236,7 @@ class BrandingStore:
             updated = brand.model_copy(
                 update={
                     "latest_output": output,
+                    "current_phase": output.current_phase,
                     "version": new_version,
                     "history": list(brand.history) + [history_entry],
                     "updated_at": now,
