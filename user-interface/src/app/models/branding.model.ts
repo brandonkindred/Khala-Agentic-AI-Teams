@@ -7,6 +7,13 @@ export interface Client {
   notes?: string | null;
 }
 
+export interface ColorPalette {
+  name: string;
+  description: string;
+  colors: string[];
+  sentiment: string;
+}
+
 export interface BrandingMissionSnapshot {
   company_name: string;
   company_description: string;
@@ -16,6 +23,12 @@ export interface BrandingMissionSnapshot {
   desired_voice?: string;
   existing_brand_material?: string[];
   wiki_path?: string | null;
+  color_inspiration?: string[];
+  color_palettes?: ColorPalette[];
+  selected_palette_index?: number | null;
+  visual_style?: string;
+  typography_preference?: string;
+  interface_density?: string;
 }
 
 export interface BrandVersionSummary {
