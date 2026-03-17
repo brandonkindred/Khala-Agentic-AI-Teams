@@ -31,6 +31,15 @@ class WorkflowStatus(str, Enum):
     READY_FOR_ROLLOUT = "ready_for_rollout"
 
 
+class ColorPalette(BaseModel):
+    """A candidate color palette for brand identity selection."""
+
+    name: str = ""
+    description: str = ""
+    colors: List[str] = Field(default_factory=list)
+    sentiment: str = ""  # e.g. "warm and energetic", "cool and professional"
+
+
 class BrandingMission(BaseModel):
     company_name: str = Field(..., min_length=2)
     company_description: str = Field(..., min_length=10)
@@ -40,6 +49,13 @@ class BrandingMission(BaseModel):
     desired_voice: str = "clear, confident, human"
     existing_brand_material: List[str] = Field(default_factory=list)
     wiki_path: Optional[str] = None
+    # Visual identity fields — populated during guided palette selection
+    color_inspiration: List[str] = Field(default_factory=list)
+    color_palettes: List[ColorPalette] = Field(default_factory=list)
+    selected_palette_index: Optional[int] = None
+    visual_style: str = ""  # e.g. "minimalist", "maximalist", "editorial"
+    typography_preference: str = ""  # e.g. "geometric sans-serif", "humanist serif"
+    interface_density: str = ""  # e.g. "spacious/minimalist", "dense/information-rich"
 
 
 class HumanReview(BaseModel):

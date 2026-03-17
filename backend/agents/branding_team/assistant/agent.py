@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from branding_team.models import BrandingMission
+from branding_team.models import BrandingMission, ColorPalette
 
 from .prompts import SYSTEM_PROMPT, USER_TURN_TEMPLATE
 
@@ -66,23 +66,57 @@ def _parse_mission_and_suggestions(response: str) -> Tuple[str, Dict[str, Any], 
 def _merge_mission_update(current: BrandingMission, update: Dict[str, Any]) -> BrandingMission:
     """Merge update dict into current mission; only set keys that are present and non-empty where we care."""
     data = current.model_dump()
+
+    # String fields
     for key in (
         "company_name",
         "company_description",
         "target_audience",
-        "values",
-        "differentiators",
         "desired_voice",
-        "existing_brand_material",
+        "visual_style",
+        "typography_preference",
+        "interface_density",
     ):
         if key not in update:
             continue
         val = update[key]
-        if key in ("values", "differentiators", "existing_brand_material"):
-            if isinstance(val, list):
-                data[key] = [str(x) for x in val if x]
-        elif isinstance(val, str) and val.strip():
+        if isinstance(val, str) and val.strip():
             data[key] = val.strip()
+
+    # List-of-string fields
+    for key in ("values", "differentiators", "existing_brand_material", "color_inspiration"):
+        if key not in update:
+            continue
+        val = update[key]
+        if isinstance(val, list):
+            data[key] = [str(x) for x in val if x]
+
+    # Color palettes — list of palette objects
+    if "color_palettes" in update:
+        raw_palettes = update["color_palettes"]
+        if isinstance(raw_palettes, list):
+            palettes = []
+            for p in raw_palettes:
+                if isinstance(p, dict):
+                    palettes.append(
+                        ColorPalette(
+                            name=p.get("name", ""),
+                            description=p.get("description", ""),
+                            colors=[str(c) for c in p.get("colors", []) if c],
+                            sentiment=p.get("sentiment", ""),
+                        ).model_dump()
+                    )
+            if palettes:
+                data["color_palettes"] = palettes
+
+    # Selected palette index — int or None
+    if "selected_palette_index" in update:
+        val = update["selected_palette_index"]
+        if val is None:
+            data["selected_palette_index"] = None
+        elif isinstance(val, int) and 0 <= val < len(data.get("color_palettes", [])):
+            data["selected_palette_index"] = val
+
     return BrandingMission(**data)
 
 
@@ -125,6 +159,12 @@ class BrandingAssistantAgent:
             differentiators=current_mission.differentiators or [],
             desired_voice=current_mission.desired_voice or "",
             existing_brand_material=current_mission.existing_brand_material or [],
+            color_inspiration=current_mission.color_inspiration or [],
+            color_palettes=[p.model_dump() if hasattr(p, "model_dump") else p for p in (current_mission.color_palettes or [])],
+            selected_palette_index=current_mission.selected_palette_index,
+            visual_style=current_mission.visual_style or "",
+            typography_preference=current_mission.typography_preference or "",
+            interface_density=current_mission.interface_density or "",
             conversation_history=conversation_history,
             user_message=user_message,
         )

@@ -50,6 +50,168 @@
   }
 }
 
+// ---------------------------------------------------------------------------
+// Live preview — mission-driven sections shown during conversation
+// ---------------------------------------------------------------------------
+
+.live-preview {
+  padding: 0.5rem 0;
+}
+
+.preview-section {
+  margin-bottom: 1.25rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+
+  &:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+  }
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0 0 0.75rem;
+
+  mat-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    color: #58a6ff;
+  }
+}
+
+.foundation-item {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 0.5rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+
+  .label {
+    color: #8b949e;
+    min-width: 80px;
+    flex-shrink: 0;
+  }
+
+  .value {
+    color: #f0f6fc;
+  }
+}
+
+.chip-group {
+  margin-bottom: 0.75rem;
+
+  .chip-label {
+    display: block;
+    font-size: 0.75rem;
+    color: #8b949e;
+    margin-bottom: 6px;
+  }
+}
+
+.voice-description {
+  font-size: 0.875rem;
+  color: #f0f6fc;
+  line-height: 1.5;
+  margin: 0;
+}
+
+// ---------------------------------------------------------------------------
+// Palette cards — used in both live preview and full output
+// ---------------------------------------------------------------------------
+
+.palette-card {
+  background: #0d1117;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 10px;
+  transition: border-color 0.2s;
+
+  &.palette-selected {
+    border-color: #3fb950;
+    background: rgba(63, 185, 80, 0.06);
+  }
+}
+
+.palette-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.palette-name {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #f0f6fc;
+}
+
+.selected-icon {
+  color: #3fb950;
+  font-size: 20px;
+  width: 20px;
+  height: 20px;
+}
+
+.palette-description {
+  font-size: 0.8125rem;
+  color: #c9d1d9;
+  margin: 0 0 8px;
+}
+
+.palette-swatches {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.palette-swatch {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  position: relative;
+  overflow: hidden;
+  cursor: default;
+
+  .swatch-label {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    font-size: 0.5625rem;
+    text-align: center;
+    padding: 2px 1px;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+.palette-sentiment {
+  font-size: 0.75rem;
+  color: #8b949e;
+  font-style: italic;
+  margin: 0;
+}
+
+// ---------------------------------------------------------------------------
+// Full output tabs (existing styles)
+// ---------------------------------------------------------------------------
+
 .preview-tabs {
   .tab-content {
     padding: 1rem 0;
