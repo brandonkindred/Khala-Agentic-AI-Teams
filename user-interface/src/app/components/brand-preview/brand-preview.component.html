@@ -9,13 +9,165 @@
     }
   </mat-card-header>
   <mat-card-content>
-    @if (!hasOutput) {
+    @if (!hasContent) {
       <div class="empty-state">
         <mat-icon>palette</mat-icon>
         <p>Your brand will appear here as we talk.</p>
-        <p class="empty-hint">Answer a few questions in the chat and the branding team will build mood boards, guidelines, and more.</p>
+        <p class="empty-hint">Answer a few questions in the chat and your brand will take shape in real time.</p>
+      </div>
+    } @else if (!hasOutput) {
+      <!-- Live mission preview — updates as the conversation progresses -->
+      <div class="live-preview">
+        <!-- Foundation -->
+        @if (mission?.company_name && mission!.company_name !== 'TBD') {
+          <section class="preview-section">
+            <h3 class="section-title">
+              <mat-icon>business</mat-icon>
+              Foundation
+            </h3>
+            <div class="foundation-item">
+              <span class="label">Company</span>
+              <span class="value">{{ mission!.company_name }}</span>
+            </div>
+            @if (mission!.company_description && mission!.company_description !== 'To be discussed.') {
+              <div class="foundation-item">
+                <span class="label">Description</span>
+                <span class="value">{{ mission!.company_description }}</span>
+              </div>
+            }
+            @if (mission!.target_audience && mission!.target_audience !== 'TBD') {
+              <div class="foundation-item">
+                <span class="label">Audience</span>
+                <span class="value">{{ mission!.target_audience }}</span>
+              </div>
+            }
+          </section>
+        }
+
+        <!-- Values & Differentiators -->
+        @if (missionValues.length > 0 || missionDifferentiators.length > 0) {
+          <section class="preview-section">
+            <h3 class="section-title">
+              <mat-icon>star</mat-icon>
+              Values &amp; Differentiators
+            </h3>
+            @if (missionValues.length > 0) {
+              <div class="chip-group">
+                <span class="chip-label">Values</span>
+                <mat-chip-set>
+                  @for (v of missionValues; track v) {
+                    <mat-chip>{{ v }}</mat-chip>
+                  }
+                </mat-chip-set>
+              </div>
+            }
+            @if (missionDifferentiators.length > 0) {
+              <div class="chip-group">
+                <span class="chip-label">Differentiators</span>
+                <mat-chip-set>
+                  @for (d of missionDifferentiators; track d) {
+                    <mat-chip>{{ d }}</mat-chip>
+                  }
+                </mat-chip-set>
+              </div>
+            }
+          </section>
+        }
+
+        <!-- Voice -->
+        @if (mission?.desired_voice && mission!.desired_voice !== 'clear, confident, human') {
+          <section class="preview-section">
+            <h3 class="section-title">
+              <mat-icon>record_voice_over</mat-icon>
+              Brand Voice
+            </h3>
+            <p class="voice-description">{{ mission!.desired_voice }}</p>
+          </section>
+        }
+
+        <!-- Color Inspiration -->
+        @if (missionColorInspiration.length > 0) {
+          <section class="preview-section">
+            <h3 class="section-title">
+              <mat-icon>color_lens</mat-icon>
+              Color Inspiration
+            </h3>
+            <mat-chip-set>
+              @for (c of missionColorInspiration; track c) {
+                <mat-chip>{{ c }}</mat-chip>
+              }
+            </mat-chip-set>
+          </section>
+        }
+
+        <!-- Color Palettes -->
+        @if (missionPalettes.length > 0) {
+          <section class="preview-section">
+            <h3 class="section-title">
+              <mat-icon>palette</mat-icon>
+              Color Palettes
+            </h3>
+            @for (palette of missionPalettes; track palette.name; let i = $index) {
+              <div class="palette-card" [class.palette-selected]="isPaletteSelected(i)">
+                <div class="palette-header">
+                  <span class="palette-name">{{ palette.name }}</span>
+                  @if (isPaletteSelected(i)) {
+                    <mat-icon class="selected-icon">check_circle</mat-icon>
+                  }
+                </div>
+                @if (palette.description) {
+                  <p class="palette-description">{{ palette.description }}</p>
+                }
+                <div class="palette-swatches">
+                  @for (color of palette.colors; track color) {
+                    <div class="palette-swatch" [style.background]="parseColor(color)" [title]="color">
+                      <span class="swatch-label">{{ color }}</span>
+                    </div>
+                  }
+                </div>
+                @if (palette.sentiment) {
+                  <p class="palette-sentiment">{{ palette.sentiment }}</p>
+                }
+              </div>
+            }
+          </section>
+        }
+
+        <!-- Visual Style -->
+        @if (mission?.visual_style || mission?.interface_density) {
+          <section class="preview-section">
+            <h3 class="section-title">
+              <mat-icon>style</mat-icon>
+              Visual Style
+            </h3>
+            @if (mission!.visual_style) {
+              <div class="foundation-item">
+                <span class="label">Style</span>
+                <span class="value">{{ mission!.visual_style }}</span>
+              </div>
+            }
+            @if (mission!.interface_density) {
+              <div class="foundation-item">
+                <span class="label">Layout</span>
+                <span class="value">{{ mission!.interface_density }}</span>
+              </div>
+            }
+          </section>
+        }
+
+        <!-- Typography -->
+        @if (mission?.typography_preference) {
+          <section class="preview-section">
+            <h3 class="section-title">
+              <mat-icon>text_fields</mat-icon>
+              Typography
+            </h3>
+            <p class="voice-description">{{ mission!.typography_preference }}</p>
+          </section>
+        }
       </div>
     } @else {
+      <!-- Full output tabs — shown after orchestrator run -->
       <mat-tab-group class="preview-tabs" animationDuration="200ms">
         <mat-tab label="Summary">
           <div class="tab-content">
@@ -63,13 +215,31 @@
         </mat-tab>
         <mat-tab label="Color palette">
           <div class="tab-content">
+            @if (selectedPalette) {
+              <div class="palette-card palette-selected" style="margin-bottom: 1rem;">
+                <div class="palette-header">
+                  <span class="palette-name">{{ selectedPalette.name }}</span>
+                  <mat-icon class="selected-icon">check_circle</mat-icon>
+                </div>
+                <div class="palette-swatches">
+                  @for (color of selectedPalette.colors; track color) {
+                    <div class="palette-swatch" [style.background]="parseColor(color)" [title]="color">
+                      <span class="swatch-label">{{ color }}</span>
+                    </div>
+                  }
+                </div>
+                @if (selectedPalette.sentiment) {
+                  <p class="palette-sentiment">{{ selectedPalette.sentiment }}</p>
+                }
+              </div>
+            }
             @if (colorStories.length) {
               <div class="color-swatches">
                 @for (c of colorStories; track c) {
                   <div class="swatch" [style.background]="parseColor(c)" [title]="c">{{ c }}</div>
                 }
               </div>
-            } @else {
+            } @else if (!selectedPalette) {
               <p>Colors will appear from mood boards and design system.</p>
             }
           </div>
