@@ -12,6 +12,24 @@ Your task: Write a full first draft of the blog post in Markdown. The draft must
 - Comply with every rule in the style guide (voice, tone, paragraph length, no em dashes, no banned phrases, headings, hooks, wrap ups, etc.). If the guide says "never use X", do not use X.
 - Be publication ready in structure and style; copy editing can come later.
 
+VOICE AND COHERENCE — NON-NEGOTIABLE:
+Write like a knowledgeable person explaining this topic to a smart colleague — not like an encyclopedia or a chatbot summarising facts. Apply these rules to every paragraph you write:
+
+- Every paragraph must have a clear arc: introduce an idea, develop it, close it. Do not write a paragraph that is just a collection of related sentences pointing in roughly the same direction.
+- Every sentence must follow logically from the one before it. Before writing a new sentence, ask: does this grow naturally out of what I just said? If not, add a bridging phrase or reorder.
+- Vary sentence length and rhythm deliberately. Mix short, punchy sentences with longer explanatory ones. Walls of same-length sentences are exhausting to read.
+- Connect paragraphs with real transitions — transitions that reference what just happened, not mechanical connectors. Wrong: "Additionally, X is important." Right: "That fragility is exactly what makes X so valuable in practice."
+- Address the reader as "you" at least a few times. A post that never speaks to the reader feels cold and academic.
+- Ground abstract ideas in concrete, specific scenarios. Don't say "a company might want to improve performance." Say what kind of company, what they were doing, what changed.
+
+BANNED PATTERNS — never write these under any circumstances:
+- Hollow openers: "In today's fast-paced world", "In the ever-evolving landscape of", "In an era where", "Now more than ever", "As we navigate", "With the rise of", "As technology continues to evolve"
+- Filler phrases: "It's worth noting that", "It's important to understand that", "It bears mentioning", "It's no secret that", "Needless to say", "Of course,", "As mentioned above"
+- Empty affirmations: "This is a game-changer", "This is incredibly important", "This is essential for success", "Harnessing the power of", "Leveraging X to unlock Y"
+- Mechanical transitions used as paragraph openers with no real meaning: "Furthermore,", "Moreover,", "Additionally,", "In conclusion,", "To summarize,"
+- Narrated lists disguised as prose: "First, X. Second, Y. Third, Z. Finally, W." with no analytical connection between the points
+- Three or more consecutive sections that are purely bullet or numbered lists — the narrative must carry the piece
+
 CRITICAL RULES:
 - You MUST output the ENTIRE blog post from start to finish. Never output a partial draft.
 - Never use placeholders like "[rest of post remains the same]" or "[unchanged]" or "..." to skip sections.
@@ -36,6 +54,19 @@ MANDATORY — APPLY EVERY FEEDBACK ITEM:
 - For consider items, apply the change if it improves the piece.
 - Preserve the draft's structure and substance. Only change what the feedback targets. Do not remove content unless the feedback explicitly asks for it.
 
+WHEN FIXING FLOW, COHERENCE, OR VOICE ISSUES:
+- To fix a choppy section: rewrite it so each sentence grows from the one before it. Add a specific bridging phrase or restructure the argument so the logic is audible on the page.
+- To fix AI writing patterns: delete the banned phrase entirely and rewrite the sentence to say the thing directly. Never replace "It's worth noting that X" with another hollow framing — just say X.
+- To fix a generic example: replace it with a specific, concrete scenario. Name the situation, the people involved (as a type), and what changed.
+- To fix a cold, impersonal section: add "you" or "your", or frame the advice in terms of what the reader will experience or gain.
+- To fix a paragraph that is just loosely related facts: identify the central argument, then rewrite so every sentence supports and develops that single idea.
+
+BANNED PATTERNS — never write these in the revised draft, even when not directly flagged by feedback:
+- "In today's fast-paced world", "In the ever-evolving landscape of", "Now more than ever", "As we navigate", "With the rise of"
+- "It's worth noting that", "It's important to understand that", "It bears mentioning", "Needless to say"
+- "This is a game-changer", "This is incredibly important", "Harnessing the power of", "Leveraging X to unlock Y"
+- "Furthermore,", "Moreover,", "Additionally,", "In conclusion,", "To summarize," as paragraph openers with no real connective meaning
+
 You MUST also comply with the style guide in the revised draft (headings descriptive, 8th grade reading level, concrete hook, one practical next step in the conclusion, technical accuracy).
 
 CRITICAL RULES:
@@ -55,7 +86,19 @@ You will be given:
 2. One feedback item: severity, category, location, issue description, and optionally a concrete Suggestion.
 3. The current draft (Markdown).
 
-Apply only this single feedback item. Use the Suggestion when provided. Preserve the rest of the draft; change only what is needed to fix this item. Do not re-evaluate or address other feedback. Do not introduce violations of the style guide (e.g. do not add banned phrases or generic openers).
+Apply only this single feedback item. Use the Suggestion when provided. Preserve the rest of the draft; change only what is needed to fix this item. Do not re-evaluate or address other feedback.
+
+WHEN FIXING FLOW OR VOICE ISSUES:
+- Choppy prose: rewrite so each sentence grows naturally from the one before it. Add bridging phrases or restructure so the logic is visible.
+- AI writing patterns: delete the hollow phrase and say the thing directly. Never swap one filler phrase for another.
+- Generic examples: replace with a specific, concrete scenario — name the situation and what changed.
+- Cold/impersonal sections: add "you"/"your" or frame advice in terms of what the reader experiences.
+
+NEVER introduce these patterns in the revised text:
+- "In today's fast-paced world", "In the ever-evolving landscape of", "Now more than ever", "With the rise of"
+- "It's worth noting that", "It's important to understand that", "It bears mentioning", "Needless to say"
+- "This is a game-changer", "This is incredibly important", "Harnessing the power of", "Leveraging X to unlock Y"
+- "Furthermore,", "Moreover,", "Additionally," as hollow paragraph openers
 
 CRITICAL: Output the ENTIRE blog post from start to finish. Never use placeholders like "[unchanged]" or "...". Every section must be present.
 
