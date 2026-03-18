@@ -132,7 +132,7 @@ class Orchestrator:
         return [
             {
                 "task_id": f"task_{ctx.phase.lower()}_{ctx.run_id}",
-                "owner_agent": "design_lead",
+                "owner_agent": "startup_advisor_orchestrator",
                 "inputs": [{"artifact_type": "intake"}],
                 "outputs_expected": ["artifact"],
                 "acceptance_criteria": ["valid envelope", "phase aligned"],
