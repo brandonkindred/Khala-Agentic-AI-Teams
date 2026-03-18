@@ -1,0 +1,84 @@
+<mat-card class="jobs-card">
+  <mat-card-header>
+    <mat-card-title>
+      <mat-icon>work_history</mat-icon>
+      Pipeline Runs
+    </mat-card-title>
+  </mat-card-header>
+
+  <mat-card-content>
+    @if (jobs.length === 0) {
+      <p class="no-jobs">No pipeline runs yet. Configure and run your first sales pipeline above.</p>
+    }
+
+    @if (runningJobs.length > 0) {
+      <div class="jobs-list-section">
+        <p class="list-section-title">Running</p>
+        <div class="jobs-list">
+          @for (job of runningJobs; track job.job_id) {
+            <button
+              class="job-item"
+              [class.selected]="selectedJobId === job.job_id"
+              (click)="selectJob(job.job_id)"
+            >
+              <div class="job-item-top">
+                <span class="job-brief">{{ job.product_name }}</span>
+                <span class="job-status-pill status-{{ job.status }}">{{ job.status }}</span>
+              </div>
+              <div class="job-stage">
+                <mat-icon class="stage-icon">{{ job.status === 'pending' ? 'schedule' : 'sync' }}</mat-icon>
+                {{ stageLabel(job.current_stage) }}
+              </div>
+              <mat-progress-bar
+                mode="determinate"
+                [value]="job.progress"
+                class="job-progress"
+              />
+              <span class="job-time">{{ timeAgo(job.last_updated_at) }}</span>
+            </button>
+          }
+        </div>
+      </div>
+    }
+
+    @if (completedJobs.length > 0) {
+      <div class="jobs-list-section">
+        @if (runningJobs.length > 0) {
+          <div class="panel-divider"></div>
+        }
+        <p class="list-section-title">Recent Runs</p>
+        <div class="jobs-list">
+          @for (job of completedJobs; track job.job_id) {
+            <button
+              class="job-item"
+              [class.selected]="selectedJobId === job.job_id"
+              (click)="selectJob(job.job_id)"
+            >
+              <div class="job-item-top">
+                <span class="job-brief">{{ job.product_name }}</span>
+                <div class="job-item-actions">
+                  <span class="job-status-pill status-{{ job.status }}">{{ job.status }}</span>
+                  @if (isTerminal(job)) {
+                    <button
+                      mat-icon-button
+                      class="delete-btn"
+                      [matTooltip]="'Delete job'"
+                      (click)="deleteJob($event, job.job_id)"
+                    >
+                      <mat-icon>delete_outline</mat-icon>
+                    </button>
+                  }
+                </div>
+              </div>
+              <div class="job-stage">
+                <mat-icon class="stage-icon">{{ job.status === 'completed' ? 'check_circle' : 'error_outline' }}</mat-icon>
+                {{ stageLabel(job.current_stage) }}
+              </div>
+              <span class="job-time">{{ timeAgo(job.last_updated_at) }}</span>
+            </button>
+          }
+        </div>
+      </div>
+    }
+  </mat-card-content>
+</mat-card>
