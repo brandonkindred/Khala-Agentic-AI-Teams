@@ -6,6 +6,7 @@ Accepts a request dict (serializable) so Temporal can pass it to activities.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -112,6 +113,26 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
         start_blog_job(job_id)
     job_updater(work_dir=str(work_dir))
 
+    stop_heartbeat = threading.Event()
+
+    def _pipeline_heartbeat() -> None:
+        """Keep last_heartbeat_at fresh during long LLM-heavy phases (no phase callback)."""
+        while not stop_heartbeat.wait(30.0):
+            if update_blog_job is not None:
+                try:
+                    update_blog_job(job_id)
+                except Exception:
+                    pass
+
+    hb_thread: Optional[threading.Thread] = None
+    if update_blog_job is not None:
+        hb_thread = threading.Thread(
+            target=_pipeline_heartbeat,
+            name=f"blog-pipeline-hb-{job_id[:12]}",
+            daemon=True,
+        )
+        hb_thread.start()
+
     try:
         research_result, review_result, draft_result, status = run_pipeline(
             brief_input,
@@ -141,6 +162,10 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
     except Exception as e:
         logger.exception("Unexpected error in pipeline for job %s", job_id)
         _fail_job(job_id, str(e))
+    finally:
+        stop_heartbeat.set()
+        if hb_thread is not None:
+            hb_thread.join(timeout=2.0)
 
 
 def _fail_job(job_id: str, error: str, failed_phase: Optional[str] = None) -> None:
