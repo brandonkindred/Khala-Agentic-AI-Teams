@@ -18,14 +18,14 @@ def test_registry_lists_agents_with_metadata():
 
 def test_find_assisting_agents_matches_required_skills_and_problem_keywords():
     matches = _registry().find_assisting_agents(
-        problem_description="Need a UI accessibility review for component specs",
-        required_skills=["accessibility_review"],
+        problem_description="Need customer discovery interviews and ICP definition for our startup",
+        required_skills=["customer_discovery"],
         limit=3,
     )
     assert matches
     top = matches[0]
-    assert top["agent_id"] == "design_lead"
-    assert "accessibility_review" in top["match"]["skills"]
+    assert top["agent_id"] == "customer_discovery_advisor"
+    assert "customer_discovery" in top["match"]["skills"]
 
 
 def test_find_assisting_agents_returns_empty_without_matching_skills():

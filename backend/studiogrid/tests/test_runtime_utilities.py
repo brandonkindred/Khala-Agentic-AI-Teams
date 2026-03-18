@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from studiogrid.runtime.errors import PermissionError, SchemaValidationError
 from studiogrid.runtime.router import PhaseRouter
 from studiogrid.runtime.tool_factory import ToolFactory

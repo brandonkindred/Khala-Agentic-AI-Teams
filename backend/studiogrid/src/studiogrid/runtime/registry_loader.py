@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -9,12 +10,15 @@ import yaml
 class RegistryLoader:
     def __init__(self, root: Path) -> None:
         self.root = root
-        self._registry = None
+        self._registry: dict | None = None
+        self._lock = threading.Lock()
 
     def _load(self) -> dict:
         if self._registry is None:
-            with (self.root / "workflows" / "agent_registry.yaml").open("r", encoding="utf-8") as f:
-                self._registry = yaml.safe_load(f)
+            with self._lock:
+                if self._registry is None:
+                    with (self.root / "workflows" / "agent_registry.yaml").open("r", encoding="utf-8") as f:
+                        self._registry = yaml.safe_load(f)
         return self._registry
 
     def get_agent(self, agent_id: str) -> dict:
@@ -25,7 +29,9 @@ class RegistryLoader:
         agents = self._load().get("agents", {})
         return [{"agent_id": agent_id, **cfg} for agent_id, cfg in agents.items()]
 
-    def find_assisting_agents(self, *, problem_description: str, required_skills: list[str], limit: int | None = None) -> list[dict[str, Any]]:
+    def find_assisting_agents(
+        self, *, problem_description: str, required_skills: list[str], limit: int | None = None
+    ) -> list[dict[str, Any]]:
         description_tokens = self._tokenize(problem_description)
         needed_skills = {skill.strip().lower() for skill in required_skills if skill.strip()}
         scored: list[dict[str, Any]] = []

@@ -50,8 +50,6 @@ def cmd_decision_choose(args: argparse.Namespace) -> None:
     _print(orch.get_decision(decision_id=args.decision_id))
 
 
-
-
 def _build_registry() -> RegistryLoader:
     root = Path(__file__).resolve().parent
     return RegistryLoader(root)
@@ -79,6 +77,7 @@ def cmd_registry_find(args: argparse.Namespace) -> None:
             "should_spawn_sub_agents": len(candidates) == 0,
         }
     )
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="studiogrid")

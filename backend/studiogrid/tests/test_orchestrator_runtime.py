@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from studiogrid.runtime.errors import SchemaValidationError
 from studiogrid.runtime.orchestrator import Orchestrator, RunContext
 from studiogrid.runtime.storage.postgres_store import PostgresStore
