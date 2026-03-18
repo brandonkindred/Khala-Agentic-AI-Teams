@@ -122,6 +122,15 @@ TEAM_CONFIGS: Dict[str, TeamConfig] = {
         description="Design-system multi-agent workflow: wireframes, design system, hi-fi, handoff",
         tags=["design", "ux"],
     ),
+    "sales_team": TeamConfig(
+        name="AI Sales Team",
+        prefix="/api/sales",
+        description=(
+            "Full B2B sales pod: prospecting, cold outreach, qualification, nurturing, "
+            "discovery, proposals, and closing — powered by AWS Strands agents"
+        ),
+        tags=["sales", "crm", "pipeline", "outreach"],
+    ),
 }
 
 

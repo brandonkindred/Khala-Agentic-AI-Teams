@@ -112,6 +112,7 @@ SHUTDOWN_HOOKS: Dict[str, tuple] = {
     "accessibility_audit": ("accessibility_audit_team.api.main", "mark_all_running_jobs_failed"),
     "nutrition_meal_planning": ("nutrition_meal_planning_team.shared.job_store", "mark_all_running_jobs_failed"),
     "planning_v3": ("planning_v3_team.shared.job_store", "mark_all_running_jobs_failed"),
+    "sales_team": ("sales_team.api.main", "mark_all_running_jobs_failed"),
 }
 
 
@@ -350,6 +351,20 @@ def _try_mount_studio_grid(app: FastAPI) -> bool:
         return False
 
 
+def _try_mount_sales_team(app: FastAPI) -> bool:
+    """Mount AI Sales Team API."""
+    try:
+        from sales_team.api.main import app as sales_app
+
+        config = TEAM_CONFIGS["sales_team"]
+        app.mount(config.prefix, sales_app)
+        logger.info("Mounted %s at %s", config.name, config.prefix)
+        return True
+    except ImportError as e:
+        logger.warning("Could not mount Sales Team API: %s", e)
+        return False
+
+
 def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
     """Mount all enabled team APIs and return mount status."""
     mount_functions = {
@@ -368,6 +383,7 @@ def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
         "planning_v3": _try_mount_planning_v3,
         "coding_team": _try_mount_coding_team,
         "studio_grid": _try_mount_studio_grid,
+        "sales_team": _try_mount_sales_team,
     }
 
     results = {}
@@ -444,6 +460,7 @@ Unified API server providing access to all Strands Agent team capabilities.
 - **AI Systems** (`/api/ai-systems`) - Spec-driven AI agent system factory
 - **Investment** (`/api/investment`) - Investment analysis and portfolio management
 - **Nutrition & Meal Planning** (`/api/nutrition-meal-planning`) - Personal nutrition and meal planning with learning from feedback
+- **AI Sales Team** (`/api/sales`) - Full B2B sales pod: prospecting, outreach, qualification, nurturing, proposals, closing
 
 Each team's endpoints are available under their respective prefix.
 Visit the team-specific `/docs` endpoint for detailed API documentation
