@@ -51,7 +51,8 @@
   gap: 16px;
   align-items: flex-start;
   padding: 16px;
-  background: rgba(0, 0, 0, 0.02);
+  background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
+  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.08));
   border-radius: 8px;
 
   .summary-item {
@@ -130,18 +131,19 @@
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  background: #ffebee;
-  color: #c62828;
+  background: var(--mat-sys-error-container, #ffebee);
+  color: var(--mat-sys-on-error-container, #c62828);
   border-radius: 4px;
   margin-bottom: 16px;
 
   mat-icon {
-    color: #c62828;
+    color: var(--mat-sys-error, #f44336);
   }
 }
 
 .decision-section {
-  background: rgba(0, 0, 0, 0.02);
+  background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
+  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.08));
   border-radius: 8px;
   padding: 24px;
   margin-top: 16px;

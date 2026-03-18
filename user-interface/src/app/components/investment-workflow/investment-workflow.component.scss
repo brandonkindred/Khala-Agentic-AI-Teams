@@ -30,7 +30,7 @@
   justify-content: center;
   gap: 16px;
   padding: 48px;
-  color: rgba(0, 0, 0, 0.54);
+  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.54));
 }
 
 .error-banner {
@@ -38,12 +38,12 @@
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  background: #ffebee;
-  color: #c62828;
+  background: var(--mat-sys-error-container, #ffebee);
+  color: var(--mat-sys-on-error-container, #c62828);
   border-radius: 4px;
 
   mat-icon {
-    color: #c62828;
+    color: var(--mat-sys-error, #f44336);
   }
 }
 
@@ -104,23 +104,23 @@
 
 .queue-card {
   padding: 20px;
-  background: rgba(0, 0, 0, 0.02);
+  background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
   border-radius: 12px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  transition: all 0.2s ease;
+  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.08));
+  transition: border-color 0.15s ease;
 
   &:hover {
-    border-color: rgba(0, 0, 0, 0.16);
+    border-color: var(--mat-sys-outline, rgba(0, 0, 0, 0.2));
   }
 
   &.has-items {
-    background: rgba(33, 150, 243, 0.04);
-    border-color: rgba(33, 150, 243, 0.2);
+    background: var(--mat-sys-primary-container, #e3f2fd);
+    border-color: rgba(33, 150, 243, 0.3);
   }
 
   &.escalation.has-items {
-    background: rgba(244, 67, 54, 0.04);
-    border-color: rgba(244, 67, 54, 0.2);
+    background: var(--mat-sys-error-container, #ffebee);
+    border-color: rgba(244, 67, 54, 0.3);
   }
 
   .queue-header {
@@ -228,7 +228,7 @@
 }
 
 .no-items-text {
-  color: rgba(0, 0, 0, 0.54);
+  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.54));
   font-style: italic;
   text-align: center;
   padding: 24px;

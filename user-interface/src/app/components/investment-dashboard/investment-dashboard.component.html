@@ -1,204 +1,193 @@
-<div class="dashboard-container">
-  <!-- Header -->
-  <header class="dashboard-header">
-    <div class="header-content">
-      <div class="title-section">
-        <mat-icon class="header-icon">account_balance</mat-icon>
-        <div>
-          <h1>Investment Team Dashboard</h1>
-          <p class="subtitle">Portfolio management, strategy validation, and promotion workflows</p>
-        </div>
-      </div>
-      <div class="header-actions">
-        <div class="health-indicator" [class]="healthStatus">
-          @switch (healthStatus) {
-            @case ('checking') {
-              <mat-icon>hourglass_empty</mat-icon>
-              <span>Checking...</span>
-            }
-            @case ('healthy') {
-              <mat-icon>check_circle</mat-icon>
-              <span>API Online</span>
-            }
-            @case ('unhealthy') {
-              <mat-icon>error</mat-icon>
-              <span>API Offline</span>
-            }
-          }
-        </div>
-      </div>
-    </div>
-  </header>
+<h1 class="mat-headline-5">Investment</h1>
 
-  <!-- Active Profile Banner -->
-  @if (currentIPS) {
-    <div class="profile-banner">
-      <div class="profile-info">
-        <mat-icon>person</mat-icon>
-        <div class="profile-details">
-          <span class="profile-label">Active Profile</span>
-          <span class="profile-id">{{ currentIPS.profile.user_id }}</span>
-        </div>
-        <mat-chip>{{ currentIPS.profile.risk_tolerance | titlecase }} Risk</mat-chip>
-        <mat-chip>{{ currentIPS.default_mode | titlecase }}</mat-chip>
-        @if (currentIPS.live_trading_enabled) {
-          <mat-chip color="primary">Live Enabled</mat-chip>
-        }
-      </div>
-      <button mat-stroked-button color="warn" (click)="clearProfile()" matTooltip="Clear current profile">
-        <mat-icon>clear</mat-icon>
-        Clear
-      </button>
-    </div>
-  }
-
-  <!-- Tab Navigation -->
-  <mat-tab-group [(selectedIndex)]="selectedTabIndex" animationDuration="200ms" class="dashboard-tabs">
-    <!-- Profile Tab -->
-    <mat-tab>
-      <ng-template mat-tab-label>
-        <mat-icon>person_add</mat-icon>
-        <span>Profile</span>
-      </ng-template>
-      <div class="tab-content">
-        @if (!currentIPS || showProfileForm) {
-          <app-investment-profile-form
-            (profileCreated)="onProfileCreated($event)"
-            (cancelled)="onProfileFormCancelled()"
-          ></app-investment-profile-form>
-        } @else {
-          <mat-card class="profile-summary-card">
-            <mat-card-header>
-              <mat-icon mat-card-avatar>verified_user</mat-icon>
-              <mat-card-title>Investment Policy Statement</mat-card-title>
-              <mat-card-subtitle>Profile for {{ currentIPS.profile.user_id }}</mat-card-subtitle>
-            </mat-card-header>
-            <mat-card-content>
-              <div class="ips-grid">
-                <div class="ips-item">
-                  <span class="label">Risk Tolerance</span>
-                  <span class="value">{{ currentIPS.profile.risk_tolerance | titlecase }}</span>
-                </div>
-                <div class="ips-item">
-                  <span class="label">Time Horizon</span>
-                  <span class="value">{{ currentIPS.profile.time_horizon_years }} years</span>
-                </div>
-                <div class="ips-item">
-                  <span class="label">Max Drawdown</span>
-                  <span class="value">{{ currentIPS.profile.max_drawdown_tolerance_pct }}%</span>
-                </div>
-                <div class="ips-item">
-                  <span class="label">Investable Assets</span>
-                  <span class="value">${{ currentIPS.profile.net_worth.investable_assets | number }}</span>
-                </div>
-                <div class="ips-item">
-                  <span class="label">Default Mode</span>
-                  <span class="value">{{ currentIPS.default_mode | titlecase }}</span>
-                </div>
-                <div class="ips-item">
-                  <span class="label">Rebalance Frequency</span>
-                  <span class="value">{{ currentIPS.rebalance_frequency | titlecase }}</span>
-                </div>
-              </div>
-
-              <mat-divider></mat-divider>
-
-              <div class="preferences-section">
-                <h4>Preferences</h4>
-                <div class="preference-chips">
-                  @if (currentIPS.profile.preferences.crypto_allowed) {
-                    <mat-chip>Crypto Allowed</mat-chip>
-                  }
-                  @if (currentIPS.profile.preferences.options_allowed) {
-                    <mat-chip>Options Allowed</mat-chip>
-                  }
-                  @if (currentIPS.profile.preferences.leverage_allowed) {
-                    <mat-chip>Leverage Allowed</mat-chip>
-                  }
-                  @if (currentIPS.live_trading_enabled) {
-                    <mat-chip color="primary">Live Trading</mat-chip>
-                  }
-                  @if (currentIPS.human_approval_required_for_live) {
-                    <mat-chip>Human Approval Required</mat-chip>
-                  }
-                </div>
-              </div>
-            </mat-card-content>
-            <mat-card-actions>
-              <button mat-stroked-button (click)="showProfileForm = true">
-                <mat-icon>add</mat-icon>
-                Create New Profile
-              </button>
-            </mat-card-actions>
-          </mat-card>
-        }
-      </div>
-    </mat-tab>
-
-    <!-- Proposals Tab -->
-    <mat-tab>
-      <ng-template mat-tab-label>
-        <mat-icon>pie_chart</mat-icon>
-        <span>Proposals</span>
-      </ng-template>
-      <div class="tab-content">
-        <app-investment-proposal
-          [ips]="currentIPS"
-          [existingProposal]="currentProposal"
-          (proposalCreated)="onProposalCreated($event)"
-        ></app-investment-proposal>
-      </div>
-    </mat-tab>
-
-    <!-- Strategies Tab -->
-    <mat-tab>
-      <ng-template mat-tab-label>
-        <mat-icon>psychology</mat-icon>
-        <span>Strategies</span>
-      </ng-template>
-      <div class="tab-content">
-        <app-investment-strategy
-          [existingStrategy]="currentStrategy"
-          (strategyCreated)="onStrategyCreated($event)"
-        ></app-investment-strategy>
-      </div>
-    </mat-tab>
-
-    <!-- Promotion Tab -->
-    <mat-tab>
-      <ng-template mat-tab-label>
-        <mat-icon>gavel</mat-icon>
-        <span>Promotion</span>
-      </ng-template>
-      <div class="tab-content">
-        <app-investment-promotion
-          [ips]="currentIPS"
-          [strategy]="currentStrategy"
-          (decisionMade)="onDecisionMade($event)"
-        ></app-investment-promotion>
-      </div>
-    </mat-tab>
-
-    <!-- Workflow Tab -->
-    <mat-tab>
-      <ng-template mat-tab-label>
-        <mat-icon>account_tree</mat-icon>
-        <span>Workflow</span>
-      </ng-template>
-      <div class="tab-content">
-        <app-investment-workflow></app-investment-workflow>
-      </div>
-    </mat-tab>
-
-    <!-- Strategy Lab Tab -->
-    <mat-tab>
-      <ng-template mat-tab-label>
-        <mat-icon>science</mat-icon>
-        <span>Strategy Lab</span>
-      </ng-template>
-      <div class="tab-content">
-        <app-strategy-lab></app-strategy-lab>
-      </div>
-    </mat-tab>
-  </mat-tab-group>
+<div class="page-header">
+  <p class="mat-body-2 page-subtitle">Portfolio management, strategy validation, and promotion workflows</p>
+  <div class="health-indicator" [class]="healthStatus">
+    @switch (healthStatus) {
+      @case ('checking') {
+        <mat-icon>hourglass_empty</mat-icon>
+        <span>Checking...</span>
+      }
+      @case ('healthy') {
+        <mat-icon>check_circle</mat-icon>
+        <span>API Online</span>
+      }
+      @case ('unhealthy') {
+        <mat-icon>error</mat-icon>
+        <span>API Offline</span>
+      }
+    }
+  </div>
 </div>
+
+<!-- Active Profile Banner -->
+@if (currentIPS) {
+  <div class="profile-banner">
+    <div class="profile-info">
+      <mat-icon>person</mat-icon>
+      <div class="profile-details">
+        <span class="profile-label">Active Profile</span>
+        <span class="profile-id">{{ currentIPS.profile.user_id }}</span>
+      </div>
+      <mat-chip>{{ currentIPS.profile.risk_tolerance | titlecase }} Risk</mat-chip>
+      <mat-chip>{{ currentIPS.default_mode | titlecase }}</mat-chip>
+      @if (currentIPS.live_trading_enabled) {
+        <mat-chip color="primary">Live Enabled</mat-chip>
+      }
+    </div>
+    <button mat-stroked-button color="warn" (click)="clearProfile()" matTooltip="Clear current profile">
+      <mat-icon>clear</mat-icon>
+      Clear
+    </button>
+  </div>
+}
+
+<!-- Tab Navigation -->
+<mat-tab-group [(selectedIndex)]="selectedTabIndex" animationDuration="200ms" class="dashboard-tabs">
+  <!-- Profile Tab -->
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>person_add</mat-icon>
+      <span>Profile</span>
+    </ng-template>
+    <div class="tab-content">
+      @if (!currentIPS || showProfileForm) {
+        <app-investment-profile-form
+          (profileCreated)="onProfileCreated($event)"
+          (cancelled)="onProfileFormCancelled()"
+        ></app-investment-profile-form>
+      } @else {
+        <mat-card class="profile-summary-card">
+          <mat-card-header>
+            <mat-icon mat-card-avatar>verified_user</mat-icon>
+            <mat-card-title>Investment Policy Statement</mat-card-title>
+            <mat-card-subtitle>Profile for {{ currentIPS.profile.user_id }}</mat-card-subtitle>
+          </mat-card-header>
+          <mat-card-content>
+            <div class="ips-grid">
+              <div class="ips-item">
+                <span class="label">Risk Tolerance</span>
+                <span class="value">{{ currentIPS.profile.risk_tolerance | titlecase }}</span>
+              </div>
+              <div class="ips-item">
+                <span class="label">Time Horizon</span>
+                <span class="value">{{ currentIPS.profile.time_horizon_years }} years</span>
+              </div>
+              <div class="ips-item">
+                <span class="label">Max Drawdown</span>
+                <span class="value">{{ currentIPS.profile.max_drawdown_tolerance_pct }}%</span>
+              </div>
+              <div class="ips-item">
+                <span class="label">Investable Assets</span>
+                <span class="value">${{ currentIPS.profile.net_worth.investable_assets | number }}</span>
+              </div>
+              <div class="ips-item">
+                <span class="label">Default Mode</span>
+                <span class="value">{{ currentIPS.default_mode | titlecase }}</span>
+              </div>
+              <div class="ips-item">
+                <span class="label">Rebalance Frequency</span>
+                <span class="value">{{ currentIPS.rebalance_frequency | titlecase }}</span>
+              </div>
+            </div>
+
+            <mat-divider></mat-divider>
+
+            <div class="preferences-section">
+              <h4>Preferences</h4>
+              <div class="preference-chips">
+                @if (currentIPS.profile.preferences.crypto_allowed) {
+                  <mat-chip>Crypto Allowed</mat-chip>
+                }
+                @if (currentIPS.profile.preferences.options_allowed) {
+                  <mat-chip>Options Allowed</mat-chip>
+                }
+                @if (currentIPS.profile.preferences.leverage_allowed) {
+                  <mat-chip>Leverage Allowed</mat-chip>
+                }
+                @if (currentIPS.live_trading_enabled) {
+                  <mat-chip color="primary">Live Trading</mat-chip>
+                }
+                @if (currentIPS.human_approval_required_for_live) {
+                  <mat-chip>Human Approval Required</mat-chip>
+                }
+              </div>
+            </div>
+          </mat-card-content>
+          <mat-card-actions>
+            <button mat-stroked-button (click)="showProfileForm = true">
+              <mat-icon>add</mat-icon>
+              Create New Profile
+            </button>
+          </mat-card-actions>
+        </mat-card>
+      }
+    </div>
+  </mat-tab>
+
+  <!-- Proposals Tab -->
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>pie_chart</mat-icon>
+      <span>Proposals</span>
+    </ng-template>
+    <div class="tab-content">
+      <app-investment-proposal
+        [ips]="currentIPS"
+        [existingProposal]="currentProposal"
+        (proposalCreated)="onProposalCreated($event)"
+      ></app-investment-proposal>
+    </div>
+  </mat-tab>
+
+  <!-- Strategies Tab -->
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>psychology</mat-icon>
+      <span>Strategies</span>
+    </ng-template>
+    <div class="tab-content">
+      <app-investment-strategy
+        [existingStrategy]="currentStrategy"
+        (strategyCreated)="onStrategyCreated($event)"
+      ></app-investment-strategy>
+    </div>
+  </mat-tab>
+
+  <!-- Promotion Tab -->
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>gavel</mat-icon>
+      <span>Promotion</span>
+    </ng-template>
+    <div class="tab-content">
+      <app-investment-promotion
+        [ips]="currentIPS"
+        [strategy]="currentStrategy"
+        (decisionMade)="onDecisionMade($event)"
+      ></app-investment-promotion>
+    </div>
+  </mat-tab>
+
+  <!-- Workflow Tab -->
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>account_tree</mat-icon>
+      <span>Workflow</span>
+    </ng-template>
+    <div class="tab-content">
+      <app-investment-workflow></app-investment-workflow>
+    </div>
+  </mat-tab>
+
+  <!-- Strategy Lab Tab -->
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>science</mat-icon>
+      <span>Strategy Lab</span>
+    </ng-template>
+    <div class="tab-content">
+      <app-strategy-lab></app-strategy-lab>
+    </div>
+  </mat-tab>
+</mat-tab-group>
