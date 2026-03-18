@@ -35,3 +35,23 @@ def test_find_assisting_agents_returns_empty_without_matching_skills():
         limit=3,
     )
     assert matches == []
+
+
+def test_find_assisting_agents_routes_startup_strategy_to_orchestrator():
+    matches = _registry().find_assisting_agents(
+        problem_description="Founder needs startup strategy help and wants advisor guidance",
+        required_skills=["startup_strategy"],
+        limit=3,
+    )
+    assert matches
+    assert matches[0]["agent_id"] == "startup_advisor_orchestrator"
+
+
+def test_find_assisting_agents_matches_growth_requests():
+    matches = _registry().find_assisting_agents(
+        problem_description="Need better GTM channel and growth positioning experiments",
+        required_skills=["go_to_market"],
+        limit=3,
+    )
+    assert matches
+    assert matches[0]["agent_id"] == "growth_gtm_advisor"
