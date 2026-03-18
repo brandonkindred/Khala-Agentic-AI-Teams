@@ -4,7 +4,7 @@ Integrations API: configure and list integrations (e.g. Slack).
 Endpoints:
 - GET    /api/integrations               -> list integrations (id, type, enabled, channel)
 - GET    /api/integrations/slack         -> Slack config detail (sensitive values masked)
-- PUT    /api/integrations/slack         -> save Slack config for webhook or bot mode
+- PUT    /api/integrations/slack         -> save Slack config (credentials, webhook, bot settings)
 - GET    /api/integrations/slack/oauth/connect   -> return Slack OAuth authorization URL
 - GET    /api/integrations/slack/oauth/callback  -> handle Slack OAuth redirect, store token
 - DELETE /api/integrations/slack/oauth   -> disconnect Slack OAuth (clear token)
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,6 +32,8 @@ from unified_api.integrations_store import (
     set_slack_oauth_token,
     verify_and_clear_oauth_state,
 )
+
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,8 @@ class SlackConfigUpdate(BaseModel):
         "webhook",
         description="Slack delivery mode: webhook (incoming webhook URL) or bot (bot token + default channel).",
     )
+    client_id: str = Field("", description="Slack app Client ID (required for OAuth).")
+    client_secret: str = Field("", description="Slack app Client Secret (required for OAuth).")
     webhook_url: str = Field("", description="Slack Incoming Webhook URL (https://hooks.slack.com/...).")
     bot_token: str = Field("", description="Slack bot token (xoxb-...) used with chat.postMessage.")
     default_channel: str = Field("", description="Default target channel for bot mode (e.g. #eng or C123...).")
@@ -72,8 +75,9 @@ class SlackConfigResponse(BaseModel):
 
     enabled: bool
     mode: Literal["webhook", "bot"] = "webhook"
+    client_id_configured: bool = Field(False, description="True if a Slack app Client ID is stored.")
     webhook_url: Optional[str] = None
-    webhook_configured: bool = Field(description="True if webhook URL is available (stored or env fallback).")
+    webhook_configured: bool = Field(description="True if webhook URL is stored.")
     bot_token_configured: bool = Field(False, description="True if a bot token is configured.")
     default_channel: str = ""
     channel_display_name: str = ""
@@ -110,6 +114,7 @@ def _build_slack_config_response(cfg: dict) -> SlackConfigResponse:
     return SlackConfigResponse(
         enabled=cfg["enabled"],
         mode=cfg.get("mode", "webhook"),
+        client_id_configured=bool(cfg.get("client_id")),
         webhook_url=None,  # never expose raw URL
         webhook_configured=bool(cfg.get("webhook_url")),
         bot_token_configured=bool(cfg.get("bot_token")),
@@ -157,10 +162,8 @@ def _get_redirect_uri(request: Request) -> str:
     return f"{base}/api/integrations/slack/oauth/callback"
 
 
-def _exchange_code(code: str, redirect_uri: str) -> dict:
+def _exchange_code(code: str, redirect_uri: str, client_id: str, client_secret: str) -> dict:
     """Exchange an OAuth authorization code for a bot token via Slack's API."""
-    client_id = os.getenv("SLACK_CLIENT_ID", "").strip()
-    client_secret = os.getenv("SLACK_CLIENT_SECRET", "").strip()
     body = urllib.parse.urlencode({
         "code": code,
         "client_id": client_id,
@@ -203,12 +206,21 @@ async def update_slack(body: SlackConfigUpdate) -> SlackConfigResponse:
         if body.mode == "webhook":
             _validate_webhook_url(webhook_url)
             if not webhook_url:
+                # Allow if already configured in store
+                cfg = get_slack_config()
+                if not cfg.get("webhook_url"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="webhook_url is required when mode=webhook and Slack is enabled.",
+                    )
+        else:
+            if bot_token:
+                _validate_bot_token(bot_token)
+            elif not get_slack_config().get("bot_token"):
                 raise HTTPException(
                     status_code=400,
-                    detail="webhook_url is required when mode=webhook and Slack is enabled.",
+                    detail="bot_token is required when mode=bot and Slack is enabled.",
                 )
-        else:
-            _validate_bot_token(bot_token)
             if not default_channel:
                 raise HTTPException(
                     status_code=400,
@@ -218,6 +230,8 @@ async def update_slack(body: SlackConfigUpdate) -> SlackConfigResponse:
     set_slack_config(
         enabled=body.enabled,
         mode=body.mode,
+        client_id=(body.client_id or "").strip(),
+        client_secret=(body.client_secret or "").strip(),
         webhook_url=webhook_url,
         bot_token=bot_token,
         default_channel=default_channel,
@@ -238,19 +252,21 @@ async def slack_oauth_connect(request: Request) -> SlackOAuthConnectResponse:
     """
     Return the Slack OAuth v2 authorization URL.
 
-    Requires SLACK_CLIENT_ID and SLACK_CLIENT_SECRET environment variables to be set.
-    The frontend should redirect the user (or open a popup) to the returned URL.
+    Requires Client ID and Client Secret to be saved via PUT /api/integrations/slack first.
     """
-    client_id = os.getenv("SLACK_CLIENT_ID", "").strip()
+    cfg = get_slack_config()
+    client_id = cfg.get("client_id", "").strip()
+    client_secret = cfg.get("client_secret", "").strip()
+
     if not client_id:
         raise HTTPException(
-            status_code=501,
-            detail="SLACK_CLIENT_ID is not configured. Set it in your environment to enable Slack OAuth.",
+            status_code=400,
+            detail="Slack Client ID is not configured. Enter it in the integrations settings first.",
         )
-    if not os.getenv("SLACK_CLIENT_SECRET", "").strip():
+    if not client_secret:
         raise HTTPException(
-            status_code=501,
-            detail="SLACK_CLIENT_SECRET is not configured. Set it in your environment to enable Slack OAuth.",
+            status_code=400,
+            detail="Slack Client Secret is not configured. Enter it in the integrations settings first.",
         )
 
     state = generate_oauth_state()
@@ -299,10 +315,18 @@ async def slack_oauth_callback(
         logger.warning("Slack OAuth state mismatch or expired")
         return RedirectResponse(url=f"{integrations_ui}?slack_error=invalid_state")
 
+    # Load credentials from store
+    cfg = get_slack_config()
+    client_id = cfg.get("client_id", "").strip()
+    client_secret = cfg.get("client_secret", "").strip()
+    if not client_id or not client_secret:
+        logger.error("Slack OAuth callback: client credentials missing from store")
+        return RedirectResponse(url=f"{integrations_ui}?slack_error=missing_credentials")
+
     # Exchange code for token
     try:
         redirect_uri = _get_redirect_uri(request)
-        result = _exchange_code(code, redirect_uri)
+        result = _exchange_code(code, redirect_uri, client_id, client_secret)
     except Exception as exc:
         logger.error("Slack OAuth token exchange failed: %s", exc)
         return RedirectResponse(url=f"{integrations_ui}?slack_error=token_exchange_failed")
@@ -334,6 +358,7 @@ async def slack_oauth_callback(
 async def slack_oauth_disconnect() -> SlackConfigResponse:
     """
     Disconnect Slack OAuth — removes the stored bot token, team info, and disables the integration.
+    Preserves app credentials (client_id, client_secret).
     Does not revoke the token at Slack's end (the user can do that via Slack's app management).
     """
     clear_slack_oauth()

@@ -1,6 +1,12 @@
 """
 Integrations store: file-backed persistence for integration config (e.g. Slack).
 
+Non-sensitive config (enabled, mode, channels, notification toggles, OAuth team info)
+is stored in JSON at {AGENT_CACHE}/integrations.json.
+
+Sensitive OAuth credentials (client_id, client_secret) are stored in an encrypted
+SQLite database via integration_credentials.py — never in the JSON file.
+
 JSON structure (integrations.json):
 {
   "slack": {
@@ -36,13 +42,21 @@ import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
+from unified_api.integration_credentials import (
+    delete_credential,
+    get_credential,
+    set_credential,
+)
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CACHE_DIR = ".agent_cache"
 _LOCK = threading.Lock()
 _OAUTH_STATE_TTL_SECONDS = 600  # 10 minutes
+
+_SLACK_SERVICE = "slack"
 
 
 def _get_integrations_path() -> Path:
@@ -87,20 +101,20 @@ def _write_raw(data: Dict[str, Any]) -> None:
 
 def get_slack_config() -> Dict[str, Any]:
     """
-    Return Slack config dict for webhook or bot posting modes.
-    If SLACK_WEBHOOK_URL env is set and webhook_url is empty in store, it is used as the webhook_url
-    (env override/fallback so deploy can set URL without UI).
+    Return Slack config dict. Non-sensitive fields come from the JSON store.
+    Sensitive credentials (client_id, client_secret) come from the encrypted DB.
     """
     with _LOCK:
         data = _read_raw()
     slack = data.get("slack") or {}
-    webhook_url = str(slack.get("webhook_url", "")).strip()
-    if not webhook_url:
-        webhook_url = os.getenv("SLACK_WEBHOOK_URL", "").strip()
     return {
         "enabled": bool(slack.get("enabled", False)),
         "mode": str(slack.get("mode", "webhook")).strip() or "webhook",
-        "webhook_url": webhook_url,
+        # Sensitive: from encrypted DB
+        "client_id": get_credential(_SLACK_SERVICE, "client_id"),
+        "client_secret": get_credential(_SLACK_SERVICE, "client_secret"),
+        # Non-sensitive: from JSON
+        "webhook_url": str(slack.get("webhook_url", "")).strip(),
         "bot_token": str(slack.get("bot_token", "")).strip(),
         "default_channel": str(slack.get("default_channel", "")).strip(),
         "channel_display_name": str(slack.get("channel_display_name", "")).strip(),
@@ -115,8 +129,10 @@ def get_slack_config() -> Dict[str, Any]:
 
 def set_slack_config(
     enabled: bool,
-    webhook_url: str,
+    webhook_url: str = "",
     mode: str = "webhook",
+    client_id: str = "",
+    client_secret: str = "",
     bot_token: str = "",
     default_channel: str = "",
     channel_display_name: str = "",
@@ -126,22 +142,29 @@ def set_slack_config(
     team_name: str = "",
     bot_user_id: str = "",
 ) -> None:
-    """Persist Slack config with atomic write. Preserves OAuth fields when not supplied."""
+    """
+    Persist Slack config. Sensitive credentials go to the encrypted DB;
+    all other fields go to the JSON store.
+    Preserves existing values when empty strings are passed.
+    """
     mode = (mode or "webhook").strip() or "webhook"
-    webhook_url = (webhook_url or "").strip()
-    bot_token = (bot_token or "").strip()
-    default_channel = (default_channel or "").strip()
-    channel_display_name = (channel_display_name or "").strip()
+
+    # Write credentials to encrypted DB (only if non-empty, to preserve existing)
+    if client_id.strip():
+        set_credential(_SLACK_SERVICE, "client_id", client_id.strip())
+    if client_secret.strip():
+        set_credential(_SLACK_SERVICE, "client_secret", client_secret.strip())
+
     with _LOCK:
         data = _read_raw()
         existing = data.get("slack") or {}
         data["slack"] = {
             "enabled": enabled,
             "mode": mode,
-            "webhook_url": webhook_url,
-            "bot_token": bot_token or existing.get("bot_token", ""),
-            "default_channel": default_channel,
-            "channel_display_name": channel_display_name,
+            "webhook_url": webhook_url.strip() or existing.get("webhook_url", ""),
+            "bot_token": bot_token.strip() or existing.get("bot_token", ""),
+            "default_channel": default_channel.strip(),
+            "channel_display_name": channel_display_name.strip(),
             "notify_open_questions": notify_open_questions,
             "notify_pa_responses": notify_pa_responses,
             # Preserve OAuth fields unless explicitly provided
@@ -162,7 +185,7 @@ def set_slack_oauth_token(
     """
     Store the result of a successful Slack OAuth exchange.
     Sets mode='bot', enabled=True, and saves team/user info.
-    Preserves existing channel and notification preferences.
+    Preserves existing channel, notification preferences, and app credentials.
     """
     with _LOCK:
         data = _read_raw()
@@ -186,7 +209,10 @@ def set_slack_oauth_token(
 
 
 def clear_slack_oauth() -> None:
-    """Disconnect Slack OAuth — removes bot token and team info, disables integration."""
+    """
+    Disconnect Slack OAuth — removes bot token and team info, disables integration.
+    Preserves app credentials (client_id, client_secret) in the encrypted DB.
+    """
     with _LOCK:
         data = _read_raw()
         existing = data.get("slack") or {}
@@ -205,6 +231,7 @@ def clear_slack_oauth() -> None:
         }
         data.pop("slack_oauth_state", None)
         _write_raw(data)
+    # Note: client_id and client_secret are intentionally preserved in the encrypted DB
 
 
 def generate_oauth_state() -> str:
@@ -250,7 +277,7 @@ def verify_and_clear_oauth_state(state: str) -> bool:
 def get_integrations_list() -> List[Dict[str, Any]]:
     """
     Return list of integration entries for GET /api/integrations.
-    Each entry: id, type, enabled, channel (no raw webhook_url).
+    Each entry: id, type, enabled, channel (no raw credentials).
     """
     with _LOCK:
         data = _read_raw()

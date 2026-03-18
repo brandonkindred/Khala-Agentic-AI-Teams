@@ -12,6 +12,7 @@ export type SlackMode = 'webhook' | 'bot';
 export interface SlackConfigResponse {
   enabled: boolean;
   mode: SlackMode;
+  client_id_configured: boolean;
   webhook_url: string | null;
   webhook_configured: boolean;
   bot_token_configured: boolean;
@@ -31,6 +32,8 @@ export interface SlackConfigResponse {
 export interface SlackConfigUpdate {
   enabled: boolean;
   mode: SlackMode;
+  client_id: string;
+  client_secret: string;
   webhook_url: string;
   bot_token: string;
   default_channel: string;
