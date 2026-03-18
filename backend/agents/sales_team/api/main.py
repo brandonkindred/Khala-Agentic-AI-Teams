@@ -296,7 +296,20 @@ def cancel_pipeline_job(job_id: str) -> CancelJobResponse:
     tags=["pipeline"],
 )
 def delete_pipeline_job(job_id: str) -> DeleteJobResponse:
-    """Delete a pipeline job from the store."""
+    """Delete a pipeline job from the store.
+
+    Returns 404 if the job does not exist and 409 if the job is still
+    pending or running (cancel it first before deleting).
+    """
+    job = _job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    current_status = job.get("status", JOB_STATUS_PENDING)
+    if current_status in (JOB_STATUS_PENDING, JOB_STATUS_RUNNING):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete an active job (status={current_status}). Cancel it first.",
+        )
     if not _job_manager.delete_job(job_id):
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     return DeleteJobResponse(job_id=job_id, message="Job deleted.")

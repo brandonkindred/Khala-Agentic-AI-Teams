@@ -3,6 +3,7 @@
 from .models import (
     ClosingStrategy,
     DealOutcome,
+    DealResult,
     DiscoveryPlan,
     IdealCustomerProfile,
     LearningInsights,
@@ -33,5 +34,6 @@ __all__ = [
     "ClosingStrategy",
     "StageOutcome",
     "DealOutcome",
+    "DealResult",
     "LearningInsights",
 ]

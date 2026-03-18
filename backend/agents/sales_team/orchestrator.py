@@ -406,18 +406,20 @@ class SalesPodOrchestrator:
 
         # Determine which prospects advance vs. go to nurture
         if qualified:
+            # Qualification ran — only explicitly advanced leads proceed downstream.
+            # Disqualified and stalled leads are intentionally excluded.
             advance = [q for q in qualified if q.recommended_action.lower().startswith("advance")]
             nurture_prospects = [
                 q.prospect for q in qualified
                 if not q.recommended_action.lower().startswith("advance")
                 and not q.recommended_action.lower().startswith("disqualify")
             ]
+            qualified_prospects = [q.prospect for q in advance]
         else:
-            # No qualification ran — advance all prospects
+            # No qualification ran — all prospects advance to downstream stages
             advance = []
             nurture_prospects = []
-            qualified_all = prospects  # type: ignore[assignment]
-        qualified_prospects = [q.prospect for q in advance] if advance else prospects
+            qualified_prospects = prospects
 
         # ------------------------------------------------------------------
         # Stage 4: Nurturing

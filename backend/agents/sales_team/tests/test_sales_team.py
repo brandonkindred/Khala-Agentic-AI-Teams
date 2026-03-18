@@ -473,6 +473,21 @@ class TestAPI:
         response = api_client.delete("/sales/pipeline/job/nonexistent")
         assert response.status_code == 404
 
+    def test_delete_active_job_returns_409(self, api_client, sample_icp):
+        """Deleting a running job must be rejected with 409 — cancel first."""
+        payload = {
+            "product_name": "TestProduct",
+            "value_proposition": "We help sales teams close more deals faster",
+            "icp": sample_icp.model_dump(),
+            "max_prospects": 1,
+        }
+        run_resp = api_client.post("/sales/pipeline/run", json=payload)
+        assert run_resp.status_code == 200
+        job_id = run_resp.json()["job_id"]
+        # Job starts as running/pending — delete should fail
+        del_resp = api_client.delete(f"/sales/pipeline/job/{job_id}")
+        assert del_resp.status_code == 409
+
 
 # ---------------------------------------------------------------------------
 # Outcome store tests

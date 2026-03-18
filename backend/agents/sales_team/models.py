@@ -417,6 +417,13 @@ class OutcomeResult(str, Enum):
     LOST = "lost"                  # Deal closed lost
 
 
+class DealResult(str, Enum):
+    """Final close result for a deal — only valid values for DealOutcome records."""
+
+    WON = "won"
+    LOST = "lost"
+
+
 class StageOutcome(BaseModel):
     """Records what happened at a single pipeline stage for one prospect."""
 
@@ -455,7 +462,7 @@ class DealOutcome(BaseModel):
     industry: Optional[str] = None
     deal_size_usd: Optional[float] = Field(default=None, gt=0)
     final_stage_reached: PipelineStage
-    result: OutcomeResult  # WON or LOST
+    result: DealResult
     loss_reason: Optional[str] = Field(
         default=None,
         description="Why the deal was lost (price, competitor, timing, no champion, etc.)"
@@ -547,7 +554,7 @@ class RecordDealOutcomeRequest(BaseModel):
     """API payload to record a final deal outcome (won or lost)."""
 
     company_name: str
-    result: OutcomeResult  # WON or LOST
+    result: DealResult
     final_stage_reached: PipelineStage
     pipeline_job_id: Optional[str] = None
     industry: Optional[str] = None
