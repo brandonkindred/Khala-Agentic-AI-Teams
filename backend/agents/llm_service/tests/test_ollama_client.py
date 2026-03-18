@@ -45,6 +45,7 @@ def test_ollama_complete_json_parses_response(monkeypatch: pytest.MonkeyPatch) -
 
 def test_ollama_complete_json_429_raises_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
     mock_response = MagicMock()
     mock_response.status_code = 429
     mock_response.text = "Rate limited"
@@ -60,6 +61,7 @@ def test_ollama_complete_json_429_raises_rate_limit(monkeypatch: pytest.MonkeyPa
 
 def test_ollama_complete_json_404_raises_permanent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
     mock_response = MagicMock()
     mock_response.status_code = 404
     mock_response.text = '{"error":{"message":"model not found"}}'

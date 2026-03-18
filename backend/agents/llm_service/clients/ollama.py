@@ -50,23 +50,33 @@ _EXPECTED_KEYS = frozenset({
 
 
 def _parse_retry_config() -> tuple[int, float, float]:
-    """Parse retry-related environment variables. Returns (max_retries, backoff_base, backoff_max)."""
-    raw_retries = os.environ.get(llm_config.ENV_LLM_MAX_RETRIES) or os.environ.get(llm_config.ENV_LLM_MAX_RETRIES_SW) or "4"
-    raw_base = os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE) or os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE_SW) or "2"
-    raw_max = os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX) or os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX_SW) or "60"
+    """Parse retry env vars. Returns (max_retries, initial_backoff_seconds, backoff_max_seconds).
+
+    Backoff is exponential: wait initial * 2^attempt after each failure (first retry ~initial seconds).
+    """
+    raw_retries = os.environ.get(llm_config.ENV_LLM_MAX_RETRIES) or os.environ.get(llm_config.ENV_LLM_MAX_RETRIES_SW) or "6"
+    raw_initial = os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE) or os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE_SW) or "2"
+    raw_max = os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX) or os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX_SW) or "120"
     try:
-        max_retries = int(raw_retries)
+        max_retries = max(0, int(raw_retries))
     except ValueError:
-        max_retries = 4
+        max_retries = 6
     try:
-        backoff_base = float(raw_base)
+        initial_backoff = float(raw_initial)
     except ValueError:
-        backoff_base = 2.0
+        initial_backoff = 2.0
     try:
         backoff_max = float(raw_max)
     except ValueError:
-        backoff_max = 60.0
-    return max_retries, backoff_base, backoff_max
+        backoff_max = 120.0
+    return max_retries, initial_backoff, backoff_max
+
+
+def _exponential_retry_delay(failed_attempt_index: int, initial_seconds: float, cap_seconds: float) -> float:
+    """Seconds to wait before the next HTTP attempt. failed_attempt_index is 0 after the first failure (waits ~initial_seconds)."""
+    base = initial_seconds * (2**failed_attempt_index)
+    jitter = random.uniform(0, min(2.0, max(0.25, base * 0.1)))
+    return min(base + jitter, cap_seconds)
 
 
 _ollama_semaphore: Optional[threading.BoundedSemaphore] = None
@@ -325,7 +335,9 @@ class OllamaLLMClient(LLMClient):
             )
         return content_str
 
-    def _ollama_post(self, payload: dict, max_retries: int, backoff_base: float, backoff_max: float, sem: threading.BoundedSemaphore) -> str:
+    def _ollama_post(
+        self, payload: dict, max_retries: int, initial_backoff: float, backoff_max: float, sem: threading.BoundedSemaphore
+    ) -> str:
         """POST to /v1/chat/completions; return raw content. Raises LLM* on non-200 or malformed."""
         url = f"{self.base_url}/v1/chat/completions"
         last_error: Optional[Exception] = None
@@ -378,7 +390,7 @@ class OllamaLLMClient(LLMClient):
                             status_code=429,
                         )
                         if attempt < max_retries:
-                            wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                            wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
                             logger.warning("LLM 429 (attempt %d/%d). Retrying in %.1fs", attempt + 1, max_retries + 1, wait)
                             time.sleep(wait)
                             continue
@@ -399,7 +411,7 @@ class OllamaLLMClient(LLMClient):
                             status_code=status,
                         )
                         if attempt < max_retries:
-                            wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                            wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
                             time.sleep(wait)
                             continue
                         self._log_llm_server_error(
@@ -447,7 +459,7 @@ class OllamaLLMClient(LLMClient):
             except LLMTemporaryError as e:
                 last_error = e
                 if attempt < max_retries:
-                    wait = min(backoff_base**attempt + random.uniform(0, 1), backoff_max)
+                    wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
                     logger.warning(
                         "LLM temporary error (attempt %d/%d): %s. Retrying in %.1fs",
                         attempt + 1,
@@ -472,21 +484,28 @@ class OllamaLLMClient(LLMClient):
                 if status == 429:
                     last_error = LLMRateLimitError(str(e), status_code=429, cause=e)
                     if attempt < max_retries:
-                        wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                        wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
                         time.sleep(wait)
                         continue
                     raise last_error
                 if status and 500 <= status < 600:
                     last_error = LLMTemporaryError(str(e), status_code=status, cause=e)
                     if attempt < max_retries:
-                        wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                        wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
                         time.sleep(wait)
                         continue
                     raise last_error
                 if status and 400 <= status < 500:
                     raise LLMPermanentError(str(e), status_code=status or 0, cause=e)
                 raise LLMPermanentError(str(e), status_code=status or 0, cause=e)
-            except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadTimeout) as e:
+            except (
+                httpx.ConnectError,
+                httpx.TimeoutException,
+                httpx.ReadTimeout,
+                httpx.RemoteProtocolError,
+                httpx.WriteError,
+                httpx.ReadError,
+            ) as e:
                 hint = ""
                 if "name resolution" in str(e).lower() or "temporary failure" in str(e).lower():
                     hint = (
@@ -494,13 +513,21 @@ class OllamaLLMClient(LLMClient):
                         "If running in Docker, set LLM_BASE_URL to a reachable endpoint "
                         "(e.g. http://host.docker.internal:11434 for local Ollama, or ensure the container has DNS/outbound access)."
                     )
+                elif isinstance(e, httpx.RemoteProtocolError):
+                    hint = " (server closed connection; retrying with exponential backoff)"
                 last_error = LLMTemporaryError(
-                    f"LLM connection/timeout error: {e}.{hint}",
+                    f"LLM connection/transport error ({type(e).__name__}): {e}.{hint}",
                     cause=e,
                 )
                 if attempt < max_retries:
-                    wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
-                    logger.warning("LLM connection error (attempt %d/%d): %s. Retrying in %.1fs", attempt + 1, max_retries + 1, type(e).__name__, wait)
+                    wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
+                    logger.warning(
+                        "LLM transport error (attempt %d/%d): %s. Retrying in %.1fs",
+                        attempt + 1,
+                        max_retries + 1,
+                        type(e).__name__,
+                        wait,
+                    )
                     time.sleep(wait)
                     continue
                 logger.error(

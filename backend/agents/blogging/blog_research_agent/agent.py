@@ -446,9 +446,19 @@ class ResearchAgent:
             f"Document URL: {doc.url}\n"
             f"Document excerpt:\n{excerpt}\n"
         )
-        data = self.llm.complete_json(prompt, temperature=0.2)
-        summary = data.get("summary") or ""
-        key_points = data.get("key_points") or []
+        try:
+            data = self.llm.complete_json(prompt, temperature=0.2)
+            summary = data.get("summary") or ""
+            key_points = data.get("key_points") or []
+        except Exception as e:
+            logger.warning(
+                "Summarization LLM failed for %s (%s); using excerpt fallback so research can continue.",
+                doc.url,
+                type(e).__name__,
+            )
+            raw = (doc.content or "").strip()[:1200].replace("\n", " ")
+            summary = (raw[:600] + "…") if len(raw) > 600 else (raw or f"(Source: {doc.title or doc.url})")
+            key_points = []
         return ResearchReference(
             title=doc.title or str(doc.url),
             url=doc.url,
