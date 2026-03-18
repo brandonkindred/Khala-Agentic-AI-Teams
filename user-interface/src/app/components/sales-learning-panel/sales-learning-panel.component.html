@@ -1,0 +1,407 @@
+<div class="learning-layout">
+
+  <!-- ================================================================== -->
+  <!-- Insights panel                                                       -->
+  <!-- ================================================================== -->
+  <mat-card class="insights-card">
+    <mat-card-header>
+      <mat-card-title>
+        <mat-icon>lightbulb</mat-icon>
+        Learning Insights
+      </mat-card-title>
+      <mat-card-subtitle>Patterns extracted from recorded pipeline outcomes</mat-card-subtitle>
+    </mat-card-header>
+
+    <mat-card-content>
+      @if (loadingInsights) {
+        <div class="loading-row">
+          <mat-progress-spinner diameter="24" mode="indeterminate" />
+          <span>Loading insights…</span>
+        </div>
+      } @else if (insightsError) {
+        <div class="error-block">
+          <mat-icon>error_outline</mat-icon>
+          {{ insightsError }}
+        </div>
+      } @else if (!insights || insights.total_outcomes_analyzed === 0) {
+        <div class="empty-insights">
+          <mat-icon>analytics</mat-icon>
+          <p>No insights yet. Record deal outcomes below, then click <strong>Refresh Insights</strong> to generate patterns.</p>
+          <p class="empty-sub">Every pipeline run automatically logs prospecting outcomes. Win/loss data needs to be logged manually after each deal closes.</p>
+        </div>
+      } @else {
+        <!-- Stats row -->
+        <div class="insights-stats">
+          <div class="stat-block">
+            <span class="stat-val win-rate">{{ winRatePercent() }}%</span>
+            <span class="stat-label">Win Rate</span>
+          </div>
+          <div class="stat-block">
+            <span class="stat-val">{{ insights.total_outcomes_analyzed }}</span>
+            <span class="stat-label">Outcomes analyzed</span>
+          </div>
+          <div class="stat-block">
+            <span class="stat-val">v{{ insights.insights_version }}</span>
+            <span class="stat-label">Insights version</span>
+          </div>
+          @if (insights.avg_deal_size_won_usd) {
+            <div class="stat-block">
+              <span class="stat-val">${{ insights.avg_deal_size_won_usd | number:'1.0-0' }}</span>
+              <span class="stat-label">Avg deal size (won)</span>
+            </div>
+          }
+          @if (insights.avg_sales_cycle_days) {
+            <div class="stat-block">
+              <span class="stat-val">{{ insights.avg_sales_cycle_days | number:'1.0-0' }}d</span>
+              <span class="stat-label">Avg cycle (won)</span>
+            </div>
+          }
+        </div>
+
+        <!-- Patterns two-col -->
+        @if (insights.winning_patterns.length || insights.losing_patterns.length) {
+          <div class="patterns-row">
+            @if (insights.winning_patterns.length) {
+              <div class="pattern-col winning">
+                <div class="pattern-label">
+                  <mat-icon>trending_up</mat-icon>
+                  What's Working
+                </div>
+                <ul>
+                  @for (p of insights.winning_patterns; track p) {
+                    <li>{{ p }}</li>
+                  }
+                </ul>
+              </div>
+            }
+            @if (insights.losing_patterns.length) {
+              <div class="pattern-col losing">
+                <div class="pattern-label">
+                  <mat-icon>trending_down</mat-icon>
+                  Watch Out For
+                </div>
+                <ul>
+                  @for (p of insights.losing_patterns; track p) {
+                    <li>{{ p }}</li>
+                  }
+                </ul>
+              </div>
+            }
+          </div>
+        }
+
+        <!-- Recommendations -->
+        @if (insights.actionable_recommendations.length) {
+          <div class="recs-section">
+            <div class="section-label">
+              <mat-icon>task_alt</mat-icon>
+              Recommendations
+            </div>
+            <div class="recs-list">
+              @for (rec of insights.actionable_recommendations; track rec) {
+                <div class="rec-item">
+                  <mat-icon>arrow_forward</mat-icon>
+                  {{ rec }}
+                </div>
+              }
+            </div>
+          </div>
+        }
+
+        <!-- Industry + techniques row -->
+        <div class="chips-row">
+          @if (insights.top_performing_industries.length) {
+            <div class="chips-block">
+              <span class="chips-label">Top industries</span>
+              <div class="chips">
+                @for (ind of insights.top_performing_industries; track ind) {
+                  <span class="data-chip">{{ ind }}</span>
+                }
+              </div>
+            </div>
+          }
+          @if (insights.best_close_techniques.length) {
+            <div class="chips-block">
+              <span class="chips-label">Best close techniques</span>
+              <div class="chips">
+                @for (ct of insights.best_close_techniques; track ct) {
+                  <span class="data-chip">{{ ct }}</span>
+                }
+              </div>
+            </div>
+          }
+        </div>
+
+        <!-- Common objections -->
+        @if (insights.common_objections.length) {
+          <div class="objections-section">
+            <div class="section-label">
+              <mat-icon>help_outline</mat-icon>
+              Most Common Objections
+            </div>
+            <ol class="objections-list">
+              @for (obj of insights.common_objections; track obj) {
+                <li>{{ obj }}</li>
+              }
+            </ol>
+          </div>
+        }
+
+        <!-- Stage conversion rates -->
+        @if (stageEntries().length) {
+          <div class="conversion-section">
+            <div class="section-label">
+              <mat-icon>funnel</mat-icon>
+              Stage Conversion Rates
+            </div>
+            <div class="conversion-table">
+              @for (entry of stageEntries(); track entry.stage) {
+                <div class="conv-row">
+                  <span class="conv-stage">{{ entry.stage }}</span>
+                  <div class="conv-bar-wrap">
+                    <div class="conv-bar" [style.width.%]="entry.rate"></div>
+                  </div>
+                  <span class="conv-pct">{{ entry.rate }}%</span>
+                </div>
+              }
+            </div>
+          </div>
+        }
+      }
+    </mat-card-content>
+
+    <mat-card-actions>
+      <button
+        mat-stroked-button
+        (click)="refreshInsights()"
+        [disabled]="refreshing"
+      >
+        @if (refreshing) {
+          <mat-progress-spinner diameter="16" mode="indeterminate" />
+          Refreshing…
+        } @else {
+          <mat-icon>refresh</mat-icon>
+          Refresh Insights
+        }
+      </button>
+    </mat-card-actions>
+  </mat-card>
+
+  <!-- ================================================================== -->
+  <!-- Record outcomes                                                      -->
+  <!-- ================================================================== -->
+  <mat-card class="outcomes-card">
+    <mat-card-header>
+      <mat-card-title>
+        <mat-icon>add_chart</mat-icon>
+        Record Outcomes
+      </mat-card-title>
+      <mat-card-subtitle>Feed results back into the learning loop</mat-card-subtitle>
+    </mat-card-header>
+
+    <mat-card-content>
+
+      <!-- Stage outcome form -->
+      <mat-expansion-panel class="outcome-panel">
+        <mat-expansion-panel-header>
+          <mat-panel-title>
+            <mat-icon>timeline</mat-icon>
+            Stage Outcome
+          </mat-panel-title>
+          <mat-panel-description>What happened at a single pipeline stage</mat-panel-description>
+        </mat-expansion-panel-header>
+
+        <form [formGroup]="stageForm" (ngSubmit)="submitStageOutcome()" class="outcome-form">
+          <div class="form-row">
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Company Name</mat-label>
+              <input matInput formControlName="company_name" placeholder="Acme Corp" />
+              @if (stageForm.get('company_name')?.hasError('required') && stageForm.get('company_name')?.touched) {
+                <mat-error>Required</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Industry</mat-label>
+              <input matInput formControlName="industry" placeholder="SaaS" />
+            </mat-form-field>
+          </div>
+
+          <div class="form-row">
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Stage</mat-label>
+              <mat-select formControlName="stage">
+                @for (s of PIPELINE_STAGES; track s.value) {
+                  <mat-option [value]="s.value">{{ s.label }}</mat-option>
+                }
+              </mat-select>
+              @if (stageForm.get('stage')?.hasError('required') && stageForm.get('stage')?.touched) {
+                <mat-error>Required</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Outcome</mat-label>
+              <mat-select formControlName="outcome">
+                @for (o of OUTCOME_RESULTS; track o.value) {
+                  <mat-option [value]="o.value">{{ o.label }}</mat-option>
+                }
+              </mat-select>
+              @if (stageForm.get('outcome')?.hasError('required') && stageForm.get('outcome')?.touched) {
+                <mat-error>Required</mat-error>
+              }
+            </mat-form-field>
+          </div>
+
+          <div class="form-row">
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Subject Line Used <span class="opt">(optional)</span></mat-label>
+              <input matInput formControlName="subject_line_used" placeholder="The subject line that got a reply" />
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="narrow-field">
+              <mat-label>Email Touch #</mat-label>
+              <input matInput type="number" formControlName="email_touch_number" min="1" max="20" />
+            </mat-form-field>
+          </div>
+
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Objection Text <span class="opt">(optional)</span></mat-label>
+            <input matInput formControlName="objection_text" placeholder="Price is too high" />
+          </mat-form-field>
+
+          <div class="form-row">
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Close Technique Used <span class="opt">(optional)</span></mat-label>
+              <mat-select formControlName="close_technique_used">
+                <mat-option [value]="null">None</mat-option>
+                @for (ct of CLOSE_TYPES; track ct.value) {
+                  <mat-option [value]="ct.value">{{ ct.label }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Notes <span class="opt">(optional)</span></mat-label>
+              <input matInput formControlName="notes" />
+            </mat-form-field>
+          </div>
+
+          <button mat-raised-button color="primary" type="submit" [disabled]="recordingStage" class="submit-btn">
+            @if (recordingStage) {
+              <mat-progress-spinner diameter="16" mode="indeterminate" />
+              Saving…
+            } @else {
+              <mat-icon>save</mat-icon>
+              Record Stage Outcome
+            }
+          </button>
+        </form>
+      </mat-expansion-panel>
+
+      <!-- Deal outcome form -->
+      <mat-expansion-panel class="outcome-panel">
+        <mat-expansion-panel-header>
+          <mat-panel-title>
+            <mat-icon>handshake</mat-icon>
+            Deal Outcome (Won / Lost)
+          </mat-panel-title>
+          <mat-panel-description>High-signal data that drives learning</mat-panel-description>
+        </mat-expansion-panel-header>
+
+        <form [formGroup]="dealForm" (ngSubmit)="submitDealOutcome()" class="outcome-form">
+          <div class="form-row">
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Company Name</mat-label>
+              <input matInput formControlName="company_name" placeholder="Acme Corp" />
+              @if (dealForm.get('company_name')?.hasError('required') && dealForm.get('company_name')?.touched) {
+                <mat-error>Required</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Industry</mat-label>
+              <input matInput formControlName="industry" placeholder="SaaS" />
+            </mat-form-field>
+          </div>
+
+          <div class="form-row">
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Result</mat-label>
+              <mat-select formControlName="result">
+                <mat-option value="won">Won</mat-option>
+                <mat-option value="lost">Lost</mat-option>
+              </mat-select>
+              @if (dealForm.get('result')?.hasError('required') && dealForm.get('result')?.touched) {
+                <mat-error>Required</mat-error>
+              }
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Final Stage Reached</mat-label>
+              <mat-select formControlName="final_stage_reached">
+                @for (s of PIPELINE_STAGES; track s.value) {
+                  <mat-option [value]="s.value">{{ s.label }}</mat-option>
+                }
+              </mat-select>
+              @if (dealForm.get('final_stage_reached')?.hasError('required') && dealForm.get('final_stage_reached')?.touched) {
+                <mat-error>Required</mat-error>
+              }
+            </mat-form-field>
+          </div>
+
+          <div class="form-row">
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Deal Size (USD) <span class="opt">(optional)</span></mat-label>
+              <input matInput type="number" formControlName="deal_size_usd" min="0" />
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="narrow-field">
+              <mat-label>Sales Cycle Days</mat-label>
+              <input matInput type="number" formControlName="sales_cycle_days" min="1" />
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Close Technique <span class="opt">(optional)</span></mat-label>
+              <mat-select formControlName="close_technique_used">
+                <mat-option [value]="null">None</mat-option>
+                @for (ct of CLOSE_TYPES; track ct.value) {
+                  <mat-option [value]="ct.value">{{ ct.label }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+          </div>
+
+          <div class="form-row">
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Win Factor <span class="opt">(optional)</span></mat-label>
+              <input matInput formControlName="win_factor" placeholder="Champion + EB on final call" />
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="flex-field">
+              <mat-label>Loss Reason <span class="opt">(optional)</span></mat-label>
+              <input matInput formControlName="loss_reason" placeholder="Price, competitor, timing…" />
+            </mat-form-field>
+          </div>
+
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Objections Raised <span class="opt">(optional, one per line)</span></mat-label>
+            <textarea matInput formControlName="objections_raised" rows="2" placeholder="Price too high&#10;No budget this quarter"></textarea>
+          </mat-form-field>
+
+          <button mat-raised-button color="primary" type="submit" [disabled]="recordingDeal" class="submit-btn">
+            @if (recordingDeal) {
+              <mat-progress-spinner diameter="16" mode="indeterminate" />
+              Saving…
+            } @else {
+              <mat-icon>save</mat-icon>
+              Record Deal Outcome
+            }
+          </button>
+        </form>
+      </mat-expansion-panel>
+
+    </mat-card-content>
+  </mat-card>
+
+</div>

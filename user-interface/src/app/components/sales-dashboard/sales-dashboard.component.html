@@ -1,0 +1,154 @@
+<div class="sales-layout">
+
+  <!-- Page header -->
+  <div class="page-header">
+    <div class="page-title-row">
+      <mat-icon class="page-icon">trending_up</mat-icon>
+      <div>
+        <h1 class="page-title">AI Sales Team</h1>
+        <p class="page-subtitle">Autonomous B2B sales pipeline — prospect, qualify, propose, and close</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main two-column layout -->
+  <div class="dashboard-columns">
+
+    <!-- Left: main content (tabs) -->
+    <div class="main-col">
+      <mat-tab-group
+        [(selectedIndex)]="activeTabIndex"
+        animationDuration="150ms"
+        class="sales-tabs"
+      >
+
+        <!-- Tab 0: Pipeline (configure + run) -->
+        <mat-tab>
+          <ng-template mat-tab-label>
+            <mat-icon class="tab-icon">rocket_launch</mat-icon>
+            Pipeline
+          </ng-template>
+          <div class="tab-content">
+            <app-sales-pipeline-form
+              (pipelineStarted)="onPipelineStarted($event)"
+            />
+          </div>
+        </mat-tab>
+
+        <!-- Tab 1: Results -->
+        <mat-tab>
+          <ng-template mat-tab-label>
+            <mat-icon class="tab-icon">bar_chart</mat-icon>
+            Results
+          </ng-template>
+          <div class="tab-content">
+            @if (selectedJobStatus && !isTerminal(selectedJobStatus.status)) {
+              <!-- Running job progress card -->
+              <mat-card class="progress-card">
+                <mat-card-content>
+                  <div class="progress-header">
+                    <mat-icon class="running-icon pulse">autorenew</mat-icon>
+                    <div>
+                      <div class="progress-title">{{ selectedJobStatus.product_name }} — running</div>
+                      <div class="progress-stage">
+                        Stage: <strong>{{ selectedJobStatus.current_stage ?? 'Starting…' }}</strong>
+                        @if (selectedJobStatus.eta_hint) {
+                          &nbsp;·&nbsp;{{ selectedJobStatus.eta_hint }}
+                        }
+                      </div>
+                    </div>
+                    <span class="spacer"></span>
+                    <span class="progress-pct">{{ ((selectedJobStatus.progress ?? 0) * 100) | number:'1.0-0' }}%</span>
+                  </div>
+                  <div class="progress-bar-wrap">
+                    <div class="progress-bar-fill" [style.width.%]="(selectedJobStatus.progress ?? 0) * 100"></div>
+                  </div>
+                </mat-card-content>
+              </mat-card>
+            }
+            <app-sales-pipeline-results [result]="selectedResult" />
+          </div>
+        </mat-tab>
+
+        <!-- Tab 2: Jobs history -->
+        <mat-tab>
+          <ng-template mat-tab-label>
+            <mat-icon class="tab-icon">history</mat-icon>
+            Jobs
+          </ng-template>
+          <div class="tab-content">
+            <div class="jobs-tab-grid">
+              @for (job of jobs; track job.job_id) {
+                <mat-card
+                  class="job-history-card"
+                  [class.selected]="job.job_id === selectedJobId"
+                  (click)="onJobSelected(job.job_id)"
+                >
+                  <mat-card-content>
+                    <div class="job-row">
+                      <div class="job-info">
+                        <span class="job-product">{{ job.product_name }}</span>
+                        <span class="job-meta">
+                          {{ job.current_stage ?? 'pending' }}
+                          @if (job.created_at) {
+                            &nbsp;·&nbsp;{{ job.created_at | date:'MMM d, h:mm a' }}
+                          }
+                        </span>
+                      </div>
+                      <div class="job-right">
+                        <span class="status-pill status-{{ job.status }}">{{ job.status }}</span>
+                        @if (isTerminal(job.status)) {
+                          <button
+                            mat-icon-button
+                            class="delete-btn"
+                            (click)="onJobDeleted(job.job_id); $event.stopPropagation()"
+                            title="Delete job"
+                          >
+                            <mat-icon>delete_outline</mat-icon>
+                          </button>
+                        }
+                      </div>
+                    </div>
+                    @if (!isTerminal(job.status)) {
+                      <div class="mini-progress-wrap">
+                        <div class="mini-progress-fill" [style.width.%]="(job.progress ?? 0) * 100"></div>
+                      </div>
+                    }
+                  </mat-card-content>
+                </mat-card>
+              } @empty {
+                <div class="empty-jobs">
+                  <mat-icon>inbox</mat-icon>
+                  <p>No pipeline jobs yet. Configure and run a pipeline from the Pipeline tab.</p>
+                </div>
+              }
+            </div>
+          </div>
+        </mat-tab>
+
+        <!-- Tab 3: Learning -->
+        <mat-tab>
+          <ng-template mat-tab-label>
+            <mat-icon class="tab-icon">school</mat-icon>
+            Learning
+          </ng-template>
+          <div class="tab-content">
+            <app-sales-learning-panel />
+          </div>
+        </mat-tab>
+
+      </mat-tab-group>
+    </div>
+
+    <!-- Right: jobs sidebar -->
+    <div class="sidebar-col">
+      <app-sales-jobs-panel
+        [jobs]="jobs"
+        [selectedJobId]="selectedJobId"
+        (jobSelected)="onJobSelected($event)"
+        (jobDeleted)="onJobDeleted($event)"
+      />
+    </div>
+
+  </div>
+</div>

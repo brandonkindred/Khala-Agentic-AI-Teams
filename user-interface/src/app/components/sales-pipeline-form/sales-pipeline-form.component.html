@@ -1,0 +1,212 @@
+<form [formGroup]="form" (ngSubmit)="submit()" class="pipeline-form">
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Section: Product                                                     -->
+  <!-- ------------------------------------------------------------------ -->
+  <div class="form-section">
+    <h3 class="section-title">
+      <mat-icon>inventory_2</mat-icon>
+      Product Details
+    </h3>
+
+    <mat-form-field appearance="outline" class="full-width">
+      <mat-label>Product / Solution Name</mat-label>
+      <input matInput formControlName="product_name" placeholder="e.g. Acme CRM Pro" />
+      @if (form.get('product_name')?.hasError('required') && form.get('product_name')?.touched) {
+        <mat-error>Product name is required.</mat-error>
+      }
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" class="full-width">
+      <mat-label>Value Proposition</mat-label>
+      <textarea
+        matInput
+        formControlName="value_proposition"
+        placeholder="Describe the core benefit: who you help, what problem you solve, and the measurable outcome."
+        rows="3"
+      ></textarea>
+      @if (form.get('value_proposition')?.hasError('required') && form.get('value_proposition')?.touched) {
+        <mat-error>Value proposition is required.</mat-error>
+      }
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" class="full-width">
+      <mat-label>Company Context <span class="optional-label">(optional)</span></mat-label>
+      <textarea
+        matInput
+        formControlName="company_context"
+        placeholder="Your company size, mission, key differentiators, and any context that helps personalize outreach."
+        rows="2"
+      ></textarea>
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" class="full-width">
+      <mat-label>Customer Win Snippets <span class="optional-label">(optional)</span></mat-label>
+      <textarea
+        matInput
+        formControlName="case_study_snippets"
+        placeholder="One per line. e.g. &quot;Acme reduced churn by 40% in 90 days using our platform.&quot;"
+        rows="2"
+      ></textarea>
+      <mat-hint>Each line is treated as a separate case study snippet used in outreach and proposals.</mat-hint>
+    </mat-form-field>
+  </div>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Section: ICP (collapsible)                                           -->
+  <!-- ------------------------------------------------------------------ -->
+  <mat-expansion-panel
+    class="icp-panel"
+    [(expanded)]="icpPanelOpen"
+    hideToggle
+  >
+    <mat-expansion-panel-header>
+      <mat-panel-title>
+        <mat-icon>person_search</mat-icon>
+        Ideal Customer Profile (ICP)
+      </mat-panel-title>
+      <mat-panel-description>
+        <span class="icp-hint">Define who to target</span>
+        <mat-icon>{{ icpPanelOpen ? 'expand_less' : 'expand_more' }}</mat-icon>
+      </mat-panel-description>
+    </mat-expansion-panel-header>
+
+    <div class="icp-fields">
+      <div class="field-row">
+        <mat-form-field appearance="outline" class="flex-field">
+          <mat-label>Target Industries</mat-label>
+          <input matInput formControlName="icp_industry" placeholder="SaaS, FinTech, HealthTech" />
+          <mat-hint>Comma-separated</mat-hint>
+        </mat-form-field>
+
+        <mat-form-field appearance="outline" class="flex-field">
+          <mat-label>Target Job Titles</mat-label>
+          <input matInput formControlName="icp_job_titles" placeholder="VP Sales, CRO, Head of Revenue" />
+          <mat-hint>Comma-separated</mat-hint>
+        </mat-form-field>
+      </div>
+
+      <div class="field-row">
+        <mat-form-field appearance="outline" class="size-field">
+          <mat-label>Min Employees</mat-label>
+          <input matInput type="number" formControlName="icp_size_min" min="1" />
+        </mat-form-field>
+
+        <mat-form-field appearance="outline" class="size-field">
+          <mat-label>Max Employees</mat-label>
+          <input matInput type="number" formControlName="icp_size_max" min="1" />
+        </mat-form-field>
+
+        <mat-form-field appearance="outline" class="flex-field">
+          <mat-label>Budget Range</mat-label>
+          <input matInput formControlName="icp_budget_range" placeholder="$10k–$100k/yr" />
+        </mat-form-field>
+      </div>
+
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>Pain Points</mat-label>
+        <textarea
+          matInput
+          formControlName="icp_pain_points"
+          placeholder="One per line. e.g. Manual reporting taking 10+ hours/week"
+          rows="3"
+        ></textarea>
+        <mat-hint>Problems your product solves — one per line</mat-hint>
+      </mat-form-field>
+
+      <div class="field-row">
+        <mat-form-field appearance="outline" class="flex-field">
+          <mat-label>Geographic Focus</mat-label>
+          <input matInput formControlName="icp_geographic_focus" placeholder="US, UK, Canada" />
+          <mat-hint>Comma-separated</mat-hint>
+        </mat-form-field>
+
+        <mat-form-field appearance="outline" class="flex-field">
+          <mat-label>Tech Stack Keywords</mat-label>
+          <input matInput formControlName="icp_tech_stack" placeholder="Salesforce, HubSpot, Slack" />
+          <mat-hint>Comma-separated</mat-hint>
+        </mat-form-field>
+      </div>
+
+      <mat-form-field appearance="outline" class="full-width">
+        <mat-label>Disqualifying Traits <span class="optional-label">(optional)</span></mat-label>
+        <input matInput formControlName="icp_disqualifying_traits" placeholder="No budget, no decision maker, competitor's customer" />
+        <mat-hint>Comma-separated traits that rule out a prospect</mat-hint>
+      </mat-form-field>
+    </div>
+  </mat-expansion-panel>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Section: Run Configuration                                           -->
+  <!-- ------------------------------------------------------------------ -->
+  <div class="form-section">
+    <h3 class="section-title">
+      <mat-icon>settings</mat-icon>
+      Run Configuration
+    </h3>
+
+    <div class="config-row">
+      <mat-form-field appearance="outline" class="stage-field">
+        <mat-label>Entry Stage</mat-label>
+        <mat-select formControlName="entry_stage">
+          @for (stage of pipelineStages; track stage.value) {
+            <mat-option [value]="stage.value">{{ stage.label }}</mat-option>
+          }
+        </mat-select>
+        <mat-hint>Pipeline will run from this stage onward</mat-hint>
+      </mat-form-field>
+
+      <div class="prospects-field">
+        <label class="prospects-label">
+          Max Prospects
+          <span class="prospects-value">{{ maxProspectsValue }}</span>
+        </label>
+        <mat-slider min="1" max="20" step="1" showTickMarks discrete class="prospects-slider">
+          <input matSliderThumb formControlName="max_prospects" />
+        </mat-slider>
+      </div>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Error                                                                -->
+  <!-- ------------------------------------------------------------------ -->
+  @if (error) {
+    <div class="form-error">
+      <mat-icon>error_outline</mat-icon>
+      {{ error }}
+    </div>
+  }
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Actions                                                              -->
+  <!-- ------------------------------------------------------------------ -->
+  <div class="form-actions">
+    <button
+      mat-raised-button
+      color="primary"
+      type="submit"
+      [disabled]="loading"
+      class="run-btn"
+    >
+      @if (loading) {
+        <mat-progress-spinner diameter="18" mode="indeterminate" class="btn-spinner" />
+        Starting…
+      } @else {
+        <mat-icon>play_circle</mat-icon>
+        Run Sales Pipeline
+      }
+    </button>
+
+    <button
+      mat-stroked-button
+      type="button"
+      [disabled]="loading"
+      (click)="reset()"
+    >
+      <mat-icon>refresh</mat-icon>
+      Reset
+    </button>
+  </div>
+
+</form>

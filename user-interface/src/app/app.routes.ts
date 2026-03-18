@@ -16,6 +16,7 @@ import { AISystemsDashboardComponent } from './components/ai-systems-dashboard/a
 import { InvestmentDashboardComponent } from './components/investment-dashboard/investment-dashboard.component';
 import { IntegrationsDashboardComponent } from './components/integrations-dashboard/integrations-dashboard.component';
 import { StudioGridDashboardComponent } from './components/studio-grid-dashboard/studio-grid-dashboard.component';
+import { SalesDashboardComponent } from './components/sales-dashboard/sales-dashboard.component';
 
 export const routes: Routes = [
   {
@@ -39,6 +40,7 @@ export const routes: Routes = [
       { path: 'investment', component: InvestmentDashboardComponent },
       { path: 'integrations', component: IntegrationsDashboardComponent },
       { path: 'studio-grid', component: StudioGridDashboardComponent },
+      { path: 'sales', component: SalesDashboardComponent },
     ],
   },
   { path: '**', redirectTo: '/dashboard' },

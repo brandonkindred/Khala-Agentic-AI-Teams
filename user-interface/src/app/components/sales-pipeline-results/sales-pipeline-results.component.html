@@ -1,0 +1,692 @@
+@if (!result) {
+  <div class="empty-state">
+    <mat-icon>assessment</mat-icon>
+    <p>No pipeline results yet. Run a pipeline to see stage-by-stage output here.</p>
+  </div>
+} @else {
+
+  <!-- Summary banner -->
+  <div class="summary-banner">
+    <mat-icon>check_circle</mat-icon>
+    <div class="summary-text">
+      <span class="summary-product">{{ result.product_name }}</span>
+      <span class="summary-body">{{ result.summary }}</span>
+    </div>
+    <span class="entry-stage-chip">From: {{ stageLabel(result.entry_stage) }}</span>
+  </div>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Stats row                                                            -->
+  <!-- ------------------------------------------------------------------ -->
+  <div class="stats-row">
+    <div class="stat-chip">
+      <mat-icon>search</mat-icon>
+      <span>{{ result.prospects.length }} prospects</span>
+    </div>
+    @if (result.outreach_sequences.length) {
+      <div class="stat-chip">
+        <mat-icon>mail</mat-icon>
+        <span>{{ result.outreach_sequences.length }} sequences</span>
+      </div>
+    }
+    @if (result.qualified_leads.length) {
+      <div class="stat-chip">
+        <mat-icon>verified</mat-icon>
+        <span>{{ result.qualified_leads.length }} qualified</span>
+      </div>
+    }
+    @if (result.proposals.length) {
+      <div class="stat-chip">
+        <mat-icon>description</mat-icon>
+        <span>{{ result.proposals.length }} proposals</span>
+      </div>
+    }
+    @if (result.closing_strategies.length) {
+      <div class="stat-chip">
+        <mat-icon>gavel</mat-icon>
+        <span>{{ result.closing_strategies.length }} closing packs</span>
+      </div>
+    }
+  </div>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Section 1: Prospects                                                 -->
+  <!-- ------------------------------------------------------------------ -->
+  @if (result.prospects.length) {
+    <mat-expansion-panel class="results-section" expanded>
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          <mat-icon class="section-icon">search</mat-icon>
+          Prospects
+          <span class="section-count">{{ result.prospects.length }}</span>
+        </mat-panel-title>
+        <mat-panel-description>Leads identified matching your ICP</mat-panel-description>
+      </mat-expansion-panel-header>
+
+      <div class="prospects-grid">
+        @for (p of result.prospects; track p.company_name) {
+          <div class="prospect-card">
+            <div class="prospect-header">
+              <div class="prospect-name-block">
+                <span class="prospect-company">{{ p.company_name }}</span>
+                @if (p.industry) {
+                  <span class="industry-chip">{{ p.industry }}</span>
+                }
+              </div>
+              <div class="icp-score-badge" [class]="icpScoreClass(p.icp_match_score)" [matTooltip]="icpScoreLabel(p.icp_match_score)">
+                {{ outcomeScorePercent(p.icp_match_score) }}%
+              </div>
+            </div>
+
+            @if (p.contact_name || p.contact_title) {
+              <div class="prospect-contact">
+                <mat-icon>person</mat-icon>
+                <span>{{ p.contact_name }}{{ p.contact_title ? ' · ' + p.contact_title : '' }}</span>
+              </div>
+            }
+            @if (p.contact_email) {
+              <div class="prospect-contact">
+                <mat-icon>mail_outline</mat-icon>
+                <span>{{ p.contact_email }}</span>
+              </div>
+            }
+            @if (p.company_size_estimate) {
+              <div class="prospect-contact">
+                <mat-icon>groups</mat-icon>
+                <span>{{ p.company_size_estimate }}</span>
+              </div>
+            }
+
+            @if (p.trigger_events.length) {
+              <div class="trigger-events">
+                <span class="trigger-label">Trigger events</span>
+                <ul class="trigger-list">
+                  @for (t of p.trigger_events; track t) {
+                    <li>{{ t }}</li>
+                  }
+                </ul>
+              </div>
+            }
+
+            @if (p.research_notes) {
+              <p class="research-notes">{{ p.research_notes }}</p>
+            }
+
+            <mat-progress-bar
+              class="icp-bar"
+              mode="determinate"
+              [value]="bantPercent(p.icp_match_score * 10)"
+              [color]="p.icp_match_score >= 0.75 ? 'primary' : p.icp_match_score >= 0.5 ? 'accent' : 'warn'"
+            />
+          </div>
+        }
+      </div>
+    </mat-expansion-panel>
+  }
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Section 2: Outreach Sequences                                        -->
+  <!-- ------------------------------------------------------------------ -->
+  @if (result.outreach_sequences.length) {
+    <mat-expansion-panel class="results-section" expanded>
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          <mat-icon class="section-icon">mail</mat-icon>
+          Outreach Sequences
+          <span class="section-count">{{ result.outreach_sequences.length }}</span>
+        </mat-panel-title>
+        <mat-panel-description>Multi-touch cold outreach cadences</mat-panel-description>
+      </mat-expansion-panel-header>
+
+      <mat-accordion>
+        @for (seq of result.outreach_sequences; track seq.prospect.company_name) {
+          <mat-expansion-panel class="inner-panel">
+            <mat-expansion-panel-header>
+              <mat-panel-title>{{ seq.prospect.company_name }}</mat-panel-title>
+              <mat-panel-description>{{ seq.email_sequence.length }} email touches</mat-panel-description>
+            </mat-expansion-panel-header>
+
+            @if (seq.sequence_rationale) {
+              <div class="rationale-block">
+                <mat-icon>lightbulb</mat-icon>
+                <span>{{ seq.sequence_rationale }}</span>
+              </div>
+            }
+
+            <div class="email-sequence">
+              @for (touch of seq.email_sequence; track touch.day) {
+                <div class="email-touch">
+                  <div class="touch-day">Day {{ touch.day + 1 }}</div>
+                  <div class="touch-body">
+                    <div class="touch-subject">{{ touch.subject_line }}</div>
+                    <pre class="touch-text">{{ touch.body }}</pre>
+                    @if (touch.call_to_action) {
+                      <div class="touch-cta">
+                        <mat-icon>arrow_forward</mat-icon>
+                        {{ touch.call_to_action }}
+                      </div>
+                    }
+                  </div>
+                </div>
+              }
+            </div>
+
+            @if (seq.call_script) {
+              <div class="script-block">
+                <div class="script-label">
+                  <mat-icon>phone</mat-icon>
+                  Call Script
+                </div>
+                <pre class="script-text">{{ seq.call_script }}</pre>
+              </div>
+            }
+
+            @if (seq.linkedin_message) {
+              <div class="script-block">
+                <div class="script-label">
+                  <mat-icon>person_add</mat-icon>
+                  LinkedIn Message
+                </div>
+                <p class="script-text">{{ seq.linkedin_message }}</p>
+              </div>
+            }
+          </mat-expansion-panel>
+        }
+      </mat-accordion>
+    </mat-expansion-panel>
+  }
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Section 3: Qualified Leads                                           -->
+  <!-- ------------------------------------------------------------------ -->
+  @if (result.qualified_leads.length) {
+    <mat-expansion-panel class="results-section" expanded>
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          <mat-icon class="section-icon">verified</mat-icon>
+          Qualification Scores
+          <span class="section-count">{{ result.qualified_leads.length }}</span>
+        </mat-panel-title>
+        <mat-panel-description>BANT + MEDDIC scoring and recommendations</mat-panel-description>
+      </mat-expansion-panel-header>
+
+      <div class="qual-grid">
+        @for (q of result.qualified_leads; track q.prospect.company_name) {
+          <div class="qual-card">
+            <div class="qual-header">
+              <span class="qual-company">{{ q.prospect.company_name }}</span>
+              <div class="qual-scores-header">
+                <span class="overall-score" [class]="icpScoreClass(q.overall_score)">
+                  {{ outcomeScorePercent(q.overall_score) }}%
+                </span>
+                <span class="value-tier" [matTooltip]="'Iannarino value tier'">L{{ q.value_creation_level }}</span>
+              </div>
+            </div>
+
+            <div class="recommendation-chip" [class]="recommendationClass(q.recommended_action)">
+              {{ q.recommended_action }}
+            </div>
+
+            <div class="bant-scores">
+              <div class="bant-row">
+                <span class="bant-label">Budget</span>
+                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.budget)" [color]="bantBarColor(q.bant.budget)" />
+                <span class="bant-val">{{ q.bant.budget }}/10</span>
+              </div>
+              <div class="bant-row">
+                <span class="bant-label">Authority</span>
+                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.authority)" [color]="bantBarColor(q.bant.authority)" />
+                <span class="bant-val">{{ q.bant.authority }}/10</span>
+              </div>
+              <div class="bant-row">
+                <span class="bant-label">Need</span>
+                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.need)" [color]="bantBarColor(q.bant.need)" />
+                <span class="bant-val">{{ q.bant.need }}/10</span>
+              </div>
+              <div class="bant-row">
+                <span class="bant-label">Timeline</span>
+                <mat-progress-bar mode="determinate" [value]="bantPercent(q.bant.timeline)" [color]="bantBarColor(q.bant.timeline)" />
+                <span class="bant-val">{{ q.bant.timeline }}/10</span>
+              </div>
+            </div>
+
+            <div class="meddic-grid">
+              @for (item of meddic(q); track item.key) {
+                <div class="meddic-item" [class.checked]="item.checked">
+                  <mat-icon>{{ item.checked ? 'check_circle' : 'radio_button_unchecked' }}</mat-icon>
+                  {{ item.label }}
+                </div>
+              }
+            </div>
+
+            @if (q.qualification_notes) {
+              <p class="qual-notes">{{ q.qualification_notes }}</p>
+            }
+          </div>
+        }
+      </div>
+    </mat-expansion-panel>
+  }
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Section 4: Nurture Sequences                                         -->
+  <!-- ------------------------------------------------------------------ -->
+  @if (result.nurture_sequences.length) {
+    <mat-expansion-panel class="results-section">
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          <mat-icon class="section-icon">water_drop</mat-icon>
+          Nurture Sequences
+          <span class="section-count">{{ result.nurture_sequences.length }}</span>
+        </mat-panel-title>
+        <mat-panel-description>Long-cycle follow-up for not-ready leads</mat-panel-description>
+      </mat-expansion-panel-header>
+
+      <mat-accordion>
+        @for (ns of result.nurture_sequences; track ns.prospect.company_name) {
+          <mat-expansion-panel class="inner-panel">
+            <mat-expansion-panel-header>
+              <mat-panel-title>{{ ns.prospect.company_name }}</mat-panel-title>
+              <mat-panel-description>{{ ns.duration_days }}-day sequence · {{ ns.touchpoints.length }} touchpoints</mat-panel-description>
+            </mat-expansion-panel-header>
+
+            <div class="nurture-timeline">
+              @for (tp of ns.touchpoints; track tp.day) {
+                <div class="timeline-item">
+                  <div class="timeline-day">Day {{ tp.day }}</div>
+                  <div class="timeline-connector"></div>
+                  <div class="timeline-content">
+                    <div class="timeline-header">
+                      <mat-icon class="channel-icon">{{ channelIcon(tp.channel) }}</mat-icon>
+                      <span class="content-type">{{ tp.content_type }}</span>
+                      @if (tp.goal) {
+                        <span class="tp-goal">{{ tp.goal }}</span>
+                      }
+                    </div>
+                    <p class="tp-message">{{ tp.message }}</p>
+                  </div>
+                </div>
+              }
+            </div>
+
+            @if (ns.re_engagement_triggers.length) {
+              <div class="triggers-block">
+                <span class="triggers-label">
+                  <mat-icon>notifications_active</mat-icon>
+                  Re-engagement triggers
+                </span>
+                <ul class="triggers-list">
+                  @for (t of ns.re_engagement_triggers; track t) {
+                    <li>{{ t }}</li>
+                  }
+                </ul>
+              </div>
+            }
+          </mat-expansion-panel>
+        }
+      </mat-accordion>
+    </mat-expansion-panel>
+  }
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Section 5: Discovery Plans                                           -->
+  <!-- ------------------------------------------------------------------ -->
+  @if (result.discovery_plans.length) {
+    <mat-expansion-panel class="results-section" expanded>
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          <mat-icon class="section-icon">explore</mat-icon>
+          Discovery Plans
+          <span class="section-count">{{ result.discovery_plans.length }}</span>
+        </mat-panel-title>
+        <mat-panel-description>SPIN questions, Challenger insight, demo agendas</mat-panel-description>
+      </mat-expansion-panel-header>
+
+      <mat-accordion>
+        @for (dp of result.discovery_plans; track dp.prospect.company_name) {
+          <mat-expansion-panel class="inner-panel">
+            <mat-expansion-panel-header>
+              <mat-panel-title>{{ dp.prospect.company_name }}</mat-panel-title>
+            </mat-expansion-panel-header>
+
+            @if (dp.challenger_insight) {
+              <div class="insight-block">
+                <mat-icon>lightbulb</mat-icon>
+                <div>
+                  <strong>Challenger Insight</strong>
+                  <p>{{ dp.challenger_insight }}</p>
+                </div>
+              </div>
+            }
+
+            <div class="spin-grid">
+              @if (dp.spin_questions.situation.length) {
+                <div class="spin-col">
+                  <div class="spin-label situation">Situation</div>
+                  <ul>
+                    @for (q of dp.spin_questions.situation; track q) {
+                      <li>{{ q }}</li>
+                    }
+                  </ul>
+                </div>
+              }
+              @if (dp.spin_questions.problem.length) {
+                <div class="spin-col">
+                  <div class="spin-label problem">Problem</div>
+                  <ul>
+                    @for (q of dp.spin_questions.problem; track q) {
+                      <li>{{ q }}</li>
+                    }
+                  </ul>
+                </div>
+              }
+              @if (dp.spin_questions.implication.length) {
+                <div class="spin-col">
+                  <div class="spin-label implication">Implication</div>
+                  <ul>
+                    @for (q of dp.spin_questions.implication; track q) {
+                      <li>{{ q }}</li>
+                    }
+                  </ul>
+                </div>
+              }
+              @if (dp.spin_questions.need_payoff.length) {
+                <div class="spin-col">
+                  <div class="spin-label need-payoff">Need-Payoff</div>
+                  <ul>
+                    @for (q of dp.spin_questions.need_payoff; track q) {
+                      <li>{{ q }}</li>
+                    }
+                  </ul>
+                </div>
+              }
+            </div>
+
+            @if (dp.demo_agenda.length) {
+              <div class="demo-agenda">
+                <div class="demo-label">
+                  <mat-icon>slideshow</mat-icon>
+                  Demo Agenda
+                </div>
+                <ol class="agenda-list">
+                  @for (item of dp.demo_agenda; track item) {
+                    <li>{{ item }}</li>
+                  }
+                </ol>
+              </div>
+            }
+
+            @if (dp.expected_objections.length) {
+              <div class="objections-block">
+                <div class="obj-label">
+                  <mat-icon>help_outline</mat-icon>
+                  Expected Objections
+                </div>
+                <ul>
+                  @for (obj of dp.expected_objections; track obj) {
+                    <li>{{ obj }}</li>
+                  }
+                </ul>
+              </div>
+            }
+
+            @if (dp.success_criteria_for_call) {
+              <div class="success-criteria">
+                <mat-icon>flag</mat-icon>
+                <strong>Success criteria:</strong>
+                {{ dp.success_criteria_for_call }}
+              </div>
+            }
+          </mat-expansion-panel>
+        }
+      </mat-accordion>
+    </mat-expansion-panel>
+  }
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Section 6: Proposals                                                 -->
+  <!-- ------------------------------------------------------------------ -->
+  @if (result.proposals.length) {
+    <mat-expansion-panel class="results-section" expanded>
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          <mat-icon class="section-icon">description</mat-icon>
+          Proposals
+          <span class="section-count">{{ result.proposals.length }}</span>
+        </mat-panel-title>
+        <mat-panel-description>Full written proposals with ROI models</mat-panel-description>
+      </mat-expansion-panel-header>
+
+      <mat-accordion>
+        @for (prop of result.proposals; track prop.prospect.company_name) {
+          <mat-expansion-panel class="inner-panel">
+            <mat-expansion-panel-header>
+              <mat-panel-title>{{ prop.prospect.company_name }}</mat-panel-title>
+              @if (prop.roi_model) {
+                <mat-panel-description>{{ formatCurrency(prop.roi_model.annual_cost_usd) }}/yr · {{ prop.roi_model.roi_percentage }}% ROI</mat-panel-description>
+              }
+            </mat-expansion-panel-header>
+
+            @if (prop.executive_summary) {
+              <div class="proposal-section-block">
+                <div class="prop-section-label">Executive Summary</div>
+                <p>{{ prop.executive_summary }}</p>
+              </div>
+            }
+
+            @if (prop.situation_analysis) {
+              <div class="proposal-section-block">
+                <div class="prop-section-label">Situation Analysis</div>
+                <p>{{ prop.situation_analysis }}</p>
+              </div>
+            }
+
+            @if (prop.proposed_solution) {
+              <div class="proposal-section-block">
+                <div class="prop-section-label">Proposed Solution</div>
+                <p>{{ prop.proposed_solution }}</p>
+              </div>
+            }
+
+            @if (prop.roi_model) {
+              <div class="roi-grid">
+                <div class="roi-cell">
+                  <span class="roi-label">Annual Cost</span>
+                  <span class="roi-value cost">{{ formatCurrency(prop.roi_model.annual_cost_usd) }}</span>
+                </div>
+                <div class="roi-cell">
+                  <span class="roi-label">Annual Benefit</span>
+                  <span class="roi-value benefit">{{ formatCurrency(prop.roi_model.estimated_annual_benefit_usd) }}</span>
+                </div>
+                <div class="roi-cell">
+                  <span class="roi-label">Payback</span>
+                  <span class="roi-value">{{ prop.roi_model.payback_months }} months</span>
+                </div>
+                <div class="roi-cell">
+                  <span class="roi-label">ROI</span>
+                  <span class="roi-value roi">{{ prop.roi_model.roi_percentage }}%</span>
+                </div>
+              </div>
+            }
+
+            @if (prop.next_steps.length) {
+              <div class="proposal-section-block">
+                <div class="prop-section-label">
+                  <mat-icon>arrow_forward</mat-icon>
+                  Next Steps
+                </div>
+                <ol class="next-steps-list">
+                  @for (step of prop.next_steps; track step) {
+                    <li>{{ step }}</li>
+                  }
+                </ol>
+              </div>
+            }
+          </mat-expansion-panel>
+        }
+      </mat-accordion>
+    </mat-expansion-panel>
+  }
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Section 7: Closing Strategies                                        -->
+  <!-- ------------------------------------------------------------------ -->
+  @if (result.closing_strategies.length) {
+    <mat-expansion-panel class="results-section" expanded>
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          <mat-icon class="section-icon">gavel</mat-icon>
+          Closing Strategies
+          <span class="section-count">{{ result.closing_strategies.length }}</span>
+        </mat-panel-title>
+        <mat-panel-description>Close scripts and objection handling packs</mat-panel-description>
+      </mat-expansion-panel-header>
+
+      <mat-accordion>
+        @for (cs of result.closing_strategies; track cs.prospect.company_name) {
+          <mat-expansion-panel class="inner-panel">
+            <mat-expansion-panel-header>
+              <mat-panel-title>{{ cs.prospect.company_name }}</mat-panel-title>
+              <mat-panel-description>{{ closeTypeLabel(cs.recommended_close_technique) }}</mat-panel-description>
+            </mat-expansion-panel-header>
+
+            <div class="close-technique-chip">
+              <mat-icon>gavel</mat-icon>
+              {{ closeTypeLabel(cs.recommended_close_technique) }}
+            </div>
+
+            @if (cs.close_script) {
+              <div class="script-block">
+                <div class="script-label">
+                  <mat-icon>record_voice_over</mat-icon>
+                  Close Script
+                </div>
+                <pre class="script-text">{{ cs.close_script }}</pre>
+              </div>
+            }
+
+            @if (cs.objection_handlers.length) {
+              <div class="objections-section">
+                <div class="obj-label">
+                  <mat-icon>help_outline</mat-icon>
+                  Objection Handlers
+                </div>
+                @for (h of cs.objection_handlers; track h.objection) {
+                  <div class="objection-handler">
+                    <div class="objection-text">
+                      <mat-icon>question_mark</mat-icon>
+                      {{ h.objection }}
+                    </div>
+                    <div class="response-text">
+                      <mat-icon>reply</mat-icon>
+                      {{ h.response }}
+                    </div>
+                    @if (h.feel_felt_found) {
+                      <div class="fff-text">
+                        <mat-icon>favorite</mat-icon>
+                        {{ h.feel_felt_found }}
+                      </div>
+                    }
+                  </div>
+                }
+              </div>
+            }
+
+            @if (cs.urgency_framing) {
+              <div class="urgency-block">
+                <mat-icon>timer</mat-icon>
+                <div>
+                  <strong>Urgency lever:</strong>
+                  {{ cs.urgency_framing }}
+                </div>
+              </div>
+            }
+
+            @if (cs.emotional_intelligence_notes) {
+              <div class="eq-block">
+                <mat-icon>psychology</mat-icon>
+                <p>{{ cs.emotional_intelligence_notes }}</p>
+              </div>
+            }
+          </mat-expansion-panel>
+        }
+      </mat-accordion>
+    </mat-expansion-panel>
+  }
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Section 8: Coaching Report                                           -->
+  <!-- ------------------------------------------------------------------ -->
+  @if (result.coaching_report) {
+    <mat-expansion-panel class="results-section" expanded>
+      <mat-expansion-panel-header>
+        <mat-panel-title>
+          <mat-icon class="section-icon">school</mat-icon>
+          Pipeline Coaching Report
+        </mat-panel-title>
+        <mat-panel-description>Gong Labs-style deal risk analysis</mat-panel-description>
+      </mat-expansion-panel-header>
+
+      @let cr = result.coaching_report;
+
+      <div class="coaching-header-row">
+        <div class="forecast-chip forecast-{{ cr.forecast_category }}">
+          <mat-icon>bar_chart</mat-icon>
+          {{ forecastLabel(cr.forecast_category) }}
+        </div>
+        <span class="prospects-reviewed">{{ cr.prospects_reviewed }} prospects reviewed</span>
+      </div>
+
+      @if (cr.coaching_summary) {
+        <div class="coaching-summary">{{ cr.coaching_summary }}</div>
+      }
+
+      @if (cr.deal_risk_signals.length) {
+        <div class="risk-signals-section">
+          <div class="risk-label">Deal Risk Signals</div>
+          @for (sig of cr.deal_risk_signals; track sig.signal) {
+            <div class="risk-signal" [class]="severityClass(sig.severity)">
+              <div class="signal-header">
+                <mat-icon>warning</mat-icon>
+                <span class="signal-text">{{ sig.signal }}</span>
+                <span class="severity-badge severity-{{ sig.severity }}">{{ sig.severity }}</span>
+              </div>
+              <div class="signal-action">
+                <mat-icon>arrow_forward</mat-icon>
+                {{ sig.recommended_action }}
+              </div>
+            </div>
+          }
+        </div>
+      }
+
+      @if (cr.recommended_next_actions.length) {
+        <div class="coaching-actions">
+          <div class="actions-label">
+            <mat-icon>task_alt</mat-icon>
+            Recommended Next Actions
+          </div>
+          <ul>
+            @for (a of cr.recommended_next_actions; track a) {
+              <li>{{ a }}</li>
+            }
+          </ul>
+        </div>
+      }
+
+      @if (cr.velocity_insights) {
+        <div class="velocity-block">
+          <mat-icon>speed</mat-icon>
+          <p>{{ cr.velocity_insights }}</p>
+        </div>
+      }
+
+      @if (cr.talk_listen_ratio_advice) {
+        <div class="tl-block">
+          <mat-icon>mic</mat-icon>
+          <p>{{ cr.talk_listen_ratio_advice }}</p>
+        </div>
+      }
+    </mat-expansion-panel>
+  }
+}

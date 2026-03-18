@@ -20,5 +20,6 @@ export const environment = {
   integrationsApiUrl: `${apiBase}/api/integrations`,
   /** StudioGrid design-system workflow API */
   studioGridApiUrl: `${apiBase}/api/studio-grid`,
+  salesApiUrl: `${apiBase}/api/sales`,
 };
 

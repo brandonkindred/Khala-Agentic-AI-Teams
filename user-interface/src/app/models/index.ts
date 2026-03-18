@@ -16,3 +16,4 @@ export * from './jobs-dashboard.model';
 export * from './integrations.model';
 export * from './planning-v3.model';
 export * from './studio-grid.model';
+export * from './sales-team.model';
