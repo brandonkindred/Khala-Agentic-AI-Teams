@@ -27,6 +27,11 @@ import type {
   ProductAnalysisRunRequest,
   ProductAnalysisRunResponse,
   ProductAnalysisStatusResponse,
+  RePlanWithClarificationsRequest,
+  ClarificationCreateRequest,
+  ClarificationMessageRequest,
+  ClarificationResponse,
+  ClarificationSessionResponse,
 } from '../models';
 
 /**
@@ -424,5 +429,54 @@ export class SoftwareEngineeringApiService {
    */
   health(): Observable<HealthResponse> {
     return this.http.get<HealthResponse>(`${this.baseUrl}/health`);
+  }
+
+  /**
+   * POST /run-team/{job_id}/re-plan-with-clarifications
+   */
+  rePlanWithClarifications(
+    jobId: string,
+    request: RePlanWithClarificationsRequest
+  ): Observable<RunTeamResponse> {
+    return this.http.post<RunTeamResponse>(
+      `${this.baseUrl}/run-team/${jobId}/re-plan-with-clarifications`,
+      request
+    );
+  }
+
+  /**
+   * POST /clarification/sessions
+   */
+  createClarificationSession(
+    request: ClarificationCreateRequest
+  ): Observable<ClarificationResponse> {
+    return this.http.post<ClarificationResponse>(
+      `${this.baseUrl}/clarification/sessions`,
+      request
+    );
+  }
+
+  /**
+   * POST /clarification/sessions/{session_id}/messages
+   */
+  sendClarificationMessage(
+    sessionId: string,
+    request: ClarificationMessageRequest
+  ): Observable<ClarificationResponse> {
+    return this.http.post<ClarificationResponse>(
+      `${this.baseUrl}/clarification/sessions/${sessionId}/messages`,
+      request
+    );
+  }
+
+  /**
+   * GET /clarification/sessions/{session_id}
+   */
+  getClarificationSession(
+    sessionId: string
+  ): Observable<ClarificationSessionResponse> {
+    return this.http.get<ClarificationSessionResponse>(
+      `${this.baseUrl}/clarification/sessions/${sessionId}`
+    );
   }
 }

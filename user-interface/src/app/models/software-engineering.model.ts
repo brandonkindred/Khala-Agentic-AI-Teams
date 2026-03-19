@@ -460,3 +460,43 @@ export interface ProductAnalysisStatusResponse {
   summary?: string;
   validated_spec_path?: string;
 }
+
+/** Request for POST /run-team/{job_id}/re-plan-with-clarifications. */
+export interface RePlanWithClarificationsRequest {
+  clarification_session_id: string;
+}
+
+/** Request for POST /clarification/sessions. */
+export interface ClarificationCreateRequest {
+  spec_text: string;
+}
+
+/** Request for POST /clarification/sessions/{id}/messages. */
+export interface ClarificationMessageRequest {
+  message: string;
+}
+
+/** Response from clarification endpoints. */
+export interface ClarificationResponse {
+  session_id: string;
+  assistant_message: string;
+  open_questions: string[];
+  assumptions: string[];
+  done_clarifying: boolean;
+  refined_spec?: string;
+}
+
+/** Response from GET /clarification/sessions/{id}. */
+export interface ClarificationSessionResponse {
+  session_id: string;
+  spec_text: string;
+  status: string;
+  created_at: string;
+  clarification_round: number;
+  max_rounds: number;
+  confidence_score: number;
+  open_questions: string[];
+  assumptions: string[];
+  refined_spec?: string;
+  turns: Array<{ role: string; message: string; timestamp?: string }>;
+}

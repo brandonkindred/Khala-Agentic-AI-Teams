@@ -1,0 +1,13 @@
+.full-width {
+  width: 100%;
+}
+
+.turns {
+  max-height: 300px;
+  overflow-y: auto;
+  margin-bottom: 1rem;
+}
+
+.turn-user {
+  color: var(--mat-sys-primary);
+}

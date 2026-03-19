@@ -1,0 +1,28 @@
+@if (sessionId && session) {
+  <mat-card>
+    <mat-card-header>
+      <mat-card-title>Clarification Chat</mat-card-title>
+      <mat-card-subtitle>Session {{ sessionId }} - {{ session.status }}</mat-card-subtitle>
+    </mat-card-header>
+    <mat-card-content>
+      <div class="turns">
+        @for (t of session.turns; track t.message) {
+          <p [class]="'turn-' + t.role">
+            <strong>{{ t.role }}:</strong> {{ t.message }}
+          </p>
+        }
+      </div>
+      @if (session.status !== 'completed') {
+        <form [formGroup]="form" (ngSubmit)="onSubmit()">
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Your response</mat-label>
+            <input matInput formControlName="message" [attr.aria-label]="'Clarification response'">
+          </mat-form-field>
+          <button mat-raised-button color="primary" type="submit" [disabled]="form.invalid">
+            Send
+          </button>
+        </form>
+      }
+    </mat-card-content>
+  </mat-card>
+}
