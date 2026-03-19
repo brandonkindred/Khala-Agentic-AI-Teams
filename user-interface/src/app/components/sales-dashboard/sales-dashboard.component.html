@@ -51,17 +51,17 @@
                     <div>
                       <div class="progress-title">{{ selectedJobStatus.product_name }} — running</div>
                       <div class="progress-stage">
-                        Stage: <strong>{{ selectedJobStatus.current_stage ?? 'Starting…' }}</strong>
+                        Stage: <strong>{{ selectedJobStatus.current_stage }}</strong>
                         @if (selectedJobStatus.eta_hint) {
                           &nbsp;·&nbsp;{{ selectedJobStatus.eta_hint }}
                         }
                       </div>
                     </div>
                     <span class="spacer"></span>
-                    <span class="progress-pct">{{ ((selectedJobStatus.progress ?? 0) * 100) | number:'1.0-0' }}%</span>
+                    <span class="progress-pct">{{ (selectedJobStatus.progress * 100) | number:'1.0-0' }}%</span>
                   </div>
                   <div class="progress-bar-wrap">
-                    <div class="progress-bar-fill" [style.width.%]="(selectedJobStatus.progress ?? 0) * 100"></div>
+                    <div class="progress-bar-fill" [style.width.%]="selectedJobStatus.progress * 100"></div>
                   </div>
                 </mat-card-content>
               </mat-card>
@@ -89,7 +89,7 @@
                       <div class="job-info">
                         <span class="job-product">{{ job.product_name }}</span>
                         <span class="job-meta">
-                          {{ job.current_stage ?? 'pending' }}
+                          {{ job.current_stage }}
                           @if (job.created_at) {
                             &nbsp;·&nbsp;{{ job.created_at | date:'MMM d, h:mm a' }}
                           }
@@ -111,7 +111,7 @@
                     </div>
                     @if (!isTerminal(job.status)) {
                       <div class="mini-progress-wrap">
-                        <div class="mini-progress-fill" [style.width.%]="(job.progress ?? 0) * 100"></div>
+                        <div class="mini-progress-fill" [style.width.%]="job.progress * 100"></div>
                       </div>
                     }
                   </mat-card-content>

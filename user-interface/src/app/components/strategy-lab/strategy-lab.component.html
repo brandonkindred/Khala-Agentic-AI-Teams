@@ -17,16 +17,11 @@
       [disabled]="running || loading"
     >
       @if (running) {
-        <ng-container matButtonIcon>
-          <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
-        </ng-container>
-        <span>Ideating…</span>
+        <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
       } @else {
-        <ng-container matButtonIcon>
-          <mat-icon>auto_awesome</mat-icon>
-        </ng-container>
-        <span>Run New Strategy</span>
+        <mat-icon>auto_awesome</mat-icon>
       }
+      <span>{{ running ? 'Ideating…' : 'Run New Strategy' }}</span>
     </button>
   </div>
 

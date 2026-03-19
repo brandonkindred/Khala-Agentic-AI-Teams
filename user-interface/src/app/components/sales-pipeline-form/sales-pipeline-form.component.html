@@ -191,11 +191,10 @@
     >
       @if (loading) {
         <mat-progress-spinner diameter="18" mode="indeterminate" class="btn-spinner" />
-        Starting…
       } @else {
         <mat-icon>play_circle</mat-icon>
-        Run Sales Pipeline
       }
+      {{ loading ? 'Starting…' : 'Run Sales Pipeline' }}
     </button>
 
     <button

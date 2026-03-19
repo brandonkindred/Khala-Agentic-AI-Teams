@@ -178,11 +178,10 @@
       >
         @if (refreshing) {
           <mat-progress-spinner diameter="16" mode="indeterminate" />
-          Refreshing…
         } @else {
           <mat-icon>refresh</mat-icon>
-          Refresh Insights
         }
+        {{ refreshing ? 'Refreshing…' : 'Refresh Insights' }}
       </button>
     </mat-card-actions>
   </mat-card>
@@ -290,11 +289,10 @@
           <button mat-raised-button color="primary" type="submit" [disabled]="recordingStage" class="submit-btn">
             @if (recordingStage) {
               <mat-progress-spinner diameter="16" mode="indeterminate" />
-              Saving…
             } @else {
               <mat-icon>save</mat-icon>
-              Record Stage Outcome
             }
+            {{ recordingStage ? 'Saving…' : 'Record Stage Outcome' }}
           </button>
         </form>
       </mat-expansion-panel>
@@ -392,11 +390,10 @@
           <button mat-raised-button color="primary" type="submit" [disabled]="recordingDeal" class="submit-btn">
             @if (recordingDeal) {
               <mat-progress-spinner diameter="16" mode="indeterminate" />
-              Saving…
             } @else {
               <mat-icon>save</mat-icon>
-              Record Deal Outcome
             }
+            {{ recordingDeal ? 'Saving…' : 'Record Deal Outcome' }}
           </button>
         </form>
       </mat-expansion-panel>
