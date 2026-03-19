@@ -1,5 +1,3 @@
-from typing import List
-
 from pydantic import BaseModel
 
 
@@ -35,4 +33,4 @@ class CoverageSummary(BaseModel):
     page_coverage: float
     journey_coverage: float
     overall_coverage: float
-    missing_statuses: List[str]
+    missing_statuses: list[str]

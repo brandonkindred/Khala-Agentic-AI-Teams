@@ -1,5 +1,3 @@
-from typing import List
-
 from pydantic import BaseModel
 
 
@@ -14,5 +12,5 @@ class ReportPackage(BaseModel):
 
 
 class DeliveryResult(BaseModel):
-    delivered_artifacts: List[str]
+    delivered_artifacts: list[str]
     delivery_notes: str
