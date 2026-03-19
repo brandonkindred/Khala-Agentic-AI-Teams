@@ -85,6 +85,7 @@ python run_unified_api.py --workers 4 --log-level warning
 | `UNIFIED_API_HOST` | `0.0.0.0` | Host to bind |
 | `UNIFIED_API_PORT` | `8080` | Port to bind |
 | `AGENT_CACHE` | `.agent_cache` | Directory for job and integrations storage (e.g. `integrations.json`). |
+| `INTEGRATIONS_BROWSER_SESSION_ROOT` | `${AGENT_CACHE}/integrations/browser_sessions` | Optional override for browser session files (e.g. Medium `storage_state.json`). Path is backend-controlled only; cannot be set from UI/API payloads. |
 | `SLACK_WEBHOOK_URL` | (none) | Optional. Slack Incoming Webhook URL; used as fallback when not set via Integrations UI. When set, open questions and Personal Assistant replies can be sent to Slack if Slack integration is enabled. |
 | `UI_BASE_URL` | `http://localhost:4200` | Base URL of the Angular UI; used in Slack messages for "Answer in UI" links. |
 
@@ -324,7 +325,7 @@ Software Engineering jobs are stored under `{cache_dir}/software_engineering_tea
 
 ### Slack integration (Phase 1)
 
-- **Integrations API:** `GET /api/integrations` lists configured integrations. **Slack:** `GET/PUT /api/integrations/slack`, OAuth connect/disconnect — configure via UI in `webhook` or `bot` mode; `SLACK_WEBHOOK_URL` remains a webhook fallback env var. **Medium (blogging stats):** `GET/PUT /api/integrations/medium`, optional `GET /api/integrations/medium/oauth/google/connect` + callback, `POST/DELETE /api/integrations/medium/session` to store or clear Playwright `storage_state`. Blogging `POST /medium-stats` requires this integration to be enabled and configured.
+- **Integrations API:** `GET /api/integrations` lists configured integrations. **Slack:** `GET/PUT /api/integrations/slack`, OAuth connect/disconnect — configure via UI in `webhook` or `bot` mode; `SLACK_WEBHOOK_URL` remains a webhook fallback env var. **Medium (blogging stats):** `GET/PUT /api/integrations/medium`, optional `GET /api/integrations/medium/oauth/google/connect` + callback, `POST/DELETE /api/integrations/medium/session` to store or clear Playwright `storage_state` on disk at `${INTEGRATIONS_BROWSER_SESSION_ROOT:-$AGENT_CACHE/integrations/browser_sessions}/medium/storage_state.json`. Blogging `POST /medium-stats` requires this integration to be enabled and configured.
 - **Manual E2E checklist:** (1) Start unified API and Angular UI. (2) Open **Integrations**, enable Slack, paste a valid Incoming Webhook URL, save. (3) Run a software-engineering job (or planning-v2 / product-analysis) that produces open questions; confirm a message appears in the Slack channel with a link to the UI. (4) Send a message to the Personal Assistant; confirm the assistant reply appears in the same Slack channel.
 
 ### Phase 2: Inbound from Slack (optional)

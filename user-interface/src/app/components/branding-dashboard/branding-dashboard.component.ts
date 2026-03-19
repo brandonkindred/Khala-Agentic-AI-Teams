@@ -96,7 +96,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     this.activeConversationId = state.conversation_id;
     this.conversationMission = state.mission;
     this.conversationLatestOutput = state.latest_output;
-    this.loadConversationHistory();
     this.syncBrandPreviewFromSelection();
   }
 
@@ -164,9 +163,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
       next: (brand) => {
         if (this.activeConversationId) {
           this.api.attachConversationToBrand(this.activeConversationId, brand.id).subscribe({
-            next: () => {
-              this.loadConversationHistory();
-            },
+            next: () => {},
           });
         }
         this.api.runBrand(clientId, brand.id).subscribe({
@@ -190,7 +187,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.loadClients();
-    this.loadConversationHistory();
   }
 
   loadClients(): void {
@@ -248,22 +244,11 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   }
 
   get canCreateBrandFromChat(): boolean {
-    return this.conversationHistory.length > 0 && !!this.conversationMission;
+    return !!this.activeConversationId && !!this.conversationMission;
   }
 
   get hasConversationHistory(): boolean {
-    return this.conversationHistory.length > 0;
-  }
-
-  private loadConversationHistory(): void {
-    this.api.listConversations().subscribe({
-      next: (items) => {
-        this.conversationHistory = items;
-      },
-      error: () => {
-        this.conversationHistory = [];
-      },
-    });
+    return !!this.activeConversationId;
   }
 
   private syncBrandPreviewFromSelection(): void {

@@ -143,3 +143,40 @@ def test_get_slack_config_invalid_json(tmp_path: Path, monkeypatch: pytest.Monke
     assert cfg["enabled"] is False
     assert cfg["webhook_url"] == ""
     assert cfg["channel_display_name"] == ""
+
+
+def test_medium_session_storage_uses_default_agent_cache_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Medium storage_state is written to AGENT_CACHE-backed browser session path by default."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    store.set_medium_session_storage_state_json('{"cookies":[],"origins":[]}')
+
+    session_path = tmp_path / "integrations" / "browser_sessions" / "medium" / "storage_state.json"
+    assert session_path.exists()
+    assert session_path.read_text(encoding="utf-8") == '{"cookies":[],"origins":[]}'
+    cfg = store.get_medium_config()
+    assert cfg["session_configured"] is True
+
+
+def test_medium_session_storage_honors_env_root_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """INTEGRATIONS_BROWSER_SESSION_ROOT overrides default disk location."""
+    custom_root = tmp_path / "custom_browser_sessions"
+    monkeypatch.setenv("INTEGRATIONS_BROWSER_SESSION_ROOT", str(custom_root))
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    store.set_medium_session_storage_state_json('{"cookies":[],"origins":[]}')
+
+    session_path = custom_root / "medium" / "storage_state.json"
+    assert session_path.exists()
+    assert session_path.read_text(encoding="utf-8") == '{"cookies":[],"origins":[]}'
+
+
+def test_clear_medium_session_storage_removes_disk_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """clear_medium_session_storage removes on-disk storage_state file."""
+    store, _ = _reload_modules(tmp_path, monkeypatch)
+    store.set_medium_session_storage_state_json('{"cookies":[],"origins":[]}')
+    session_path = tmp_path / "integrations" / "browser_sessions" / "medium" / "storage_state.json"
+    assert session_path.exists()
+
+    store.clear_medium_session_storage()
+    assert not session_path.exists()
+    cfg = store.get_medium_config()
+    assert cfg["session_configured"] is False

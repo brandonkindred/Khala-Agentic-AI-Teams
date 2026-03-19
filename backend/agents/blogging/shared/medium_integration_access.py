@@ -36,8 +36,10 @@ def resolve_medium_stats_storage_state() -> Tuple[Optional[Dict[str, Any]], str,
     """
     _ensure_backend_on_path()
     try:
-        from unified_api.integration_credentials import get_credential
-        from unified_api.integrations_store import get_medium_config
+        from unified_api.integrations_store import (
+            get_medium_config,
+            get_medium_session_storage_state_json,
+        )
     except ImportError as e:
         logger.warning("Medium integration modules unavailable: %s", e)
         return None, "", (
@@ -58,7 +60,7 @@ def resolve_medium_stats_storage_state() -> Tuple[Optional[Dict[str, Any]], str,
             "then import a browser session.",
         )
 
-    raw = get_credential("medium", "session_storage_state")
+    raw = get_medium_session_storage_state_json()
     if not (raw and raw.strip()):
         return (
             None,

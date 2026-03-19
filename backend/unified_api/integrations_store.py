@@ -60,6 +60,8 @@ from unified_api.integration_credentials import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CACHE_DIR = ".agent_cache"
+_BROWSER_SESSION_ROOT_ENV = "INTEGRATIONS_BROWSER_SESSION_ROOT"
+_DEFAULT_BROWSER_SESSIONS_SUBDIR = "integrations/browser_sessions"
 _LOCK = threading.Lock()
 _OAUTH_STATE_TTL_SECONDS = 600  # 10 minutes
 
@@ -73,6 +75,55 @@ def _get_integrations_path() -> Path:
     path = Path(cache_dir)
     path.mkdir(parents=True, exist_ok=True)
     return path / "integrations.json"
+
+
+def _resolve_browser_session_root() -> Path:
+    """Return root directory for browser session files (env override supported)."""
+    override = os.getenv(_BROWSER_SESSION_ROOT_ENV, "").strip()
+    if override:
+        root = Path(override).expanduser().resolve()
+    else:
+        cache_dir = Path(os.getenv("AGENT_CACHE", _DEFAULT_CACHE_DIR))
+        root = (cache_dir / _DEFAULT_BROWSER_SESSIONS_SUBDIR).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        root.chmod(0o700)
+    except OSError:
+        pass
+    return root
+
+
+def _medium_storage_state_path() -> Path:
+    """Return Medium storage_state.json path under the browser session root."""
+    medium_dir = _resolve_browser_session_root() / "medium"
+    medium_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        medium_dir.chmod(0o700)
+    except OSError:
+        pass
+    return medium_dir / "storage_state.json"
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    """Write text to disk atomically (tmp + replace)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _read_text_if_exists(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning("Failed to read file %s: %s", path, e)
+        return ""
 
 
 def _read_raw() -> Dict[str, Any]:
@@ -290,7 +341,7 @@ def get_medium_config() -> Dict[str, Any]:
     with _LOCK:
         data = _read_raw()
     medium = data.get("medium") or {}
-    session_raw = get_credential(_MEDIUM_SERVICE, "session_storage_state")
+    session_raw = get_medium_session_storage_state_json()
     return {
         "enabled": bool(medium.get("enabled", False)),
         "oauth_provider": str(medium.get("oauth_provider", "google")).strip() or "google",
@@ -357,12 +408,41 @@ def set_medium_google_oauth_identity(
 
 
 def set_medium_session_storage_state_json(session_json: str) -> None:
-    """Encrypt and store Playwright storage_state JSON for medium.com (required for the stats agent)."""
+    """Store Playwright storage_state JSON on disk for medium.com (required for the stats agent)."""
     session_json = (session_json or "").strip()
+    path = _medium_storage_state_path()
     if not session_json:
-        delete_credential(_MEDIUM_SERVICE, "session_storage_state")
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError as e:
+            logger.warning("Failed to remove Medium session file %s: %s", path, e)
         return
-    set_credential(_MEDIUM_SERVICE, "session_storage_state", session_json)
+    _write_text_atomic(path, session_json)
+    # Backward-compat cleanup: remove legacy DB copy when writing new file.
+    delete_credential(_MEDIUM_SERVICE, "session_storage_state")
+
+
+def get_medium_session_storage_state_json() -> str:
+    """
+    Return Medium storage_state JSON from disk.
+    If missing, migrate legacy encrypted DB value (one-time) into the file path.
+    """
+    path = _medium_storage_state_path()
+    raw = _read_text_if_exists(path).strip()
+    if raw:
+        return raw
+
+    legacy_raw = get_credential(_MEDIUM_SERVICE, "session_storage_state").strip()
+    if legacy_raw:
+        try:
+            _write_text_atomic(path, legacy_raw)
+            delete_credential(_MEDIUM_SERVICE, "session_storage_state")
+        except OSError as e:
+            logger.warning("Failed to migrate Medium session to %s: %s", path, e)
+            return legacy_raw
+        return legacy_raw
+    return ""
 
 
 def clear_medium_google_oauth_identity() -> None:
@@ -384,6 +464,13 @@ def clear_medium_google_oauth_identity() -> None:
 
 def clear_medium_session_storage() -> None:
     """Remove stored Playwright session for Medium."""
+    path = _medium_storage_state_path()
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError as e:
+        logger.warning("Failed to remove Medium session file %s: %s", path, e)
+    # Backward-compat cleanup
     delete_credential(_MEDIUM_SERVICE, "session_storage_state")
 
 
