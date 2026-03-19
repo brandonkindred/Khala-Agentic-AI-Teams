@@ -9,17 +9,6 @@ Phase gate logic:
 The orchestrator enforces dependency order — nothing in a later phase
 should be definable without what came before it.
 """
-"""Orchestrator for the 5-phase branding strategy team.
-
-Phase gate logic:
-  Phase 1 → 2: Strategy is validated with stakeholders
-  Phase 2 → 3: Messaging is approved and stable
-  Phase 3 → 4: Identity system is locked
-  Phase 4 → 5: At least one full channel is live
-
-The orchestrator enforces dependency order — nothing in a later phase
-should be definable without what came before it.
-"""
 
 from __future__ import annotations
 
@@ -31,14 +20,9 @@ from .agents import (
     BrandGuidelinesAgent,
     BrandWikiAgent,
     ChannelActivationAgent,
-    ChannelActivationAgent,
     CreativeRefinementAgent,
     GovernanceAgent,
-    GovernanceAgent,
     MoodBoardIdeationAgent,
-    NarrativeMessagingAgent,
-    StrategicCoreAgent,
-    VisualIdentityAgent,
     NarrativeMessagingAgent,
     StrategicCoreAgent,
     VisualIdentityAgent,
@@ -50,20 +34,12 @@ from .models import (
     BrandPhase,
     ChannelActivationOutput,
     GovernanceOutput,
-    BrandPhase,
-    ChannelActivationOutput,
-    GovernanceOutput,
     HumanReview,
     NarrativeMessagingOutput,
     PhaseGate,
     PhaseGateStatus,
     StrategicCoreOutput,
-    NarrativeMessagingOutput,
-    PhaseGate,
-    PhaseGateStatus,
-    StrategicCoreOutput,
     TeamOutput,
-    VisualIdentityOutput,
     VisualIdentityOutput,
     WorkflowStatus,
 )
@@ -178,15 +154,7 @@ class BrandingTeamOrchestrator:
         include_market_research: bool = False,
         include_design_assets: bool = False,
         target_phase: Optional[BrandPhase] = None,
-        target_phase: Optional[BrandPhase] = None,
     ) -> TeamOutput:
-        """Run the branding pipeline up to the target phase (default: all phases).
-
-        Parameters
-        ----------
-        target_phase : optional
-            Stop after completing this phase. ``None`` means run all phases.
-        """
         """Run the branding pipeline up to the target phase (default: all phases).
 
         Parameters
@@ -331,19 +299,6 @@ class BrandingTeamOrchestrator:
         )
 
         phase_gates = _build_phase_gates(current_phase, human_review.approved)
-        brand_book = _build_brand_book(
-            strategic_core,
-            narrative,
-            visual_identity,
-            channel_activation,
-            governance,
-            codification,
-            writing_guidelines,
-            brand_guidelines,
-            design_system,
-        )
-
-        phase_gates = _build_phase_gates(current_phase, human_review.approved)
 
         if not human_review.approved:
             status = WorkflowStatus.NEEDS_HUMAN_DECISION
@@ -359,13 +314,6 @@ class BrandingTeamOrchestrator:
             mission_summary = (
                 "All five branding phases complete. The brand system is finalized and "
                 "ready for enterprise-wide rollout."
-            status = WorkflowStatus.NEEDS_HUMAN_DECISION
-            phase_label = (
-                _PHASE_ORDER[min(stop_idx, len(_PHASE_ORDER) - 1)].value.replace("_", " ").title()
-            )
-            mission_summary = (
-                f"Phase '{phase_label}' artifacts are ready for stakeholder review. "
-                f"Approval is required before advancing to the next phase."
             )
         else:
             # Approved but not all phases are done — signal that the current
@@ -373,44 +321,6 @@ class BrandingTeamOrchestrator:
             status = WorkflowStatus.NEEDS_HUMAN_DECISION
             phase_label = current_phase.value.replace("_", " ").title()
             mission_summary = f"Phase '{phase_label}' approved. Artifacts are locked and the next phase can begin."
-
-        output = TeamOutput(
-            status=status,
-            mission_summary=mission_summary,
-            current_phase=current_phase,
-            phase_gates=phase_gates,
-            strategic_core=strategic_core,
-            narrative_messaging=narrative,
-            visual_identity=visual_identity,
-            channel_activation=channel_activation,
-            governance=governance,
-            codification=codification,
-            mood_boards=mood_boards,
-            creative_refinement=refinement_plan,
-            writing_guidelines=writing_guidelines,
-            brand_guidelines=brand_guidelines,
-            design_system=design_system,
-            wiki_backlog=wiki_backlog,
-            brand_checks=checks,
-            human_feedback=human_review.feedback
-            or (
-                "Approved for rollout."
-                if human_review.approved
-                else "Awaiting approval from brand leadership."
-            ),
-            competitive_snapshot=competitive_snapshot,
-            design_asset_result=design_asset_result,
-            brand_book=brand_book,
-        )
-            status = WorkflowStatus.READY_FOR_ROLLOUT
-            if current_phase == BrandPhase.COMPLETE:
-                mission_summary = (
-                    "All five branding phases complete. The brand system is finalized and "
-                    "ready for enterprise-wide rollout."
-                )
-            else:
-                phase_label = current_phase.value.replace("_", " ").title()
-                mission_summary = f"Phase '{phase_label}' approved. Artifacts are locked and the next phase can begin."
 
         output = TeamOutput(
             status=status,
@@ -490,11 +400,6 @@ class BrandingTeamOrchestrator:
 
 
 def _build_brand_book(
-    strategic_core: StrategicCoreOutput,
-    narrative: Optional[NarrativeMessagingOutput],
-    visual_identity: Optional[VisualIdentityOutput],
-    channel_activation: Optional[ChannelActivationOutput],
-    governance: Optional[GovernanceOutput],
     strategic_core: StrategicCoreOutput,
     narrative: Optional[NarrativeMessagingOutput],
     visual_identity: Optional[VisualIdentityOutput],
