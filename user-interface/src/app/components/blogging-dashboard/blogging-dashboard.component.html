@@ -37,7 +37,10 @@
       </mat-tab>
       <mat-tab label="Full Pipeline">
         <div class="tab-content">
-          <app-full-pipeline-form (submitRequest)="onFullPipelineSubmit($event)" />
+          <app-full-pipeline-form
+            [brandSpecConfigured]="blogBrandSpecConfigured"
+            (submitRequest)="onFullPipelineSubmit($event)"
+          />
           @if (fullPipelineResult) {
             <app-full-pipeline-results [data]="fullPipelineResult" />
           }

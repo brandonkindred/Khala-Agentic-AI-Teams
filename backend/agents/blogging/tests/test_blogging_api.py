@@ -26,6 +26,16 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+def test_health_includes_brand_spec_configured(client: TestClient) -> None:
+    """GET /health returns brand_spec_configured when the blogging package has a substantive brand spec file."""
+    r = client.get("/health")
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("status") == "ok"
+    assert "brand_spec_configured" in data
+    assert isinstance(data["brand_spec_configured"], bool)
+
+
 @pytest.fixture
 def cache_dir(tmp_path: Path):
     return tmp_path

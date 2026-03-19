@@ -57,15 +57,22 @@
         </mat-form-field>
       }
 
-      <mat-form-field appearance="outline" class="full-width">
-        <mat-label>Audience</mat-label>
-        <input matInput formControlName="audience" [attr.aria-label]="'Target audience'">
-      </mat-form-field>
+      @if (showAudienceToneFields) {
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-label>Audience</mat-label>
+          <input matInput formControlName="audience" [attr.aria-label]="'Target audience'">
+        </mat-form-field>
 
-      <mat-form-field appearance="outline" class="full-width">
-        <mat-label>Tone or purpose</mat-label>
-        <input matInput formControlName="tone_or_purpose" [attr.aria-label]="'Tone or purpose'">
-      </mat-form-field>
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-label>Tone or purpose</mat-label>
+          <input matInput formControlName="tone_or_purpose" [attr.aria-label]="'Tone or purpose'">
+        </mat-form-field>
+      } @else {
+        <p class="brand-spec-note mat-body-2">
+          <strong>Audience</strong> and <strong>tone</strong> come from the server
+          <strong>brand spec</strong> (<code>brand_spec_prompt.md</code>) — not from this form.
+        </p>
+      }
 
       <mat-form-field appearance="outline" class="full-width">
         <mat-label>Max results</mat-label>

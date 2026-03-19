@@ -112,6 +112,8 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   artifactContent: Record<string, string | object> = {};
   artifactContentLoading: Record<string, boolean> = {};
   activeTabIndex = 1; // 0 Research and Review, 1 Full Pipeline, 2 Assets — default to Full Pipeline
+  /** From GET /health when `brand_spec_configured` is true — hides audience/tone on full pipeline form. */
+  blogBrandSpecConfigured = false;
   viewArtifactModal: { name: string; content: string | object } | null = null;
   viewArtifactLoading = false;
   viewArtifactError: string | null = null;
@@ -157,6 +159,15 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
+    this.api.health().subscribe({
+      next: (h) => {
+        this.blogBrandSpecConfigured = h.brand_spec_configured === true;
+      },
+      error: () => {
+        this.blogBrandSpecConfigured = false;
+      },
+    });
+
     this.queryParamsSub = this.route.queryParams.subscribe((params) => {
       const id = params['jobId'];
       if (id) this.pendingJobId = id;

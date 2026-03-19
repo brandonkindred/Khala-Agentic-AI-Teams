@@ -1,3 +1,10 @@
+/** GET /health from the Blogging API (extends generic status). */
+export interface BloggingHealthResponse {
+  status: string;
+  /** True when brand_spec_prompt.md is present and substantive; UI hides audience/tone for full pipeline. */
+  brand_spec_configured?: boolean;
+}
+
 /** Audience details for targeting content. */
 export interface AudienceDetails {
   skill_level?: string;

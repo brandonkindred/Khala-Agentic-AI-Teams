@@ -7,7 +7,7 @@ import type {
   ResearchAndReviewResponse,
   FullPipelineRequest,
   FullPipelineResponse,
-  HealthResponse,
+  BloggingHealthResponse,
   BlogJobListItem,
   BlogJobStatusResponse,
   BlogJobArtifactsResponse,
@@ -87,10 +87,10 @@ export class BloggingApiService {
 
   /**
    * GET /health
-   * Health check for the Blogging API.
+   * Health check for the Blogging API (includes brand_spec_configured when supported).
    */
-  health(): Observable<HealthResponse> {
-    return this.http.get<HealthResponse>(`${this.baseUrl}/health`);
+  health(): Observable<BloggingHealthResponse> {
+    return this.http.get<BloggingHealthResponse>(`${this.baseUrl}/health`);
   }
 
   /**

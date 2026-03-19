@@ -31,6 +31,7 @@ from llm_service import OllamaLLMClient
 from blog_research_agent.models import ResearchBriefInput
 from blog_review_agent import BlogReviewAgent, BlogReviewInput
 from shared.content_profile import ContentProfile, SeriesContext, resolve_length_policy
+from shared.brand_spec import brand_spec_prompt_configured
 from shared.medium_stats_api import MediumStatsRequest
 from shared.medium_integration_access import medium_stats_integration_eligible
 
@@ -513,7 +514,10 @@ def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
 @app.get("/health")
 def health() -> dict:
     """Health check endpoint."""
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "brand_spec_configured": brand_spec_prompt_configured(),
+    }
 
 
 # ---------------------------------------------------------------------------

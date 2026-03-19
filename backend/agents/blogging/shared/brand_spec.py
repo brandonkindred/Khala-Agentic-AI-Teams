@@ -93,6 +93,33 @@ class BrandSpec(BaseModel):
             return self.model_dump(exclude_none=True)
         return self.dict(exclude_none=True)  # Pydantic v1
 
+_BRAND_SPEC_PROMPT_RELATIVE = Path("docs") / "brand_spec_prompt.md"
+_DEFAULT_MIN_CONFIGURED_CHARS = 400
+
+
+def brand_spec_prompt_configured(
+    *,
+    blogging_root: Optional[Path] = None,
+    min_content_chars: int = _DEFAULT_MIN_CONFIGURED_CHARS,
+) -> bool:
+    """
+    True when ``docs/brand_spec_prompt.md`` exists under the blogging package and has
+    enough content to be treated as the canonical brand source.
+
+    Used by the API health endpoint so the UI can hide audience/tone fields when the
+    pipeline will rely on the brand spec file instead.
+    """
+    root = blogging_root or Path(__file__).resolve().parent.parent
+    path = root / _BRAND_SPEC_PROMPT_RELATIVE
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return len(text) >= min_content_chars
+
+
 def load_brand_spec_prompt(path: str | Path) -> str:
     """
     Load the full brand spec prompt from brand_spec_prompt.md.

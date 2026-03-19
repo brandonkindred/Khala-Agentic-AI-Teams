@@ -54,6 +54,28 @@ describe('FullPipelineFormComponent', () => {
     expect(emitted.series_context).toBeUndefined();
   });
 
+  it('hides audience and tone when brand spec is configured on the server', () => {
+    fixture.componentRef.setInput('brandSpecConfigured', true);
+    fixture.detectChanges();
+    expect(fixture.debugElement.query(By.css('[formControlName="audience"]'))).toBeNull();
+    expect(fixture.debugElement.query(By.css('.brand-spec-note'))).not.toBeNull();
+  });
+
+  it('omits audience and tone from payload when brand spec is configured', () => {
+    fixture.componentRef.setInput('brandSpecConfigured', true);
+    component.form.patchValue({
+      brief: 'Test brief',
+      max_results: 20,
+      audience: 'CTOs',
+      tone_or_purpose: 'technical',
+    });
+    let emitted: any;
+    component.submitRequest.subscribe((v) => (emitted = v));
+    component.onSubmit();
+    expect(emitted.audience).toBeUndefined();
+    expect(emitted.tone_or_purpose).toBeUndefined();
+  });
+
   it('emits series_context for series_instalment when series fields are set', () => {
     component.form.patchValue({
       brief: 'Test brief',

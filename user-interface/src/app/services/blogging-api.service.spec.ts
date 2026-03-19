@@ -68,11 +68,12 @@ describe('BloggingApiService', () => {
   it('should call GET /health', () => {
     service.health().subscribe((res) => {
       expect(res.status).toBe('ok');
+      expect(res.brand_spec_configured).toBe(true);
     });
 
     const req = httpMock.expectOne(`${baseUrl}/health`);
     expect(req.request.method).toBe('GET');
-    req.flush({ status: 'ok' });
+    req.flush({ status: 'ok', brand_spec_configured: true });
   });
 
   it('should call GET /job/{jobId}/artifacts', () => {

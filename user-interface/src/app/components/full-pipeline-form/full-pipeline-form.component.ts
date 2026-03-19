@@ -1,4 +1,4 @@
-import { Component, OnDestroy, output } from '@angular/core';
+import { Component, effect, input, OnDestroy, output } from '@angular/core';
 import { Subscription } from 'rxjs';
 import { FormBuilder, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
@@ -54,6 +54,12 @@ const CONTENT_PROFILE_OPTIONS: { value: BlogContentProfile; label: string; hint:
 export class FullPipelineFormComponent implements OnDestroy {
   readonly submitRequest = output<FullPipelineRequest>();
 
+  /**
+   * When true (from GET /health `brand_spec_configured`), audience and tone fields are hidden
+   * and omitted from the request so the pipeline uses `brand_spec_prompt.md` on the server.
+   */
+  readonly brandSpecConfigured = input(false);
+
   readonly profileOptions = CONTENT_PROFILE_OPTIONS;
 
   form: FormGroup;
@@ -70,6 +76,11 @@ export class FullPipelineFormComponent implements OnDestroy {
   /** Series-only fields are shown only for the series instalment profile. */
   get showSeriesFields(): boolean {
     return this.form.get('content_profile')?.value === 'series_instalment';
+  }
+
+  /** Audience / tone inputs only when no substantive brand spec is deployed on the API. */
+  get showAudienceToneFields(): boolean {
+    return !this.brandSpecConfigured();
   }
 
   constructor(private readonly fb: FormBuilder) {
@@ -104,6 +115,12 @@ export class FullPipelineFormComponent implements OnDestroy {
         );
       }
     });
+
+    effect(() => {
+      if (this.brandSpecConfigured()) {
+        this.form.patchValue({ audience: '', tone_or_purpose: '' }, { emitEvent: false });
+      }
+    });
   }
 
   ngOnDestroy(): void {
@@ -118,13 +135,21 @@ export class FullPipelineFormComponent implements OnDestroy {
     const payload: FullPipelineRequest = {
       brief: v.brief,
       title_concept: v.title_concept || undefined,
-      audience: v.audience || undefined,
-      tone_or_purpose: v.tone_or_purpose || undefined,
       max_results: v.max_results,
       run_gates: v.run_gates,
       max_rewrite_iterations: v.max_rewrite_iterations,
       content_profile: v.content_profile as BlogContentProfile,
     };
+    if (!this.brandSpecConfigured()) {
+      const aud = v.audience?.trim();
+      if (aud) {
+        payload.audience = aud;
+      }
+      const tone = v.tone_or_purpose?.trim();
+      if (tone) {
+        payload.tone_or_purpose = tone;
+      }
+    }
     if (v.length_notes?.trim()) {
       payload.length_notes = v.length_notes.trim();
     }
