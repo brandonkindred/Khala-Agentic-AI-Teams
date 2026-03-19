@@ -373,3 +373,19 @@ The team tests against all WCAG 2.2 Level A and AA success criteria, including n
 ## License
 
 MIT License - See LICENSE file for details.
+
+
+## Strands-Native Agency (KIN-27)
+
+A fresh, deterministic Strands-style implementation now lives under:
+
+`agents/accessibility_audit_team/a11y_agency_strands/`
+
+It implements:
+- a Python workflow coordinator (`app/workflows/engagement_workflow.py`)
+- a dedicated orchestrator with phase + quality gate enforcement (`app/agents/orchestrator.py`)
+- specialist agents exposed as tool functions with typed outputs (`app/agents/*.py`)
+- local tool implementations for discovery, scanning, evidence, checklist/reporting, storage, and approvals (`app/tools/*.py`)
+- contract tests covering execution order + hard gate behavior (`tests/contract_tests/`)
+
+See `a11y_agency_spec.md` in that module for the exact phase sequence and gate contract.

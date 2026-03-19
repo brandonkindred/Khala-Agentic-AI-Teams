@@ -1,0 +1,20 @@
+frameworks:
+  - name: WCAG 2.2
+    version: "2.2"
+  - name: Section 508
+    version: "2017 refresh"
+workflow_phases:
+  - discovery
+  - inventory_setup
+  - component_audit
+  - journey_assessment
+  - page_audit
+  - architecture_audit
+  - infrastructure_audit
+  - wcag_coverage
+  - sec508_mapping
+  - scoring_prioritization
+  - reporting
+  - approval
+  - delivery
+  - retest
