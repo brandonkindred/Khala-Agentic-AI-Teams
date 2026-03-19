@@ -8,7 +8,7 @@ UI actions mapped to HTTP endpoints.
 |-----------|--------|------|---------|----------|
 | Submit research form | POST | `/research-and-review` | `ResearchAndReviewRequest` | `ResearchAndReviewResponse` |
 | Submit full pipeline form | POST | `/full-pipeline` | `FullPipelineRequest` | `FullPipelineResponse` |
-| Health check | GET | `/health` | - | `{ status: "ok" }` |
+| Health check | GET | `/health` | - | `BloggingHealthResponse` (`status`, optional `brand_spec_configured`) |
 
 ## Software Engineering Team API (port 8000)
 
