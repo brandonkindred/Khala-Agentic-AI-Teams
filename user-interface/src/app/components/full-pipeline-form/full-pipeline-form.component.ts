@@ -1,4 +1,5 @@
-import { Component, output } from '@angular/core';
+import { Component, OnDestroy, output } from '@angular/core';
+import { Subscription } from 'rxjs';
 import { FormBuilder, FormGroup, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -50,18 +51,25 @@ const CONTENT_PROFILE_OPTIONS: { value: BlogContentProfile; label: string; hint:
   templateUrl: './full-pipeline-form.component.html',
   styleUrl: './full-pipeline-form.component.scss',
 })
-export class FullPipelineFormComponent {
+export class FullPipelineFormComponent implements OnDestroy {
   readonly submitRequest = output<FullPipelineRequest>();
 
   readonly profileOptions = CONTENT_PROFILE_OPTIONS;
 
   form: FormGroup;
 
+  private readonly profileSub: Subscription;
+
   /** Hint text for the selected writing format (template-safe). */
   get selectedProfileHint(): string {
     const v = this.form.get('content_profile')?.value as BlogContentProfile | undefined;
     const row = CONTENT_PROFILE_OPTIONS.find((p) => p.value === v);
     return row?.hint ?? '';
+  }
+
+  /** Series-only fields are shown only for the series instalment profile. */
+  get showSeriesFields(): boolean {
+    return this.form.get('content_profile')?.value === 'series_instalment';
   }
 
   constructor(private readonly fb: FormBuilder) {
@@ -82,6 +90,24 @@ export class FullPipelineFormComponent {
       planned_parts: [null as number | null],
       instalment_scope: [''],
     });
+
+    this.profileSub = this.form.get('content_profile')!.valueChanges.subscribe((profile) => {
+      if (profile !== 'series_instalment') {
+        this.form.patchValue(
+          {
+            series_title: '',
+            part_number: 1,
+            planned_parts: null,
+            instalment_scope: '',
+          },
+          { emitEvent: false },
+        );
+      }
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.profileSub.unsubscribe();
   }
 
   onSubmit(): void {
@@ -105,16 +131,18 @@ export class FullPipelineFormComponent {
     if (v.use_custom_word_count) {
       payload.target_word_count = v.target_word_count;
     }
-    const st = v.series_title?.trim();
-    const isc = v.instalment_scope?.trim();
-    const pp = v.planned_parts;
-    if (st || isc || pp != null) {
-      payload.series_context = {
-        ...(st ? { series_title: st } : {}),
-        part_number: v.part_number ?? 1,
-        ...(pp != null && pp !== '' ? { planned_parts: Number(pp) } : {}),
-        ...(isc ? { instalment_scope: isc } : {}),
-      };
+    if (v.content_profile === 'series_instalment') {
+      const st = v.series_title?.trim();
+      const isc = v.instalment_scope?.trim();
+      const pp = v.planned_parts;
+      if (st || isc || pp != null) {
+        payload.series_context = {
+          ...(st ? { series_title: st } : {}),
+          part_number: v.part_number ?? 1,
+          ...(pp != null && pp !== '' ? { planned_parts: Number(pp) } : {}),
+          ...(isc ? { instalment_scope: isc } : {}),
+        };
+      }
     }
     this.submitRequest.emit(payload);
   }

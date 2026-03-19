@@ -35,25 +35,27 @@
         <mat-hint>Anything the team should know about depth, sections, or what to skip</mat-hint>
       </mat-form-field>
 
-      <p class="section-label">Series (optional)</p>
-      <mat-form-field appearance="outline" class="full-width">
-        <mat-label>Series title</mat-label>
-        <input matInput formControlName="series_title" [attr.aria-label]="'Series title'">
-      </mat-form-field>
-      <div class="row-2">
-        <mat-form-field appearance="outline" class="half">
-          <mat-label>Part number</mat-label>
-          <input matInput type="number" formControlName="part_number" [attr.aria-label]="'Series part number'">
+      @if (showSeriesFields) {
+        <p class="section-label">Series instalment</p>
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-label>Series title</mat-label>
+          <input matInput formControlName="series_title" [attr.aria-label]="'Series title'">
         </mat-form-field>
-        <mat-form-field appearance="outline" class="half">
-          <mat-label>Planned parts (optional)</mat-label>
-          <input matInput type="number" formControlName="planned_parts" [attr.aria-label]="'Planned number of posts'">
+        <div class="row-2">
+          <mat-form-field appearance="outline" class="half">
+            <mat-label>Part number</mat-label>
+            <input matInput type="number" formControlName="part_number" [attr.aria-label]="'Series part number'">
+          </mat-form-field>
+          <mat-form-field appearance="outline" class="half">
+            <mat-label>Planned parts (optional)</mat-label>
+            <input matInput type="number" formControlName="planned_parts" [attr.aria-label]="'Planned number of posts'">
+          </mat-form-field>
+        </div>
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-label>This instalment covers</mat-label>
+          <input matInput formControlName="instalment_scope" [attr.aria-label]="'Scope of this instalment'">
         </mat-form-field>
-      </div>
-      <mat-form-field appearance="outline" class="full-width">
-        <mat-label>This instalment covers</mat-label>
-        <input matInput formControlName="instalment_scope" [attr.aria-label]="'Scope of this instalment'">
-      </mat-form-field>
+      }
 
       <mat-form-field appearance="outline" class="full-width">
         <mat-label>Audience</mat-label>
