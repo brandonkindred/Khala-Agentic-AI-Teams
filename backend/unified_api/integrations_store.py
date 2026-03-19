@@ -64,6 +64,7 @@ _BROWSER_SESSION_ROOT_ENV = "INTEGRATIONS_BROWSER_SESSION_ROOT"
 _DEFAULT_BROWSER_SESSIONS_SUBDIR = "integrations/browser_sessions"
 _LOCK = threading.Lock()
 _OAUTH_STATE_TTL_SECONDS = 600  # 10 minutes
+_BROWSER_SESSION_ROOT_LOGGED = False
 
 _SLACK_SERVICE = "slack"
 _MEDIUM_SERVICE = "medium"
@@ -79,6 +80,7 @@ def _get_integrations_path() -> Path:
 
 def _resolve_browser_session_root() -> Path:
     """Return root directory for browser session files (env override supported)."""
+    global _BROWSER_SESSION_ROOT_LOGGED
     override = os.getenv(_BROWSER_SESSION_ROOT_ENV, "").strip()
     if override:
         root = Path(override).expanduser().resolve()
@@ -90,6 +92,13 @@ def _resolve_browser_session_root() -> Path:
         root.chmod(0o700)
     except OSError:
         pass
+    if not _BROWSER_SESSION_ROOT_LOGGED:
+        logger.info(
+            "Integration browser session root resolved to: %s (env_override=%s)",
+            root,
+            bool(override),
+        )
+        _BROWSER_SESSION_ROOT_LOGGED = True
     return root
 
 
