@@ -65,6 +65,10 @@ Thumbs.db
 __MACOSX/
 
 # Project-specific
+# Branding team — local SQLite (user/session data; created at runtime)
+backend/agents/branding_team/data/branding.db
+backend/agents/branding_team/data/branding.db-wal
+backend/agents/branding_team/data/branding.db-shm
 agents/software_engineering_team/test_repo/
 .agent_cache/
 .cursor/
