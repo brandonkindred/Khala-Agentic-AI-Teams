@@ -15,6 +15,8 @@ import { AgentProvisioningDashboardComponent } from './components/agent-provisio
 import { AISystemsDashboardComponent } from './components/ai-systems-dashboard/ai-systems-dashboard.component';
 import { InvestmentDashboardComponent } from './components/investment-dashboard/investment-dashboard.component';
 import { IntegrationsDashboardComponent } from './components/integrations-dashboard/integrations-dashboard.component';
+import { IntegrationsPageComponent } from './components/integrations-page/integrations-page.component';
+import { IntegrationConfigPageComponent } from './components/integration-config-page/integration-config-page.component';
 import { StudioGridDashboardComponent } from './components/studio-grid-dashboard/studio-grid-dashboard.component';
 import { SalesDashboardComponent } from './components/sales-dashboard/sales-dashboard.component';
 
@@ -38,7 +40,9 @@ export const routes: Routes = [
       { path: 'agent-provisioning', component: AgentProvisioningDashboardComponent },
       { path: 'ai-systems', component: AISystemsDashboardComponent },
       { path: 'investment', component: InvestmentDashboardComponent },
-      { path: 'integrations', component: IntegrationsDashboardComponent },
+      { path: 'integrations', component: IntegrationsPageComponent },
+      { path: 'integrations/slack', component: IntegrationsDashboardComponent },
+      { path: 'integrations/:integrationId', component: IntegrationConfigPageComponent },
       { path: 'studio-grid', component: StudioGridDashboardComponent },
       { path: 'sales', component: SalesDashboardComponent },
     ],

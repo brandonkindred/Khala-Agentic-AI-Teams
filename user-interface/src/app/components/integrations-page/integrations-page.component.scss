@@ -1,0 +1,49 @@
+.integrations-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.page-header p {
+  color: #4b5563;
+  max-width: 760px;
+}
+
+.integrations-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.integration-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.integration-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.integration-header mat-icon {
+  color: #2563eb;
+}
+
+h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.category {
+  margin: 0.15rem 0 0;
+  color: #6b7280;
+  font-size: 0.85rem;
+}
+
+.description {
+  margin: 0;
+  color: #374151;
+  min-height: 3rem;
+}

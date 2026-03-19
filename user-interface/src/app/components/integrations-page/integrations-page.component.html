@@ -1,0 +1,27 @@
+<section class="integrations-page">
+  <header class="page-header">
+    <h1>Integrations</h1>
+    <p>
+      Connect tools and services to extend your agents. Choose a service below to configure access,
+      authentication, and default settings.
+    </p>
+  </header>
+
+  <div class="integrations-grid">
+    @for (integration of integrations; track integration.id) {
+      <mat-card class="integration-card">
+        <div class="integration-header">
+          <mat-icon>{{ integration.icon }}</mat-icon>
+          <div>
+            <h2>{{ integration.name }}</h2>
+            <p class="category">{{ integration.category }}</p>
+          </div>
+        </div>
+        <p class="description">{{ integration.description }}</p>
+        <button mat-raised-button color="primary" [routerLink]="['/integrations', integration.id]">
+          Configure {{ integration.name }}
+        </button>
+      </mat-card>
+    }
+  </div>
+</section>

@@ -1,0 +1,60 @@
+<section class="config-page">
+  <a class="back-link" routerLink="/integrations">
+    <mat-icon>arrow_back</mat-icon>
+    Back to Integrations
+  </a>
+
+  @if (!integration) {
+    <mat-card>
+      <p>Integration not found.</p>
+    </mat-card>
+  } @else {
+    <mat-card>
+      <header class="config-header">
+        <div class="title-row">
+          <mat-icon>{{ integration.icon }}</mat-icon>
+          <h1>Configure {{ integration.name }}</h1>
+        </div>
+        <p>{{ integration.description }}</p>
+      </header>
+
+      <form [formGroup]="form" (ngSubmit)="onSave()" class="config-form">
+        @for (field of integration.fields; track field.key) {
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>{{ field.label }}</mat-label>
+            @if (field.type === 'textarea') {
+              <textarea matInput [formControlName]="field.key" [placeholder]="field.placeholder || ''" rows="4"></textarea>
+            } @else {
+              <input
+                matInput
+                [type]="field.type === 'password' ? 'password' : field.type === 'url' ? 'url' : 'text'"
+                [formControlName]="field.key"
+                [placeholder]="field.placeholder || ''"
+              />
+            }
+            @if (form.controls[field.key].invalid && form.controls[field.key].touched) {
+              <mat-error>{{ field.label }} is required.</mat-error>
+            }
+          </mat-form-field>
+        }
+
+        <div class="actions">
+          <button mat-button type="button" routerLink="/integrations">Cancel</button>
+          <button mat-raised-button color="primary" type="submit">Save Integration</button>
+        </div>
+      </form>
+    </mat-card>
+
+    @if (submitted) {
+      <mat-card class="success-card">
+        <div class="success-row">
+          <mat-icon>check_circle</mat-icon>
+          <div>
+            <h2>{{ integration.name }} configuration saved</h2>
+            <p>Your integration details were captured successfully.</p>
+          </div>
+        </div>
+      </mat-card>
+    }
+  }
+</section>
