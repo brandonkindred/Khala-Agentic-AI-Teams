@@ -13,5 +13,12 @@ def run_wcag_coverage(engagement_id: str, tool_context: ToolContext) -> dict:
         overall_coverage=1.0,
         missing_statuses=[],
     )
-    artifact = persist_artifact(f"{tool_context.invocation_state['artifact_root']}/coverage.json", summary.model_dump())
-    return {"phase": "wcag_coverage", "artifact": artifact, "overall_coverage": summary.overall_coverage}
+    artifact = persist_artifact(
+        f"{tool_context.invocation_state['artifact_root']}/coverage.json",
+        summary.model_dump(),
+    )
+    return {
+        "phase": "wcag_coverage",
+        "artifact": artifact,
+        "overall_coverage": summary.overall_coverage,
+    }

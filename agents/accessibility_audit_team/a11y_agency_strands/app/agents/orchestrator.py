@@ -100,7 +100,13 @@ class EngagementOrchestrator:
     def run_reporting(self, engagement_id: str) -> dict:
         self._enforce_reporting_gate()
         findings = [{"finding_id": fid} for fid in self.state.findings_index]
-        evidence = run_evidence_curation(self.state.findings_index[0], "checkout", self.context) if self.state.findings_index else None
+        evidence = (
+            run_evidence_curation(
+                self.state.findings_index[0], "checkout", self.context
+            )
+            if self.state.findings_index
+            else None
+        )
         if evidence:
             link = TraceabilityLink(
                 requirement_id="REQ-1",
@@ -110,13 +116,17 @@ class EngagementOrchestrator:
                 remediation_ticket="A11Y-1",
                 retest_status="pending",
             )
-            self.traceability_matrix = update_traceability_matrix(self.traceability_matrix, link.model_dump())
+            self.traceability_matrix = update_traceability_matrix(
+                self.traceability_matrix, link.model_dump()
+            )
         result = run_reporting(engagement_id, findings, self.context)
         self._mark_complete("reporting")
         return result
 
     def request_human_approval(self, engagement_id: str) -> dict:
-        result = run_approval_and_comms(engagement_id, "Delivery package ready", self.context)
+        result = run_approval_and_comms(
+            engagement_id, "Delivery package ready", self.context
+        )
         self.state.pending_approvals.append(result["artifact"])
         self.state.approval_granted = bool(result.get("approved", False))
         if self.state.approval_granted:
@@ -140,7 +150,12 @@ class EngagementOrchestrator:
         return result
 
     def _enforce_reporting_gate(self) -> None:
-        required = {"component_audit", "journey_assessment", "page_audit", "wcag_coverage"}
+        required = {
+            "component_audit",
+            "journey_assessment",
+            "page_audit",
+            "wcag_coverage",
+        }
         missing = required.difference(set(self.state.completed_tasks))
         if missing:
             raise ValueError(f"Reporting blocked; missing phases: {sorted(missing)}")

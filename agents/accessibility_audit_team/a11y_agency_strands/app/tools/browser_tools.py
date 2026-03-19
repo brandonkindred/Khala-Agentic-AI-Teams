@@ -3,4 +3,4 @@ def capture_screenshot(target: str) -> str:
 
 
 def capture_dom_snippet(target: str) -> str:
-    return f"<snippet target=\"{target}\">...</snippet>"
+    return f'<snippet target="{target}">...</snippet>'

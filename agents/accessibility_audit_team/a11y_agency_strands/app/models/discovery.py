@@ -1,23 +1,21 @@
-from typing import List
-
 from pydantic import BaseModel
 
 
 class ClientProfile(BaseModel):
     organization: str
-    goals: List[str]
-    business_metrics: List[str]
+    goals: list[str]
+    business_metrics: list[str]
 
 
 class ScopeDefinition(BaseModel):
     conformance_target: str
-    legal_requirements: List[str]
-    site_characteristics: List[str]
+    legal_requirements: list[str]
+    site_characteristics: list[str]
     timeline_constraints: str
 
 
 class SamplingPlan(BaseModel):
-    tier1_pages: List[str]
-    tier2_pages: List[str]
-    tier3_pages: List[str]
-    priority_journeys: List[str]
+    tier1_pages: list[str]
+    tier2_pages: list[str]
+    tier3_pages: list[str]
+    priority_journeys: list[str]

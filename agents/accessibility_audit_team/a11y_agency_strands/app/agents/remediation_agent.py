@@ -10,5 +10,8 @@ def run_remediation_planning(findings: list[dict], tool_context: ToolContext) ->
         "30-90": ["Resolve high-severity systemic issues"],
         "90+": ["Institutionalize regression prevention"],
     }
-    artifact = persist_artifact(f"{tool_context.invocation_state['artifact_root']}/remediation_plan.json", {"tickets": tickets, "roadmap": roadmap})
+    artifact = persist_artifact(
+        f"{tool_context.invocation_state['artifact_root']}/remediation_plan.json",
+        {"tickets": tickets, "roadmap": roadmap},
+    )
     return {"phase": "remediation", "artifact": artifact, "tickets": tickets}

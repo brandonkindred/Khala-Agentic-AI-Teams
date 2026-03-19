@@ -11,4 +11,4 @@ def export_backlog_csv(findings: list[dict]) -> str:
 
 
 def create_jira_issues(findings: list[dict]) -> list[str]:
-    return [f"A11Y-{idx+1}" for idx, _ in enumerate(findings)]
+    return [f"A11Y-{idx + 1}" for idx, _ in enumerate(findings)]

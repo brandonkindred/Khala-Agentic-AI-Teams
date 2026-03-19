@@ -1,5 +1,9 @@
-from agents.accessibility_audit_team.a11y_agency_strands.app.agents.base import ToolContext
-from agents.accessibility_audit_team.a11y_agency_strands.app.agents.component_auditor import run_component_audit
+from agents.accessibility_audit_team.a11y_agency_strands.app.agents.base import (
+    ToolContext,
+)
+from agents.accessibility_audit_team.a11y_agency_strands.app.agents.component_auditor import (
+    run_component_audit,
+)
 
 
 def test_component_specialist_tool_contract_returns_machine_summary(tmp_path):
