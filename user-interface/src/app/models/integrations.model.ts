@@ -78,6 +78,8 @@ export interface MediumSessionImportBody {
 /** GET /api/integrations/google-browser-login */
 export interface GoogleBrowserLoginStatusResponse {
   configured: boolean;
+  /** False when the API has no Postgres (POSTGRES_HOST); credentials cannot be saved. */
+  storage_available: boolean;
 }
 
 /** PUT /api/integrations/google-browser-login */

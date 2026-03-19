@@ -139,6 +139,8 @@ export class IntegrationsDashboardComponent implements OnInit {
   googleBrowserError: string | null = null;
   googleBrowserSuccess: string | null = null;
   googleBrowserLoginConfigured = false;
+  /** When false, API runs without Postgres — browser-login credentials are not supported. */
+  googleBrowserStorageAvailable = true;
   googleAccountEmail = '';
   googleAccountPassword = '';
   savingGoogleBrowserCredentials = false;
@@ -150,6 +152,8 @@ export class IntegrationsDashboardComponent implements OnInit {
     this.api.getGoogleBrowserLoginStatus().subscribe({
       next: (r) => {
         this.googleBrowserLoginConfigured = r.configured;
+        // Older APIs omit this field; treat as available so we do not disable the form incorrectly.
+        this.googleBrowserStorageAvailable = r.storage_available !== false;
         this.googleBrowserLoading = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
@@ -171,6 +175,7 @@ export class IntegrationsDashboardComponent implements OnInit {
     this.api.putGoogleBrowserLoginCredentials(body).subscribe({
       next: (r) => {
         this.googleBrowserLoginConfigured = r.configured;
+        this.googleBrowserStorageAvailable = r.storage_available !== false;
         this.googleAccountPassword = '';
         this.googleBrowserSuccess = 'Gmail / Google credentials saved (encrypted on the server).';
         this.savingGoogleBrowserCredentials = false;
@@ -190,6 +195,7 @@ export class IntegrationsDashboardComponent implements OnInit {
     this.api.deleteGoogleBrowserLoginCredentials().subscribe({
       next: (r) => {
         this.googleBrowserLoginConfigured = r.configured;
+        this.googleBrowserStorageAvailable = r.storage_available !== false;
         this.googleAccountEmail = '';
         this.googleAccountPassword = '';
         this.googleBrowserSuccess = 'Shared Google credentials removed.';

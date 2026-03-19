@@ -15,9 +15,11 @@
         </div>
         <mat-card-title>Google account (browser sign-in)</mat-card-title>
         <mat-card-subtitle>
-          One encrypted Gmail / Google login for <strong>every</strong> integration that uses
-          <strong>Sign in with Google</strong> in a real browser (e.g. Medium). Stored with Fernet; uses Postgres when
-          the API has <code>POSTGRES_HOST</code>, otherwise encrypted SQLite.
+          One Fernet-encrypted Gmail / Google login for <strong>every</strong> integration that uses
+          <strong>Sign in with Google</strong> in a real browser (e.g. Medium). Stored only in Postgres
+          (<code>encrypted_integration_credentials</code>) when the API runs with <code>POSTGRES_HOST</code>
+          (e.g. Docker Compose). Not available in local API dev without Postgres — passwords are never written to
+          SQLite.
         </mat-card-subtitle>
       </mat-card-header>
       <mat-card-content>
@@ -25,6 +27,15 @@
           <div class="status-banner error-banner">
             <mat-icon>error_outline</mat-icon>
             <span>{{ googleBrowserError }}</span>
+          </div>
+        }
+        @if (!googleBrowserStorageAvailable) {
+          <div class="status-banner info-banner" role="status">
+            <mat-icon>info</mat-icon>
+            <span>
+              This feature is disabled: the API is not using PostgreSQL (<code>POSTGRES_HOST</code>). Run the stack with
+              Docker (or otherwise set <code>POSTGRES_HOST</code>) to save encrypted Google sign-in credentials.
+            </span>
           </div>
         }
         @if (googleBrowserSuccess) {
@@ -42,7 +53,13 @@
         <div class="form-row">
           <mat-form-field appearance="outline" class="full-width">
             <mat-label>Google email</mat-label>
-            <input matInput type="email" [(ngModel)]="googleAccountEmail" autocomplete="username" />
+            <input
+              matInput
+              type="email"
+              [(ngModel)]="googleAccountEmail"
+              autocomplete="username"
+              [disabled]="!googleBrowserStorageAvailable"
+            />
           </mat-form-field>
         </div>
         <div class="form-row">
@@ -53,6 +70,7 @@
               type="password"
               [(ngModel)]="googleAccountPassword"
               autocomplete="new-password"
+              [disabled]="!googleBrowserStorageAvailable"
             />
           </mat-form-field>
         </div>
@@ -64,6 +82,7 @@
             (click)="saveGoogleBrowserLoginCredentials()"
             [disabled]="
               savingGoogleBrowserCredentials ||
+              !googleBrowserStorageAvailable ||
               !googleAccountEmail.trim() ||
               !googleAccountPassword
             "
@@ -75,7 +94,11 @@
             color="warn"
             type="button"
             (click)="clearGoogleBrowserLoginCredentials()"
-            [disabled]="clearingGoogleBrowserCredentials || !googleBrowserLoginConfigured"
+            [disabled]="
+              clearingGoogleBrowserCredentials ||
+              !googleBrowserStorageAvailable ||
+              !googleBrowserLoginConfigured
+            "
           >
             @if (clearingGoogleBrowserCredentials) { Clearing… } @else { Clear credentials }
           </button>

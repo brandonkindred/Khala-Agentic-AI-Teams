@@ -75,8 +75,9 @@ def resolve_medium_stats_storage_state() -> Tuple[Optional[Dict[str, Any]], str,
             return (
                 None,
                 "",
-                "No Medium browser session. Save shared Google sign-in credentials "
-                "(PUT /api/integrations/google-browser-login), then run session capture or Medium stats.",
+                "No Medium browser session. Save shared Google sign-in credentials in Postgres "
+                "(PUT /api/integrations/google-browser-login with POSTGRES_HOST set), "
+                "then run session capture or Medium stats.",
             )
 
     try:

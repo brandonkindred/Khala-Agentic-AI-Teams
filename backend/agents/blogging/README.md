@@ -24,7 +24,7 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-**Auth:** The agent runs when the **Medium** integration is **enabled** and a Playwright `storage_state` exists on disk (or **shared** Google browser credentials are saved — **`PUT /api/integrations/google-browser-login`** — so the resolver can log in automatically). With provider **Google**, use **`POST /api/integrations/medium/session/browser-login`** or run stats (auto-login if session is missing). Optional platform Google OAuth (`/medium/oauth/google/*`) is separate.
+**Auth:** The agent runs when the **Medium** integration is **enabled** and a Playwright `storage_state` exists on disk (or **shared** Google browser credentials are saved in Postgres — **`PUT /api/integrations/google-browser-login`** with `POSTGRES_HOST` set — so the resolver can log in automatically). With provider **Google**, use **`POST /api/integrations/medium/session/browser-login`** or run stats (auto-login if session is missing). Optional platform Google OAuth (`/medium/oauth/google/*`) is separate.
 
 **API:** `POST /medium-stats` (sync) and `POST /medium-stats-async` (job + poll `GET /job/{id}`). Without a valid integration, these return **503**. Results are written to `medium_stats_report.json` in the job’s `work_dir` and appear in the blogging dashboard artifact list.
 

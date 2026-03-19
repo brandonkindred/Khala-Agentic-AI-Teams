@@ -8,7 +8,7 @@ Endpoints:
 - GET    /api/integrations/slack/oauth/connect   -> return Slack OAuth authorization URL
 - GET    /api/integrations/slack/oauth/callback  -> handle Slack OAuth redirect, store token
 - DELETE /api/integrations/slack/oauth   -> disconnect Slack OAuth (clear token)
-- GET/PUT/DELETE /api/integrations/google-browser-login -> shared encrypted Gmail/Google credentials (Playwright)
+- GET/PUT/DELETE /api/integrations/google-browser-login -> shared encrypted Gmail/Google credentials (Playwright; Postgres only)
 - POST   /api/integrations/medium/session/browser-login -> Playwright Medium+Google (uses shared Google credentials)
 """
 
@@ -46,6 +46,7 @@ from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
     get_google_browser_login_credentials,
     google_browser_login_credentials_configured,
+    google_browser_login_storage_available,
     set_google_browser_login_credentials,
 )
 
@@ -173,9 +174,13 @@ class GoogleBrowserLoginCredentialsBody(BaseModel):
 
 
 class GoogleBrowserLoginStatusResponse(BaseModel):
-    """GET /api/integrations/google-browser-login — whether shared credentials are stored."""
+    """GET/PUT/DELETE /api/integrations/google-browser-login — status (no secrets returned)."""
 
     configured: bool = Field(False, description="True when encrypted email+password are stored for Playwright.")
+    storage_available: bool = Field(
+        ...,
+        description="False when POSTGRES_HOST is unset; browser-login credentials are not persisted (PUT returns 503).",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +502,11 @@ async def slack_oauth_disconnect() -> SlackConfigResponse:
 @router.get("/google-browser-login", response_model=GoogleBrowserLoginStatusResponse)
 async def get_google_browser_login_status() -> GoogleBrowserLoginStatusResponse:
     """Return whether encrypted shared Google browser-login credentials are stored (no secrets)."""
-    return GoogleBrowserLoginStatusResponse(configured=google_browser_login_credentials_configured())
+    avail = google_browser_login_storage_available()
+    return GoogleBrowserLoginStatusResponse(
+        configured=google_browser_login_credentials_configured(),
+        storage_available=avail,
+    )
 
 
 @router.put("/google-browser-login", response_model=GoogleBrowserLoginStatusResponse)
@@ -510,14 +519,20 @@ async def put_google_browser_login_credentials(body: GoogleBrowserLoginCredentia
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     logger.info("Shared Google browser-login credentials stored (encrypted).")
-    return GoogleBrowserLoginStatusResponse(configured=True)
+    return GoogleBrowserLoginStatusResponse(
+        configured=True,
+        storage_available=google_browser_login_storage_available(),
+    )
 
 
 @router.delete("/google-browser-login", response_model=GoogleBrowserLoginStatusResponse)
 async def delete_google_browser_login_credentials() -> GoogleBrowserLoginStatusResponse:
     """Remove shared Google browser-login credentials."""
     clear_google_browser_login_credentials()
-    return GoogleBrowserLoginStatusResponse(configured=False)
+    return GoogleBrowserLoginStatusResponse(
+        configured=False,
+        storage_available=google_browser_login_storage_available(),
+    )
 
 
 # ---------------------------------------------------------------------------
