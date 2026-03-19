@@ -13,6 +13,7 @@ describe('BrandingDashboardComponent', () => {
     listClients: ReturnType<typeof vi.fn>;
     listBrands: ReturnType<typeof vi.fn>;
     createClient: ReturnType<typeof vi.fn>;
+    listConversations: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(async () => {
@@ -21,6 +22,7 @@ describe('BrandingDashboardComponent', () => {
       listClients: vi.fn().mockReturnValue(of([])),
       listBrands: vi.fn().mockReturnValue(of([])),
       createClient: vi.fn(),
+      listConversations: vi.fn().mockReturnValue(of([])),
     };
     await TestBed.configureTestingModule({
       imports: [BrandingDashboardComponent, NoopAnimationsModule],

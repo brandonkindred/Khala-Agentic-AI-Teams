@@ -22,14 +22,68 @@
     <div class="chat-view">
       <div class="split-panel">
         <div class="panel chat-panel">
-          <app-branding-chat (stateChange)="onChatStateChange($event)" />
+          <div class="chat-toolbar">
+            @if (hasConversationHistory && conversationMission) {
+              <button mat-stroked-button color="primary" (click)="onSaveToAgency()" [disabled]="!canCreateBrandFromChat">
+                Create New Brand
+              </button>
+            }
+          </div>
+          <app-branding-chat
+            [conversationId]="selectedHistoryConversationId"
+            [brandId]="selectedBrand?.id ?? null"
+            (stateChange)="onChatStateChange($event)"
+          />
+
+          @if (conversationHistory.length > 0) {
+            <mat-card class="history-card">
+              <mat-card-header>
+                <mat-card-title>Chat History</mat-card-title>
+                <mat-card-subtitle>Select a conversation to continue</mat-card-subtitle>
+              </mat-card-header>
+              <mat-card-content>
+                <div class="history-list">
+                  @for (item of conversationHistory; track item.conversation_id) {
+                    <button
+                      mat-stroked-button
+                      [color]="selectedHistoryConversationId === item.conversation_id ? 'primary' : undefined"
+                      (click)="selectConversationHistory(item)"
+                    >
+                      {{ item.brand_name || 'Unassigned' }} · {{ item.message_count }} messages
+                    </button>
+                  }
+                </div>
+              </mat-card-content>
+            </mat-card>
+          }
         </div>
         <div class="panel preview-panel">
           <app-brand-preview
-            [mission]="conversationMission"
-            [latestOutput]="conversationLatestOutput"
+            [mission]="selectedBrand?.mission ?? conversationMission"
+            [latestOutput]="(($any(selectedBrand)?.latest_output ?? null) || conversationLatestOutput)"
             (saveToAgency)="onSaveToAgency()"
           />
+          @if (brands.length > 0) {
+            <mat-card class="history-card">
+              <mat-card-header>
+                <mat-card-title>Brands</mat-card-title>
+                <mat-card-subtitle>Pick a brand to continue branded conversations</mat-card-subtitle>
+              </mat-card-header>
+              <mat-card-content>
+                <div class="history-list">
+                  @for (brand of brands; track brand.id) {
+                    <button
+                      mat-stroked-button
+                      [color]="selectedBrand?.id === brand.id ? 'primary' : undefined"
+                      (click)="startNewBrandConversation(brand)"
+                    >
+                      {{ brand.name }} (v{{ brand.version }})
+                    </button>
+                  }
+                </div>
+              </mat-card-content>
+            </mat-card>
+          }
         </div>
       </div>
     </div>

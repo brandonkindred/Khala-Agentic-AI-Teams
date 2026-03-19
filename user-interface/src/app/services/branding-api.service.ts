@@ -7,6 +7,7 @@ import type {
   BrandingQuestion,
   BrandingSessionResponse,
   Client,
+  ConversationSummary,
   CompetitiveSnapshot,
   ConversationStateResponse,
   CreateBrandRequest,
@@ -98,6 +99,14 @@ export class BrandingApiService {
     return this.http.post<ConversationStateResponse>(`${this.baseUrl}/conversations`, body);
   }
 
+  createConversationForBrand(brandId: string, initialMessage?: string | null): Observable<ConversationStateResponse> {
+    const body: CreateConversationRequest = {
+      brand_id: brandId,
+      ...(initialMessage != null ? { initial_message: initialMessage } : {}),
+    };
+    return this.http.post<ConversationStateResponse>(`${this.baseUrl}/conversations`, body);
+  }
+
   sendConversationMessage(conversationId: string, message: string): Observable<ConversationStateResponse> {
     return this.http.post<ConversationStateResponse>(
       `${this.baseUrl}/conversations/${conversationId}/messages`,
@@ -107,6 +116,20 @@ export class BrandingApiService {
 
   getConversation(conversationId: string): Observable<ConversationStateResponse> {
     return this.http.get<ConversationStateResponse>(`${this.baseUrl}/conversations/${conversationId}`);
+  }
+
+  listConversations(brandId?: string | null): Observable<ConversationSummary[]> {
+    if (brandId) {
+      return this.http.get<ConversationSummary[]>(`${this.baseUrl}/conversations?brand_id=${encodeURIComponent(brandId)}`);
+    }
+    return this.http.get<ConversationSummary[]>(`${this.baseUrl}/conversations`);
+  }
+
+  attachConversationToBrand(conversationId: string, brandId: string): Observable<ConversationStateResponse> {
+    return this.http.post<ConversationStateResponse>(
+      `${this.baseUrl}/conversations/${conversationId}/brand`,
+      { brand_id: brandId }
+    );
   }
 
   health(): Observable<HealthResponse> {

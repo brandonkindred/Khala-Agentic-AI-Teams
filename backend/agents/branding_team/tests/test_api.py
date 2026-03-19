@@ -317,3 +317,30 @@ def test_get_conversation_returns_stored_state() -> None:
 def test_get_conversation_404_for_unknown_id() -> None:
     resp = client.get("/conversations/unknown-conversation-id")
     assert resp.status_code == 404
+
+
+def test_list_conversations_and_attach_brand() -> None:
+    conv = client.post("/conversations", json={})
+    assert conv.status_code == 200
+    conversation_id = conv.json()["conversation_id"]
+
+    create_c = client.post("/clients", json={"name": "Attach Client"})
+    client_id = create_c.json()["id"]
+    create_b = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "AttachCo",
+            "company_description": "Company for attaching chat conversations",
+            "target_audience": "teams",
+        },
+    )
+    brand_id = create_b.json()["id"]
+
+    attach = client.post(f"/conversations/{conversation_id}/brand", json={"brand_id": brand_id})
+    assert attach.status_code == 200
+    assert attach.json()["brand_id"] == brand_id
+
+    listed = client.get("/conversations")
+    assert listed.status_code == 200
+    rows = listed.json()
+    assert any(r["conversation_id"] == conversation_id and r["brand_id"] == brand_id for r in rows)

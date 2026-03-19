@@ -3,6 +3,8 @@ import {
   Input,
   Output,
   EventEmitter,
+  OnChanges,
+  SimpleChanges,
   OnInit,
   ViewChild,
   ElementRef,
@@ -25,6 +27,7 @@ import type {
 } from '../../models';
 
 export interface BrandingChatState {
+  conversation_id: string | null;
   mission: BrandingMissionSnapshot;
   latest_output: BrandingTeamOutput | null;
 }
@@ -44,8 +47,9 @@ export interface BrandingChatState {
   templateUrl: './branding-chat.component.html',
   styleUrl: './branding-chat.component.scss',
 })
-export class BrandingChatComponent implements OnInit, AfterViewChecked {
+export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecked {
   @Input() conversationId: string | null = null;
+  @Input() brandId: string | null = null;
   @Output() stateChange = new EventEmitter<BrandingChatState>();
 
   @ViewChild('messagesContainer') messagesContainer!: ElementRef<HTMLDivElement>;
@@ -73,25 +77,15 @@ export class BrandingChatComponent implements OnInit, AfterViewChecked {
   }
 
   ngOnInit(): void {
-    if (this.conversationId) {
-      this._conversationId = this.conversationId;
-      this.api.getConversation(this.conversationId).subscribe({
-        next: (res) => this.applyState(res),
-        error: (err) => {
-          this.error = this.isUnreachableError(err)
-            ? BrandingChatComponent.CONVERSATION_UNAVAILABLE_MESSAGE
-            : (err?.error?.detail ?? err?.message ?? 'Failed to load conversation');
-        },
-      });
-    } else {
-      this.api.createConversation().subscribe({
-        next: (res) => this.applyState(res),
-        error: (err) => {
-          this.error = this.isUnreachableError(err)
-            ? BrandingChatComponent.CONVERSATION_UNAVAILABLE_MESSAGE
-            : (err?.error?.detail ?? err?.message ?? 'Failed to start conversation');
-        },
-      });
+    this.bootstrapConversation();
+  }
+
+  ngOnChanges(changes: SimpleChanges): void {
+    if (
+      (changes['conversationId'] && !changes['conversationId'].firstChange) ||
+      (changes['brandId'] && !changes['brandId'].firstChange && !this.conversationId)
+    ) {
+      this.bootstrapConversation();
     }
   }
 
@@ -120,6 +114,7 @@ export class BrandingChatComponent implements OnInit, AfterViewChecked {
   private emitState(): void {
     if (this.mission) {
       this.stateChange.emit({
+        conversation_id: this._conversationId,
         mission: this.mission,
         latest_output: this.latestOutput,
       });
@@ -140,7 +135,10 @@ export class BrandingChatComponent implements OnInit, AfterViewChecked {
   retryStartConversation(): void {
     this.error = null;
     this.loading = true;
-    this.api.createConversation().subscribe({
+    const starter = this.brandId
+      ? this.api.createConversationForBrand(this.brandId)
+      : this.api.createConversation();
+    starter.subscribe({
       next: (res) => {
         this.applyState(res);
         this.loading = false;
@@ -150,6 +148,33 @@ export class BrandingChatComponent implements OnInit, AfterViewChecked {
           ? BrandingChatComponent.CONVERSATION_UNAVAILABLE_MESSAGE
           : (err?.error?.detail ?? err?.message ?? 'Failed to start conversation');
         this.loading = false;
+      },
+    });
+  }
+
+  private bootstrapConversation(): void {
+    this.error = null;
+    if (this.conversationId) {
+      this._conversationId = this.conversationId;
+      this.api.getConversation(this.conversationId).subscribe({
+        next: (res) => this.applyState(res),
+        error: (err) => {
+          this.error = this.isUnreachableError(err)
+            ? BrandingChatComponent.CONVERSATION_UNAVAILABLE_MESSAGE
+            : (err?.error?.detail ?? err?.message ?? 'Failed to load conversation');
+        },
+      });
+      return;
+    }
+    const starter = this.brandId
+      ? this.api.createConversationForBrand(this.brandId)
+      : this.api.createConversation();
+    starter.subscribe({
+      next: (res) => this.applyState(res),
+      error: (err) => {
+        this.error = this.isUnreachableError(err)
+          ? BrandingChatComponent.CONVERSATION_UNAVAILABLE_MESSAGE
+          : (err?.error?.detail ?? err?.message ?? 'Failed to start conversation');
       },
     });
   }
@@ -165,7 +190,10 @@ export class BrandingChatComponent implements OnInit, AfterViewChecked {
         { role: 'user', content: message, timestamp: new Date().toISOString() },
       ];
       this.loading = true;
-      this.api.createConversation(message).subscribe({
+      const starter = this.brandId
+        ? this.api.createConversationForBrand(this.brandId, message)
+        : this.api.createConversation(message);
+      starter.subscribe({
         next: (res) => {
           this.applyState(res);
           this.error = null;

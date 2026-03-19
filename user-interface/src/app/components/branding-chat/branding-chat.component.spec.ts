@@ -24,8 +24,14 @@ describe('BrandingChatComponent', () => {
   };
 
   beforeEach(async () => {
-    apiSpy = jasmine.createSpyObj('BrandingApiService', ['createConversation', 'getConversation', 'sendConversationMessage']);
+    apiSpy = jasmine.createSpyObj('BrandingApiService', [
+      'createConversation',
+      'createConversationForBrand',
+      'getConversation',
+      'sendConversationMessage',
+    ]);
     apiSpy.createConversation.and.returnValue(of(mockResponse));
+    apiSpy.createConversationForBrand.and.returnValue(of(mockResponse));
     apiSpy.getConversation.and.returnValue(of(mockResponse));
     apiSpy.sendConversationMessage.and.returnValue(of(mockResponse));
 

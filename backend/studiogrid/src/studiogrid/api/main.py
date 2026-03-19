@@ -115,7 +115,7 @@ def list_agents() -> dict[str, Any]:
 
     from studiogrid.runtime.registry_loader import RegistryLoader
 
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[1]
     registry = RegistryLoader(root)
     return {"agents": registry.list_agents()}
 
@@ -127,7 +127,7 @@ def find_agents(payload: FindAgentsRequest) -> dict[str, Any]:
 
     from studiogrid.runtime.registry_loader import RegistryLoader
 
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[1]
     registry = RegistryLoader(root)
     candidates = registry.find_assisting_agents(
         problem_description=payload.problem,

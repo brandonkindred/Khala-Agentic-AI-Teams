@@ -143,6 +143,7 @@ class AnswerBrandingQuestionRequest(BaseModel):
 # Conversation (chat) API models
 class CreateConversationRequest(BaseModel):
     initial_message: Optional[str] = None
+    brand_id: Optional[str] = None
 
 
 class SendMessageRequest(BaseModel):
@@ -157,10 +158,24 @@ class ConversationMessage(BaseModel):
 
 class ConversationStateResponse(BaseModel):
     conversation_id: str
+    brand_id: Optional[str] = None
     messages: List[ConversationMessage] = Field(default_factory=list)
     mission: BrandingMission
     latest_output: Optional[TeamOutput] = None
     suggested_questions: List[str] = Field(default_factory=list)
+
+
+class ConversationSummaryResponse(BaseModel):
+    conversation_id: str
+    brand_id: Optional[str] = None
+    brand_name: Optional[str] = None
+    created_at: str
+    updated_at: str
+    message_count: int
+
+
+class AttachConversationBrandRequest(BaseModel):
+    brand_id: str = Field(..., min_length=1)
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +330,13 @@ def _run_orchestrator_if_ready(mission: BrandingMission) -> Optional[TeamOutput]
         mission=mission,
         human_review=HumanReview(approved=False, feedback="Building brand from conversation."),
     )
+
+
+def _brand_exists(brand_id: str) -> bool:
+    for client in branding_store.list_clients():
+        if branding_store.get_brand(client.id, brand_id):
+            return True
+    return False
 
 
 def _build_open_questions(mission: BrandingMission) -> List[BrandingQuestion]:
@@ -701,6 +723,7 @@ def answer_branding_question(
 
 def _conversation_to_response(
     conversation_id: str,
+    brand_id: Optional[str],
     messages: list,
     mission: BrandingMission,
     latest_output: Optional[TeamOutput],
@@ -711,6 +734,7 @@ def _conversation_to_response(
     ]
     return ConversationStateResponse(
         conversation_id=conversation_id,
+        brand_id=brand_id,
         messages=msg_list,
         mission=mission,
         latest_output=latest_output,
@@ -723,7 +747,11 @@ def create_branding_conversation(
     body: Optional[CreateConversationRequest] = Body(default=None),
 ) -> ConversationStateResponse:
     req = body or CreateConversationRequest()
-    conversation_id = conversation_store.create()
+    brand_id = (req.brand_id or "").strip() or None
+    if brand_id:
+        if not _brand_exists(brand_id):
+            raise HTTPException(status_code=404, detail="Brand not found")
+    conversation_id = conversation_store.create(brand_id=brand_id)
     initial_message = (req.initial_message or "").strip()
     suggested_questions: List[str] = []
 
@@ -766,7 +794,7 @@ def create_branding_conversation(
         )
 
     return _conversation_to_response(
-        conversation_id, messages, mission, latest_output, suggested_questions
+        conversation_id, brand_id, messages, mission, latest_output, suggested_questions
     )
 
 
@@ -778,6 +806,7 @@ def send_branding_conversation_message(
     if not state:
         raise HTTPException(status_code=404, detail="Conversation not found")
     messages, mission, _ = state
+    brand_id = conversation_store.get_conversation_brand_id(conversation_id)
     conversation_store.append_message(conversation_id, "user", payload.message)
     msg_pairs = [(m.role, m.content) for m in messages]
     msg_pairs.append(("user", payload.message))
@@ -795,7 +824,7 @@ def send_branding_conversation_message(
         output,
     )
     return _conversation_to_response(
-        conversation_id, messages, mission, latest_output, suggested_questions
+        conversation_id, brand_id, messages, mission, latest_output, suggested_questions
     )
 
 
@@ -805,7 +834,43 @@ def get_branding_conversation(conversation_id: str) -> ConversationStateResponse
     if not state:
         raise HTTPException(status_code=404, detail="Conversation not found")
     messages, mission, latest_output = state
-    return _conversation_to_response(conversation_id, messages, mission, latest_output, [])
+    brand_id = conversation_store.get_conversation_brand_id(conversation_id)
+    return _conversation_to_response(conversation_id, brand_id, messages, mission, latest_output, [])
+
+
+@app.get("/conversations", response_model=List[ConversationSummaryResponse])
+def list_branding_conversations(brand_id: Optional[str] = None) -> List[ConversationSummaryResponse]:
+    summaries = conversation_store.list_conversations(brand_id=brand_id)
+    brand_names: Dict[str, str] = {}
+    for client in branding_store.list_clients():
+        for brand in branding_store.list_brands_for_client(client.id):
+            brand_names[brand.id] = brand.name
+    return [
+        ConversationSummaryResponse(
+            conversation_id=s.conversation_id,
+            brand_id=s.brand_id,
+            brand_name=brand_names.get(s.brand_id) if s.brand_id else None,
+            created_at=s.created_at,
+            updated_at=s.updated_at,
+            message_count=s.message_count,
+        )
+        for s in summaries
+    ]
+
+
+@app.post("/conversations/{conversation_id}/brand", response_model=ConversationStateResponse)
+def attach_conversation_to_brand(
+    conversation_id: str, payload: AttachConversationBrandRequest
+) -> ConversationStateResponse:
+    brand_id = payload.brand_id.strip()
+    if not _brand_exists(brand_id):
+        raise HTTPException(status_code=404, detail="Brand not found")
+    state = conversation_store.get(conversation_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conversation_store.set_brand(conversation_id, brand_id)
+    messages, mission, latest_output = state
+    return _conversation_to_response(conversation_id, brand_id, messages, mission, latest_output, [])
 
 
 # ---------------------------------------------------------------------------

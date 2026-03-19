@@ -1,4 +1,4 @@
-import { Component, OnDestroy, inject } from '@angular/core';
+import { Component, OnDestroy, OnInit, inject } from '@angular/core';
 import { FormBuilder, FormsModule, ReactiveFormsModule, Validators } from '@angular/forms';
 import { interval, Subscription, switchMap } from 'rxjs';
 import { MatCardModule } from '@angular/material/card';
@@ -21,6 +21,7 @@ import type {
   BrandingSessionResponse,
   BrandingTeamOutput,
   Client,
+  ConversationSummary,
   CreateBrandRequest,
   RunBrandingTeamRequest,
 } from '../../models';
@@ -49,12 +50,15 @@ import type { BrandingChatState } from '../branding-chat/branding-chat.component
   templateUrl: './branding-dashboard.component.html',
   styleUrl: './branding-dashboard.component.scss',
 })
-export class BrandingDashboardComponent implements OnDestroy {
+export class BrandingDashboardComponent implements OnInit, OnDestroy {
   private readonly api = inject(BrandingApiService);
   private readonly fb = inject(FormBuilder);
 
   conversationMission: BrandingMissionSnapshot | null = null;
   conversationLatestOutput: BrandingTeamOutput | null = null;
+  activeConversationId: string | null = null;
+  conversationHistory: ConversationSummary[] = [];
+  selectedHistoryConversationId: string | null = null;
 
   loading = false;
   error: string | null = null;
@@ -89,8 +93,11 @@ export class BrandingDashboardComponent implements OnDestroy {
   healthCheck = (): ReturnType<BrandingApiService['health']> => this.api.health();
 
   onChatStateChange(state: BrandingChatState): void {
+    this.activeConversationId = state.conversation_id;
     this.conversationMission = state.mission;
     this.conversationLatestOutput = state.latest_output;
+    this.loadConversationHistory();
+    this.syncBrandPreviewFromSelection();
   }
 
   onSaveToAgency(): void {
@@ -155,6 +162,13 @@ export class BrandingDashboardComponent implements OnDestroy {
     this.saveToAgencyError = null;
     this.api.createBrand(clientId, request).subscribe({
       next: (brand) => {
+        if (this.activeConversationId) {
+          this.api.attachConversationToBrand(this.activeConversationId, brand.id).subscribe({
+            next: () => {
+              this.loadConversationHistory();
+            },
+          });
+        }
         this.api.runBrand(clientId, brand.id).subscribe({
           next: () => {
             this.saveToAgencySuccess = `Brand "${brand.name}" saved and run completed.`;
@@ -172,6 +186,11 @@ export class BrandingDashboardComponent implements OnDestroy {
         this.saveToAgencyError = err?.error?.detail ?? err?.message ?? 'Failed to create brand';
       },
     });
+  }
+
+  ngOnInit(): void {
+    this.loadClients();
+    this.loadConversationHistory();
   }
 
   loadClients(): void {
@@ -195,9 +214,65 @@ export class BrandingDashboardComponent implements OnDestroy {
     this.brands = [];
     this.brandActionMessage = null;
     this.api.listBrands(client.id).subscribe({
-      next: (list) => (this.brands = list),
+      next: (list) => {
+        this.brands = list;
+        this.syncBrandPreviewFromSelection();
+      },
       error: () => (this.brands = []),
     });
+  }
+
+  selectBrandForChat(brand: Brand): void {
+    this.selectedBrand = brand;
+    this.selectedHistoryConversationId = null;
+    this.activeConversationId = null;
+    this.conversationMission = brand.mission;
+    this.conversationLatestOutput = (brand.latest_output as BrandingTeamOutput | null) ?? null;
+  }
+
+  selectConversationHistory(item: ConversationSummary): void {
+    this.selectedHistoryConversationId = item.conversation_id;
+    this.activeConversationId = item.conversation_id;
+    if (item.brand_id) {
+      const match = this.brands.find((b) => b.id === item.brand_id) ?? null;
+      this.selectedBrand = match;
+    }
+  }
+
+  startNewBrandConversation(brand: Brand): void {
+    this.selectedBrand = brand;
+    this.selectedHistoryConversationId = null;
+    this.activeConversationId = null;
+    this.conversationMission = brand.mission;
+    this.conversationLatestOutput = (brand.latest_output as BrandingTeamOutput | null) ?? null;
+  }
+
+  get canCreateBrandFromChat(): boolean {
+    return this.conversationHistory.length > 0 && !!this.conversationMission;
+  }
+
+  get hasConversationHistory(): boolean {
+    return this.conversationHistory.length > 0;
+  }
+
+  private loadConversationHistory(): void {
+    this.api.listConversations().subscribe({
+      next: (items) => {
+        this.conversationHistory = items;
+      },
+      error: () => {
+        this.conversationHistory = [];
+      },
+    });
+  }
+
+  private syncBrandPreviewFromSelection(): void {
+    if (!this.selectedBrand) return;
+    const fresh = this.brands.find((b) => b.id === this.selectedBrand!.id);
+    if (fresh) {
+      this.selectedBrand = fresh;
+      this.conversationLatestOutput = (fresh.latest_output as BrandingTeamOutput | null) ?? this.conversationLatestOutput;
+    }
   }
 
   createClient(): void {

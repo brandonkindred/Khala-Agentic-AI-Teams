@@ -22,8 +22,11 @@ from branding_team.models import BrandingMission, TeamOutput
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
     conversation_id    TEXT PRIMARY KEY,
+    brand_id           TEXT,
     mission_json       TEXT NOT NULL,
-    latest_output_json TEXT
+    latest_output_json TEXT,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS conv_messages (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +54,15 @@ class _StoredMessage:
     timestamp: str
 
 
+@dataclass
+class ConversationSummary:
+    conversation_id: str
+    brand_id: Optional[str]
+    created_at: str
+    updated_at: str
+    message_count: int
+
+
 class BrandingConversationStore:
     """SQLite-backed store for chat conversations and mission state."""
 
@@ -63,6 +75,7 @@ class BrandingConversationStore:
             )
             self._mem_conn.row_factory = sqlite3.Row
             self._mem_conn.executescript(_SCHEMA)
+            self._run_migrations(self._mem_conn)
             self._mem_conn.commit()
         else:
             self._file_path = str(db_path)
@@ -74,8 +87,23 @@ class BrandingConversationStore:
         conn = sqlite3.connect(self._file_path, timeout=15)  # type: ignore[arg-type]
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
+        self._run_migrations(conn)
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _run_migrations(conn: sqlite3.Connection) -> None:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "brand_id" not in cols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN brand_id TEXT")
+        if "created_at" not in cols:
+            ts = datetime.now(tz=timezone.utc).isoformat()
+            conn.execute("ALTER TABLE conversations ADD COLUMN created_at TEXT")
+            conn.execute("UPDATE conversations SET created_at = ? WHERE created_at IS NULL", (ts,))
+        if "updated_at" not in cols:
+            ts = datetime.now(tz=timezone.utc).isoformat()
+            conn.execute("ALTER TABLE conversations ADD COLUMN updated_at TEXT")
+            conn.execute("UPDATE conversations SET updated_at = ? WHERE updated_at IS NULL", (ts,))
 
     @contextlib.contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
@@ -101,16 +129,19 @@ class BrandingConversationStore:
     def create(
         self,
         conversation_id: Optional[str] = None,
+        brand_id: Optional[str] = None,
         mission: Optional[BrandingMission] = None,
         latest_output: Optional[TeamOutput] = None,
     ) -> str:
         cid = conversation_id or str(uuid4())
         m = mission or _default_mission()
         output_json = latest_output.model_dump_json() if latest_output else None
+        now = datetime.now(tz=timezone.utc).isoformat()
         with self._db() as conn:
             conn.execute(
-                "INSERT INTO conversations (conversation_id, mission_json, latest_output_json) VALUES (?, ?, ?)",
-                (cid, m.model_dump_json(), output_json),
+                "INSERT INTO conversations (conversation_id, brand_id, mission_json, latest_output_json, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (cid, brand_id, m.model_dump_json(), output_json, now, now),
             )
         return cid
 
@@ -150,24 +181,84 @@ class BrandingConversationStore:
                 "INSERT INTO conv_messages (conversation_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
                 (conversation_id, role, content, ts),
             )
+            conn.execute(
+                "UPDATE conversations SET updated_at = ? WHERE conversation_id = ?",
+                (ts, conversation_id),
+            )
         return True
 
     def update_mission(self, conversation_id: str, mission: BrandingMission) -> bool:
+        ts = datetime.now(tz=timezone.utc).isoformat()
         with self._db() as conn:
             result = conn.execute(
-                "UPDATE conversations SET mission_json = ? WHERE conversation_id = ?",
-                (mission.model_dump_json(), conversation_id),
+                "UPDATE conversations SET mission_json = ?, updated_at = ? WHERE conversation_id = ?",
+                (mission.model_dump_json(), ts, conversation_id),
             )
         return result.rowcount > 0
 
     def update_output(self, conversation_id: str, output: Optional[TeamOutput]) -> bool:
         output_json = output.model_dump_json() if output else None
+        ts = datetime.now(tz=timezone.utc).isoformat()
         with self._db() as conn:
             result = conn.execute(
-                "UPDATE conversations SET latest_output_json = ? WHERE conversation_id = ?",
-                (output_json, conversation_id),
+                "UPDATE conversations SET latest_output_json = ?, updated_at = ? WHERE conversation_id = ?",
+                (output_json, ts, conversation_id),
             )
         return result.rowcount > 0
+
+    def set_brand(self, conversation_id: str, brand_id: Optional[str]) -> bool:
+        ts = datetime.now(tz=timezone.utc).isoformat()
+        with self._db() as conn:
+            result = conn.execute(
+                "UPDATE conversations SET brand_id = ?, updated_at = ? WHERE conversation_id = ?",
+                (brand_id, ts, conversation_id),
+            )
+        return result.rowcount > 0
+
+    def list_conversations(self, brand_id: Optional[str] = None) -> List[ConversationSummary]:
+        with self._db() as conn:
+            if brand_id:
+                rows = conn.execute(
+                    """
+                    SELECT c.conversation_id, c.brand_id, c.created_at, c.updated_at, COUNT(m.id) AS message_count
+                    FROM conversations c
+                    LEFT JOIN conv_messages m ON m.conversation_id = c.conversation_id
+                    WHERE c.brand_id = ?
+                    GROUP BY c.conversation_id, c.brand_id, c.created_at, c.updated_at
+                    ORDER BY c.updated_at DESC
+                    """,
+                    (brand_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT c.conversation_id, c.brand_id, c.created_at, c.updated_at, COUNT(m.id) AS message_count
+                    FROM conversations c
+                    LEFT JOIN conv_messages m ON m.conversation_id = c.conversation_id
+                    GROUP BY c.conversation_id, c.brand_id, c.created_at, c.updated_at
+                    ORDER BY c.updated_at DESC
+                    """
+                ).fetchall()
+        return [
+            ConversationSummary(
+                conversation_id=str(r[0]),
+                brand_id=(str(r[1]) if r[1] else None),
+                created_at=str(r[2] or ""),
+                updated_at=str(r[3] or ""),
+                message_count=int(r[4] or 0),
+            )
+            for r in rows
+        ]
+
+    def get_conversation_brand_id(self, conversation_id: str) -> Optional[str]:
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT brand_id FROM conversations WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+        if row is None or not row[0]:
+            return None
+        return str(row[0])
 
 
 # ---------------------------------------------------------------------------

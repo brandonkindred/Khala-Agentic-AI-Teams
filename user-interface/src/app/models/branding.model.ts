@@ -222,6 +222,7 @@ export interface ConversationMessage {
 
 export interface CreateConversationRequest {
   initial_message?: string | null;
+  brand_id?: string | null;
 }
 
 export interface SendMessageRequest {
@@ -230,8 +231,18 @@ export interface SendMessageRequest {
 
 export interface ConversationStateResponse {
   conversation_id: string;
+  brand_id?: string | null;
   messages: ConversationMessage[];
   mission: BrandingMissionSnapshot;
   latest_output: BrandingTeamOutput | null;
   suggested_questions: string[];
+}
+
+export interface ConversationSummary {
+  conversation_id: string;
+  brand_id?: string | null;
+  brand_name?: string | null;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
 }
