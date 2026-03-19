@@ -289,8 +289,6 @@ class OllamaLLMClient(LLMClient):
         env_val = (os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING) or os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING_SW) or "").lower()
         if env_val == "false":
             return False
-        if env_val == "true":
-            return "qwen3.5" in self.model.lower()
         return "qwen3.5" in self.model.lower()
 
     def _parse_response_content(self, data: dict) -> str:
