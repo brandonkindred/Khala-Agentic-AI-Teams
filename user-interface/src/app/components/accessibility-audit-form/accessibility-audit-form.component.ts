@@ -75,7 +75,7 @@ export class AccessibilityAuditFormComponent {
     if (this.auditType === 'mobile') {
       return this.mobileApps.length > 0;
     }
-    return this.webUrls.length > 0;
+    return this.effectiveWebUrls.length > 0;
   }
 
   get selectedWcagLevels(): WCAGLevel[] {
@@ -131,9 +131,10 @@ export class AccessibilityAuditFormComponent {
   onSubmit(): void {
     if (!this.canSubmit) return;
 
+    const webUrls = this.effectiveWebUrls;
     const request: CreateAuditRequest = {
       name: this.auditName.trim(),
-      web_urls: this.auditType === 'mobile' ? [] : this.webUrls,
+      web_urls: this.auditType === 'mobile' ? [] : webUrls,
       mobile_apps: this.auditType === 'mobile' ? this.mobileApps : [],
       critical_journeys: this.criticalJourneys,
       wcag_levels: this.selectedWcagLevels,
@@ -148,6 +149,17 @@ export class AccessibilityAuditFormComponent {
     };
 
     this.submitRequest.emit(request);
+  }
+
+  private get effectiveWebUrls(): string[] {
+    const typedUrl = this.webUrl.trim();
+    if (!typedUrl) {
+      return this.webUrls;
+    }
+    if (this.webUrls.includes(typedUrl)) {
+      return this.webUrls;
+    }
+    return [...this.webUrls, typedUrl];
   }
 
   resetForm(): void {

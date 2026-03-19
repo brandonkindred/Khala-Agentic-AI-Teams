@@ -1,5 +1,8 @@
 .status-card {
-  margin-bottom: 16px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(15, 23, 42, 0.56);
 }
 
 .header-icon {
@@ -9,11 +12,11 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #1976d2;
+  color: #7dc6ff;
 }
 
 .audit-id {
-  color: rgba(0, 0, 0, 0.54);
+  color: #94a3b8;
   margin-left: 4px;
 }
 
@@ -34,23 +37,23 @@
   font-size: 14px;
 
   &.running {
-    background: #e3f2fd;
-    color: #1976d2;
+    background: rgba(125, 198, 255, 0.18);
+    color: #b9e0ff;
   }
 
   &.complete {
-    background: #e8f5e9;
-    color: #388e3c;
+    background: rgba(63, 185, 80, 0.18);
+    color: #bbf7d0;
   }
 
   &.failed {
-    background: #ffebee;
-    color: #d32f2f;
+    background: rgba(248, 113, 113, 0.18);
+    color: #fecaca;
   }
 
   &.cancelled {
-    background: #fff3e0;
-    color: #f57c00;
+    background: rgba(245, 158, 11, 0.2);
+    color: #fde68a;
   }
 }
 
@@ -59,8 +62,8 @@
   align-items: center;
   gap: 4px;
   padding: 6px 12px;
-  background: #fff3e0;
-  color: #e65100;
+  background: rgba(245, 158, 11, 0.2);
+  color: #fde68a;
   border-radius: 16px;
   font-size: 13px;
   font-weight: 500;
@@ -74,7 +77,7 @@
     justify-content: space-between;
     margin-bottom: 8px;
     font-size: 14px;
-    color: rgba(0, 0, 0, 0.6);
+    color: #9ca3af;
   }
 }
 
@@ -83,7 +86,7 @@
 
   h4 {
     margin: 0 0 16px 0;
-    color: rgba(0, 0, 0, 0.87);
+    color: #e6edf3;
     font-size: 14px;
     font-weight: 500;
   }
@@ -131,7 +134,7 @@
   .step-connector {
     flex: 1;
     height: 2px;
-    background: #e0e0e0;
+    background: rgba(148, 163, 184, 0.25);
     margin: 0 4px;
 
     &.completed {
@@ -146,7 +149,7 @@
 
   .step-label {
     font-size: 12px;
-    color: rgba(0, 0, 0, 0.6);
+      color: #9ca3af;
   }
 
   &.completed {
@@ -156,7 +159,7 @@
     }
 
     .step-label {
-      color: #4caf50;
+      color: #86efac;
       font-weight: 500;
     }
   }
@@ -169,15 +172,15 @@
     }
 
     .step-label {
-      color: #1976d2;
+      color: #b9e0ff;
       font-weight: 500;
     }
   }
 
   &.pending {
     .step-circle {
-      background: #e0e0e0;
-      color: rgba(0, 0, 0, 0.38);
+      background: rgba(148, 163, 184, 0.18);
+      color: #94a3b8;
     }
   }
 }
@@ -197,7 +200,7 @@
 .results-summary {
   margin-bottom: 24px;
   padding: 16px;
-  background: #fafafa;
+  background: rgba(148, 163, 184, 0.08);
   border-radius: 8px;
 
   h4 {
@@ -217,23 +220,23 @@
   font-weight: 500;
 
   &.critical {
-    background-color: #ffcdd2 !important;
-    color: #c62828 !important;
+    background-color: rgba(248, 113, 113, 0.18) !important;
+    color: #fecaca !important;
   }
 
   &.high {
-    background-color: #ffe0b2 !important;
-    color: #e65100 !important;
+    background-color: rgba(251, 146, 60, 0.18) !important;
+    color: #fed7aa !important;
   }
 
   &.medium {
-    background-color: #fff9c4 !important;
-    color: #f57f17 !important;
+    background-color: rgba(245, 158, 11, 0.2) !important;
+    color: #fde68a !important;
   }
 
   &.low {
-    background-color: #e3f2fd !important;
-    color: #1565c0 !important;
+    background-color: rgba(125, 198, 255, 0.18) !important;
+    color: #b9e0ff !important;
   }
 }
 
@@ -242,8 +245,8 @@
   align-items: center;
   gap: 8px;
   padding: 12px;
-  background: #ffebee;
-  color: #c62828;
+  background: rgba(248, 113, 113, 0.16);
+  color: #fecaca;
   border-radius: 8px;
   margin-bottom: 16px;
 }
@@ -251,18 +254,18 @@
 .error-section {
   margin-top: 16px;
   padding: 12px;
-  background: #ffebee;
+  background: rgba(248, 113, 113, 0.14);
   border-radius: 8px;
 
   h4 {
     margin: 0 0 8px 0;
-    color: #c62828;
+    color: #fecaca;
     font-size: 14px;
   }
 
   .error-text {
     margin: 0;
-    color: #c62828;
+    color: #fecaca;
     font-size: 13px;
   }
 }
@@ -283,5 +286,5 @@
   justify-content: center;
   gap: 8px;
   padding: 24px;
-  color: rgba(0, 0, 0, 0.54);
+  color: #9ca3af;
 }

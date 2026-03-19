@@ -1,97 +1,88 @@
 .audit-form-card {
-  margin-bottom: 16px;
+  margin-bottom: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(15, 23, 42, 0.56);
 }
 
-.full-width {
-  width: 100%;
-}
-
-mat-form-field {
-  margin-bottom: 8px;
-}
-
-.url-input-section {
-  margin-bottom: 16px;
-}
-
+.full-width,
 .url-input {
   width: 100%;
 }
 
-.url-chips,
-.app-chips {
-  margin-top: 8px;
-  margin-bottom: 16px;
+mat-form-field {
+  margin-bottom: 4px;
 }
 
+.url-input-section,
 .mobile-app-section {
-  margin-bottom: 16px;
+  margin-bottom: 14px;
+}
+
+.url-chips,
+.app-chips {
+  margin-top: 6px;
+  margin-bottom: 12px;
 }
 
 .mobile-app-inputs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: flex-start;
-}
-
-.platform-select {
-  width: 120px;
-}
-
-.app-name-input {
-  flex: 2;
-  min-width: 150px;
-}
-
-.version-input {
-  width: 100px;
-}
-
-.build-input {
-  width: 100px;
+  display: grid;
+  grid-template-columns: 120px minmax(140px, 1fr) 120px 120px auto;
+  gap: 10px;
+  align-items: start;
 }
 
 .wcag-section {
-  margin: 16px 0;
+  margin: 14px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.06);
 }
 
 .section-label {
   display: block;
-  font-size: 14px;
-  color: rgba(0, 0, 0, 0.6);
+  font-size: 0.8rem;
+  color: #94a3b8;
   margin-bottom: 8px;
+  font-weight: 600;
 }
 
 .wcag-checkboxes {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
+  gap: 14px;
 }
 
 .advanced-panel {
-  margin: 16px 0;
-
-  mat-panel-title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
+  margin: 14px 0;
+  border-radius: 10px;
+  overflow: hidden;
 }
 
 .advanced-options {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 16px;
-  padding-top: 8px;
+  gap: 12px;
+  padding-top: 6px;
 }
 
 mat-card-actions {
+  padding: 0 16px 16px;
+
   button {
     margin-left: 8px;
+  }
+}
 
-    mat-icon {
-      margin-right: 4px;
-    }
+@media (max-width: 980px) {
+  .mobile-app-inputs {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .mobile-app-inputs {
+    grid-template-columns: 1fr;
   }
 }

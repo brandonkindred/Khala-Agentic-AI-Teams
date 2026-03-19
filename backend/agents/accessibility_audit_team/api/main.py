@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from ..models import (
     AuditJobResponse,
     AuditRequest,
+    AccessibilityAuditResult,
     AuditStatusResponse,
     BacklogExportResponse,
     Finding,
@@ -22,25 +23,41 @@ from ..models import (
     WCAGLevel,
 )
 from ..orchestrator import AccessibilityAuditOrchestrator, run_accessibility_audit
+from shared_job_management import (
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    CentralJobManager,
+    start_stale_job_monitor,
+)
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# In-memory job store (would be replaced with persistent storage in production)
-_job_store: Dict[str, Dict[str, Any]] = {}
+_job_manager = CentralJobManager(team="accessibility_audit_team")
+_stale_monitor_stop = start_stale_job_monitor(
+    _job_manager,
+    interval_seconds=15.0,
+    stale_after_seconds=300.0,
+    reason="Job heartbeat stale while pending/running",
+)
 _orchestrator: Optional[AccessibilityAuditOrchestrator] = None
 
 
 def mark_all_running_jobs_failed(reason: str) -> None:
     """Mark all running accessibility audit jobs as failed (e.g. on server shutdown)."""
     try:
-        for job in _job_store.values():
-            if job.get("status") == "running":
-                job["status"] = "failed"
-                job["error"] = reason
+        _job_manager.mark_stale_active_jobs_failed(stale_after_seconds=0, reason=reason)
     except Exception as e:
         logger.warning("mark_all_running_jobs_failed: %s", e)
+
+
+def _to_ui_status(status: str) -> str:
+    """Map shared manager statuses to frontend-compatible values."""
+    if status == "completed":
+        return "complete"
+    return status
 
 
 def get_orchestrator() -> AccessibilityAuditOrchestrator:
@@ -174,28 +191,40 @@ async def create_audit(
         wcag_levels=wcag_levels or [WCAGLevel.A, WCAGLevel.AA],
     )
 
-    # Store job
-    _job_store[job_id] = {
-        "audit_id": audit_id,
-        "status": "running",
-        "progress": 0,
-        "result": None,
-        "error": None,
-    }
+    _job_manager.create_job(
+        job_id,
+        job_type="accessibility_audit_create",
+        status=JOB_STATUS_PENDING,
+        audit_id=audit_id,
+        current_phase="intake",
+        progress=0,
+        completed_phases=[],
+        findings_count=0,
+        result=None,
+        error=None,
+        request_payload=request.model_dump(),
+    )
 
     # Run audit in background
     async def run_audit_task():
         try:
+            _job_manager.update_job(job_id, status=JOB_STATUS_RUNNING, current_phase="discovery", progress=20)
             orchestrator = get_orchestrator()
             result = await orchestrator.run_audit(audit_request, request.tech_stack)
-            _job_store[job_id]["status"] = "complete" if result.success else "failed"
-            _job_store[job_id]["progress"] = 100
-            _job_store[job_id]["result"] = result
+            _job_manager.update_job(
+                job_id,
+                status="completed" if result.success else JOB_STATUS_FAILED,
+                progress=100,
+                current_phase=result.current_phase.value if result else "report_packaging",
+                completed_phases=[p.value for p in result.completed_phases] if result else [],
+                findings_count=result.total_findings if result else 0,
+                result=result.model_dump() if result else None,
+                error=result.failure_reason if result and not result.success else None,
+            )
             if not result.success:
-                _job_store[job_id]["error"] = result.failure_reason
+                _job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=result.failure_reason)
         except Exception as e:
-            _job_store[job_id]["status"] = "failed"
-            _job_store[job_id]["error"] = str(e)
+            _job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
 
     background_tasks.add_task(run_audit_task)
 
@@ -212,18 +241,23 @@ async def get_audit_status(job_id: str) -> AuditStatusResponse:
     """
     Get the status of an audit job.
     """
-    if job_id not in _job_store:
+    job = _job_manager.get_job(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    job = _job_store[job_id]
     result = job.get("result")
+    if isinstance(result, dict):
+        try:
+            result = AccessibilityAuditResult.model_validate(result)
+        except Exception:
+            result = None
 
     return AuditStatusResponse(
         job_id=job_id,
         audit_id=job["audit_id"],
-        status=job["status"],
+        status=_to_ui_status(job.get("status", JOB_STATUS_PENDING)),
         current_phase=result.current_phase.value if result else None,
-        progress=job["progress"],
+        progress=job.get("progress", 0),
         completed_phases=[p.value for p in result.completed_phases] if result else [],
         findings_count=result.total_findings if result else 0,
         error=job.get("error"),
@@ -327,23 +361,33 @@ async def retest_findings(
 
     job_id = f"retest_{uuid.uuid4().hex[:8]}"
 
-    _job_store[job_id] = {
-        "audit_id": audit_id,
-        "status": "running",
-        "progress": 0,
-        "result": None,
-        "error": None,
-    }
+    _job_manager.create_job(
+        job_id,
+        job_type="accessibility_audit_retest",
+        status=JOB_STATUS_PENDING,
+        audit_id=audit_id,
+        current_phase="retest",
+        progress=0,
+        completed_phases=[],
+        findings_count=0,
+        result=None,
+        error=None,
+        request_payload=request.model_dump(),
+    )
 
     async def run_retest_task():
         try:
+            _job_manager.update_job(job_id, status=JOB_STATUS_RUNNING, progress=30)
             result = await orchestrator.run_retest(audit_id, request.finding_ids)
-            _job_store[job_id]["status"] = "complete" if result.success else "failed"
-            _job_store[job_id]["progress"] = 100
-            _job_store[job_id]["result"] = result
+            _job_manager.update_job(
+                job_id,
+                status="completed" if result.success else JOB_STATUS_FAILED,
+                progress=100,
+                result=result.model_dump(),
+                error=result.failure_reason if not result.success else None,
+            )
         except Exception as e:
-            _job_store[job_id]["status"] = "failed"
-            _job_store[job_id]["error"] = str(e)
+            _job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
 
     background_tasks.add_task(run_retest_task)
 

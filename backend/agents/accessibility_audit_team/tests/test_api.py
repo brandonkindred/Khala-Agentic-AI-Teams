@@ -53,3 +53,18 @@ def test_create_audit_returns_message():
     data = resp.json()
     assert len(data["job_id"]) > 0
     assert len(data["audit_id"]) > 0
+    assert "Poll /audit/status/{job_id}" in data["message"]
+
+
+def test_job_status_returns_frontend_compatible_status_values():
+    resp = client.post(
+        "/audit/create",
+        json={"name": "status-compat", "web_urls": ["https://example.org"]},
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["job_id"]
+
+    status_resp = client.get(f"/audit/status/{job_id}")
+    assert status_resp.status_code == 200
+    status_data = status_resp.json()
+    assert status_data["status"] in {"running", "complete", "failed", "cancelled", "pending"}
