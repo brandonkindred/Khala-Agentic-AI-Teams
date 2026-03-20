@@ -24,7 +24,7 @@ import type { BrandingMissionSnapshot, BrandingTeamOutput, ColorPalette } from '
 export class BrandPreviewComponent {
   @Input() mission: BrandingMissionSnapshot | null = null;
   @Input() latestOutput: BrandingTeamOutput | null = null;
-  @Output() saveToAgency = new EventEmitter<void>();
+  @Output() saveAsBrand = new EventEmitter<void>();
 
   get hasOutput(): boolean {
     return this.latestOutput != null;

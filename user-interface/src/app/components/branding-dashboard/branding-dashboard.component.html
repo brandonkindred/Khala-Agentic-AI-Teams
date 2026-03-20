@@ -1,31 +1,85 @@
 <h1>Branding Team</h1>
-<p>Chat with the branding assistant to build your brand, or use the form-based workflow (Expert mode).</p>
+<p class="page-intro">
+  <strong>Chat</strong> to explore ideas with the branding assistant. Use <strong>Form (Expert)</strong> to add brands, run the workflow, or request research and design assets.
+</p>
 
 <div class="header-row">
   <app-health-indicator [healthCheck]="healthCheck" label="Branding API" />
 </div>
 
 @if (loading) {
-  <app-loading-spinner message="Processing branding workflow..." />
+  <app-loading-spinner message="Loading branding workspace..." />
 }
 
 @if (error) {
   <app-error-message [message]="error" />
 }
 
-<mat-tab-group class="branding-tabs" animationDuration="200ms" [selectedIndex]="0">
+<mat-tab-group
+  class="branding-tabs"
+  animationDuration="200ms"
+  [(selectedIndex)]="selectedTabIndex"
+>
   <mat-tab>
     <ng-template mat-tab-label>
       <mat-icon>chat</mat-icon>
       <span class="tab-label">Chat</span>
     </ng-template>
     <div class="chat-view">
+      <div
+        class="current-brand-bar"
+        aria-live="polite"
+        [attr.aria-label]="
+          selectedBrand
+            ? 'Current brand: ' + selectedBrand.name + ', version ' + selectedBrand.version
+            : 'No brand selected'
+        "
+      >
+        @if (selectedBrand) {
+          <div class="current-brand-bar__main">
+            <span class="current-brand-bar__label">Current brand</span>
+            <span class="current-brand-bar__value">
+              {{ selectedBrand.name }} · v{{ selectedBrand.version }} · {{ selectedBrand.status }}
+            </span>
+            @if (brands.length > 1) {
+              <button mat-stroked-button type="button" [matMenuTriggerFor]="brandMenu">Change brand</button>
+              <mat-menu #brandMenu="matMenu">
+                @for (b of brands; track b.id) {
+                  <button mat-menu-item type="button" (click)="selectBrandForChat(b)">
+                    {{ b.name }} · v{{ b.version }} · {{ b.status }}
+                  </button>
+                }
+              </mat-menu>
+            }
+          </div>
+        } @else if (brands.length > 0) {
+          <div class="current-brand-bar__main">
+            <span class="current-brand-bar__empty">Pick a brand to scope the assistant.</span>
+            <button mat-stroked-button type="button" [matMenuTriggerFor]="brandMenuEmpty">Select brand</button>
+            <mat-menu #brandMenuEmpty="matMenu">
+              @for (b of brands; track b.id) {
+                <button mat-menu-item type="button" (click)="selectBrandForChat(b)">
+                  {{ b.name }} · v{{ b.version }} · {{ b.status }}
+                </button>
+              }
+            </mat-menu>
+          </div>
+        } @else {
+          <div class="current-brand-bar__main current-brand-bar__main--empty">
+            <span class="current-brand-bar__empty">No brands yet.</span>
+            <button mat-stroked-button color="primary" type="button" (click)="openFormTabForNewBrand()">
+              Create brand
+            </button>
+          </div>
+        }
+      </div>
+
       <div class="split-panel">
         <div class="panel chat-panel">
           <div class="chat-toolbar">
             @if (hasConversationHistory && conversationMission) {
-              <button mat-stroked-button color="primary" (click)="onSaveToAgency()" [disabled]="!canCreateBrandFromChat">
-                Create New Brand
+              <button mat-stroked-button color="primary" type="button" (click)="onOpenSaveAsBrand()" [disabled]="!canCreateBrandFromChat">
+                Save conversation as brand
               </button>
             }
           </div>
@@ -38,8 +92,15 @@
           @if (conversationHistory.length > 0) {
             <mat-card class="history-card">
               <mat-card-header>
-                <mat-card-title>Chat History</mat-card-title>
-                <mat-card-subtitle>Select a conversation to continue</mat-card-subtitle>
+                <mat-card-title>Past conversations</mat-card-title>
+                <mat-card-subtitle>
+                  Continue a conversation below.
+                  @if (selectedBrand) {
+                    Showing threads for {{ selectedBrand.name }}; change brand above to load others.
+                  } @else {
+                    Pick a row to resume chatting.
+                  }
+                </mat-card-subtitle>
               </mat-card-header>
               <mat-card-content>
                 <div class="history-list">
@@ -49,7 +110,8 @@
                       [color]="selectedHistoryConversationId === item.conversation_id ? 'primary' : undefined"
                       (click)="selectConversationHistory(item)"
                     >
-                      {{ item.brand_name || 'Unassigned' }} · {{ item.message_count }} messages
+                      {{ item.brand_name || 'Unassigned' }} · {{ formatConversationTime(item.updated_at) }} ·
+                      {{ item.message_count }} messages
                     </button>
                   }
                 </div>
@@ -58,16 +120,30 @@
           }
         </div>
         <div class="panel preview-panel">
-          <app-brand-preview
-            [mission]="selectedBrand?.mission ?? conversationMission"
-            [latestOutput]="(($any(selectedBrand)?.latest_output ?? null) || conversationLatestOutput)"
-            (saveToAgency)="onSaveToAgency()"
-          />
+          @if (isCompactLayout) {
+            <mat-expansion-panel [expanded]="true" class="preview-mobile-panel">
+              <mat-expansion-panel-header>
+                <mat-panel-title>Brand preview</mat-panel-title>
+                <mat-panel-description>On small screens, collapse to save space</mat-panel-description>
+              </mat-expansion-panel-header>
+              <app-brand-preview
+                [mission]="selectedBrand?.mission ?? conversationMission"
+                [latestOutput]="(($any(selectedBrand)?.latest_output ?? null) || conversationLatestOutput)"
+                (saveAsBrand)="onOpenSaveAsBrand()"
+              />
+            </mat-expansion-panel>
+          } @else {
+            <app-brand-preview
+              [mission]="selectedBrand?.mission ?? conversationMission"
+              [latestOutput]="(($any(selectedBrand)?.latest_output ?? null) || conversationLatestOutput)"
+              (saveAsBrand)="onOpenSaveAsBrand()"
+            />
+          }
           @if (brands.length > 0) {
             <mat-card class="history-card">
               <mat-card-header>
-                <mat-card-title>Brands</mat-card-title>
-                <mat-card-subtitle>Pick a brand to continue branded conversations</mat-card-subtitle>
+                <mat-card-title>Quick switch</mat-card-title>
+                <mat-card-subtitle>Jump between saved brands for this workspace</mat-card-subtitle>
               </mat-card-header>
               <mat-card-content>
                 <div class="history-list">
@@ -96,78 +172,116 @@
     <div class="form-view">
       <mat-card>
         <mat-card-header>
-          <mat-card-title>Clients &amp; Brands (Agency)</mat-card-title>
-          <mat-card-subtitle>One client, many brands. Run or evolve a brand, request market research or design assets.</mat-card-subtitle>
+          <mat-card-title>Your brands</mat-card-title>
+          <mat-card-subtitle>
+            One workspace, many brand identities. Create a brand here, then chat or run workflows on it.
+          </mat-card-subtitle>
         </mat-card-header>
         <mat-card-content>
-          <div class="agency-actions">
-            <button mat-stroked-button color="primary" (click)="loadClients()">Load Clients</button>
-            <span class="new-client-row">
-              <input type="text" [(ngModel)]="newClientName" placeholder="New client name" class="client-name-input" />
-              <button mat-stroked-button (click)="createClient()" [disabled]="!newClientName.trim()">Add Client</button>
-            </span>
-          </div>
           @if (clientLoadError) {
             <app-error-message [message]="clientLoadError" />
           }
-          @if (clients.length > 0) {
-            <p class="client-list-label">Select client:</p>
-            <div class="client-list">
-              @for (c of clients; track c.id) {
-                <button mat-stroked-button [color]="selectedClient?.id === c.id ? 'primary' : null" (click)="selectClient(c)">{{ c.name }}</button>
-              }
+          @if (selectedClient) {
+            <div class="brand-summary-row">
+              <span class="brand-count">{{ brands.length }} {{ brands.length === 1 ? 'brand' : 'brands' }}</span>
+              <button mat-stroked-button color="primary" type="button" (click)="showCreateBrand = !showCreateBrand">
+                {{ showCreateBrand ? 'Cancel' : 'New brand' }}
+              </button>
             </div>
-            @if (selectedClient) {
-              <p class="brands-label">Brands for {{ selectedClient.name }}:</p>
-              <button mat-stroked-button (click)="showCreateBrand = !showCreateBrand">Create Brand</button>
-              @if (showCreateBrand) {
-                <form [formGroup]="newBrandForm" (ngSubmit)="createBrand()" class="new-brand-form">
-                  <mat-form-field appearance="outline">
-                    <mat-label>Company name</mat-label>
-                    <input matInput formControlName="company_name" />
-                  </mat-form-field>
-                  <mat-form-field appearance="outline">
-                    <mat-label>Company description</mat-label>
-                    <textarea matInput rows="2" formControlName="company_description"></textarea>
-                  </mat-form-field>
-                  <mat-form-field appearance="outline">
-                    <mat-label>Target audience</mat-label>
-                    <input matInput formControlName="target_audience" />
-                  </mat-form-field>
-                  <mat-form-field appearance="outline">
-                    <mat-label>Brand name (optional)</mat-label>
-                    <input matInput formControlName="name" />
-                  </mat-form-field>
-                  <button mat-raised-button color="primary" type="submit">Create Brand</button>
-                </form>
-              }
+            @if (showCreateBrand) {
+              <form [formGroup]="newBrandForm" (ngSubmit)="createBrand()" class="new-brand-form">
+                <mat-form-field appearance="outline">
+                  <mat-label>Company name</mat-label>
+                  <input matInput formControlName="company_name" />
+                </mat-form-field>
+                <mat-form-field appearance="outline">
+                  <mat-label>Company description</mat-label>
+                  <textarea matInput rows="2" formControlName="company_description"></textarea>
+                </mat-form-field>
+                <mat-form-field appearance="outline">
+                  <mat-label>Target audience</mat-label>
+                  <input matInput formControlName="target_audience" />
+                </mat-form-field>
+                <mat-form-field appearance="outline">
+                  <mat-label>Brand name (optional)</mat-label>
+                  <input matInput formControlName="name" />
+                </mat-form-field>
+                <button mat-raised-button color="primary" type="submit" [disabled]="brandFormBusy || newBrandForm.invalid">
+                  Create brand
+                </button>
+              </form>
+            }
+            <div #brandListWrap class="brand-list-wrap">
               <ul class="brand-list">
                 @for (b of brands; track b.id) {
-                  <li class="brand-item">
+                  <li
+                    class="brand-item"
+                    [class.brand-item--highlight]="highlightedBrandId === b.id"
+                    [attr.data-brand-id]="b.id"
+                  >
                     <strong>{{ b.name }}</strong> ({{ b.status }}, v{{ b.version }})
                     <span class="brand-actions">
-                      <button mat-stroked-button (click)="runBrand(b)">Run</button>
-                      <button mat-stroked-button (click)="requestMarketResearchForBrand(b)">Market Research</button>
-                      <button mat-stroked-button (click)="requestDesignAssetsForBrand(b)">Design Assets</button>
+                      <button mat-stroked-button type="button" [disabled]="brandFormBusy" (click)="runBrand(b)">
+                        Run
+                      </button>
+                      <button mat-stroked-button type="button" [disabled]="brandFormBusy" (click)="requestMarketResearchForBrand(b)">
+                        Market Research
+                      </button>
+                      <button mat-stroked-button type="button" [disabled]="brandFormBusy" (click)="requestDesignAssetsForBrand(b)">
+                        Design Assets
+                      </button>
                     </span>
                   </li>
                 }
               </ul>
-              @if (brands.length === 0 && !showCreateBrand) {
-                <p>No brands yet. Create a brand to run the workflow, request market research, or design assets.</p>
-              }
-              @if (brandActionMessage) {
-                <p class="action-message">{{ brandActionMessage }}</p>
-              }
+            </div>
+            @if (brands.length === 0 && !showCreateBrand) {
+              <p>No brands yet. Use <strong>New brand</strong> to add one.</p>
             }
+            @if (brandActionMessage) {
+              <p class="action-message">{{ brandActionMessage }}</p>
+            }
+          } @else if (!loading && !clientLoadError) {
+            <p>Preparing workspace…</p>
           }
+
+          <mat-expansion-panel class="advanced-workspace-panel">
+            <mat-expansion-panel-header>
+              <mat-panel-title>Advanced</mat-panel-title>
+              <mat-panel-description>Optional: extra workspace entries (rarely needed)</mat-panel-description>
+            </mat-expansion-panel-header>
+            <div class="agency-actions">
+              <button mat-stroked-button type="button" color="primary" (click)="loadClients()">Reload workspaces</button>
+              <span class="new-client-row">
+                <input type="text" [(ngModel)]="newClientName" placeholder="Additional workspace name" class="client-name-input" />
+                <button mat-stroked-button type="button" (click)="createClient()" [disabled]="!newClientName.trim() || brandFormBusy">
+                  Add workspace
+                </button>
+              </span>
+            </div>
+            @if (clients.length > 0) {
+              <p class="client-list-label">Switch workspace:</p>
+              <div class="client-list">
+                @for (c of clients; track c.id) {
+                  <button
+                    mat-stroked-button
+                    type="button"
+                    [color]="selectedClient?.id === c.id ? 'primary' : null"
+                    (click)="selectClient(c)"
+                  >
+                    {{ c.name }}
+                  </button>
+                }
+              </div>
+            }
+          </mat-expansion-panel>
         </mat-card-content>
       </mat-card>
 
       <mat-card>
         <mat-card-header>
           <mat-card-title>Start Branding Session (one-off)</mat-card-title>
-          <mat-card-subtitle>No client/brand required. Answer open questions to refine output.</mat-card-subtitle>
+          <mat-card-subtitle>No saved brand required. Answer open questions to refine output.</mat-card-subtitle>
         </mat-card-header>
         <mat-card-content>
           <form [formGroup]="form" (ngSubmit)="startSession()" class="session-form">
@@ -201,7 +315,7 @@
               <input matInput formControlName="differentiators_csv" />
             </mat-form-field>
 
-            <button mat-raised-button color="primary" type="submit">Start Session</button>
+            <button mat-raised-button color="primary" type="submit" [disabled]="loading">Start Session</button>
           </form>
         </mat-card-content>
       </mat-card>
@@ -249,11 +363,11 @@
   </mat-tab>
 </mat-tab-group>
 
-@if (showSaveToAgencyFlow) {
-  <mat-card class="save-to-agency-overlay">
+@if (showSaveAsBrandDialog) {
+  <mat-card class="save-as-brand-overlay">
     <mat-card-header>
-      <mat-card-title>Save to agency</mat-card-title>
-      <button mat-icon-button (click)="closeSaveToAgency()">
+      <mat-card-title>Save as brand</mat-card-title>
+      <button mat-icon-button type="button" (click)="closeSaveAsBrandDialog()" aria-label="Close">
         <mat-icon>close</mat-icon>
       </button>
     </mat-card-header>
@@ -264,33 +378,46 @@
       @if (saveToAgencyError) {
         <app-error-message [message]="saveToAgencyError" />
       }
-      <p>Select a client or create one, then enter a brand name to save the current conversation as a brand.</p>
-      <div class="agency-actions">
-        <button mat-stroked-button (click)="loadClients()">Load Clients</button>
-        @if (clients.length > 0) {
-          <mat-form-field appearance="outline">
-            <mat-label>Client</mat-label>
-            <mat-select [(ngModel)]="saveToAgencyClientId" name="saveClient">
-              <mat-option [value]="null">-- Select client --</mat-option>
-              @for (c of clients; track c.id) {
-                <mat-option [value]="c.id">{{ c.name }}</mat-option>
-              }
-            </mat-select>
-          </mat-form-field>
-        }
-      </div>
-      <p class="new-client-row">
-        <input type="text" [(ngModel)]="saveToAgencyNewClientName" placeholder="Or new client name" class="client-name-input" />
-        <button mat-stroked-button (click)="createClientForSave()" [disabled]="!saveToAgencyNewClientName.trim()">Create client</button>
-      </p>
-      <mat-form-field appearance="outline">
+      <p>Save this conversation as a new brand. Your workspace is already selected.</p>
+      <mat-form-field appearance="outline" class="save-brand-name-field">
         <mat-label>Brand name</mat-label>
         <input matInput [(ngModel)]="saveToAgencyBrandName" [placeholder]="conversationMission?.company_name ?? 'Brand name'" />
       </mat-form-field>
       <div class="save-actions">
-        <button mat-raised-button color="primary" (click)="saveConversationToAgency()">Save brand</button>
-        <button mat-stroked-button (click)="closeSaveToAgency()">Cancel</button>
+        <button mat-raised-button color="primary" type="button" (click)="saveConversationToAgency()">Save brand</button>
+        <button mat-stroked-button type="button" (click)="closeSaveAsBrandDialog()">Cancel</button>
       </div>
+
+      <mat-expansion-panel [(expanded)]="saveModalAdvanced" class="save-advanced-panel">
+        <mat-expansion-panel-header>
+          <mat-panel-title>Advanced</mat-panel-title>
+        </mat-expansion-panel-header>
+        <div class="agency-actions">
+          <button mat-stroked-button type="button" (click)="loadClients()">Reload workspaces</button>
+          @if (clients.length > 0) {
+            <mat-form-field appearance="outline">
+              <mat-label>Workspace</mat-label>
+              <mat-select [(ngModel)]="saveToAgencyClientId" name="saveClient">
+                <mat-option [value]="null">-- Select workspace --</mat-option>
+                @for (c of clients; track c.id) {
+                  <mat-option [value]="c.id">{{ c.name }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+          }
+        </div>
+        <p class="new-client-row">
+          <input
+            type="text"
+            [(ngModel)]="saveToAgencyNewClientName"
+            placeholder="New workspace name"
+            class="client-name-input"
+          />
+          <button mat-stroked-button type="button" (click)="createClientForSave()" [disabled]="!saveToAgencyNewClientName.trim()">
+            Add workspace
+          </button>
+        </p>
+      </mat-expansion-panel>
     </mat-card-content>
   </mat-card>
 }

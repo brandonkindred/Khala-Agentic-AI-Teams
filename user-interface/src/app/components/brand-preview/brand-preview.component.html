@@ -2,9 +2,9 @@
   <mat-card-header>
     <mat-card-title>Brand preview</mat-card-title>
     @if (hasOutput) {
-      <button mat-stroked-button color="primary" (click)="saveToAgency.emit()" class="save-btn">
+      <button mat-stroked-button color="primary" type="button" (click)="saveAsBrand.emit()" class="save-btn">
         <mat-icon>save</mat-icon>
-        Save to agency
+        Save as brand
       </button>
     }
   </mat-card-header>

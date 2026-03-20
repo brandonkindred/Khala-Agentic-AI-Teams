@@ -81,10 +81,9 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
   }
 
   ngOnChanges(changes: SimpleChanges): void {
-    if (
-      (changes['conversationId'] && !changes['conversationId'].firstChange) ||
-      (changes['brandId'] && !changes['brandId'].firstChange && !this.conversationId)
-    ) {
+    const convChanged = changes['conversationId'] && !changes['conversationId'].firstChange;
+    const brandChanged = changes['brandId'] && !changes['brandId'].firstChange;
+    if (convChanged || (brandChanged && !this.conversationId)) {
       this.bootstrapConversation();
     }
   }
