@@ -176,6 +176,16 @@ Optional: `work_dir` or `run_id` – when set, persists `research_packet.md` and
 
 Interactive docs: http://localhost:8000/docs
 
+## Dedicated container deployment (behind Unified API)
+
+You can run blogging as a standalone container and keep the public route at `/api/blogging` via unified API proxy mode:
+
+1. Start a dedicated blogging service (e.g. uvicorn `blogging.api.main:app` on `:8081` in Docker network).
+2. Set `BLOGGING_REMOTE_URL` in unified API (for example `http://blogging-api:8081`).
+3. Keep UI and external clients calling unified API at `/api/blogging/*` unchanged.
+
+Rollback: unset `BLOGGING_REMOTE_URL` to return to in-process blogging mount.
+
 ## Style guide and brand spec
 
 The Draft and Copy Editor agents do **not** accept file paths. Callers must load the writing style guide and brand spec **before** instantiating the agents, then pass the **full file contents** as strings:

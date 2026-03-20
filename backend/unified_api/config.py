@@ -30,6 +30,11 @@ TEMPORAL_ADDRESS = os.getenv("TEMPORAL_ADDRESS", "").strip() or None
 TEMPORAL_NAMESPACE = os.getenv("TEMPORAL_NAMESPACE", "default").strip()
 TEMPORAL_TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "software-engineering").strip()
 
+# Optional: proxy /api/blogging to an external blogging container/service.
+# When set, unified_api will route blogging requests to this URL instead of
+# mounting blogging.api.main in-process.
+BLOGGING_REMOTE_URL = os.getenv("BLOGGING_REMOTE_URL", "").strip() or None
+
 # Team configurations with route prefixes
 TEAM_CONFIGS: Dict[str, TeamConfig] = {
     "blogging": TeamConfig(

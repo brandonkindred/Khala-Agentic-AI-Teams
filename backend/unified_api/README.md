@@ -93,6 +93,17 @@ python run_unified_api.py --workers 4 --log-level warning
 
 Team-specific environment variables (e.g., `OLLAMA_API_KEY`, `SW_LLM_*`, `PA_*`) are passed through to the mounted team APIs.
 
+### Optional blogging remote mode
+
+Set `BLOGGING_REMOTE_URL` (example: `http://blogging-api:8081`) to proxy `/api/blogging/*` to a dedicated blogging container/service instead of mounting blogging in-process.
+
+- When `BLOGGING_REMOTE_URL` is set:
+  - Unified API forwards `/api/blogging` and `/api/blogging/{path}` requests to the remote target.
+  - Blogging Temporal worker is not started in unified API.
+  - Blogging shutdown job-failure hook is not run in unified API.
+- When `BLOGGING_REMOTE_URL` is unset:
+  - Existing in-process blogging mount behavior is preserved.
+
 ## CLI Options
 
 ```
@@ -292,6 +303,16 @@ Check the console output for import errors:
 ```
 
 Fix: Install missing dependencies (`pip install cryptography`).
+
+### Blogging route returns 503
+
+If `/api/blogging/*` returns `503` with `Blogging service unavailable`, unified API is in remote-blogging mode and cannot reach `BLOGGING_REMOTE_URL`.
+
+Checklist:
+
+1. Verify `BLOGGING_REMOTE_URL` is reachable from the unified API container.
+2. Verify blogging service health endpoint responds (`/health`).
+3. For immediate rollback, unset `BLOGGING_REMOTE_URL` and restart unified API to use local mount mode.
 
 ### Port Already in Use
 

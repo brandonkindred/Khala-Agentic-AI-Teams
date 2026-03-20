@@ -10,7 +10,7 @@ def test_run_shutdown_hooks_calls_mounted_team_hook() -> None:
     from unified_api import main as unified_main
 
     mock_fn = MagicMock()
-    with patch.dict(unified_main._mounted_teams, {"blogging": True}, clear=False):
+    with patch.dict(unified_main._locally_mounted_teams, {"blogging": True}, clear=False):
         with patch("importlib.import_module") as import_mock:
             mod = MagicMock()
             mod.mark_all_running_jobs_failed = mock_fn
@@ -26,7 +26,7 @@ def test_run_shutdown_hooks_skips_unmounted_teams() -> None:
     """_run_shutdown_hooks does not call hook for teams that are not mounted."""
     from unified_api import main as unified_main
 
-    with patch.dict(unified_main._mounted_teams, {"blogging": False, "software_engineering": False}, clear=False):
+    with patch.dict(unified_main._locally_mounted_teams, {"blogging": False, "software_engineering": False}, clear=False):
         with patch("importlib.import_module") as import_mock:
             unified_main._run_shutdown_hooks("test")
 

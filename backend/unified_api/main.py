@@ -25,9 +25,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List
 
+import httpx
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 # Add agents directory to path for imports
@@ -43,7 +45,7 @@ _studiogrid_src = _project_root / "studiogrid" / "src"
 if str(_studiogrid_src) not in sys.path:
     sys.path.insert(0, str(_studiogrid_src))
 
-from unified_api.config import TEAM_CONFIGS, get_enabled_teams
+from unified_api.config import BLOGGING_REMOTE_URL, TEAM_CONFIGS, get_enabled_teams
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,6 +100,7 @@ class SecurityErrorResponse(BaseModel):
 
 # Track mounted routers for health checks
 _mounted_teams: Dict[str, bool] = {}
+_locally_mounted_teams: Dict[str, bool] = {}
 
 # Team keys that have async jobs: on shutdown, call their mark_all_running_jobs_failed(reason).
 # Maps team_key -> (module_dot_path, function_name).
@@ -119,7 +122,7 @@ SHUTDOWN_HOOKS: Dict[str, tuple] = {
 def _run_shutdown_hooks(reason: str) -> None:
     """Call each mounted team's mark_all_running_jobs_failed(reason). Used by lifespan and atexit."""
     for team_key, (module_path, func_name) in SHUTDOWN_HOOKS.items():
-        if not _mounted_teams.get(team_key):
+        if not _locally_mounted_teams.get(team_key):
             continue
         try:
             mod = importlib.import_module(module_path)
@@ -129,8 +132,69 @@ def _run_shutdown_hooks(reason: str) -> None:
             logger.warning("Shutdown hook for team %s failed: %s", team_key, e)
 
 
+def _proxyable_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    """Drop hop-by-hop headers before proxying."""
+    blocked = {"host", "content-length", "connection", "transfer-encoding"}
+    return {k: v for k, v in headers.items() if k.lower() not in blocked}
+
+
+def _register_blogging_proxy_routes(app: FastAPI, remote_base: str) -> None:
+    """Proxy /api/blogging requests to a dedicated blogging container."""
+
+    async def _proxy(request: Request, subpath: str = "") -> Response:
+        target_url = f"{remote_base.rstrip('/')}/{subpath.lstrip('/')}" if subpath else remote_base.rstrip("/")
+        if request.url.query:
+            target_url = f"{target_url}?{request.url.query}"
+
+        body = await request.body()
+        headers = _proxyable_headers(dict(request.headers))
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                upstream = await client.request(
+                    request.method,
+                    target_url,
+                    content=body,
+                    headers=headers,
+                )
+        except httpx.RequestError as exc:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": "Blogging service unavailable",
+                    "error": str(exc),
+                },
+            )
+
+        passthrough = {}
+        content_type = upstream.headers.get("content-type")
+        if content_type:
+            passthrough["content-type"] = content_type
+        content_disposition = upstream.headers.get("content-disposition")
+        if content_disposition:
+            passthrough["content-disposition"] = content_disposition
+
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            headers=passthrough,
+        )
+
+    app.add_api_route("/api/blogging", _proxy, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+    app.add_api_route(
+        "/api/blogging/{subpath:path}",
+        _proxy,
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    )
+
+
 def _try_mount_blogging(app: FastAPI) -> bool:
     """Mount blogging team API."""
+    if BLOGGING_REMOTE_URL:
+        remote = BLOGGING_REMOTE_URL.rstrip("/")
+        _register_blogging_proxy_routes(app, remote)
+        logger.info("Configured Blogging API proxy at /api/blogging -> %s", remote)
+        return True
     try:
         from blogging.api.main import app as blogging_app
 
@@ -387,15 +451,22 @@ def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
     }
 
     results = {}
+    local_results: Dict[str, bool] = {}
     enabled_teams = get_enabled_teams()
 
     for team_key, mount_fn in mount_functions.items():
         if team_key in enabled_teams:
             results[team_key] = mount_fn(app)
+            local_results[team_key] = bool(results[team_key])
+            if team_key == "blogging" and BLOGGING_REMOTE_URL:
+                local_results[team_key] = False
         else:
             results[team_key] = False
+            local_results[team_key] = False
             logger.info("Team %s is disabled, skipping mount", team_key)
 
+    global _locally_mounted_teams
+    _locally_mounted_teams = local_results
     return results
 
 
@@ -424,7 +495,7 @@ async def lifespan(app: FastAPI):
         "social_marketing": ("social_media_marketing_team.temporal.worker", "start_social_marketing_temporal_worker_thread"),
     }
     for team_key, (mod_path, func_name) in _temporal_worker_starters.items():
-        if not _mounted_teams.get(team_key):
+        if not _locally_mounted_teams.get(team_key):
             continue
         try:
             mod = importlib.import_module(mod_path)

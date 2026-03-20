@@ -6,7 +6,8 @@ This directory defines a **Docker Compose stack** that runs:
 - **Temporal** – workflow engine (Postgres-backed, no Elasticsearch)
 - **Temporal UI** – Web UI for workflows
 - **Ollama** (optional) – local Ollama server if you override LLM to use it
-- **Strands Agents** – all agent APIs; **default LLM is Ollama Cloud** (https://ollama.com) when running from Docker
+- **Strands Agents (Unified API)** – public entrypoint on `:8888` for all team routes
+- **Blogging API** – dedicated blogging container (proxied by Unified API at `/api/blogging`)
 
 ## Quick start
 
@@ -40,7 +41,8 @@ This directory defines a **Docker Compose stack** that runs:
    | Service        | URL                         |
    |----------------|-----------------------------|
    | **Angular UI** | http://localhost:4201       (proxies /api to agents) |
-   | Agents API     | http://localhost:8888       (direct) |
+| Agents API (Unified) | http://localhost:8888  (direct) |
+| Blogging API (internal service) | `http://blogging-api:8081` inside Docker network |
    | Temporal UI    | http://localhost:8080       |
    | Postgres       | localhost:5432 (user `postgres` / `temporal` / `strands`) |
    | Ollama (local) | http://localhost:11434      |
@@ -55,6 +57,7 @@ Optional (defaults in compose / `docker/.env.example`; copy to `docker/.env` and
 
 - **SW_LLM_BASE_URL** – default is `https://ollama.com` (Ollama Cloud). Set to `http://ollama:11434` to use the local Ollama container instead.
 - **SW_LLM_MODEL** – default `qwen3.5:397b-cloud`
+- **BLOGGING_REMOTE_URL** – default `http://blogging-api:8081`; when set in the unified container, `/api/blogging/*` is proxied to the dedicated blogging service.
 - **POSTGRES_USER**, **POSTGRES_PASSWORD**, **POSTGRES_DB** – used for the default Postgres superuser; init scripts create `temporal` and `strands` DBs and users.
 
 Personal Assistant credential encryption uses a key generated at **Docker image build time** (stored in the image), so credentials persist across container restarts without setting any env var.
@@ -128,7 +131,17 @@ After starting the stack:
 1. **Compose up** – `docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build` should bring up all services without errors.
 2. **Temporal UI** – Open http://localhost:8080 and confirm the Temporal Web UI loads.
 3. **Agents** – `curl http://localhost:8888/health` should return `{"status":"ok"}` (agents use stack Postgres and Ollama Cloud when configured).
-4. **Logs API** – With `ENABLE_LOG_API=1` in `.env`, `curl "http://localhost:8888/api/software-engineering/logs?service=sw_api&lines=100"` should return 200 and log content. With `ENABLE_LOG_API` unset, the same URL should return 404.
+4. **Blogging proxy** – `curl http://localhost:8888/api/blogging/health` should return blogging health through unified proxy.
+5. **Failure-path check** – stop `blogging-api` and verify `curl http://localhost:8888/api/blogging/health` returns `503` while other teams still respond.
+6. **Logs API** – With `ENABLE_LOG_API=1` in `.env`, `curl "http://localhost:8888/api/software-engineering/logs?service=sw_api&lines=100"` should return 200 and log content. With `ENABLE_LOG_API` unset, the same URL should return 404.
+
+## Rollback
+
+To roll back quickly to in-process blogging mount in unified API:
+
+1. Set `BLOGGING_REMOTE_URL` to empty for the `strands-agents` service.
+2. Recreate `strands-agents`.
+3. (Optional) stop/remove `blogging-api`.
 
 ## Security
 
