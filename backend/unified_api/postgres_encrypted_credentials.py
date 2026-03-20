@@ -17,6 +17,30 @@ from unified_api.integration_credentials import get_integration_fernet
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
+_psycopg_module = None
+_psycopg_import_failed: bool = False
+
+
+def _get_psycopg():
+    """Lazy import psycopg (optional at dev time; required in Docker when POSTGRES_HOST is set)."""
+    global _psycopg_module, _psycopg_import_failed
+    if _psycopg_module is not None:
+        return _psycopg_module
+    if _psycopg_import_failed:
+        return None
+    try:
+        import psycopg
+
+        _psycopg_module = psycopg
+        return psycopg
+    except ModuleNotFoundError as e:
+        _psycopg_import_failed = True
+        logger.warning(
+            "psycopg is not installed (%s). Postgres encrypted credentials are unavailable; "
+            "install psycopg[binary] (see agents/requirements.txt) or unset POSTGRES_HOST.",
+            e,
+        )
+        return None
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS encrypted_integration_credentials (
@@ -81,11 +105,16 @@ def pg_get_credential(service: str, key: str) -> str:
 def pg_set_credential(service: str, key: str, value: str) -> None:
     if not postgres_credentials_enabled():
         raise RuntimeError("POSTGRES_HOST is not set; cannot use Postgres credential store.")
+    psycopg = _get_psycopg()
+    if psycopg is None:
+        raise RuntimeError(
+            "psycopg is not installed; cannot use Postgres credential store. "
+            "Install psycopg[binary] (pip install 'psycopg[binary]') or unset POSTGRES_HOST."
+        )
     if not value:
         pg_delete_credential(service, key)
         return
     encrypted = get_integration_fernet().encrypt(value.encode()).decode()
-    import psycopg
 
     with _LOCK:
         with psycopg.connect(_dsn(), autocommit=True) as conn:
@@ -105,7 +134,9 @@ def pg_set_credential(service: str, key: str, value: str) -> None:
 def pg_delete_credential(service: str, key: str) -> None:
     if not postgres_credentials_enabled():
         return
-    import psycopg
+    psycopg = _get_psycopg()
+    if psycopg is None:
+        return
 
     with _LOCK:
         try:
