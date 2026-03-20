@@ -9,16 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-
-from shared_job_management import (
-    JOB_STATUS_COMPLETED,
-    JOB_STATUS_FAILED,
-    JOB_STATUS_PENDING,
-    JOB_STATUS_RUNNING,
-    CentralJobManager,
-    start_stale_job_monitor,
-)
+from pydantic import BaseModel
 
 from sales_team.learning_engine import LearningEngine
 from sales_team.models import (
@@ -27,7 +18,6 @@ from sales_team.models import (
     LearningInsights,
     NurtureRequest,
     OutreachRequest,
-    PipelineStage,
     ProposalRequest,
     ProspectingRequest,
     QualificationRequest,
@@ -46,6 +36,15 @@ from sales_team.outcome_store import (
     record_deal_outcome,
     record_stage_outcome,
 )
+from shared_job_management import (
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    job_manager_for_team,
+    maybe_start_job_heartbeat,
+    start_stale_job_monitor,
+)
 
 app = FastAPI(
     title="AI Sales Team API",
@@ -59,7 +58,7 @@ app = FastAPI(
 )
 
 logger = logging.getLogger(__name__)
-_job_manager = CentralJobManager(team="sales_team")
+_job_manager = job_manager_for_team("sales_team")
 _stale_monitor_stop = start_stale_job_monitor(
     _job_manager,
     interval_seconds=15.0,
@@ -201,6 +200,7 @@ def run_pipeline(request: SalesPipelineRequest) -> SalesPipelineRunResponse:
         created_at=now,
         last_updated_at=now,
     )
+    maybe_start_job_heartbeat(job_id, team="sales_team")
     thread = threading.Thread(target=_run_pipeline_job, args=(job_id, request), daemon=True)
     thread.start()
     return SalesPipelineRunResponse(

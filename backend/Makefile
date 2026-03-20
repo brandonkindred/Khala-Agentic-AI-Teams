@@ -18,7 +18,7 @@ PORT ?= 8080
 HOST ?= 0.0.0.0
 
 .DEFAULT_GOAL := help
-.PHONY: help install install-dev lint lint-fix test coverage coverage-html build run deploy clean
+.PHONY: help install install-dev lint lint-fix test coverage coverage-html build run run-job-service deploy clean
 
 help:
 	@echo "Backend targets:"
@@ -29,6 +29,7 @@ help:
 	@echo "  make test       - Run pytest (agents + unified_api)"
 	@echo "  make build      - install, lint, test"
 	@echo "  make run        - Start unified API server (dev, foreground)"
+	@echo "  make run-job-service - Start central job microservice (needs DATABASE_URL)"
 	@echo "  make deploy     - Start API server (production: no reload)"
 	@echo "  make clean      - Remove .venv and caches"
 
@@ -62,6 +63,9 @@ build: install-dev lint test
 
 run:
 	$(VENV_PYTHON) run_unified_api.py --host $(HOST) --port $(PORT) --reload
+
+run-job-service:
+	$(VENV_PYTHON) run_job_service.py --reload
 
 deploy:
 	$(VENV_PYTHON) run_unified_api.py --host $(HOST) --port $(PORT) --workers 4 --log-level warning

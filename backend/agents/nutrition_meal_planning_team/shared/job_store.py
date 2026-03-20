@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared_job_management import CentralJobManager
+from shared_job_management import job_manager_for_team, maybe_start_job_heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +22,9 @@ JOB_STATUS_CANCELLED = "cancelled"
 
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
 
-_manager_instance: Optional[CentralJobManager] = None
 
-
-def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
-    global _manager_instance
-    if _manager_instance is None:
-        _manager_instance = CentralJobManager(
-            team="nutrition_meal_planning_team",
-            cache_dir=cache_dir,
-        )
-    return _manager_instance
+def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR):
+    return job_manager_for_team("nutrition_meal_planning_team", cache_dir=cache_dir)
 
 
 def create_job(
@@ -42,6 +34,7 @@ def create_job(
 ) -> None:
     """Create a new job with pending status."""
     _manager(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **fields)
+    maybe_start_job_heartbeat(job_id, team="nutrition_meal_planning_team", cache_dir=cache_dir)
 
 
 def get_job(

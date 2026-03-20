@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared_job_management import CentralJobManager
+from shared_job_management import job_manager_for_team, maybe_start_job_heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +26,8 @@ PA_JOB_STATUS_CANCELLED = "cancelled"
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache")).resolve()
 
 
-def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
-    return CentralJobManager(team="personal_assistant_team", cache_dir=cache_dir)
+def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR):
+    return job_manager_for_team("personal_assistant_team", cache_dir=cache_dir)
 
 
 def create_job(
@@ -54,7 +54,9 @@ def create_job(
         "created_at": now,
         "updated_at": now,
     }
-    _manager(cache_dir).create_job(job_id, status=PA_JOB_STATUS_PENDING, **data)
+    fields = {k: v for k, v in data.items() if k not in ("job_id", "status")}
+    _manager(cache_dir).create_job(job_id, status=PA_JOB_STATUS_PENDING, **fields)
+    maybe_start_job_heartbeat(job_id, team="personal_assistant_team", cache_dir=cache_dir)
 
 
 def get_job(

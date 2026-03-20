@@ -18,7 +18,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared_job_management import CentralJobManager, start_stale_job_monitor
+from shared_job_management import (
+    job_manager_for_team,
+    maybe_start_job_heartbeat,
+    start_stale_job_monitor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +56,8 @@ JOB_STATUS_NEEDS_REVIEW = "needs_human_review"
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache")).resolve()
 
 
-def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
-    return CentralJobManager(team="blogging_team", cache_dir=cache_dir)
+def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR):
+    return job_manager_for_team("blogging_team", cache_dir=cache_dir)
 
 
 def medium_stats_run_dir(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> Path:
@@ -108,6 +112,7 @@ def create_blog_job(
     # create_job(job_id, **fields) expects job_id as first arg; omit job_id from **data to avoid duplicate
     fields = {k: v for k, v in data.items() if k != "job_id"}
     _manager(cache_dir).create_job(job_id, **fields)
+    maybe_start_job_heartbeat(job_id, team="blogging_team", cache_dir=cache_dir)
 
 
 def get_blog_job(

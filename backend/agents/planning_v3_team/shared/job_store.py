@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    from shared_job_management import CentralJobManager
+    from shared_job_management import job_manager_for_team, maybe_start_job_heartbeat
 except ImportError:
-    CentralJobManager = None  # type: ignore
+    job_manager_for_team = None  # type: ignore
+    maybe_start_job_heartbeat = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -22,19 +23,12 @@ JOB_STATUS_COMPLETED = "completed"
 JOB_STATUS_FAILED = "failed"
 
 DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache"))
-_manager_instance: Optional[CentralJobManager] = None
 
 
-def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
-    global _manager_instance
-    if _manager_instance is None:
-        if CentralJobManager is None:
-            raise RuntimeError("shared_job_management not available")
-        _manager_instance = CentralJobManager(
-            team="planning_v3_team",
-            cache_dir=cache_dir,
-        )
-    return _manager_instance
+def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR):
+    if job_manager_for_team is None:
+        raise RuntimeError("shared_job_management not available")
+    return job_manager_for_team("planning_v3_team", cache_dir=cache_dir)
 
 
 def create_job(
@@ -56,6 +50,8 @@ def create_job(
     }
     data.update(fields)
     _manager(cache_dir).create_job(job_id=job_id, status=JOB_STATUS_PENDING, **data)
+    if maybe_start_job_heartbeat:
+        maybe_start_job_heartbeat(job_id, team="planning_v3_team", cache_dir=cache_dir)
 
 
 def get_job(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> Optional[Dict[str, Any]]:

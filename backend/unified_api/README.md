@@ -85,6 +85,9 @@ python run_unified_api.py --workers 4 --log-level warning
 | `UNIFIED_API_HOST` | `0.0.0.0` | Host to bind |
 | `UNIFIED_API_PORT` | `8080` | Port to bind |
 | `AGENT_CACHE` | `.agent_cache` | Directory for job and integrations storage (e.g. `integrations.json`). |
+| `JOB_SERVICE_URL` | (none) | When set, team job records use the central job HTTP API (Postgres); unset keeps JSON files under `AGENT_CACHE`. |
+| `JOB_SERVICE_API_KEY` | (none) | Optional; sent as `X-Job-Service-Key` when calling the job service. |
+| `JOB_HEARTBEAT_INTERVAL_SECONDS` | `90` | Client-side heartbeat interval for remote jobs (keep below `JOB_HEARTBEAT_STALE_SECONDS` on the service). |
 | `INTEGRATIONS_BROWSER_SESSION_ROOT` | `${AGENT_CACHE}/integrations/browser_sessions` | Optional override for browser session files (e.g. Medium `storage_state.json`). Path is backend-controlled only; cannot be set from UI/API payloads. |
 | `MEDIUM_BROWSER_HEADLESS` | `0` | Optional: set `1`/`true` for headless Chromium during Medium Playwright login. |
 | `MEDIUM_BROWSER_TIMEOUT_MS` | `180000` | Optional: max time (ms) for automated Medium/Google login. |

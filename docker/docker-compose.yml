@@ -66,6 +66,46 @@ services:
       stack:
         ipv4_address: 172.28.0.4
 
+  job-service:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: strands-unified-api
+    container_name: strands-stack-job-service
+    command:
+      [
+        "uvicorn",
+        "job_service.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8091",
+        "--workers",
+        "2",
+        "--log-level",
+        "warning",
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PYTHONUNBUFFERED: "1"
+      DATABASE_URL: postgresql://strands_jobs:strands_jobs@postgres:5432/strands_jobs
+      JOB_HEARTBEAT_STALE_SECONDS: ${JOB_HEARTBEAT_STALE_SECONDS:-300}
+      JOB_STALE_CHECK_INTERVAL_SECONDS: ${JOB_STALE_CHECK_INTERVAL_SECONDS:-30}
+      JOB_SERVICE_API_KEY: ${JOB_SERVICE_API_KEY:-}
+    extra_hosts:
+      - "postgres:172.28.0.2"
+    networks:
+      stack:
+        ipv4_address: 172.28.0.8
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
   strands-agents:
     build:
       context: ../backend
@@ -77,6 +117,8 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
+      job-service:
+        condition: service_healthy
     volumes:
       - agents_workspace:/workspace
     ports:
@@ -104,9 +146,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       ENABLE_LOG_API: ${ENABLE_LOG_API:-0}
       TEMPORAL_ADDRESS: temporal:7233
+      JOB_SERVICE_URL: ${JOB_SERVICE_URL:-http://job-service:8091}
+      JOB_SERVICE_API_KEY: ${JOB_SERVICE_API_KEY:-}
     extra_hosts:
       - "postgres:172.28.0.2"
       - "temporal:172.28.0.3"
+      - "job-service:172.28.0.8"
     networks:
       stack:
         ipv4_address: 172.28.0.6

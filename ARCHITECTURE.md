@@ -57,6 +57,10 @@ flowchart LR
 
 The API also exposes `GET /run-team/{job_id}` for polling job status, `POST /run-team/{job_id}/retry-failed` for retrying failed tasks, and clarification endpoints for interactive spec refinement.
 
+### Central job service (optional)
+
+When `JOB_SERVICE_URL` is set, shared job state for teams that used `CentralJobManager` is stored in the **job microservice** (`backend/agents/job_service/`) in Postgres (database `strands_jobs` in the default Docker stack) instead of JSON files under `AGENT_CACHE`. The service runs a heartbeat stale sweep (`JOB_HEARTBEAT_STALE_SECONDS`, default 300). Agents send periodic heartbeats via `maybe_start_job_heartbeat` / `POST .../heartbeat`. Unset `JOB_SERVICE_URL` for file-backed local dev. See `backend/agents/job_service/README.md` and Compose service `job-service`.
+
 ### Temporal (durable execution)
 
 When `TEMPORAL_ADDRESS` is set (e.g. in Docker), the SE team uses **Temporal** instead of background threads:

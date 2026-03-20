@@ -2,7 +2,6 @@
 FastAPI endpoints for the Digital Accessibility Audit Team.
 """
 
-import asyncio
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
@@ -10,32 +9,32 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
+from shared_job_management import (
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    job_manager_for_team,
+    maybe_start_job_heartbeat,
+    start_stale_job_monitor,
+)
+
 from ..models import (
+    AccessibilityAuditResult,
     AuditJobResponse,
     AuditRequest,
-    AccessibilityAuditResult,
     AuditStatusResponse,
     BacklogExportResponse,
-    Finding,
     FindingsListResponse,
     MobileAppTarget,
     Severity,
     WCAGLevel,
 )
-from ..orchestrator import AccessibilityAuditOrchestrator, run_accessibility_audit
-from shared_job_management import (
-    JOB_STATUS_FAILED,
-    JOB_STATUS_PENDING,
-    JOB_STATUS_RUNNING,
-    CentralJobManager,
-    start_stale_job_monitor,
-)
-
+from ..orchestrator import AccessibilityAuditOrchestrator
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-_job_manager = CentralJobManager(team="accessibility_audit_team")
+_job_manager = job_manager_for_team("accessibility_audit_team")
 _stale_monitor_stop = start_stale_job_monitor(
     _job_manager,
     interval_seconds=15.0,
@@ -204,6 +203,7 @@ async def create_audit(
         error=None,
         request_payload=request.model_dump(),
     )
+    maybe_start_job_heartbeat(job_id, team="accessibility_audit_team")
 
     # Run audit in background
     async def run_audit_task():
@@ -374,6 +374,7 @@ async def retest_findings(
         error=None,
         request_payload=request.model_dump(),
     )
+    maybe_start_job_heartbeat(job_id, team="accessibility_audit_team")
 
     async def run_retest_task():
         try:

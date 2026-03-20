@@ -3,13 +3,88 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from remote_job_manager import RemoteJobManager
+
+JobManager = Union["CentralJobManager", "RemoteJobManager"]
+
+_remote_clients: Dict[tuple[str, str], "RemoteJobManager"] = {}
+
+
+def uses_remote_job_service() -> bool:
+    return bool(os.getenv("JOB_SERVICE_URL", "").strip())
+
+
+def job_manager_for_team(team: str, cache_dir: str | Path = ".agent_cache") -> JobManager:
+    if uses_remote_job_service():
+        from remote_job_manager import RemoteJobManager
+
+        key = (team, str(Path(cache_dir).resolve()))
+        if key not in _remote_clients:
+            _remote_clients[key] = RemoteJobManager(team=team, cache_dir=cache_dir)
+        return _remote_clients[key]
+    return CentralJobManager(team=team, cache_dir=cache_dir)
+
+
+def start_periodic_job_heartbeat(
+    job_id: str,
+    *,
+    team: str,
+    cache_dir: str | Path | None = None,
+    interval_seconds: Optional[float] = None,
+) -> None:
+    """Daemon thread: send heartbeats while job is pending or running (interval < JOB_HEARTBEAT_STALE_SECONDS)."""
+    if interval_seconds is None:
+        try:
+            interval_seconds = float(os.getenv("JOB_HEARTBEAT_INTERVAL_SECONDS", "90"))
+        except (TypeError, ValueError):
+            interval_seconds = 90.0
+    base = (
+        Path(cache_dir) if cache_dir is not None else Path(os.getenv("AGENT_CACHE", ".agent_cache"))
+    )
+    active_statuses = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING)
+
+    def _loop() -> None:
+        mgr = job_manager_for_team(team, base)
+        while True:
+            time.sleep(interval_seconds)
+            try:
+                data = mgr.get_job(job_id)
+                if not data:
+                    return
+                if data.get("status") not in active_statuses:
+                    return
+                mgr.send_heartbeat(job_id)
+            except Exception as exc:
+                logger.warning("Job heartbeat for %s/%s: %s", team, job_id, exc)
+
+    thread = threading.Thread(
+        target=_loop,
+        name=f"job-hb-{team[:12]}-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+
+
+def maybe_start_job_heartbeat(
+    job_id: str,
+    *,
+    team: str,
+    cache_dir: str | Path | None = None,
+) -> None:
+    """When using the remote job service, start a periodic heartbeat for long-running jobs."""
+    if uses_remote_job_service():
+        start_periodic_job_heartbeat(job_id, team=team, cache_dir=cache_dir)
+
 
 JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"
@@ -117,9 +192,7 @@ class CentralJobManager:
                 data["last_heartbeat_at"] = now
             self._write(path, data)
 
-    def apply_to_job(
-        self, job_id: str, fn: Callable[[Dict[str, Any]], None]
-    ) -> None:
+    def apply_to_job(self, job_id: str, fn: Callable[[Dict[str, Any]], None]) -> None:
         """Atomically read job, call fn(data), write back. No-op if job does not exist."""
         with self._lock:
             path = self._job_file(job_id)
@@ -131,6 +204,10 @@ class CentralJobManager:
             data["updated_at"] = now
             data["last_heartbeat_at"] = now
             self._write(path, data)
+
+    def send_heartbeat(self, job_id: str) -> None:
+        """Lightweight liveness update (same as update_job with no extra fields)."""
+        self.update_job(job_id)
 
     def append_event(
         self,
@@ -179,7 +256,11 @@ class CentralJobManager:
                     continue
                 if data.get(waiting_field):
                     continue
-                hb_raw = data.get("last_heartbeat_at") or data.get("updated_at") or data.get("created_at")
+                hb_raw = (
+                    data.get("last_heartbeat_at")
+                    or data.get("updated_at")
+                    or data.get("created_at")
+                )
                 try:
                     hb = datetime.fromisoformat(str(hb_raw))
                 except Exception:
@@ -197,13 +278,15 @@ class CentralJobManager:
 
 
 def start_stale_job_monitor(
-    manager: CentralJobManager,
+    manager: JobManager,
     *,
     interval_seconds: float,
     stale_after_seconds: float,
     reason: str,
 ) -> threading.Event:
     stop_event = threading.Event()
+    if uses_remote_job_service():
+        return stop_event
 
     def _run() -> None:
         while not stop_event.is_set():

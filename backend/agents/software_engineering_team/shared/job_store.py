@@ -17,13 +17,11 @@ from __future__ import annotations
 import copy
 import logging
 import os
-import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared_job_management import CentralJobManager
+from shared_job_management import job_manager_for_team, start_periodic_job_heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +54,13 @@ def get_stale_after_seconds() -> float:
 _jobs_path_logged = False
 
 
-def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
+def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR):
     global _jobs_path_logged
     if not _jobs_path_logged:
         jobs_dir = Path(cache_dir) / "software_engineering_team" / "jobs"
         logger.info("Software engineering job store path: %s", jobs_dir)
         _jobs_path_logged = True
-    return CentralJobManager(team="software_engineering_team", cache_dir=cache_dir)
+    return job_manager_for_team("software_engineering_team", cache_dir=cache_dir)
 
 
 def create_job(
@@ -221,28 +219,12 @@ def start_job_heartbeat_thread(
     """Start a daemon thread that periodically updates the job's heartbeat (last_heartbeat_at)
     while the job is pending or running. The thread exits when the job is missing or in a
     terminal status (completed, failed, cancelled, etc.)."""
-    active_statuses = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING)
-
-    def _heartbeat_loop() -> None:
-        while True:
-            time.sleep(interval_seconds)
-            try:
-                data = get_job(job_id, cache_dir=cache_dir)
-                if not data:
-                    return
-                if data.get("status") not in active_statuses:
-                    return
-                update_job(job_id, cache_dir=cache_dir)
-            except Exception as exc:
-                logger.warning("Job heartbeat thread for %s: %s", job_id, exc)
-                # Continue loop so one failure does not kill the thread
-
-    thread = threading.Thread(
-        target=_heartbeat_loop,
-        name=f"job-heartbeat-{job_id[:8]}",
-        daemon=True,
+    start_periodic_job_heartbeat(
+        job_id,
+        team="software_engineering_team",
+        cache_dir=cache_dir,
+        interval_seconds=interval_seconds,
     )
-    thread.start()
 
 
 def update_task_state(

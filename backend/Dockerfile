@@ -28,7 +28,7 @@ COPY studiogrid /app/studiogrid
 RUN python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" > /app/pa_credential_key
 ENV PA_CREDENTIAL_KEY_FILE=/app/pa_credential_key
 
-EXPOSE 8080
+EXPOSE 8080 8091
 
 # Same as make deploy (host 0.0.0.0, port 8080, workers 4)
 CMD ["python", "run_unified_api.py", "--host", "0.0.0.0", "--port", "8080", "--workers", "4", "--log-level", "warning"]

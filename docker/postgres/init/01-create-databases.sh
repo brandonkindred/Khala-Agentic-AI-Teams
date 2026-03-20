@@ -10,4 +10,7 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
 
   CREATE USER strands WITH PASSWORD 'strands';
   CREATE DATABASE strands OWNER strands;
+
+  CREATE USER strands_jobs WITH PASSWORD 'strands_jobs';
+  CREATE DATABASE strands_jobs OWNER strands_jobs;
 EOSQL

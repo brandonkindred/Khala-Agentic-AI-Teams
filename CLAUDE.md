@@ -140,6 +140,10 @@ Environment variables for LLM: `SW_LLM_PROVIDER`, `SW_LLM_BASE_URL`, `SW_LLM_MOD
 | `BLOG_PLANNING_MAX_ITERATIONS` | Blog planning refine loop cap (default 5) |
 | `BLOG_PLANNING_MAX_PARSE_RETRIES` | JSON parse/repair attempts per planning LLM call (default 3) |
 | `BLOG_PLANNING_MODEL` | Optional Ollama model name for **planning only** (same base URL as `SW_LLM_*`) |
+| `JOB_SERVICE_URL` | When set, agents persist job records via the central job HTTP API (Postgres); unset uses file cache |
+| `JOB_SERVICE_API_KEY` | Optional shared secret; send as `X-Job-Service-Key` to the job service |
+| `JOB_HEARTBEAT_STALE_SECONDS` | Job service: mark `pending`/`running` jobs failed if no heartbeat (default 300) |
+| `JOB_HEARTBEAT_INTERVAL_SECONDS` | Agent periodic heartbeat interval when using remote jobs (default 90) |
 
 **Blogging pipeline:** `research → planning (ContentPlan) → draft → gates`; `POST /research-and-review` runs research + the same planning step. See `backend/agents/blogging/README.md` and repo `CHANGELOG.md`.
 

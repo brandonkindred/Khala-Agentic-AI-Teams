@@ -2,7 +2,8 @@
 
 This directory defines a **Docker Compose stack** that runs:
 
-- **PostgreSQL 16** – shared database with `temporal` and `strands` databases (created at first run)
+- **PostgreSQL 16** – shared database with `temporal`, `strands`, and **`strands_jobs`** databases (created at first run; see `postgres/STRANDS_JOBS_MIGRATION.md` if upgrading an old volume)
+- **Job service** – central Postgres-backed job store; unified API uses `JOB_SERVICE_URL=http://job-service:8091` by default in Compose
 - **Temporal** – workflow engine (Postgres-backed, no Elasticsearch)
 - **Temporal UI** – Web UI for workflows
 - **Ollama** (optional) – local Ollama server if you override LLM to use it
@@ -42,7 +43,7 @@ This directory defines a **Docker Compose stack** that runs:
    | **Angular UI** | http://localhost:4201       (proxies /api to agents) |
    | Agents API     | http://localhost:8888       (direct) |
    | Temporal UI    | http://localhost:8080       |
-   | Postgres       | localhost:5432 (user `postgres` / `temporal` / `strands`) |
+   | Postgres       | localhost:5432 (users/db: `postgres`, `temporal`, `strands`, `strands_jobs`) |
    | Ollama (local) | http://localhost:11434      |
 
    Use the **Angular UI at 4201** so API requests go through the same origin and nginx proxies them to the backend. If you run only the API container and use the UI with `ng serve`, point the dev API base to `http://localhost:8888` in `user-interface/src/environments/environment.ts`.

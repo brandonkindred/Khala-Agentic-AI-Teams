@@ -17,8 +17,15 @@ DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache"))
 
 
 def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR):
-    from shared_job_management import CentralJobManager
-    return CentralJobManager(team="coding_team", cache_dir=cache_dir)
+    from shared_job_management import job_manager_for_team
+
+    return job_manager_for_team("coding_team", cache_dir=cache_dir)
+
+
+def _maybe_hb(job_id: str, cache_dir: str | Path) -> None:
+    from shared_job_management import maybe_start_job_heartbeat
+
+    maybe_start_job_heartbeat(job_id, team="coding_team", cache_dir=cache_dir)
 
 
 def create_job(
@@ -42,6 +49,7 @@ def create_job(
         "plan_input": plan_input or {},
     }
     _manager(cache_dir).create_job(**data)
+    _maybe_hb(job_id, cache_dir)
 
 
 def get_job(

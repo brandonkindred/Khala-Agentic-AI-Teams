@@ -11,6 +11,9 @@ import json
 import logging
 import os
 import re
+
+# Path setup for imports when run as uvicorn from project root
+import sys
 import tempfile
 import threading
 import time
@@ -24,8 +27,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-# Path setup for imports when run as uvicorn from project root
-import sys
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
@@ -40,8 +41,8 @@ from software_engineering_team.shared.job_store import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
-    JOB_STATUS_PENDING,
     JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
+    JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     create_job,
     delete_job,
@@ -54,9 +55,10 @@ from software_engineering_team.shared.job_store import (
     reset_job,
     start_job_heartbeat_thread,
     update_job,
+)
+from software_engineering_team.shared.job_store import (
     submit_answers as store_submit_answers,
 )
-
 from software_engineering_team.shared.logging_config import setup_logging
 
 setup_logging(level=logging.INFO)
@@ -67,9 +69,14 @@ _stale_monitor_lock = threading.Lock()
 
 
 def _start_stale_job_monitor_once() -> None:
+    from shared_job_management import uses_remote_job_service
+
     global _stale_monitor_started
     with _stale_monitor_lock:
         if _stale_monitor_started:
+            return
+        if uses_remote_job_service():
+            _stale_monitor_started = True
             return
 
         def _monitor() -> None:
@@ -1144,6 +1151,7 @@ def architect_design(request: ArchitectDesignRequest) -> ArchitectDesignResponse
         from architecture_expert import ArchitectureExpertAgent
         from architecture_expert.models import ArchitectureInput
         from spec_parser import parse_spec_with_llm
+
         from llm_service import get_client
     except ImportError as e:
         logger.exception("Failed to import architect dependencies")
@@ -1292,11 +1300,18 @@ class FrontendCodeV2StatusResponse(BaseModel):
 def _run_frontend_code_v2_background(job_id: str, repo_path: str, task_dict: dict, architecture_overview: str) -> None:
     """Run frontend-code-v2 workflow in a background thread."""
     try:
-        from pathlib import Path as _Path
-        from frontend_code_v2_team import FrontendCodeV2TeamLead
-        from llm_service import get_client
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType, SystemArchitecture
         import uuid as _uuid
+        from pathlib import Path as _Path
+
+        from frontend_code_v2_team import FrontendCodeV2TeamLead
+
+        from llm_service import get_client
+        from software_engineering_team.shared.models import (
+            SystemArchitecture,
+            Task,
+            TaskStatus,
+            TaskType,
+        )
 
         update_job(job_id, status="running")
 
@@ -1496,11 +1511,18 @@ class PlanningV2ResultResponse(BaseModel):
 def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict, architecture_overview: str) -> None:
     """Run backend-code-v2 workflow in a background thread."""
     try:
-        from pathlib import Path as _Path
-        from backend_code_v2_team import BackendCodeV2TeamLead
-        from llm_service import get_client
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType, SystemArchitecture
         import uuid as _uuid
+        from pathlib import Path as _Path
+
+        from backend_code_v2_team import BackendCodeV2TeamLead
+
+        from llm_service import get_client
+        from software_engineering_team.shared.models import (
+            SystemArchitecture,
+            Task,
+            TaskStatus,
+            TaskType,
+        )
 
         update_job(job_id, status="running")
 
@@ -1561,8 +1583,10 @@ def _run_planning_v2_background(
     """Run planning-v2 workflow in a background thread."""
     try:
         from pathlib import Path as _Path
+
         from planning_v2_team import PlanningV2TeamLead
         from planning_v2_team.models import Phase
+
         from llm_service import get_client
 
         update_job(job_id, status="running")
@@ -2020,6 +2044,7 @@ def auto_answer_run_team_question(
 
     try:
         from product_requirements_analysis_agent import get_auto_answer_for_job
+
         from llm_service import get_client
 
         llm = get_client("backend")
@@ -2097,6 +2122,7 @@ def auto_answer_planning_v2_question(
 
     try:
         from product_requirements_analysis_agent import get_auto_answer_for_job
+
         from llm_service import get_client
 
         llm = get_client("backend")
@@ -2232,12 +2258,14 @@ def _run_product_analysis_background(
     """Run product analysis workflow in a background thread."""
     try:
         from pathlib import Path as _Path
+
         from product_requirements_analysis_agent import (
             AnalysisPhase,
             ProductRequirementsAnalysisAgent,
         )
-        from llm_service import get_client
         from spec_parser import gather_context_files
+
+        from llm_service import get_client
 
         update_job(job_id, status="running")
 
@@ -2297,7 +2325,7 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
     initial_spec_path = None
     if not spec_content:
         try:
-            from spec_parser import get_newest_spec_path, get_newest_spec_content
+            from spec_parser import get_newest_spec_content, get_newest_spec_path
 
             initial_spec_path = get_newest_spec_path(repo)
             spec_content = get_newest_spec_content(repo)
@@ -2574,6 +2602,7 @@ def auto_answer_product_analysis_question(
 
     try:
         from product_requirements_analysis_agent import get_auto_answer_for_job
+
         from llm_service import get_client
 
         llm = get_client("backend")

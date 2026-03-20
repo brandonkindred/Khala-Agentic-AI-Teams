@@ -7,25 +7,25 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from blog_research_agent.tools.web_search import OllamaWebSearch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from llm_service import get_client
 from shared_job_management import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
-    CentralJobManager,
+    job_manager_for_team,
+    maybe_start_job_heartbeat,
     start_stale_job_monitor,
 )
-
-from blog_research_agent.tools.web_search import OllamaWebSearch
-from llm_service import get_client
 from social_media_marketing_team.models import (
     BrandGoals,
     CampaignPerformanceSnapshot,
@@ -40,7 +40,7 @@ from social_media_marketing_team.trend_models import TrendDigest
 app = FastAPI(title="Social Media Marketing Team API", version="1.0.0")
 
 logger = logging.getLogger(__name__)
-_job_manager = CentralJobManager(team="social_media_marketing_team")
+_job_manager = job_manager_for_team("social_media_marketing_team")
 _stale_monitor_stop = start_stale_job_monitor(
     _job_manager,
     interval_seconds=15.0,
@@ -218,6 +218,7 @@ def run_marketing_team(request: RunMarketingTeamRequest) -> RunMarketingTeamResp
         revision_history=[],
         request_payload=request.model_dump(),
     )
+    maybe_start_job_heartbeat(job_id, team="social_media_marketing_team")
 
     try:
         from social_media_marketing_team.temporal.client import is_temporal_enabled
@@ -290,6 +291,7 @@ def revise_marketing_team(job_id: str, request: ReviseMarketingTeamRequest) -> R
         request_payload=revised.model_dump(),
         last_updated_at=_now(),
     )
+    maybe_start_job_heartbeat(job_id, team="social_media_marketing_team")
 
     try:
         from social_media_marketing_team.temporal.client import is_temporal_enabled
