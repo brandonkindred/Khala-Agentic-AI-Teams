@@ -1,15 +1,15 @@
 # Blogging Agent Suite
 
-This package provides the **blogging agent suite**: research, review, draft, copy-edit, and publication (with optional platform-specific output for Medium, dev.to, and Substack).
+This package provides the **blogging agent suite**: research, **planning**, draft, copy-edit, and publication (with optional platform-specific output for Medium, dev.to, and Substack).
 
 ## Agents overview
 
 | Agent | Role |
 |-------|------|
 | **Research** | Brief → web (Ollama web_search) + arXiv search → ranked references, compiled document, notes |
-| **Review** | Brief + references → title choices + outline |
-| **Draft** | Research document + outline + style guide → draft; supports revise-from-feedback (e.g. from Copy Editor) |
-| **Copy Editor** | Draft → feedback items and summary (for Draft revision loop) |
+| **Planning** | Research digest + length profile → structured **content plan** (titles, narrative flow, per-section coverage, requirements analysis) with refine-until-done |
+| **Draft** | Research document + **content plan** + style guide → draft; supports revise-from-feedback (e.g. from Copy Editor) |
+| **Copy Editor** | Draft → feedback items and summary (for Draft revision loop); optional **content plan** context for structure-aware feedback |
 | **Publication** | Submit draft → pending; human approve → write to `blog_posts`, generate Medium/dev.to/Substack versions; reject → optional revision loop with Draft + Copy Editor |
 | **Medium stats** | Playwright automation using the **Medium.com platform integration** (stored browser session) → scrape [medium.com/me/stats](https://medium.com/me/stats) → `medium_stats_report.json` artifact |
 
@@ -33,17 +33,17 @@ Optional env: `BLOGGING_MEDIUM_STATS_ROOT` (job work dir base); Google redirect 
 ## Full pipeline
 
 ```
-Research → Review → Draft → (optional) Draft ↔ Copy Editor revision loop → (optional) Publication
+Research → Planning → Draft → (optional) Draft ↔ Copy Editor revision loop → (optional) Publication
 ```
 
 - **Research** fetches and ranks sources from the web and arXiv.
-- **Review** produces title choices and a detailed outline.
-- **Draft** writes the initial draft from research + outline. Style and brand content are loaded by the caller before agent creation and passed in as full file contents (see Style guide below).
+- **Planning** produces a persisted content plan (`content_plan.json` / `content_plan.md`): titles, narrative flow, section coverage, and analysis; refine loop until the plan is acceptable for the profile.
+- **Draft** writes the initial draft from research + **content plan**. Style and brand content are loaded by the caller before agent creation and passed in as full file contents (see Style guide below).
 - **Copy Editor** reviews the draft and returns feedback; the **Draft** agent revises based on feedback. This loop runs a configurable number of times (e.g. 3).
 - **Publication** receives the final draft: submit → human approve/reject. On approve: write to `blog_posts/`, generate platform-specific versions. On reject: optional revision loop with Draft + Copy Editor.
 
 **Example scripts:**
-- [blogging/agent_implementations/blog_writing_process.py](agent_implementations/blog_writing_process.py) – Full pipeline: research → review → draft → copy-editor loop.
+- [blogging/agent_implementations/blog_writing_process.py](agent_implementations/blog_writing_process.py) – Legacy pipeline (superseded by v2 for production).
 - [blogging/agent_implementations/blog_writing_process_v2.py](agent_implementations/blog_writing_process_v2.py) – Brand-aligned pipeline with artifact persistence and gates.
 - [blogging/agent_implementations/run_publication_agent.py](agent_implementations/run_publication_agent.py) – Publication agent (submit, approve, reject, revision loop).
 
@@ -53,10 +53,11 @@ When `work_dir` is provided, the pipeline persists all outputs as versioned arti
 
 **Artifacts** (in `work_dir`):
 - `brand_spec_prompt.md` – Brand and style rules (single source of truth)
-- `content_brief.md` – Audience model, title choices, outline
+- `content_brief.md` – Audience model, title choices, outline (derived from content plan)
+- `content_plan.json` / `content_plan.md` – Structured plan + requirements analysis
 - `research_packet.md` – Compiled research document
 - `allowed_claims.json` – Evidence-backed factual claims (writer must tag as `[CLAIM:id]`)
-- `outline.md` – Blog outline
+- `outline.md` – Flat outline derived from the content plan (for display / compatibility)
 - `draft_v1.md`, `draft_v2.md`, `final.md` – Draft versions
 - `validator_report.json` – Deterministic checks (banned phrases, paragraph length, reading level, etc.)
 - `compliance_report.json` – Brand/style violations (PASS/FAIL; FAIL blocks publication)
@@ -70,7 +71,26 @@ When `work_dir` is provided, the pipeline persists all outputs as versioned arti
 
 **Closed-loop rewrite**: On any FAIL, the pipeline passes `required_fixes` to the Draft agent and re-runs gates until PASS or max iterations (default 3). Then status is `NEEDS_HUMAN_REVIEW`.
 
-**API**: `POST /full-pipeline` runs the full pipeline with gates. `POST /research-and-review` accepts optional `work_dir` or `run_id` to persist artifacts.
+**API**: `POST /full-pipeline` runs the full pipeline with gates. `POST /research-and-review` runs **research + planning** (same planning step as the full pipeline) and accepts optional `work_dir` or `run_id` to persist artifacts.
+
+**Env (planning):** `BLOG_PLANNING_MAX_ITERATIONS` (default 5), `BLOG_PLANNING_MAX_PARSE_RETRIES` (default 3), optional `BLOG_PLANNING_MODEL` (Ollama model name for planning only; same API base as `SW_LLM_*`).
+
+### Planning definition of done (refine loop)
+
+Refinement stops and the pipeline proceeds **only when** `requirements_analysis.plan_acceptable` **and** `requirements_analysis.scope_feasible` are both true (see `RequirementsAnalysis` in `shared/content_plan.py`). Post-validation may set `plan_acceptable` false when the section count is outside `[min,max]` for the chosen `content_profile`.
+
+**`planning_failure_reason`** (enum `PlanningFailureReason`) when planning stops without an acceptable plan:
+
+| Value | Meaning |
+|-------|---------|
+| `max_iterations_reached` | Refine loop exhausted `BLOG_PLANNING_MAX_ITERATIONS` |
+| `infeasible_scope` | Reserved for explicit scope aborts |
+| `parse_failure` | JSON schema/parse failed after bounded retries |
+| `model_abort` | Reserved |
+
+HTTP: failed planning returns **422** on sync `/full-pipeline` with `detail.failure_reason` when available; async jobs store `failed_phase=planning` and optional `planning_failure_reason` on the job record.
+
+**Breaking change:** The old `BlogReviewAgent` package has been removed; titles and outline always come from the planning phase / `ContentPlan`.
 
 ### Content profiles (guideline-based length)
 
@@ -218,8 +238,8 @@ blogging/
 │       ├── web_search.py    # Ollama web_search
 │       ├── web_fetch.py     # Web fetch/scrape
 │       └── arxiv_search.py # arXiv search
-├── blog_review_agent/       # Title choices + outline
-├── blog_draft_agent/        # Draft from research + outline; revise from feedback
+├── blog_planning_agent/     # Structured content plan + refine loop
+├── blog_draft_agent/        # Draft from research + content plan; revise from feedback
 ├── blog_copy_editor_agent/  # Draft → feedback items
 ├── blog_compliance_agent/   # Brand/style enforcer (veto on FAIL)
 ├── blog_fact_check_agent/   # Claims and risk officer

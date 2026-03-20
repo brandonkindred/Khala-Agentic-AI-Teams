@@ -1,5 +1,5 @@
 <h1 class="mat-headline-5">Blogging</h1>
-<p class="mat-body-2 page-subtitle">Research and review pipeline, full pipeline with gates.</p>
+<p class="mat-body-2 page-subtitle">Research and planning, full pipeline with gates.</p>
 
 @if (loading) {
   <app-loading-spinner message="Processing..." />
@@ -240,6 +240,9 @@
                 }
                 @if (selectedJobStatus.failed_phase) {
                   <p class="detail-row"><strong>Failed phase</strong> {{ selectedJobStatus.failed_phase }}</p>
+                }
+                @if (selectedJobStatus.planning_failure_reason) {
+                  <p class="detail-row"><strong>Planning failure reason</strong> {{ selectedJobStatus.planning_failure_reason }}</p>
                 }
                 <p class="detail-row"><strong>Research sources</strong> {{ selectedJobStatus.research_sources_count }}</p>
                 <p class="detail-row"><strong>Draft iterations</strong> {{ selectedJobStatus.draft_iterations }}</p>

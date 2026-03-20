@@ -24,7 +24,7 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
 
 @workflow.defn(name="BlogFullPipelineWorkflow")
 class BlogFullPipelineWorkflow:
-    """Runs the full blog pipeline (research, review, draft, copy-edit) as an activity."""
+    """Runs the full blog pipeline (research, planning, draft, copy-edit) as an activity."""
 
     @workflow.run
     async def run(self, job_id: str, request_dict: Dict[str, Any]) -> None:

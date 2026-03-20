@@ -156,17 +156,17 @@ class BlogDraftAgent:
 
         When draft_output_path is set, writes the draft to that path and logs the path.
         """
-        outline = draft_input.outline.strip()
+        outline = draft_input.outline_for_prompt().strip()
         if len(outline) > MAX_OUTLINE_CHARS_FOR_DRAFT:
             logger.warning(
-                "Truncating outline from %s to %s chars to fit context",
+                "Truncating content plan text from %s to %s chars to fit context",
                 len(outline),
                 MAX_OUTLINE_CHARS_FOR_DRAFT,
             )
-            outline = outline[:MAX_OUTLINE_CHARS_FOR_DRAFT] + "\n\n[... outline truncated for context ...]"
+            outline = outline[:MAX_OUTLINE_CHARS_FOR_DRAFT] + "\n\n[... content plan truncated for context ...]"
         if not outline:
-            logger.warning("Empty outline; returning minimal draft.")
-            return DraftOutput(draft="# Draft\n\nAdd outline to generate a draft.")
+            logger.warning("Empty content plan; returning minimal draft.")
+            return DraftOutput(draft="# Draft\n\nAdd a content plan to generate a draft.")
 
         refs = draft_input.research_references if draft_input.research_references else []
         if refs:
@@ -264,7 +264,7 @@ class BlogDraftAgent:
             research,
             "",
             "---",
-            "OUTLINE (follow this structure):",
+            "CONTENT PLAN (follow narrative flow and section coverage):",
             "---",
             outline,
         ])
@@ -345,6 +345,9 @@ class BlogDraftAgent:
             if self._brand_spec_prompt
             else "No brand specification was provided. Follow the style guide below."
         )
+        cp = revise_input.outline_for_prompt()
+        if len(cp) > MAX_OUTLINE_CHARS_FOR_DRAFT:
+            cp = cp[:MAX_OUTLINE_CHARS_FOR_DRAFT] + "\n\n[... content plan truncated ...]"
         prompt_parts = [
             REVISE_SINGLE_ITEM_PROMPT,
             "",
@@ -357,6 +360,11 @@ class BlogDraftAgent:
             "STYLE GUIDE (follow in the revised draft):",
             "---",
             style_guide_text,
+            "",
+            "---",
+            "CONTENT PLAN (preserve section intent):",
+            "---",
+            cp,
             "",
             "---",
             f"SINGLE FEEDBACK ITEM TO APPLY (item {item_index}):",
@@ -440,6 +448,9 @@ class BlogDraftAgent:
         ]
         feedback_block = "\n\n".join(feedback_lines)
 
+        cp = revise_input.outline_for_prompt()
+        if len(cp) > MAX_OUTLINE_CHARS_FOR_DRAFT:
+            cp = cp[:MAX_OUTLINE_CHARS_FOR_DRAFT] + "\n\n[... content plan truncated ...]"
         prompt_parts = [
             REVISE_DRAFT_PROMPT,
             "",
@@ -452,6 +463,11 @@ class BlogDraftAgent:
             "STYLE GUIDE (follow in the revised draft):",
             "---",
             style_guide_text,
+            "",
+            "---",
+            "CONTENT PLAN (preserve section intent and narrative flow):",
+            "---",
+            cp,
             "",
             "---",
             "COPY EDITOR FEEDBACK (apply every numbered item below):",

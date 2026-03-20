@@ -14,7 +14,12 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 
 from llm_service import DummyLLMClient
 from shared.style_loader import load_style_file
-from blog_review_agent import BlogReviewAgent, BlogReviewInput
+from shared.content_plan import (
+    ContentPlan,
+    ContentPlanSection,
+    RequirementsAnalysis,
+    TitleCandidate,
+)
 from blog_research_agent.models import ResearchReference
 from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
@@ -24,7 +29,6 @@ STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
 BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 DRAFT_EDITOR_ITERATIONS = 100
 
-# Fixed context (no research pipeline)
 CONTEXT_BRIEF = "LLM observability best practices for large enterprises."
 PLACEHOLDER_REF = ResearchReference(
     title="LLM Observability Guide",
@@ -32,17 +36,22 @@ PLACEHOLDER_REF = ResearchReference(
     summary="Best practices for monitoring LLMs in production.",
     key_points=["Tracing", "Cost attribution", "Prompt versioning"],
 )
-OUTLINE = """# Introduction
-Hook on the importance of observability. Set stakes for CTOs.
-
-# The Problem
-Traditional monitoring falls short for LLMs. Non-deterministic outputs.
-
-# What to Look For
-Tracing, cost attribution, evaluation metrics.
-
-# Wrap up
-Recap and one practical next step."""
+CONTENT_PLAN = ContentPlan(
+    overarching_topic="LLM observability for enterprises",
+    narrative_flow="Problem, practices, wrap-up.",
+    sections=[
+        ContentPlanSection(title="Introduction", coverage_description="Hook and stakes.", order=0),
+        ContentPlanSection(title="The Problem", coverage_description="Why classic monitoring fails.", order=1),
+        ContentPlanSection(title="What to Look For", coverage_description="Tracing, cost, evals.", order=2),
+        ContentPlanSection(title="Wrap up", coverage_description="One next step.", order=3),
+    ],
+    title_candidates=[TitleCandidate(title="Observability essentials", probability_of_success=0.7)],
+    requirements_analysis=RequirementsAnalysis(
+        plan_acceptable=True,
+        scope_feasible=True,
+        research_gaps=[],
+    ),
+)
 
 RESEARCH_DOC = "## Sources\n- LLM Observability Guide: Best practices for monitoring LLMs in production."
 
@@ -51,17 +60,6 @@ def main() -> None:
     llm = DummyLLMClient()
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
     brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
-
-    # Get outline from review agent
-    review_agent = BlogReviewAgent(llm_client=llm)
-    review_input = BlogReviewInput(
-        brief=CONTEXT_BRIEF,
-        audience="CTOs and platform teams",
-        tone_or_purpose="technical deep-dive",
-        references=[PLACEHOLDER_REF],
-    )
-    review_result = review_agent.run(review_input)
-    outline = review_result.outline
 
     draft_agent = BlogDraftAgent(
         llm_client=llm,
@@ -79,7 +77,7 @@ def main() -> None:
         if iteration == 1:
             draft_input = DraftInput(
                 research_document=RESEARCH_DOC,
-                outline=outline,
+                content_plan=CONTENT_PLAN,
                 audience="CTOs and platform teams",
                 tone_or_purpose="technical deep-dive",
             )
@@ -99,7 +97,7 @@ def main() -> None:
                 feedback_items=copy_editor_result.feedback_items,
                 feedback_summary=copy_editor_result.summary,
                 research_document=RESEARCH_DOC,
-                outline=outline,
+                content_plan=CONTENT_PLAN,
                 audience="CTOs and platform teams",
                 tone_or_purpose="technical deep-dive",
             )

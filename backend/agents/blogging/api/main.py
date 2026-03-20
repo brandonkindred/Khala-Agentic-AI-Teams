@@ -1,7 +1,8 @@
 """
-FastAPI application exposing the research-and-review and full pipeline as HTTP endpoints.
+FastAPI application exposing research + planning (research-and-review) and the full pipeline.
 
-Supports both synchronous and asynchronous execution with job polling for UI integration.
+The review-only agent has been replaced by a planning phase that produces a ContentPlan.
+Supports synchronous and asynchronous execution with job polling for UI integration.
 """
 
 from __future__ import annotations
@@ -25,15 +26,14 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from blog_research_agent.agent import ResearchAgent
-from blog_research_agent.agent_cache import AgentCache
 from llm_service import OllamaLLMClient
 from blog_research_agent.models import ResearchBriefInput
-from blog_review_agent import BlogReviewAgent, BlogReviewInput
+from shared.content_plan import content_plan_summary_text, content_plan_to_outline_markdown
 from shared.content_profile import ContentProfile, SeriesContext, resolve_length_policy
 from shared.brand_spec import brand_spec_prompt_configured
 from shared.medium_stats_api import MediumStatsRequest
 from shared.medium_integration_access import medium_stats_integration_eligible
+from shared.errors import BloggingError, PlanningError
 
 from blog_medium_stats_agent.agent import BlogMediumStatsAgent
 from blog_medium_stats_agent.models import MediumStatsReport, MediumStatsRunConfig
@@ -62,7 +62,6 @@ try:
         JOB_STATUS_COMPLETED,
         JOB_STATUS_NEEDS_REVIEW,
     )
-    from shared.errors import BloggingError
 except ImportError:
     create_blog_job = None
     delete_blog_job = None
@@ -143,6 +142,25 @@ class ResearchAndReviewRequest(BaseModel):
         None,
         description="Optional run ID; artifacts are written to a subdir under RUN_ARTIFACTS_BASE when set.",
     )
+    content_profile: Optional[ContentProfile] = Field(
+        None,
+        description="Writing format; drives planning length/scope (default standard article).",
+    )
+    series_context: Optional[SeriesContext] = Field(
+        None,
+        description="When this post is part of a series — scopes planning to this instalment.",
+    )
+    length_notes: Optional[str] = Field(
+        None,
+        max_length=4000,
+        description="Optional author notes merged into length/format guidance for planning.",
+    )
+    target_word_count: Optional[int] = Field(
+        None,
+        ge=100,
+        le=10000,
+        description="Numeric word target override for planning/draft length.",
+    )
 
 
 class TitleChoiceResponse(BaseModel):
@@ -191,10 +209,8 @@ def _format_audience(audience: Optional[Union[AudienceDetails, str]]) -> str:
     return "; ".join(parts) if parts else ""
 
 
-# Shared LLM client and agents (initialized on first request or at startup)
+# Shared LLM client (initialized on first request or at startup)
 _llm_client: Optional[OllamaLLMClient] = None
-_research_agent: Optional[ResearchAgent] = None
-_review_agent: Optional[BlogReviewAgent] = None
 
 
 def _get_llm_client() -> OllamaLLMClient:
@@ -205,41 +221,29 @@ def _get_llm_client() -> OllamaLLMClient:
     return _llm_client
 
 
-def _get_agents() -> tuple[ResearchAgent, BlogReviewAgent]:
-    """Lazily initialize and return research and review agents."""
-    global _research_agent, _review_agent
-    llm_client = _get_llm_client()
-    if _research_agent is None:
-        cache = AgentCache(cache_dir=".agent_cache")
-        _research_agent = ResearchAgent(llm_client=llm_client, cache=cache)
-    if _review_agent is None:
-        _review_agent = BlogReviewAgent(llm_client=llm_client)
-    return _research_agent, _review_agent
-
-
 @app.post(
     "/research-and-review",
     response_model=ResearchAndReviewResponse,
-    summary="Run research and review pipeline",
-    description="Executes the research agent (web + arXiv search) and review agent to produce title choices and a blog outline from the given brief and audience details.",
+    summary="Run research and planning pipeline",
+    description=(
+        "Executes research (web + arXiv) then structured content planning: title choices and outline "
+        "from the approved content plan."
+    ),
 )
 def research_and_review(request: ResearchAndReviewRequest) -> ResearchAndReviewResponse:
     """
-    Run the research-and-review pipeline.
+    Run research then planning (same planning step as the full pipeline).
 
-    Accepts a brief, optional title concept, and audience details. Returns
-    title choices, a blog outline, and the compiled research document.
+    Returns title choices, outline derived from the content plan, and the compiled research document.
     """
     try:
-        research_agent, review_agent = _get_agents()
         llm_client = _get_llm_client()
     except Exception as e:
-        logger.exception("Failed to initialize agents")
+        logger.exception("Failed to initialize LLM client")
         raise HTTPException(status_code=500, detail=f"Agent initialization failed: {e}") from e
 
     llm_requests_before = llm_client.request_count
 
-    # Build brief text (include title concept if provided)
     brief_text = request.brief.strip()
     if request.title_concept:
         brief_text = f"{brief_text}. Title concept: {request.title_concept.strip()}"
@@ -260,38 +264,44 @@ def research_and_review(request: ResearchAndReviewRequest) -> ResearchAndReviewR
         max_results=request.max_results,
     )
 
-    try:
-        research_result = research_agent.run(brief_input)
-    except Exception as e:
-        logger.exception("Research agent failed")
-        raise HTTPException(status_code=500, detail=f"Research failed: {e}") from e
+    length_policy = resolve_length_policy(
+        content_profile=request.content_profile,
+        explicit_target_word_count=request.target_word_count,
+        length_notes=request.length_notes,
+        series_context=request.series_context,
+    )
 
     try:
-        review_input = BlogReviewInput(
-            brief=request.brief,
-            audience=audience_str or None,
-            tone_or_purpose=request.tone_or_purpose,
-            references=research_result.references,
+        from agent_implementations.blog_writing_process_v2 import run_research_and_planning
+
+        research_result, _research_document, planning_phase_result = run_research_and_planning(
+            brief_input,
+            work_dir=work_dir,
+            llm_client=llm_client,
+            length_policy=length_policy,
+            series_context=request.series_context,
+            job_updater=None,
         )
-        review_result = review_agent.run(review_input)
+    except PlanningError as e:
+        logger.exception("Planning failed")
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "planning_failed",
+                "message": str(e),
+                "failure_reason": getattr(e, "failure_reason", None),
+            },
+        ) from e
     except Exception as e:
-        logger.exception("Review agent failed")
-        raise HTTPException(status_code=500, detail=f"Review failed: {e}") from e
+        logger.exception("Research-and-planning failed")
+        raise HTTPException(status_code=500, detail=f"Pipeline failed: {e}") from e
 
-    if work_dir is not None and write_artifact is not None:
-        research_doc = research_result.compiled_document or ""
-        if not research_doc and research_result.references:
-            parts = ["## Sources\n"]
-            for ref in research_result.references:
-                parts.append(f"- **{ref.title}** ({ref.url}): {ref.summary}")
-            research_doc = "\n".join(parts)
-        write_artifact(work_dir, "research_packet.md", research_doc)
-        write_artifact(work_dir, "outline.md", review_result.outline)
-        logger.info("Persisted artifacts to %s", work_dir)
+    plan = planning_phase_result.content_plan
+    outline = content_plan_to_outline_markdown(plan)
 
     llm_requests_after = llm_client.request_count
     logger.info(
-        "Completed research-and-review pipeline with %s LLM requests",
+        "Completed research-and-planning pipeline with %s LLM requests",
         llm_requests_after - llm_requests_before,
     )
 
@@ -301,20 +311,28 @@ def research_and_review(request: ResearchAndReviewRequest) -> ResearchAndReviewR
                 title=tc.title,
                 probability_of_success=tc.probability_of_success,
             )
-            for tc in review_result.title_choices
+            for tc in plan.title_candidates
         ],
-        outline=review_result.outline,
+        outline=outline,
         compiled_document=research_result.compiled_document,
         notes=research_result.notes,
     )
 
 
 def _run_research_review_with_tracking(job_id: str, request: ResearchAndReviewRequest) -> None:
-    """Run the research-and-review pipeline in a background thread with job tracking."""
+    """Run research + planning in a background thread with job tracking."""
     try:
-        research_agent, review_agent = _get_agents()
+        import sys
+        from pathlib import Path as P
+
+        _root = P(__file__).resolve().parent.parent
+        if str(_root) not in sys.path:
+            sys.path.insert(0, str(_root))
+        from agent_implementations.blog_writing_process_v2 import run_research_and_planning
+
+        llm_client = _get_llm_client()
     except Exception as e:
-        logger.exception("Failed to initialize agents for job %s", job_id)
+        logger.exception("Failed to initialize for job %s", job_id)
         if fail_blog_job is not None:
             fail_blog_job(job_id, error=f"Agent initialization failed: {e}")
         return
@@ -339,68 +357,62 @@ def _run_research_review_with_tracking(job_id: str, request: ResearchAndReviewRe
         max_results=request.max_results,
     )
 
+    length_policy = resolve_length_policy(
+        content_profile=request.content_profile,
+        explicit_target_word_count=request.target_word_count,
+        length_notes=request.length_notes,
+        series_context=request.series_context,
+    )
+
     if start_blog_job is not None:
         start_blog_job(job_id)
 
-    def _research_progress(status_text: str, sub_progress: float) -> None:
+    def job_updater(**kwargs: Any) -> None:
         if update_blog_job is not None:
             try:
-                progress_pct = int(10 + (50 - 10) * sub_progress)  # research phase 10–50%
-                update_blog_job(job_id, phase="research", progress=progress_pct, status_text=status_text)
+                update_blog_job(job_id, **kwargs)
             except Exception as e:
                 logger.warning("Failed to update job %s: %s", job_id, e)
 
     try:
-        research_result = research_agent.run(brief_input, progress_callback=_research_progress)
-    except Exception as e:
-        logger.exception("Research agent failed for job %s", job_id)
-        if fail_blog_job is not None:
-            fail_blog_job(job_id, error=f"Research failed: {e}")
-        return
-
-    if update_blog_job is not None:
-        try:
-            update_blog_job(job_id, phase="review", progress=50, status_text="Generating title choices and outline...")
-        except Exception as e:
-            logger.warning("Failed to update job %s: %s", job_id, e)
-
-    try:
-        review_input = BlogReviewInput(
-            brief=request.brief,
-            audience=audience_str or None,
-            tone_or_purpose=request.tone_or_purpose,
-            references=research_result.references,
+        research_result, _rd, planning_phase_result = run_research_and_planning(
+            brief_input,
+            work_dir=work_dir,
+            llm_client=llm_client,
+            length_policy=length_policy,
+            series_context=request.series_context,
+            job_updater=job_updater,
         )
-        review_result = review_agent.run(review_input)
-    except Exception as e:
-        logger.exception("Review agent failed for job %s", job_id)
+    except PlanningError as e:
+        logger.exception("Planning failed for job %s", job_id)
         if fail_blog_job is not None:
-            fail_blog_job(job_id, error=f"Review failed: {e}")
+            fail_blog_job(
+                job_id,
+                error=str(e),
+                failed_phase="planning",
+                planning_failure_reason=getattr(e, "failure_reason", None),
+            )
+        return
+    except Exception as e:
+        logger.exception("Research-and-planning failed for job %s", job_id)
+        if fail_blog_job is not None:
+            fail_blog_job(job_id, error=f"Pipeline failed: {e}")
         return
 
-    if work_dir is not None and write_artifact is not None:
-        research_doc = research_result.compiled_document or ""
-        if not research_doc and research_result.references:
-            parts = ["## Sources\n"]
-            for ref in research_result.references:
-                parts.append(f"- **{ref.title}** ({ref.url}): {ref.summary}")
-            research_doc = "\n".join(parts)
-        write_artifact(work_dir, "research_packet.md", research_doc)
-        write_artifact(work_dir, "outline.md", review_result.outline)
-        logger.info("Persisted artifacts to %s", work_dir)
-
+    plan = planning_phase_result.content_plan
+    outline = content_plan_to_outline_markdown(plan)
     title_choices = [
         {"title": tc.title, "probability_of_success": tc.probability_of_success}
-        for tc in review_result.title_choices
+        for tc in plan.title_candidates
     ]
     if complete_blog_job is not None:
         complete_blog_job(
             job_id,
             status=JOB_STATUS_COMPLETED,
             title_choices=title_choices,
-            outline=review_result.outline,
+            outline=outline,
         )
-    logger.info("Completed research-and-review job %s", job_id)
+    logger.info("Completed research-and-planning job %s", job_id)
 
 
 class FullPipelineRequest(BaseModel):
@@ -448,13 +460,17 @@ class FullPipelineResponse(BaseModel):
     title_choices: List[TitleChoiceResponse] = Field(default_factory=list)
     outline: str = ""
     draft_preview: Optional[str] = Field(None, description="First 2000 chars of draft.")
+    content_plan_summary: Optional[str] = Field(
+        None,
+        description="Short summary from the approved ContentPlan (topic + narrative flow).",
+    )
 
 
 @app.post(
     "/full-pipeline",
     response_model=FullPipelineResponse,
     summary="Run full blog pipeline with gates",
-    description="Runs research -> review -> draft -> validators -> compliance -> rewrite loop. Persists all artifacts.",
+    description="Runs research -> planning -> draft -> validators -> compliance -> rewrite loop. Persists all artifacts.",
 )
 def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
     """Run the full brand-aligned pipeline with artifact persistence and gates."""
@@ -488,26 +504,39 @@ def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
         series_context=request.series_context,
     )
     try:
-        research_result, review_result, draft_result, status = run_pipeline(
+        research_result, planning_phase_result, draft_result, status = run_pipeline(
             brief_input,
             work_dir=work_dir,
             run_gates=request.run_gates,
             max_rewrite_iterations=request.max_rewrite_iterations,
             length_policy=length_policy,
         )
+    except PlanningError as e:
+        logger.exception("Full pipeline planning failed")
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "planning_failed",
+                "message": str(e),
+                "failure_reason": getattr(e, "failure_reason", None),
+            },
+        ) from e
     except Exception as e:
         logger.exception("Full pipeline failed")
         raise HTTPException(status_code=500, detail=f"Pipeline failed: {e}") from e
 
+    plan = planning_phase_result.content_plan
+    outline = content_plan_to_outline_markdown(plan)
     return FullPipelineResponse(
         status=status,
         work_dir=str(work_dir),
         title_choices=[
             TitleChoiceResponse(title=tc.title, probability_of_success=tc.probability_of_success)
-            for tc in review_result.title_choices
+            for tc in plan.title_candidates
         ],
-        outline=review_result.outline,
+        outline=outline,
         draft_preview=draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else ""),
+        content_plan_summary=content_plan_summary_text(plan),
     )
 
 
@@ -548,6 +577,57 @@ class BlogJobStatusResponse(BaseModel):
     approved_at: Optional[str] = Field(None, description="When the job was approved (ISO timestamp)")
     approved_by: Optional[str] = Field(None, description="Who approved the job (optional)")
     job_type: Optional[str] = Field(None, description="Job category, e.g. medium_stats")
+    content_plan_summary: Optional[str] = Field(
+        None,
+        description="Short summary from ContentPlan when pipeline completed planning",
+    )
+    planning_iterations_used: Optional[int] = Field(None, description="Planning refine iterations completed")
+    parse_retry_count: Optional[int] = Field(None, description="JSON parse/repair attempts during planning")
+    planning_wall_ms_total: Optional[float] = Field(None, description="Wall-clock ms spent in planning phase")
+    planning_failure_reason: Optional[str] = Field(
+        None,
+        description="When status is failed and failed_phase is planning, machine-readable reason",
+    )
+
+
+def _blog_job_dict_to_status_response(job: Dict[str, Any], job_id_fallback: str) -> BlogJobStatusResponse:
+    """Map persisted job dict to API response (single place for optional planning fields)."""
+    title_choices: List[TitleChoiceResponse] = []
+    for tc in job.get("title_choices", []):
+        if isinstance(tc, dict):
+            title_choices.append(
+                TitleChoiceResponse(
+                    title=tc.get("title", ""),
+                    probability_of_success=tc.get("probability_of_success", 0.0),
+                )
+            )
+    return BlogJobStatusResponse(
+        job_id=job.get("job_id", job_id_fallback),
+        status=job.get("status", "pending"),
+        phase=job.get("phase"),
+        progress=job.get("progress", 0),
+        status_text=job.get("status_text"),
+        error=job.get("error"),
+        failed_phase=job.get("failed_phase"),
+        title_choices=title_choices,
+        outline=job.get("outline"),
+        draft_preview=job.get("draft_preview"),
+        work_dir=job.get("work_dir"),
+        research_sources_count=job.get("research_sources_count", 0),
+        draft_iterations=job.get("draft_iterations", 0),
+        rewrite_iterations=job.get("rewrite_iterations", 0),
+        created_at=job.get("created_at"),
+        started_at=job.get("started_at"),
+        completed_at=job.get("completed_at"),
+        approved_at=job.get("approved_at"),
+        approved_by=job.get("approved_by"),
+        job_type=job.get("job_type"),
+        content_plan_summary=job.get("content_plan_summary"),
+        planning_iterations_used=job.get("planning_iterations_used"),
+        parse_retry_count=job.get("parse_retry_count"),
+        planning_wall_ms_total=job.get("planning_wall_ms_total"),
+        planning_failure_reason=job.get("planning_failure_reason"),
+    )
 
 
 class BlogJobListItem(BaseModel):
@@ -689,7 +769,7 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
             series_context=request.series_context,
         )
         try:
-            research_result, review_result, draft_result, status = run_pipeline(
+            _research_result, planning_phase_result, draft_result, status = run_pipeline(
                 brief_input,
                 work_dir=work_dir,
                 run_gates=request.run_gates,
@@ -698,10 +778,11 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
                 length_policy=length_policy,
             )
 
-            # Mark job as completed
+            plan = planning_phase_result.content_plan
+            outline = content_plan_to_outline_markdown(plan)
             title_choices = [
                 {"title": tc.title, "probability_of_success": tc.probability_of_success}
-                for tc in review_result.title_choices
+                for tc in plan.title_candidates
             ]
             draft_preview = draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else "")
 
@@ -711,10 +792,23 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
                     job_id,
                     status=final_status,
                     title_choices=title_choices,
-                    outline=review_result.outline,
+                    outline=outline,
                     draft_preview=draft_preview,
+                    content_plan_summary=content_plan_summary_text(plan),
+                    planning_iterations_used=planning_phase_result.planning_iterations_used,
+                    parse_retry_count=planning_phase_result.parse_retry_count,
+                    planning_wall_ms_total=planning_phase_result.planning_wall_ms_total,
                 )
 
+        except PlanningError as e:
+            logger.exception("Pipeline planning failed for job %s", job_id)
+            if fail_blog_job is not None:
+                fail_blog_job(
+                    job_id,
+                    error=str(e),
+                    failed_phase="planning",
+                    planning_failure_reason=getattr(e, "failure_reason", None),
+                )
         except BloggingError as e:
             logger.exception("Pipeline failed for job %s", job_id)
             if fail_blog_job is not None:
@@ -894,37 +988,7 @@ def get_job_status(job_id: str) -> BlogJobStatusResponse:
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
-    # Convert title_choices from dict to response model
-    title_choices = []
-    for tc in job.get("title_choices", []):
-        if isinstance(tc, dict):
-            title_choices.append(TitleChoiceResponse(
-                title=tc.get("title", ""),
-                probability_of_success=tc.get("probability_of_success", 0.0),
-            ))
-
-    return BlogJobStatusResponse(
-        job_id=job.get("job_id", job_id),
-        status=job.get("status", "pending"),
-        phase=job.get("phase"),
-        progress=job.get("progress", 0),
-        status_text=job.get("status_text"),
-        error=job.get("error"),
-        failed_phase=job.get("failed_phase"),
-        title_choices=title_choices,
-        outline=job.get("outline"),
-        draft_preview=job.get("draft_preview"),
-        work_dir=job.get("work_dir"),
-        research_sources_count=job.get("research_sources_count", 0),
-        draft_iterations=job.get("draft_iterations", 0),
-        rewrite_iterations=job.get("rewrite_iterations", 0),
-        created_at=job.get("created_at"),
-        started_at=job.get("started_at"),
-        completed_at=job.get("completed_at"),
-        approved_at=job.get("approved_at"),
-        approved_by=job.get("approved_by"),
-        job_type=job.get("job_type"),
-    )
+    return _blog_job_dict_to_status_response(job, job_id)
 
 
 class CancelJobResponse(BaseModel):
@@ -1011,36 +1075,7 @@ def approve_job(job_id: str) -> BlogJobStatusResponse:
     updated = get_blog_job(job_id)
     if updated is None:
         raise HTTPException(status_code=500, detail="Job not found after approve")
-    # Build response same as get_job_status
-    title_choices = []
-    for tc in updated.get("title_choices", []):
-        if isinstance(tc, dict):
-            title_choices.append(TitleChoiceResponse(
-                title=tc.get("title", ""),
-                probability_of_success=tc.get("probability_of_success", 0.0),
-            ))
-    return BlogJobStatusResponse(
-        job_id=updated.get("job_id", job_id),
-        status=updated.get("status", "pending"),
-        phase=updated.get("phase"),
-        progress=updated.get("progress", 0),
-        status_text=updated.get("status_text"),
-        error=updated.get("error"),
-        failed_phase=updated.get("failed_phase"),
-        title_choices=title_choices,
-        outline=updated.get("outline"),
-        draft_preview=updated.get("draft_preview"),
-        work_dir=updated.get("work_dir"),
-        research_sources_count=updated.get("research_sources_count", 0),
-        draft_iterations=updated.get("draft_iterations", 0),
-        rewrite_iterations=updated.get("rewrite_iterations", 0),
-        created_at=updated.get("created_at"),
-        started_at=updated.get("started_at"),
-        completed_at=updated.get("completed_at"),
-        approved_at=updated.get("approved_at"),
-        approved_by=updated.get("approved_by"),
-        job_type=updated.get("job_type"),
-    )
+    return _blog_job_dict_to_status_response(updated, job_id)
 
 
 @app.post(
@@ -1063,35 +1098,7 @@ def unapprove_job(job_id: str) -> BlogJobStatusResponse:
     updated = get_blog_job(job_id)
     if updated is None:
         raise HTTPException(status_code=500, detail="Job not found after unapprove")
-    title_choices = []
-    for tc in updated.get("title_choices", []):
-        if isinstance(tc, dict):
-            title_choices.append(TitleChoiceResponse(
-                title=tc.get("title", ""),
-                probability_of_success=tc.get("probability_of_success", 0.0),
-            ))
-    return BlogJobStatusResponse(
-        job_id=updated.get("job_id", job_id),
-        status=updated.get("status", "pending"),
-        phase=updated.get("phase"),
-        progress=updated.get("progress", 0),
-        status_text=updated.get("status_text"),
-        error=updated.get("error"),
-        failed_phase=updated.get("failed_phase"),
-        title_choices=title_choices,
-        outline=updated.get("outline"),
-        draft_preview=updated.get("draft_preview"),
-        work_dir=updated.get("work_dir"),
-        research_sources_count=updated.get("research_sources_count", 0),
-        draft_iterations=updated.get("draft_iterations", 0),
-        rewrite_iterations=updated.get("rewrite_iterations", 0),
-        created_at=updated.get("created_at"),
-        started_at=updated.get("started_at"),
-        completed_at=updated.get("completed_at"),
-        approved_at=updated.get("approved_at"),
-        approved_by=updated.get("approved_by"),
-        job_type=updated.get("job_type"),
-    )
+    return _blog_job_dict_to_status_response(updated, job_id)
 
 
 @app.get(

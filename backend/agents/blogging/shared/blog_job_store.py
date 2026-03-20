@@ -171,6 +171,10 @@ def complete_blog_job(
     title_choices: Optional[List[Dict[str, Any]]] = None,
     outline: Optional[str] = None,
     draft_preview: Optional[str] = None,
+    content_plan_summary: Optional[str] = None,
+    planning_iterations_used: Optional[int] = None,
+    parse_retry_count: Optional[int] = None,
+    planning_wall_ms_total: Optional[float] = None,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Mark a job as completed with final results."""
@@ -187,6 +191,14 @@ def complete_blog_job(
         kwargs["outline"] = outline
     if draft_preview is not None:
         kwargs["draft_preview"] = draft_preview
+    if content_plan_summary is not None:
+        kwargs["content_plan_summary"] = content_plan_summary
+    if planning_iterations_used is not None:
+        kwargs["planning_iterations_used"] = planning_iterations_used
+    if parse_retry_count is not None:
+        kwargs["parse_retry_count"] = parse_retry_count
+    if planning_wall_ms_total is not None:
+        kwargs["planning_wall_ms_total"] = planning_wall_ms_total
     update_blog_job(job_id, cache_dir=cache_dir, **kwargs)
 
 
@@ -195,17 +207,19 @@ def fail_blog_job(
     error: str,
     *,
     failed_phase: Optional[str] = None,
+    planning_failure_reason: Optional[str] = None,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Mark a job as failed with error details."""
-    update_blog_job(
-        job_id,
-        cache_dir=cache_dir,
-        status=JOB_STATUS_FAILED,
-        error=error,
-        failed_phase=failed_phase,
-        completed_at=datetime.now(timezone.utc).isoformat(),
-    )
+    kwargs: Dict[str, Any] = {
+        "status": JOB_STATUS_FAILED,
+        "error": error,
+        "failed_phase": failed_phase,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if planning_failure_reason is not None:
+        kwargs["planning_failure_reason"] = planning_failure_reason
+    update_blog_job(job_id, cache_dir=cache_dir, **kwargs)
 
 
 def mark_all_running_jobs_failed(

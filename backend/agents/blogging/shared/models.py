@@ -12,12 +12,12 @@ from typing import Dict
 
 class BlogPhase(str, Enum):
     """Lifecycle phases of the blogging pipeline workflow.
-    
+
     Each phase has an associated progress range for UI display.
     """
 
     RESEARCH = "research"
-    REVIEW = "review"
+    PLANNING = "planning"
     DRAFT_INITIAL = "draft_initial"
     COPY_EDIT_LOOP = "copy_edit"
     FACT_CHECK = "fact_check"
@@ -28,9 +28,9 @@ class BlogPhase(str, Enum):
 
 # Progress ranges for each phase (min, max percentage)
 PHASE_PROGRESS_RANGES: Dict[BlogPhase, tuple[int, int]] = {
-    BlogPhase.RESEARCH: (0, 15),
-    BlogPhase.REVIEW: (15, 25),
-    BlogPhase.DRAFT_INITIAL: (25, 40),
+    BlogPhase.RESEARCH: (0, 12),
+    BlogPhase.PLANNING: (12, 24),
+    BlogPhase.DRAFT_INITIAL: (24, 40),
     BlogPhase.COPY_EDIT_LOOP: (40, 60),
     BlogPhase.FACT_CHECK: (60, 70),
     BlogPhase.COMPLIANCE: (70, 80),
@@ -41,11 +41,11 @@ PHASE_PROGRESS_RANGES: Dict[BlogPhase, tuple[int, int]] = {
 
 def get_phase_progress(phase: BlogPhase, sub_progress: float = 0.0) -> int:
     """Calculate overall progress percentage based on phase and sub-progress within phase.
-    
+
     Args:
         phase: Current pipeline phase
         sub_progress: Progress within the current phase (0.0 to 1.0)
-        
+
     Returns:
         Overall progress percentage (0-100)
     """
@@ -56,7 +56,7 @@ def get_phase_progress(phase: BlogPhase, sub_progress: float = 0.0) -> int:
 # Phase order for tracking completed phases
 PHASE_ORDER = [
     BlogPhase.RESEARCH,
-    BlogPhase.REVIEW,
+    BlogPhase.PLANNING,
     BlogPhase.DRAFT_INITIAL,
     BlogPhase.COPY_EDIT_LOOP,
     BlogPhase.FACT_CHECK,

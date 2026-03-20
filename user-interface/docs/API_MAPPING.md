@@ -6,8 +6,8 @@ UI actions mapped to HTTP endpoints.
 
 | UI Action | Method | Path | Request | Response |
 |-----------|--------|------|---------|----------|
-| Submit research form | POST | `/research-and-review` | `ResearchAndReviewRequest` | `ResearchAndReviewResponse` |
-| Submit full pipeline form | POST | `/full-pipeline` | `FullPipelineRequest` | `FullPipelineResponse` |
+| Submit research form | POST | `/research-and-review` | `ResearchAndReviewRequest` | `ResearchAndReviewResponse` (research **+ planning**; titles/outline from `ContentPlan`) |
+| Submit full pipeline form | POST | `/full-pipeline` | `FullPipelineRequest` | `FullPipelineResponse` (includes optional `content_plan_summary`) |
 | Health check | GET | `/health` | - | `BloggingHealthResponse` (`status`, optional `brand_spec_configured`) |
 
 ## Software Engineering Team API (port 8000)

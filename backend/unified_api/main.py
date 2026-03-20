@@ -5,7 +5,7 @@ This server mounts all agent team APIs under namespaced prefixes,
 providing a single entry point for the entire platform.
 
 Route Prefixes:
-- /api/blogging          - Blog research, review, draft, publication
+- /api/blogging          - Blog research, planning, draft, copy-edit, publication
 - /api/software-engineering - Full dev team simulation
 - /api/personal-assistant   - Personal assistant (email, calendar, tasks)
 - /api/market-research      - Market research and UX synthesis
@@ -448,7 +448,7 @@ Unified API server providing access to all Strands Agent team capabilities.
 
 ## Available Teams
 
-- **Blogging** (`/api/blogging`) - Research, review, draft, copy-edit, publication
+- **Blogging** (`/api/blogging`) - Research, planning, draft, copy-edit, publication
 - **Software Engineering** (`/api/software-engineering`) - Full dev team simulation
 - **Personal Assistant** (`/api/personal-assistant`) - Email, calendar, tasks, deals
 - **Market Research** (`/api/market-research`) - User discovery, UX synthesis

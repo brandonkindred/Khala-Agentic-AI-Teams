@@ -13,6 +13,13 @@ from typing import Optional
 
 from llm_service import LLMClient
 
+from shared.content_plan import (
+    ContentPlan,
+    ContentPlanSection,
+    RequirementsAnalysis,
+    TitleCandidate,
+)
+
 from .models import (
     ApprovalResult,
     PublicationMetadata,
@@ -31,6 +38,28 @@ from .platform_formatters import (
 from .prompts import CONVERT_FEEDBACK_TO_EDITOR_PROMPT, REJECTION_FOLLOW_UP_PROMPT
 
 logger = logging.getLogger(__name__)
+
+
+def _content_plan_from_outline(outline: str) -> ContentPlan:
+    """Build a minimal content plan when only a flat outline string exists (e.g. legacy submissions)."""
+    body = (outline or "").strip() or "Article body"
+    return ContentPlan(
+        overarching_topic="Blog post",
+        narrative_flow="Follow the outline/coverage below.",
+        sections=[
+            ContentPlanSection(
+                title="Main",
+                coverage_description=body[:8000],
+                order=0,
+            )
+        ],
+        title_candidates=[TitleCandidate(title="Post", probability_of_success=0.5)],
+        requirements_analysis=RequirementsAnalysis(
+            plan_acceptable=True,
+            scope_feasible=True,
+            research_gaps=[],
+        ),
+    )
 
 
 class BlogPublicationAgent:
@@ -292,7 +321,7 @@ class BlogPublicationAgent:
                 feedback_items=all_feedback,
                 feedback_summary=copy_editor_result.summary,
                 research_document=research or None,
-                outline=outline_text or None,
+                content_plan=_content_plan_from_outline(outline_text),
                 audience=aud,
                 tone_or_purpose=tone,
             )

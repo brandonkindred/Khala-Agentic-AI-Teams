@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 ARTIFACT_NAMES = (
     "brand_spec_prompt.md",
     "content_brief.md",
+    "content_plan.json",
+    "content_plan.md",
     "research_packet.md",
     "allowed_claims.json",
     "outline.md",
@@ -35,10 +37,12 @@ ARTIFACT_NAMES = (
 # Static metadata: which pipeline phase/agent produces each artifact (for API list response)
 ARTIFACT_PRODUCER: dict[str, dict[str, str]] = {
     "brand_spec_prompt.md": {"producer_phase": "draft_initial", "producer_agent": "Pipeline (brand load)"},
-    "content_brief.md": {"producer_phase": "review", "producer_agent": "BlogReviewAgent"},
+    "content_brief.md": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
+    "content_plan.json": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
+    "content_plan.md": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
     "research_packet.md": {"producer_phase": "research", "producer_agent": "ResearchAgent"},
     "allowed_claims.json": {"producer_phase": "research", "producer_agent": "ResearchAgent"},
-    "outline.md": {"producer_phase": "review", "producer_agent": "BlogReviewAgent"},
+    "outline.md": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
     "draft_v1.md": {"producer_phase": "draft_initial", "producer_agent": "BlogDraftAgent"},
     "draft_v2.md": {"producer_phase": "copy_edit", "producer_agent": "BlogCopyEditorAgent"},
     "final.md": {"producer_phase": "finalize", "producer_agent": "BlogCopyEditorAgent"},

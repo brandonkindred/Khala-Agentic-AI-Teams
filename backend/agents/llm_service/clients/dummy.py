@@ -240,4 +240,54 @@ class DummyLLMClient(LLMClient):
             return {"daily_calories": 2000, "macros": {"protein": 100, "carbs": 200, "fat": 67}, "meals_per_day": 3, "notes": "Dummy nutrition plan."}
         elif "meal" in lowered and ("suggestions" in lowered or "recommendations" in lowered):
             return {"suggestions": [{"meal": "Dummy meal", "reason": "Dummy reason"}]}
+        # Blogging: structured content plan JSON (planning agent; token in user prompt)
+        elif "content_plan_json_v1" in lowered:
+            return {
+                "overarching_topic": "Dummy blog topic",
+                "narrative_flow": "Open with context, develop the core idea, close with actions.",
+                "sections": [
+                    {
+                        "title": "Introduction",
+                        "coverage_description": "Hook and problem framing.",
+                        "order": 0,
+                        "research_support_note": "Supported by research digest.",
+                        "gap_flag": False,
+                    },
+                    {
+                        "title": "Core ideas",
+                        "coverage_description": "Main substance from sources.",
+                        "order": 1,
+                        "research_support_note": None,
+                        "gap_flag": False,
+                    },
+                    {
+                        "title": "Conclusion",
+                        "coverage_description": "Recap and one next step.",
+                        "order": 2,
+                        "research_support_note": None,
+                        "gap_flag": False,
+                    },
+                    {
+                        "title": "Further reading",
+                        "coverage_description": "Optional pointers (keeps section count in band for standard_article).",
+                        "order": 3,
+                        "research_support_note": None,
+                        "gap_flag": False,
+                    },
+                ],
+                "title_candidates": [
+                    {"title": "Dummy Title: Why This Topic Matters", "probability_of_success": 0.72},
+                    {"title": "A Practical Take on the Topic", "probability_of_success": 0.58},
+                ],
+                "requirements_analysis": {
+                    "plan_acceptable": True,
+                    "scope_feasible": True,
+                    "research_gaps": [],
+                    "fits_profile": True,
+                    "gaps": [],
+                    "risks": [],
+                    "suggested_format_change": None,
+                },
+                "plan_version": 1,
+            }
         return {"output": "Dummy response", "status": "ok"}

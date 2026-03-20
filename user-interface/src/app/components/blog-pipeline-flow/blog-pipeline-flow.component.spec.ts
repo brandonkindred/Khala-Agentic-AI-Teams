@@ -23,7 +23,7 @@ describe('BlogPipelineFlowComponent', () => {
     expect(component.BLOG_PHASES.length).toBe(8);
     expect(component.BLOG_PHASES.map((p) => p.id)).toEqual([
       'research',
-      'review',
+      'planning',
       'draft_initial',
       'copy_edit',
       'fact_check',
@@ -48,7 +48,7 @@ describe('BlogPipelineFlowComponent', () => {
     fixture.detectChanges();
 
     expect(component.isPhaseCompleted('research')).toBe(true);
-    expect(component.isPhaseCompleted('review')).toBe(true);
+    expect(component.isPhaseCompleted('planning')).toBe(true);
     expect(component.isPhaseCompleted('draft_initial')).toBe(true);
     expect(component.isCurrentPhase('copy_edit')).toBe(true);
     expect(component.isPhasePending('fact_check')).toBe(true);

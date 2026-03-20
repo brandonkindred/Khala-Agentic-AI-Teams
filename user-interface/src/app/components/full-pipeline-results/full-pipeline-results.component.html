@@ -7,6 +7,11 @@
     <mat-card-content>
       <p><strong>Work directory:</strong> {{ data.work_dir }}</p>
 
+      @if (data.content_plan_summary) {
+        <h3>Content plan summary</h3>
+        <pre class="outline">{{ data.content_plan_summary }}</pre>
+      }
+
       @if (data.title_choices && data.title_choices.length) {
         <h3>Title choices</h3>
         <div class="title-choices">

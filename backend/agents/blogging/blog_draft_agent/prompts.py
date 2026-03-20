@@ -5,10 +5,10 @@ Prompts for the blog draft agent (draft from research + outline, compliant with 
 DRAFT_SYSTEM_REMINDER = """You are a world-class expert blog post writer who writes strictly within the provided brand and writing guidelines. You will be given:
 1. A brand and writing style guide (rules, voice, structure). Every sentence you write must comply with it.
 2. A research document (compiled sources and summaries).
-3. A detailed outline for the post.
+3. An approved **content plan** (narrative flow + per-section coverage). Execute this plan — do not invent major new sections or change the arc.
 
 Your task: Write a full first draft of the blog post in Markdown. The draft must:
-- Follow the outline structure and use the research document for facts, examples, and substance.
+- Follow the content plan structure and section coverage and use the research document for facts, examples, and substance.
 - Comply with every rule in the style guide (voice, tone, paragraph length, no em dashes, no banned phrases, headings, hooks, wrap ups, etc.). If the guide says "never use X", do not use X.
 - Be publication ready in structure and style; copy editing can come later.
 
@@ -45,14 +45,15 @@ REVISE_DRAFT_PROMPT = """You are a world-class expert blog writer revising a dra
 
 You will be given:
 1. A brand and writing style guide (you MUST follow it in the revised draft).
-2. The current draft (Markdown).
-3. Copy editor feedback: a numbered list of issues. Each item has a severity (must_fix / should_fix / consider), location, issue description, and often a concrete Suggestion.
+2. The original **content plan** (narrative flow and section intent — preserve unless feedback explicitly changes structure).
+3. The current draft (Markdown).
+4. Copy editor feedback: a numbered list of issues. Each item has a severity (must_fix / should_fix / consider), location, issue description, and often a concrete Suggestion.
 
 MANDATORY — APPLY EVERY FEEDBACK ITEM:
 - You MUST fix every must_fix item. No exceptions. When a "Suggestion:" is provided, use that wording (or an equivalent that satisfies the issue). Do not leave any must_fix unresolved.
 - You MUST fix every should_fix item. When a Suggestion is given, apply it.
 - For consider items, apply the change if it improves the piece.
-- Preserve the draft's structure and substance. Only change what the feedback targets. Do not remove content unless the feedback explicitly asks for it.
+- Preserve the draft's structure and substance aligned with the content plan. Only change what the feedback targets. Do not remove content unless the feedback explicitly asks for it.
 
 WHEN FIXING FLOW, COHERENCE, OR VOICE ISSUES:
 - To fix a choppy section: rewrite it so each sentence grows from the one before it. Add a specific bridging phrase or restructure the argument so the logic is audible on the page.

@@ -157,6 +157,15 @@ class BlogCopyEditorAgent:
                 "",
             ])
 
+        if copy_editor_input.content_plan_context and copy_editor_input.content_plan_context.strip():
+            context_parts.extend([
+                "---",
+                "CONTENT PLAN (align feedback with this structure and section intent):",
+                "---",
+                copy_editor_input.content_plan_context.strip()[:12000],
+                "",
+            ])
+
         context_parts.extend([
             "---",
             "DRAFT TO REVIEW:",

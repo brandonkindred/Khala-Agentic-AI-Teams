@@ -27,7 +27,7 @@ export class BloggingApiService {
 
   /**
    * POST /research-and-review
-   * Runs research and review pipeline; returns title choices and outline.
+   * Runs research and structured planning; returns title choices and outline.
    */
   researchAndReview(
     request: ResearchAndReviewRequest
@@ -40,7 +40,7 @@ export class BloggingApiService {
 
   /**
    * POST /full-pipeline
-   * Runs full blog pipeline with gates (research, review, draft, validators, compliance).
+   * Runs full blog pipeline with gates (research, planning, draft, validators, compliance).
    */
   fullPipeline(request: FullPipelineRequest): Observable<FullPipelineResponse> {
     return this.http.post<FullPipelineResponse>(
@@ -62,7 +62,7 @@ export class BloggingApiService {
 
   /**
    * POST /research-and-review-async
-   * Starts research and review in the background. Returns job_id for polling.
+   * Starts research and planning in the background. Returns job_id for polling.
    */
   startResearchReviewAsync(request: ResearchAndReviewRequest): Observable<StartJobResponse> {
     return this.http.post<StartJobResponse>(

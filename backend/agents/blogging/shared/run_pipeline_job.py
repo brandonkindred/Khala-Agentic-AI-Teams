@@ -48,11 +48,13 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
     try:
         from blog_research_agent.models import ResearchBriefInput
         from agent_implementations.blog_writing_process_v2 import run_pipeline
+        from shared.content_plan import content_plan_summary_text, content_plan_to_outline_markdown
         from shared.content_profile import resolve_length_policy_from_request_dict
     except ImportError:
         try:
             from blog_research_agent.models import ResearchBriefInput
             from blogging.agent_implementations.blog_writing_process_v2 import run_pipeline
+            from blogging.shared.content_plan import content_plan_to_outline_markdown
             from blogging.shared.content_profile import resolve_length_policy_from_request_dict
         except ImportError as e:
             logger.exception("Import failed for pipeline job %s", job_id)
@@ -68,7 +70,7 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
             JOB_STATUS_COMPLETED,
             JOB_STATUS_NEEDS_REVIEW,
         )
-        from blogging.shared.errors import BloggingError
+        from blogging.shared.errors import BloggingError, PlanningError
     except ImportError:
         try:
             from shared.blog_job_store import (
@@ -79,7 +81,7 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
                 JOB_STATUS_COMPLETED,
                 JOB_STATUS_NEEDS_REVIEW,
             )
-            from shared.errors import BloggingError
+            from shared.errors import BloggingError, PlanningError
         except ImportError:
             logger.warning("Blog job store not available; pipeline will run without job updates")
             update_blog_job = None
@@ -89,6 +91,7 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
             JOB_STATUS_COMPLETED = "completed"
             JOB_STATUS_NEEDS_REVIEW = "needs_human_review"
             BloggingError = Exception
+            PlanningError = Exception
 
     work_dir = _get_run_artifacts_base() / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -138,7 +141,7 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
 
     try:
         length_policy = resolve_length_policy_from_request_dict(request_dict)
-        research_result, review_result, draft_result, status = run_pipeline(
+        _research_result, planning_phase_result, draft_result, status = run_pipeline(
             brief_input,
             work_dir=work_dir,
             run_gates=bool(request_dict.get("run_gates", True)),
@@ -146,9 +149,11 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
             job_updater=job_updater,
             length_policy=length_policy,
         )
+        plan = planning_phase_result.content_plan
+        outline = content_plan_to_outline_markdown(plan)
         title_choices = [
             {"title": tc.title, "probability_of_success": tc.probability_of_success}
-            for tc in review_result.title_choices
+            for tc in plan.title_candidates
         ]
         draft_preview = draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else "")
         final_status = JOB_STATUS_COMPLETED if status == "PASS" else JOB_STATUS_NEEDS_REVIEW
@@ -157,9 +162,21 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
                 job_id,
                 status=final_status,
                 title_choices=title_choices,
-                outline=review_result.outline,
+                outline=outline,
                 draft_preview=draft_preview,
+                content_plan_summary=content_plan_summary_text(plan),
+                planning_iterations_used=planning_phase_result.planning_iterations_used,
+                parse_retry_count=planning_phase_result.parse_retry_count,
+                planning_wall_ms_total=planning_phase_result.planning_wall_ms_total,
             )
+    except PlanningError as e:
+        logger.exception("Planning failed for job %s", job_id)
+        _fail_job(
+            job_id,
+            str(e),
+            failed_phase="planning",
+            planning_failure_reason=getattr(e, "failure_reason", None),
+        )
     except BloggingError as e:
         logger.exception("Pipeline failed for job %s", job_id)
         _fail_job(job_id, str(e), failed_phase=getattr(e, "phase", None))
@@ -172,13 +189,28 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
             hb_thread.join(timeout=2.0)
 
 
-def _fail_job(job_id: str, error: str, failed_phase: Optional[str] = None) -> None:
+def _fail_job(
+    job_id: str,
+    error: str,
+    failed_phase: Optional[str] = None,
+    planning_failure_reason: Optional[str] = None,
+) -> None:
     try:
         from blogging.shared.blog_job_store import fail_blog_job as fn
-        fn(job_id, error=error, failed_phase=failed_phase)
+        fn(
+            job_id,
+            error=error,
+            failed_phase=failed_phase,
+            planning_failure_reason=planning_failure_reason,
+        )
     except ImportError:
         try:
             from shared.blog_job_store import fail_blog_job as fn
-            fn(job_id, error=error, failed_phase=failed_phase)
+            fn(
+                job_id,
+                error=error,
+                failed_phase=failed_phase,
+                planning_failure_reason=planning_failure_reason,
+            )
         except ImportError:
             pass

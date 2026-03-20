@@ -97,6 +97,10 @@ class CopyEditorInput(BaseModel):
         None,
         description="Resolved profile id (e.g. technical_deep_dive) for under-length hints.",
     )
+    content_plan_context: Optional[str] = Field(
+        None,
+        description="Approved content plan (narrative + sections). Editor should align feedback with this structure.",
+    )
 
 
 class CopyEditorOutput(BaseModel):

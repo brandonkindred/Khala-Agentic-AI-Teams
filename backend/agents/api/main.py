@@ -1,28 +1,34 @@
 """
-FastAPI application exposing the research-and-review pipeline as an HTTP endpoint.
+FastAPI application exposing the research-and-planning pipeline as an HTTP endpoint.
 """
 
 from __future__ import annotations
 
 import logging
+import sys
+from pathlib import Path
 from typing import List, Optional, Union
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from blog_research_agent.agent import ResearchAgent
-from blog_research_agent.agent_cache import AgentCache
 from llm_service import get_client
 from blog_research_agent.models import ResearchBriefInput
-from blog_review_agent import BlogReviewAgent, BlogReviewInput
+from shared.content_plan import content_plan_to_outline_markdown
+from shared.content_profile import resolve_length_policy
+from shared.errors import PlanningError
+
+_blogging_root = Path(__file__).resolve().parent.parent / "blogging"
+if str(_blogging_root) not in sys.path:
+    sys.path.insert(0, str(_blogging_root))
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Blog Research & Review API",
-    description="Runs research and review agents to produce title choices and a blog outline from a brief.",
-    version="0.1.0",
+    title="Blog Research & Planning API",
+    description="Runs research and structured content planning to produce title choices and an outline.",
+    version="0.2.0",
 )
 
 
@@ -48,7 +54,7 @@ class AudienceDetails(BaseModel):
 
 
 class ResearchAndReviewRequest(BaseModel):
-    """Request body for the research-and-review endpoint."""
+    """Request body for the research-and-planning endpoint."""
 
     brief: str = Field(..., description="Short description of the content topic.")
     title_concept: Optional[str] = Field(
@@ -79,7 +85,7 @@ class TitleChoiceResponse(BaseModel):
 
 
 class ResearchAndReviewResponse(BaseModel):
-    """Response from the research-and-review endpoint."""
+    """Response from the research-and-planning endpoint."""
 
     title_choices: List[TitleChoiceResponse] = Field(
         ...,
@@ -117,47 +123,26 @@ def _format_audience(audience: Optional[Union[AudienceDetails, str]]) -> str:
     return "; ".join(parts) if parts else ""
 
 
-# Shared LLM client and agents (initialized on first request or at startup)
-_llm_client = None
-_research_agent: Optional[ResearchAgent] = None
-_review_agent: Optional[BlogReviewAgent] = None
-
-
-def _get_agents() -> tuple[ResearchAgent, BlogReviewAgent]:
-    """Lazily initialize and return research and review agents."""
-    global _llm_client, _research_agent, _review_agent
-    if _llm_client is None:
-        _llm_client = get_client("blog")
-    if _research_agent is None:
-        cache = AgentCache(cache_dir=".agent_cache")
-        _research_agent = ResearchAgent(llm_client=_llm_client, cache=cache)
-    if _review_agent is None:
-        _review_agent = BlogReviewAgent(llm_client=_llm_client)
-    return _research_agent, _review_agent
-
-
 @app.post(
     "/research-and-review",
     response_model=ResearchAndReviewResponse,
-    summary="Run research and review pipeline",
-    description="Executes the research agent (web + arXiv search) and review agent to produce title choices and a blog outline from the given brief and audience details.",
+    summary="Run research and planning pipeline",
+    description="Executes research then structured planning (same as blogging service).",
 )
 def research_and_review(request: ResearchAndReviewRequest) -> ResearchAndReviewResponse:
     """
-    Run the research-and-review pipeline.
+    Run research then content planning.
 
-    Accepts a brief, optional title concept, and audience details. Returns
-    title choices, a blog outline, and the compiled research document.
+    Accepts a brief, optional title concept, and audience details.
     """
     try:
-        research_agent, review_agent = _get_agents()
+        llm_client = get_client("blog")
     except Exception as e:
-        logger.exception("Failed to initialize agents")
+        logger.exception("Failed to initialize LLM client")
         raise HTTPException(status_code=500, detail=f"Agent initialization failed: {e}") from e
 
-    llm_requests_before = getattr(_llm_client, "request_count", 0) if _llm_client is not None else 0
+    llm_requests_before = getattr(llm_client, "request_count", 0)
 
-    # Build brief text (include title concept if provided)
     brief_text = request.brief.strip()
     if request.title_concept:
         brief_text = f"{brief_text}. Title concept: {request.title_concept.strip()}"
@@ -171,27 +156,39 @@ def research_and_review(request: ResearchAndReviewRequest) -> ResearchAndReviewR
         max_results=request.max_results,
     )
 
-    try:
-        research_result = research_agent.run(brief_input)
-    except Exception as e:
-        logger.exception("Research agent failed")
-        raise HTTPException(status_code=500, detail=f"Research failed: {e}") from e
+    length_policy = resolve_length_policy()
+
+    from agent_implementations.blog_writing_process_v2 import run_research_and_planning
 
     try:
-        review_input = BlogReviewInput(
-            brief=request.brief,
-            audience=audience_str or None,
-            tone_or_purpose=request.tone_or_purpose,
-            references=research_result.references,
+        research_result, _rd, planning_phase_result = run_research_and_planning(
+            brief_input,
+            work_dir=None,
+            llm_client=llm_client,
+            length_policy=length_policy,
+            series_context=None,
+            job_updater=None,
         )
-        review_result = review_agent.run(review_input)
+    except PlanningError as e:
+        logger.exception("Planning failed")
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "planning_failed",
+                "message": str(e),
+                "failure_reason": getattr(e, "failure_reason", None),
+            },
+        ) from e
     except Exception as e:
-        logger.exception("Review agent failed")
-        raise HTTPException(status_code=500, detail=f"Review failed: {e}") from e
+        logger.exception("Research-and-planning failed")
+        raise HTTPException(status_code=500, detail=f"Pipeline failed: {e}") from e
 
-    llm_requests_after = getattr(_llm_client, "request_count", llm_requests_before) if _llm_client is not None else llm_requests_before
+    plan = planning_phase_result.content_plan
+    outline = content_plan_to_outline_markdown(plan)
+
+    llm_requests_after = getattr(llm_client, "request_count", llm_requests_before)
     logger.info(
-        "Completed research-and-review pipeline with %s LLM requests",
+        "Completed research-and-planning pipeline with %s LLM requests",
         llm_requests_after - llm_requests_before,
     )
 
@@ -201,9 +198,9 @@ def research_and_review(request: ResearchAndReviewRequest) -> ResearchAndReviewR
                 title=tc.title,
                 probability_of_success=tc.probability_of_success,
             )
-            for tc in review_result.title_choices
+            for tc in plan.title_candidates
         ],
-        outline=review_result.outline,
+        outline=outline,
         compiled_document=research_result.compiled_document,
         notes=research_result.notes,
     )

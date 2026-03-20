@@ -1,7 +1,7 @@
 """
 Brand-aligned blog writing pipeline with artifact persistence and gates.
 
-Runs research -> review -> draft -> copy-editor loop. When work_dir is provided,
+Runs research -> planning -> draft -> copy-editor loop. When work_dir is provided,
 persists artifacts and runs validators, fact-check, and compliance. On FAIL,
 enters closed-loop rewrite until PASS or max_rewrite_iterations.
 
@@ -20,21 +20,30 @@ from blog_copy_editor_agent.models import FeedbackItem
 from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput
 from blog_fact_check_agent import BlogFactCheckAgent
 from blog_research_agent.agent import ResearchAgent
-from blog_research_agent.agent_cache import AgentCache
 from blog_research_agent.allowed_claims import extract_allowed_claims
 from llm_service import get_client, OllamaLLMClient
+from llm_service.interface import LLMClient
 from blog_research_agent.models import ResearchBriefInput
 from blog_publication_agent.models import PublishingPack
-from blog_review_agent import BlogReviewAgent, BlogReviewInput
+from blog_planning_agent import BlogPlanningAgent
 from shared.artifacts import read_artifact, write_artifact
+from shared.content_plan import (
+    PlanningInput,
+    PlanningPhaseResult,
+    build_research_digest,
+    content_plan_to_content_brief_markdown,
+    content_plan_to_markdown_doc,
+    content_plan_to_outline_markdown,
+)
 from shared.brand_spec import load_brand_spec_prompt
 from shared.content_profile import (
     ContentProfile,
     LengthPolicy,
     SeriesContext,
     build_draft_length_instruction,
-    build_review_length_context,
+    build_planning_length_context,
     resolve_length_policy,
+    series_context_block,
 )
 from shared.style_loader import load_style_file
 from shared.errors import (
@@ -42,8 +51,8 @@ from shared.errors import (
     ComplianceError,
     DraftError,
     FactCheckError,
+    PlanningError,
     ResearchError,
-    ReviewError,
 )
 from shared.models import BlogPhase, get_phase_progress
 from validators.runner import run_validators_from_work_dir
@@ -65,6 +74,146 @@ PipelineStatus = Literal["PASS", "FAIL", "NEEDS_HUMAN_REVIEW"]
 JobUpdater = Callable[..., None]
 
 
+def planning_llm_client(base: LLMClient) -> LLMClient:
+    """Use BLOG_PLANNING_MODEL for planning when set (Ollama clients only)."""
+    model = planning_model_override()
+    if not model:
+        return base
+    if isinstance(base, OllamaLLMClient):
+        return OllamaLLMClient(model=model, base_url=base.base_url, timeout=base.timeout)
+    return base
+
+
+def run_research_and_planning(
+    brief: ResearchBriefInput,
+    *,
+    work_dir: Optional[Union[str, Path]],
+    llm_client: OllamaLLMClient,
+    length_policy: LengthPolicy,
+    series_context: Optional[SeriesContext],
+    job_updater: Optional[JobUpdater],
+) -> Tuple[Any, str, PlanningPhaseResult]:
+    """
+    Shared Research → Planning steps for full pipeline and POST /research-and-review.
+
+    Returns research agent result, compiled research_document markdown, and planning phase result.
+    """
+
+    def _update(
+        phase: BlogPhase,
+        sub_progress: float = 0.0,
+        status_text: str = "",
+        **kwargs: Any,
+    ) -> None:
+        if job_updater:
+            try:
+                progress = get_phase_progress(phase, sub_progress)
+                job_updater(
+                    phase=phase.value,
+                    progress=progress,
+                    status_text=status_text,
+                    **kwargs,
+                )
+            except Exception as e:
+                logger.warning("Failed to update job status: %s", e)
+
+    def _research_progress(status_text: str, sub_progress: float) -> None:
+        _update(BlogPhase.RESEARCH, sub_progress=sub_progress, status_text=status_text)
+
+    try:
+        research_agent = ResearchAgent(llm_client=llm_client)
+        research_result = research_agent.run(brief, progress_callback=_research_progress)
+    except BloggingError:
+        raise
+    except Exception as e:
+        raise ResearchError(f"Research failed: {e}", cause=e) from e
+
+    logger.info("Research complete: %s references", len(research_result.references))
+    _update(
+        BlogPhase.RESEARCH,
+        sub_progress=1.0,
+        status_text=f"Research complete: {len(research_result.references)} sources found",
+        research_sources_count=len(research_result.references),
+    )
+
+    parts = ["## Sources\n"]
+    for ref in research_result.references:
+        parts.append(f"- **{ref.title}** ({ref.url}): {ref.summary}")
+        if ref.key_points:
+            parts.append("  Key points: " + "; ".join(ref.key_points))
+    research_document = "\n".join(parts)
+
+    if work_dir is not None:
+        write_artifact(work_dir, "research_packet.md", research_document)
+        logger.info("Persisted research_packet.md")
+        try:
+            allowed = extract_allowed_claims(
+                llm_client,
+                research_document,
+                research_result.references,
+                topic=brief.brief,
+            )
+            write_artifact(work_dir, "allowed_claims.json", allowed.to_dict())
+            logger.info("Persisted allowed_claims.json (%s claims)", len(allowed.claims))
+        except Exception as e:
+            logger.warning("Could not extract allowed claims: %s", e)
+
+    _update(
+        BlogPhase.PLANNING,
+        sub_progress=0.0,
+        status_text="Generating content plan...",
+    )
+
+    research_digest = build_research_digest(research_document)
+    planning_input = PlanningInput(
+        brief=brief.brief,
+        audience=brief.audience,
+        tone_or_purpose=brief.tone_or_purpose,
+        research_digest=research_digest,
+        length_policy_context=build_planning_length_context(length_policy),
+        series_context_block=series_context_block(series_context),
+    )
+
+    try:
+        planning_agent = BlogPlanningAgent(llm_client=planning_llm_client(llm_client))
+        planning_phase_result = planning_agent.run(
+            planning_input,
+            length_policy=length_policy,
+            on_llm_request=lambda msg: _update(BlogPhase.PLANNING, status_text=msg),
+        )
+    except BloggingError:
+        raise
+    except Exception as e:
+        raise PlanningError(f"Planning failed: {e}", cause=e) from e
+
+    plan = planning_phase_result.content_plan
+    logger.info(
+        "Planning complete: %s iteration(s), %s title candidates",
+        planning_phase_result.planning_iterations_used,
+        len(plan.title_candidates),
+    )
+    _update(
+        BlogPhase.PLANNING,
+        sub_progress=1.0,
+        status_text=(
+            f"Planning complete ({planning_phase_result.planning_iterations_used} iteration(s), "
+            f"{len(plan.title_candidates)} titles)"
+        ),
+        planning_iterations_used=planning_phase_result.planning_iterations_used,
+        parse_retry_count=planning_phase_result.parse_retry_count,
+        planning_wall_ms_total=planning_phase_result.planning_wall_ms_total,
+    )
+
+    if work_dir is not None:
+        write_artifact(work_dir, "content_plan.json", plan.model_dump(mode="json"))
+        write_artifact(work_dir, "content_plan.md", content_plan_to_markdown_doc(plan))
+        write_artifact(work_dir, "outline.md", content_plan_to_outline_markdown(plan))
+        write_artifact(work_dir, "content_brief.md", content_plan_to_content_brief_markdown(plan))
+        logger.info("Persisted content_plan.json, content_plan.md, outline.md, content_brief.md")
+
+    return research_result, research_document, planning_phase_result
+
+
 def run_pipeline(
     brief: ResearchBriefInput,
     *,
@@ -81,7 +230,7 @@ def run_pipeline(
     target_word_count: Optional[int] = None,
 ):
     """
-    Run the full blog writing pipeline: research -> review -> draft -> copy-editor loop.
+    Run the full blog writing pipeline: research -> planning -> draft -> copy-editor loop.
 
     When work_dir is provided, persists artifacts. When run_gates is True (default when
     work_dir is set), runs validators, fact-check, and compliance. On FAIL, enters
@@ -104,12 +253,12 @@ def run_pipeline(
         target_word_count: Optional override for numeric target (100–10_000).
 
     Returns:
-        Tuple of (research_result, review_result, draft_result, status).
+        Tuple of (research_result, planning_phase_result, draft_result, status).
         status is PASS, FAIL, or NEEDS_HUMAN_REVIEW.
-        
+
     Raises:
         ResearchError: If research phase fails.
-        ReviewError: If title/outline generation fails.
+        PlanningError: If content planning fails.
         DraftError: If draft generation fails.
         ComplianceError: If compliance check fails unrecoverably.
         FactCheckError: If fact check fails unrecoverably.
@@ -150,92 +299,17 @@ def run_pipeline(
         work_path.mkdir(parents=True, exist_ok=True)
         logger.info("Artifact work_dir: %s", work_path)
 
-    # 1. Research
-    def _research_progress(status_text: str, sub_progress: float) -> None:
-        _update(BlogPhase.RESEARCH, sub_progress=sub_progress, status_text=status_text)
-
-    try:
-        research_agent = ResearchAgent(llm_client=llm_client)
-        research_result = research_agent.run(brief, progress_callback=_research_progress)
-    except BloggingError:
-        raise
-    except Exception as e:
-        raise ResearchError(f"Research failed: {e}", cause=e) from e
-    
-    logger.info("Research complete: %s references", len(research_result.references))
-    _update(
-        BlogPhase.RESEARCH,
-        sub_progress=1.0,
-        status_text=f"Research complete: {len(research_result.references)} sources found",
-        research_sources_count=len(research_result.references),
+    research_result, research_document, planning_phase_result = run_research_and_planning(
+        brief,
+        work_dir=work_dir,
+        llm_client=llm_client,
+        length_policy=length_policy,
+        series_context=series_context,
+        job_updater=job_updater,
     )
+    plan = planning_phase_result.content_plan
 
-    parts = ["## Sources\n"]
-    for ref in research_result.references:
-        parts.append(f"- **{ref.title}** ({ref.url}): {ref.summary}")
-        if ref.key_points:
-            parts.append("  Key points: " + "; ".join(ref.key_points))
-    research_document = "\n".join(parts)
-
-    if work_dir is not None:
-        write_artifact(work_dir, "research_packet.md", research_document)
-        logger.info("Persisted research_packet.md")
-        # Extract and persist allowed claims for claims policy
-        try:
-            allowed = extract_allowed_claims(
-                llm_client,
-                research_document,
-                research_result.references,
-                topic=brief.brief,
-            )
-            write_artifact(work_dir, "allowed_claims.json", allowed.to_dict())
-            logger.info("Persisted allowed_claims.json (%s claims)", len(allowed.claims))
-        except Exception as e:
-            logger.warning("Could not extract allowed claims: %s", e)
-
-    # 2. Review
-    _update(
-        BlogPhase.REVIEW,
-        sub_progress=0.0,
-        status_text="Generating title choices and outline...",
-    )
-    
-    try:
-        review_agent = BlogReviewAgent(llm_client=llm_client)
-        review_input = BlogReviewInput(
-            brief=brief.brief,
-            audience=brief.audience,
-            tone_or_purpose=brief.tone_or_purpose,
-            outline_length_context=build_review_length_context(length_policy),
-            references=research_result.references,
-        )
-        review_result = review_agent.run(
-            review_input,
-            on_llm_request=lambda msg: _update(BlogPhase.REVIEW, status_text=msg),
-        )
-    except BloggingError:
-        raise
-    except Exception as e:
-        raise ReviewError(f"Review failed: {e}", cause=e) from e
-    
-    logger.info("Review complete: %s title choices", len(review_result.title_choices))
-    _update(
-        BlogPhase.REVIEW,
-        sub_progress=1.0,
-        status_text=f"Review complete: {len(review_result.title_choices)} title choices generated",
-    )
-
-    if work_dir is not None:
-        write_artifact(work_dir, "outline.md", review_result.outline)
-        # Optionally persist content_brief with title choices
-        content_brief = "# Content Brief\n\n## Title Choices\n"
-        for i, tc in enumerate(review_result.title_choices, 1):
-            content_brief += f"{i}. {tc.title} [{tc.probability_of_success:.0%}]\n"
-        content_brief += "\n## Outline\n\n" + review_result.outline
-        write_artifact(work_dir, "content_brief.md", content_brief)
-        logger.info("Persisted outline.md and content_brief.md")
-
-    # 3. Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
+    # Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
     brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
     allowed_claims_data = (
@@ -268,7 +342,7 @@ def run_pipeline(
                 draft_input = DraftInput(
                     research_document=research_document,
                     research_references=research_result.references if research_result.references else None,
-                    outline=review_result.outline,
+                    content_plan=plan,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
@@ -317,6 +391,7 @@ def run_pipeline(
                     editor_must_fix_over_ratio=length_policy.editor_must_fix_over_ratio,
                     editor_should_fix_over_ratio=length_policy.editor_should_fix_over_ratio,
                     content_profile=length_policy.content_profile.value,
+                    content_plan_context=content_plan_to_outline_markdown(plan),
                 )
                 feedback_path = (Path(work_dir) / f"editor_feedback_iter_{copy_edit_num}.json") if work_dir is not None else None
                 copy_editor_result = copy_editor_agent.run(
@@ -347,7 +422,7 @@ def run_pipeline(
                     feedback_summary=copy_editor_result.summary,
                     previous_feedback_items=previous_feedback_items if previous_feedback_items else None,
                     research_document=research_document,
-                    outline=review_result.outline,
+                    content_plan=plan,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
@@ -447,7 +522,7 @@ def run_pipeline(
                 )
                 
                 pack = PublishingPack(
-                    title_options=[tc.title for tc in review_result.title_choices[:5]],
+                    title_options=[tc.title for tc in plan.title_candidates[:5]],
                     meta_description=draft_result.draft[:155].strip() or None,
                     tags=[],
                 )
@@ -509,7 +584,7 @@ def run_pipeline(
                     feedback_items=feedback_items,
                     feedback_summary=f"Compliance FAIL: {len(compliance_report.violations)} violations. Apply required_fixes.",
                     research_document=research_document,
-                    outline=review_result.outline,
+                    content_plan=plan,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
@@ -537,7 +612,7 @@ def run_pipeline(
             status_text="Pipeline complete (gates skipped)",
         )
 
-    return research_result, review_result, draft_result, status
+    return research_result, planning_phase_result, draft_result, status
 
 
 def main() -> None:
@@ -552,13 +627,14 @@ def main() -> None:
     )
 
     work_dir = Path(__file__).resolve().parent / "run_dir"
-    research_result, review_result, draft_result, status = run_pipeline(brief, work_dir=work_dir)
+    research_result, planning_phase_result, draft_result, status = run_pipeline(brief, work_dir=work_dir)
+    plan = planning_phase_result.content_plan
 
     print("\n--- Title choices ---")
-    for i, tc in enumerate(review_result.title_choices, 1):
+    for i, tc in enumerate(plan.title_candidates, 1):
         print(f"{i}. {tc.title}  [{tc.probability_of_success:.0%}]")
     print("\n--- Outline ---\n")
-    print(review_result.outline)
+    print(content_plan_to_outline_markdown(plan))
     print("\n--- Draft ---\n")
     print(draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else ""))
     print(f"\nStatus: {status}")

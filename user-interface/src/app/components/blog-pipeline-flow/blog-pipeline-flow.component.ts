@@ -14,7 +14,7 @@ export interface BlogPhaseDefinition {
 /** Ordered pipeline phases matching backend BlogPhase. */
 export const BLOG_PHASES: BlogPhaseDefinition[] = [
   { id: 'research', label: 'Research', icon: 'search' },
-  { id: 'review', label: 'Review', icon: 'rate_review' },
+  { id: 'planning', label: 'Planning', icon: 'account_tree' },
   { id: 'draft_initial', label: 'Draft', icon: 'edit_note' },
   { id: 'copy_edit', label: 'Copy edit', icon: 'spellcheck' },
   { id: 'fact_check', label: 'Fact check', icon: 'fact_check' },

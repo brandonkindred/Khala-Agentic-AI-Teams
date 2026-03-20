@@ -104,14 +104,18 @@ class ResearchError(BloggingError):
         self.sources_found = sources_found
 
 
-class ReviewError(BloggingError):
-    """Review phase failed.
-    
-    Raised when title/outline generation fails.
-    """
+class PlanningError(BloggingError):
+    """Planning phase failed (content plan could not be produced or refined)."""
 
-    def __init__(self, message: str, *, cause: Optional[Exception] = None):
-        super().__init__(message, phase="review", cause=cause)
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: Optional[Exception] = None,
+        failure_reason: Optional[str] = None,
+    ):
+        super().__init__(message, phase="planning", cause=cause)
+        self.failure_reason = failure_reason
 
 
 class DraftError(BloggingError):

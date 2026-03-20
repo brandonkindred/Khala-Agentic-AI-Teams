@@ -17,6 +17,12 @@ from pathlib import Path
 import pytest
 
 from blog_draft_agent import BlogDraftAgent, DraftInput, DraftOutput
+from shared.content_plan import (
+    ContentPlan,
+    ContentPlanSection,
+    RequirementsAnalysis,
+    TitleCandidate,
+)
 from llm_service import LLMPermanentError, LLMTemporaryError, get_client, OllamaLLMClient
 
 logger = logging.getLogger(__name__)
@@ -32,6 +38,7 @@ def _is_placeholder_or_minimal(draft: str) -> bool:
         "# Draft\n\nNo draft was generated.",
         "# Draft\n\nAdd outline to generate a draft.",
         "# Draft\n\nAdd research document and outline to generate a draft.",
+        "# Draft\n\nAdd a content plan to generate a draft.",
     )
     draft_stripped = draft.strip()
     if len(draft_stripped) < 200:
@@ -89,18 +96,45 @@ def test_draft_agent_with_ollama_produces_real_content() -> None:
         writing_style_guide_content="Use short sentences. No em dashes. Define terms on first use.",
         brand_spec_content="",
     )
+    plan = ContentPlan(
+        overarching_topic="Observability for production systems",
+        narrative_flow="Why it matters, key practices, OpenTelemetry path, wrap-up.",
+        sections=[
+            ContentPlanSection(
+                title="Why observability matters",
+                coverage_description="Stakes for platform teams.",
+                order=0,
+            ),
+            ContentPlanSection(
+                title="Key practices: logging, tracing, metrics",
+                coverage_description="Concrete practices from research.",
+                order=1,
+            ),
+            ContentPlanSection(
+                title="Getting started with OpenTelemetry",
+                coverage_description="Adoption steps.",
+                order=2,
+            ),
+            ContentPlanSection(
+                title="Wrap-up and next steps",
+                coverage_description="Close with one action.",
+                order=3,
+            ),
+        ],
+        title_candidates=[TitleCandidate(title="Observability essentials", probability_of_success=0.7)],
+        requirements_analysis=RequirementsAnalysis(
+            plan_acceptable=True,
+            scope_feasible=True,
+            research_gaps=[],
+        ),
+    )
     draft_input = DraftInput(
         research_document=(
             "Observability helps teams understand system behavior in production. "
             "Key practices include structured logging, distributed tracing, and metrics. "
             "Many organizations adopt OpenTelemetry for vendor-neutral instrumentation."
         ),
-        outline=(
-            "# Why observability matters\n"
-            "# Key practices: logging, tracing, metrics\n"
-            "# Getting started with OpenTelemetry\n"
-            "# Wrap-up and next steps\n"
-        ),
+        content_plan=plan,
         audience="Platform and SRE teams",
         tone_or_purpose="technical overview",
     )

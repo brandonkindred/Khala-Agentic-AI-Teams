@@ -1,10 +1,35 @@
 """Tests for the blog draft agent."""
 
+import re
+
 import pytest
 
 from blog_draft_agent import BlogDraftAgent, DraftInput, DraftOutput
 from blog_research_agent.models import ResearchReference
 from llm_service import DummyLLMClient
+from shared.content_plan import (
+    ContentPlan,
+    ContentPlanSection,
+    RequirementsAnalysis,
+    TitleCandidate,
+)
+
+
+def _minimal_plan() -> ContentPlan:
+    return ContentPlan(
+        overarching_topic="Test topic",
+        narrative_flow="Intro, main, wrap.",
+        sections=[
+            ContentPlanSection(title="Intro", coverage_description="Hook", order=0),
+            ContentPlanSection(title="Main", coverage_description="Body", order=1),
+        ],
+        title_candidates=[TitleCandidate(title="T1", probability_of_success=0.5)],
+        requirements_analysis=RequirementsAnalysis(
+            plan_acceptable=True,
+            scope_feasible=True,
+            research_gaps=[],
+        ),
+    )
 
 
 class _PromptCapturingLLM(DummyLLMClient):
@@ -26,28 +51,49 @@ class _PromptCapturingLLM(DummyLLMClient):
 
 def test_draft_input_requires_research_source() -> None:
     """DraftInput raises when both research_document and research_references are empty."""
+    p = _minimal_plan()
     with pytest.raises(ValueError, match="either research_document or non-empty research_references"):
         DraftInput(
             research_document=None,
             research_references=None,
-            outline="# Intro\n# Main",
+            content_plan=p,
         )
     with pytest.raises(ValueError, match="either research_document or non-empty research_references"):
         DraftInput(
             research_document="",
             research_references=[],
-            outline="# Intro\n# Main",
+            content_plan=p,
         )
 
 
+def test_golden_draft_h2_headings_match_content_plan_sections() -> None:
+    """Regression: Markdown H2 headings follow planned section titles (order)."""
+    plan = _minimal_plan()
+
+    class H2DraftLLM(DummyLLMClient):
+        def complete(self, prompt, **kwargs):  # type: ignore[no-untyped-def]
+            self._request_count += 1
+            body = "\n\n".join(
+                f"## {s.title}\n\nBody for {s.title}."
+                for s in sorted(plan.sections, key=lambda x: x.order)
+            )
+            return '{"draft": 0}\n---DRAFT---\n# Post title\n\n' + body
+
+    agent = BlogDraftAgent(llm_client=H2DraftLLM())
+    out = agent.run(DraftInput(research_document="Compiled research text.", content_plan=plan))
+    h2s = re.findall(r"^## (.+)$", out.draft, re.MULTILINE)
+    expected = [s.title for s in sorted(plan.sections, key=lambda x: x.order)]
+    assert h2s == expected
+
+
 def test_blog_draft_agent_run() -> None:
-    """BlogDraftAgent returns a non-empty draft from research + outline."""
+    """BlogDraftAgent returns a non-empty draft from research + content plan."""
     llm = DummyLLMClient()
     agent = BlogDraftAgent(llm_client=llm)
 
     draft_input = DraftInput(
         research_document="Compiled research: Source 1 summary. Source 2 key points.",
-        outline="# Intro\n# Main\n# Wrap up",
+        content_plan=_minimal_plan(),
     )
 
     result = agent.run(draft_input)
@@ -68,7 +114,7 @@ def test_blog_draft_agent_with_style_guide() -> None:
 
     draft_input = DraftInput(
         research_document="Research here.",
-        outline="Outline here.",
+        content_plan=_minimal_plan(),
     )
 
     result = agent.run(draft_input)
@@ -96,7 +142,7 @@ def test_blog_draft_agent_run_with_research_references() -> None:
     draft_input = DraftInput(
         research_document=None,
         research_references=refs,
-        outline="# Intro\n# Main\n# Wrap up",
+        content_plan=_minimal_plan(),
     )
 
     result = agent.run(draft_input)
@@ -116,11 +162,23 @@ def test_draft_prompt_includes_provided_brand_spec() -> None:
     )
     draft_input = DraftInput(
         research_document="Research here.",
-        outline="# Intro\n# Main",
+        content_plan=_minimal_plan(),
     )
     agent.run(draft_input)
     assert "MyBrand: Test brand." in llm.last_prompt
     assert "BRAND AND STYLE" in llm.last_prompt
+
+
+def test_outline_for_prompt_includes_section_titles() -> None:
+    """outline_for_prompt flattens the content plan for LLM consumption."""
+    inp = DraftInput(
+        research_document="R",
+        content_plan=_minimal_plan(),
+    )
+    text = inp.outline_for_prompt()
+    assert "Test topic" in text
+    assert "Intro" in text
+    assert "Main" in text
 
 
 def test_draft_prompt_includes_fallback_when_no_brand_spec() -> None:
@@ -133,10 +191,9 @@ def test_draft_prompt_includes_fallback_when_no_brand_spec() -> None:
     )
     draft_input = DraftInput(
         research_document="Research here.",
-        outline="# Intro\n# Main",
+        content_plan=_minimal_plan(),
     )
     agent.run(draft_input)
     assert "No brand specification was provided. Follow the style guide below." in llm.last_prompt
     assert "BRAND AND STYLE" in llm.last_prompt
-    # Regression: no hardcoded BRAND_AND_STYLE_PRIMER (old primer started with this line)
     assert "You are writing in a specific brand voice" not in llm.last_prompt

@@ -45,6 +45,8 @@ export function artifactLabel(name: string): string {
   const labels: Record<string, string> = {
     'brand_spec_prompt.md': 'Brand spec prompt',
     'content_brief.md': 'Content brief',
+    'content_plan.json': 'Content plan (JSON)',
+    'content_plan.md': 'Content plan',
     'research_packet.md': 'Research packet',
     'allowed_claims.json': 'Allowed claims',
     'outline.md': 'Outline',

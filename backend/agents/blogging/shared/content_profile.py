@@ -184,16 +184,28 @@ def build_draft_length_instruction(policy: LengthPolicy) -> str:
     )
 
 
-def build_review_length_context(policy: LengthPolicy) -> str:
-    """Extra context appended to the blog review (outline) prompt."""
+def series_context_block(ctx: Optional[SeriesContext]) -> Optional[str]:
+    """Return series instalment block for planning/draft prompts, or None."""
+    if ctx is None:
+        return None
+    return _series_block(ctx)
+
+
+def build_planning_length_context(policy: LengthPolicy) -> str:
+    """Context for planning prompts: profile, word band, and qualitative guidance."""
     return (
         f"CONTENT PROFILE: {policy.content_profile.value.replace('_', ' ')}\n"
         f"Approximate word target for the finished post: {policy.target_word_count} "
         f"(soft range {policy.soft_min_words}–{policy.soft_max_words}). "
-        "Shape the outline so a draft at this depth fits the profile — not a treatise if the profile "
-        "is short, and not a thin outline if the profile is a deep dive.\n\n"
+        "Shape the plan so a draft at this depth fits the profile — not a treatise if the profile "
+        "is short, and not a thin plan if the profile is a deep dive.\n\n"
         f"{policy.length_guidance}"
     )
+
+
+def build_review_length_context(policy: LengthPolicy) -> str:
+    """Alias for :func:`build_planning_length_context` (legacy name)."""
+    return build_planning_length_context(policy)
 
 
 def resolve_length_policy_from_request_dict(request_dict: Dict[str, Any]) -> LengthPolicy:

@@ -23,7 +23,7 @@ from .errors import (
     LLMUnreachableError,
     PublicationError,
     ResearchError,
-    ReviewError,
+    PlanningError,
     ValidationError,
 )
 from .blog_job_store import (
@@ -47,9 +47,11 @@ from .content_profile import (
     LengthPolicy,
     SeriesContext,
     build_draft_length_instruction,
+    build_planning_length_context,
     build_review_length_context,
     resolve_length_policy,
     resolve_length_policy_from_request_dict,
+    series_context_block,
 )
 from .models import (
     BlogPhase,
@@ -74,7 +76,7 @@ __all__ = [
     "LLMUnreachableError",
     "PublicationError",
     "ResearchError",
-    "ReviewError",
+    "PlanningError",
     "ValidationError",
     "JOB_STATUS_PENDING",
     "JOB_STATUS_RUNNING",
@@ -105,4 +107,5 @@ __all__ = [
     "build_review_length_context",
     "resolve_length_policy",
     "resolve_length_policy_from_request_dict",
+    "series_context_block",
 ]

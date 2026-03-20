@@ -15,7 +15,7 @@ backend/
     blogging/                # Blog content pipeline
     llm_service/             # Centralized LLM client (Ollama, Claude)
     integrations/            # Shared integration contracts
-    api/                     # Legacy blog research/review API
+    api/                     # Legacy blog API surface (see blogging/ for current pipeline)
   unified_api/               # Single-entry-point FastAPI server (port 8080)
     config.py                # Team routing + Temporal settings
     main.py                  # App with team route mounting
@@ -137,6 +137,11 @@ Environment variables for LLM: `SW_LLM_PROVIDER`, `SW_LLM_BASE_URL`, `SW_LLM_MOD
 | `ENABLE_LOG_API` | Exposes HTTP log endpoint |
 | `BLOGGING_MEDIUM_STATS_ROOT` | Optional base dir for Medium stats job `work_dir` (default: `{AGENT_CACHE}/blogging_team/medium_stats_runs`) |
 | `MEDIUM_GOOGLE_REDIRECT_URI` | Optional; fixed OAuth redirect for Medium’s Google identity link (`…/api/integrations/medium/oauth/google/callback`) when the API is behind a proxy |
+| `BLOG_PLANNING_MAX_ITERATIONS` | Blog planning refine loop cap (default 5) |
+| `BLOG_PLANNING_MAX_PARSE_RETRIES` | JSON parse/repair attempts per planning LLM call (default 3) |
+| `BLOG_PLANNING_MODEL` | Optional Ollama model name for **planning only** (same base URL as `SW_LLM_*`) |
+
+**Blogging pipeline:** `research → planning (ContentPlan) → draft → gates`; `POST /research-and-review` runs research + the same planning step. See `backend/agents/blogging/README.md` and repo `CHANGELOG.md`.
 
 **Google browser login (shared):** **`GET/PUT/DELETE /api/integrations/google-browser-login`** stores one Fernet-encrypted Gmail/Google email+password for **any** integration that signs in with Google via Playwright in **Postgres only** (`encrypted_integration_credentials` when `POSTGRES_HOST` is set, e.g. Docker). **Not available** without Postgres (credentials are never stored in SQLite). Code: `unified_api/google_browser_login_credentials.py` — reuse for new integrations when the site uses “Sign in with Google”.
 

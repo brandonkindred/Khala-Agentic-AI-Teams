@@ -13,13 +13,17 @@ export interface AudienceDetails {
   other?: string;
 }
 
-/** Request for POST /research-and-review. */
+/** Request for POST /research-and-review (research + planning; same length options as full pipeline). */
 export interface ResearchAndReviewRequest {
   brief: string;
   title_concept?: string;
   audience?: AudienceDetails | string;
   tone_or_purpose?: string;
   max_results?: number;
+  content_profile?: BlogContentProfile;
+  series_context?: BlogSeriesContext;
+  length_notes?: string;
+  target_word_count?: number;
 }
 
 /** A title choice with probability of success. */
@@ -77,6 +81,8 @@ export interface FullPipelineResponse {
   title_choices: TitleChoiceResponse[];
   outline: string;
   draft_preview?: string;
+  /** Short summary from the approved ContentPlan (topic + narrative flow). */
+  content_plan_summary?: string;
 }
 
 /** Request for POST /medium-stats and /medium-stats-async. */
@@ -120,6 +126,12 @@ export interface BlogJobStatusResponse {
   approved_at?: string;
   approved_by?: string;
   job_type?: string | null;
+  content_plan_summary?: string;
+  planning_iterations_used?: number;
+  parse_retry_count?: number;
+  planning_wall_ms_total?: number;
+  /** When failed during planning, machine-readable reason (e.g. parse_failure). */
+  planning_failure_reason?: string;
 }
 
 /** Metadata for a single artifact (from GET /job/{id}/artifacts). */

@@ -1,12 +1,12 @@
-# Blog Research & Review API
+# Blog Research & Planning API
 
-HTTP API exposing the **research + review** pipeline from the [blogging](../blogging/) agent suite. Produces title choices and a blog outline from a content brief.
+HTTP API exposing **research + planning** from the [blogging](../blogging/) agent suite. Produces title choices and an outline from a content brief via a persisted **ContentPlan** (same planning step as the full pipeline).
 
 ## Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/research-and-review` | Run research and review agents; returns title choices, outline, compiled document |
+| POST | `/research-and-review` | Run research and planning; returns title choices, outline, compiled document |
 | GET | `/health` | Health check |
 
 ## How to Run
@@ -44,15 +44,15 @@ Interactive docs: http://localhost:8000/docs
 }
 ```
 
-`audience` can be an object (`skill_level`, `profession`, `hobbies`, `other`) or a free-text string. `title_concept` and `audience` are optional.
+`audience` can be an object (`skill_level`, `profession`, `hobbies`, `other`) or a free-text string. `title_concept` and `audience` are optional. Optional `content_profile`, `series_context`, `length_notes`, and `target_word_count` match the full pipeline (see blogging OpenAPI / README).
 
 ## Response
 
-- `title_choices` – Top title options with probability of success
-- `outline` – Detailed blog outline with notes for the first draft
+- `title_choices` – Title options with probability of success (from planning)
+- `outline` – Outline derived from the **ContentPlan** (Markdown)
 - `compiled_document` – Formatted research (sources, papers, similar topics)
 - `notes` – High-level synthesis and suggestions
 
 ## Full Blogging Pipeline
 
-This API exposes **research + review** only. For the full pipeline (draft, copy-editor loop, publication), see [blogging/README.md](../blogging/README.md).
+This mount may expose **research + planning** only, depending on deployment. For the full pipeline (planning → draft → copy-editor → gates → publication), see [blogging/README.md](../blogging/README.md) and the blogging service’s `/full-pipeline` routes.
