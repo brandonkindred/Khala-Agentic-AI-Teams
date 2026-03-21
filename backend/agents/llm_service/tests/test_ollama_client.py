@@ -6,13 +6,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from llm_service.clients.ollama import OllamaLLMClient
-from llm_service.interface import LLMJsonParseError, LLMRateLimitError, LLMPermanentError
+from llm_service.interface import LLMPermanentError, LLMRateLimitError
 
 
 def test_ollama_get_max_context_tokens_known_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_CONTEXT_SIZE", raising=False)
     monkeypatch.delenv("SW_LLM_CONTEXT_SIZE", raising=False)
-    client = OllamaLLMClient(model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5)
+    client = OllamaLLMClient(
+        model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5
+    )
     assert client.get_max_context_tokens() == 262144
 
 
@@ -81,3 +83,20 @@ def test_extract_json_tolerates_replacement_char_noise() -> None:
     parsed = client._extract_json(noisy)
     assert parsed["approved"] is False
     assert parsed["summary"] == "ok"
+
+
+def test_extract_json_json_repair_unescaped_quotes_in_strings() -> None:
+    """Models often cite JSON/code with unescaped \" inside JSON string values."""
+    client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+    q = chr(34)
+    broken_invalid = (
+        '{"approved":false,"summary":"Needs fixes","feedback_items":['
+        '{"category":"technical",'
+        f'"issue":"Displays {q}Resource{q}: {q}*{q} which is wrong",'
+        '"suggestion":"Narrow the ARN"}]}'
+    )
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(broken_invalid)
+    parsed = client._extract_json(broken_invalid)
+    assert parsed["approved"] is False
+    assert "Resource" in parsed["feedback_items"][0]["issue"]

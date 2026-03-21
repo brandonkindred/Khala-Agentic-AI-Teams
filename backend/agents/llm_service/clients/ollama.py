@@ -41,12 +41,27 @@ CONTINUATION_CONTEXT_CHARS = 150
 _MAX_LOG_BODY = 2000
 
 # Expected keys for "try every code block" fallback
-_EXPECTED_KEYS = frozenset({
-    "files", "summary", "code", "overview", "issues", "approved", "components",
-    "architecture_document", "diagrams", "decisions",
-    "tasks", "execution_order",
-    "bugs_found", "integration_tests", "unit_tests", "readme_content",
-})
+_EXPECTED_KEYS = frozenset(
+    {
+        "files",
+        "summary",
+        "code",
+        "overview",
+        "issues",
+        "approved",
+        "components",
+        "architecture_document",
+        "diagrams",
+        "decisions",
+        "tasks",
+        "execution_order",
+        "bugs_found",
+        "integration_tests",
+        "unit_tests",
+        "readme_content",
+        "feedback_items",
+    }
+)
 _JSON_NOISE_RE = re.compile(r"[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\uFFFD]")
 
 
@@ -55,9 +70,21 @@ def _parse_retry_config() -> tuple[int, float, float]:
 
     Backoff is exponential: wait initial * 2^attempt after each failure (first retry ~initial seconds).
     """
-    raw_retries = os.environ.get(llm_config.ENV_LLM_MAX_RETRIES) or os.environ.get(llm_config.ENV_LLM_MAX_RETRIES_SW) or "6"
-    raw_initial = os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE) or os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE_SW) or "2"
-    raw_max = os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX) or os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX_SW) or "120"
+    raw_retries = (
+        os.environ.get(llm_config.ENV_LLM_MAX_RETRIES)
+        or os.environ.get(llm_config.ENV_LLM_MAX_RETRIES_SW)
+        or "6"
+    )
+    raw_initial = (
+        os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE)
+        or os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE_SW)
+        or "2"
+    )
+    raw_max = (
+        os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX)
+        or os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX_SW)
+        or "120"
+    )
     try:
         max_retries = max(0, int(raw_retries))
     except ValueError:
@@ -73,7 +100,9 @@ def _parse_retry_config() -> tuple[int, float, float]:
     return max_retries, initial_backoff, backoff_max
 
 
-def _exponential_retry_delay(failed_attempt_index: int, initial_seconds: float, cap_seconds: float) -> float:
+def _exponential_retry_delay(
+    failed_attempt_index: int, initial_seconds: float, cap_seconds: float
+) -> float:
     """Seconds to wait before the next HTTP attempt. failed_attempt_index is 0 after the first failure (waits ~initial_seconds)."""
     base = initial_seconds * (2**failed_attempt_index)
     jitter = random.uniform(0, min(2.0, max(0.25, base * 0.1)))
@@ -89,7 +118,11 @@ def _get_ollama_semaphore() -> threading.BoundedSemaphore:
     global _ollama_semaphore
     with _semaphore_lock:
         if _ollama_semaphore is None:
-            raw = os.environ.get(llm_config.ENV_LLM_MAX_CONCURRENCY) or os.environ.get(llm_config.ENV_LLM_MAX_CONCURRENCY_SW) or "4"
+            raw = (
+                os.environ.get(llm_config.ENV_LLM_MAX_CONCURRENCY)
+                or os.environ.get(llm_config.ENV_LLM_MAX_CONCURRENCY_SW)
+                or "4"
+            )
             try:
                 limit = max(1, int(raw))
             except ValueError:
@@ -131,7 +164,9 @@ class OllamaLLMClient(LLMClient):
         ctx = llm_config.resolve_context_size_for_model(self.model)
         if ctx is not None:
             self._model_num_ctx = ctx
-            logger.info("LLM model %s: using known/context size %s", self.model, self._model_num_ctx)
+            logger.info(
+                "LLM model %s: using known/context size %s", self.model, self._model_num_ctx
+            )
             return self._model_num_ctx
         try:
             url = f"{self.base_url}/api/show"
@@ -139,7 +174,11 @@ class OllamaLLMClient(LLMClient):
             with httpx.Client(timeout=min(30, self.timeout)) as client:
                 resp = client.post(url, json={"model": self.model}, headers=headers)
             if resp.status_code != 200:
-                logger.warning("Ollama /api/show returned %s for model %s; using 16384", resp.status_code, self.model)
+                logger.warning(
+                    "Ollama /api/show returned %s for model %s; using 16384",
+                    resp.status_code,
+                    self.model,
+                )
                 self._model_num_ctx = 16384
                 return self._model_num_ctx
             data = resp.json()
@@ -157,7 +196,9 @@ class OllamaLLMClient(LLMClient):
                         self._model_num_ctx = max(2048, int(ctx_val))
                         return self._model_num_ctx
         except (httpx.HTTPError, KeyError, ValueError, TypeError) as e:
-            logger.warning("Could not fetch Ollama model info for %s: %s; using 16384", self.model, e)
+            logger.warning(
+                "Could not fetch Ollama model info for %s: %s; using 16384", self.model, e
+            )
         self._model_num_ctx = 16384
         return self._model_num_ctx
 
@@ -207,6 +248,20 @@ class OllamaLLMClient(LLMClient):
         s = re.sub(r",\s*([}\]])", r"\1", s)
         return s
 
+    def _parse_with_json_repair(self, s: str) -> Optional[Dict[str, Any]]:
+        """Parse broken LLM JSON (e.g. unescaped quotes inside strings). Uses optional json-repair."""
+        if not (s or "").strip():
+            return None
+        try:
+            from json_repair import loads as json_repair_loads
+        except ImportError:
+            return None
+        try:
+            out = json_repair_loads(s.strip())
+        except Exception:
+            return None
+        return out if isinstance(out, dict) and out else None
+
     def _strip_json_noise(self, s: str) -> str:
         """Drop transport artifacts (BOM/replacement chars/control bytes) from JSON-ish text."""
         if not s:
@@ -225,7 +280,9 @@ class OllamaLLMClient(LLMClient):
         if json_block_match:
             text = json_block_match.group(1).strip()
         else:
-            fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+            fenced_match = re.search(
+                r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.DOTALL | re.IGNORECASE
+            )
             if fenced_match:
                 block_content = fenced_match.group(1).strip()
                 if block_content.lstrip().startswith(("{", "[")):
@@ -279,7 +336,31 @@ class OllamaLLMClient(LLMClient):
                     if isinstance(parsed, dict) and _EXPECTED_KEYS & set(parsed.keys()):
                         return parsed
                 except (json.JSONDecodeError, ValueError):
+                    jr = self._parse_with_json_repair(block)
+                    if jr and _EXPECTED_KEYS & set(jr.keys()):
+                        logger.info(
+                            "LLM JSON parsed via json-repair (fenced block, keys=%s)",
+                            list(jr.keys())[:8],
+                        )
+                        return jr
                     continue
+        # Last resort: json-repair on full text or outermost {...} (fixes unescaped " in string values)
+        candidates: list[str] = []
+        t = text.strip()
+        if t:
+            candidates.append(t)
+        lo, hi = t.find("{"), t.rfind("}")
+        if lo >= 0 and hi > lo:
+            brace_slice = t[lo : hi + 1]
+            if brace_slice not in candidates:
+                candidates.append(brace_slice)
+        for cand in candidates:
+            jr_dict = self._parse_with_json_repair(cand)
+            if jr_dict is not None:
+                logger.info(
+                    "LLM JSON parsed via json-repair fallback (%d top-level keys)", len(jr_dict)
+                )
+                return jr_dict
         logger.error(
             "LLM JSON parse failed. model=%s base_url=%s. Raw content (truncated): %s",
             self.model,
@@ -295,7 +376,11 @@ class OllamaLLMClient(LLMClient):
 
     def _should_enable_thinking(self) -> bool:
         """Enable thinking mode for qwen3.5 models by default; overridable via env."""
-        env_val = (os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING) or os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING_SW) or "").lower()
+        env_val = (
+            os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING)
+            or os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING_SW)
+            or ""
+        ).lower()
         if env_val == "false":
             return False
         return "qwen3.5" in self.model.lower()
@@ -304,7 +389,9 @@ class OllamaLLMClient(LLMClient):
         """Extract content from OpenAI-compatible response. Raises LLMTruncatedError if finish_reason=length."""
         choices = data.get("choices")
         if not choices or not isinstance(choices, list):
-            raise LLMPermanentError("Unexpected response format from LLM: missing or invalid 'choices'")
+            raise LLMPermanentError(
+                "Unexpected response format from LLM: missing or invalid 'choices'"
+            )
         first = choices[0]
         if not isinstance(first, dict):
             raise LLMPermanentError("Unexpected response format from LLM: invalid choice object")
@@ -320,7 +407,10 @@ class OllamaLLMClient(LLMClient):
                 raise LLMTemporaryError(
                     "Empty response (finish_reason=length); treating as transient for retry",
                 )
-            logger.warning("LLM response truncated (finish_reason=length). Partial content: %d chars", len(partial_content))
+            logger.warning(
+                "LLM response truncated (finish_reason=length). Partial content: %d chars",
+                len(partial_content),
+            )
             raise LLMTruncatedError(
                 "Response truncated due to token limit (finish_reason=length)",
                 partial_content=partial_content,
@@ -328,7 +418,9 @@ class OllamaLLMClient(LLMClient):
             )
         msg = first.get("message")
         if not msg or not isinstance(msg, dict):
-            raise LLMPermanentError("Unexpected response format from LLM: missing or invalid 'message'")
+            raise LLMPermanentError(
+                "Unexpected response format from LLM: missing or invalid 'message'"
+            )
         content = msg.get("content")
         if content is None:
             raise LLMPermanentError("Unexpected response format from LLM: missing 'content'")
@@ -343,7 +435,12 @@ class OllamaLLMClient(LLMClient):
         return content_str
 
     def _ollama_post(
-        self, payload: dict, max_retries: int, initial_backoff: float, backoff_max: float, sem: threading.BoundedSemaphore
+        self,
+        payload: dict,
+        max_retries: int,
+        initial_backoff: float,
+        backoff_max: float,
+        sem: threading.BoundedSemaphore,
     ) -> str:
         """POST to /v1/chat/completions; return raw content. Raises LLM* on non-200 or malformed."""
         url = f"{self.base_url}/v1/chat/completions"
@@ -377,7 +474,9 @@ class OllamaLLMClient(LLMClient):
                                 self.base_url,
                                 body,
                             )
-                            raise LLMPermanentError(f"Malformed LLM response (invalid JSON): {e}") from e
+                            raise LLMPermanentError(
+                                f"Malformed LLM response (invalid JSON): {e}"
+                            ) from e
                         try:
                             return self._parse_response_content(data)
                         except LLMPermanentError:
@@ -398,7 +497,12 @@ class OllamaLLMClient(LLMClient):
                         )
                         if attempt < max_retries:
                             wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
-                            logger.warning("LLM 429 (attempt %d/%d). Retrying in %.1fs", attempt + 1, max_retries + 1, wait)
+                            logger.warning(
+                                "LLM 429 (attempt %d/%d). Retrying in %.1fs",
+                                attempt + 1,
+                                max_retries + 1,
+                                wait,
+                            )
                             time.sleep(wait)
                             continue
                         self._log_llm_server_error(
@@ -438,7 +542,9 @@ class OllamaLLMClient(LLMClient):
                             attempt + 1,
                             reason="client error",
                         )
-                        if status == 404 and ("not found" in err_text.lower() or "model" in err_text.lower()):
+                        if status == 404 and (
+                            "not found" in err_text.lower() or "model" in err_text.lower()
+                        ):
                             raise LLMPermanentError(
                                 f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text[:200]}",
                                 status_code=status,
@@ -446,13 +552,16 @@ class OllamaLLMClient(LLMClient):
                         if status == 401:
                             auth_hint = (
                                 " Set OLLAMA_API_KEY (or LLM_OLLAMA_API_KEY / SW_LLM_OLLAMA_API_KEY) for Ollama Cloud."
-                                if not headers else " Check that the key is valid and not expired."
+                                if not headers
+                                else " Check that the key is valid and not expired."
                             )
                             raise LLMPermanentError(
                                 f"LLM unauthorized (401): {err_text[:200]}.{auth_hint}",
                                 status_code=status,
                             )
-                        raise LLMPermanentError(f"LLM client error {status}: {err_text}", status_code=status)
+                        raise LLMPermanentError(
+                            f"LLM client error {status}: {err_text}", status_code=status
+                        )
                     self._log_llm_server_error(
                         status,
                         response.text,
@@ -460,7 +569,10 @@ class OllamaLLMClient(LLMClient):
                         attempt + 1,
                         reason="unexpected status",
                     )
-                    raise LLMPermanentError(f"Unexpected LLM response status {status}: {response.text[:200]}", status_code=status)
+                    raise LLMPermanentError(
+                        f"Unexpected LLM response status {status}: {response.text[:200]}",
+                        status_code=status,
+                    )
             except (LLMPermanentError, LLMRateLimitError, LLMTruncatedError):
                 raise
             except LLMTemporaryError as e:
@@ -569,7 +681,9 @@ class OllamaLLMClient(LLMClient):
         )
         max_tokens = kwargs.pop("max_tokens", None)
         if max_tokens is None:
-            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS) or os.environ.get(llm_config.ENV_LLM_MAX_TOKENS_SW)
+            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS) or os.environ.get(
+                llm_config.ENV_LLM_MAX_TOKENS_SW
+            )
             if env_max:
                 try:
                     max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
@@ -701,7 +815,9 @@ class OllamaLLMClient(LLMClient):
             }
 
             try:
-                next_content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+                next_content = self._ollama_post(
+                    payload, max_retries, backoff_base, backoff_max, sem
+                )
                 accumulated = self._merge_continuation(accumulated, next_content)
                 return self._extract_json(accumulated)
             except LLMTruncatedError as e2:
@@ -728,8 +844,12 @@ class OllamaLLMClient(LLMClient):
         """Return raw text from the model (no JSON mode)."""
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         sem = _get_ollama_semaphore()
-        logger.info("LLM request (text): provider=ollama model=%s base_url=%s", self.model, self.base_url)
-        env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS) or os.environ.get(llm_config.ENV_LLM_MAX_TOKENS_SW)
+        logger.info(
+            "LLM request (text): provider=ollama model=%s base_url=%s", self.model, self.base_url
+        )
+        env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS) or os.environ.get(
+            llm_config.ENV_LLM_MAX_TOKENS_SW
+        )
         if max_tokens is None:
             if env_max:
                 try:
@@ -747,7 +867,10 @@ class OllamaLLMClient(LLMClient):
             "think": self._should_enable_thinking(),
         }
         if system_prompt:
-            payload["messages"] = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
+            payload["messages"] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ]
         try:
             return self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
         except LLMTruncatedError as e:
@@ -790,7 +913,9 @@ class OllamaLLMClient(LLMClient):
                 messages.append({"role": "system", "content": system_message})
             messages.append({"role": "user", "content": prompt})
             messages.append({"role": "assistant", "content": accumulated})
-            messages.append({"role": "user", "content": self._continuation_user_message(accumulated)})
+            messages.append(
+                {"role": "user", "content": self._continuation_user_message(accumulated)}
+            )
             payload = {
                 "model": self.model,
                 "temperature": temperature,
@@ -799,7 +924,9 @@ class OllamaLLMClient(LLMClient):
                 "think": self._should_enable_thinking(),
             }
             try:
-                next_content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+                next_content = self._ollama_post(
+                    payload, max_retries, backoff_base, backoff_max, sem
+                )
                 accumulated = self._merge_continuation(accumulated, next_content)
                 return accumulated
             except LLMTruncatedError as e2:

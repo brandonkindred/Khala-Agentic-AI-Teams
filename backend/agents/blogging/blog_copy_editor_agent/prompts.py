@@ -86,4 +86,6 @@ Return a single JSON object with exactly these keys:
 
 Include every issue you find in feedback_items; do not cap the number. For each item, be thorough: the writer should never have to infer what you mean.
 
+**JSON string safety:** In "issue", "suggestion", and "location", any literal double-quote characters inside the string must be escaped as \\". Alternatively use single quotes for nested quotes (e.g. 'Resource': '*' instead of "Resource": "*"). Unescaped " inside a JSON string breaks parsing.
+
 Respond with valid JSON only. No explanatory text, markdown, or code fences."""
