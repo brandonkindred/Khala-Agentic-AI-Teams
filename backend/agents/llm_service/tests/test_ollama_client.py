@@ -74,6 +74,22 @@ def test_ollama_streams_and_accumulates_chunks(monkeypatch: pytest.MonkeyPatch) 
     assert result == {"key": "value"}
 
 
+def test_ollama_sse_no_space_after_colon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SSE lines with data:{...} (no space after colon) must be parsed correctly."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    sse_lines = [
+        'data:{"choices":[{"delta":{"content":"{\\"v\\":1}"},"finish_reason":null}]}',
+        'data:{"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data:[DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("test", temperature=0)
+    assert result == {"v": 1}
+
+
 def test_ollama_complete_json_429_raises_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.setenv("LLM_MAX_RETRIES", "0")

@@ -478,9 +478,9 @@ class OllamaLLMClient(LLMClient):
                                 finish_reason: Optional[str] = None
                                 tool_call_buffers: dict[int, dict] = {}
                                 for line in response.iter_lines():
-                                    if not line or not line.startswith("data: "):
+                                    if not line or not line.startswith("data:"):
                                         continue
-                                    chunk_data = line[6:]
+                                    chunk_data = line[5:].lstrip()
                                     if chunk_data.strip() == "[DONE]":
                                         break
                                     try:
