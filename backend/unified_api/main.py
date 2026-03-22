@@ -113,6 +113,7 @@ SHUTDOWN_HOOKS: Dict[str, tuple] = {
     "nutrition_meal_planning": ("nutrition_meal_planning_team.shared.job_store", "mark_all_running_jobs_failed"),
     "planning_v3": ("planning_v3_team.shared.job_store", "mark_all_running_jobs_failed"),
     "sales_team": ("sales_team.api.main", "mark_all_running_jobs_failed"),
+    "road_trip_planning": ("road_trip_planning_team.shared.job_store", "mark_all_running_jobs_failed"),
 }
 
 
@@ -365,6 +366,20 @@ def _try_mount_sales_team(app: FastAPI) -> bool:
         return False
 
 
+def _try_mount_road_trip_planning(app: FastAPI) -> bool:
+    """Mount Road Trip Planning team API."""
+    try:
+        from road_trip_planning_team.api.main import app as road_trip_app
+
+        config = TEAM_CONFIGS["road_trip_planning"]
+        app.mount(config.prefix, road_trip_app)
+        logger.info("Mounted %s at %s", config.name, config.prefix)
+        return True
+    except ImportError as e:
+        logger.warning("Could not mount Road Trip Planning API: %s", e)
+        return False
+
+
 def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
     """Mount all enabled team APIs and return mount status."""
     mount_functions = {
@@ -384,6 +399,7 @@ def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
         "coding_team": _try_mount_coding_team,
         "studio_grid": _try_mount_studio_grid,
         "sales_team": _try_mount_sales_team,
+        "road_trip_planning": _try_mount_road_trip_planning,
     }
 
     results = {}

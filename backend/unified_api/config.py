@@ -131,6 +131,15 @@ TEAM_CONFIGS: Dict[str, TeamConfig] = {
         ),
         tags=["sales", "crm", "pipeline", "outreach"],
     ),
+    "road_trip_planning": TeamConfig(
+        name="Road Trip Planning",
+        prefix="/api/road-trip-planning",
+        description=(
+            "Multi-agent road trip planner: traveler profiling, route optimization, "
+            "activity recommendations, logistics, and day-by-day itinerary generation"
+        ),
+        tags=["travel", "road-trip", "itinerary", "planning"],
+    ),
 }
 
 
