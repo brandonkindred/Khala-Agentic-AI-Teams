@@ -103,11 +103,15 @@ class LLMClient(ABC):
         *,
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """
         Run the model with the given prompt and return a JSON-decoded dict.
 
+        Pass ``tools`` (OpenAI-compatible tool definitions) to enable function/tool calling.
+        When the model invokes a tool, the returned dict has the key ``__tool_calls__`` whose
+        value is a list of tool-call objects (id, type, function.name, function.arguments).
         Optional kwargs may include expected_keys, decomposition_hints for PA-style robust extraction.
         """
         ...
@@ -119,16 +123,19 @@ class LLMClient(ABC):
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
     ) -> str:
         """
         Run the model and return raw text.
 
         Override in implementations that support it. Default uses complete_json and extracts text.
+        Pass ``tools`` for function/tool calling; tool-call responses are returned as JSON strings.
         """
         result = self.complete_json(
             prompt,
             temperature=temperature,
             system_prompt=system_prompt,
+            tools=tools,
         )
         if isinstance(result, dict) and len(result) == 1 and "text" in result:
             return str(result["text"])

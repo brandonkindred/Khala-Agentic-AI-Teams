@@ -83,6 +83,7 @@ class DummyLLMClient(LLMClient):
         *,
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         lowered = prompt.lower()
