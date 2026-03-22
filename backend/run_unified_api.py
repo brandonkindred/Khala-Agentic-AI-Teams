@@ -25,7 +25,6 @@ Example:
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -51,9 +50,8 @@ if str(_project_root) not in sys.path:
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
-import uvicorn
-
-from unified_api.config import DEFAULT_HOST, DEFAULT_PORT
+import uvicorn  # noqa: E402
+from unified_api.config import DEFAULT_HOST, DEFAULT_PORT  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -127,8 +125,8 @@ def main() -> None:
     logger.info("Workers: %d", args.workers)
     logger.info("Log Level: %s", args.log_level)
     logger.info("")
-    logger.info("API Documentation: http://%s:%d/docs", 
-                "localhost" if args.host == "0.0.0.0" else args.host, 
+    logger.info("API Documentation: http://%s:%d/docs",
+                "localhost" if args.host == "0.0.0.0" else args.host,
                 args.port)
     logger.info("Health Check: http://%s:%d/health",
                 "localhost" if args.host == "0.0.0.0" else args.host,

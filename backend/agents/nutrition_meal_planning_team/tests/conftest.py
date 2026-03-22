@@ -4,8 +4,6 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
-
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 _backend_dir = _agents_dir.parent
 for _d in (_backend_dir, _agents_dir):
