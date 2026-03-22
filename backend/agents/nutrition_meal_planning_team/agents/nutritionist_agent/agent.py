@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from llm_service import LLMClient, LLMJsonParseError
+from llm_service import LLMClient, LLMError, LLMJsonParseError
 
 from ...models import ClientProfile, DailyTargets, NutritionPlan
 
@@ -43,8 +43,8 @@ class NutritionistAgent:
                 system_prompt=SYSTEM_PROMPT,
                 expected_keys=["daily_targets", "balance_guidelines", "foods_to_emphasize", "foods_to_avoid"],
             )
-        except LLMJsonParseError as e:
-            logger.warning("Nutritionist JSON extraction failed: %s", e)
+        except (LLMJsonParseError, LLMError) as e:
+            logger.warning("Nutritionist LLM call failed, returning empty plan: %s", e)
             return NutritionPlan(generated_at=datetime.now(timezone.utc).isoformat())
 
         if "daily_targets" in data and isinstance(data["daily_targets"], dict):

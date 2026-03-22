@@ -5,8 +5,12 @@ Run from software_engineering_team directory:
   cd software_engineering_team && pytest
 """
 
+import os
 import sys
 from pathlib import Path
+
+# Disable LLM retries so tests that hit an unavailable LLM fail fast.
+os.environ.setdefault("LLM_MAX_RETRIES", "0")
 
 # Add software_engineering_team and agents to path so imports resolve.
 # software_engineering_team must come first so its modules take precedence over agents/.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from llm_service import LLMClient, LLMJsonParseError
+from llm_service import LLMClient, LLMError, LLMJsonParseError
 
 from ...models import (
     ClientProfile,
@@ -90,8 +90,8 @@ class MealPlanningAgent:
                 system_prompt=SYSTEM_PROMPT,
                 expected_keys=["suggestions"],
             )
-        except LLMJsonParseError as e:
-            logger.warning("Meal planning JSON extraction failed: %s", e)
+        except (LLMJsonParseError, LLMError) as e:
+            logger.warning("Meal planning LLM call failed: %s", e)
             return []
 
         suggestions = data.get("suggestions") or []

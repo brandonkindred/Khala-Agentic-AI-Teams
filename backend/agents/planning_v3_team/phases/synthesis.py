@@ -41,10 +41,9 @@ def run_synthesis(
         constraints = dict(client_context.constraints or {})
         constraints["market_research_summary"] = summary or ""
         constraints["market_research_insights"] = insights
-        updated = ClientContext(
-            **client_context.model_dump(),
-            constraints=constraints,
-        )
+        dump = client_context.model_dump()
+        dump["constraints"] = constraints
+        updated = ClientContext(**dump)
         context_update["client_context"] = updated
 
     return context_update, artifacts

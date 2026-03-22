@@ -248,19 +248,104 @@ class OllamaLLMClient(LLMClient):
         s = re.sub(r",\s*([}\]])", r"\1", s)
         return s
 
+    def _escape_unescaped_quotes(self, s: str) -> str:
+        """Escape unescaped double quotes inside JSON string values.
+
+        Uses a state machine that tracks whether we are inside a string.
+        Quotes that appear mid-string and are not followed by a structural
+        JSON character (:, ,, }, ]) are treated as unescaped inner quotes
+        and get a backslash prepended.
+        """
+        result: list[str] = []
+        in_string = False
+        i = 0
+        n = len(s)
+        while i < n:
+            c = s[i]
+            if c == "\\" and in_string:
+                # Consume escape sequence as-is
+                result.append(c)
+                i += 1
+                if i < n:
+                    result.append(s[i])
+                    i += 1
+                continue
+            if c == '"':
+                if not in_string:
+                    in_string = True
+                    result.append(c)
+                else:
+                    # Determine if this closes the string by checking the
+                    # next non-whitespace character.
+                    j = i + 1
+                    while j < n and s[j] in " \t\n\r":
+                        j += 1
+                    if j >= n or s[j] in ":,}]":
+                        in_string = False
+                        result.append(c)
+                    else:
+                        # Mid-string quote: escape it
+                        result.append("\\")
+                        result.append(c)
+            else:
+                result.append(c)
+            i += 1
+        return "".join(result)
+
+    def _is_truncated_json(self, s: str) -> bool:
+        """Return True if ``s`` appears to be truncated (unclosed brackets or string)."""
+        t = s.strip()
+        if t.count("{") != t.count("}"):
+            return True
+        if t.count("[") != t.count("]"):
+            return True
+        # Check for unclosed string (odd number of unescaped quotes)
+        in_str = False
+        i = 0
+        while i < len(t):
+            c = t[i]
+            if c == "\\" and in_str:
+                i += 2
+                continue
+            if c == '"':
+                in_str = not in_str
+            i += 1
+        return in_str
+
     def _parse_with_json_repair(self, s: str) -> Optional[Dict[str, Any]]:
-        """Parse broken LLM JSON (e.g. unescaped quotes inside strings). Uses optional json-repair."""
+        """Parse broken LLM JSON (e.g. unescaped quotes inside strings).
+
+        Skips repair entirely for truncated JSON (unclosed brackets/strings)
+        so that truncated responses surface as parse errors rather than being
+        silently completed with invented content.
+
+        For syntactically broken but complete JSON (e.g. unescaped inner
+        quotes), first tries the built-in ``_escape_unescaped_quotes``
+        heuristic, then falls back to the optional *json-repair* library.
+        """
         if not (s or "").strip():
             return None
+        # Do not repair truncated JSON — return None so the caller raises.
+        if self._is_truncated_json(s.strip()):
+            return None
+        # Built-in heuristic: escape unescaped inner quotes
+        try:
+            repaired = self._escape_unescaped_quotes(s.strip())
+            out = json.loads(repaired)
+            if isinstance(out, dict) and out:
+                return out
+        except Exception:
+            pass
+        # Optional external library
         try:
             from json_repair import loads as json_repair_loads
+
+            out = json_repair_loads(s.strip())
+            return out if isinstance(out, dict) and out else None
         except ImportError:
             return None
-        try:
-            out = json_repair_loads(s.strip())
         except Exception:
             return None
-        return out if isinstance(out, dict) and out else None
 
     def _strip_json_noise(self, s: str) -> str:
         """Drop transport artifacts (BOM/replacement chars/control bytes) from JSON-ish text."""
@@ -674,6 +759,7 @@ class OllamaLLMClient(LLMClient):
                 httpx.RemoteProtocolError,
                 httpx.WriteError,
                 httpx.ReadError,
+                httpx.ProxyError,
             ) as e:
                 hint = ""
                 if "name resolution" in str(e).lower() or "temporary failure" in str(e).lower():

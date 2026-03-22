@@ -56,7 +56,11 @@ class UserProfileStore:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_user_dir(self, user_id: str) -> Path:
-        """Get the profile directory for a user."""
+        """Get the profile directory for a user (does not create it)."""
+        return self.storage_dir / user_id
+
+    def _ensure_user_dir(self, user_id: str) -> Path:
+        """Get the profile directory for a user, creating it if necessary."""
         user_dir = self.storage_dir / user_id
         user_dir.mkdir(parents=True, exist_ok=True)
         return user_dir
@@ -143,7 +147,7 @@ class UserProfileStore:
             profile: The UserProfile to save
         """
         profile.updated_at = datetime.utcnow().isoformat()
-        self._get_user_dir(profile.user_id)
+        self._ensure_user_dir(profile.user_id)
         
         profile_dict = profile.model_dump()
         

@@ -40,7 +40,7 @@ class LLMTemporaryError(LLMError):
     """Raised when the LLM returns 5xx or network errors and retries are exhausted."""
 
 
-class LLMUnreachableAfterRetriesError(LLMError):
+class LLMUnreachableAfterRetriesError(LLMTemporaryError):
     """Raised when the caller exhausted retries and could not reach the LLM. Orchestrator should pause job."""
 
 
