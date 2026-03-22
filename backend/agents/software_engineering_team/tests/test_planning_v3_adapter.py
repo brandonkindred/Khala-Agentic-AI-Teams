@@ -3,8 +3,7 @@
 from pathlib import Path
 
 import pytest
-
-from planning_v3_adapter import adapt_planning_v3_result, PlanningV2AdapterResult
+from planning_v3_adapter import PlanningV2AdapterResult, adapt_planning_v3_result
 
 
 def test_adapt_planning_v3_result_success_with_handoff() -> None:

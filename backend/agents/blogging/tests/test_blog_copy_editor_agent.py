@@ -4,10 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
-
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput, CopyEditorOutput
-from llm_service import DummyLLMClient
 
+from llm_service import DummyLLMClient
 
 # Inline style guide passed at agent init so tests do not load the default file.
 _TEST_STYLE_GUIDE = "Clear, conversational prose at ~8th grade. No em dashes."

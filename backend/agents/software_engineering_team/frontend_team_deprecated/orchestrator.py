@@ -12,27 +12,32 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from frontend_team_deprecated.feature_agent import FrontendExpertAgent, FrontendInput
+from frontend_team_deprecated.feature_agent.agent import (
+    _apply_frontend_build_fix_edits,
+    _extract_affected_file_paths_from_frontend_build_errors,
+    _read_frontend_affected_files_code,
+)
+from frontend_team_deprecated.feature_agent.models import FrontendOutput, FrontendWorkflowResult
+
 from llm_service import LLMClient
 from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
 from software_engineering_team.shared.repo_utils import (
-    int_env as _int_env,
+    FRONTEND_EXTENSIONS,
     read_repo_code,
     truncate_for_context,
-    FRONTEND_EXTENSIONS,
+)
+from software_engineering_team.shared.repo_utils import (
+    int_env as _int_env,
 )
 from software_engineering_team.shared.task_utils import (
     task_requirements,
     task_requirements_with_expectations,
 )
 
-from frontend_team_deprecated.feature_agent import FrontendExpertAgent, FrontendInput
-from frontend_team_deprecated.feature_agent.agent import (
-    _extract_affected_file_paths_from_frontend_build_errors,
-    _read_frontend_affected_files_code,
-    _apply_frontend_build_fix_edits,
-)
-from frontend_team_deprecated.feature_agent.models import FrontendOutput, FrontendWorkflowResult
-
+from .build_release import BuildReleaseAgent, BuildReleaseInput
+from .design_system import DesignSystemAgent, DesignSystemInput
+from .frontend_architect import FrontendArchitectAgent, FrontendArchitectInput
 from .models import (
     DesignSystemOutput,
     FrontendArchitectOutput,
@@ -40,18 +45,17 @@ from .models import (
     UXDesignerOutput,
     build_feature_implementation_context,
 )
-from .ux_designer import UXDesignerAgent, UXDesignerInput
-from .ui_designer import UIDesignerAgent, UIDesignerInput
-from .design_system import DesignSystemAgent, DesignSystemInput
-from .frontend_architect import FrontendArchitectAgent, FrontendArchitectInput
-from .ux_engineer import UXEngineerAgent, UXEngineerInput
 from .performance_engineer import PerformanceEngineerAgent, PerformanceEngineerInput
-from .build_release import BuildReleaseAgent, BuildReleaseInput
+from .ui_designer import UIDesignerAgent, UIDesignerInput
+from .ux_designer import UXDesignerAgent, UXDesignerInput
+from .ux_engineer import UXEngineerAgent, UXEngineerInput
 
 logger = logging.getLogger(__name__)
 
 
 MAX_CODE_REVIEW_ITERATIONS = _int_env("SW_MAX_CODE_REVIEW_ITERATIONS", 100)
+MAX_EXISTING_CODE_CHARS = 40_000
+MAX_API_SPEC_CHARS = 20_000
 MAX_CLARIFICATION_REFINEMENTS = _int_env("SW_MAX_CLARIFICATION_REFINEMENTS", 100)
 MAX_SAME_BUILD_FAILURES = _int_env("SW_MAX_SAME_BUILD_FAILURES", 3)
 # Frontend-specific checklists for shared agents
@@ -155,7 +159,10 @@ class FrontendOrchestratorAgent:
             delete_branch,
             merge_branch,
         )
-        from software_engineering_team.shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
+        from software_engineering_team.shared.repo_writer import (
+            NO_FILES_TO_WRITE_MSG,
+            write_agent_output,
+        )
 
         task_id = task.id
         branch_name = f"feature/{task_id}"
@@ -176,7 +183,9 @@ class FrontendOrchestratorAgent:
                 failure_reason=f"Feature branch failed: {e}",
             )
 
-        from software_engineering_team.shared.command_runner import ensure_frontend_dependencies_installed
+        from software_engineering_team.shared.command_runner import (
+            ensure_frontend_dependencies_installed,
+        )
         install_result = ensure_frontend_dependencies_installed(repo_path)
         if not install_result.success:
             checkout_branch(repo_path, DEVELOPMENT_BRANCH)
@@ -520,7 +529,10 @@ class FrontendOrchestratorAgent:
 
             suggested_tests_from_qa = None
             code_on_branch = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
-            from software_engineering_team.shared.context_sizing import compute_code_review_total_chars, compute_existing_code_chars
+            from software_engineering_team.shared.context_sizing import (
+                compute_code_review_total_chars,
+                compute_existing_code_chars,
+            )
             max_code = compute_existing_code_chars(self.feature_agent.llm)
             max_review = compute_code_review_total_chars(self.feature_agent.llm)
             existing_code_ctx = _truncate_for_context(code_on_branch, max_code)
@@ -780,6 +792,7 @@ class FrontendOrchestratorAgent:
     ) -> None:
         """Run DBC comments agent on frontend code."""
         from technical_writers.dbc_comments_agent.models import DbcCommentsInput
+
         from software_engineering_team.shared.git_utils import write_files_and_commit
 
         try:

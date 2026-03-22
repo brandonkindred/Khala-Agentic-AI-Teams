@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
-
 from build_fix_specialist.models import CodeEdit
+from pydantic import BaseModel, Field
 
 
 class LintIssue(BaseModel):

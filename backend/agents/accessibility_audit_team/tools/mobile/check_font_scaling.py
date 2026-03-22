@@ -4,7 +4,7 @@ Tool: mobile.check_font_scaling
 Test dynamic type / font scaling behavior.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Dict, List, Literal
 
 from pydantic import BaseModel, Field
 

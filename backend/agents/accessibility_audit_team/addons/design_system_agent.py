@@ -10,16 +10,14 @@ Tools:
 - designsystem.check_tokens
 """
 
-from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
 import uuid
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 from ..models import (
     A11yContract,
     ComponentInventory,
-    PatternCluster,
     Surface,
 )
 

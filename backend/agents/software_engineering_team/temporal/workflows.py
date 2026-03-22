@@ -16,11 +16,11 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from software_engineering_team.temporal import activities as _activities
     from software_engineering_team.temporal.constants import (
-        TASK_QUEUE,
-        STANDALONE_TYPE_FRONTEND,
         STANDALONE_TYPE_BACKEND,
+        STANDALONE_TYPE_FRONTEND,
         STANDALONE_TYPE_PLANNING,
         STANDALONE_TYPE_PRODUCT_ANALYSIS,
+        TASK_QUEUE,
     )
 
 RUN_ORCHESTRATOR_TIMEOUT = timedelta(seconds=48 * 3600)

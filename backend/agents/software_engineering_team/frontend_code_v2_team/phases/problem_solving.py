@@ -22,8 +22,8 @@ from ..models import (
     ToolAgentKind,
     ToolAgentPhaseInput,
 )
-from ..output_templates import parse_problem_solving_single_issue_template, parse_batch_fix_template
-from ..prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT, BATCH_FIX_PROMPT, TYPESCRIPT_CONVENTIONS
+from ..output_templates import parse_batch_fix_template, parse_problem_solving_single_issue_template
+from ..prompts import BATCH_FIX_PROMPT, PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT, TYPESCRIPT_CONVENTIONS
 
 logger = logging.getLogger(__name__)
 

@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
+from llm_service import LLMClient
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_chunk_chars,
     compute_code_review_existing_codebase_chars,
     compute_code_review_spec_excerpt_chars,
 )
-from llm_service import LLMClient
 
 from .models import ChunkReviewInput, ChunkReviewOutput
 from .prompts import CODE_REVIEW_PROMPT
@@ -61,11 +61,11 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     context_parts = [
         CHUNK_REVIEW_NOTE,
         f"**Files in this chunk:** {input_data.file_path_or_label}",
-        f"**Language:** python" if "def " in code_chunk[:500] else "**Language:** typescript",
+        "**Language:** python" if "def " in code_chunk[:500] else "**Language:** typescript",
         f"**Task description:** {input_data.task_description}",
     ]
     if input_data.task_requirements:
-        context_parts.extend(["", f"**Task requirements:**", input_data.task_requirements])
+        context_parts.extend(["", "**Task requirements:**", input_data.task_requirements])
     if input_data.acceptance_criteria:
         context_parts.extend([
             "",

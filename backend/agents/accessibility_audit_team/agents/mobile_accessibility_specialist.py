@@ -5,15 +5,13 @@ Owns: iOS/Android testing, platform-specific issues, device repro steps
 Outputs: Mobile findings with platform remediation and verification
 """
 
-from typing import Any, Dict, List, Optional
 import uuid
+from typing import Any, Dict, List
 
-from .base import AgentMessage, BaseSpecialistAgent
 from ..models import (
     Finding,
     FindingState,
     IssueType,
-    MobileAppTarget,
     Phase,
     Scope,
     Severity,
@@ -21,17 +19,18 @@ from ..models import (
     WCAGMapping,
 )
 from ..tools.mobile import (
-    record_screen_reader_flow,
-    check_touch_targets,
     check_font_scaling,
+    check_touch_targets,
+    record_screen_reader_flow,
 )
-from ..tools.mobile.record_screen_reader_flow import (
-    RecordScreenReaderFlowInput,
-    DeviceInfo,
-    AppInfo,
-)
-from ..tools.mobile.check_touch_targets import CheckTouchTargetsInput
 from ..tools.mobile.check_font_scaling import CheckFontScalingInput
+from ..tools.mobile.check_touch_targets import CheckTouchTargetsInput
+from ..tools.mobile.record_screen_reader_flow import (
+    AppInfo,
+    DeviceInfo,
+    RecordScreenReaderFlowInput,
+)
+from .base import AgentMessage, BaseSpecialistAgent
 
 
 class MobileAccessibilitySpecialist(BaseSpecialistAgent):
@@ -61,7 +60,7 @@ class MobileAccessibilitySpecialist(BaseSpecialistAgent):
         - DISCOVERY: Test mobile apps, draft findings
         """
         phase = context.get("phase", Phase.DISCOVERY)
-        audit_id = context.get("audit_id", "")
+        context.get("audit_id", "")
 
         if phase == Phase.DISCOVERY:
             return await self._handle_discovery(context)
@@ -117,7 +116,7 @@ class MobileAccessibilitySpecialist(BaseSpecialistAgent):
                         surface=surface,
                         issue_type=IssueType.NAME_ROLE_VALUE,
                         severity=Severity.HIGH,
-                        title=f"Screen reader announcement issue",
+                        title="Screen reader announcement issue",
                         summary=f"Element '{announcement.element}' announces incorrectly",
                         expected=announcement.expected,
                         actual=announcement.announcement,
@@ -134,7 +133,7 @@ class MobileAccessibilitySpecialist(BaseSpecialistAgent):
                     surface=surface,
                     issue_type=IssueType.NAME_ROLE_VALUE,
                     severity=Severity.CRITICAL,
-                    title=f"Missing accessibility label",
+                    title="Missing accessibility label",
                     summary=f"Element '{missing}' has no accessibility label",
                     expected="Accessible name that describes the element's purpose",
                     actual="No accessible name present",
@@ -159,7 +158,7 @@ class MobileAccessibilitySpecialist(BaseSpecialistAgent):
                     surface=surface,
                     issue_type=IssueType.TARGET_SIZE,
                     severity=Severity.MEDIUM,
-                    title=f"Touch target too small",
+                    title="Touch target too small",
                     summary=f"Element has touch target of {violation.size_px}px, below minimum of {violation.required_px}px",
                     expected=f"Touch target of at least {violation.required_px}px",
                     actual=f"Touch target is {violation.size_px}px",

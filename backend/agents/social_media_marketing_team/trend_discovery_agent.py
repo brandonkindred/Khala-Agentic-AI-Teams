@@ -14,10 +14,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from llm_service import LLMClient, LLMJsonParseError
-
 from blog_research_agent.models import CandidateResult, SearchQuery
 from blog_research_agent.tools.web_search import OllamaWebSearch, WebSearchError
+
+from llm_service import LLMClient, LLMJsonParseError
 
 from .trend_models import TrendDigest, TrendingTopic
 

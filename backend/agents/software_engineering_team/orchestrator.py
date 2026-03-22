@@ -16,18 +16,18 @@ from __future__ import annotations
 
 import logging
 import os
+
+# Path setup when run as module
+import sys
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-# Path setup when run as module
-import sys
 _team_dir = Path(__file__).resolve().parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
@@ -35,54 +35,49 @@ _arch_dir = _team_dir / "architect-agents"
 if _arch_dir.exists() and str(_arch_dir) not in sys.path:
     sys.path.insert(0, str(_arch_dir))
 
-from software_engineering_team.shared.git_utils import (
-    DEVELOPMENT_BRANCH,
-    checkout_branch,
-    create_feature_branch,
-    delete_branch,
-    ensure_development_branch,
-    merge_branch,
-)
-from llm_service import (
+# Plan dir: kept in planning_team (also used by planning_consolidation; shared/plan_dir would require moving consolidation)
+from planning_team.plan_dir import ensure_plan_dir  # noqa: E402
+
+from llm_service import (  # noqa: E402
+    OLLAMA_WEEKLY_LIMIT_MESSAGE,
     LLMError,
     LLMJsonParseError,
     LLMPermanentError,
     LLMRateLimitError,
     LLMTemporaryError,
-    LLMTruncatedError,
-    OLLAMA_WEEKLY_LIMIT_MESSAGE,
     get_client,
 )
-from software_engineering_team.shared.job_store import (
+from software_engineering_team.shared.development_plan_writer import (  # noqa: E402
+    write_architecture_plan,
+    write_tech_lead_plan,
+)
+from software_engineering_team.shared.execution_tracker import execution_tracker  # noqa: E402
+from software_engineering_team.shared.git_utils import (  # noqa: E402
+    DEVELOPMENT_BRANCH,
+    checkout_branch,
+)
+from software_engineering_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_AGENT_CRASH,
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
-    JOB_STATUS_RUNNING,
     JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
+    JOB_STATUS_RUNNING,
     LLM_UNREACHABLE_AFTER_RETRIES,
-    update_job,
-    update_task_state,
-    update_job_team_progress,
     add_pending_questions,
-    is_waiting_for_answers,
-    is_cancel_requested,
     get_job,
+    is_cancel_requested,
+    is_waiting_for_answers,
+    update_job,
+    update_job_team_progress,
+    update_task_state,
 )
-from software_engineering_team.shared.command_runner import run_command_with_nvm
-from software_engineering_team.shared.execution_tracker import execution_tracker
-# Plan dir: kept in planning_team (also used by planning_consolidation; shared/plan_dir would require moving consolidation)
-from planning_team.plan_dir import ensure_plan_dir
-from software_engineering_team.shared.development_plan_writer import (
-    write_architecture_plan,
-    write_features_and_functionality_plan,
-    write_project_overview_plan,
-    write_tech_lead_plan,
+from software_engineering_team.shared.models import TaskUpdate  # noqa: E402
+from software_engineering_team.shared.repo_utils import (  # noqa: E402
+    read_repo_code,
+    truncate_for_context,
 )
-from software_engineering_team.shared.models import TaskUpdate, model_to_dict
-from software_engineering_team.shared.repo_writer import write_agent_output
-from software_engineering_team.shared.repo_utils import read_repo_code, truncate_for_context
-from software_engineering_team.shared.task_utils import task_requirements
+from software_engineering_team.shared.task_utils import task_requirements  # noqa: E402
 
 try:
     from unified_api.slack_notifier import notify_open_questions as slack_notify_open_questions
@@ -374,22 +369,23 @@ def _get_agents() -> Dict[str, Any]:
     Each agent uses get_client(key) for per-agent model configuration.
     Main pipeline uses planning_v3_team for planning; spec_intake/project_planning/domain planning agents
     are not used in the main flow (clarification_store may still use Spec Intake elsewhere)."""
-    from accessibility_agent import AccessibilityExpertAgent, AccessibilityInput
-    from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
-    from code_review_agent import CodeReviewAgent, CodeReviewInput
-    from technical_writers.dbc_comments_agent import DbcCommentsAgent, DbcCommentsInput
-    from devops_team import DevOpsTeamLeadAgent
-    from technical_writers.documentation_agent import DocumentationAgent, DocumentationInput
-    from frontend_team_deprecated.feature_agent import FrontendExpertAgent, FrontendInput
-    from git_setup_agent import GitSetupAgent
-    from integration_team import IntegrationAgent, IntegrationInput
-    from qa_agent import QAExpertAgent, QAInput
-    from security_agent import CybersecurityExpertAgent, SecurityInput
-    from tech_lead_agent import TechLeadAgent, TechLeadInput
     from acceptance_verifier_agent import AcceptanceVerifierAgent
-    from agent_repair_team import RepairExpertAgent, RepairInput
-    from linting_tool_agent import LintingToolAgent
+    from accessibility_agent import AccessibilityExpertAgent
+    from architecture_expert import ArchitectureExpertAgent
     from build_fix_specialist import BuildFixSpecialistAgent
+    from code_review_agent import CodeReviewAgent
+    from devops_team import DevOpsTeamLeadAgent
+    from frontend_team_deprecated.feature_agent import FrontendExpertAgent
+    from git_setup_agent import GitSetupAgent
+    from integration_team import IntegrationAgent
+    from linting_tool_agent import LintingToolAgent
+    from qa_agent import QAExpertAgent
+    from security_agent import CybersecurityExpertAgent
+    from tech_lead_agent import TechLeadAgent
+    from technical_writers.dbc_comments_agent import DbcCommentsAgent
+    from technical_writers.documentation_agent import DocumentationAgent
+
+    from agent_repair_team import RepairExpertAgent
 
     return {
         "architecture": ArchitectureExpertAgent(get_client("architecture")),
@@ -513,6 +509,7 @@ def _run_dbc_comments_review(
         - Any failures are logged but do not block the pipeline
     """
     from technical_writers.dbc_comments_agent.models import DbcCommentsInput
+
     from software_engineering_team.shared.git_utils import write_files_and_commit
 
     try:
@@ -627,8 +624,9 @@ def _run_code_review(
     Run the code review agent on the given code.
     Returns the CodeReviewOutput.
     """
-    from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
     from code_review_agent.models import CodeReviewInput
+
+    from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
 
     llm = agents["code_review"].llm
     max_chars = compute_code_review_total_chars(llm)
@@ -699,7 +697,12 @@ def _run_build_verification(
     For frontend: runs ng build.
     For backend: runs python syntax check (pytest if tests exist).
     """
-    from software_engineering_team.shared.command_runner import run_command, run_ng_build_with_nvm_fallback, run_python_syntax_check, run_pytest
+    from software_engineering_team.shared.command_runner import (
+        run_command,
+        run_ng_build_with_nvm_fallback,
+        run_pytest,
+        run_python_syntax_check,
+    )
 
     if agent_type == "frontend":
         # repo_path may be frontend repo root (package.json here) or work path (frontend/ subdir)
@@ -720,7 +723,10 @@ def _run_build_verification(
                 return True, ""
             failures = result.parsed_failures("ng_build")
             if failures:
-                from software_engineering_team.shared.error_parsing import build_agent_feedback, get_failure_class_tag
+                from software_engineering_team.shared.error_parsing import (
+                    build_agent_feedback,
+                    get_failure_class_tag,
+                )
                 feedback = build_agent_feedback(failures)
                 logger.warning(
                     "Build verification failed for task %s: %s",
@@ -770,7 +776,10 @@ def _run_build_verification(
             if not test_result.success:
                 failures = test_result.parsed_failures("pytest")
                 if failures:
-                    from software_engineering_team.shared.error_parsing import build_agent_feedback, get_failure_class_tag
+                    from software_engineering_team.shared.error_parsing import (
+                        build_agent_feedback,
+                        get_failure_class_tag,
+                    )
                     summary = build_agent_feedback(failures)
                     logger.warning(
                         "Tests failed for task %s: %s",
@@ -797,6 +806,7 @@ def _run_build_verification(
     elif agent_type == "devops":
         # Validate YAML files and run docker build if Dockerfile exists
         import yaml
+
         from software_engineering_team.shared.command_runner import run_command
 
         errors: list[str] = []
@@ -865,8 +875,8 @@ def _try_build_fix_one_at_a_time(
     from software_engineering_team.shared.command_runner import (
         run_command,
         run_ng_build_with_nvm_fallback,
-        run_python_syntax_check,
         run_pytest,
+        run_python_syntax_check,
     )
 
     if agent_type == "frontend":
@@ -874,7 +884,9 @@ def _try_build_fix_one_at_a_time(
         if not (project_dir / "package.json").exists():
             return False, "No frontend project found"
         try:
-            from software_engineering_team.shared.command_runner import is_ng_build_environment_failure
+            from software_engineering_team.shared.command_runner import (
+                is_ng_build_environment_failure,
+            )
             result = run_ng_build_with_nvm_fallback(project_dir)
         except Exception as e:
             logger.warning("Build fix: ng build failed to run: %s", e)
@@ -998,8 +1010,10 @@ def _try_build_fix_one_at_a_time(
     else:
         from backend_code_v2_team.prompts import (
             JAVA_CONVENTIONS,
-            PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT,
             PYTHON_CONVENTIONS,
+        )
+        from backend_code_v2_team.prompts import (
+            PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT,
         )
         language_conventions = JAVA_CONVENTIONS if language == "java" else PYTHON_CONVENTIONS
 
@@ -1361,7 +1375,9 @@ def _run_backend_frontend_workers(
             logger.info("%s[%s] >>> Backend worker starting task %s", log_prefix, task_id, task_id)
             task_start_time = time.monotonic()
             try:
-                from software_engineering_team.shared.command_runner import ensure_backend_project_initialized
+                from software_engineering_team.shared.command_runner import (
+                    ensure_backend_project_initialized,
+                )
                 init_result = ensure_backend_project_initialized(backend_dir)
                 if not init_result.success:
                     update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=init_result.error_summary)
@@ -1542,8 +1558,12 @@ def _run_backend_frontend_workers(
             logger.info("%s[%s] >>> Frontend worker starting task %s", log_prefix, task_id, task_id)
             task_start_time = time.monotonic()
             try:
-                from software_engineering_team.shared.command_runner import ensure_frontend_project_initialized
-                from software_engineering_team.shared.frontend_framework import resolve_frontend_framework
+                from software_engineering_team.shared.command_runner import (
+                    ensure_frontend_project_initialized,
+                )
+                from software_engineering_team.shared.frontend_framework import (
+                    resolve_frontend_framework,
+                )
                 # Detect framework from task metadata, project files, or spec
                 task_meta = getattr(task, "metadata", None) or {}
                 detected_framework = resolve_frontend_framework(task_meta, spec_content, frontend_dir)
@@ -1807,7 +1827,12 @@ def run_orchestrator(
         agents = _get_agents()
 
         # 1. Read spec from work path or use override (no git required at root)
-        from spec_parser import get_newest_spec_path, get_newest_spec_content, parse_spec_with_llm, gather_context_files
+        from spec_parser import (
+            gather_context_files,
+            get_newest_spec_content,
+            get_newest_spec_path,
+            parse_spec_with_llm,
+        )
         initial_spec_path = None
         if spec_content_override is not None:
             spec_content = spec_content_override
@@ -1891,8 +1916,9 @@ def run_orchestrator(
         update_job(job_id, phase="planning", message="Starting planning workflow...", status_text="Starting planning workflow")
         logger.info("Next step -> Running Planning V3 team to generate handoff and context")
 
+        from planning_v3_adapter import PlanningV2AdapterResult, adapt_planning_v3_result
+
         from planning_v3_team.orchestrator import run_workflow as run_planning_v3_workflow
-        from planning_v3_adapter import adapt_planning_v3_result, PlanningV2AdapterResult
 
         PLANNING_V3_PHASE_ORDER = [
             "intake", "discovery", "requirements", "synthesis", "document_production", "sub_agent_provisioning"
@@ -1920,8 +1946,9 @@ def run_orchestrator(
             client_context: Optional[Dict[str, Any]],
         ) -> Optional[str]:
             """Produce architecture overview during Planning V3 document production (merged Architecture Expert)."""
-            from software_engineering_team.shared.models import ProductRequirements
             from architecture_expert.models import ArchitectureInput
+
+            from software_engineering_team.shared.models import ProductRequirements
             req_desc = (spec_content or "").strip()
             if (prd_content or "").strip():
                 req_desc = (req_desc + "\n\n" + prd_content.strip()).strip()
@@ -2516,7 +2543,9 @@ def run_orchestrator(
                             completed_task_ids=completed_code_task_ids,
                         )
                     else:
-                        from software_engineering_team.shared.context_sizing import compute_existing_code_chars
+                        from software_engineering_team.shared.context_sizing import (
+                            compute_existing_code_chars,
+                        )
                         max_code_chars = compute_existing_code_chars(doc_agent.llm)
                         codebase_content = _truncate_for_context(
                             _read_repo_code(

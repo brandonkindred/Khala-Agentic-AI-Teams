@@ -34,6 +34,6 @@ def run_planning_v3_activity(
             use_planning_v2,
             use_market_research,
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Planning V3 activity failed for job %s", job_id)
         raise

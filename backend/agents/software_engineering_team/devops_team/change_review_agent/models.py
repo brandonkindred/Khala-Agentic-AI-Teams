@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from pydantic import BaseModel, Field
-
 from devops_team.models import ReviewFinding
+from pydantic import BaseModel, Field
 
 
 class ChangeReviewInput(BaseModel):

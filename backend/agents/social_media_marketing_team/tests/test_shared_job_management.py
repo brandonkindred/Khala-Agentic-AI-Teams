@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from shared_job_management import CentralJobManager, JOB_STATUS_FAILED, JOB_STATUS_PENDING
+from shared_job_management import JOB_STATUS_FAILED, JOB_STATUS_PENDING, CentralJobManager
 
 
 def test_apply_to_job_merges_nested_key(tmp_path) -> None:

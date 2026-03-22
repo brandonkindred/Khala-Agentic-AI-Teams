@@ -1,7 +1,7 @@
 """Tests for SOC2 audit API."""
 
-import pytest
 from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from soc2_compliance_team.api.main import app

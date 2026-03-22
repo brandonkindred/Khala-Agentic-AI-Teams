@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..models import TraceabilityLink
+from ..tools import update_traceability_matrix
 from .approval_agent import run_approval_and_comms
 from .architecture_agent import run_architecture_audit
 from .base import ToolContext
@@ -17,8 +19,6 @@ from .retest_agent import run_retest_cycle
 from .scoring_agent import run_scoring_and_prioritization
 from .sec508_agent import run_508_mapping
 from .wcag_agent import run_wcag_coverage
-from ..models import TraceabilityLink
-from ..tools import update_traceability_matrix
 
 
 @dataclass(slots=True)

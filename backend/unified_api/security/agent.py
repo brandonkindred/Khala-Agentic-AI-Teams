@@ -9,17 +9,16 @@ Returns (passed, findings) where findings are human-readable messages.
 from __future__ import annotations
 
 import re
-from typing import List, Tuple
 
 # Type alias for scan result
-ScanResult = Tuple[bool, List[str]]
+ScanResult = tuple[bool, list[str]]
 
 
 def _normalize_inputs(
     method: str,
     path: str,
     query_string: bytes,
-    headers: List[Tuple[bytes, bytes]],
+    headers: list[tuple[bytes, bytes]],
     body_bytes: bytes,
 ) -> str:
     """Build a single string from all request parts for scanning. UTF-8 decode with replace."""
@@ -35,7 +34,7 @@ def _normalize_inputs(
 
 # Rules: (pattern, message). Pattern is compiled regex or we use re.escape for literal.
 # Messages are human-readable findings for the 403 response.
-_RULES: List[Tuple[re.Pattern[str], str]] = []
+_RULES: list[tuple[re.Pattern[str], str]] = []
 
 
 def _add_rule(pattern: str, message: str, flags: int = re.IGNORECASE) -> None:
@@ -82,7 +81,7 @@ def scan(
     method: str,
     path: str,
     query_string: bytes,
-    headers: List[Tuple[bytes, bytes]],
+    headers: list[tuple[bytes, bytes]],
     body_bytes: bytes,
 ) -> ScanResult:
     """
@@ -100,7 +99,7 @@ def scan(
         a non-empty list of human-readable finding messages.
     """
     text = _normalize_inputs(method, path, query_string, headers, body_bytes)
-    findings: List[str] = []
+    findings: list[str] = []
     for pattern, message in _RULES:
         if pattern.search(text):
             findings.append(message)

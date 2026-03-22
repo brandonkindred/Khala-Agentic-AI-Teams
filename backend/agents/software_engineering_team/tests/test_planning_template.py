@@ -1,6 +1,5 @@
 """Tests for planning template parser (template-based LLM output)."""
 
-import pytest
 
 from planning_team.planning_template import parse_planning_template
 

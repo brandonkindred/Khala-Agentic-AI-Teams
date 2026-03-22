@@ -377,27 +377,6 @@ class BrandingTeamOrchestrator:
             target_phase=phase,
         )
 
-    def run_phase(
-        self,
-        mission: BrandingMission,
-        phase: BrandPhase,
-        human_review: HumanReview,
-        brand_checks: List[BrandCheckRequest] | None = None,
-        store: Optional[BrandingStore] = None,
-        client_id: Optional[str] = None,
-        brand_id: Optional[str] = None,
-    ) -> TeamOutput:
-        """Convenience method: run the pipeline up to (and including) a specific phase."""
-        return self.run(
-            mission=mission,
-            human_review=human_review,
-            brand_checks=brand_checks,
-            store=store,
-            client_id=client_id,
-            brand_id=brand_id,
-            target_phase=phase,
-        )
-
 
 def _build_brand_book(
     strategic_core: StrategicCoreOutput,

@@ -1,8 +1,8 @@
 """Tests for spec_parser."""
 
 import pytest
-
 from spec_parser import (
+    SPEC_FILENAME,
     get_latest_spec_content,
     get_newest_spec_content,
     get_newest_spec_path,
@@ -11,8 +11,8 @@ from spec_parser import (
     parse_spec_with_llm,
     validate_repo_path,
     validate_work_path,
-    SPEC_FILENAME,
 )
+
 from llm_service import DummyLLMClient
 
 

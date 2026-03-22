@@ -7,13 +7,12 @@ import imaplib
 import logging
 import os
 import smtplib
-from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional
 
-from ..models import EmailDraft, EmailMessage, EmailProvider
-from ..shared.credential_store import CredentialStore, IMAPCredentials, OAuthCredentials
+from ..models import EmailDraft, EmailMessage
+from ..shared.credential_store import CredentialStore, IMAPCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -283,8 +282,8 @@ class EmailToolAgent:
     def _send_gmail(self, draft: EmailDraft, cred_data: Dict[str, Any]) -> bool:
         """Send email via Gmail API."""
         try:
-            from googleapiclient.discovery import build
             from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
         except ImportError:
             logger.warning("Google API client not installed, falling back to SMTP")
             return False
@@ -344,8 +343,8 @@ class EmailToolAgent:
             raise EmailToolError("Draft creation only supported for Gmail")
         
         try:
-            from googleapiclient.discovery import build
             from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
         except ImportError:
             raise EmailToolError("Google API client not installed")
         

@@ -11,6 +11,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from software_engineering_team.shared.models import LicenseType, PricingTier, ToolRecommendation
+
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
 from ...output_templates import (
     looks_like_truncated_file_content,
@@ -20,7 +22,6 @@ from ...output_templates import (
     parse_spec_review_output,
 )
 from ..json_utils import attempt_fix_output_continuation, complete_text_with_continuation
-from software_engineering_team.shared.models import ToolRecommendation, PricingTier, LicenseType
 
 if TYPE_CHECKING:
     from llm_service import LLMClient

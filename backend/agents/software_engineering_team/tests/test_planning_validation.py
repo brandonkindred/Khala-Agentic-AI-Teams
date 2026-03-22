@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from planning_team.planning_graph import (
     EdgeType,
     PlanningDomain,

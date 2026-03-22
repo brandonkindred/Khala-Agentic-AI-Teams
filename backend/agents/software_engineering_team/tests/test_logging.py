@@ -6,9 +6,8 @@ Run with visible logs: pytest tests/test_logging.py -v --log-cli-level=INFO
 
 import logging
 
-import pytest
-
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
+
 from llm_service import DummyLLMClient
 from software_engineering_team.shared.models import ProductRequirements
 

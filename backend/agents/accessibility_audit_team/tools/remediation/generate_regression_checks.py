@@ -4,7 +4,7 @@ Tool: tests.generate_regression_checks
 Generate regression test ideas and optional scripts.
 """
 
-from typing import List, Literal, Optional
+from typing import List, Literal
 
 from pydantic import BaseModel, Field
 

@@ -23,6 +23,6 @@ def run_provisioning_activity(
         from agent_provisioning_team.api.main import _run_provisioning_background
         access_tier = AccessTier(access_tier_str)
         _run_provisioning_background(job_id, agent_id, manifest_path, access_tier)
-    except Exception as e:
+    except Exception:
         logger.exception("Agent Provisioning activity failed for job %s", job_id)
         raise

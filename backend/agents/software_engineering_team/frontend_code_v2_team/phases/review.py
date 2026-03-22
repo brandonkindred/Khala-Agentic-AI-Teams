@@ -24,8 +24,8 @@ from ..models import (
     ToolAgentKind,
     ToolAgentPhaseInput,
 )
-from ..output_templates import parse_review_template, parse_documentation_self_review_template
-from ..prompts import REVIEW_PROMPT, DOCUMENTATION_SELF_REVIEW_PROMPT
+from ..output_templates import parse_documentation_self_review_template, parse_review_template
+from ..prompts import DOCUMENTATION_SELF_REVIEW_PROMPT, REVIEW_PROMPT
 
 logger = logging.getLogger(__name__)
 

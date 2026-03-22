@@ -28,10 +28,11 @@ for _d in (_team_dir, _agents_dir):
 sys.path.insert(0, str(_agents_dir))
 sys.path.insert(0, str(_team_dir))
 
-import logging
-import uvicorn
+import logging  # noqa: E402
 
-from llm_service import get_llm_config_summary
+import uvicorn  # noqa: E402
+
+from llm_service import get_llm_config_summary  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

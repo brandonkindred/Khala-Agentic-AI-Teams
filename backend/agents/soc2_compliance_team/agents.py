@@ -6,14 +6,15 @@ import logging
 from typing import Any, Dict, List
 
 from llm_service import LLMClient
+
 from .models import (
     FindingSeverity,
     NextStepsDocument,
     RepoContext,
     SOC2ComplianceReport,
     TSCAuditResult,
-    TSCFinding,
     TSCCategory,
+    TSCFinding,
 )
 
 logger = logging.getLogger(__name__)

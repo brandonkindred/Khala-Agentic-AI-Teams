@@ -6,7 +6,11 @@ Agents obtain a client via get_client(agent_key?) and use the LLMClient interfac
 and config (env vars, known context, per-agent defaults) are centralized here.
 """
 
+from . import config as _config
+from .clients import DummyLLMClient, OllamaLLMClient
+from .factory import _clear_client_cache_for_testing, get_client
 from .interface import (
+    OLLAMA_WEEKLY_LIMIT_MESSAGE,
     LLMClient,
     LLMError,
     LLMJsonParseError,
@@ -15,12 +19,9 @@ from .interface import (
     LLMTemporaryError,
     LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
-    OLLAMA_WEEKLY_LIMIT_MESSAGE,
 )
-from . import config as _config
-from .factory import _clear_client_cache_for_testing, get_client
-from .clients import DummyLLMClient, OllamaLLMClient
 from .util import call_llm_with_retries, extract_json_from_response
+
 
 def get_llm_config_summary() -> str:
     """Return a short summary of current LLM config (provider, model, etc.) for logging."""

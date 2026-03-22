@@ -8,7 +8,7 @@ claims and tags them as [CLAIM:id] in the draft.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field
 

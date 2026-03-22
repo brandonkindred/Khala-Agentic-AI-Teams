@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient
-
 from devops_team.models import ReviewFinding
+
+from llm_service import LLMClient
 
 from .models import DevSecOpsReviewInput, DevSecOpsReviewOutput
 from .prompts import DEVSECOPS_REVIEW_PROMPT

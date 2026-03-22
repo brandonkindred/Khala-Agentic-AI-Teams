@@ -4,13 +4,13 @@ Tool: qa.cluster_patterns
 Dedupe and cluster findings into systemic patterns.
 """
 
+import uuid
 from collections import defaultdict
 from typing import List, Literal
-import uuid
 
 from pydantic import BaseModel, Field
 
-from ...models import Finding, PatternCluster, Severity, Scope, IssueType
+from ...models import Finding, PatternCluster, Scope, Severity
 
 
 class ClusterPatternsInput(BaseModel):

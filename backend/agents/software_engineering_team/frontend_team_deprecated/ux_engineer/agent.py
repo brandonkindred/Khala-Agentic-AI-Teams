@@ -6,7 +6,6 @@ import logging
 from typing import Any, Dict, List
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import SystemArchitecture
 
 from .models import UXEngineerInput, UXEngineerOutput
 from .prompts import UX_ENGINEER_PROMPT

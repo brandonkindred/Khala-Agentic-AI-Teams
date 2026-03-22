@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from ..models import CalendarEvent
 from ..shared.credential_store import CredentialStore
-from ..shared.llm import LLMClient, JSONExtractionFailure
+from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
 from ..tools.calendar_tools import CalendarToolAgent
 from .models import (
@@ -20,7 +20,7 @@ from .models import (
     ScheduleRequest,
     ScheduleSuggestion,
 )
-from .prompts import CONFLICT_RESOLUTION_PROMPT, PARSE_EVENT_PROMPT, SCHEDULE_SUGGESTION_PROMPT
+from .prompts import PARSE_EVENT_PROMPT, SCHEDULE_SUGGESTION_PROMPT
 
 logger = logging.getLogger(__name__)
 

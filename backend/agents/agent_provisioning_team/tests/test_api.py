@@ -2,7 +2,6 @@
 
 from unittest.mock import patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from agent_provisioning_team.api.main import app
@@ -54,7 +53,6 @@ def test_start_provision_returns_job_id():
 
 
 def test_deprovision_runs_via_orchestrator():
-    from unittest.mock import MagicMock
     from agent_provisioning_team.models import DeprovisionResponse
     mock_resp = DeprovisionResponse(agent_id="nonexistent-agent", success=False, error="not found")
     with patch("agent_provisioning_team.api.main.orchestrator") as mock_orch:

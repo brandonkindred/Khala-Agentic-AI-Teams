@@ -11,7 +11,6 @@ import json
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
-
 # ---------------------------------------------------------------------------
 # Exceptions (unified for all teams)
 # ---------------------------------------------------------------------------

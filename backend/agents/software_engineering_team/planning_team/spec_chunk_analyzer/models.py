@@ -4,7 +4,6 @@ from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field
 
-
 # Max chars per spec chunk (enforced by caller; ~12K for ~3K tokens)
 MAX_SPEC_CHUNK_CHARS = 12000
 

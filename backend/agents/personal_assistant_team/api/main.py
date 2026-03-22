@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
@@ -19,19 +18,15 @@ from pydantic import BaseModel, Field
 from ..models import (
     AssistantRequest,
     AssistantResponse,
-    CalendarEvent,
-    Deal,
-    EmailDraft,
-    Reservation,
-    TaskItem,
-    TaskList,
-    UserProfile,
 )
 from ..orchestrator.agent import PersonalAssistantOrchestrator
 from ..shared.credential_store import CredentialStore
 from ..shared.llm import get_llm_client
-from ..shared.user_profile_store import UserProfileStore
 from ..shared.pa_job_store import (
+    PA_JOB_STATUS_COMPLETED,
+    PA_JOB_STATUS_FAILED,
+    PA_JOB_STATUS_PENDING,
+    PA_JOB_STATUS_RUNNING,
     cancel_job,
     create_job,
     delete_job,
@@ -39,12 +34,8 @@ from ..shared.pa_job_store import (
     is_job_cancelled,
     list_jobs,
     update_job,
-    PA_JOB_STATUS_CANCELLED,
-    PA_JOB_STATUS_COMPLETED,
-    PA_JOB_STATUS_FAILED,
-    PA_JOB_STATUS_PENDING,
-    PA_JOB_STATUS_RUNNING,
 )
+from ..shared.user_profile_store import UserProfileStore
 
 try:
     from unified_api.slack_notifier import notify_pa_response as slack_notify_pa_response
@@ -718,8 +709,8 @@ async def get_task_list(user_id: str, list_id: str):
 @app.post("/users/{user_id}/tasks/lists/{list_id}/items")
 async def add_task_item(user_id: str, list_id: str, body: TaskItemAddBody):
     """Add an item to a task list."""
-    from ..task_agent.models import AddItemRequest
     from ..models import Priority
+    from ..task_agent.models import AddItemRequest
     
     item = orchestrator.task_agent.add_item(AddItemRequest(
         user_id=user_id,
@@ -821,8 +812,8 @@ async def list_reservations(user_id: str, include_past: bool = False):
 @app.post("/users/{user_id}/reservations")
 async def create_reservation(user_id: str, body: ReservationCreateBody):
     """Create a reservation."""
-    from ..reservation_agent.models import MakeReservationRequest
     from ..models import ReservationType
+    from ..reservation_agent.models import MakeReservationRequest
     
     result = orchestrator.reservation_agent.make_reservation(MakeReservationRequest(
         user_id=user_id,

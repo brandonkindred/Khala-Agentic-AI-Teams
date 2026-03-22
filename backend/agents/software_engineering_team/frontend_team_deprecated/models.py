@@ -1,6 +1,6 @@
 """Shared handoff models for the Frontend Engineering Team pipeline."""
 
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 

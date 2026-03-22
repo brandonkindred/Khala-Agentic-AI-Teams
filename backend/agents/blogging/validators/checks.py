@@ -5,7 +5,7 @@ Individual validator checks for blog drafts.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from shared.brand_spec import BrandSpec
 

@@ -5,17 +5,16 @@ Owns: AT verification as the "truth layer"
 Outputs: AT-verified impact statements and AT evidence notes
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from .base import AgentMessage, BaseSpecialistAgent
 from ..models import (
     Finding,
     FindingState,
     Phase,
-    WCAGMapping,
 )
 from ..tools.at import run_script
-from ..tools.at.run_script import RunScriptInput, ATScript, TargetInfo
+from ..tools.at.run_script import ATScript, RunScriptInput, TargetInfo
+from .base import AgentMessage, BaseSpecialistAgent
 
 
 class AssistiveTechSpecialist(BaseSpecialistAgent):
@@ -44,7 +43,7 @@ class AssistiveTechSpecialist(BaseSpecialistAgent):
         - VERIFICATION: Verify findings with AT testing
         """
         phase = context.get("phase", Phase.VERIFICATION)
-        audit_id = context.get("audit_id", "")
+        context.get("audit_id", "")
 
         if phase == Phase.VERIFICATION:
             return await self._handle_verification(context)

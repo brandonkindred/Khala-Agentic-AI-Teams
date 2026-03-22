@@ -1,19 +1,17 @@
 """Tests for Section 508 criteria module."""
 
-import pytest
 
 from accessibility_audit_team.section_508_criteria import (
     SECTION_508_REQUIREMENTS,
     ApplicablePlatform,
     Section508Category,
-    Section508Requirement,
     get_508_requirements_for_wcag,
     get_508_tags_for_wcag_list,
+    get_mobile_requirements,
     get_requirement,
     get_requirements_by_category,
     get_requirements_by_platform,
     get_web_requirements,
-    get_mobile_requirements,
 )
 
 

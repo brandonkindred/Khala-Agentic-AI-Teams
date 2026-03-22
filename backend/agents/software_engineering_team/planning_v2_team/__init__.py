@@ -14,9 +14,9 @@ This team does NOT import or reuse any code from ``planning_team`` or ``project_
 
 from .models import Phase, ToolAgentKind
 from .orchestrator import (
-    PlanningV2TeamLead,
-    PlanningV2ProductLead,
     PlanningV2PlanningAgent,
+    PlanningV2ProductLead,
+    PlanningV2TeamLead,
 )
 
 __all__ = [

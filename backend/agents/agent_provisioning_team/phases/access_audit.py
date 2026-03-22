@@ -16,10 +16,10 @@ from ..shared.access_policy import validate_permissions
 from ..shared.tool_manifest import ToolManifest
 from ..tool_agents.base import ToolProvisionerInterface
 from ..tool_agents.docker_provisioner import DockerProvisionerTool
+from ..tool_agents.generic_provisioner import GenericProvisionerTool
 from ..tool_agents.git_provisioner import GitProvisionerTool
 from ..tool_agents.postgres_provisioner import PostgresProvisionerTool
 from ..tool_agents.redis_provisioner import RedisProvisionerTool
-from ..tool_agents.generic_provisioner import GenericProvisionerTool
 
 
 def _build_provisioners() -> Dict[str, ToolProvisionerInterface]:
@@ -58,7 +58,7 @@ def run_access_audit(
     Returns:
         AccessAuditResult with verification results
     """
-    provs = provisioners or _build_provisioners()
+    provisioners or _build_provisioners()
     
     verifications: List[AccessVerification] = []
     all_warnings: List[str] = []

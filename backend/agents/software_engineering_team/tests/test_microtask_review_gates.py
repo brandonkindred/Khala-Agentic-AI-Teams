@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Dict
-from unittest.mock import MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
+
+if TYPE_CHECKING:
+    from software_engineering_team.shared.models import Task
 
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
@@ -113,8 +116,8 @@ class TestFrontendReviewDependencies:
 
 class TestFrontendRunMicrotaskReview:
     def test_run_microtask_review_passes_when_no_issues(self, tmp_path):
-        from frontend_code_v2_team.phases.review import run_microtask_review
         from frontend_code_v2_team.models import Microtask
+        from frontend_code_v2_team.phases.review import run_microtask_review
 
         task = _create_test_task("frontend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -142,8 +145,8 @@ No issues found.
         assert result.build_ok
 
     def test_run_microtask_review_fails_with_critical_issue(self, tmp_path):
-        from frontend_code_v2_team.phases.review import run_microtask_review
         from frontend_code_v2_team.models import Microtask
+        from frontend_code_v2_team.phases.review import run_microtask_review
 
         task = _create_test_task("frontend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -178,8 +181,8 @@ Critical security issue found.
 
 class TestFrontendRunProblemSolvingForMicrotask:
     def test_problem_solving_with_no_issues_returns_resolved(self):
-        from frontend_code_v2_team.phases.problem_solving import run_problem_solving_for_microtask
         from frontend_code_v2_team.models import Microtask, ReviewResult
+        from frontend_code_v2_team.phases.problem_solving import run_problem_solving_for_microtask
 
         mock_llm = MagicMock()
         mt = Microtask(id="mt-1")
@@ -199,16 +202,16 @@ class TestFrontendRunProblemSolvingForMicrotask:
 
 class TestFrontendRunExecutionWithReviewGates:
     def test_execution_with_review_gates_completes_microtask(self, tmp_path):
-        from frontend_code_v2_team.phases.execution import (
-            run_execution_with_review_gates,
-            ReviewDependencies,
-        )
         from frontend_code_v2_team.models import (
             Microtask,
             MicrotaskReviewConfig,
             MicrotaskStatus,
             PlanningResult,
             ToolAgentKind,
+        )
+        from frontend_code_v2_team.phases.execution import (
+            ReviewDependencies,
+            run_execution_with_review_gates,
         )
 
         (tmp_path / ".git").mkdir()
@@ -256,16 +259,16 @@ All good.
         assert len(completed) <= 1
 
     def test_execution_with_stop_on_failure_raises_error(self, tmp_path):
-        from frontend_code_v2_team.phases.execution import (
-            run_execution_with_review_gates,
-            ReviewDependencies,
-        )
         from frontend_code_v2_team.models import (
             Microtask,
             MicrotaskReviewConfig,
             MicrotaskReviewFailedError,
             PlanningResult,
             ToolAgentKind,
+        )
+        from frontend_code_v2_team.phases.execution import (
+            ReviewDependencies,
+            run_execution_with_review_gates,
         )
 
         (tmp_path / ".git").mkdir()
@@ -350,8 +353,8 @@ class TestBackendReviewDependencies:
 
 class TestBackendRunMicrotaskReview:
     def test_run_microtask_review_basic(self, tmp_path):
-        from backend_code_v2_team.phases.review import run_microtask_review
         from backend_code_v2_team.models import Microtask
+        from backend_code_v2_team.phases.review import run_microtask_review
 
         task = _create_test_task("backend")
         mt = Microtask(id="mt-1", title="Test Microtask")
@@ -381,8 +384,8 @@ No issues found.
 
 class TestBackendRunProblemSolvingForMicrotask:
     def test_problem_solving_no_issues(self):
-        from backend_code_v2_team.phases.problem_solving import run_problem_solving_for_microtask
         from backend_code_v2_team.models import Microtask, ReviewResult
+        from backend_code_v2_team.phases.problem_solving import run_problem_solving_for_microtask
 
         mock_llm = MagicMock()
         mt = Microtask(id="mt-1")
@@ -401,16 +404,16 @@ class TestBackendRunProblemSolvingForMicrotask:
 
 class TestBackendRunExecutionWithReviewGates:
     def test_execution_with_skip_continue_behavior(self, tmp_path):
-        from backend_code_v2_team.phases.execution import (
-            run_execution_with_review_gates,
-            ReviewDependencies,
-        )
         from backend_code_v2_team.models import (
             Microtask,
             MicrotaskReviewConfig,
             MicrotaskStatus,
             PlanningResult,
             ToolAgentKind,
+        )
+        from backend_code_v2_team.phases.execution import (
+            ReviewDependencies,
+            run_execution_with_review_gates,
         )
 
         (tmp_path / ".git").mkdir()

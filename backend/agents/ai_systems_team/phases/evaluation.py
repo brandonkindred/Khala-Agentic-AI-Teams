@@ -6,10 +6,10 @@ import logging
 from typing import Callable, Optional
 
 from ..models import (
+    KPI,
     AcceptanceTest,
     EvaluationHarness,
     EvaluationResult,
-    KPI,
     SpecIntakeResult,
 )
 

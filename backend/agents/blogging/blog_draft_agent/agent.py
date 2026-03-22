@@ -10,11 +10,11 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Union
-
-from llm_service import LLMClient, LLMJsonParseError, LLMTemporaryError, LLMTruncatedError
+from typing import Any, Callable, Optional, Union
 
 from blog_research_agent.models import ResearchReference
+
+from llm_service import LLMClient, LLMJsonParseError, LLMTemporaryError, LLMTruncatedError
 
 from .models import DraftInput, DraftOutput, ReviseDraftInput
 from .prompts import (

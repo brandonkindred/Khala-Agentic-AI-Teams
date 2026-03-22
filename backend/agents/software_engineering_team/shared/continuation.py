@@ -8,14 +8,12 @@ from where it left off.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import httpx
 

@@ -12,8 +12,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Dict, Generic, List, Optional, TypeVar
 
 if TYPE_CHECKING:
     from llm_service import LLMClient

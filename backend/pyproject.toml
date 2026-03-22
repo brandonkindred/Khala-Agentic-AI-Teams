@@ -26,8 +26,16 @@ ignore = [
 known-first-party = ["shared", "backend_agent", "frontend_team", "devops_agent", "qa_agent"]
 
 [tool.ruff.lint.per-file-ignores]
-"agents/**/tests/**" = ["N", "B"]
+"agents/**/tests/**" = ["N", "B", "E402"]
 "agents/**/agent_implementations/**" = ["E", "F"]
+"agents/**/api/main.py" = ["E402"]
+"agents/**/api/*.py" = ["E402"]
+"agents/blogging/blog_research_agent/agent.py" = ["E402"]
+"agents/software_engineering_team/orchestrator.py" = ["E402"]
+"agents/software_engineering_team/devops_team/orchestrator.py" = ["E402"]
+"agents/software_engineering_team/architect-agents/**" = ["E402"]
+"unified_api/main.py" = ["E402"]
+"unified_api/tests/**" = ["E402"]
 
 [tool.pytest.ini_options]
 addopts = "--cov=agents --cov=unified_api --cov-report=term-missing --cov-fail-under=85"

@@ -1,6 +1,5 @@
 """Integration test: init frontend project, add MatButton, run ng build."""
 
-import os
 from pathlib import Path
 
 import pytest

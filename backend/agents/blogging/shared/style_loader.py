@@ -4,10 +4,9 @@ Load style guide and brand spec file contents for draft and copy editor agents.
 Callers load files before instantiating agents; on failure log an error and return empty string.
 """
 
+import logging
 from pathlib import Path
 from typing import Union
-
-import logging
 
 logger = logging.getLogger(__name__)
 

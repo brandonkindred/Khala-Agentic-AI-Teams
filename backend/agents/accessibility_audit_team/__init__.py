@@ -36,6 +36,6 @@ __all__ = [
     "TestRunConfig",
 ]
 
-from .a11y_agency_strands import run_engagement as run_strands_engagement
+from .a11y_agency_strands import run_engagement as run_strands_engagement  # noqa: F401
 
 __all__.append("run_strands_engagement")

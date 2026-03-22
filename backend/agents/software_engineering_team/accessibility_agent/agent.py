@@ -27,7 +27,7 @@ class AccessibilityExpertAgent:
         logger.info("Accessibility: reviewing %s chars of code", len(input_data.code or ""))
         context_parts = [
             f"**Language:** {input_data.language}",
-            f"**Code to review:**",
+            "**Code to review:**",
             "```",
             input_data.code,
             "```",

@@ -16,16 +16,26 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
+from unified_api.google_browser_login_credentials import (
+    clear_google_browser_login_credentials,
+    get_google_browser_login_credentials,
+    google_browser_login_credentials_configured,
+    google_browser_login_storage_available,
+    set_google_browser_login_credentials,
+)
 from unified_api.integrations_store import (
+    clear_medium_google_oauth_identity,
+    clear_medium_session_storage,
     clear_slack_oauth,
     generate_medium_google_oauth_state,
     generate_oauth_state,
@@ -35,22 +45,11 @@ from unified_api.integrations_store import (
     set_medium_config,
     set_medium_google_oauth_identity,
     set_medium_session_storage_state_json,
-    clear_medium_google_oauth_identity,
-    clear_medium_session_storage,
     set_slack_config,
     set_slack_oauth_token,
     verify_and_clear_medium_google_oauth_state,
     verify_and_clear_oauth_state,
 )
-from unified_api.google_browser_login_credentials import (
-    clear_google_browser_login_credentials,
-    get_google_browser_login_credentials,
-    google_browser_login_credentials_configured,
-    google_browser_login_storage_available,
-    set_google_browser_login_credentials,
-)
-
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +97,7 @@ class SlackConfigResponse(BaseModel):
     enabled: bool
     mode: Literal["webhook", "bot"] = "webhook"
     client_id_configured: bool = Field(False, description="True if a Slack app Client ID is stored.")
-    webhook_url: Optional[str] = None
+    webhook_url: str | None = None
     webhook_configured: bool = Field(description="True if webhook URL is stored.")
     bot_token_configured: bool = Field(False, description="True if a bot token is configured.")
     default_channel: str = ""
@@ -107,8 +106,8 @@ class SlackConfigResponse(BaseModel):
     notify_pa_responses: bool = True
     # OAuth connection info
     oauth_connected: bool = Field(False, description="True when a bot token was obtained via OAuth.")
-    team_name: Optional[str] = Field(None, description="Slack workspace name (populated after OAuth).")
-    team_id: Optional[str] = Field(None, description="Slack team/workspace ID.")
+    team_name: str | None = Field(None, description="Slack workspace name (populated after OAuth).")
+    team_id: str | None = Field(None, description="Slack team/workspace ID.")
 
 
 class SlackOAuthConnectResponse(BaseModel):
@@ -124,7 +123,7 @@ class IntegrationListItem(BaseModel):
     id: str
     type: str
     enabled: bool
-    channel: Optional[str] = None
+    channel: str | None = None
 
 
 MediumOAuthProvider = Literal["google", "apple", "facebook", "twitter"]
@@ -150,8 +149,8 @@ class MediumConfigResponse(BaseModel):
     oauth_identity_connected: bool = Field(False, description="True after Google OAuth completes.")
     google_client_configured: bool = False
     session_configured: bool = Field(False, description="True when Playwright storage_state is stored.")
-    linked_email: Optional[str] = None
-    linked_name: Optional[str] = None
+    linked_email: str | None = None
+    linked_name: str | None = None
 
 
 class MediumGoogleOAuthConnectResponse(BaseModel):
@@ -163,7 +162,7 @@ class MediumGoogleOAuthConnectResponse(BaseModel):
 class MediumSessionImportBody(BaseModel):
     """POST /api/integrations/medium/session — Playwright storage_state object."""
 
-    storage_state: Dict[str, Any] = Field(..., description="Full object from Playwright context.storage_state()")
+    storage_state: dict[str, Any] = Field(..., description="Full object from Playwright context.storage_state()")
 
 
 class GoogleBrowserLoginCredentialsBody(BaseModel):
@@ -314,8 +313,8 @@ def _google_userinfo(access_token: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@router.get("", response_model=List[IntegrationListItem])
-async def list_integrations() -> List[IntegrationListItem]:
+@router.get("", response_model=list[IntegrationListItem])
+async def list_integrations() -> list[IntegrationListItem]:
     raw = get_integrations_list()
     return [IntegrationListItem(**item) for item in raw]
 
@@ -415,9 +414,9 @@ async def slack_oauth_connect(request: Request) -> SlackOAuthConnectResponse:
 @router.get("/slack/oauth/callback")
 async def slack_oauth_callback(
     request: Request,
-    code: Optional[str] = Query(None),
-    state: Optional[str] = Query(None),
-    error: Optional[str] = Query(None),
+    code: str | None = Query(None),
+    state: str | None = Query(None),
+    error: str | None = Query(None),
 ) -> RedirectResponse:
     """
     Handle the OAuth redirect from Slack after the user authorizes the app.
@@ -602,9 +601,9 @@ async def medium_google_oauth_connect(request: Request) -> MediumGoogleOAuthConn
 @router.get("/medium/oauth/google/callback")
 async def medium_google_oauth_callback(
     request: Request,
-    code: Optional[str] = Query(None),
-    state: Optional[str] = Query(None),
-    error: Optional[str] = Query(None),
+    code: str | None = Query(None),
+    state: str | None = Query(None),
+    error: str | None = Query(None),
 ) -> RedirectResponse:
     """Google redirects here after user consents; we store refresh token and profile email."""
     ui_base = _get_ui_base_url()

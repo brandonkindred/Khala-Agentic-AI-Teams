@@ -54,7 +54,9 @@ def resolve_medium_stats_storage_state() -> Tuple[Optional[Dict[str, Any]], str,
 
     raw = get_medium_session_storage_state_json()
     if not (raw and raw.strip()):
-        from unified_api.google_browser_login_credentials import get_google_browser_login_credentials
+        from unified_api.google_browser_login_credentials import (
+            get_google_browser_login_credentials,
+        )
         from unified_api.medium_browser_login import perform_medium_google_browser_login
 
         em, pw = get_google_browser_login_credentials()

@@ -4,11 +4,11 @@ Tool: standards.map_wcag
 Suggest WCAG SC mappings with confidence and rationale.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import List, Literal
 
 from pydantic import BaseModel, Field
 
-from ...wcag_criteria import WCAG_22_CRITERIA, get_criterion
+from ...wcag_criteria import get_criterion
 
 
 class FindingInfo(BaseModel):

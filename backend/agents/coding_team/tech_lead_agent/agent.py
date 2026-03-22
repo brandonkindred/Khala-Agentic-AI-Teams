@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from coding_team.models import CodingTeamPlanInput
 from coding_team.tech_lead_agent import prompts

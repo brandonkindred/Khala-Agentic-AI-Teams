@@ -23,12 +23,12 @@ from ..models import (
     MicrotaskStatus,
     PlanningResult,
     ReviewResult,
-    ToolAgentKind,
     ToolAgentInput,
+    ToolAgentKind,
     ToolAgentOutput,
 )
 from ..output_templates import parse_files_and_summary_template
-from ..prompts import EXECUTION_PROMPT, PYTHON_CONVENTIONS, JAVA_CONVENTIONS
+from ..prompts import EXECUTION_PROMPT, JAVA_CONVENTIONS, PYTHON_CONVENTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -214,13 +214,13 @@ def run_execution_with_review_gates(
     ``microtask_phase`` is one of: "coding", "code_review", "qa_testing", "security_testing", "documentation", "completed".
     ``phase_detail`` provides human-readable detail about the current action.
     """
+    from .problem_solving import run_batch_coding_fixes
     from .review import (
         run_code_review_phase,
+        run_documentation_self_review,
         run_qa_testing_phase,
         run_security_testing_phase,
-        run_documentation_self_review,
     )
-    from .problem_solving import run_batch_coding_fixes
 
     config = review_config or MicrotaskReviewConfig()
     deps = review_deps or ReviewDependencies()

@@ -9,20 +9,21 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     abort_merge,
     checkout_branch,
     commit_working_tree,
-    create_feature_branch as git_create_feature_branch,
     delete_branch,
     merge_branch,
 )
+from software_engineering_team.shared.git_utils import (
+    create_feature_branch as git_create_feature_branch,
+)
 
 from ...models import (
-    Phase,
     ToolAgentInput,
     ToolAgentOutput,
     ToolAgentPhaseInput,
@@ -126,7 +127,7 @@ class GitBranchManagementToolAgent:
 
         if branch_name:
             # We have been committing along the way; commit any remaining, then merge and cleanup.
-            commit_working_tree(repo_path, f"chore: finalize before merge")
+            commit_working_tree(repo_path, "chore: finalize before merge")
             merge_ok, merge_msg = merge_branch(repo_path, branch_name, DEVELOPMENT_BRANCH)
             if not merge_ok:
                 abort_merge(repo_path)

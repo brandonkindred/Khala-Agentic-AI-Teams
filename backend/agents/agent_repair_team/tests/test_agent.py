@@ -2,9 +2,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from agent_repair_team.agent import RepairExpertAgent
 from agent_repair_team.models import RepairInput, RepairOutput

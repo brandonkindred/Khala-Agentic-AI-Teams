@@ -1,25 +1,36 @@
 from __future__ import annotations
+
 import json
 import logging
-import os
 import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from software_engineering_team.shared.context_sizing import compute_existing_code_chars, compute_spec_content_chars
+
 from llm_service import LLMClient
+from software_engineering_team.shared.context_sizing import (
+    compute_existing_code_chars,
+    compute_spec_content_chars,
+)
 from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
-from software_engineering_team.shared.prompt_utils import build_problem_solving_header, log_llm_prompt
+from software_engineering_team.shared.prompt_utils import (
+    build_problem_solving_header,
+    log_llm_prompt,
+)
 from software_engineering_team.shared.repo_utils import (
-    int_env as _int_env,
+    BACKEND_EXTENSIONS,
     read_repo_code,
     truncate_for_context,
-    BACKEND_EXTENSIONS,
 )
+from software_engineering_team.shared.repo_utils import (
+    int_env as _int_env,
+)
+from software_engineering_team.shared.task_plan import TaskPlan
 from software_engineering_team.shared.task_utils import (
     task_requirements,
     task_requirements_with_expectations,
 )
+
 from .models import (
     BackendInput,
     BackendOutput,
@@ -27,7 +38,7 @@ from .models import (
     ReviewIterationRecord,
 )
 from .prompts import BACKEND_PLANNING_PROMPT, BACKEND_PROMPT
-from software_engineering_team.shared.task_plan import TaskPlan
+
 MAX_EXISTING_CODE_CHARS = 10000
 logger = logging.getLogger(__name__)
 
@@ -608,7 +619,10 @@ class BackendExpertAgent:
             delete_branch,
             merge_branch,
         )
-        from software_engineering_team.shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
+        from software_engineering_team.shared.repo_writer import (
+            NO_FILES_TO_WRITE_MSG,
+            write_agent_output,
+        )
         task_id = task.id
         workflow_start = time.monotonic()
         review_history: List[ReviewIterationRecord] = []
@@ -1062,7 +1076,6 @@ class BackendExpertAgent:
                     )
                     break
                 # When same error repeats 2+ times, try BuildFixSpecialist for minimal targeted fix
-                specialist_success = False
                 if consecutive_same_build_failures >= 2 and build_fix_specialist is not None:
                     try:
                         from build_fix_specialist.models import BuildFixInput
@@ -1095,7 +1108,6 @@ class BackendExpertAgent:
                             if ok_apply and files_dict:
                                 ok_write, write_msg = write_agent_output(repo_path, type("R", (), {"files": files_dict, "summary": bf_result.summary})(), subdir="")
                                 if ok_write:
-                                    specialist_success = True
                                     logger.info(
                                         "[%s] WORKFLOW   [%d] BuildFixSpecialist applied %d edit(s), re-running build",
                                         task_id,
@@ -2249,8 +2261,9 @@ class BackendExpertAgent:
         Postconditions:
             - Returns a ``CodeReviewOutput`` with ``approved`` and ``issues``.
         """
-        from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
         from code_review_agent.models import CodeReviewInput
+
+        from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
         max_chars = compute_code_review_total_chars(code_review_agent.llm)
         code_capped = _truncate_for_context(code, max_chars)
         return code_review_agent.run(
@@ -2409,6 +2422,7 @@ class BackendExpertAgent:
             Tuple of (comments_added, comments_updated, already_compliant).
         """
         from technical_writers.dbc_comments_agent.models import DbcCommentsInput
+
         from software_engineering_team.shared.git_utils import write_files_and_commit
         try:
             dbc_code = _read_repo_code(repo_path)

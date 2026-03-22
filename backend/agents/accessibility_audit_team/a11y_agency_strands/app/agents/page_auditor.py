@@ -1,5 +1,5 @@
-from .base import ToolContext, tool
 from ..tools import build_page_inventory, persist_artifact, run_lighthouse_accessibility
+from .base import ToolContext, tool
 
 
 @tool(context=True)

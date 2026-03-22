@@ -11,16 +11,12 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
 from .models import (
     ResearchBriefInput,
-    SearchQuery,
-    CandidateResult,
-    SourceDocument,
-    ResearchReference,
 )
 
 logger = logging.getLogger(__name__)

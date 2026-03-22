@@ -4,8 +4,8 @@ Tool: audit.build_coverage_matrix
 Produce SC x surface x journey coverage matrix.
 """
 
-from typing import List, Optional
 import uuid
+from typing import List
 
 from pydantic import BaseModel, Field
 
@@ -15,7 +15,7 @@ from ...models import (
     Surface,
     VerificationDepth,
 )
-from ...wcag_criteria import get_level_a_aa_criteria, WCAG_22_CRITERIA
+from ...wcag_criteria import WCAG_22_CRITERIA, get_level_a_aa_criteria
 
 
 class BuildCoverageMatrixInput(BaseModel):

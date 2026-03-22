@@ -4,7 +4,6 @@ Secure credential storage using Fernet encryption.
 Stores generated credentials encrypted at rest in .agent_cache/credentials/
 """
 
-import base64
 import json
 import os
 import secrets

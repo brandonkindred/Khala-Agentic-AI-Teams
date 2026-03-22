@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
 
-from software_engineering_team.shared.context_sizing import compute_spec_chunk_chars
 from llm_service import LLMClient
+from software_engineering_team.shared.context_sizing import compute_spec_chunk_chars
 
 from .models import SpecChunkAnalysis, SpecChunkAnalyzerInput
 from .prompts import SPEC_CHUNK_ANALYZER_PROMPT

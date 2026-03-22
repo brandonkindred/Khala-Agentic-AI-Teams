@@ -8,7 +8,7 @@ from typing import List
 import httpx
 from pydantic import HttpUrl
 
-from ..models import SearchQuery, CandidateResult
+from ..models import CandidateResult, SearchQuery
 
 logger = logging.getLogger(__name__)
 

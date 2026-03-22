@@ -8,7 +8,7 @@ to avoid repeated or near-identical items in merged lists.
 from __future__ import annotations
 
 from difflib import SequenceMatcher
-from typing import Any, Callable, List, TypeVar
+from typing import Callable, List, TypeVar
 
 T = TypeVar("T")
 

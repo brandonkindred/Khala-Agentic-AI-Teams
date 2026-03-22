@@ -11,6 +11,11 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from software_engineering_team.shared.deduplication import (
+    DEFAULT_MAX_ISSUES,
+    dedupe_by_key,
+    dedupe_strings,
+)
 from software_engineering_team.shared.models import PlanningHierarchy
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
@@ -164,7 +169,6 @@ class TaskDependencyToolAgent:
         
         tasks = _extract_tasks_from_hierarchy(inp.hierarchy)
         
-        tasks_json = ""
         if not tasks:
             task_artifacts = "\n".join(
                 f"--- {path} ---\n{content[:500]}"
@@ -182,7 +186,7 @@ class TaskDependencyToolAgent:
                 f"- {t['id']}: [{t['team']}] {t['title']} - {t['description'][:80]}"
                 for t in tasks[:50]
             )
-            tasks_json = json.dumps([{"id": t["id"], "team": t["team"], "title": t["title"], "description": t["description"][:80]} for t in tasks[:50]])
+            json.dumps([{"id": t["id"], "team": t["team"], "title": t["title"], "description": t["description"][:80]} for t in tasks[:50]])
         
         prompt = TASK_DEPENDENCY_REVIEW_PROMPT.format(tasks=tasks_text)
         raw_text = complete_text_with_continuation(
@@ -193,7 +197,6 @@ class TaskDependencyToolAgent:
         recommendations = data.get("recommendations") or []
         summary = data.get("summary", "Task dependency review complete.")
         dependencies: List[Dict[str, Any]] = []
-        circular_risks: List[str] = []
         critical_path: List[str] = []
         parallelizable: List[List[str]] = []
         if not isinstance(issues, list):

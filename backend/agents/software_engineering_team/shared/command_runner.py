@@ -11,10 +11,10 @@ from __future__ import annotations
 import logging
 import os
 import re
-import sys
 import shlex
 import signal
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -1801,7 +1801,10 @@ def ensure_backend_project_initialized(backend_dir: str | Path) -> CommandResult
 
     Returns a :class:`CommandResult` indicating success or the first failure.
     """
-    from software_engineering_team.shared.git_utils import ensure_files_committed_on_main, initialize_new_repo
+    from software_engineering_team.shared.git_utils import (
+        ensure_files_committed_on_main,
+        initialize_new_repo,
+    )
 
     cwd = Path(backend_dir).resolve()
     requirements = cwd / "requirements.txt"

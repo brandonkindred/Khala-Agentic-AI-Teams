@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
 
 from llm_service import LLMClient, LLMJsonParseError
 
@@ -38,7 +37,7 @@ class QAExpertAgent:
 
         context_parts = [
             f"**Language:** {input_data.language}",
-            f"**Code to review:**",
+            "**Code to review:**",
             "```",
             input_data.code,
             "```",

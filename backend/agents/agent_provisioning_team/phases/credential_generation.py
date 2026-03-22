@@ -4,10 +4,9 @@ Credential generation phase: Generate passwords and tokens for tools.
 This is phase 2 of the provisioning workflow.
 """
 
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Optional
 
 from ..models import (
-    AccessTier,
     CredentialGenerationResult,
     GeneratedCredentials,
 )

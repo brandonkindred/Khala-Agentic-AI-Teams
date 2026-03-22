@@ -1,7 +1,6 @@
 """Tests for content profile / length policy resolution."""
 
 import pytest
-
 from shared.content_profile import (
     ContentProfile,
     LengthPolicy,

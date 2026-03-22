@@ -153,6 +153,7 @@ def test_apply_repair_fixes_rejects_path_outside_tree(tmp_path: Path) -> None:
 def test_orchestrator_repair_requeue_on_backend_crash(tmp_path: Path) -> None:
     """On backend NameError crash, repair applied, task re-queued, worker picks it up and completes."""
     import orchestrator
+
     from software_engineering_team.shared.models import Task, TaskType
 
     backend_dir = tmp_path / "backend"
@@ -238,6 +239,7 @@ def test_orchestrator_repair_requeue_on_backend_crash(tmp_path: Path) -> None:
 def test_orchestrator_requeues_when_task_contract_is_repaired(tmp_path: Path) -> None:
     """Backend task blocked by missing contract fields is refined and re-queued."""
     import orchestrator
+
     from software_engineering_team.shared.models import Task, TaskType
 
     backend_dir = tmp_path / "backend"

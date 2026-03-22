@@ -1,6 +1,6 @@
-from .base import StubAgent, ToolContext, tool
 from ..models import ClientProfile, SamplingPlan, ScopeDefinition
 from ..tools import collect_client_discovery, persist_artifact
+from .base import StubAgent, ToolContext, tool
 
 
 @tool(context=True)

@@ -8,10 +8,17 @@ from .agents import (
     MarketViabilityAgent,
     ResearchScriptAgent,
     TranscriptIngestionAgent,
-    UXResearchAgent,
     UserPsychologyAgent,
+    UXResearchAgent,
 )
-from .models import HumanReview, MarketSignal, ResearchMission, TeamOutput, TeamTopology, WorkflowStatus
+from .models import (
+    HumanReview,
+    MarketSignal,
+    ResearchMission,
+    TeamOutput,
+    TeamTopology,
+    WorkflowStatus,
+)
 
 
 class MarketResearchOrchestrator:

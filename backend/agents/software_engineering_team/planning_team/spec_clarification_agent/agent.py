@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 
 from llm_service import LLMClient
 
-from .models import SpecClarificationInput, SpecClarificationOutput
+from .models import SpecClarificationOutput
 from .prompts import ASK_NEXT_PROMPT, PROCESS_ANSWER_PROMPT
 
 logger = logging.getLogger(__name__)

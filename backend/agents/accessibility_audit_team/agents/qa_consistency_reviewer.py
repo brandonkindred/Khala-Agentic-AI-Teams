@@ -5,13 +5,13 @@ Owns: Quality bar enforcement + dedupe + consistency
 Outputs: Approved backlog + report readiness
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from .base import AgentMessage, BaseSpecialistAgent
-from ..models import Finding, FindingState, PatternCluster, Phase, Severity, Scope
-from ..tools.qa import validate_finding, cluster_patterns
-from ..tools.qa.validate_finding import ValidateFindingInput
+from ..models import Finding, FindingState, Phase, Severity
+from ..tools.qa import cluster_patterns, validate_finding
 from ..tools.qa.cluster_patterns import ClusterPatternsInput
+from ..tools.qa.validate_finding import ValidateFindingInput
+from .base import AgentMessage, BaseSpecialistAgent
 
 
 class QAConsistencyReviewer(BaseSpecialistAgent):
@@ -41,7 +41,7 @@ class QAConsistencyReviewer(BaseSpecialistAgent):
         - REPORT_PACKAGING: Final quality gate
         """
         phase = context.get("phase", Phase.REPORT_PACKAGING)
-        audit_id = context.get("audit_id", "")
+        context.get("audit_id", "")
 
         if phase == Phase.DISCOVERY:
             return await self._handle_early_qa(context)

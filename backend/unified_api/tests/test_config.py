@@ -7,7 +7,6 @@ _backend = Path(__file__).resolve().parent.parent.parent
 if str(_backend) not in sys.path:
     sys.path.insert(0, str(_backend))
 
-import pytest
 
 from unified_api.config import TEAM_CONFIGS, TeamConfig, get_enabled_teams
 

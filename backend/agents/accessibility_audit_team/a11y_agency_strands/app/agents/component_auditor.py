@@ -1,6 +1,6 @@
-from .base import StubAgent, ToolContext, tool
 from ..models import Finding
 from ..tools import build_component_inventory, persist_artifact, run_axe_scan
+from .base import StubAgent, ToolContext, tool
 
 
 @tool(context=True)

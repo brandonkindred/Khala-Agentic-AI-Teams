@@ -1,8 +1,7 @@
 """Tests for task parsing: flat and hierarchical formats."""
 
-import pytest
 
-from software_engineering_team.shared.models import Task, TaskAssignment, TaskStatus, TaskType
+from software_engineering_team.shared.models import TaskType
 from software_engineering_team.shared.task_parsing import (
     flatten_hierarchy_to_assignment,
     parse_assignment_from_data,

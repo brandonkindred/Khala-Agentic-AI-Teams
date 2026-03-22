@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 
 from llm_service import LLMClient
 from software_engineering_team.shared.prompt_utils import log_llm_prompt

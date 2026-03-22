@@ -4,7 +4,7 @@ Tool: mobile.record_screen_reader_flow
 Record VoiceOver/TalkBack navigation and announcements.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Dict, List, Literal
 
 from pydantic import BaseModel, Field
 

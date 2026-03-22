@@ -7,14 +7,16 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from blog_research_agent.tools.web_search import OllamaWebSearch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from llm_service import get_client
 from shared_job_management import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -23,9 +25,6 @@ from shared_job_management import (
     CentralJobManager,
     start_stale_job_monitor,
 )
-
-from blog_research_agent.tools.web_search import OllamaWebSearch
-from llm_service import get_client
 from social_media_marketing_team.models import (
     BrandGoals,
     CampaignPerformanceSnapshot,

@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Optional
+from typing import Optional
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
+from llm_service import get_client
+
+from ..agents.intake_profile_agent import IntakeProfileAgent
+from ..agents.meal_planning_agent import MealPlanningAgent
+from ..agents.nutritionist_agent import NutritionistAgent
 from ..models import (
     ClientProfile,
     FeedbackRequest,
@@ -25,19 +29,15 @@ from ..models import (
 )
 from ..shared.client_profile_store import ClientProfileStore
 from ..shared.job_store import (
-    create_job,
-    get_job,
-    update_job,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
+    create_job,
+    get_job,
+    update_job,
 )
 from ..shared.meal_feedback_store import MealFeedbackStore
-from llm_service import get_client
-from ..agents.intake_profile_agent import IntakeProfileAgent
-from ..agents.meal_planning_agent import MealPlanningAgent
-from ..agents.nutritionist_agent import NutritionistAgent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

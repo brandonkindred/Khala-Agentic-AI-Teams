@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from software_engineering_team.shared.models import SystemArchitecture
 
+
 class ChunkReviewInput(BaseModel):
     """Input for reviewing one chunk of code (used by ChunkReviewAgent)."""
 

@@ -23,19 +23,21 @@ from ..models import (
 from ..orchestrator import AISystemsOrchestrator
 from ..shared.job_store import (
     JOB_STATUS_COMPLETED,
-    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
-    add_completed_phase,
-    cancel_job as store_cancel_job,
     create_job,
-    delete_job as store_delete_job,
     get_job,
     list_jobs,
     mark_job_completed,
     mark_job_failed,
     mark_job_running,
     update_job,
+)
+from ..shared.job_store import (
+    cancel_job as store_cancel_job,
+)
+from ..shared.job_store import (
+    delete_job as store_delete_job,
 )
 
 app = FastAPI(

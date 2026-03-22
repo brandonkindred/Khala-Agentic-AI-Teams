@@ -4,8 +4,6 @@ import time
 import uuid
 from pathlib import Path
 
-import pytest
-
 
 def test_heartbeat_updates_last_heartbeat_at(tmp_path: Path) -> None:
     """start_job_heartbeat_thread causes last_heartbeat_at to advance for a pending job."""
@@ -111,12 +109,12 @@ def test_waiting_for_answers_excluded_from_stale(tmp_path: Path) -> None:
     """Job with waiting_for_answers=True is not marked stale even when last_heartbeat_at is old."""
     from datetime import datetime, timedelta, timezone
 
+    from shared_job_management import CentralJobManager
     from software_engineering_team.shared.job_store import (
         create_job,
         get_job,
         mark_stale_jobs_failed,
     )
-    from shared_job_management import CentralJobManager
 
     cache_dir = tmp_path
     job_id = str(uuid.uuid4())

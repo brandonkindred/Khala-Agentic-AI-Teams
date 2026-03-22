@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-from strands import tool
 
 import httpx
+from strands import tool
 
 
 def _ollama_web_search_impl(query: str, max_results: int = 10) -> str:

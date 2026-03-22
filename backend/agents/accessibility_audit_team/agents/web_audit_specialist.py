@@ -5,10 +5,9 @@ Owns: Manual web testing + scan orchestration + web-specific evidence
 Outputs: Web findings with proof and fix guidance drafts
 """
 
-from typing import Any, Dict, List, Optional
 import uuid
+from typing import Any, Dict, List
 
-from .base import AgentMessage, BaseSpecialistAgent
 from ..models import (
     Finding,
     FindingState,
@@ -20,17 +19,16 @@ from ..models import (
     WCAGMapping,
 )
 from ..tools.web import (
-    run_automated_scan,
-    record_keyboard_flow,
-    capture_dom_snapshot,
     check_reflow_zoom,
     compute_contrast_and_focus,
+    record_keyboard_flow,
+    run_automated_scan,
 )
-from ..tools.web.run_automated_scan import RunAutomatedScanInput
-from ..tools.web.record_keyboard_flow import RecordKeyboardFlowInput, KeyboardAction
-from ..tools.web.capture_dom_snapshot import CaptureDomSnapshotInput
 from ..tools.web.check_reflow_zoom import CheckReflowZoomInput
 from ..tools.web.compute_contrast_and_focus import ComputeContrastAndFocusInput
+from ..tools.web.record_keyboard_flow import KeyboardAction, RecordKeyboardFlowInput
+from ..tools.web.run_automated_scan import RunAutomatedScanInput
+from .base import AgentMessage, BaseSpecialistAgent
 
 
 class WebAuditSpecialist(BaseSpecialistAgent):
@@ -64,7 +62,7 @@ class WebAuditSpecialist(BaseSpecialistAgent):
         - DISCOVERY: Run scans, perform manual sweep, draft findings
         """
         phase = context.get("phase", Phase.DISCOVERY)
-        audit_id = context.get("audit_id", "")
+        context.get("audit_id", "")
 
         if phase == Phase.DISCOVERY:
             return await self._handle_discovery(context)
@@ -117,7 +115,7 @@ class WebAuditSpecialist(BaseSpecialistAgent):
                         target=url,
                         issue_type=IssueType.KEYBOARD,
                         severity=Severity.CRITICAL,
-                        title=f"Keyboard trap detected",
+                        title="Keyboard trap detected",
                         summary=f"Keyboard focus gets trapped at element: {trap}",
                         expected="Keyboard focus should be able to move away from any focusable element",
                         actual=f"Keyboard focus cannot escape from {trap}",
@@ -134,7 +132,7 @@ class WebAuditSpecialist(BaseSpecialistAgent):
                         target=url,
                         issue_type=IssueType.FOCUS,
                         severity=Severity.HIGH,
-                        title=f"Focus indicator not visible",
+                        title="Focus indicator not visible",
                         summary=f"Element {step.selector} does not have a visible focus indicator",
                         expected="A visible focus indicator when element receives keyboard focus",
                         actual="No visible focus indicator present",
@@ -182,7 +180,7 @@ class WebAuditSpecialist(BaseSpecialistAgent):
                         target=url,
                         issue_type=IssueType.CONTRAST,
                         severity=Severity.HIGH,
-                        title=f"Insufficient text contrast",
+                        title="Insufficient text contrast",
                         summary=f"Element {result.selector} has contrast ratio of {result.contrast_ratio:.2f}:1",
                         expected="Contrast ratio of at least 4.5:1 for normal text",
                         actual=f"Contrast ratio is {result.contrast_ratio:.2f}:1",

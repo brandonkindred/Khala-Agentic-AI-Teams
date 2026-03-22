@@ -13,16 +13,13 @@ SLMS sets mapping taxonomy and reporting tags.
 Outputs: AuditPlan, CoverageMatrix, TestRunConfig
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from ..agents import AccessibilityProgramLead, StandardsMappingSpecialist
 from ..models import (
-    AuditPlan,
     AuditRequest,
-    CoverageMatrix,
     IntakeResult,
     Phase,
-    TestRunConfig,
 )
 
 

@@ -1,6 +1,5 @@
 """Tests for WCAG 2.2 criteria module."""
 
-import pytest
 
 from accessibility_audit_team.wcag_criteria import (
     WCAG_22_CRITERIA,

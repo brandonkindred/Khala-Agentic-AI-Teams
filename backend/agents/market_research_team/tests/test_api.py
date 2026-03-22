@@ -4,7 +4,6 @@ from fastapi.testclient import TestClient
 
 from market_research_team.api.main import app
 
-
 client = TestClient(app)
 
 

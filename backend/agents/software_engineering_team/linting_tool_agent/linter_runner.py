@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 from typing import List
 
-from software_engineering_team.shared.command_runner import CommandResult, run_command
+from software_engineering_team.shared.command_runner import run_command
 
 from .models import LintExecutionResult, LintIssue, LintPlan
 

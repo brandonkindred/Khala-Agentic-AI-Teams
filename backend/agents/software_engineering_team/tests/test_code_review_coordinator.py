@@ -1,8 +1,6 @@
 """Tests for Code Review Coordinator."""
 
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from code_review_agent.coordinator import (
     build_chunks,

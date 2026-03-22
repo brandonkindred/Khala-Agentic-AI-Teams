@@ -5,8 +5,9 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
+from llm_service import LLMClient
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,
@@ -15,8 +16,7 @@ from software_engineering_team.shared.git_utils import (
     merge_branch,
     write_files_and_commit,
 )
-from llm_service import LLMClient
-from software_engineering_team.shared.repo_utils import read_repo_code, DOCUMENTATION_EXTENSIONS
+from software_engineering_team.shared.repo_utils import DOCUMENTATION_EXTENSIONS, read_repo_code
 
 from .models import DocumentationInput, DocumentationOutput, DocumentationStatus
 from .prompts import (

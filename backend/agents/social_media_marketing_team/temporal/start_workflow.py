@@ -6,7 +6,10 @@ import asyncio
 import logging
 from typing import Any, Dict
 
-from social_media_marketing_team.temporal.client import get_temporal_client, get_temporal_loop, is_temporal_enabled
+from social_media_marketing_team.temporal.client import (
+    get_temporal_client,
+    get_temporal_loop,
+)
 from social_media_marketing_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX_RUN
 from social_media_marketing_team.temporal.workflows import SocialMarketingTeamWorkflow
 

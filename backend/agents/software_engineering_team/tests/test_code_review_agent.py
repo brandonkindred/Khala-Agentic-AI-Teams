@@ -2,8 +2,6 @@
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from code_review_agent.agent import CodeReviewAgent
 from code_review_agent.models import CodeReviewInput
 

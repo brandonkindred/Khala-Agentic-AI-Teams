@@ -1,6 +1,6 @@
-from .base import ToolContext, tool
 from ..models import EvidenceBundle
 from ..tools import capture_dom_snippet, capture_screenshot, persist_artifact
+from .base import ToolContext, tool
 
 
 @tool(context=True)

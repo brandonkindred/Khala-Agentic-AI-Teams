@@ -10,19 +10,20 @@ This script demonstrates the full flow. In practice, approval/rejection may come
 from a CLI prompt, API, or another system.
 """
 
-from . import _path_setup  # noqa: F401  # Add blogging to path when run from project root
-
 import logging
 from pathlib import Path
 
-from llm_service import get_client
-from shared.style_loader import load_style_file
 from blog_copy_editor_agent import BlogCopyEditorAgent
 from blog_draft_agent import BlogDraftAgent
 from blog_publication_agent import (
     BlogPublicationAgent,
     SubmitDraftInput,
 )
+from shared.style_loader import load_style_file
+
+from llm_service import get_client
+
+from . import _path_setup  # noqa: F401  # Add blogging to path when run from project root
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,12 +65,12 @@ def main() -> None:
         max_revision_loops=3,
     )
 
-    draft_agent = BlogDraftAgent(
+    BlogDraftAgent(
         llm_client=llm,
         writing_style_guide_content=writing_style_content,
         brand_spec_content=brand_spec_content,
     )
-    copy_editor_agent = BlogCopyEditorAgent(
+    BlogCopyEditorAgent(
         llm_client=llm,
         writing_style_guide_content=writing_style_content,
         brand_spec_content=brand_spec_content,

@@ -107,7 +107,6 @@ def chunk_spec_by_sections(
     chunks: List[Tuple[str, str]] = []
     current_content: List[str] = []
     current_title = ""
-    current_len = 0
 
     for title, content in sections:
         new_content = current_content + [content]
@@ -117,7 +116,6 @@ def chunk_spec_by_sections(
             combined = "\n\n".join(current_content)
             chunks.append((current_title, combined))
             current_content = []
-            current_len = 0
             current_title = ""
 
         # If single section exceeds max_chars, sub-split by size
@@ -128,7 +126,7 @@ def chunk_spec_by_sections(
             continue
 
         current_content.append(content)
-        current_len = len("\n\n".join(current_content))
+        len("\n\n".join(current_content))
         if not current_title:
             current_title = title
 

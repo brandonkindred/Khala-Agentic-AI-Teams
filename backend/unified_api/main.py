@@ -23,11 +23,10 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # Add agents directory to path for imports
@@ -66,7 +65,7 @@ class UnifiedHealthResponse(BaseModel):
 
     status: str
     version: str
-    teams: List[TeamHealth]
+    teams: list[TeamHealth]
 
 
 class TeamInfo(BaseModel):
@@ -75,7 +74,7 @@ class TeamInfo(BaseModel):
     name: str
     prefix: str
     description: str
-    tags: List[str]
+    tags: list[str]
     enabled: bool
 
 
@@ -85,7 +84,7 @@ class ApiInfoResponse(BaseModel):
     name: str
     version: str
     description: str
-    teams: List[TeamInfo]
+    teams: list[TeamInfo]
     docs_url: str
 
 
@@ -93,15 +92,15 @@ class SecurityErrorResponse(BaseModel):
     """Response body when the security gateway rejects a request (403)."""
 
     detail: str
-    security_findings: List[str]
+    security_findings: list[str]
 
 
 # Track mounted routers for health checks
-_mounted_teams: Dict[str, bool] = {}
+_mounted_teams: dict[str, bool] = {}
 
 # Team keys that have async jobs: on shutdown, call their mark_all_running_jobs_failed(reason).
 # Maps team_key -> (module_dot_path, function_name).
-SHUTDOWN_HOOKS: Dict[str, tuple] = {
+SHUTDOWN_HOOKS: dict[str, tuple] = {
     "blogging": ("blogging.shared.blog_job_store", "mark_all_running_jobs_failed"),
     "software_engineering": ("software_engineering_team.shared.job_store", "mark_all_running_jobs_failed"),
     "personal_assistant": ("personal_assistant_team.shared.pa_job_store", "mark_all_running_jobs_failed"),
@@ -249,8 +248,9 @@ def _try_mount_agent_provisioning(app: FastAPI) -> bool:
 def _try_mount_accessibility_audit(app: FastAPI) -> bool:
     """Mount accessibility audit team API."""
     try:
-        from accessibility_audit_team.api.main import router as a11y_router
         from fastapi import FastAPI as SubApp
+
+        from accessibility_audit_team.api.main import router as a11y_router
 
         # Create sub-app for accessibility audit
         a11y_app = SubApp(
@@ -380,7 +380,7 @@ def _try_mount_road_trip_planning(app: FastAPI) -> bool:
         return False
 
 
-def mount_all_teams(app: FastAPI) -> Dict[str, bool]:
+def mount_all_teams(app: FastAPI) -> dict[str, bool]:
     """Mount all enabled team APIs and return mount status."""
     mount_functions = {
         "blogging": _try_mount_blogging,
@@ -428,7 +428,7 @@ async def lifespan(app: FastAPI):
 
     # Start each team's Temporal worker when mounted and TEMPORAL_ADDRESS is set.
     # Map: team_key -> (module_path, start_function_name)
-    _temporal_worker_starters: Dict[str, tuple] = {
+    _temporal_worker_starters: dict[str, tuple] = {
         "software_engineering": ("software_engineering_team.temporal.worker", "start_se_temporal_worker_thread"),
         "blogging": ("blogging.temporal.worker", "start_blogging_temporal_worker_thread"),
         "personal_assistant": ("personal_assistant_team.temporal.worker", "start_pa_temporal_worker_thread"),
@@ -499,10 +499,12 @@ app.add_middleware(
 
 # Security gateway: scan requests to team APIs before forwarding (when SECURITY_GATEWAY_ENABLED is true)
 from unified_api.middleware import SecurityGatewayMiddleware
+
 app.add_middleware(SecurityGatewayMiddleware)
 
 # Integrations API (Slack config)
 from unified_api.routes.integrations import router as integrations_router
+
 app.include_router(integrations_router)
 
 
@@ -563,7 +565,7 @@ async def health() -> UnifiedHealthResponse:
 
 
 @app.get("/teams", tags=["root"])
-async def list_teams() -> Dict[str, Any]:
+async def list_teams() -> dict[str, Any]:
     """List all available teams with their mount status."""
     teams = {}
     for key, config in TEAM_CONFIGS.items():

@@ -6,14 +6,15 @@ that complies with it. Pass your own research_document and outline, or
 use placeholders for testing.
 """
 
-from . import _path_setup  # noqa: F401  # Add blogging to path when run from project root
-
 import logging
 from pathlib import Path
 
-from llm_service import get_client  # or DummyLLMClient for quick test
-from shared.style_loader import load_style_file
 from blog_draft_agent import BlogDraftAgent, DraftInput
+from shared.style_loader import load_style_file
+
+from llm_service import get_client  # or DummyLLMClient for quick test
+
+from . import _path_setup  # noqa: F401  # Add blogging to path when run from project root
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 

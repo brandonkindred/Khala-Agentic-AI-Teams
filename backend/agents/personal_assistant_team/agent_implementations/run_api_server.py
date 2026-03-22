@@ -26,10 +26,10 @@ _project_root = _agents_dir.parent  # strands-agents/
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
-import logging
-import os
+import logging  # noqa: E402
+import os  # noqa: E402
 
-import uvicorn
+import uvicorn  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

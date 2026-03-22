@@ -1,6 +1,7 @@
 """Unit tests for shared prompt utilities."""
 
 import logging
+
 import pytest
 
 from software_engineering_team.shared.prompt_utils import (

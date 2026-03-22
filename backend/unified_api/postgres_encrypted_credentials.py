@@ -10,7 +10,6 @@ import logging
 import os
 import threading
 import urllib.parse
-from typing import Optional
 
 from unified_api.integration_credentials import get_integration_fernet
 
@@ -75,20 +74,19 @@ def pg_get_credential(service: str, key: str) -> str:
     """Return decrypted plaintext or empty string."""
     if not postgres_credentials_enabled():
         return ""
-    row: Optional[tuple] = None
+    row: tuple | None = None
     with _LOCK:
         import psycopg
 
         try:
-            with psycopg.connect(_dsn(), autocommit=True) as conn:
-                with conn.cursor() as cur:
-                    _ensure_table(cur)
-                    cur.execute(
-                        "SELECT ciphertext FROM encrypted_integration_credentials "
-                        "WHERE service = %s AND credential_key = %s",
-                        (service, key),
-                    )
-                    row = cur.fetchone()
+            with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+                _ensure_table(cur)
+                cur.execute(
+                    "SELECT ciphertext FROM encrypted_integration_credentials "
+                    "WHERE service = %s AND credential_key = %s",
+                    (service, key),
+                )
+                row = cur.fetchone()
         except Exception as e:
             logger.warning("Postgres credential read failed (%s/%s): %s", service, key, e)
             return ""
@@ -116,19 +114,17 @@ def pg_set_credential(service: str, key: str, value: str) -> None:
         return
     encrypted = get_integration_fernet().encrypt(value.encode()).decode()
 
-    with _LOCK:
-        with psycopg.connect(_dsn(), autocommit=True) as conn:
-            with conn.cursor() as cur:
-                _ensure_table(cur)
-                cur.execute(
-                    """
+    with _LOCK, psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+        _ensure_table(cur)
+        cur.execute(
+            """
                     INSERT INTO encrypted_integration_credentials (service, credential_key, ciphertext, updated_at)
                     VALUES (%s, %s, %s, NOW())
                     ON CONFLICT (service, credential_key)
                     DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = NOW()
                     """,
-                    (service, key, encrypted),
-                )
+            (service, key, encrypted),
+        )
 
 
 def pg_delete_credential(service: str, key: str) -> None:
@@ -140,12 +136,11 @@ def pg_delete_credential(service: str, key: str) -> None:
 
     with _LOCK:
         try:
-            with psycopg.connect(_dsn(), autocommit=True) as conn:
-                with conn.cursor() as cur:
-                    _ensure_table(cur)
-                    cur.execute(
-                        "DELETE FROM encrypted_integration_credentials WHERE service = %s AND credential_key = %s",
-                        (service, key),
-                    )
+            with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+                _ensure_table(cur)
+                cur.execute(
+                    "DELETE FROM encrypted_integration_credentials WHERE service = %s AND credential_key = %s",
+                    (service, key),
+                )
         except Exception as e:
             logger.warning("Postgres credential delete failed (%s/%s): %s", service, key, e)

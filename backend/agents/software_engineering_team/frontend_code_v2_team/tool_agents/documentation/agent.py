@@ -16,8 +16,8 @@ from ...models import (
 from ...output_templates import parse_problem_solving_single_issue_template, parse_review_template
 from ...prompts import (
     DOCUMENTATION_MICROTASK_PROMPT,
-    DOCUMENTATION_REVIEW_PROMPT,
     DOCUMENTATION_PROBLEM_SOLVE_PROMPT,
+    DOCUMENTATION_REVIEW_PROMPT,
     TYPESCRIPT_CONVENTIONS,
 )
 

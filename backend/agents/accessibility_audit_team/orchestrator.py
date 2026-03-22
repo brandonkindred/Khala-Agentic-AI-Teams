@@ -15,24 +15,22 @@ Two-Lane Execution Model:
 QCR ensures Lane A doesn't dump garbage into Lane B.
 """
 
-from typing import Any, Dict, List, Optional
 import logging
+from typing import Any, Dict, List, Optional
 
 from .agents import (
     AccessibilityProgramLead,
-    WebAuditSpecialist,
-    MobileAccessibilitySpecialist,
     AssistiveTechSpecialist,
-    StandardsMappingSpecialist,
     EvidenceEngineer,
-    RemediationAdvisor,
+    MobileAccessibilitySpecialist,
     QAConsistencyReviewer,
+    RemediationAdvisor,
+    StandardsMappingSpecialist,
+    WebAuditSpecialist,
 )
 from .models import (
     AccessibilityAuditResult,
-    AuditPlan,
     AuditRequest,
-    CoverageMatrix,
     Finding,
     MobileAppTarget,
     PatternCluster,
@@ -41,13 +39,12 @@ from .models import (
     WCAGLevel,
 )
 from .phases import (
-    run_intake_phase,
     run_discovery_phase,
-    run_verification_phase,
+    run_intake_phase,
     run_report_packaging_phase,
     run_retest_phase,
+    run_verification_phase,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +110,7 @@ class AccessibilityAuditOrchestrator:
 
         try:
             # Phase 0: Intake
-            logger.info(f"Starting intake phase for audit")
+            logger.info("Starting intake phase for audit")
             result.current_phase = Phase.INTAKE
 
             intake_result = await run_intake_phase(

@@ -1,6 +1,5 @@
 """Tests for spec chunking utilities."""
 
-import pytest
 
 from planning_team.spec_chunking import chunk_spec_by_sections, chunk_spec_by_size
 

@@ -2,7 +2,6 @@
 FastAPI endpoints for the Digital Accessibility Audit Team.
 """
 
-import asyncio
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
@@ -10,19 +9,6 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
-from ..models import (
-    AuditJobResponse,
-    AuditRequest,
-    AccessibilityAuditResult,
-    AuditStatusResponse,
-    BacklogExportResponse,
-    Finding,
-    FindingsListResponse,
-    MobileAppTarget,
-    Severity,
-    WCAGLevel,
-)
-from ..orchestrator import AccessibilityAuditOrchestrator, run_accessibility_audit
 from shared_job_management import (
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
@@ -31,6 +17,18 @@ from shared_job_management import (
     start_stale_job_monitor,
 )
 
+from ..models import (
+    AccessibilityAuditResult,
+    AuditJobResponse,
+    AuditRequest,
+    AuditStatusResponse,
+    BacklogExportResponse,
+    FindingsListResponse,
+    MobileAppTarget,
+    Severity,
+    WCAGLevel,
+)
+from ..orchestrator import AccessibilityAuditOrchestrator
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -324,7 +322,7 @@ async def get_audit_report(audit_id: str) -> Dict[str, Any]:
             detail=f"Audit {audit_id} is not complete yet",
         )
 
-    findings = orchestrator.get_findings(audit_id)
+    orchestrator.get_findings(audit_id)
     patterns = orchestrator.get_patterns(audit_id)
 
     # Build report

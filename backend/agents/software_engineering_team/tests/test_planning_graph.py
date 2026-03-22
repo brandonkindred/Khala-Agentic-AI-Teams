@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import pytest
-
 from planning_team.planning_graph import (
+    EdgeType,
     PlanningDomain,
     PlanningEdge,
     PlanningGraph,
     PlanningNode,
     PlanningNodeKind,
-    EdgeType,
-    Phase,
     ensure_dict,
     ensure_str_list,
 )

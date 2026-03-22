@@ -2,9 +2,9 @@
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
-
 from frontend_team_deprecated.models import UXDesignerOutput
+from pydantic import BaseModel
+
 from software_engineering_team.shared.models import SystemArchitecture
 
 

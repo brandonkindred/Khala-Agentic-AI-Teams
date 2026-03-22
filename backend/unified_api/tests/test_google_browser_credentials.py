@@ -29,9 +29,8 @@ def test_without_postgres_clear_is_noop(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_save_rejects_invalid_email(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
-    with mock.patch.object(mod, "pg_set_credential"):
-        with pytest.raises(ValueError, match="email"):
-            mod.set_google_browser_login_credentials("not-an-email", "x")
+    with mock.patch.object(mod, "pg_set_credential"), pytest.raises(ValueError, match="email"):
+        mod.set_google_browser_login_credentials("not-an-email", "x")
 
 
 def test_save_clear_roundtrip_postgres_mocked(monkeypatch: pytest.MonkeyPatch) -> None:

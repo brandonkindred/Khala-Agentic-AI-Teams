@@ -3,16 +3,16 @@
 import re
 
 import pytest
-
 from blog_draft_agent import BlogDraftAgent, DraftInput, DraftOutput
 from blog_research_agent.models import ResearchReference
-from llm_service import DummyLLMClient
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,
     TitleCandidate,
 )
+
+from llm_service import DummyLLMClient
 
 
 def _minimal_plan() -> ContentPlan:

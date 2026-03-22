@@ -6,9 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from linting_tool_agent import LintingToolAgent, LintIssue, LintToolInput, LintToolOutput
-from linting_tool_agent.models import LintExecutionResult, LintPlan
 from linting_tool_agent.linter_runner import detect_linter, parse_lint_output
-
+from linting_tool_agent.models import LintExecutionResult, LintPlan
 
 # ---------------------------------------------------------------------------
 # Model construction and serialization
@@ -235,6 +234,7 @@ def test_agent_run_llm_failure_is_non_blocking(tmp_path: Path) -> None:
 def test_backend_workflow_calls_linting_tool_agent(tmp_path: Path) -> None:
     """When linting_tool_agent is provided, run_workflow invokes it."""
     import subprocess
+
     from backend_agent import BackendExpertAgent
 
     # Set up a minimal git repo
@@ -268,7 +268,7 @@ def test_backend_workflow_calls_linting_tool_agent(tmp_path: Path) -> None:
         plan=lint_plan, execution_result=lint_exec, summary="Lint passed"
     )
 
-    from qa_agent.models import QAOutput, BugReport
+    from qa_agent.models import QAOutput
 
     mock_qa = MagicMock()
     mock_qa.run.return_value = QAOutput(
@@ -312,7 +312,7 @@ def test_backend_workflow_calls_linting_tool_agent(tmp_path: Path) -> None:
         },
     )
 
-    result = agent.run_workflow(
+    agent.run_workflow(
         repo_path=tmp_path,
         task=task,
         spec_content="test spec",

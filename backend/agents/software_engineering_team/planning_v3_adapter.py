@@ -13,9 +13,9 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from software_engineering_team.shared.models import ProductRequirements
-
 from planning_v2_adapter import PlanningV2AdapterResult
+
+from software_engineering_team.shared.models import ProductRequirements
 
 logger = logging.getLogger(__name__)
 

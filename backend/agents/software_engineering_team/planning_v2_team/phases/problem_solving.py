@@ -20,8 +20,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from llm_service import LLMClient
 
 from ..models import (
-    ImplementationPhaseResult,
     PLAN_PLANNING_TEAM_DIR,
+    ImplementationPhaseResult,
     PlanningPhaseResult,
     ProblemSolvingPhaseResult,
     ReviewPhaseResult,
@@ -30,7 +30,7 @@ from ..models import (
     ToolAgentPhaseInput,
 )
 from ..output_templates import looks_like_truncated_file_content, parse_fix_output
-from ..prompts import PROBLEM_SOLVING_PROMPT, PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
+from ..prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 from ..tool_agents.json_utils import complete_with_continuation
 
 logger = logging.getLogger(__name__)

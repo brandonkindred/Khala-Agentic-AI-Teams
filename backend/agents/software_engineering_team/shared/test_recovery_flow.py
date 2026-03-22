@@ -11,15 +11,13 @@ Run from the shared directory:
 """
 
 import sys
-import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import unittest
-from unittest.mock import Mock, MagicMock, patch
-import tempfile
 import shutil
+import tempfile
+import unittest
 
 
 class TestContinuationModule(unittest.TestCase):

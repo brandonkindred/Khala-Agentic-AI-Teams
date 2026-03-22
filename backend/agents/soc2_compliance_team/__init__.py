@@ -5,8 +5,8 @@ from .models import (
     SOC2AuditResult,
     SOC2ComplianceReport,
     TSCAuditResult,
-    TSCFinding,
     TSCCategory,
+    TSCFinding,
 )
 
 __all__ = [

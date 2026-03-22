@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient
-
 from devops_team.models import (
     DevOpsCompletionPackage,
     GitOperationsMetadata,
     HandoffInfo,
     ReleaseReadiness,
 )
+
+from llm_service import LLMClient
 
 from .models import DocumentationRunbookInput, DocumentationRunbookOutput
 from .prompts import DOC_RUNBOOK_PROMPT

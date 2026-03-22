@@ -5,10 +5,10 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
-from software_engineering_team.shared.development_plan_writer import write_architecture_plan
+
 from llm_service import DummyLLMClient
+from software_engineering_team.shared.development_plan_writer import write_architecture_plan
 from software_engineering_team.shared.models import ProductRequirements
 
 

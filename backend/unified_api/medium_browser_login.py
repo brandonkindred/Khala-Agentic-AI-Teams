@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ def perform_medium_google_browser_login(
     *,
     headless: bool | None = None,
     timeout_ms: int | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Launch Chromium, open Medium sign-in, use Google with the given email/password, return storage_state dict.
     """
@@ -192,8 +192,8 @@ def perform_medium_google_browser_login(
     timeout_ms = max(30000, min(int(timeout_ms), 600000))
 
     try:
-        from playwright.sync_api import sync_playwright
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
     except ImportError as e:
         raise RuntimeError(
             "playwright is not installed. Install with: pip install playwright && playwright install chromium",

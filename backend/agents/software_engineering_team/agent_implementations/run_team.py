@@ -15,27 +15,27 @@ Or with path setup from project root:
   python software_engineering_team/agent_implementations/run_team.py
 """
 
-import _path_setup  # noqa: F401
-
 import logging
 from pathlib import Path
 
-from llm_service import get_client
-from software_engineering_team.shared.models import ProductRequirements, TaskType
+import _path_setup  # noqa: F401
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
-from tech_lead_agent import TechLeadAgent, TechLeadInput
-from devops_agent import DevOpsExpertAgent, DevOpsInput
-from security_agent import CybersecurityExpertAgent, SecurityInput
 from backend_agent import BackendExpertAgent, BackendInput
 from backend_agent.agent import _read_openapi_spec_from_repo
+from devops_agent import DevOpsExpertAgent, DevOpsInput
 from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
 from qa_agent import QAExpertAgent, QAInput
+from security_agent import CybersecurityExpertAgent, SecurityInput
+from tech_lead_agent import TechLeadAgent, TechLeadInput
+
+from llm_service import get_client
+from software_engineering_team.shared.models import ProductRequirements, TaskType
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # Uses get_llm_client() which reads SW_LLM_PROVIDER, SW_LLM_MODEL (default: qwen3.5:397b-cloud)
-LLM = get_llm_client()
+LLM = get_client()
 
 # Example product requirements
 REQUIREMENTS = ProductRequirements(

@@ -25,16 +25,14 @@ from ..models import (
     ToolAgentPhaseInput,
 )
 from ..output_templates import (
-    parse_problem_solving_template,
-    parse_problem_solving_single_issue_template,
     parse_batch_fix_template,
+    parse_problem_solving_single_issue_template,
 )
 from ..prompts import (
-    PROBLEM_SOLVING_PROMPT,
-    PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT,
     BATCH_FIX_PROMPT,
-    PYTHON_CONVENTIONS,
     JAVA_CONVENTIONS,
+    PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT,
+    PYTHON_CONVENTIONS,
 )
 
 logger = logging.getLogger(__name__)
@@ -163,7 +161,7 @@ def run_batch_coding_fixes(
     merged.update(fixed_files)
 
     addressed_count = len(issues_addressed)
-    unresolved_count = len(actionable) - addressed_count
+    len(actionable) - addressed_count
     
     unresolved_issues: List[ReviewIssue] = []
     if addressed_count < len(actionable):

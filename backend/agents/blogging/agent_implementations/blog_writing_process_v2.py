@@ -8,8 +8,6 @@ enters closed-loop rewrite until PASS or max_rewrite_iterations.
 Supports job_updater callback for UI phase tracking.
 """
 
-from . import _path_setup  # noqa: F401
-
 import logging
 import time
 from pathlib import Path
@@ -20,14 +18,13 @@ from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 from blog_copy_editor_agent.models import FeedbackItem
 from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput
 from blog_fact_check_agent import BlogFactCheckAgent
+from blog_planning_agent import BlogPlanningAgent
+from blog_publication_agent.models import PublishingPack
 from blog_research_agent.agent import ResearchAgent
 from blog_research_agent.allowed_claims import extract_allowed_claims
-from llm_service import get_client, OllamaLLMClient
-from llm_service.interface import LLMClient
 from blog_research_agent.models import ResearchBriefInput
-from blog_publication_agent.models import PublishingPack
-from blog_planning_agent import BlogPlanningAgent
 from shared.artifacts import read_artifact, write_artifact
+from shared.brand_spec import load_brand_spec_prompt
 from shared.content_plan import (
     PlanningInput,
     PlanningPhaseResult,
@@ -36,7 +33,6 @@ from shared.content_plan import (
     content_plan_to_markdown_doc,
     content_plan_to_outline_markdown,
 )
-from shared.brand_spec import load_brand_spec_prompt
 from shared.content_profile import (
     ContentProfile,
     LengthPolicy,
@@ -46,7 +42,6 @@ from shared.content_profile import (
     resolve_length_policy,
     series_context_block,
 )
-from shared.style_loader import load_style_file
 from shared.errors import (
     BloggingError,
     ComplianceError,
@@ -57,7 +52,13 @@ from shared.errors import (
 )
 from shared.models import BlogPhase, get_phase_progress
 from shared.planning_config import planning_model_override
+from shared.style_loader import load_style_file
 from validators.runner import run_validators_from_work_dir
+
+from llm_service import OllamaLLMClient, get_client
+from llm_service.interface import LLMClient
+
+from . import _path_setup  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +368,6 @@ def run_pipeline(
                 add_story_agent_message,
                 complete_story_elicitation,
                 get_blog_job,
-                is_waiting_for_story_input,
                 update_blog_job,
             )
 

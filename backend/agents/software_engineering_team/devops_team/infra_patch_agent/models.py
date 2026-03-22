@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import Dict
 
-from pydantic import BaseModel, Field
-
 from devops_team.infra_debug_agent.models import IaCDebugOutput
+from pydantic import BaseModel, Field
 
 
 class IaCPatchInput(BaseModel):

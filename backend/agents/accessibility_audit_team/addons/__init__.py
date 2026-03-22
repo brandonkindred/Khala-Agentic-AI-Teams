@@ -8,9 +8,9 @@ Add-on agents provide extended functionality beyond the core audit workflow:
 - ADSE (Design System Agent): Hardens design system components with a11y contracts
 """
 
-from .training_agent import AccessibilityTrainingAgent
-from .monitoring_agent import AccessibilityMonitoringAgent
 from .design_system_agent import AccessibleDesignSystemAgent
+from .monitoring_agent import AccessibilityMonitoringAgent
+from .training_agent import AccessibilityTrainingAgent
 
 __all__ = [
     "AccessibilityTrainingAgent",

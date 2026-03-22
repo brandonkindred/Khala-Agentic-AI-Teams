@@ -1,18 +1,20 @@
 """Unit/integration tests for intake, nutritionist, and meal planning agents (mocked LLM or full)."""
 
-import pytest
-from pathlib import Path
 
+import pytest
+
+from nutrition_meal_planning_team.agents.intake_profile_agent import IntakeProfileAgent
+from nutrition_meal_planning_team.agents.meal_planning_agent import (
+    MealPlanningAgent,
+    _summarize_history,
+)
+from nutrition_meal_planning_team.agents.nutritionist_agent import NutritionistAgent
 from nutrition_meal_planning_team.models import (
     ClientProfile,
     HouseholdInfo,
-    LifestyleInfo,
     MealHistoryEntry,
     NutritionPlan,
 )
-from nutrition_meal_planning_team.agents.intake_profile_agent import IntakeProfileAgent
-from nutrition_meal_planning_team.agents.nutritionist_agent import NutritionistAgent
-from nutrition_meal_planning_team.agents.meal_planning_agent import MealPlanningAgent, _summarize_history
 
 
 class TestMealPlanningAgentHelpers:

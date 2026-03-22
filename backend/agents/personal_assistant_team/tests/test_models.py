@@ -1,24 +1,22 @@
 """Tests for shared models."""
 
-import pytest
 from datetime import datetime
 
 from ..models import (
+    CalendarEvent,
     ClothingPreferences,
+    Deal,
+    Goal,
+    GoalsProfile,
     IdentityProfile,
     PreferencesProfile,
-    GoalsProfile,
-    Goal,
-    UserProfile,
+    Priority,
+    Reservation,
+    ReservationType,
     TaskItem,
     TaskList,
     TaskStatus,
-    Priority,
-    EmailMessage,
-    CalendarEvent,
-    Deal,
-    Reservation,
-    ReservationType,
+    UserProfile,
 )
 
 

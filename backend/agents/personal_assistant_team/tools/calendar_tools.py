@@ -67,8 +67,8 @@ class CalendarToolAgent:
     ) -> List[CalendarEvent]:
         """List events from Google Calendar."""
         try:
-            from googleapiclient.discovery import build
             from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
         except ImportError:
             raise CalendarToolError("Google API client not installed")
         
@@ -153,8 +153,8 @@ class CalendarToolAgent:
     ) -> str:
         """Create an event in Google Calendar."""
         try:
-            from googleapiclient.discovery import build
             from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
         except ImportError:
             raise CalendarToolError("Google API client not installed")
         
@@ -229,8 +229,8 @@ class CalendarToolAgent:
             raise CalendarToolError("No calendar credentials found for user")
         
         try:
-            from googleapiclient.discovery import build
             from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
         except ImportError:
             raise CalendarToolError("Google API client not installed")
         
@@ -292,8 +292,8 @@ class CalendarToolAgent:
             raise CalendarToolError("No calendar credentials found for user")
         
         try:
-            from googleapiclient.discovery import build
             from google.oauth2.credentials import Credentials
+            from googleapiclient.discovery import build
         except ImportError:
             raise CalendarToolError("Google API client not installed")
         

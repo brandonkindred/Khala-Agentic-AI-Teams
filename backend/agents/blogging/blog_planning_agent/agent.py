@@ -9,8 +9,6 @@ import logging
 import time
 from typing import Any, Callable, Optional
 
-from llm_service import LLMClient, LLMJsonParseError
-
 from shared.content_plan import (
     ContentPlan,
     PlanningFailureReason,
@@ -22,6 +20,8 @@ from shared.content_plan import (
 from shared.content_profile import LengthPolicy
 from shared.errors import PlanningError
 from shared.planning_config import planning_max_iterations, planning_max_parse_retries
+
+from llm_service import LLMClient, LLMJsonParseError
 
 from .json_utils import parse_json_object
 from .prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM

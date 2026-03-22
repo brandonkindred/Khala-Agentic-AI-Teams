@@ -5,17 +5,17 @@ Owns: Proof bundles and reproducibility
 Outputs: Evidence pack + minimal repro when feasible
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from .base import AgentMessage, BaseSpecialistAgent
 from ..models import EvidencePack, Finding, Phase
 from ..tools.evidence import create_pack, generate_minimal_case
 from ..tools.evidence.create_pack import (
-    CreatePackInput,
     ArtifactInput,
+    CreatePackInput,
     EnvironmentInput,
 )
 from ..tools.evidence.generate_minimal_case import GenerateMinimalCaseInput
+from .base import BaseSpecialistAgent
 
 
 class EvidenceEngineer(BaseSpecialistAgent):
@@ -45,7 +45,7 @@ class EvidenceEngineer(BaseSpecialistAgent):
         - VERIFICATION: Supplement evidence for verified findings
         """
         phase = context.get("phase", Phase.DISCOVERY)
-        audit_id = context.get("audit_id", "")
+        context.get("audit_id", "")
 
         if phase in [Phase.DISCOVERY, Phase.VERIFICATION]:
             return await self._handle_evidence_capture(context)

@@ -14,8 +14,8 @@ from software_engineering_team.shared.models import (
     PlanningHierarchy,
     StoryPlan,
     Task,
-    TaskPlan,
     TaskAssignment,
+    TaskPlan,
     TaskStatus,
     TaskType,
 )

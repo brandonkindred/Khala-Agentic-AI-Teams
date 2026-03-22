@@ -12,7 +12,6 @@ from ..models import (
     AccessVerification,
     DeprovisionResult,
     GeneratedCredentials,
-    ToolConfig,
     ToolProvisionResult,
 )
 

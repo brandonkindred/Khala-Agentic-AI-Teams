@@ -21,16 +21,15 @@ _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
-from planning_v3_team.models import (
+from planning_v3_team.models import (  # noqa: E402
     PlanningV3ResultResponse,
     PlanningV3RunRequest,
     PlanningV3RunResponse,
     PlanningV3StatusResponse,
 )
-from planning_v3_team.orchestrator import run_workflow
-from planning_v3_team.shared.job_store import (
+from planning_v3_team.orchestrator import run_workflow  # noqa: E402
+from planning_v3_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_COMPLETED,
-    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     create_job,

@@ -3,7 +3,9 @@
 import importlib.util
 import os
 import subprocess
-import tempfile
+
+# Load api.main from this team's api/ (avoids conflict with agents/api/main.py)
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -11,8 +13,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-# Load api.main from this team's api/ (avoids conflict with agents/api/main.py)
-import sys
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
@@ -277,7 +277,7 @@ def test_resume_400_when_invalid_repo_path(client: TestClient) -> None:
 
 def test_resume_400_when_job_type_not_run_team(client: TestClient, temp_work_path: Path) -> None:
     """POST /run-team/{job_id}/resume returns 400 when job_type is not run_team."""
-    from software_engineering_team.shared.job_store import create_job, update_job
+    from software_engineering_team.shared.job_store import create_job
 
     job_id = str(uuid.uuid4())
     create_job(job_id, str(temp_work_path), job_type="planning_v2")
@@ -310,8 +310,12 @@ def test_resume_200_when_pending(client: TestClient, temp_work_path: Path) -> No
 
 def test_resume_200_when_agent_crash(client: TestClient, temp_work_path: Path) -> None:
     """POST /run-team/{job_id}/resume returns 200 when status is agent_crash."""
-    from software_engineering_team.shared.job_store import create_job, get_job, update_job
-    from software_engineering_team.shared.job_store import JOB_STATUS_AGENT_CRASH
+    from software_engineering_team.shared.job_store import (
+        JOB_STATUS_AGENT_CRASH,
+        create_job,
+        get_job,
+        update_job,
+    )
 
     job_id = str(uuid.uuid4())
     create_job(job_id, str(temp_work_path), job_type="run_team")
@@ -331,11 +335,11 @@ def test_resume_200_when_agent_crash(client: TestClient, temp_work_path: Path) -
 def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:
     """mark_all_running_jobs_failed sets all running/pending jobs to failed with reason."""
     from software_engineering_team.shared.job_store import (
+        JOB_STATUS_RUNNING,
         create_job,
         get_job,
         mark_all_running_jobs_failed,
         update_job,
-        JOB_STATUS_RUNNING,
     )
 
     cache_dir = tmp_path

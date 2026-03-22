@@ -5,7 +5,7 @@ sources, and observability expectations before any work begins.
 """
 
 from .agent import DevOpsTaskClarifierAgent
-from .models import DevOpsTaskClarifierInput, DevOpsTaskClarifierOutput, ClarificationGap
+from .models import ClarificationGap, DevOpsTaskClarifierInput, DevOpsTaskClarifierOutput
 
 __all__ = [
     "DevOpsTaskClarifierAgent",

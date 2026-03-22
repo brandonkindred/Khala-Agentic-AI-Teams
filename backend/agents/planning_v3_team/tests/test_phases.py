@@ -3,14 +3,12 @@
 import sys
 from pathlib import Path
 
-import pytest
-
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
-from planning_v3_team.models import ClientContext
-from planning_v3_team.phases import run_intake, run_synthesis, run_requirements
+from planning_v3_team.models import ClientContext  # noqa: E402
+from planning_v3_team.phases import run_intake, run_requirements, run_synthesis  # noqa: E402
 
 
 def test_run_intake():

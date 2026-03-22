@@ -4,8 +4,6 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from software_engineering_team.shared.command_runner import (
     CommandResult,
     _ensure_angular_common_in_package_json,
@@ -14,12 +12,12 @@ from software_engineering_team.shared.command_runner import (
     _ensure_material_theme_in_styles,
     _ensure_provide_animations_in_config,
     _ensure_tsconfig_module_resolution,
+    _get_nvm_script_prefix,
     ensure_frontend_dependencies_installed,
     ensure_frontend_project_initialized,
     is_ng_build_environment_failure,
     run_command,
     run_ng_serve_smoke_test,
-    _get_nvm_script_prefix,
 )
 
 

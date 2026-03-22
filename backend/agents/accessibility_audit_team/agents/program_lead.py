@@ -5,13 +5,10 @@ Owns: Scope, strategy, coverage, final report, risk posture
 Outputs: AuditPlan, CoverageMatrix, FinalReport
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from .base import AgentMessage, BaseSpecialistAgent
 from ..models import (
-    AuditPlan,
     AuditRequest,
-    CoverageMatrix,
     Finding,
     IntakeResult,
     PatternCluster,
@@ -19,10 +16,11 @@ from ..models import (
     ReportPackagingResult,
     Severity,
 )
-from ..tools.audit import create_plan, build_coverage_matrix, export_backlog
-from ..tools.audit.create_plan import CreatePlanInput
+from ..tools.audit import build_coverage_matrix, create_plan, export_backlog
 from ..tools.audit.build_coverage_matrix import BuildCoverageMatrixInput
+from ..tools.audit.create_plan import CreatePlanInput
 from ..tools.audit.export_backlog import ExportBacklogInput
+from .base import AgentMessage, BaseSpecialistAgent
 
 
 class AccessibilityProgramLead(BaseSpecialistAgent):
@@ -54,7 +52,7 @@ class AccessibilityProgramLead(BaseSpecialistAgent):
         - REPORT_PACKAGING: Produce final report and export backlog
         """
         phase = context.get("phase", Phase.INTAKE)
-        audit_id = context.get("audit_id", "")
+        context.get("audit_id", "")
 
         if phase == Phase.INTAKE:
             return await self._handle_intake(context)

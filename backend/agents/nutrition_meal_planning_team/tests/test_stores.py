@@ -1,12 +1,11 @@
 """Unit tests for ClientProfileStore and MealFeedbackStore."""
 
+
 import pytest
-from pathlib import Path
 
 from nutrition_meal_planning_team.models import (
     ClientProfile,
     HouseholdInfo,
-    LifestyleInfo,
 )
 from nutrition_meal_planning_team.shared.client_profile_store import (
     ClientProfileStore,

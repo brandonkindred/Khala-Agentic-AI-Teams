@@ -9,11 +9,12 @@ Shared contract: see quality_gates.protocols.ReviewResult (approved: bool, issue
 
 from __future__ import annotations
 
+from acceptance_verifier_agent import AcceptanceVerifierAgent
+
 # Re-exports for discoverability. Orchestrator and other callers may use these or import directly.
 from code_review_agent import CodeReviewAgent, CodeReviewInput
 from qa_agent import QAExpertAgent, QAInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
-from acceptance_verifier_agent import AcceptanceVerifierAgent
 from technical_writers.dbc_comments_agent import DbcCommentsAgent, DbcCommentsInput
 
 from . import protocols

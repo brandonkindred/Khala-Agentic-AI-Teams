@@ -1,18 +1,13 @@
 """Tests for the Frontend Engineering Team."""
 
 import inspect
-from pathlib import Path
-from unittest.mock import MagicMock
 
-import pytest
+from frontend_team import FrontendOrchestratorAgent
+from frontend_team.feature_agent import FrontendExpertAgent
+from frontend_team.orchestrator import _is_lightweight_task
 
 from llm_service import DummyLLMClient
 from software_engineering_team.shared.models import Task, TaskType
-
-from frontend_team.feature_agent import FrontendExpertAgent
-from frontend_team.feature_agent.models import FrontendWorkflowResult
-from frontend_team import FrontendOrchestratorAgent
-from frontend_team.orchestrator import _is_lightweight_task
 
 
 def test_frontend_orchestrator_run_workflow_signature_matches_frontend_expert() -> None:

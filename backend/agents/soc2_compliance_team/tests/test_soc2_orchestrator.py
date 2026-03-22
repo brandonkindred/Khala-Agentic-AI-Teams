@@ -1,11 +1,12 @@
 """Tests for SOC2 audit orchestrator and pipeline."""
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from llm_service import DummyLLMClient
 from soc2_compliance_team.models import SOC2AuditResult, TSCCategory
-from soc2_compliance_team.orchestrator import SOC2AuditOrchestrator, run_soc2_audit
+from soc2_compliance_team.orchestrator import run_soc2_audit
 from soc2_compliance_team.repo_loader import load_repo_context
 
 

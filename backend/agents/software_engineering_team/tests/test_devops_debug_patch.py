@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
-from devops_team.infra_debug_agent import InfraDebugAgent, IaCDebugInput, IaCDebugOutput, IaCExecutionError
-from devops_team.infra_patch_agent import InfraPatchAgent, IaCPatchInput, IaCPatchOutput
-
+from devops_team.infra_debug_agent import (
+    IaCDebugInput,
+    IaCDebugOutput,
+    IaCExecutionError,
+    InfraDebugAgent,
+)
+from devops_team.infra_patch_agent import IaCPatchInput, InfraPatchAgent
 
 # ---------------------------------------------------------------------------
 # Debug Agent tests

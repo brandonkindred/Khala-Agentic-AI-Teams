@@ -5,13 +5,13 @@ Owns: Correct WCAG mapping + Section 508 tags
 Outputs: Standards mapping with confidence + rationale
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from .base import AgentMessage, BaseSpecialistAgent
 from ..models import Finding, FindingState, Phase, WCAGMapping
 from ..tools.standards import map_wcag, tag_section508
-from ..tools.standards.map_wcag import MapWcagInput, FindingInfo
+from ..tools.standards.map_wcag import FindingInfo, MapWcagInput
 from ..tools.standards.tag_section508 import TagSection508Input
+from .base import AgentMessage, BaseSpecialistAgent
 
 
 class StandardsMappingSpecialist(BaseSpecialistAgent):
@@ -41,7 +41,7 @@ class StandardsMappingSpecialist(BaseSpecialistAgent):
         - INTAKE: Set mapping taxonomy and guardrails
         """
         phase = context.get("phase", Phase.VERIFICATION)
-        audit_id = context.get("audit_id", "")
+        context.get("audit_id", "")
 
         if phase == Phase.VERIFICATION:
             return await self._handle_verification(context)
@@ -54,7 +54,7 @@ class StandardsMappingSpecialist(BaseSpecialistAgent):
         """
         Set up mapping taxonomy and guardrails for the audit.
         """
-        audit_id = context.get("audit_id", "")
+        context.get("audit_id", "")
 
         # Define mapping guardrails - common mis-maps to avoid
         guardrails = {

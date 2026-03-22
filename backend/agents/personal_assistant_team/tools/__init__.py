@@ -1,9 +1,9 @@
 """Tools for Personal Assistant agents."""
 
-from .email_tools import EmailToolAgent
 from .calendar_tools import CalendarToolAgent
-from .web_search import WebSearchTool
+from .email_tools import EmailToolAgent
 from .web_fetch import WebFetchTool
+from .web_search import WebSearchTool
 
 __all__ = [
     "EmailToolAgent",

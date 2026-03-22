@@ -4,7 +4,6 @@ Tool: repro.generate_minimal_case
 Isolate minimal repro snippet (web).
 """
 
-from typing import Optional
 
 from pydantic import BaseModel, Field
 

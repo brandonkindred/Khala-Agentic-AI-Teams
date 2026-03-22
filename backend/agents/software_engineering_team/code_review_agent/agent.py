@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
 
+from llm_service import LLMClient
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_chunk_chars,
     compute_code_review_total_chars,
 )
-from llm_service import LLMClient
 
 from .coordinator import run_coordinator
 from .models import CodeReviewInput, CodeReviewIssue, CodeReviewOutput
@@ -81,7 +80,7 @@ class CodeReviewAgent:
         ]
 
         if input_data.task_requirements:
-            context_parts.extend(["", f"**Task requirements:**", input_data.task_requirements])
+            context_parts.extend(["", "**Task requirements:**", input_data.task_requirements])
 
         if input_data.acceptance_criteria:
             context_parts.extend([

@@ -3,11 +3,10 @@
 from unittest.mock import MagicMock
 
 import pytest
-
 from planning_team.spec_chunk_analyzer import (
+    SpecChunkAnalysis,
     SpecChunkAnalyzer,
     SpecChunkAnalyzerInput,
-    SpecChunkAnalysis,
 )
 
 

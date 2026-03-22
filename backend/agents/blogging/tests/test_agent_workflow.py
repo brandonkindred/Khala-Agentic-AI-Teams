@@ -1,8 +1,14 @@
 from unittest.mock import patch
 
 from blog_research_agent.agent import ResearchAgent
+from blog_research_agent.models import (
+    CandidateResult,
+    ResearchBriefInput,
+    SearchQuery,
+    SourceDocument,
+)
+
 from llm_service import LLMClient
-from blog_research_agent.models import ResearchBriefInput, SearchQuery, CandidateResult, SourceDocument
 
 
 class StubLLM(LLMClient):

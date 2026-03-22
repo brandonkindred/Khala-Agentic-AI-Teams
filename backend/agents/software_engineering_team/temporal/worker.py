@@ -16,10 +16,10 @@ from typing import Optional
 from temporalio.worker import Worker
 
 from software_engineering_team.temporal.activities import (
-    run_orchestrator_activity,
     retry_failed_activity,
-    run_frontend_code_v2_activity,
     run_backend_code_v2_activity,
+    run_frontend_code_v2_activity,
+    run_orchestrator_activity,
     run_planning_v2_activity,
     run_product_analysis_activity,
 )
@@ -31,8 +31,8 @@ from software_engineering_team.temporal.client import (
 )
 from software_engineering_team.temporal.constants import TASK_QUEUE
 from software_engineering_team.temporal.workflows import (
-    RunTeamWorkflow,
     RetryFailedWorkflow,
+    RunTeamWorkflow,
     StandaloneJobWorkflow,
 )
 

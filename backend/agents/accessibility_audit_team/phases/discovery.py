@@ -11,13 +11,13 @@ QCR dedupes early and identifies systemic patterns.
 Outputs: FindingDraft[], SignalScanResults, InitialPatternClusters
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from ..agents import (
-    WebAuditSpecialist,
-    MobileAccessibilitySpecialist,
     EvidenceEngineer,
+    MobileAccessibilitySpecialist,
     QAConsistencyReviewer,
+    WebAuditSpecialist,
 )
 from ..models import (
     AuditPlan,

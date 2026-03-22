@@ -4,7 +4,7 @@ Generic provisioner tool agent template.
 Base implementation that can be extended for custom tools.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..models import (
     AccessTier,

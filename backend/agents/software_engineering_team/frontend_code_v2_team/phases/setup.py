@@ -11,7 +11,6 @@ import logging
 from pathlib import Path
 
 from software_engineering_team.shared.git_utils import (
-    DEVELOPMENT_BRANCH,
     ensure_development_branch,
     initialize_new_repo,
 )

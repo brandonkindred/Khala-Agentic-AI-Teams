@@ -1,6 +1,5 @@
 """Tests for accessibility_audit_team API endpoints."""
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 

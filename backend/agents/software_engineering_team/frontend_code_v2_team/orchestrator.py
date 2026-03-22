@@ -21,15 +21,13 @@ from .models import (
     MicrotaskReviewFailedError,
     MicrotaskStatus,
     Phase,
-    ToolAgentKind,
     ToolAgentInput,
+    ToolAgentKind,
     ToolAgentOutput,
 )
-from .phases.planning import run_planning, plan_fixes_for_unresolved_issues
-from .phases.execution import run_execution, run_execution_with_review_gates, ReviewDependencies
-from .phases.review import run_review
-from .phases.problem_solving import run_problem_solving
 from .phases.deliver import run_deliver
+from .phases.execution import ReviewDependencies, run_execution_with_review_gates
+from .phases.planning import run_planning
 from .phases.setup import run_setup
 
 logger = logging.getLogger(__name__)
@@ -39,23 +37,23 @@ MAX_REVIEW_ITERATIONS = 100
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     """Build team-owned tool agent instances with LLM support where applicable."""
-    from .tool_agents.state_management import StateManagementToolAgent
-    from .tool_agents.auth import AuthToolAgent
+    from .tool_agents.accessibility import AccessibilityToolAgent
     from .tool_agents.api_openapi import ApiOpenApiToolAgent
+    from .tool_agents.architecture import ArchitectureToolAgent
+    from .tool_agents.auth import AuthToolAgent
+    from .tool_agents.branding_theme import BrandingThemeToolAgent
+    from .tool_agents.build_specialist import BuildSpecialistAdapterAgent
     from .tool_agents.cicd import CicdAdapterAgent
     from .tool_agents.containerization import ContainerizationAdapterAgent
     from .tool_agents.documentation import DocumentationToolAgent
-    from .tool_agents.testing_qa import TestingQAToolAgent
-    from .tool_agents.security import SecurityToolAgent
     from .tool_agents.git_branch_management import GitBranchManagementToolAgent
-    from .tool_agents.ui_design import UiDesignToolAgent
-    from .tool_agents.branding_theme import BrandingThemeToolAgent
-    from .tool_agents.ux_usability import UxUsabilityToolAgent
-    from .tool_agents.accessibility import AccessibilityToolAgent
-    from .tool_agents.performance import PerformanceToolAgent
-    from .tool_agents.architecture import ArchitectureToolAgent
-    from .tool_agents.build_specialist import BuildSpecialistAdapterAgent
     from .tool_agents.linter import LinterToolAgent
+    from .tool_agents.performance import PerformanceToolAgent
+    from .tool_agents.security import SecurityToolAgent
+    from .tool_agents.state_management import StateManagementToolAgent
+    from .tool_agents.testing_qa import TestingQAToolAgent
+    from .tool_agents.ui_design import UiDesignToolAgent
+    from .tool_agents.ux_usability import UxUsabilityToolAgent
 
     return {
         ToolAgentKind.STATE_MANAGEMENT: StateManagementToolAgent(),

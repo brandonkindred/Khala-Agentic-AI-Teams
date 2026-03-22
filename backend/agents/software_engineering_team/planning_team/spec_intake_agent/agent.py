@@ -9,7 +9,11 @@ from typing import Any, Dict, List
 from llm_service import LLMClient
 from software_engineering_team.shared.models import ProductRequirements
 
-from .models import AcceptanceCriterionItem, SpecIntakeInput, SpecIntakeOutput, validated_spec_to_requirements
+from .models import (
+    AcceptanceCriterionItem,
+    SpecIntakeInput,
+    SpecIntakeOutput,
+)
 from .prompts import SPEC_INTAKE_PROMPT
 
 logger = logging.getLogger(__name__)

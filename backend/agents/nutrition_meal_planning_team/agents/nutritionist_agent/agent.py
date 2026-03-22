@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+
+from llm_service import LLMClient, LLMJsonParseError
 
 from ...models import ClientProfile, DailyTargets, NutritionPlan
-from llm_service import LLMClient, LLMJsonParseError
 
 logger = logging.getLogger(__name__)
 

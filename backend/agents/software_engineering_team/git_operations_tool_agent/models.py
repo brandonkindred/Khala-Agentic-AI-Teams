@@ -6,7 +6,6 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-
 RequestedOperation = Literal["create_branch", "commit_changes", "merge_to_development", "abort_or_reset"]
 MergeStrategy = Literal["squash", "no_ff", "ff_only"]
 

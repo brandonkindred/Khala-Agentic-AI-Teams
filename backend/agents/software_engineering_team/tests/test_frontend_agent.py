@@ -3,8 +3,8 @@
 from unittest.mock import MagicMock
 
 import pytest
-
 from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput, FrontendOutput
+
 from llm_service import DummyLLMClient
 
 
@@ -271,7 +271,7 @@ def test_frontend_agent_with_architecture() -> None:
         overview="Test arch",
         components=[ArchitectureComponent(name="UserService", type="frontend")],
     )
-    result = agent.run(
+    agent.run(
         FrontendInput(
             task_description="Add component",
             requirements="",
@@ -295,7 +295,7 @@ def test_frontend_agent_with_security_issues() -> None:
         "suggested_commit_message": "feat: add",
     }
     agent = FrontendExpertAgent(llm_client=mock_llm)
-    result = agent.run(
+    agent.run(
         FrontendInput(
             task_description="Fix vulnerability",
             requirements="",
@@ -317,7 +317,7 @@ def test_frontend_agent_with_accessibility_issues() -> None:
         "suggested_commit_message": "feat: add",
     }
     agent = FrontendExpertAgent(llm_client=mock_llm)
-    result = agent.run(
+    agent.run(
         FrontendInput(
             task_description="Fix a11y",
             requirements="",
@@ -339,7 +339,7 @@ def test_frontend_agent_with_code_review_issues() -> None:
         "suggested_commit_message": "feat: add",
     }
     agent = FrontendExpertAgent(llm_client=mock_llm)
-    result = agent.run(
+    agent.run(
         FrontendInput(
             task_description="Address review",
             requirements="",
@@ -480,7 +480,7 @@ def test_frontend_agent_with_qa_issues() -> None:
         "suggested_commit_message": "feat: add",
     }
     agent = FrontendExpertAgent(llm_client=mock_llm)
-    result = agent.run(
+    agent.run(
         FrontendInput(
             task_description="Fix bugs",
             requirements="",

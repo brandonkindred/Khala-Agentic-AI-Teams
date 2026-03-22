@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-import sys
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))

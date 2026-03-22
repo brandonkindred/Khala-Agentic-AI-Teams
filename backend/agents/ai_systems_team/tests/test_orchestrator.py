@@ -2,10 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from ai_systems_team.models import (
-    AgentBlueprint,
     ArchitectureResult,
     BuildResult,
     CapabilitiesResult,

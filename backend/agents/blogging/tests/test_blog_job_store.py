@@ -3,8 +3,6 @@
 import uuid
 from pathlib import Path
 
-import pytest
-
 
 def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:
     """mark_all_running_jobs_failed sets all running/pending blog jobs to failed with reason."""

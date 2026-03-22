@@ -143,7 +143,7 @@ class UserProfileStore:
             profile: The UserProfile to save
         """
         profile.updated_at = datetime.utcnow().isoformat()
-        user_dir = self._get_user_dir(profile.user_id)
+        self._get_user_dir(profile.user_id)
         
         profile_dict = profile.model_dump()
         

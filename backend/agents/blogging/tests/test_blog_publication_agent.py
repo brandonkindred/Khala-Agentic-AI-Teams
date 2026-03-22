@@ -1,14 +1,12 @@
 """Tests for the blog publication agent."""
 
-import tempfile
-from pathlib import Path
 
 import pytest
-
 from blog_publication_agent import (
     BlogPublicationAgent,
     SubmitDraftInput,
 )
+
 from llm_service import DummyLLMClient
 
 

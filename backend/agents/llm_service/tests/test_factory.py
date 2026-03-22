@@ -2,7 +2,7 @@
 
 import pytest
 
-from llm_service import get_client, DummyLLMClient, OllamaLLMClient
+from llm_service import DummyLLMClient, OllamaLLMClient, get_client
 
 
 def test_get_client_dummy_when_provider_dummy(monkeypatch: pytest.MonkeyPatch) -> None:

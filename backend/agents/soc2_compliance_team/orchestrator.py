@@ -5,15 +5,16 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from llm_service import LLMClient, get_client
+
 from .agents import (
     AvailabilityTSCAgent,
     ConfidentialityTSCAgent,
-    ProcessingIntegrityTSCAgent,
     PrivacyTSCAgent,
+    ProcessingIntegrityTSCAgent,
     ReportWriterAgent,
     SecurityTSCAgent,
 )
-from llm_service import LLMClient, get_client
 from .models import (
     FindingSeverity,
     NextStepsDocument,

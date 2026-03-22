@@ -5,7 +5,6 @@ FastAPI app for coding_team: POST /run, GET /status/{job_id}, GET /jobs.
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import threading
 import uuid
@@ -17,12 +16,18 @@ _agents_root = Path(__file__).resolve().parent.parent.parent
 if str(_agents_root) not in sys.path:
     sys.path.insert(0, str(_agents_root))
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
-from coding_team.job_store import create_job, get_job, list_jobs, update_job, DEFAULT_CACHE_DIR
-from coding_team.models import CodingTeamPlanInput
-from coding_team.orchestrator import run_coding_team_orchestrator
+from coding_team.job_store import (  # noqa: E402
+    DEFAULT_CACHE_DIR,
+    create_job,
+    get_job,
+    list_jobs,
+    update_job,
+)
+from coding_team.models import CodingTeamPlanInput  # noqa: E402
+from coding_team.orchestrator import run_coding_team_orchestrator  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)

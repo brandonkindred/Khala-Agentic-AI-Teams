@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import List, Optional
+
+from llm_service import LLMClient, LLMJsonParseError
 
 from ...models import (
     ClientProfile,
@@ -12,7 +13,6 @@ from ...models import (
     MealRecommendation,
     NutritionPlan,
 )
-from llm_service import LLMClient, LLMJsonParseError
 
 logger = logging.getLogger(__name__)
 

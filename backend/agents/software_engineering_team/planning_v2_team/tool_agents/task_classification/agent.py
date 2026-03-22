@@ -16,7 +16,11 @@ from software_engineering_team.shared.deduplication import dedupe_by_key
 from software_engineering_team.shared.models import PlanningHierarchy
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
-from ...output_templates import looks_like_truncated_file_content, parse_fix_output, parse_task_classification_output
+from ...output_templates import (
+    looks_like_truncated_file_content,
+    parse_fix_output,
+    parse_task_classification_output,
+)
 from ..json_utils import attempt_fix_output_continuation, complete_text_with_continuation
 
 if TYPE_CHECKING:

@@ -46,13 +46,15 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
                   content_profile, series_context, length_notes, target_word_count (all optional).
     """
     try:
-        from blog_research_agent.models import ResearchBriefInput
         from agent_implementations.blog_writing_process_v2 import run_pipeline
+        from blog_research_agent.models import ResearchBriefInput
+
         from shared.content_plan import content_plan_summary_text, content_plan_to_outline_markdown
         from shared.content_profile import resolve_length_policy_from_request_dict
     except ImportError:
         try:
             from blog_research_agent.models import ResearchBriefInput
+
             from blogging.agent_implementations.blog_writing_process_v2 import run_pipeline
             from blogging.shared.content_plan import content_plan_to_outline_markdown
             from blogging.shared.content_profile import resolve_length_policy_from_request_dict
@@ -63,23 +65,23 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
 
     try:
         from blogging.shared.blog_job_store import (
-            update_blog_job,
-            start_blog_job,
-            complete_blog_job,
-            fail_blog_job,
             JOB_STATUS_COMPLETED,
             JOB_STATUS_NEEDS_REVIEW,
+            complete_blog_job,
+            fail_blog_job,
+            start_blog_job,
+            update_blog_job,
         )
         from blogging.shared.errors import BloggingError, PlanningError
     except ImportError:
         try:
             from shared.blog_job_store import (
-                update_blog_job,
-                start_blog_job,
-                complete_blog_job,
-                fail_blog_job,
                 JOB_STATUS_COMPLETED,
                 JOB_STATUS_NEEDS_REVIEW,
+                complete_blog_job,
+                fail_blog_job,  # noqa: F401
+                start_blog_job,
+                update_blog_job,
             )
             from shared.errors import BloggingError, PlanningError
         except ImportError:
@@ -87,7 +89,6 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
             update_blog_job = None
             start_blog_job = None
             complete_blog_job = None
-            fail_blog_job = None
             JOB_STATUS_COMPLETED = "completed"
             JOB_STATUS_NEEDS_REVIEW = "needs_human_review"
             BloggingError = Exception

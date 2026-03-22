@@ -1,24 +1,24 @@
 """Tests for Planning V3 models."""
 
-import pytest
 
 import sys
 from pathlib import Path
+
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
-from planning_v3_team.models import (
-    Phase,
-    PlanningV3RunRequest,
-    PlanningV3RunResponse,
-    PlanningV3StatusResponse,
-    PlanningV3ResultResponse,
+from planning_v3_team.models import (  # noqa: E402
+    AnsweredQuestion,
     ClientContext,
     HandoffPackage,
     OpenQuestion,
     OpenQuestionOption,
-    AnsweredQuestion,
+    Phase,
+    PlanningV3ResultResponse,
+    PlanningV3RunRequest,
+    PlanningV3RunResponse,
+    PlanningV3StatusResponse,
 )
 
 

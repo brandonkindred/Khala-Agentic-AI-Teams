@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from llm_service import LLMClient
 from software_engineering_team.shared.prompt_utils import log_llm_prompt
@@ -238,7 +237,10 @@ class DevOpsExpertAgent:
             context_parts.extend(["", "**Implementation plan:**", input_data.task_plan])
         if getattr(input_data, "build_errors", None) and input_data.build_errors:
             from software_engineering_team.shared.context_sizing import compute_build_errors_chars
-            from software_engineering_team.shared.error_parsing import build_agent_feedback, parse_devops_failure
+            from software_engineering_team.shared.error_parsing import (
+                build_agent_feedback,
+                parse_devops_failure,
+            )
 
             max_errors = compute_build_errors_chars(self.llm)
             raw_errors = input_data.build_errors
@@ -304,7 +306,10 @@ class DevOpsExpertAgent:
         re-generates with build_errors and retries up to max_iterations.
         """
         from software_engineering_team.shared.context_sizing import compute_build_errors_chars
-        from software_engineering_team.shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
+        from software_engineering_team.shared.repo_writer import (
+            NO_FILES_TO_WRITE_MSG,
+            write_agent_output,
+        )
 
         path = Path(repo_path).resolve()
         if subdir:

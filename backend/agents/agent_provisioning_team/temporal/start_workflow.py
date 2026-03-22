@@ -6,7 +6,10 @@ import asyncio
 import logging
 from typing import Any
 
-from agent_provisioning_team.temporal.client import get_temporal_client, get_temporal_loop, is_temporal_enabled
+from agent_provisioning_team.temporal.client import (
+    get_temporal_client,
+    get_temporal_loop,
+)
 from agent_provisioning_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
 from agent_provisioning_team.temporal.workflows import AgentProvisioningWorkflow
 

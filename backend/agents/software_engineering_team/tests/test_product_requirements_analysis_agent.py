@@ -5,7 +5,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from product_requirements_analysis_agent import ProductRequirementsAnalysisAgent
 from product_requirements_analysis_agent.agent import _context_discovery_fallback_questions
 from product_requirements_analysis_agent.models import (

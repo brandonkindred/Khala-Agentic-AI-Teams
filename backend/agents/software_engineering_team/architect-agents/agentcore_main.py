@@ -22,8 +22,8 @@ _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from agents.orchestrator import create_orchestrator
-from agents.session import get_session_manager
+from agents.orchestrator import create_orchestrator  # noqa: E402
+from agents.session import get_session_manager  # noqa: E402
 
 
 def _create_app():

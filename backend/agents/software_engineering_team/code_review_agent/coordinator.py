@@ -6,13 +6,13 @@ import logging
 import re
 from typing import List, Tuple
 
+from llm_service import LLMClient
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_chunk_chars,
     compute_code_review_existing_codebase_chars,
     compute_code_review_spec_excerpt_chars,
 )
-from llm_service import LLMClient
 
 from .chunk_reviewer import ChunkReviewAgent
 from .models import ChunkReviewInput, CodeReviewInput, CodeReviewIssue, CodeReviewOutput

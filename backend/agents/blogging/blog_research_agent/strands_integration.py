@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .agent import ResearchAgent
 from llm_service import LLMClient
-from .models import ResearchBriefInput, ResearchAgentOutput
+
+from .agent import ResearchAgent
+from .models import ResearchAgentOutput, ResearchBriefInput
 
 
 def create_research_agent(llm_client: LLMClient) -> ResearchAgent:

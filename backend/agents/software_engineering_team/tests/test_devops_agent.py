@@ -4,8 +4,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 from devops_agent.agent import DevOpsExpertAgent, _gather_codebase_context
 
 

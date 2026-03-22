@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 def run_team_job_activity(job_id: str, request_dict: Dict[str, Any]) -> None:
     """Run the social marketing team job (or run or revise)."""
     try:
-        from social_media_marketing_team.api.main import _run_team_job, RunMarketingTeamRequest
+        from social_media_marketing_team.api.main import RunMarketingTeamRequest, _run_team_job
         request = RunMarketingTeamRequest(**request_dict)
         _run_team_job(job_id, request)
-    except Exception as e:
+    except Exception:
         logger.exception("Social marketing team job activity failed for job %s", job_id)
         raise

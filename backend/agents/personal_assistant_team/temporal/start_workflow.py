@@ -6,7 +6,10 @@ import asyncio
 import logging
 from typing import Any, Dict
 
-from personal_assistant_team.temporal.client import get_temporal_client, get_temporal_loop, is_temporal_enabled
+from personal_assistant_team.temporal.client import (
+    get_temporal_client,
+    get_temporal_loop,
+)
 from personal_assistant_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX_ASSISTANT
 from personal_assistant_team.temporal.workflows import PaAssistantWorkflow
 

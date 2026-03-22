@@ -1,9 +1,8 @@
 """Tests for robust JSON extraction with retry and decomposition."""
 
-import json
 import pytest
 
-from ..shared.llm import LLMClient, JSONExtractionFailure
+from ..shared.llm import JSONExtractionFailure, LLMClient
 
 
 class MockLLMClient(LLMClient):
@@ -185,7 +184,7 @@ class TestDecompositionHints:
             '{"details": "more"}',
         ])
         
-        result = client.complete_json(
+        client.complete_json(
             "analyze this",
             decomposition_hints=["summary of content", "details about items"],
         )

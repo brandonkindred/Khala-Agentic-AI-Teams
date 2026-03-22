@@ -5,10 +5,18 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import Task, TaskAssignment, TaskStatus, TaskType, TaskUpdate
+from software_engineering_team.shared.models import (
+    Task,
+    TaskStatus,
+    TaskType,
+    TaskUpdate,
+)
+
+if TYPE_CHECKING:
+    from software_engineering_team.shared.models import PlanningHierarchy, ProductRequirements
 from software_engineering_team.shared.task_parsing import (
     flatten_hierarchy_to_assignment,
     parse_assignment_from_data,
@@ -90,29 +98,28 @@ class TechLeadAgent:
         Generate a detailed development plan summary from the Planning V2 hierarchy
         and plan artifacts.
         """
-        from software_engineering_team.shared.models import PlanningHierarchy, ProductRequirements
         
         parts: List[str] = []
         
         # Header with project info
         parts.append(f"# Development Plan: {requirements.title}\n")
-        parts.append(f"\n## Overview\n")
+        parts.append("\n## Overview\n")
         parts.append(f"This development plan covers {requirements.description[:200]}{'...' if len(requirements.description) > 200 else ''}\n")
         
         # Hierarchy summary
-        parts.append(f"\n## Planning Hierarchy Summary\n")
+        parts.append("\n## Planning Hierarchy Summary\n")
         parts.append(f"- **Initiatives:** {init_count}\n")
         parts.append(f"- **Epics:** {epic_count}\n")
         parts.append(f"- **Stories:** {story_count}\n")
         parts.append(f"- **Tasks:** {task_count}\n")
         
         # Team breakdown
-        parts.append(f"\n## Task Distribution by Team\n")
+        parts.append("\n## Task Distribution by Team\n")
         for team, count in sorted(team_counts.items()):
             parts.append(f"- **{team.title()}:** {count} tasks\n")
         
         # Initiative details
-        parts.append(f"\n## Initiatives\n")
+        parts.append("\n## Initiatives\n")
         for init in hierarchy.initiatives:
             parts.append(f"\n### {init.title}\n")
             parts.append(f"{init.description}\n")
@@ -125,14 +132,14 @@ class TechLeadAgent:
         
         # Key acceptance criteria from requirements
         if requirements.acceptance_criteria:
-            parts.append(f"\n## Key Acceptance Criteria\n")
+            parts.append("\n## Key Acceptance Criteria\n")
             for i, criterion in enumerate(requirements.acceptance_criteria[:10], 1):
                 parts.append(f"{i}. {criterion}\n")
         
         # Architecture and design context from artifacts
         if plan_artifacts:
             # Extract key sections from artifacts
-            parts.append(f"\n## Planning Context\n")
+            parts.append("\n## Planning Context\n")
             parts.append("Planning artifacts include: ")
             
             artifact_names = []
@@ -146,8 +153,8 @@ class TechLeadAgent:
         
         # Execution order hint
         if hierarchy.execution_order:
-            parts.append(f"\n## Execution Order\n")
-            parts.append(f"Tasks will be executed in dependency order. First tasks: ")
+            parts.append("\n## Execution Order\n")
+            parts.append("Tasks will be executed in dependency order. First tasks: ")
             parts.append(", ".join(hierarchy.execution_order[:5]))
             if len(hierarchy.execution_order) > 5:
                 parts.append(f" (and {len(hierarchy.execution_order) - 5} more)")
@@ -519,7 +526,10 @@ class TechLeadAgent:
         """
         if not completed_code_task_ids:
             return False
-        from software_engineering_team.shared.context_sizing import compute_requirement_mapping_chars, compute_spec_excerpt_chars
+        from software_engineering_team.shared.context_sizing import (
+            compute_requirement_mapping_chars,
+            compute_spec_excerpt_chars,
+        )
 
         logger.info("Tech Lead: evaluating if security review should run (%s completed code tasks)", len(completed_code_task_ids))
         max_spec = compute_spec_excerpt_chars(self.llm)
@@ -710,7 +720,9 @@ class TechLeadAgent:
             should_update = force_docs_because_readme_empty
             rationale = ""
             if not force_docs_because_readme_empty:
-                from software_engineering_team.shared.context_sizing import compute_spec_excerpt_chars
+                from software_engineering_team.shared.context_sizing import (
+                    compute_spec_excerpt_chars,
+                )
                 max_code = compute_spec_excerpt_chars(self.llm)
                 code_excerpt = (codebase_summary or "")[:max_code] + ("..." if len(codebase_summary or "") > max_code else "")
                 context_parts = [

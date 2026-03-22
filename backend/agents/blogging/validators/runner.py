@@ -4,7 +4,6 @@ Validator runner: orchestrates all checks and produces validator_report.json.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -13,8 +12,8 @@ from shared.artifacts import read_artifact, write_artifact
 from shared.brand_spec import BrandSpec
 
 from .checks import (
-    check_banned_phrases,
     check_banned_patterns,
+    check_banned_phrases,
     check_paragraph_length,
     check_reading_level,
     check_required_sections,

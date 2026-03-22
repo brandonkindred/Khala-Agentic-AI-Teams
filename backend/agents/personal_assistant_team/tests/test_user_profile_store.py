@@ -1,12 +1,12 @@
 """Tests for UserProfileStore."""
 
-import pytest
-import tempfile
 import shutil
-from pathlib import Path
+import tempfile
 
-from ..shared.user_profile_store import UserProfileStore
+import pytest
+
 from ..models import UserProfile
+from ..shared.user_profile_store import UserProfileStore
 
 
 class TestUserProfileStore:
@@ -78,7 +78,7 @@ class TestUserProfileStore:
 
     def test_update_category_merge(self, store):
         """Test merging data into a profile category."""
-        profile = store.create_profile("test_user")
+        store.create_profile("test_user")
         store.update_category(
             user_id="test_user",
             category="preferences",
@@ -165,7 +165,7 @@ class TestUserProfileStore:
 
     def test_get_profile_summary(self, store):
         """Test getting a profile summary."""
-        profile = store.create_profile("test_user")
+        store.create_profile("test_user")
         store.update_category(
             user_id="test_user",
             category="identity",

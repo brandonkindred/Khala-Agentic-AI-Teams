@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from coding_team.models import StackSpec, Task
 from coding_team.senior_software_engineer_agent import prompts
@@ -42,7 +42,7 @@ class SeniorSWEAgent:
         - files_to_create_or_edit: optional list of {path, content} for orchestrator to apply
         - error: optional error message if failed
         """
-        path = Path(repo_path)
+        Path(repo_path)
         stack_name = self.stack_spec.name or self.agent_id
         tools_services = ", ".join(self.stack_spec.tools_services or [])
         user = prompts.IMPLEMENT_TASK_USER.format(

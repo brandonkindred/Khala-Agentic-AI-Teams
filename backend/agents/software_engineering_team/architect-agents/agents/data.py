@@ -9,9 +9,13 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from strands import Agent, tool
-
-from tools import aws_pricing_tool, document_writer_tool, file_read_tool, web_search_tool
+from strands import Agent, tool  # noqa: E402
+from tools import (  # noqa: E402
+    aws_pricing_tool,
+    document_writer_tool,
+    file_read_tool,
+    web_search_tool,
+)
 
 _PROMPT_PATH = _root / "prompts" / "data.md"
 

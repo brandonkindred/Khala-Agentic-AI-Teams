@@ -4,7 +4,7 @@ Tool: remediation.suggest_fix
 Generate fix recipe + acceptance criteria + test plan.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import List, Literal
 
 from pydantic import BaseModel, Field
 

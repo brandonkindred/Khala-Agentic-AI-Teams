@@ -9,16 +9,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 from software_engineering_team.shared.git_utils import (
-    DEVELOPMENT_BRANCH,
-    MAIN_BRANCH,
     ensure_development_branch,
     initialize_new_repo,
 )
 
-from ..models import Phase, SetupResult
+from ..models import SetupResult
 
 logger = logging.getLogger(__name__)
 

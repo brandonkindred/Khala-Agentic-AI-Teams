@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable, List
+from collections.abc import Callable
+from typing import Any
 
 from unified_api.config import SECURITY_GATEWAY_ENABLED, TEAM_CONFIGS
 from unified_api.security import scan
@@ -61,8 +62,8 @@ class SecurityGatewayMiddleware:
             return
 
         # Collect body by wrapping receive
-        messages: List[dict] = []
-        body_chunks: List[bytes] = []
+        messages: list[dict] = []
+        body_chunks: list[bytes] = []
 
         async def collecting_receive() -> dict:
             message = await receive()
@@ -106,7 +107,7 @@ class SecurityGatewayMiddleware:
 
         await self._forward_with_replay(scope, messages, send)
 
-    async def _send_403(self, send: Callable[[Any], Any], security_findings: List[str]) -> None:
+    async def _send_403(self, send: Callable[[Any], Any], security_findings: list[str]) -> None:
         """Send 403 Forbidden with JSON body (detail + security_findings)."""
         body = json.dumps(
             {"detail": SECURITY_ERROR_DETAIL, "security_findings": security_findings},
@@ -125,7 +126,7 @@ class SecurityGatewayMiddleware:
     async def _forward_with_replay(
         self,
         scope: dict,
-        messages: List[dict],
+        messages: list[dict],
         send: Callable[[Any], Any],
     ) -> None:
         """Call the app with a receive that replays the collected messages."""

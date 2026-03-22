@@ -1,17 +1,14 @@
 """Tests for accessibility_audit_team models."""
 
-import pytest
 
 from accessibility_audit_team.models import (
-    AuditConstraints,
     AuditPlan,
     AuditRequest,
     AuditTargets,
     CoverageMatrix,
     CoverageRow,
-    EvidenceArtifact,
-    EvidencePack,
     EnvironmentInfo,
+    EvidencePack,
     Finding,
     FindingState,
     IssueType,

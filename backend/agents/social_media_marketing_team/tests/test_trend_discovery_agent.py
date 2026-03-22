@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-
-from blog_research_agent.models import CandidateResult, SearchQuery
+from blog_research_agent.models import CandidateResult
 from blog_research_agent.tools.web_search import WebSearchError
+
 from llm_service import LLMJsonParseError
 from social_media_marketing_team.trend_discovery_agent import TrendDiscoveryAgent
 from social_media_marketing_team.trend_models import TrendDigest, TrendingTopic

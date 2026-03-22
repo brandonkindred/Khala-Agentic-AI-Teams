@@ -4,11 +4,11 @@ Tool: qa.validate_finding
 Validate completeness and consistency of a finding.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from ...models import Finding, Severity, Scope
+from ...models import Finding, Scope, Severity
 
 
 class ValidationIssue(BaseModel):

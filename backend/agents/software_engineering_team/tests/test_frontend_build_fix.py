@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from frontend_team.feature_agent.agent import (
     _apply_frontend_build_fix_edits,
     _extract_affected_file_paths_from_frontend_build_errors,
@@ -143,8 +141,9 @@ class TestFrontendWorkflowBuildFixSpecialist:
 
     @patch("shared.command_runner.ensure_frontend_dependencies_installed", return_value=_INSTALL_OK)
     def test_specialist_invoked_on_repeated_failure(self, _mock_install: MagicMock, _setup_repo: Path) -> None:
-        from software_engineering_team.shared.models import Task, TaskType
         from build_fix_specialist.models import CodeEdit
+
+        from software_engineering_team.shared.models import Task, TaskType
 
         task = Task(
             id="fe-1", type=TaskType.FRONTEND, assignee="frontend",

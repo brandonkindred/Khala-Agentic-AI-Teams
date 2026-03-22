@@ -9,9 +9,11 @@ import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from llm_service import LLMClient
+if TYPE_CHECKING:
+    from blog_copy_editor_agent import BlogCopyEditorAgent
+    from blog_draft_agent import BlogDraftAgent
 
 from shared.content_plan import (
     ContentPlan,
@@ -19,6 +21,8 @@ from shared.content_plan import (
     RequirementsAnalysis,
     TitleCandidate,
 )
+
+from llm_service import LLMClient
 
 from .models import (
     ApprovalResult,

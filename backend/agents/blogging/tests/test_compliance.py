@@ -1,10 +1,12 @@
 """Tests for the blog compliance agent."""
 
-import pytest
 from pathlib import Path
+
+import pytest
 from blog_compliance_agent import BlogComplianceAgent
-from llm_service import DummyLLMClient
 from shared.brand_spec import load_brand_spec_prompt
+
+from llm_service import DummyLLMClient
 
 
 @pytest.fixture
@@ -42,5 +44,5 @@ def test_compliance_agent_with_work_dir(brand_spec_prompt, tmp_path):
     llm = DummyLLMClient()
     agent = BlogComplianceAgent(llm_client=llm)
     draft = "Short draft."
-    report = agent.run(draft, brand_spec_prompt, work_dir=tmp_path)
+    agent.run(draft, brand_spec_prompt, work_dir=tmp_path)
     assert (tmp_path / "compliance_report.json").exists()

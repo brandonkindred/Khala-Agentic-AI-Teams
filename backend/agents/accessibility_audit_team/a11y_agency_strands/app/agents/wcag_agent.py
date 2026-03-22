@@ -1,6 +1,6 @@
-from .base import ToolContext, tool
 from ..models import CoverageSummary
 from ..tools import persist_artifact, update_wcag_checklist_xlsx
+from .base import ToolContext, tool
 
 
 @tool(context=True)

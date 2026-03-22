@@ -5,7 +5,7 @@ Export normalized findings for tracker ingestion.
 """
 
 import json
-from typing import List, Literal, Optional
+from typing import List, Literal
 
 from pydantic import BaseModel, Field
 

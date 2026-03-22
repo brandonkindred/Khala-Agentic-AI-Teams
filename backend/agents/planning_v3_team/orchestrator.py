@@ -46,6 +46,17 @@ def run_workflow(
     {question_id, selected_option_id?, other_text?}. If None, defaults are used (first option).
     Returns a result dict with success, handoff_package, summary, failure_reason, current_phase.
     """
+    from planning_v3_team.adapters import (
+        get_planning_v2_result,
+        market_research_to_evidence,
+        request_market_research,
+        run_planning_v2,
+        run_product_analysis,
+        start_ai_systems_build,
+        wait_for_ai_systems_build_completion,
+        wait_for_planning_v2_completion,
+        wait_for_product_analysis_completion,
+    )
     from planning_v3_team.phases import (
         run_discovery,
         run_document_production,
@@ -53,17 +64,6 @@ def run_workflow(
         run_requirements,
         run_sub_agent_provisioning,
         run_synthesis,
-    )
-    from planning_v3_team.adapters import (
-        get_planning_v2_result,
-        request_market_research,
-        market_research_to_evidence,
-        run_planning_v2,
-        run_product_analysis,
-        wait_for_planning_v2_completion,
-        wait_for_product_analysis_completion,
-        start_ai_systems_build,
-        wait_for_ai_systems_build_completion,
     )
 
     def _update(phase: str, progress: int, status_text: str = "") -> None:

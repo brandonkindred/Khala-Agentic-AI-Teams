@@ -4,10 +4,9 @@ Access policy definitions for permission tiers.
 Maps access tiers to specific permissions for each tool type.
 """
 
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Tuple
 
 from ..models import AccessTier
-
 
 POSTGRES_PERMISSIONS: Dict[AccessTier, List[str]] = {
     AccessTier.MINIMAL: ["SELECT"],

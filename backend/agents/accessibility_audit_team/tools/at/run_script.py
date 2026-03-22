@@ -4,7 +4,7 @@ Tool: at.run_script
 Run a standardized AT script and capture results.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 

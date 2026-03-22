@@ -6,7 +6,6 @@ from integrations.registry import IntegrationRegistry, McpToolConfig, ProviderCo
 from integrations.router import CapabilityRouter
 from integrations.service import IntegrationService
 
-
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config/providers.example.yaml"
 
 REQUIRED_PROVIDERS = {

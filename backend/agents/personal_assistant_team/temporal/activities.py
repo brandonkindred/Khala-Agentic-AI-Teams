@@ -21,6 +21,6 @@ def run_assistant_activity(
     try:
         from personal_assistant_team.api.main import _run_assistant_job
         _run_assistant_job(job_id, user_id, message, context or {})
-    except Exception as e:
+    except Exception:
         logger.exception("PA assistant activity failed for job %s", job_id)
         raise

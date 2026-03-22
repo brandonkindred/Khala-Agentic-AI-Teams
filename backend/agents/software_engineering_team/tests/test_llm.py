@@ -1,6 +1,5 @@
 """Unit tests for LLM client error handling, retries, and exceptions."""
 
-import json
 import os
 from unittest.mock import MagicMock, patch
 
@@ -8,12 +7,12 @@ import httpx
 import pytest
 
 from llm_service import (
+    OLLAMA_WEEKLY_LIMIT_MESSAGE,
     DummyLLMClient,
     LLMJsonParseError,
     LLMPermanentError,
     LLMRateLimitError,
     LLMTemporaryError,
-    OLLAMA_WEEKLY_LIMIT_MESSAGE,
     OllamaLLMClient,
     _clear_client_cache_for_testing,
     get_client,
@@ -283,7 +282,9 @@ def test_get_client_cache_returns_same_instance() -> None:
 
 def test_extract_task_assignment_from_content_recovers_tasks() -> None:
     """When LLM returns raw content with embedded JSON, extract_task_assignment_from_content recovers it."""
-    from software_engineering_team.shared.llm_response_utils import extract_task_assignment_from_content
+    from software_engineering_team.shared.llm_response_utils import (
+        extract_task_assignment_from_content,
+    )
 
     content = '''Here is the task plan:
 
@@ -306,7 +307,9 @@ def test_extract_task_assignment_from_content_recovers_tasks() -> None:
 
 def test_extract_task_assignment_from_content_returns_none_for_empty() -> None:
     """extract_task_assignment_from_content returns None when no tasks in content."""
-    from software_engineering_team.shared.llm_response_utils import extract_task_assignment_from_content
+    from software_engineering_team.shared.llm_response_utils import (
+        extract_task_assignment_from_content,
+    )
 
     assert extract_task_assignment_from_content("") is None
     assert extract_task_assignment_from_content("No JSON here") is None

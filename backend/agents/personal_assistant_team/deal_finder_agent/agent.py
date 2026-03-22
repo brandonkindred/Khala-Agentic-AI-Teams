@@ -7,14 +7,13 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 from uuid import uuid4
 
-from ..models import Deal
-from ..shared.llm import LLMClient, JSONExtractionFailure
+from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
-from ..tools.web_search import SearchResult, WebSearchTool
 from ..tools.web_fetch import WebFetchTool
+from ..tools.web_search import SearchResult, WebSearchTool
 from .models import (
     AddWishlistRequest,
     DealMatch,
@@ -22,7 +21,7 @@ from .models import (
     SearchDealsRequest,
     WishlistItem,
 )
-from .prompts import DEAL_RELEVANCE_PROMPT, EXTRACT_DEAL_INFO_PROMPT, GENERATE_SEARCH_QUERIES_PROMPT
+from .prompts import DEAL_RELEVANCE_PROMPT, GENERATE_SEARCH_QUERIES_PROMPT
 
 logger = logging.getLogger(__name__)
 

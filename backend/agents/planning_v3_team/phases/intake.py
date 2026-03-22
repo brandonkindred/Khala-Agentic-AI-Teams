@@ -6,7 +6,6 @@ Builds initial ClientContext from request inputs.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Dict, List
 
 from planning_v3_team.models import ClientContext

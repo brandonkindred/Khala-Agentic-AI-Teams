@@ -16,9 +16,11 @@ from software_engineering_team.shared.git_utils import (
     abort_merge,
     checkout_branch,
     commit_working_tree,
-    create_feature_branch as git_create_feature_branch,
     delete_branch,
     merge_branch,
+)
+from software_engineering_team.shared.git_utils import (
+    create_feature_branch as git_create_feature_branch,
 )
 
 from ...models import ToolAgentInput, ToolAgentOutput, ToolAgentPhaseInput, ToolAgentPhaseOutput

@@ -1,17 +1,17 @@
 """API tests for Nutrition & Meal Planning team (profile, plan, meals, feedback, history)."""
 
-import pytest
 from pathlib import Path
-import os
+
+import pytest
 
 # Ensure agents dir is on path
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in __import__("sys").path:
     __import__("sys").path.insert(0, str(_agents_dir))
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient  # noqa: E402
 
-from nutrition_meal_planning_team.api.main import app
+from nutrition_meal_planning_team.api.main import app  # noqa: E402
 
 
 @pytest.fixture

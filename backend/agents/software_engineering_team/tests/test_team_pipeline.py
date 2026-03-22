@@ -1,17 +1,16 @@
 """Integration tests for the full software engineering team pipeline."""
 
-import pytest
+
+from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
+from backend_agent import BackendExpertAgent, BackendInput
+from devops_agent import DevOpsExpertAgent, DevOpsInput
+from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
+from qa_agent import QAExpertAgent, QAInput
+from security_agent import CybersecurityExpertAgent, SecurityInput
+from tech_lead_agent import TechLeadAgent, TechLeadInput
 
 from llm_service import DummyLLMClient
-from software_engineering_team.shared.models import ProductRequirements, SystemArchitecture
 from software_engineering_team.shared.models import ProductRequirements
-from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
-from tech_lead_agent import TechLeadAgent, TechLeadInput
-from devops_agent import DevOpsExpertAgent, DevOpsInput
-from backend_agent import BackendExpertAgent, BackendInput
-from frontend_team.feature_agent import FrontendExpertAgent, FrontendInput
-from security_agent import CybersecurityExpertAgent, SecurityInput
-from qa_agent import QAExpertAgent, QAInput
 
 
 def test_full_pipeline_with_dummy_llm() -> None:

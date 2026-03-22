@@ -9,9 +9,9 @@ _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient  # noqa: E402
 
-from planning_v3_team.api.main import app
+from planning_v3_team.api.main import app  # noqa: E402
 
 
 @pytest.fixture

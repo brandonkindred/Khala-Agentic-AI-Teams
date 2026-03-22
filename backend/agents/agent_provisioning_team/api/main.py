@@ -14,34 +14,33 @@ from pydantic import BaseModel, Field
 
 from ..models import (
     AccessTier,
-    DeprovisionRequest,
     DeprovisionResponse,
-    Phase,
+    ProvisioningResult,
     ProvisionJobResponse,
-    ProvisionJobSummary,
     ProvisionJobsListResponse,
+    ProvisionJobSummary,
     ProvisionRequest,
     ProvisionStatusResponse,
-    ProvisioningResult,
 )
 from ..orchestrator import ProvisioningOrchestrator
 from ..phases.deliver import redact_credentials_for_response
 from ..shared.job_store import (
     JOB_STATUS_COMPLETED,
-    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
-    add_completed_phase,
-    cancel_job as store_cancel_job,
     create_job,
-    delete_job as store_delete_job,
     get_job,
     list_jobs,
     mark_job_completed,
     mark_job_failed,
     mark_job_running,
     update_job,
-    update_phase_progress,
+)
+from ..shared.job_store import (
+    cancel_job as store_cancel_job,
+)
+from ..shared.job_store import (
+    delete_job as store_delete_job,
 )
 
 app = FastAPI(

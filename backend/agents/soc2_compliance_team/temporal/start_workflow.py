@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from soc2_compliance_team.temporal.client import get_temporal_client, get_temporal_loop, is_temporal_enabled
+from soc2_compliance_team.temporal.client import (
+    get_temporal_client,
+    get_temporal_loop,
+)
 from soc2_compliance_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX_AUDIT
 from soc2_compliance_team.temporal.workflows import Soc2AuditWorkflow
 

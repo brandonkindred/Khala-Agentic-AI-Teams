@@ -5,7 +5,6 @@ Platform-specific formatters for blog posts (Medium, dev.to, Substack).
 from __future__ import annotations
 
 import re
-from datetime import datetime
 from typing import List, Optional
 
 
@@ -36,7 +35,7 @@ def format_for_devto(
     front_matter_lines = [
         "---",
         f"title: {title}",
-        f"published: false",
+        "published: false",
         f"tags: {', '.join(tags) if tags else ''}",
     ]
     if canonical_url:

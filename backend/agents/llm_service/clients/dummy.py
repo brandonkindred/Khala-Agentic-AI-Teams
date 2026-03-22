@@ -178,7 +178,7 @@ class DummyLLMClient(LLMClient):
             return {"issues": [], "summary": "No WCAG 2.2 accessibility issues found (dummy)"}
         elif "senior backend software engineer" in lowered:
             slug = _extract_name_from_hint(task_hint, separator="_", max_length=25) or f"module_{counter}"
-            class_prefix = slug.title().replace("_", "")
+            slug.title().replace("_", "")
             return {
                 "code": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
                 "language": "python",

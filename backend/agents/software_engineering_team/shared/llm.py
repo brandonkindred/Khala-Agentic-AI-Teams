@@ -11,23 +11,21 @@ import logging
 from typing import Any, Dict, Optional
 
 from llm_service import (
+    OLLAMA_WEEKLY_LIMIT_MESSAGE,
     DummyLLMClient,
     LLMClient,
+    LLMError,
     LLMJsonParseError,
+    LLMPermanentError,
+    LLMRateLimitError,
+    LLMTemporaryError,
     LLMTruncatedError,
+    LLMUnreachableAfterRetriesError,
     OllamaLLMClient,
     call_llm_with_retries,
     extract_json_from_response,
     get_client,
     get_llm_config_summary,
-)
-from llm_service import (
-    LLMError,
-    LLMPermanentError,
-    LLMRateLimitError,
-    LLMTemporaryError,
-    LLMUnreachableAfterRetriesError,
-    OLLAMA_WEEKLY_LIMIT_MESSAGE,
 )
 
 logger = logging.getLogger(__name__)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
@@ -19,7 +19,6 @@ from ..models import (
     ExecutionResult,
     Phase,
     PlanningResult,
-    ReviewIssue,
     ToolAgentKind,
     ToolAgentPhaseInput,
 )

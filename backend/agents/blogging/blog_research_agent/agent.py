@@ -9,28 +9,28 @@ from pydantic import HttpUrl
 
 logger = logging.getLogger(__name__)
 
-from .llm import LLMClient, LLMJsonParseError
-from .models import (
-    ResearchBriefInput,
+from .agent_cache import AgentCache  # noqa: E402
+from .llm import LLMClient, LLMJsonParseError  # noqa: E402
+from .models import (  # noqa: E402
+    AcademicPaper,
+    CandidateResult,
     ResearchAgentOutput,
+    ResearchBriefInput,
     ResearchReference,
     SearchQuery,
-    CandidateResult,
     SourceDocument,
-    AcademicPaper,
 )
-from .prompts import (
+from .prompts import (  # noqa: E402
     BRIEF_PARSING_PROMPT,
-    QUERY_GENERATION_PROMPT,
     DOC_RELEVANCE_SCORING_PROMPT,
     DOC_SUMMARIZATION_PROMPT,
     FINAL_SYNTHESIS_PROMPT,
+    QUERY_GENERATION_PROMPT,
     SIMILAR_TOPICS_PROMPT,
 )
-from .tools.web_search import OllamaWebSearch
-from .tools.web_fetch import SimpleWebFetcher
-from .tools.arxiv_search import search_arxiv
-from .agent_cache import AgentCache
+from .tools.arxiv_search import search_arxiv  # noqa: E402
+from .tools.web_fetch import SimpleWebFetcher  # noqa: E402
+from .tools.web_search import OllamaWebSearch  # noqa: E402
 
 
 class ResearchAgent:
@@ -681,7 +681,7 @@ class ResearchAgent:
                 lines.append(f"{i}. {ref.url}")
                 body = ref.summary.strip()
                 lines.append(f"-- {body}")
-                lines.append(f"Key points:")
+                lines.append("Key points:")
                 for key_point in ref.key_points:
                     lines.append(f"  - {key_point}")
                 lines.append("")

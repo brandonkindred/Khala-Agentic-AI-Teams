@@ -6,10 +6,9 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, model_validator
-
 from blog_copy_editor_agent.models import FeedbackItem
 from blog_research_agent.models import ResearchReference
+from pydantic import BaseModel, Field, model_validator
 from shared.content_plan import ContentPlan, content_plan_to_outline_markdown
 
 

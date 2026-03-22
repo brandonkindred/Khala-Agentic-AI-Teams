@@ -4,7 +4,7 @@ Tool: mobile.check_touch_targets
 Detect target size and spacing problems.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import List, Literal
 
 from pydantic import BaseModel, Field
 

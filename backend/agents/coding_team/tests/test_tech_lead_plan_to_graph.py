@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from coding_team.models import CodingTeamPlanInput
 from coding_team.tech_lead_agent.agent import TechLeadAgent
 

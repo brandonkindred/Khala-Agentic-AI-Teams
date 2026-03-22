@@ -1,7 +1,7 @@
 """Multi-asset investment organization agents package."""
 
-from .agents import AgentIdentity, InvestmentCommitteeAgent, PolicyGuardianAgent, PromotionGateAgent
 from .agent_catalog import CORE_AGENTS, SPECIALIST_DESKS, AgentDefinition
+from .agents import AgentIdentity, InvestmentCommitteeAgent, PolicyGuardianAgent, PromotionGateAgent
 from .models import (
     IPS,
     AssetUniverse,
@@ -22,7 +22,13 @@ from .models import (
     WorkflowMode,
 )
 from .orchestrator import InvestmentTeamOrchestrator, QueueItem, WorkflowState
-from .spec_models import IPSV1, InvestmentProfileV1, PromotionDecisionV1, StrategySpecV1, ValidationReportV1
+from .spec_models import (
+    IPSV1,
+    InvestmentProfileV1,
+    PromotionDecisionV1,
+    StrategySpecV1,
+    ValidationReportV1,
+)
 
 __all__ = [
     "AgentIdentity",

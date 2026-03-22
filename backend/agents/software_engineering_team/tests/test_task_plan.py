@@ -1,6 +1,5 @@
 """Tests for shared TaskPlan model."""
 
-import pytest
 
 from software_engineering_team.shared.task_plan import TaskPlan
 

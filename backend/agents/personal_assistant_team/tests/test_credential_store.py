@@ -1,15 +1,14 @@
 """Tests for CredentialStore."""
 
-import pytest
-import tempfile
 import shutil
-import os
+import tempfile
+
+import pytest
 
 from ..shared.credential_store import (
     CredentialStore,
-    OAuthCredentials,
     IMAPCredentials,
-    CredentialStoreError,
+    OAuthCredentials,
 )
 
 

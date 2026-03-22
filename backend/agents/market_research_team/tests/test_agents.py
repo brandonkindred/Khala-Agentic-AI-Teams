@@ -4,8 +4,8 @@ from market_research_team.agents import (
     MarketViabilityAgent,
     ResearchScriptAgent,
     TranscriptIngestionAgent,
-    UXResearchAgent,
     UserPsychologyAgent,
+    UXResearchAgent,
 )
 from market_research_team.models import InterviewInsight, MarketSignal, ResearchMission
 

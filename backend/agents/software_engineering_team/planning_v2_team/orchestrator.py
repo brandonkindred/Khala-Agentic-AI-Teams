@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import PlanningHierarchy
 from software_engineering_team.shared.job_store import add_pending_questions, is_waiting_for_answers
+from software_engineering_team.shared.models import PlanningHierarchy
 
 try:
     from unified_api.slack_notifier import notify_open_questions as slack_notify_open_questions
@@ -39,26 +39,24 @@ except ImportError:
     slack_notify_open_questions = None
 
 from .models import (
+    PLAN_PLANNING_TEAM_DIR,
     DeliverPhaseResult,
     ImplementationPhaseResult,
     Phase,
-    PLAN_PLANNING_TEAM_DIR,
     PlanningPhaseResult,
     PlanningRole,
     PlanningV2WorkflowResult,
     ReviewPhaseResult,
     ToolAgentKind,
-    ToolAgentPhaseInput,
-    ToolAgentPhaseOutput,
 )
-from .phases.planning import run_planning
-from .phases.implementation import run_implementation
-from .phases.review import run_review
 from .phases.deliver import run_deliver
+from .phases.implementation import run_implementation
+from .phases.planning import run_planning
 from .phases.problem_solving import (
     format_issues_breakdown_and_synopsis,
     group_issues_by_agent,
 )
+from .phases.review import run_review
 
 logger = logging.getLogger(__name__)
 
@@ -195,14 +193,14 @@ def _generate_options_for_question(question_text: str, source: str) -> List[Dict
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     """Build all 8 tool agent instances."""
-    from .tool_agents.system_design import SystemDesignToolAgent
     from .tool_agents.architecture import ArchitectureToolAgent
-    from .tool_agents.user_story import UserStoryToolAgent
     from .tool_agents.devops import DevOpsToolAgent
-    from .tool_agents.ui_design import UIDesignToolAgent
-    from .tool_agents.ux_design import UXDesignToolAgent
+    from .tool_agents.system_design import SystemDesignToolAgent
     from .tool_agents.task_classification import TaskClassificationToolAgent
     from .tool_agents.task_dependency import TaskDependencyToolAgent
+    from .tool_agents.ui_design import UIDesignToolAgent
+    from .tool_agents.user_story import UserStoryToolAgent
+    from .tool_agents.ux_design import UXDesignToolAgent
 
     return {
         ToolAgentKind.SYSTEM_DESIGN: SystemDesignToolAgent(llm),
@@ -268,7 +266,6 @@ class PlanningV2PlanningAgent:
         
         current_files: Dict[str, str] = {}
         hierarchy: Optional[PlanningHierarchy] = None
-        metadata: Dict[str, Any] = {}
 
         def _update_job(**kwargs: Any) -> None:
             if job_updater:

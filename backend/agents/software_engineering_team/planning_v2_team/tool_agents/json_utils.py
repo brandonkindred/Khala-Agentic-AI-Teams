@@ -6,7 +6,7 @@ consumers parse responses via output_templates (section markers).
 
 import logging
 import re
-from typing import Any, Callable, Dict, List, Optional, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from software_engineering_team.shared.deduplication import dedupe_strings
 

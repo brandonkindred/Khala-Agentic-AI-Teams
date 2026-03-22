@@ -14,13 +14,12 @@ from typing import Any, Dict, Optional
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     abort_merge,
-    branch_has_commits_ahead_of,
     checkout_branch,
     create_feature_branch,
     delete_branch,
     merge_branch,
 )
-from software_engineering_team.shared.repo_writer import write_agent_output, NO_FILES_TO_WRITE_MSG
+from software_engineering_team.shared.repo_writer import write_agent_output
 
 from ..models import DeliverResult, Phase, ToolAgentKind, ToolAgentPhaseInput
 from ..prompts import DELIVER_COMMIT_MSG_TEMPLATE

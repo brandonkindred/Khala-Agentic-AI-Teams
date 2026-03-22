@@ -201,7 +201,7 @@ class RobustJSONExtractor:
         
         try:
             return json.loads(text), None
-        except json.JSONDecodeError as e:
+        except json.JSONDecodeError:
             pass
         
         start = text.find("{")

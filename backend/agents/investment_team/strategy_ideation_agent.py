@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from llm_service.interface import LLMClient
 
-from .models import StrategyLabRecord, StrategySpec
+from .models import StrategyLabRecord
 
 logger = logging.getLogger(__name__)
 

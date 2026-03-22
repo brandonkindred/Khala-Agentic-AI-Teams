@@ -10,18 +10,18 @@ Verifies that:
 
 from __future__ import annotations
 
-import subprocess
+import sys
 from pathlib import Path
 
-import pytest
-
-import sys
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
 
-from software_engineering_team.shared.models import Task, TaskStatus, TaskType
-from software_engineering_team.shared.task_parsing import parse_assignment_from_data, _assignee_to_task_type
+from software_engineering_team.shared.models import TaskType  # noqa: E402
+from software_engineering_team.shared.task_parsing import (  # noqa: E402
+    _assignee_to_task_type,
+    parse_assignment_from_data,
+)
 
 
 class TestTaskParsingBackendCodeV2:
@@ -103,7 +103,7 @@ class TestNoBackendAgentImports:
                     violations.append(f"{py_file.relative_to(team_dir)}:{i}: {stripped}")
 
         assert not violations, (
-            f"Found backend_agent imports in backend_code_v2_team:\n" + "\n".join(violations)
+            "Found backend_agent imports in backend_code_v2_team:\n" + "\n".join(violations)
         )
 
 

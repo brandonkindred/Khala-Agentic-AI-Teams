@@ -22,8 +22,8 @@ from ..models import (
     MicrotaskStatus,
     PlanningResult,
     ReviewResult,
-    ToolAgentKind,
     ToolAgentInput,
+    ToolAgentKind,
     ToolAgentOutput,
 )
 from ..output_templates import parse_files_and_summary_template
@@ -203,8 +203,8 @@ def run_execution_with_review_gates(
     ``microtask_phase`` is one of: "coding", "code_review", "qa_testing", "security_testing", "documentation", "completed".
     ``phase_detail`` provides human-readable detail about the current action.
     """
-    from .review import run_microtask_review, run_documentation_self_review
     from .problem_solving import run_batch_coding_fixes
+    from .review import run_documentation_self_review, run_microtask_review
 
     config = review_config or MicrotaskReviewConfig()
     deps = review_deps or ReviewDependencies()

@@ -20,7 +20,6 @@ from .learning_engine import LearningEngine, format_insights_for_prompt
 from .models import (
     BANTScore,
     ClosingStrategy,
-    DealOutcome,
     DiscoveryPlan,
     IdealCustomerProfile,
     LearningInsights,
@@ -31,8 +30,8 @@ from .models import (
     OutreachSequence,
     PipelineCoachingReport,
     PipelineStage,
-    Prospect,
     ProposalRequest,
+    Prospect,
     QualificationScore,
     ROIModel,
     SalesPipelineRequest,
@@ -41,7 +40,7 @@ from .models import (
     SPINQuestions,
     StageOutcome,
 )
-from .outcome_store import load_current_insights, record_deal_outcome, record_stage_outcome
+from .outcome_store import load_current_insights, record_stage_outcome
 
 logger = logging.getLogger(__name__)
 

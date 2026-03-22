@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import SystemArchitecture
 
 from .models import BuildReleaseInput, BuildReleaseOutput
 from .prompts import BUILD_RELEASE_PROMPT

@@ -5,19 +5,20 @@ TEMPORAL_ADDRESS set, POST /run-team to start a job, kill the API process, resta
 then verify the workflow continues or the job can be resumed via POST /run-team/{id}/resume.
 See ARCHITECTURE.md section \"Temporal (durable execution)\" for env and setup."""
 
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-import sys
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
 
 # Import after path setup
-import importlib.util
+import importlib.util  # noqa: E402
+
 _spec = importlib.util.spec_from_file_location(
     "software_engineering_api_main",
     _team_dir / "api" / "main.py",

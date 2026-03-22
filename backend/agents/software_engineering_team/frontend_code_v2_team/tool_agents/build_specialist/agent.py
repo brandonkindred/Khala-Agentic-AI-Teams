@@ -49,7 +49,10 @@ def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) 
 def _run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
     """Run frontend build and return one ReviewIssue per parsed failure."""
     try:
-        from software_engineering_team.shared.command_runner import run_frontend_build, detect_frontend_framework
+        from software_engineering_team.shared.command_runner import (
+            detect_frontend_framework,
+            run_frontend_build,
+        )
     except ImportError:
         logger.warning("Build Specialist: shared.command_runner not available")
         return []

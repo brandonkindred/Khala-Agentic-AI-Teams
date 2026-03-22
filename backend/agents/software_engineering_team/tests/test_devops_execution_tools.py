@@ -5,12 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from devops_team.tool_agents.terraform_execution import (
-    TerraformExecutionInput,
-    TerraformExecutionToolAgent,
-)
 from devops_team.tool_agents.cdk_execution import (
     CDKExecutionInput,
     CDKExecutionToolAgent,
@@ -22,6 +16,10 @@ from devops_team.tool_agents.docker_compose_execution import (
 from devops_team.tool_agents.helm_execution import (
     HelmExecutionInput,
     HelmExecutionToolAgent,
+)
+from devops_team.tool_agents.terraform_execution import (
+    TerraformExecutionInput,
+    TerraformExecutionToolAgent,
 )
 
 

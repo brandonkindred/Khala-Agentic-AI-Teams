@@ -5,14 +5,15 @@ Loads the Brandon Kindred style guide from docs/ and provides feedback
 on how well the draft aligns with the brand and writing style.
 """
 
-from . import _path_setup  # noqa: F401  # Add blogging to path when run from project root
-
 import logging
 from pathlib import Path
 
-from llm_service import get_client
-from shared.style_loader import load_style_file
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
+from shared.style_loader import load_style_file
+
+from llm_service import get_client
+
+from . import _path_setup  # noqa: F401  # Add blogging to path when run from project root
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 

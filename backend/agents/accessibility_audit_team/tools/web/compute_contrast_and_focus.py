@@ -4,7 +4,7 @@ Tool: web.compute_contrast_and_focus
 Contrast checks + focus ring visibility metrics.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import List, Literal
 
 from pydantic import BaseModel, Field
 

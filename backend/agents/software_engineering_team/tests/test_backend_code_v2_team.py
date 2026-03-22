@@ -4,26 +4,21 @@ Unit tests for the backend-code-v2 team: models, phases, tool agents, orchestrat
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict
-from unittest.mock import MagicMock, patch
-
-import pytest
-
 import sys
+from pathlib import Path
+from unittest.mock import MagicMock
+
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
 
-from backend_code_v2_team.models import (
+from backend_code_v2_team.models import (  # noqa: E402
     BackendCodeV2WorkflowResult,
-    DeliverResult,
     ExecutionResult,
     Microtask,
     MicrotaskStatus,
     Phase,
     PlanningResult,
-    ProblemSolvingResult,
     ReviewIssue,
     ReviewResult,
     SetupResult,
@@ -33,7 +28,6 @@ from backend_code_v2_team.models import (
     ToolAgentPhaseInput,
     ToolAgentPhaseOutput,
 )
-
 
 # ---------------------------------------------------------------------------
 # Model tests
@@ -120,6 +114,7 @@ class TestSetupPhase:
 class TestPlanningPhase:
     def test_language_detection_python(self, tmp_path):
         from backend_code_v2_team.phases.planning import _detect_language
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         (tmp_path / "requirements.txt").write_text("flask")
@@ -128,6 +123,7 @@ class TestPlanningPhase:
 
     def test_language_detection_java(self, tmp_path):
         from backend_code_v2_team.phases.planning import _detect_language
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         (tmp_path / "pom.xml").write_text("<project/>")
@@ -136,6 +132,7 @@ class TestPlanningPhase:
 
     def test_language_detection_from_description(self, tmp_path):
         from backend_code_v2_team.phases.planning import _detect_language
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="Use Spring Boot and Java")
@@ -159,6 +156,7 @@ class TestPlanningPhase:
 
     def test_run_planning_fallback(self, tmp_path):
         from backend_code_v2_team.phases.planning import run_planning
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
@@ -180,6 +178,7 @@ class TestPlanningPhase:
 class TestExecutionPhase:
     def test_run_execution_with_tool_runners(self, tmp_path):
         from backend_code_v2_team.phases.execution import run_execution
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
@@ -204,6 +203,7 @@ class TestExecutionPhase:
 
     def test_run_execution_general_fallback(self, tmp_path):
         from backend_code_v2_team.phases.execution import run_execution
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
@@ -226,6 +226,7 @@ class TestExecutionPhase:
 class TestReviewPhase:
     def test_review_passes_no_issues(self, tmp_path):
         from backend_code_v2_team.phases.review import run_review
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
@@ -242,6 +243,7 @@ class TestReviewPhase:
 
     def test_review_fails_on_critical_issues(self, tmp_path):
         from backend_code_v2_team.phases.review import run_review
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
@@ -263,6 +265,7 @@ class TestReviewPhase:
 class TestProblemSolvingPhase:
     def test_no_actionable_issues(self):
         from backend_code_v2_team.phases.problem_solving import run_problem_solving
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
@@ -275,6 +278,7 @@ class TestProblemSolvingPhase:
 
     def test_applies_fixes(self):
         from backend_code_v2_team.phases.problem_solving import run_problem_solving
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
@@ -353,7 +357,9 @@ class TestToolAgents:
         assert out.summary
 
     def test_git_branch_management_agent(self, tmp_path):
-        from backend_code_v2_team.tool_agents.git_branch_management import GitBranchManagementToolAgent
+        from backend_code_v2_team.tool_agents.git_branch_management import (
+            GitBranchManagementToolAgent,
+        )
 
         agent = GitBranchManagementToolAgent()
         phase_inp = ToolAgentPhaseInput(
@@ -384,7 +390,10 @@ class TestToolAgents:
         assert "feature/" in branch
 
     def test_git_agent_commit_current_changes(self, tmp_path):
-        from backend_code_v2_team.tool_agents.git_branch_management import GitBranchManagementToolAgent
+        from backend_code_v2_team.tool_agents.git_branch_management import (
+            GitBranchManagementToolAgent,
+        )
+
         from software_engineering_team.shared.git_utils import initialize_new_repo
 
         initialize_new_repo(tmp_path)
@@ -394,8 +403,14 @@ class TestToolAgents:
         assert ok
 
     def test_git_agent_deliver_with_feature_branch_name(self, tmp_path):
-        from backend_code_v2_team.tool_agents.git_branch_management import GitBranchManagementToolAgent
-        from software_engineering_team.shared.git_utils import initialize_new_repo, create_feature_branch
+        from backend_code_v2_team.tool_agents.git_branch_management import (
+            GitBranchManagementToolAgent,
+        )
+
+        from software_engineering_team.shared.git_utils import (
+            create_feature_branch,
+            initialize_new_repo,
+        )
 
         initialize_new_repo(tmp_path)
         ok, branch = create_feature_branch(tmp_path, "development", "t1-api")
@@ -428,8 +443,8 @@ class TestToolAgents:
 
     def test_tool_agents_have_plan_review_problem_solve_deliver(self):
         """Tool agents participate in all phases: plan, execute, review, problem_solve, deliver."""
-        from backend_code_v2_team.tool_agents.data_engineering import DataEngineeringToolAgent
         from backend_code_v2_team.tool_agents.cicd import CicdAdapterAgent
+        from backend_code_v2_team.tool_agents.data_engineering import DataEngineeringToolAgent
 
         mock_llm = MagicMock()
         data_eng = DataEngineeringToolAgent(mock_llm)
@@ -500,6 +515,7 @@ class TestBackendCodeV2TeamLead:
     def test_team_lead_runs_setup_then_delegates(self, tmp_path):
         """BackendCodeV2TeamLead runs Setup then delegates to BackendDevelopmentAgent."""
         from backend_code_v2_team.orchestrator import BackendCodeV2TeamLead
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()

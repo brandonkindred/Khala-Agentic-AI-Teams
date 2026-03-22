@@ -9,11 +9,11 @@ Phases:
 - Retest (Phase 4): Re-verification after fixes
 """
 
-from .intake import run_intake_phase
 from .discovery import run_discovery_phase
-from .verification import run_verification_phase
+from .intake import run_intake_phase
 from .report_packaging import run_report_packaging_phase
 from .retest import run_retest_phase
+from .verification import run_verification_phase
 
 __all__ = [
     "run_intake_phase",

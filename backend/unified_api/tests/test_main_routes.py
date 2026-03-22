@@ -2,9 +2,7 @@
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 _backend = Path(__file__).resolve().parent.parent.parent
 if str(_backend) not in sys.path:
@@ -106,7 +104,7 @@ def test_health_degraded_when_enabled_team_not_mounted():
     # Insert a fake enabled team that is not mounted
     fake_key = "_test_fake_team"
     TEAM_CONFIGS[fake_key] = TeamConfig(name="Fake", prefix="/api/fake", description="test", enabled=True)
-    original_mounted = unified_main._mounted_teams.get(fake_key, False)
+    unified_main._mounted_teams.get(fake_key, False)
     unified_main._mounted_teams[fake_key] = False
 
     try:
@@ -163,7 +161,7 @@ def test_list_teams_docs_url_none_when_not_mounted():
 def test_list_teams_docs_url_set_when_mounted():
     """GET /teams sets docs_url to <prefix>/docs for mounted teams."""
     resp = client.get("/teams")
-    for key, info in resp.json()["teams"].items():
+    for _key, info in resp.json()["teams"].items():
         if info["mounted"]:
             assert info["docs_url"] == f"{info['prefix']}/docs"
 
@@ -195,19 +193,18 @@ def test_try_mount_blogging_returns_false_on_import_error():
     from unified_api.main import _try_mount_blogging
 
     test_app = FastAPI()
-    with patch.dict("sys.modules", {"blogging.api.main": None}):
-        with patch("unified_api.main.importlib") as _:
-            # Simulate ImportError by patching the import inside the function
-            import builtins
+    with patch.dict("sys.modules", {"blogging.api.main": None}), patch("unified_api.main.importlib") as _:
+        # Simulate ImportError by patching the import inside the function
+        import builtins
 
-            real_import = builtins.__import__
+        real_import = builtins.__import__
 
-            def _fail_blogging(name, *args, **kwargs):
-                if "blogging" in name:
-                    raise ImportError("no blogging module")
-                return real_import(name, *args, **kwargs)
+        def _fail_blogging(name, *args, **kwargs):
+            if "blogging" in name:
+                raise ImportError("no blogging module")
+            return real_import(name, *args, **kwargs)
 
-            with patch("builtins.__import__", side_effect=_fail_blogging):
-                result = _try_mount_blogging(test_app)
+        with patch("builtins.__import__", side_effect=_fail_blogging):
+            result = _try_mount_blogging(test_app)
 
     assert result is False

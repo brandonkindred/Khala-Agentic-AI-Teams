@@ -23,7 +23,7 @@ from ..models import (
     ToolAgentPhaseInput,
 )
 from ..output_templates import parse_planning_template
-from ..prompts import PLANNING_PROMPT, PLANNING_FIXES_FOR_ISSUES_PROMPT
+from ..prompts import PLANNING_FIXES_FOR_ISSUES_PROMPT, PLANNING_PROMPT
 
 logger = logging.getLogger(__name__)
 

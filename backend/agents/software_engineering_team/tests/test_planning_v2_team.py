@@ -10,26 +10,25 @@ Tests:
 Note: This team expects a pre-validated specification - no spec review tests.
 """
 
-import pytest
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
-from typing import Dict, Any
 
+import pytest
 from planning_v2_team.models import (
     Phase,
+    PlanningPhaseResult,
     ToolAgentKind,
     ToolAgentPhaseInput,
     ToolAgentPhaseOutput,
-    PlanningPhaseResult,
 )
 from planning_v2_team.orchestrator import (
-    PlanningV2ProductLead,
+    PHASE_TOOL_AGENTS,
     PlanningV2PlanningAgent,
+    PlanningV2ProductLead,
     PlanningV2TeamLead,
     _build_tool_agents,
-    PHASE_TOOL_AGENTS,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -373,7 +372,7 @@ class TestWorkflowExecution:
         }
 
         lead = PlanningV2ProductLead(mock_llm)
-        result = lead.run_workflow(
+        lead.run_workflow(
             spec_content=sample_spec,
             repo_path=temp_repo,
         )
@@ -743,7 +742,7 @@ class TestOrchestratorStatusText:
 
     def test_update_job_receives_planning_status_text(self, mock_llm: MagicMock, temp_repo: Path, sample_spec: str):
         """When workflow runs, job updater is called with planning status_text listing agents."""
-        from planning_v2_team.orchestrator import PlanningV2ProductLead, Phase
+        from planning_v2_team.orchestrator import Phase, PlanningV2ProductLead
 
         job_updates: list = []
 
@@ -785,8 +784,7 @@ class TestOrchestratorStatusText:
 
     def test_implementation_with_issues_status_includes_breakdown(self, mock_llm: MagicMock, temp_repo: Path, sample_spec: str):
         """When implementation runs with review issues, status_text includes breakdown."""
-        from planning_v2_team.models import ReviewPhaseResult
-        from planning_v2_team.orchestrator import PlanningV2PlanningAgent, Phase
+        from planning_v2_team.orchestrator import PlanningV2PlanningAgent
 
         job_updates: list = []
 
@@ -811,7 +809,7 @@ class TestOrchestratorStatusText:
             "issues": [],
             "passed": False,
         }
-        agent = PlanningV2PlanningAgent(mock_llm)
+        PlanningV2PlanningAgent(mock_llm)
         # Run one full Planning -> Implementation (with mock review_result) would require
         # injecting review_result. Easier: assert that the code path that builds
         # "Fixing N issues: ..." is used when issue_count > 0 (tested via group_issues_by_agent + format)

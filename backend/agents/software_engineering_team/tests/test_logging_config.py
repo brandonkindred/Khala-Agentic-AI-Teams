@@ -6,8 +6,6 @@ import logging
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from software_engineering_team.shared.logging_config import (
     JOB_LOG_FILENAME,
     setup_logging,

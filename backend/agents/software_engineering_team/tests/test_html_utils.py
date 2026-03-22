@@ -1,14 +1,13 @@
 """Unit tests for HTML truncation detection and recovery utilities."""
 
-import pytest
 
 from software_engineering_team.shared.html_utils import (
+    get_truncated_files_summary,
+    get_truncated_html_files,
     is_html_file,
     is_html_truncated,
-    validate_html_completeness,
-    get_truncated_html_files,
-    get_truncated_files_summary,
     merge_html_continuation,
+    validate_html_completeness,
 )
 
 

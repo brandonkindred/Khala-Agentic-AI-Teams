@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
-from ...output_templates import looks_like_truncated_file_content, parse_devops_planning_output, parse_fix_output
+from ...output_templates import (
+    looks_like_truncated_file_content,
+    parse_devops_planning_output,
+    parse_fix_output,
+)
 from ..json_utils import attempt_fix_output_continuation, complete_text_with_continuation
 
 if TYPE_CHECKING:

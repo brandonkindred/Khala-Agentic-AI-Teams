@@ -4,7 +4,6 @@ Configuration for the Unified API Server.
 
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List
 
 
 @dataclass
@@ -15,7 +14,7 @@ class TeamConfig:
     prefix: str
     description: str
     enabled: bool = True
-    tags: List[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
 
 
 # Default port for the unified API server
@@ -31,7 +30,7 @@ TEMPORAL_NAMESPACE = os.getenv("TEMPORAL_NAMESPACE", "default").strip()
 TEMPORAL_TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "software-engineering").strip()
 
 # Team configurations with route prefixes
-TEAM_CONFIGS: Dict[str, TeamConfig] = {
+TEAM_CONFIGS: dict[str, TeamConfig] = {
     "blogging": TeamConfig(
         name="Blogging",
         prefix="/api/blogging",
@@ -143,6 +142,6 @@ TEAM_CONFIGS: Dict[str, TeamConfig] = {
 }
 
 
-def get_enabled_teams() -> Dict[str, TeamConfig]:
+def get_enabled_teams() -> dict[str, TeamConfig]:
     """Return only enabled team configurations."""
     return {k: v for k, v in TEAM_CONFIGS.items() if v.enabled}

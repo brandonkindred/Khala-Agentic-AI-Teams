@@ -1,13 +1,12 @@
 """Unit tests for deterministic validators."""
 
+
 import pytest
-from pathlib import Path
-from shared.brand_spec import BrandSpec, VoiceConfig, FormattingConfig, ReadabilityConfig
+from shared.brand_spec import BrandSpec, FormattingConfig, ReadabilityConfig, VoiceConfig
 from validators.checks import (
-    check_banned_phrases,
     check_banned_patterns,
+    check_banned_phrases,
     check_paragraph_length,
-    check_reading_level,
     check_required_sections,
 )
 from validators.runner import run_validators

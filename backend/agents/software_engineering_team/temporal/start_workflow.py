@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional
 from software_engineering_team.temporal.client import (
     get_temporal_client,
     get_temporal_loop,
-    is_temporal_enabled,
 )
 from software_engineering_team.temporal.constants import (
     TASK_QUEUE,
@@ -22,8 +21,8 @@ from software_engineering_team.temporal.constants import (
     WORKFLOW_ID_PREFIX_STANDALONE,
 )
 from software_engineering_team.temporal.workflows import (
-    RunTeamWorkflow,
     RetryFailedWorkflow,
+    RunTeamWorkflow,
     StandaloneJobWorkflow,
 )
 

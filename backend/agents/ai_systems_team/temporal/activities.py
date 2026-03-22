@@ -22,6 +22,6 @@ def run_build_activity(
     try:
         from ai_systems_team.api.main import _run_build_background
         _run_build_background(job_id, project_name, spec_path, constraints, output_dir)
-    except Exception as e:
+    except Exception:
         logger.exception("AI Systems build activity failed for job %s", job_id)
         raise

@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from ..models import Reservation, ReservationType
-from ..shared.llm import LLMClient, JSONExtractionFailure
+from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
 from ..tools.web_search import WebSearchTool
 from .models import (
@@ -22,7 +22,7 @@ from .models import (
     SearchVenuesRequest,
     VenueResult,
 )
-from .prompts import CONFIRM_RESERVATION_PROMPT, PARSE_RESERVATION_PROMPT, RECOMMEND_VENUES_PROMPT
+from .prompts import PARSE_RESERVATION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class ReservationAgent:
         if location:
             query_parts.append(f"near {location}")
         
-        query = " ".join(query_parts)
+        " ".join(query_parts)
         
         try:
             if request.venue_type.lower() in ("restaurant", "restaurants", "dining"):

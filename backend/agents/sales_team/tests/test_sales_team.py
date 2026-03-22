@@ -7,9 +7,6 @@ making them suitable for CI environments without AWS credentials.
 from __future__ import annotations
 
 import json
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,27 +14,17 @@ from fastapi.testclient import TestClient
 from sales_team.models import (
     BANTScore,
     CloseType,
-    CoachingRequest,
     DealOutcome,
-    ForecastCategory,
     IdealCustomerProfile,
     LearningInsights,
-    MEDDICScore,
-    NurtureRequest,
     OutcomeResult,
-    OutreachRequest,
     PipelineStage,
     Prospect,
-    ProspectingRequest,
-    QualificationRequest,
-    RecordDealOutcomeRequest,
-    RecordStageOutcomeRequest,
     SalesPipelineRequest,
     SalesPipelineResult,
     StageOutcome,
 )
 from sales_team.orchestrator import SalesPodOrchestrator, _parse_json, _prospects_from_json
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -563,7 +550,10 @@ class TestOutcomeStore:
         assert len(loaded) == 3
 
     def test_outcome_counts(self):
-        from sales_team.outcome_store import outcome_counts, record_deal_outcome, record_stage_outcome
+        from sales_team.outcome_store import (
+            outcome_counts,
+            record_stage_outcome,
+        )
 
         assert outcome_counts()["stage_outcomes"] == 0
         record_stage_outcome(StageOutcome(

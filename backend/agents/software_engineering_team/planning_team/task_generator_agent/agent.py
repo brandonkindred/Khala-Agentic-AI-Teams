@@ -10,13 +10,13 @@ import logging
 from typing import Any, Dict, List
 
 from llm_service import LLMClient
-
 from software_engineering_team.shared.context_sizing import (
     compute_task_generator_arch_chars,
     compute_task_generator_existing_chars,
     compute_task_generator_features_chars,
     compute_task_generator_spec_chars,
 )
+
 from .models import TaskGeneratorInput
 from .prompts import TASK_GENERATOR_CONTEXT_NOTE
 

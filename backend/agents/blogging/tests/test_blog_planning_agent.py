@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from blog_planning_agent import BlogPlanningAgent
 from blog_planning_agent.agent import _post_validate
-from llm_service import DummyLLMClient
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -14,6 +13,8 @@ from shared.content_plan import (
     section_count_bounds_for_profile,
 )
 from shared.content_profile import ContentProfile, LengthPolicy, resolve_length_policy
+
+from llm_service import DummyLLMClient
 
 
 def _policy_standard() -> LengthPolicy:

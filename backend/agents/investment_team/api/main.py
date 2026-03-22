@@ -15,7 +15,9 @@ from pydantic import BaseModel, Field
 from investment_team.agents import AgentIdentity, InvestmentCommitteeAgent, PolicyGuardianAgent
 from investment_team.models import (
     IPS,
-    GateCheckResult,
+    BacktestConfig,
+    BacktestRecord,
+    BacktestResult,
     IncomeProfile,
     InvestmentCommitteeMemo,
     InvestmentProfile,
@@ -25,16 +27,12 @@ from investment_team.models import (
     PortfolioPosition,
     PortfolioProposal,
     PromotionDecision,
-    PromotionStage,
     RiskTolerance,
     SavingsRate,
     StrategyLabRecord,
     StrategySpec,
-    BacktestConfig,
-    BacktestRecord,
-    BacktestResult,
-    TradeRecord,
     TaxProfile,
+    TradeRecord,
     UserGoal,
     UserPreferences,
     ValidationCheck,
@@ -42,7 +40,7 @@ from investment_team.models import (
     ValidationStatus,
     WorkflowMode,
 )
-from investment_team.orchestrator import InvestmentTeamOrchestrator, QueueItem, WorkflowState
+from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
 from investment_team.strategy_ideation_agent import StrategyIdeationAgent
 
 logging.basicConfig(level=logging.INFO)

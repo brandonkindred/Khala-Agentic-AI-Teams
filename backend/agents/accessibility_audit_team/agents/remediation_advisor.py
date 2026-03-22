@@ -5,19 +5,19 @@ Owns: Fix guidance + acceptance criteria + verification plan
 Outputs: Developer-ready remediation guidance
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from .base import AgentMessage, BaseSpecialistAgent
 from ..models import Finding, Phase
-from ..tools.remediation import suggest_fix, generate_regression_checks
-from ..tools.remediation.suggest_fix import (
-    SuggestFixInput,
-    FindingInput,
-    StackInfo,
-)
+from ..tools.remediation import generate_regression_checks, suggest_fix
 from ..tools.remediation.generate_regression_checks import (
     GenerateRegressionChecksInput,
 )
+from ..tools.remediation.suggest_fix import (
+    FindingInput,
+    StackInfo,
+    SuggestFixInput,
+)
+from .base import AgentMessage, BaseSpecialistAgent
 
 
 class RemediationAdvisor(BaseSpecialistAgent):
@@ -45,7 +45,7 @@ class RemediationAdvisor(BaseSpecialistAgent):
         - VERIFICATION: Add remediation guidance to verified findings
         """
         phase = context.get("phase", Phase.VERIFICATION)
-        audit_id = context.get("audit_id", "")
+        context.get("audit_id", "")
 
         if phase == Phase.VERIFICATION:
             return await self._handle_remediation(context)

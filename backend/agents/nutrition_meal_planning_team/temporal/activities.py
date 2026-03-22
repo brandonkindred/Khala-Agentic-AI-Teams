@@ -18,6 +18,6 @@ def run_meal_plan_activity(job_id: str, request_dict: Dict[str, Any]) -> None:
         from nutrition_meal_planning_team.models import MealPlanRequest
         body = MealPlanRequest(**request_dict)
         _run_meal_plan_job(job_id, body)
-    except Exception as e:
+    except Exception:
         logger.exception("Nutrition meal plan activity failed for job %s", job_id)
         raise

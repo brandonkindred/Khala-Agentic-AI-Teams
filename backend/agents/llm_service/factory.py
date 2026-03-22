@@ -12,7 +12,6 @@ import threading
 from typing import Optional, Union
 
 from . import config as llm_config
-from .interface import LLMClient
 from .clients import DummyLLMClient, OllamaLLMClient
 
 logger = logging.getLogger(__name__)

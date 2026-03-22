@@ -17,6 +17,17 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
+from planning_v2_team.tool_agents.json_utils import (
+    default_decompose_by_sections,
+    parse_json_with_recovery,
+)
+
+from software_engineering_team.shared.context_sizing import (
+    compute_pra_spec_review_spec_chars,
+    compute_prd_snippet_chars,
+)
+from software_engineering_team.shared.deduplication import dedupe_strings as _dedupe_items
+
 from .models import (
     AnalysisPhase,
     AnalysisWorkflowResult,
@@ -30,22 +41,13 @@ from .prompts import (
     CONSOLIDATE_QUESTIONS_PROMPT,
     CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT,
     GENERATE_QUESTION_RECOMMENDATIONS_PROMPT,
+    PRD_PROMPT,
     REVIEW_QUESTIONS_ALIGNMENT_PROMPT,
     SPEC_CLEANUP_CHUNK_PROMPT,
     SPEC_CLEANUP_PROMPT,
     SPEC_CONSISTENCY_CLARIFICATION_PROMPT,
     SPEC_REVIEW_PROMPT,
     SPEC_UPDATE_PROMPT,
-    PRD_PROMPT,
-)
-from planning_v2_team.tool_agents.json_utils import (
-    parse_json_with_recovery,
-    default_decompose_by_sections,
-)
-from software_engineering_team.shared.deduplication import dedupe_strings as _dedupe_items
-from software_engineering_team.shared.context_sizing import (
-    compute_pra_spec_review_spec_chars,
-    compute_prd_snippet_chars,
 )
 
 if TYPE_CHECKING:
@@ -1091,7 +1093,7 @@ The following additional files were provided in the project folder. Review these
 
         logger.info(
             "Constraint status: %s",
-            {d: f"L{l}" for d, l in constraint_status.items()}
+            {d: f"L{lvl}" for d, lvl in constraint_status.items()}
         )
 
         # Build the full content including context files
@@ -1838,7 +1840,6 @@ Previously Answered Questions:
         from software_engineering_team.shared.job_store import (
             add_pending_questions,
             get_submitted_answers,
-            is_waiting_for_answers,
             update_job,
         )
 
@@ -2327,7 +2328,6 @@ Previously Answered Questions:
             if block_match:
                 question_text = block_match.group(1).strip()
                 answer = ""
-                rationale = ""
                 block_lines = [line]
                 i += 1
                 while i < len(lines):
@@ -2340,7 +2340,7 @@ Previously Answered Questions:
                     if next_line.strip().startswith("**Answer:**"):
                         answer = next_line.replace("**Answer:**", "").strip()
                     elif next_line.strip().startswith("**Rationale:**"):
-                        rationale = next_line.replace("**Rationale:**", "").strip()
+                        next_line.replace("**Rationale:**", "").strip()
                     i += 1
                 full_block_text = "\n".join(block_lines)
                 if question_text or answer:

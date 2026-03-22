@@ -4,13 +4,13 @@ Tool: evidence.create_pack
 Create an evidence bundle with stable refs.
 """
 
-from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
 import uuid
+from datetime import datetime
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from ...models import EvidenceArtifact, EvidencePack, EnvironmentInfo, Surface
+from ...models import EnvironmentInfo, EvidenceArtifact, EvidencePack, Surface
 
 
 class ArtifactInput(BaseModel):

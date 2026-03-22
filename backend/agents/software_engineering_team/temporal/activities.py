@@ -70,9 +70,15 @@ def _run_frontend_code_v2_impl(
 ) -> None:
     """Same logic as _run_frontend_code_v2_background without starting a thread."""
     import uuid as _uuid
-    from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
-    from software_engineering_team.shared.models import Task, TaskStatus, TaskType, SystemArchitecture
+
     from llm_service import get_client
+    from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
+    from software_engineering_team.shared.models import (
+        SystemArchitecture,
+        Task,
+        TaskStatus,
+        TaskType,
+    )
 
     update_job(job_id, status="running")
     tid = task_dict.get("id") or f"fv2-{_uuid.uuid4().hex[:8]}"
@@ -139,9 +145,15 @@ def _run_backend_code_v2_impl(
 ) -> None:
     """Same logic as _run_backend_code_v2_background without starting a thread."""
     import uuid as _uuid
-    from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
-    from software_engineering_team.shared.models import Task, TaskStatus, TaskType, SystemArchitecture
+
     from llm_service import get_client
+    from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
+    from software_engineering_team.shared.models import (
+        SystemArchitecture,
+        Task,
+        TaskStatus,
+        TaskType,
+    )
 
     update_job(job_id, status="running")
     tid = task_dict.get("id") or f"bv2-{_uuid.uuid4().hex[:8]}"
@@ -207,9 +219,9 @@ def _run_planning_v2_impl(
     inspiration_content: Optional[str],
 ) -> None:
     """Same logic as _run_planning_v2_background without starting a thread."""
+    from llm_service import get_client
     from software_engineering_team.planning_v2_team import PlanningV2TeamLead
     from software_engineering_team.planning_v2_team.models import Phase
-    from llm_service import get_client
 
     update_job(job_id, status="running")
     phase_order = [p.value for p in Phase]
@@ -286,11 +298,11 @@ def _run_product_analysis_impl(
     initial_spec_path: Optional[str] = None,
 ) -> None:
     """Same logic as _run_product_analysis_background without starting a thread."""
+    from llm_service import get_client
     from software_engineering_team.product_requirements_analysis_agent import (
         AnalysisPhase,
         ProductRequirementsAnalysisAgent,
     )
-    from llm_service import get_client
     from software_engineering_team.spec_parser import gather_context_files
 
     update_job(job_id, status="running")

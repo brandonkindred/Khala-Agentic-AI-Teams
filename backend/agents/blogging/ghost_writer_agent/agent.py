@@ -14,8 +14,9 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from llm_service.interface import LLMClient
 from shared.content_plan import ContentPlan
+
+from llm_service.interface import LLMClient
 
 from .models import StoryElicitationResult, StoryGap
 

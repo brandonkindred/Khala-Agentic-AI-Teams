@@ -10,13 +10,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from ..shared.llm import LLMClient, JSONExtractionFailure
+from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
 from .models import (
     GenerateChecklistRequest,
-    GenerateDocRequest,
     GeneratedChecklist,
     GeneratedDocument,
+    GenerateDocRequest,
     GeneratedTemplate,
     GenerateTemplateRequest,
     SOPRequest,

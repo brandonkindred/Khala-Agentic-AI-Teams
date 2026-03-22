@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-
 RiskLevel = Literal["low", "medium", "high", "critical"]
 GateStatus = Literal["pass", "fail", "skipped", "not_run"]
 

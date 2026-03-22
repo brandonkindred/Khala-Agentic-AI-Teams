@@ -15,11 +15,21 @@ Organized by domain:
 - training: Training tools (AET add-on)
 """
 
+from .at import run_script
 from .audit import (
     build_coverage_matrix,
     create_plan,
     export_backlog,
 )
+from .evidence import create_pack, generate_minimal_case
+from .mobile import (
+    check_font_scaling,
+    check_touch_targets,
+    record_screen_reader_flow,
+)
+from .qa import cluster_patterns, validate_finding
+from .remediation import generate_regression_checks, suggest_fix
+from .standards import map_wcag, tag_section508
 from .web import (
     capture_dom_snapshot,
     check_reflow_zoom,
@@ -27,16 +37,6 @@ from .web import (
     record_keyboard_flow,
     run_automated_scan,
 )
-from .mobile import (
-    check_font_scaling,
-    check_touch_targets,
-    record_screen_reader_flow,
-)
-from .at import run_script
-from .standards import map_wcag, tag_section508
-from .evidence import create_pack, generate_minimal_case
-from .remediation import generate_regression_checks, suggest_fix
-from .qa import cluster_patterns, validate_finding
 
 __all__ = [
     # Audit

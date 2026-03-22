@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -761,7 +761,7 @@ class ProposalAgent:
             "next_steps": [
                 "Review this proposal with your team by [date]",
                 "Schedule a 30-min Q&A call with our technical team",
-                f"Sign and return by [date] to secure [implementation slot]",
+                "Sign and return by [date] to secure [implementation slot]",
             ],
             "custom_sections": [],
         })

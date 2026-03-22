@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from llm_service import LLMClient
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
@@ -28,7 +28,6 @@ from .models import (
     ReleaseReadiness,
     SubtaskContract,
 )
-
 
 DEVOPS_REQUIRED_GATE_NAMES = [
     "iac_validate",
@@ -61,13 +60,24 @@ ENV_POLICY = {
         "policy_strictness": "high",
     },
 }
-from .task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput
-from .test_validation_agent import DevOpsTestValidationAgent, DevOpsTestValidationInput
-from .tool_agents import (
+from .infra_debug_agent import IaCDebugInput, InfraDebugAgent  # noqa: E402
+from .infra_patch_agent import IaCPatchInput, InfraPatchAgent  # noqa: E402
+from .task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput  # noqa: E402
+from .test_validation_agent import (  # noqa: E402
+    DevOpsTestValidationAgent,
+    DevOpsTestValidationInput,
+)
+from .tool_agents import (  # noqa: E402
+    CDKExecutionInput,
+    CDKExecutionToolAgent,
     CICDLintInput,
     CICDLintPipelineValidationToolAgent,
     DeploymentDryRunInput,
     DeploymentDryRunPlanToolAgent,
+    DockerComposeExecutionInput,
+    DockerComposeExecutionToolAgent,
+    HelmExecutionInput,
+    HelmExecutionToolAgent,
     IaCValidationInput,
     IaCValidationToolAgent,
     PolicyAsCodeInput,
@@ -76,15 +86,7 @@ from .tool_agents import (
     RepoNavigatorToolAgent,
     TerraformExecutionInput,
     TerraformExecutionToolAgent,
-    CDKExecutionInput,
-    CDKExecutionToolAgent,
-    DockerComposeExecutionInput,
-    DockerComposeExecutionToolAgent,
-    HelmExecutionInput,
-    HelmExecutionToolAgent,
 )
-from .infra_debug_agent import InfraDebugAgent, IaCDebugInput
-from .infra_patch_agent import InfraPatchAgent, IaCPatchInput
 
 logger = logging.getLogger(__name__)
 

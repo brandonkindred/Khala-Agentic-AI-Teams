@@ -3,16 +3,9 @@
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from software_engineering_team.shared.git_utils import (
     _clear_disposable_files_if_blocking,
     checkout_branch,
-    create_feature_branch,
-    ensure_files_committed_on_main,
-    ensure_development_branch,
-    DEVELOPMENT_BRANCH,
-    MAIN_BRANCH,
 )
 
 

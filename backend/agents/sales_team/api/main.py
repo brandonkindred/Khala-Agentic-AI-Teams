@@ -9,16 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-
-from shared_job_management import (
-    JOB_STATUS_COMPLETED,
-    JOB_STATUS_FAILED,
-    JOB_STATUS_PENDING,
-    JOB_STATUS_RUNNING,
-    CentralJobManager,
-    start_stale_job_monitor,
-)
+from pydantic import BaseModel
 
 from sales_team.learning_engine import LearningEngine
 from sales_team.models import (
@@ -27,7 +18,6 @@ from sales_team.models import (
     LearningInsights,
     NurtureRequest,
     OutreachRequest,
-    PipelineStage,
     ProposalRequest,
     ProspectingRequest,
     QualificationRequest,
@@ -45,6 +35,14 @@ from sales_team.outcome_store import (
     outcome_counts,
     record_deal_outcome,
     record_stage_outcome,
+)
+from shared_job_management import (
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    CentralJobManager,
+    start_stale_job_monitor,
 )
 
 app = FastAPI(
@@ -238,7 +236,7 @@ def get_pipeline_status(job_id: str) -> SalesPipelineStatusResponse:
         current_stage=job.get("current_stage", ""),
         progress=job.get("progress", 0),
         product_name=job.get("product_name", ""),
-        last_updated_at=job.get("last_updated_at", now := _now()),
+        last_updated_at=job.get("last_updated_at", _now()),
         eta_hint=job.get("eta_hint"),
         error=job.get("error"),
         result=result_obj,

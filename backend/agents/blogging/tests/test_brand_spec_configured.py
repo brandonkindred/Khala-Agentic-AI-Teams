@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from shared.brand_spec import brand_spec_prompt_configured
 
 

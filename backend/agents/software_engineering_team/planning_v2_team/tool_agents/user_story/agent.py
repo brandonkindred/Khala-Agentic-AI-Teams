@@ -11,12 +11,22 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from software_engineering_team.shared.models import Initiative, Epic, StoryPlan, TaskPlan, PlanningHierarchy
+from software_engineering_team.shared.deduplication import dedupe_by_key
+from software_engineering_team.shared.models import (
+    Epic,
+    Initiative,
+    PlanningHierarchy,
+    StoryPlan,
+    TaskPlan,
+)
 
 from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
-from ...output_templates import looks_like_truncated_file_content, parse_fix_output, parse_review_output
+from ...output_templates import (
+    looks_like_truncated_file_content,
+    parse_fix_output,
+    parse_review_output,
+)
 from ..json_utils import attempt_fix_output_continuation, complete_text_with_continuation
-from software_engineering_team.shared.deduplication import dedupe_by_key
 
 if TYPE_CHECKING:
     from llm_service import LLMClient

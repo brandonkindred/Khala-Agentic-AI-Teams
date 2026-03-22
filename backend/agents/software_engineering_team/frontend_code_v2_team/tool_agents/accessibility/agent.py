@@ -6,6 +6,8 @@ import json
 import logging
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS
+
 from ...models import (
     ReviewIssue,
     ToolAgentInput,
@@ -15,7 +17,6 @@ from ...models import (
 )
 from ...output_templates import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
-from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
 if TYPE_CHECKING:
     from llm_service import LLMClient

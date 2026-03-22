@@ -1,14 +1,14 @@
 """QA and consistency tools for accessibility audits."""
 
-from .validate_finding import (
-    validate_finding,
-    ValidateFindingInput,
-    ValidateFindingOutput,
-)
 from .cluster_patterns import (
-    cluster_patterns,
     ClusterPatternsInput,
     ClusterPatternsOutput,
+    cluster_patterns,
+)
+from .validate_finding import (
+    ValidateFindingInput,
+    ValidateFindingOutput,
+    validate_finding,
 )
 
 __all__ = [

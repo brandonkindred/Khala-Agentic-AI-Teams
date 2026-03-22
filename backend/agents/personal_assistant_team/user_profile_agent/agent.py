@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from ..models import ProfileUpdateSignal, UserProfile
-from ..shared.llm import LLMClient, JSONExtractionFailure
+from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
 from .models import (
     ExtractedPreference,
@@ -317,6 +317,7 @@ class UserProfileAgent:
     ) -> ProfileUpdateResult:
         """Add a goal to the user's profile."""
         from uuid import uuid4
+
         from ..models import Goal, Priority
         
         goal = Goal(

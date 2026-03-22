@@ -6,7 +6,10 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional
 
-from ai_systems_team.temporal.client import get_temporal_client, get_temporal_loop, is_temporal_enabled
+from ai_systems_team.temporal.client import (
+    get_temporal_client,
+    get_temporal_loop,
+)
 from ai_systems_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX_BUILD
 from ai_systems_team.temporal.workflows import AISystemsBuildWorkflow
 

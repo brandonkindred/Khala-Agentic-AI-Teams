@@ -10,7 +10,6 @@ _agents = _backend / "agents"
 if str(_agents) not in sys.path:
     sys.path.insert(0, str(_agents))
 
-import pytest
 from fastapi.testclient import TestClient
 
 # Import app after path is set; some team mounts may fail in test env

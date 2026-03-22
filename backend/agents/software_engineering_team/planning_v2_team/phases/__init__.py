@@ -6,10 +6,10 @@ When Review finds issues, they are passed back to Implementation for fixing.
 The team expects a pre-validated specification - no spec review is performed.
 """
 
-from .planning import run_planning
-from .implementation import run_implementation
-from .review import run_review
 from .deliver import run_deliver
+from .implementation import run_implementation
+from .planning import run_planning
+from .review import run_review
 
 __all__ = [
     "run_planning",

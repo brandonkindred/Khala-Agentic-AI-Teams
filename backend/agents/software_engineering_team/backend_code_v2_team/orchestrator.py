@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
+from software_engineering_team.shared.models import SystemArchitecture, Task
 
 from .models import (
     BackendCodeV2WorkflowResult,
@@ -21,15 +21,13 @@ from .models import (
     MicrotaskReviewFailedError,
     MicrotaskStatus,
     Phase,
-    ToolAgentKind,
     ToolAgentInput,
+    ToolAgentKind,
     ToolAgentOutput,
 )
-from .phases.planning import run_planning, plan_fixes_for_unresolved_issues
-from .phases.execution import run_execution, run_execution_with_review_gates, ReviewDependencies
-from .phases.review import run_review
-from .phases.problem_solving import run_problem_solving
 from .phases.deliver import run_deliver
+from .phases.execution import ReviewDependencies, run_execution_with_review_gates
+from .phases.planning import run_planning
 from .phases.setup import run_setup
 
 logger = logging.getLogger(__name__)
@@ -39,16 +37,16 @@ MAX_REVIEW_ITERATIONS = 100
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
     """Build team-owned tool agent instances (for plan/execute/review/problem_solve/deliver)."""
-    from .tool_agents.data_engineering import DataEngineeringToolAgent
     from .tool_agents.api_openapi import ApiOpenApiToolAgent
     from .tool_agents.auth import AuthToolAgent
+    from .tool_agents.build_specialist import BuildSpecialistAdapterAgent
     from .tool_agents.cicd import CicdAdapterAgent
     from .tool_agents.containerization import ContainerizationAdapterAgent
-    from .tool_agents.git_branch_management import GitBranchManagementToolAgent
-    from .tool_agents.build_specialist import BuildSpecialistAdapterAgent
-    from .tool_agents.testing_qa import TestingQAToolAgent
-    from .tool_agents.security import SecurityToolAgent
+    from .tool_agents.data_engineering import DataEngineeringToolAgent
     from .tool_agents.documentation import DocumentationToolAgent
+    from .tool_agents.git_branch_management import GitBranchManagementToolAgent
+    from .tool_agents.security import SecurityToolAgent
+    from .tool_agents.testing_qa import TestingQAToolAgent
 
     return {
         ToolAgentKind.DATA_ENGINEERING: DataEngineeringToolAgent(llm),

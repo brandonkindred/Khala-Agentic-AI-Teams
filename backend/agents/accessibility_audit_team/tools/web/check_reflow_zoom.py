@@ -4,7 +4,7 @@ Tool: web.check_reflow_zoom
 Validate layout behavior at 320 CSS px and zoom levels.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 

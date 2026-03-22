@@ -10,21 +10,19 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from coding_team.job_store import (
+    DEFAULT_CACHE_DIR,
     get_job,
     update_job,
     update_job_task_graph,
-    DEFAULT_CACHE_DIR,
 )
 from coding_team.models import (
     CodingTeamPlanInput,
     StackSpec,
-    SeniorEngineerSpec,
-    Task,
     TaskStatus,
 )
-from coding_team.task_graph import create_task_graph, TaskGraphService
-from coding_team.tech_lead_agent import TechLeadAgent
 from coding_team.senior_software_engineer_agent import SeniorSWEAgent
+from coding_team.task_graph import TaskGraphService, create_task_graph
+from coding_team.tech_lead_agent import TechLeadAgent
 
 logger = logging.getLogger(__name__)
 
@@ -175,8 +173,8 @@ def run_coding_team_orchestrator(
             if review.get("approved"):
                 try:
                     from software_engineering_team.shared.git_utils import (
-                        merge_branch,
                         DEVELOPMENT_BRANCH,
+                        merge_branch,
                     )
                     branch = task.feature_branch or f"feature/{task.id}"
                     ok, _ = merge_branch(path, branch, DEVELOPMENT_BRANCH)

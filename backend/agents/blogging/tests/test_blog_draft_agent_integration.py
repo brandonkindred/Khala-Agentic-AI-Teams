@@ -15,7 +15,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from blog_draft_agent import BlogDraftAgent, DraftInput, DraftOutput
 from shared.content_plan import (
     ContentPlan,
@@ -23,7 +22,8 @@ from shared.content_plan import (
     RequirementsAnalysis,
     TitleCandidate,
 )
-from llm_service import LLMPermanentError, LLMTemporaryError, get_client, OllamaLLMClient
+
+from llm_service import LLMPermanentError, LLMTemporaryError, OllamaLLMClient, get_client
 
 logger = logging.getLogger(__name__)
 

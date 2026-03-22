@@ -3,11 +3,10 @@
 from unittest.mock import MagicMock
 
 import pytest
-
 from planning_team.spec_analysis_merger import (
+    MergedSpecAnalysis,
     SpecAnalysisMerger,
     SpecAnalysisMergerInput,
-    MergedSpecAnalysis,
 )
 
 

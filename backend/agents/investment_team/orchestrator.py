@@ -15,6 +15,7 @@ from .models import (
     WorkflowMode,
 )
 
+
 class WebActionCoordinator(Protocol):
     """Minimal contract for web action orchestration dependencies."""
 

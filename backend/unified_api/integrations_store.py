@@ -42,6 +42,7 @@ File path: {AGENT_CACHE}/integrations.json (AGENT_CACHE env or .agent_cache).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -49,7 +50,7 @@ import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from unified_api.integration_credentials import (
     delete_credential,
@@ -88,10 +89,8 @@ def _resolve_browser_session_root() -> Path:
         cache_dir = Path(os.getenv("AGENT_CACHE", _DEFAULT_CACHE_DIR))
         root = (cache_dir / _DEFAULT_BROWSER_SESSIONS_SUBDIR).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
-    try:
+    with contextlib.suppress(OSError):
         root.chmod(0o700)
-    except OSError:
-        pass
     if not _BROWSER_SESSION_ROOT_LOGGED:
         logger.info(
             "Integration browser session root resolved to: %s (env_override=%s)",
@@ -106,10 +105,8 @@ def _medium_storage_state_path() -> Path:
     """Return Medium storage_state.json path under the browser session root."""
     medium_dir = _resolve_browser_session_root() / "medium"
     medium_dir.mkdir(parents=True, exist_ok=True)
-    try:
+    with contextlib.suppress(OSError):
         medium_dir.chmod(0o700)
-    except OSError:
-        pass
     return medium_dir / "storage_state.json"
 
 
@@ -119,10 +116,8 @@ def _write_text_atomic(path: Path, content: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     tmp.replace(path)
-    try:
+    with contextlib.suppress(OSError):
         path.chmod(0o600)
-    except OSError:
-        pass
 
 
 def _read_text_if_exists(path: Path) -> str:
@@ -135,7 +130,7 @@ def _read_text_if_exists(path: Path) -> str:
         return ""
 
 
-def _read_raw() -> Dict[str, Any]:
+def _read_raw() -> dict[str, Any]:
     """Read raw JSON from file. Caller should hold _LOCK if needed."""
     path = _get_integrations_path()
     if not path.exists():
@@ -150,7 +145,7 @@ def _read_raw() -> Dict[str, Any]:
         return {}
 
 
-def _write_raw(data: Dict[str, Any]) -> None:
+def _write_raw(data: dict[str, Any]) -> None:
     """Write JSON to file with atomic write (temp + rename). Caller should hold _LOCK."""
     path = _get_integrations_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,13 +156,11 @@ def _write_raw(data: Dict[str, Any]) -> None:
     except OSError as e:
         logger.warning("Failed to write integrations file %s: %s", path, e)
         if tmp.exists():
-            try:
+            with contextlib.suppress(OSError):
                 tmp.unlink()
-            except OSError:
-                pass
 
 
-def get_slack_config() -> Dict[str, Any]:
+def get_slack_config() -> dict[str, Any]:
     """
     Return Slack config dict. Non-sensitive fields come from the JSON store.
     Sensitive credentials (client_id, client_secret) come from the encrypted DB.
@@ -342,7 +335,7 @@ def verify_and_clear_oauth_state(state: str) -> bool:
     return True
 
 
-def get_medium_config() -> Dict[str, Any]:
+def get_medium_config() -> dict[str, Any]:
     """
     Medium.com integration: blogging stats agent and OAuth identity (Google).
     Session cookies for medium.com are stored encrypted as session_storage_state.
@@ -495,7 +488,7 @@ def verify_and_clear_medium_google_oauth_state(state: str) -> bool:
     return True
 
 
-def get_integrations_list() -> List[Dict[str, Any]]:
+def get_integrations_list() -> list[dict[str, Any]]:
     """
     Return list of integration entries for GET /api/integrations.
     Each entry: id, type, enabled, channel (no raw credentials).

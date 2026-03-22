@@ -8,7 +8,7 @@ product context, and risk assessment.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from .models import AutoAnswerResult, OpenQuestion, QuestionOption
 from .prompts import AUTO_ANSWER_PROMPT

@@ -4,7 +4,7 @@ Tool: audit.create_plan
 Create an audit plan and seed the audit workspace.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field
 
@@ -15,7 +15,6 @@ from ...models import (
     MobileAppTarget,
     SamplingStrategy,
     TestRunConfig,
-    WCAGLevel,
 )
 
 

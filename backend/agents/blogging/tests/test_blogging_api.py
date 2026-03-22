@@ -214,7 +214,11 @@ def test_approve_job_200_and_includes_approved_at(
     client: TestClient, cache_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """POST /job/{id}/approve returns 200 and response includes approved_at when job is completed."""
-    from shared.blog_job_store import create_blog_job, get_blog_job, update_blog_job, approve_blog_job
+    from shared.blog_job_store import (
+        create_blog_job,
+        get_blog_job,
+        update_blog_job,
+    )
 
     job_id = str(uuid.uuid4())
     create_blog_job(job_id, "Brief", cache_dir=cache_dir)
@@ -244,11 +248,10 @@ def test_unapprove_job_200(
 ) -> None:
     """POST /job/{id}/unapprove returns 200 and clears approved_at."""
     from shared.blog_job_store import (
+        approve_blog_job,
         create_blog_job,
         get_blog_job,
         update_blog_job,
-        approve_blog_job,
-        unapprove_blog_job,
     )
 
     job_id = str(uuid.uuid4())

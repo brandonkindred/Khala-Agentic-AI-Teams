@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import List
 
-from pydantic import BaseModel, Field
-
 from devops_team.models import DevOpsTaskSpec
+from pydantic import BaseModel, Field
 
 
 class ClarificationGap(BaseModel):

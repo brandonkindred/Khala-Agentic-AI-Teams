@@ -4,33 +4,24 @@ Unit tests for the frontend-code-v2 team: models, phases, tool agents, orchestra
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
-import sys
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
 
-from frontend_code_v2_team.models import (
+from frontend_code_v2_team.models import (  # noqa: E402
     FrontendCodeV2WorkflowResult,
-    DeliverResult,
-    ExecutionResult,
     Microtask,
     MicrotaskStatus,
     Phase,
     PlanningResult,
-    ProblemSolvingResult,
-    ReviewIssue,
-    ReviewResult,
     SetupResult,
     ToolAgentInput,
     ToolAgentKind,
     ToolAgentOutput,
-    ToolAgentPhaseInput,
-    ToolAgentPhaseOutput,
 )
 
 
@@ -97,6 +88,7 @@ class TestSetupPhase:
 class TestPlanningPhase:
     def test_language_detection_angular(self, tmp_path):
         from frontend_code_v2_team.phases.planning import _detect_language
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         (tmp_path / "angular.json").write_text("{}")
@@ -105,6 +97,7 @@ class TestPlanningPhase:
 
     def test_language_detection_from_description(self, tmp_path):
         from frontend_code_v2_team.phases.planning import _detect_language
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         task = Task(id="t1", type=TaskType.FRONTEND, assignee="frontend-code-v2", status=TaskStatus.PENDING, description="Use React and TypeScript")
@@ -129,6 +122,7 @@ class TestPlanningPhase:
 
     def test_run_planning_fallback(self, tmp_path):
         from frontend_code_v2_team.phases.planning import run_planning
+
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
@@ -157,7 +151,10 @@ class TestToolAgents:
 
     def test_git_agent_create_feature_branch(self, tmp_path):
         import subprocess
-        from frontend_code_v2_team.tool_agents.git_branch_management import GitBranchManagementToolAgent
+
+        from frontend_code_v2_team.tool_agents.git_branch_management import (
+            GitBranchManagementToolAgent,
+        )
 
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
         subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True, check=True)
@@ -172,7 +169,9 @@ class TestToolAgents:
         assert name
 
     def test_git_agent_commit_current_changes(self, tmp_path):
-        from frontend_code_v2_team.tool_agents.git_branch_management import GitBranchManagementToolAgent
+        from frontend_code_v2_team.tool_agents.git_branch_management import (
+            GitBranchManagementToolAgent,
+        )
 
         (tmp_path / ".git").mkdir()
         agent = GitBranchManagementToolAgent()
@@ -194,10 +193,12 @@ class TestToolAgents:
 
 class TestFrontendDevelopmentAgent:
     def test_build_tool_runners(self):
-        from frontend_code_v2_team.orchestrator import FrontendDevelopmentAgent
         from frontend_code_v2_team.models import ToolAgentKind
+        from frontend_code_v2_team.orchestrator import FrontendDevelopmentAgent
+        from frontend_code_v2_team.tool_agents.git_branch_management import (
+            GitBranchManagementToolAgent,
+        )
         from frontend_code_v2_team.tool_agents.state_management import StateManagementToolAgent
-        from frontend_code_v2_team.tool_agents.git_branch_management import GitBranchManagementToolAgent
 
         agent = FrontendDevelopmentAgent(MagicMock())
         tool_agents = {

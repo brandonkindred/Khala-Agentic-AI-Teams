@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import List
 
 from software_engineering_team.shared.git_utils import _run_git
 

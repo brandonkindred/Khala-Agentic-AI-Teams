@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from llm_service import get_client
+
 from ..agents.intake_profile_agent import IntakeProfileAgent
 from ..agents.meal_planning_agent import MealPlanningAgent
 from ..agents.nutritionist_agent import NutritionistAgent
@@ -21,7 +23,6 @@ from ..models import (
 )
 from ..shared.client_profile_store import ClientProfileStore
 from ..shared.meal_feedback_store import MealFeedbackStore
-from llm_service import get_client
 
 logger = logging.getLogger(__name__)
 

@@ -12,7 +12,7 @@ from ..email_agent.agent import EmailAgent
 from ..models import AssistantRequest, AssistantResponse
 from ..reservation_agent.agent import ReservationAgent
 from ..shared.credential_store import CredentialStore
-from ..shared.llm import LLMClient, JSONExtractionFailure
+from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
 from ..task_agent.agent import TaskAgent
 from ..user_profile_agent.agent import UserProfileAgent
@@ -257,6 +257,7 @@ class PersonalAssistantOrchestrator:
         
         elif any(word in message_lower for word in ["free", "available", "open"]):
             from datetime import datetime, timedelta
+
             from ..calendar_agent.models import ScheduleRequest
             
             suggestions = self.calendar_agent.suggest_schedule(ScheduleRequest(
@@ -305,7 +306,7 @@ class PersonalAssistantOrchestrator:
                 action="list_items",
                 result={
                     "items": [i.model_dump() for i in items],
-                    "lists": [l.model_dump() for l in lists],
+                    "lists": [lst.model_dump() for lst in lists],
                 },
             )
         

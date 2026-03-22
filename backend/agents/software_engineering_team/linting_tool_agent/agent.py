@@ -6,12 +6,12 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
-from llm_service import LLMClient
-
 from build_fix_specialist.models import CodeEdit
 
+from llm_service import LLMClient
+
 from .linter_runner import detect_linter, execute_linter
-from .models import LintExecutionResult, LintIssue, LintPlan, LintToolInput, LintToolOutput
+from .models import LintIssue, LintToolInput, LintToolOutput
 from .prompts import LINT_FIX_PROMPT
 
 logger = logging.getLogger(__name__)

@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from ..models import CalendarEvent, EmailDraft, EmailMessage
+from ..models import EmailDraft, EmailMessage
 from ..shared.credential_store import CredentialStore, IMAPCredentials, OAuthCredentials
-from ..shared.llm import LLMClient, JSONExtractionFailure
+from ..shared.llm import JSONExtractionFailure, LLMClient
 from ..shared.user_profile_store import UserProfileStore
 from ..tools.email_tools import EmailToolAgent
 from .models import (

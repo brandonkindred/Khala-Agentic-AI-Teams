@@ -1,8 +1,8 @@
 """Tests for ai_systems_team models."""
 
-import pytest
 
 from ai_systems_team.models import (
+    KPI,
     AcceptanceTest,
     AgentBlueprint,
     AgentRole,
@@ -10,18 +10,10 @@ from ai_systems_team.models import (
     AISystemJobsListResponse,
     AISystemRequest,
     AISystemStatusResponse,
-    ArchitectureResult,
-    BuildResult,
-    CapabilitiesResult,
-    EvaluationResult,
     HandoffRule,
-    KPI,
-    MemoryPolicy,
-    OrchestrationGraph,
     OrchestrationPattern,
     Phase,
     SafetyCheckpoint,
-    SafetyResult,
     SpecIntakeResult,
     ToolContract,
 )

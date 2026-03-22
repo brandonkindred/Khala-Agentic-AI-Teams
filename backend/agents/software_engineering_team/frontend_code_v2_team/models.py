@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 
 from software_engineering_team.shared.models import ToolRecommendation
 
-
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------

@@ -1,19 +1,19 @@
 """Tests for TaskAgent."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
 
+import pytest
+
+from ..models import Priority, TaskStatus
+from ..shared.llm import LLMClient
 from ..task_agent.agent import TaskAgent
 from ..task_agent.models import (
-    CreateListRequest,
     AddItemRequest,
     AddItemsFromTextRequest,
     CompleteItemRequest,
-    ListTasksRequest,
+    CreateListRequest,
 )
-from ..models import Priority, TaskStatus
-from ..shared.llm import LLMClient
 
 
 class DummyLLMClient(LLMClient):

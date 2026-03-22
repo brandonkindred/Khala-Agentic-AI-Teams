@@ -6,7 +6,10 @@ import asyncio
 import logging
 from typing import Any, Optional
 
-from planning_v3_team.temporal.client import get_temporal_client, get_temporal_loop, is_temporal_enabled
+from planning_v3_team.temporal.client import (
+    get_temporal_client,
+    get_temporal_loop,
+)
 from planning_v3_team.temporal.constants import TASK_QUEUE, WORKFLOW_ID_PREFIX
 from planning_v3_team.temporal.workflows import PlanningV3Workflow
 

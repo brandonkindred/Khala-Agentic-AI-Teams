@@ -10,14 +10,12 @@ Tools:
 - monitor.emit_alerts
 """
 
-from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
 import uuid
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 from ..models import (
-    Finding,
     MonitoringBaseline,
     MonitoringDiff,
     MonitoringRunResult,
@@ -160,7 +158,7 @@ class AccessibilityMonitoringAgent:
                 baseline_ref=baseline_ref,
             )
 
-        baseline = self._baselines[baseline_ref]
+        self._baselines[baseline_ref]
 
         # In production, would compare actual results
         new_issues = []

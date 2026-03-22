@@ -2,10 +2,10 @@
 
 from .base import ToolProvisionerInterface
 from .docker_provisioner import DockerProvisionerTool
-from .postgres_provisioner import PostgresProvisionerTool
-from .git_provisioner import GitProvisionerTool
-from .redis_provisioner import RedisProvisionerTool
 from .generic_provisioner import GenericProvisionerTool
+from .git_provisioner import GitProvisionerTool
+from .postgres_provisioner import PostgresProvisionerTool
+from .redis_provisioner import RedisProvisionerTool
 
 __all__ = [
     "ToolProvisionerInterface",
