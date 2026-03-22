@@ -34,10 +34,6 @@ MAX_OUTLINE_CHARS_FOR_DRAFT = 20_000
 MAX_CLAIMS_CHARS_FOR_DRAFT = 15_000
 # Per-source cap for extraction calls (each document sent to one LLM call).
 MAX_CHARS_PER_SOURCE = 12_000
-# Research snippet included in revision prompts. Larger than initial 3 K so the draft agent
-# can ground feedback fixes (e.g. "replace generic example with research-grounded detail")
-# in real source material rather than resorting to another fabricated or vague example.
-MAX_RESEARCH_CHARS_FOR_REVISION = 25_000
 
 
 def _extract_draft_after_marker(raw_response: str) -> str:
@@ -425,15 +421,12 @@ class BlogDraftAgent:
             ])
         if revise_input.research_document:
             research = revise_input.research_document.strip()
-            research_snippet = research[:MAX_RESEARCH_CHARS_FOR_REVISION] + (
-                "\n\n[... research truncated for context ...]" if len(research) > MAX_RESEARCH_CHARS_FOR_REVISION else ""
-            )
             prompt_parts.extend([
                 "",
                 "---",
                 "RESEARCH (for context; preserve facts):",
                 "---",
-                research_snippet,
+                research,
             ])
         length_block = (
             revise_input.length_guidance.strip()
@@ -542,15 +535,12 @@ class BlogDraftAgent:
             ])
         if revise_input.research_document:
             research = revise_input.research_document.strip()
-            research_snippet = research[:MAX_RESEARCH_CHARS_FOR_REVISION] + (
-                "\n\n[... research truncated for context ...]" if len(research) > MAX_RESEARCH_CHARS_FOR_REVISION else ""
-            )
             prompt_parts.extend([
                 "",
                 "---",
                 "RESEARCH (for context; preserve facts):",
                 "---",
-                research_snippet,
+                research,
             ])
         length_block = (
             revise_input.length_guidance.strip()
