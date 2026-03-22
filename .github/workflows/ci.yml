@@ -142,6 +142,24 @@ jobs:
       - run: npm ci
       - run: npm run test:coverage
 
+  # ── Gate ────────────────────────────────────────────────────────────────────
+  # Single convergence point: both build jobs must wait for every test suite
+  # (backend and frontend) so neither image can be published while any suite
+  # is red, preventing partial releases where only one image reaches Docker Hub.
+
+  all-checks:
+    name: All checks passed
+    runs-on: ubuntu-latest
+    needs:
+      - test-software-engineering
+      - test-blogging
+      - test-market-research
+      - test-soc2
+      - test-social-marketing
+      - test-ui
+    steps:
+      - run: echo "All lint, test, and build checks passed."
+
   # ── Build & Deploy ──────────────────────────────────────────────────────────
   # On pull_request: build only (validates the image can be built).
   # On push to main/development (merged PR): build + push to Docker Hub.
@@ -153,11 +171,7 @@ jobs:
     name: Build Backend Docker image
     runs-on: ubuntu-latest
     needs:
-      - test-software-engineering
-      - test-blogging
-      - test-market-research
-      - test-soc2
-      - test-social-marketing
+      - all-checks
     steps:
       - uses: actions/checkout@v4
 
@@ -195,7 +209,7 @@ jobs:
     name: Build Frontend Docker image
     runs-on: ubuntu-latest
     needs:
-      - test-ui
+      - all-checks
     steps:
       - uses: actions/checkout@v4
 
