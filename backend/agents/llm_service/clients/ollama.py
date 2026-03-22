@@ -442,10 +442,11 @@ class OllamaLLMClient(LLMClient):
         backoff_max: float,
         sem: threading.BoundedSemaphore,
     ) -> str:
-        """POST to /v1/chat/completions; return raw content. Raises LLM* on non-200 or malformed."""
+        """POST to /v1/chat/completions with SSE streaming; return raw content. Raises LLM* on non-200 or malformed."""
         url = f"{self.base_url}/v1/chat/completions"
         last_error: Optional[Exception] = None
         headers = self._ollama_auth_headers()
+        stream_payload = {**payload, "stream": True}
         for attempt in range(max_retries + 1):
             try:
                 with sem:
@@ -457,122 +458,124 @@ class OllamaLLMClient(LLMClient):
                     )
                     t0 = time.monotonic()
                     with httpx.Client(timeout=self.timeout) as client:
-                        response = client.post(url, json=payload, headers=headers)
-                    elapsed = time.monotonic() - t0
-                    status = response.status_code
-                    if status == 200:
-                        logger.info("LLM response received in %.1fs", elapsed)
-                        try:
-                            data = response.json()
-                        except json.JSONDecodeError as e:
-                            body = response.text[:_MAX_LOG_BODY]
-                            if len(response.text) > _MAX_LOG_BODY:
-                                body += "... [truncated]"
-                            logger.error(
-                                "LLM returned 200 but body is not valid JSON. model=%s base_url=%s. Raw body: %s",
-                                self.model,
-                                self.base_url,
-                                body,
-                            )
-                            raise LLMPermanentError(
-                                f"Malformed LLM response (invalid JSON): {e}"
-                            ) from e
-                        try:
-                            return self._parse_response_content(data)
-                        except LLMPermanentError:
-                            body = response.text[:_MAX_LOG_BODY]
-                            if len(response.text) > _MAX_LOG_BODY:
-                                body += "... [truncated]"
-                            logger.error(
-                                "LLM returned 200 but unexpected response structure. model=%s base_url=%s. Raw body: %s",
-                                self.model,
-                                self.base_url,
-                                body,
-                            )
-                            raise
-                    if status == 429:
-                        last_error = LLMRateLimitError(
-                            f"LLM rate limited (429) after {attempt + 1} attempt(s)",
-                            status_code=429,
-                        )
-                        if attempt < max_retries:
-                            wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
-                            logger.warning(
-                                "LLM 429 (attempt %d/%d). Retrying in %.1fs",
+                        with client.stream("POST", url, json=stream_payload, headers=headers) as response:
+                            status = response.status_code
+                            if status != 200:
+                                response.read()
+                            if status == 200:
+                                content_parts: list[str] = []
+                                finish_reason: Optional[str] = None
+                                for line in response.iter_lines():
+                                    if not line or not line.startswith("data: "):
+                                        continue
+                                    chunk_data = line[6:]
+                                    if chunk_data.strip() == "[DONE]":
+                                        break
+                                    try:
+                                        chunk = json.loads(chunk_data)
+                                    except json.JSONDecodeError:
+                                        continue
+                                    choices = chunk.get("choices") or []
+                                    if choices:
+                                        delta = choices[0].get("delta", {})
+                                        piece = delta.get("content")
+                                        if piece:
+                                            content_parts.append(piece)
+                                        fr = choices[0].get("finish_reason")
+                                        if fr:
+                                            finish_reason = fr
+                                elapsed = time.monotonic() - t0
+                                logger.info("LLM streaming response complete in %.1fs", elapsed)
+                                synthetic = {
+                                    "choices": [{
+                                        "message": {"content": "".join(content_parts)},
+                                        "finish_reason": finish_reason or "stop",
+                                    }]
+                                }
+                                return self._parse_response_content(synthetic)
+                            if status == 429:
+                                last_error = LLMRateLimitError(
+                                    f"LLM rate limited (429) after {attempt + 1} attempt(s)",
+                                    status_code=429,
+                                )
+                                if attempt < max_retries:
+                                    wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
+                                    logger.warning(
+                                        "LLM 429 (attempt %d/%d). Retrying in %.1fs",
+                                        attempt + 1,
+                                        max_retries + 1,
+                                        wait,
+                                    )
+                                    time.sleep(wait)
+                                    continue
+                                self._log_llm_server_error(
+                                    429,
+                                    response.text,
+                                    response.headers,
+                                    attempt + 1,
+                                    reason="rate limited",
+                                )
+                                raise last_error
+                            if 500 <= status < 600:
+                                hint = ""
+                                if "ollama.com" in self.base_url and "qwen3.5" in self.model.lower():
+                                    hint = " If using Ollama Cloud with qwen3.5, try LLM_ENABLE_THINKING=false."
+                                last_error = LLMTemporaryError(
+                                    f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}.{hint}",
+                                    status_code=status,
+                                )
+                                if attempt < max_retries:
+                                    wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
+                                    time.sleep(wait)
+                                    continue
+                                self._log_llm_server_error(
+                                    status,
+                                    response.text,
+                                    response.headers,
+                                    attempt + 1,
+                                    reason="server error",
+                                )
+                                raise last_error
+                            if 400 <= status < 500:
+                                err_text = response.text[:500]
+                                self._log_llm_server_error(
+                                    status,
+                                    response.text,
+                                    response.headers,
+                                    attempt + 1,
+                                    reason="client error",
+                                )
+                                if status == 404 and (
+                                    "not found" in err_text.lower() or "model" in err_text.lower()
+                                ):
+                                    raise LLMPermanentError(
+                                        f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text[:200]}",
+                                        status_code=status,
+                                    )
+                                if status == 401:
+                                    auth_hint = (
+                                        " Set OLLAMA_API_KEY (or LLM_OLLAMA_API_KEY / SW_LLM_OLLAMA_API_KEY) for Ollama Cloud."
+                                        if not headers
+                                        else " Check that the key is valid and not expired."
+                                    )
+                                    raise LLMPermanentError(
+                                        f"LLM unauthorized (401): {err_text[:200]}.{auth_hint}",
+                                        status_code=status,
+                                    )
+                                raise LLMPermanentError(
+                                    f"LLM client error {status}: {err_text}", status_code=status
+                                )
+                            self._log_llm_server_error(
+                                status,
+                                response.text,
+                                response.headers,
                                 attempt + 1,
-                                max_retries + 1,
-                                wait,
-                            )
-                            time.sleep(wait)
-                            continue
-                        self._log_llm_server_error(
-                            429,
-                            response.text,
-                            response.headers,
-                            attempt + 1,
-                            reason="rate limited",
-                        )
-                        raise last_error
-                    if 500 <= status < 600:
-                        hint = ""
-                        if "ollama.com" in self.base_url and "qwen3.5" in self.model.lower():
-                            hint = " If using Ollama Cloud with qwen3.5, try LLM_ENABLE_THINKING=false."
-                        last_error = LLMTemporaryError(
-                            f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}.{hint}",
-                            status_code=status,
-                        )
-                        if attempt < max_retries:
-                            wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
-                            time.sleep(wait)
-                            continue
-                        self._log_llm_server_error(
-                            status,
-                            response.text,
-                            response.headers,
-                            attempt + 1,
-                            reason="server error",
-                        )
-                        raise last_error
-                    if 400 <= status < 500:
-                        err_text = response.text[:500]
-                        self._log_llm_server_error(
-                            status,
-                            response.text,
-                            response.headers,
-                            attempt + 1,
-                            reason="client error",
-                        )
-                        if status == 404 and (
-                            "not found" in err_text.lower() or "model" in err_text.lower()
-                        ):
-                            raise LLMPermanentError(
-                                f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text[:200]}",
-                                status_code=status,
-                            )
-                        if status == 401:
-                            auth_hint = (
-                                " Set OLLAMA_API_KEY (or LLM_OLLAMA_API_KEY / SW_LLM_OLLAMA_API_KEY) for Ollama Cloud."
-                                if not headers
-                                else " Check that the key is valid and not expired."
+                                reason="unexpected status",
                             )
                             raise LLMPermanentError(
-                                f"LLM unauthorized (401): {err_text[:200]}.{auth_hint}",
+                                f"Unexpected LLM response status {status}: {response.text[:200]}",
                                 status_code=status,
                             )
-                        raise LLMPermanentError(
-                            f"LLM client error {status}: {err_text}", status_code=status
-                        )
-                    self._log_llm_server_error(
-                        status,
-                        response.text,
-                        response.headers,
-                        attempt + 1,
-                        reason="unexpected status",
-                    )
-                    raise LLMPermanentError(
-                        f"Unexpected LLM response status {status}: {response.text[:200]}",
-                        status_code=status,
-                    )
             except (LLMPermanentError, LLMRateLimitError, LLMTruncatedError):
                 raise
             except LLMTemporaryError as e:
