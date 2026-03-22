@@ -1,6 +1,6 @@
 # Strands Agents User Interface
 
-Angular application providing an interactive UI for all Strands agent APIs: Blogging, Software Engineering Team, Personal Assistant, Market Research, SOC2 Compliance, Social Media Marketing, and Branding.
+Angular application providing an interactive UI for all Strands agent APIs: Blogging, Software Engineering Team, Personal Assistant, Market Research, SOC2 Compliance, Social Media Marketing, Branding, Agent Provisioning, Accessibility Audit, AI Systems, Investment, Nutrition & Meal Planning, Planning V3, Coding Team, StudioGrid, AI Sales Team, and Road Trip Planning.
 
 ## Prerequisites
 
@@ -36,7 +36,7 @@ API base URLs are configured in `src/environments/environment.ts` (development) 
 | Branding | `http://localhost:8012` | 8012 |
 | **Unified API** | `http://localhost:8080` | 8080 |
 
-**Note:** The Unified API provides all team APIs under a single endpoint with namespaced prefixes (e.g., `/api/blogging`, `/api/personal-assistant`).
+**Note:** The Unified API provides all team APIs under a single endpoint with namespaced prefixes (e.g., `/api/blogging`, `/api/personal-assistant`, `/api/planning-v3`, `/api/coding-team`, `/api/sales`, `/api/road-trip-planning`). When running via Docker Compose the UI at port 4201 proxies all `/api/*` requests to the agents container at port 8888.
 
 To override, edit `src/environments/environment.ts` before building.
 

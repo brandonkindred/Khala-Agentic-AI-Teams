@@ -26,6 +26,11 @@ graph TB
             AISys["/api/ai-systems"]
             Invest["/api/investment"]
             Nutrition["/api/nutrition-meal-planning"]
+            PlanV3["/api/planning-v3"]
+            Coding["/api/coding-team"]
+            Studio["/api/studio-grid"]
+            Sales["/api/sales"]
+            RoadTrip["/api/road-trip-planning"]
         end
     end
     
@@ -77,6 +82,11 @@ python run_unified_api.py --workers 4 --log-level warning
 | AI Systems | `/api/ai-systems` | `/api/ai-systems/docs` |
 | Investment | `/api/investment` | `/api/investment/docs` |
 | Nutrition & Meal Planning | `/api/nutrition-meal-planning` | `/api/nutrition-meal-planning/docs` |
+| Planning V3 | `/api/planning-v3` | `/api/planning-v3/docs` |
+| Coding Team | `/api/coding-team` | `/api/coding-team/docs` |
+| StudioGrid | `/api/studio-grid` | `/api/studio-grid/docs` |
+| AI Sales Team | `/api/sales` | `/api/sales/docs` |
+| Road Trip Planning | `/api/road-trip-planning` | `/api/road-trip-planning/docs` |
 
 ## Environment Variables
 

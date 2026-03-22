@@ -9,6 +9,8 @@ backend/agents/
 ├── api/                               # Legacy blog research-and-review API package
 ├── blogging/
 ├── software_engineering_team/
+├── coding_team/
+├── planning_v3_team/
 ├── personal_assistant_team/
 ├── social_media_marketing_team/
 ├── market_research_team/
@@ -19,7 +21,11 @@ backend/agents/
 ├── ai_systems_team/
 ├── investment_team/
 ├── nutrition_meal_planning_team/
+├── road_trip_planning_team/
+├── sales_team/
+├── agent_repair_team/
 ├── integrations/                      # Shared integrations layer used across teams
+├── llm_service/                       # Centralized LLM client (Ollama, dummy)
 ├── docker/                            # Agents-only Docker assets
 ├── Dockerfile
 ├── docker-compose.yml
@@ -58,6 +64,8 @@ For team-specific setup and env vars, use each team's README.
 ## Team READMEs
 
 - `software_engineering_team/README.md`
+- `coding_team/README.md`
+- `planning_v3_team/README.md`
 - `blogging/README.md`
 - `personal_assistant_team/README.md`
 - `social_media_marketing_team/README.md`
@@ -69,6 +77,7 @@ For team-specific setup and env vars, use each team's README.
 - `ai_systems_team/README.md`
 - `investment_team/README.md`
 - `nutrition_meal_planning_team/README.md`
+- `llm_service/README.md`
 
 ## Shared integrations
 

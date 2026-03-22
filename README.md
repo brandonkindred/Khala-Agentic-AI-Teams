@@ -59,6 +59,11 @@ The Unified API mounts teams under `/api/*` prefixes. Current configured routes:
 - `/api/ai-systems`
 - `/api/investment`
 - `/api/nutrition-meal-planning`
+- `/api/planning-v3`
+- `/api/coding-team`
+- `/api/studio-grid`
+- `/api/sales`
+- `/api/road-trip-planning`
 
 ## Team documentation
 
@@ -75,6 +80,8 @@ The Unified API mounts teams under `/api/*` prefixes. Current configured routes:
 - `backend/agents/ai_systems_team/README.md`
 - `backend/agents/investment_team/README.md`
 - `backend/agents/nutrition_meal_planning_team/README.md`
+- `backend/agents/planning_v3_team/README.md`
+- `backend/agents/coding_team/README.md`
 
 ## Docker
 
