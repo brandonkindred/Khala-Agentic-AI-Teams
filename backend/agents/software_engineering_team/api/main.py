@@ -5,8 +5,6 @@ Async API: POST /run-team returns job_id, GET /run-team/{job_id} polls status.
 Tech Lead orchestrator runs in background.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import os
@@ -189,6 +187,8 @@ class RunningJobsResponse(BaseModel):
     """Response from GET /run-team/jobs (list of running/pending jobs)."""
 
     jobs: List[RunningJobSummary] = Field(default_factory=list, description="Running or pending jobs.")
+
+
 
 
 class FailedTaskDetail(BaseModel):

@@ -311,6 +311,7 @@ def initialize_new_repo(
     code, out = _run_git(path, ["git", "init"])
     if code != 0:
         return False, f"git init failed: {out}"
+    _run_git(path, ["git", "config", "commit.gpgsign", "false"])
 
     # 2. .gitignore, README.md, CONTRIBUTORS.md, docs/ (only if missing)
     gitignore_path = path / ".gitignore"

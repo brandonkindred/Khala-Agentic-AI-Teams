@@ -134,7 +134,7 @@ class DevOpsTeamLeadAgent:
         return DevOpsTaskSpec(
             task_id=task_id,
             title=task_description[:120] or task_id,
-            platform_scope={"environments": ["dev", env]},
+            platform_scope={"cloud": "on-premises", "environments": ["dev", env]},
             repo_context={"app_repo": repo_name or "application", "infra_repo": "platform-infra", "pipeline_repo": repo_name or "application"},
             goal={"summary": task_description},
             scope={"included": [requirements], "excluded": []},

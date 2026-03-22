@@ -307,6 +307,11 @@ def _validate_file_paths(
         is_root_level = "/" not in path
         if not is_src_file:
             if is_root_level:
+                # Known-safe root config files are always allowed (no LLM call needed)
+                if path in _ALLOWED_ROOT_FILES:
+                    if content and content.strip():
+                        validated[path] = content
+                    continue
                 if llm_client is None:
                     warnings.append(
                         f"Path must be under 'src/' (LLM required for root file validation): '{path}'"
