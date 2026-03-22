@@ -14,7 +14,7 @@ class FeedbackItem(BaseModel):
 
     category: str = Field(
         ...,
-        description="Category of feedback: voice, style, clarity, structure, technical, or formatting.",
+        description="Category of feedback: e.g. voice, style, clarity, structure, flow, engagement, technical, formatting, authenticity, length.",
     )
     severity: str = Field(
         ...,

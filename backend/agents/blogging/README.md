@@ -39,7 +39,7 @@ Research → Planning → Draft → (optional) Draft ↔ Copy Editor revision lo
 - **Research** fetches and ranks sources from the web and arXiv.
 - **Planning** produces a persisted content plan (`content_plan.json` / `content_plan.md`): titles, narrative flow, section coverage, and analysis; refine loop until the plan is acceptable for the profile.
 - **Draft** writes the initial draft from research + **content plan**. Style and brand content are loaded by the caller before agent creation and passed in as full file contents (see Style guide below).
-- **Copy Editor** reviews the draft and returns feedback; the **Draft** agent revises based on feedback. This loop runs a configurable number of times (e.g. 3).
+- **Copy Editor** reviews the draft and returns feedback; the **Draft** agent revises based on feedback. In the v2 pipeline this loop runs up to `DRAFT_EDITOR_ITERATIONS` times (default 500; stops early when the editor approves).
 - **Publication** receives the final draft: submit → human approve/reject. On approve: write to `blog_posts/`, generate platform-specific versions. On reject: optional revision loop with Draft + Copy Editor.
 
 **Example scripts:**

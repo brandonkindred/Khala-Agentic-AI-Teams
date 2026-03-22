@@ -7,17 +7,19 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Callable, Optional, Union
 
-from llm_service import LLMClient
-
-from shared.errors import LLMJsonParseError
+from llm_service import LLMClient, LLMJsonParseError, LLMTemporaryError
 
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
 from .prompts import COPY_EDITOR_PROMPT
 
 logger = logging.getLogger(__name__)
+
+# After llm_service exhausts HTTP retries, re-run complete_json a few times (timeouts, cloud blips).
+_MAX_COPY_EDITOR_LLM_ROUNDS = 3
 
 
 class BlogCopyEditorAgent:
@@ -178,27 +180,53 @@ class BlogCopyEditorAgent:
         if on_llm_request:
             on_llm_request("Reviewing draft for style and clarity...")
         data = None
-        for attempt in range(2):
-            try:
-                data = self.llm.complete_json(prompt, temperature=0.2)
-                break
-            except LLMJsonParseError as e:
-                if attempt == 0:
-                    logger.warning(
-                        "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
-                        e,
-                    )
-                    prompt = prompt + "\n\nRespond with a single JSON object only (no markdown, no code fence). Keys: approved (boolean), summary (string), feedback_items (array of objects with category, severity, location?, issue, suggestion?)."
-                else:
-                    logger.warning(
-                        "Copy editor JSON parse failed after retry; using fallback output: %s",
-                        e,
-                    )
-                    data = {
-                        "summary": "Copy editor could not parse the model response. Please review the draft manually.",
-                        "feedback_items": [],
-                    }
+        base_prompt = prompt
+        working_prompt = prompt
+        strict_json_suffix = (
+            "\n\nRespond with a single JSON object only (no markdown, no code fence). "
+            "Keys: approved (boolean), summary (string), feedback_items (array of objects with "
+            "category, severity, location?, issue, suggestion?)."
+        )
+        for llm_round in range(_MAX_COPY_EDITOR_LLM_ROUNDS):
+            for json_attempt in range(2):
+                try:
+                    data = self.llm.complete_json(working_prompt, temperature=0.2)
                     break
+                except LLMJsonParseError as e:
+                    if json_attempt == 0:
+                        logger.warning(
+                            "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
+                            e,
+                        )
+                        working_prompt = base_prompt + strict_json_suffix
+                    else:
+                        logger.warning(
+                            "Copy editor JSON parse failed after retry; using fallback output: %s",
+                            e,
+                        )
+                        data = {
+                            "summary": "Copy editor could not parse the model response. Please review the draft manually.",
+                            "feedback_items": [],
+                        }
+                        break
+                except LLMTemporaryError as e:
+                    if llm_round >= _MAX_COPY_EDITOR_LLM_ROUNDS - 1:
+                        raise
+                    wait = min(60.0, 15.0 * (llm_round + 1))
+                    logger.warning(
+                        "Copy editor LLM transport/timeout after service retries (agent round %d/%d, "
+                        "json sub-attempt %d): %s — sleeping %.0fs and retrying.",
+                        llm_round + 1,
+                        _MAX_COPY_EDITOR_LLM_ROUNDS,
+                        json_attempt + 1,
+                        e,
+                        wait,
+                    )
+                    time.sleep(wait)
+                    working_prompt = base_prompt
+                    break
+            if data is not None:
+                break
 
         if not data:
             data = {

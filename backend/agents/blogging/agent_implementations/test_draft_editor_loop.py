@@ -24,10 +24,12 @@ from blog_research_agent.models import ResearchReference
 from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 
+# Keep in sync with DRAFT_EDITOR_ITERATIONS in blog_writing_process_v2.py
+DRAFT_EDITOR_ITERATIONS = 500
+
 _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
 STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
 BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
-DRAFT_EDITOR_ITERATIONS = 100
 
 CONTEXT_BRIEF = "LLM observability best practices for large enterprises."
 PLACEHOLDER_REF = ResearchReference(

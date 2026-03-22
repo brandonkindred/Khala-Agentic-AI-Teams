@@ -139,7 +139,7 @@ class OllamaLLMClient(LLMClient):
         model: str = "llama3.1",
         *,
         base_url: str = "https://ollama.com",
-        timeout: float = 300.0,
+        timeout: float = 600.0,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -649,13 +649,20 @@ class OllamaLLMClient(LLMClient):
                     )
                     time.sleep(wait)
                     continue
+                timeout_hint = ""
+                if isinstance(e, httpx.ReadTimeout):
+                    timeout_hint = (
+                        f" Per-request timeout is {int(self.timeout)}s; increase LLM_TIMEOUT or SW_LLM_TIMEOUT "
+                        "(e.g. 900–1200) for slow cloud models or very long prompts."
+                    )
                 logger.error(
-                    "LLM connection/timeout failed after all retries. model=%s base_url=%s attempt=%s error=%s%s",
+                    "LLM connection/timeout failed after all retries. model=%s base_url=%s attempt=%s error=%s%s%s",
                     self.model,
                     self.base_url,
                     attempt + 1,
                     type(e).__name__,
                     hint,
+                    timeout_hint,
                 )
                 raise last_error
         if last_error:

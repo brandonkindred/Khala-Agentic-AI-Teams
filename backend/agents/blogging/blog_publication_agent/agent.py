@@ -74,7 +74,7 @@ class BlogPublicationAgent:
         llm_client: LLMClient,
         *,
         blog_posts_root: Optional[str | Path] = None,
-        max_revision_loops: int = 100,
+        max_revision_loops: int = 500,
     ) -> None:
         """
         Preconditions:

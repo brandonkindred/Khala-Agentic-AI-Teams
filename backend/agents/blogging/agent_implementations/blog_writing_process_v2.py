@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 _blogging_docs = Path(__file__).resolve().parent.parent / "docs"
 STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
 BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
-DRAFT_EDITOR_ITERATIONS = 100
+DRAFT_EDITOR_ITERATIONS = 500
 MAX_REWRITE_ITERATIONS = 100
 
 # Default model - use environment variable or this default
