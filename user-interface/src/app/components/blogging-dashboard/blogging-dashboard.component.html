@@ -25,6 +25,147 @@
       } @else {
         <app-blog-pipeline-flow [status]="selectedJobStatus" />
       }
+
+      @if (collaborationError) {
+        <app-error-message [message]="collaborationError" />
+      }
+
+      <!-- ================================================================
+           Title Selection Panel
+           ================================================================ -->
+      @if (selectedJobStatus.waiting_for_title_selection && selectedJobStatus.title_choices.length) {
+        <mat-card class="collaboration-card title-selection-card">
+          <mat-card-header>
+            <mat-icon mat-card-avatar>title</mat-icon>
+            <mat-card-title>Choose a title</mat-card-title>
+            <mat-card-subtitle>
+              Select the title that best fits this post. The draft will use your choice as its H1 heading.
+            </mat-card-subtitle>
+          </mat-card-header>
+          <mat-card-content>
+            <div class="title-candidates">
+              @for (tc of selectedJobStatus.title_choices; track tc.title) {
+                <button
+                  mat-stroked-button
+                  class="title-candidate-btn"
+                  (click)="selectTitle(tc.title)"
+                >
+                  <span class="title-text">{{ tc.title }}</span>
+                  <span class="title-prob">{{ (tc.probability_of_success * 100).toFixed(0) }}%</span>
+                </button>
+              }
+            </div>
+          </mat-card-content>
+        </mat-card>
+      }
+
+      <!-- ================================================================
+           Story Elicitation Panel
+           ================================================================ -->
+      @if (selectedJobStatus.waiting_for_story_input && getCurrentStoryGap()) {
+        <mat-card class="collaboration-card story-elicitation-card">
+          <mat-card-header>
+            <mat-icon mat-card-avatar>chat</mat-icon>
+            <mat-card-title>Ghost writer interview</mat-card-title>
+            <mat-card-subtitle>
+              Section: <strong>{{ getCurrentStoryGap()!.section_title }}</strong>
+              @if ((selectedJobStatus.story_gaps?.length ?? 0) > 1) {
+                &nbsp;({{ (selectedJobStatus.current_story_gap_index ?? 0) + 1 }}/{{ selectedJobStatus.story_gaps!.length }})
+              }
+            </mat-card-subtitle>
+          </mat-card-header>
+          <mat-card-content>
+            <div class="story-chat">
+              @for (msg of getStoryAgentMessages(); track $index) {
+                <div class="story-message" [class.story-message-agent]="msg.role === 'agent'" [class.story-message-user]="msg.role === 'user'">
+                  <span class="story-role">{{ msg.role === 'agent' ? 'Ghost writer' : 'You' }}</span>
+                  <p class="story-content">{{ msg.content }}</p>
+                </div>
+              }
+            </div>
+            <div class="story-input-row">
+              <mat-form-field class="story-input-field" appearance="outline">
+                <mat-label>Your response</mat-label>
+                <textarea
+                  matInput
+                  [(ngModel)]="storyResponseText"
+                  rows="3"
+                  placeholder="Share a specific moment, failure, or experience..."
+                  (keydown.ctrl.enter)="submitStoryResponse()"
+                ></textarea>
+              </mat-form-field>
+              <div class="story-input-actions">
+                <button
+                  mat-flat-button
+                  color="primary"
+                  [disabled]="!storyResponseText.trim() || storySubmitting"
+                  (click)="submitStoryResponse()"
+                >
+                  @if (storySubmitting) { Sending… } @else { Send }
+                </button>
+                <button mat-stroked-button (click)="skipStoryGap()" matTooltip="Skip this story gap">
+                  Skip
+                </button>
+              </div>
+            </div>
+          </mat-card-content>
+        </mat-card>
+      }
+
+      <!-- ================================================================
+           General Q&A Panel
+           ================================================================ -->
+      @if (selectedJobStatus.waiting_for_answers && (selectedJobStatus.pending_questions?.length ?? 0) > 0) {
+        <mat-card class="collaboration-card qa-card">
+          <mat-card-header>
+            <mat-icon mat-card-avatar>help_outline</mat-icon>
+            <mat-card-title>Questions from the pipeline</mat-card-title>
+            <mat-card-subtitle>Answer these to help the agent make better decisions</mat-card-subtitle>
+          </mat-card-header>
+          <mat-card-content>
+            @for (q of selectedJobStatus.pending_questions; track q.id) {
+              <div class="qa-question">
+                <p class="qa-question-text">
+                  <strong>{{ q.question_text }}</strong>
+                  @if (q.required) { <span class="qa-required">*</span> }
+                </p>
+                @if (q.context) {
+                  <p class="qa-context">{{ q.context }}</p>
+                }
+                @if (q.options && q.options.length) {
+                  <div class="qa-options">
+                    @for (opt of q.options; track opt.id) {
+                      <button
+                        mat-stroked-button
+                        class="qa-option-btn"
+                        [class.qa-option-selected]="qaAnswers[q.id] === opt.label"
+                        (click)="qaAnswers[q.id] = opt.label"
+                      >
+                        {{ opt.label }}
+                      </button>
+                    }
+                  </div>
+                } @else {
+                  <mat-form-field class="qa-free-text" appearance="outline">
+                    <mat-label>Your answer</mat-label>
+                    <input matInput [(ngModel)]="qaAnswers[q.id]" />
+                  </mat-form-field>
+                }
+              </div>
+            }
+            <div class="qa-submit-row">
+              <button
+                mat-flat-button
+                color="primary"
+                [disabled]="!allQaAnswered() || qaSubmitting"
+                (click)="submitQaAnswers()"
+              >
+                @if (qaSubmitting) { Submitting… } @else { Submit answers }
+              </button>
+            </div>
+          </mat-card-content>
+        </mat-card>
+      }
     }
     <mat-tab-group [(selectedIndex)]="activeTabIndex">
       <mat-tab label="Research and Review">

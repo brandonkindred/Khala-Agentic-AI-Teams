@@ -50,6 +50,17 @@ class DraftInput(BaseModel):
         default="",
         description="Qualitative length/format instructions (content profile). Appended to target length in prompts.",
     )
+    selected_title: Optional[str] = Field(
+        None,
+        description="Title chosen by the author from the planning candidates. When set, the draft MUST use this exact title as the H1 heading.",
+    )
+    elicited_stories: Optional[str] = Field(
+        None,
+        description=(
+            "First-person story narratives elicited by the ghost writer agent. "
+            "Incorporate these into the relevant sections to personalise the post."
+        ),
+    )
 
     def outline_for_prompt(self) -> str:
         """Flattened outline + narrative for LLM prompts (replaces legacy outline-only string)."""
@@ -112,6 +123,14 @@ class ReviseDraftInput(BaseModel):
     length_guidance: str = Field(
         default="",
         description="Qualitative length/format instructions; same as initial draft when revising.",
+    )
+    selected_title: Optional[str] = Field(
+        None,
+        description="Author-chosen title; preserve this exact H1 when revising.",
+    )
+    elicited_stories: Optional[str] = Field(
+        None,
+        description="First-person story narratives elicited by the ghost writer agent; preserve in revision.",
     )
 
     def outline_for_prompt(self) -> str:

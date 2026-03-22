@@ -59,6 +59,10 @@ try:
         approve_blog_job,
         unapprove_blog_job,
         medium_stats_run_dir,
+        submit_title_selection,
+        submit_story_user_message,
+        skip_current_story_gap,
+        submit_blog_answers,
         JOB_STATUS_COMPLETED,
         JOB_STATUS_NEEDS_REVIEW,
     )
@@ -74,6 +78,10 @@ except ImportError:
     approve_blog_job = None
     unapprove_blog_job = None
     medium_stats_run_dir = None
+    submit_title_selection = None
+    submit_story_user_message = None
+    skip_current_story_gap = None
+    submit_blog_answers = None
     JOB_STATUS_COMPLETED = "completed"
     JOB_STATUS_NEEDS_REVIEW = "needs_human_review"
     BloggingError = Exception
@@ -588,6 +596,18 @@ class BlogJobStatusResponse(BaseModel):
         None,
         description="When status is failed and failed_phase is planning, machine-readable reason",
     )
+    # Title selection collaboration fields
+    waiting_for_title_selection: bool = Field(False, description="True when the pipeline is paused waiting for the author to select a title")
+    selected_title: Optional[str] = Field(None, description="Title chosen by the author from the planning candidates")
+    # Story elicitation collaboration fields
+    waiting_for_story_input: bool = Field(False, description="True when the ghost writer agent is waiting for the author's story response")
+    story_gaps: List[Dict[str, Any]] = Field(default_factory=list, description="Story gap opportunities identified by the ghost writer agent")
+    current_story_gap_index: int = Field(0, description="Index of the story gap currently being elicited")
+    story_chat_history: List[Dict[str, Any]] = Field(default_factory=list, description="Multi-turn conversation between ghost writer and author")
+    elicited_stories: List[str] = Field(default_factory=list, description="Compiled first-person story narratives from the interview")
+    # General Q&A collaboration fields
+    pending_questions: List[Dict[str, Any]] = Field(default_factory=list, description="Questions from pipeline agents waiting for author answers")
+    waiting_for_answers: bool = Field(False, description="True when the pipeline is paused waiting for Q&A answers")
 
 
 def _blog_job_dict_to_status_response(job: Dict[str, Any], job_id_fallback: str) -> BlogJobStatusResponse:
@@ -627,6 +647,15 @@ def _blog_job_dict_to_status_response(job: Dict[str, Any], job_id_fallback: str)
         parse_retry_count=job.get("parse_retry_count"),
         planning_wall_ms_total=job.get("planning_wall_ms_total"),
         planning_failure_reason=job.get("planning_failure_reason"),
+        waiting_for_title_selection=bool(job.get("waiting_for_title_selection", False)),
+        selected_title=job.get("selected_title"),
+        waiting_for_story_input=bool(job.get("waiting_for_story_input", False)),
+        story_gaps=job.get("story_gaps", []),
+        current_story_gap_index=job.get("current_story_gap_index", 0),
+        story_chat_history=job.get("story_chat_history", []),
+        elicited_stories=job.get("elicited_stories", []),
+        pending_questions=job.get("pending_questions", []),
+        waiting_for_answers=bool(job.get("waiting_for_answers", False)),
     )
 
 
@@ -775,6 +804,7 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
                 run_gates=request.run_gates,
                 max_rewrite_iterations=request.max_rewrite_iterations,
                 job_updater=job_updater,
+                job_id=job_id,
                 length_policy=length_policy,
             )
 
@@ -1098,6 +1128,129 @@ def unapprove_job(job_id: str) -> BlogJobStatusResponse:
     updated = get_blog_job(job_id)
     if updated is None:
         raise HTTPException(status_code=500, detail="Job not found after unapprove")
+    return _blog_job_dict_to_status_response(updated, job_id)
+
+
+class SelectTitleRequest(BaseModel):
+    """Request body for title selection."""
+
+    title: str = Field(..., description="The author-chosen title from the planning candidates.")
+
+
+@app.post(
+    "/job/{job_id}/select-title",
+    response_model=BlogJobStatusResponse,
+    summary="Submit title selection",
+    description=(
+        "Resume the pipeline after title selection. "
+        "Sets waiting_for_title_selection=False and records the chosen title."
+    ),
+)
+def select_title(job_id: str, request: SelectTitleRequest) -> BlogJobStatusResponse:
+    """Author submits their chosen title, resuming the pipeline."""
+    if get_blog_job is None or submit_title_selection is None:
+        raise HTTPException(status_code=501, detail="Job store not available")
+    job = get_blog_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if not job.get("waiting_for_title_selection"):
+        raise HTTPException(status_code=400, detail="Job is not currently waiting for title selection")
+    if not request.title.strip():
+        raise HTTPException(status_code=422, detail="title must not be empty")
+    submit_title_selection(job_id, request.title.strip())
+    updated = get_blog_job(job_id)
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Job not found after title selection")
+    return _blog_job_dict_to_status_response(updated, job_id)
+
+
+class StoryResponseRequest(BaseModel):
+    """Request body for a story elicitation response."""
+
+    message: str = Field(..., description="The author's response to the ghost writer's question.")
+
+
+@app.post(
+    "/job/{job_id}/story-response",
+    response_model=BlogJobStatusResponse,
+    summary="Submit story elicitation response",
+    description=(
+        "Send a message in the ghost writer story elicitation conversation. "
+        "Clears waiting_for_story_input and appends the message to story_chat_history."
+    ),
+)
+def story_response(job_id: str, request: StoryResponseRequest) -> BlogJobStatusResponse:
+    """Author submits a message in the story elicitation chat."""
+    if get_blog_job is None or submit_story_user_message is None:
+        raise HTTPException(status_code=501, detail="Job store not available")
+    job = get_blog_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if not job.get("waiting_for_story_input"):
+        raise HTTPException(status_code=400, detail="Job is not currently waiting for a story response")
+    if not request.message.strip():
+        raise HTTPException(status_code=422, detail="message must not be empty")
+    submit_story_user_message(job_id, request.message.strip())
+    updated = get_blog_job(job_id)
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Job not found after story response")
+    return _blog_job_dict_to_status_response(updated, job_id)
+
+
+@app.post(
+    "/job/{job_id}/skip-story-gap",
+    response_model=BlogJobStatusResponse,
+    summary="Skip the current story gap",
+    description=(
+        "Skip the current story elicitation gap and advance to the next one. "
+        "Increments current_story_gap_index and clears waiting_for_story_input."
+    ),
+)
+def skip_story_gap(job_id: str) -> BlogJobStatusResponse:
+    """Author skips the current story gap."""
+    if get_blog_job is None or skip_current_story_gap is None:
+        raise HTTPException(status_code=501, detail="Job store not available")
+    job = get_blog_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    skip_current_story_gap(job_id)
+    updated = get_blog_job(job_id)
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Job not found after skip")
+    return _blog_job_dict_to_status_response(updated, job_id)
+
+
+class BlogAnswersRequest(BaseModel):
+    """Request body for submitting Q&A answers."""
+
+    answers: List[Dict[str, Any]] = Field(
+        ...,
+        description="List of answer objects (question_id, selected_option_id, selected_answer, etc.).",
+    )
+
+
+@app.post(
+    "/job/{job_id}/answers",
+    response_model=BlogJobStatusResponse,
+    summary="Submit answers to pending questions",
+    description=(
+        "Resume the pipeline after Q&A. Stores answers, clears pending_questions, "
+        "and sets waiting_for_answers=False."
+    ),
+)
+def submit_answers(job_id: str, request: BlogAnswersRequest) -> BlogJobStatusResponse:
+    """Author submits answers to pipeline Q&A questions."""
+    if get_blog_job is None or submit_blog_answers is None:
+        raise HTTPException(status_code=501, detail="Job store not available")
+    job = get_blog_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if not job.get("waiting_for_answers"):
+        raise HTTPException(status_code=400, detail="Job is not currently waiting for answers")
+    submit_blog_answers(job_id, request.answers)
+    updated = get_blog_job(job_id)
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Job not found after answer submission")
     return _blog_job_dict_to_status_response(updated, job_id)
 
 

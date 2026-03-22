@@ -1,6 +1,7 @@
 import { Component, inject, OnDestroy, OnInit } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { CommonModule, SlicePipe } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { marked } from 'marked';
 import { MatTabsModule } from '@angular/material/tabs';
@@ -15,6 +16,8 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
 import { ResearchReviewFormComponent } from '../research-review-form/research-review-form.component';
 import { ResearchReviewResultsComponent } from '../research-review-results/research-review-results.component';
 import { FullPipelineFormComponent } from '../full-pipeline-form/full-pipeline-form.component';
@@ -68,6 +71,7 @@ export function artifactLabel(name: string): string {
   imports: [
     CommonModule,
     SlicePipe,
+    FormsModule,
     MatTabsModule,
     MatCardModule,
     MatExpansionModule,
@@ -75,6 +79,8 @@ export function artifactLabel(name: string): string {
     MatIconModule,
     MatTooltipModule,
     MatProgressBarModule,
+    MatFormFieldModule,
+    MatInputModule,
     LoadingSpinnerComponent,
     ErrorMessageComponent,
     ResearchReviewFormComponent,
@@ -119,6 +125,17 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   viewArtifactModal: { name: string; content: string | object } | null = null;
   viewArtifactLoading = false;
   viewArtifactError: string | null = null;
+
+  // Collaboration: title selection
+  collaborationError: string | null = null;
+
+  // Collaboration: story elicitation
+  storyResponseText = '';
+  storySubmitting = false;
+
+  // Collaboration: Q&A
+  qaAnswers: Record<string, string> = {};
+  qaSubmitting = false;
 
   isTerminalStatus(status: string): boolean {
     return (TERMINAL_STATUSES as readonly string[]).includes(status);
@@ -212,6 +229,9 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
     this.artifactContent = {};
     this.artifactContentLoading = {};
     this.artifactsError = null;
+    this.collaborationError = null;
+    this.storyResponseText = '';
+    this.qaAnswers = {};
   }
 
   selectJob(job: BlogJobListItem): void {
@@ -392,6 +412,109 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.error = err?.error?.detail ?? err?.message ?? 'Failed to unapprove job';
       },
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Collaboration: title selection
+  // ---------------------------------------------------------------------------
+
+  selectTitle(title: string): void {
+    const jobId = this.selectedBlogJob?.job_id;
+    if (!jobId) return;
+    this.collaborationError = null;
+    this.api.selectTitle(jobId, title).subscribe({
+      next: (status) => {
+        this.selectedJobStatus = status;
+      },
+      error: (err) => {
+        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit title selection';
+      },
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Collaboration: story elicitation
+  // ---------------------------------------------------------------------------
+
+  submitStoryResponse(): void {
+    const jobId = this.selectedBlogJob?.job_id;
+    const msg = this.storyResponseText.trim();
+    if (!jobId || !msg) return;
+    this.storySubmitting = true;
+    this.collaborationError = null;
+    this.api.submitStoryResponse(jobId, msg).subscribe({
+      next: (status) => {
+        this.selectedJobStatus = status;
+        this.storyResponseText = '';
+        this.storySubmitting = false;
+      },
+      error: (err) => {
+        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit story response';
+        this.storySubmitting = false;
+      },
+    });
+  }
+
+  skipStoryGap(): void {
+    const jobId = this.selectedBlogJob?.job_id;
+    if (!jobId) return;
+    this.collaborationError = null;
+    this.api.skipStoryGap(jobId).subscribe({
+      next: (status) => {
+        this.selectedJobStatus = status;
+        this.storyResponseText = '';
+      },
+      error: (err) => {
+        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to skip story gap';
+      },
+    });
+  }
+
+  getCurrentStoryGap() {
+    const status = this.selectedJobStatus;
+    if (!status?.story_gaps?.length) return null;
+    const idx = status.current_story_gap_index ?? 0;
+    return status.story_gaps[idx] ?? null;
+  }
+
+  getStoryAgentMessages() {
+    const status = this.selectedJobStatus;
+    const idx = status?.current_story_gap_index ?? 0;
+    return (status?.story_chat_history ?? []).filter(
+      (m) => m.gap_index === idx || m.gap_index === undefined
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Collaboration: Q&A
+  // ---------------------------------------------------------------------------
+
+  submitQaAnswers(): void {
+    const jobId = this.selectedBlogJob?.job_id;
+    const questions = this.selectedJobStatus?.pending_questions ?? [];
+    if (!jobId || !questions.length) return;
+    this.qaSubmitting = true;
+    this.collaborationError = null;
+    const answers = questions.map((q) => ({
+      question_id: q.id,
+      selected_answer: this.qaAnswers[q.id] ?? '',
+    }));
+    this.api.submitBlogAnswers(jobId, answers).subscribe({
+      next: (status) => {
+        this.selectedJobStatus = status;
+        this.qaAnswers = {};
+        this.qaSubmitting = false;
+      },
+      error: (err) => {
+        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit answers';
+        this.qaSubmitting = false;
+      },
+    });
+  }
+
+  allQaAnswered(): boolean {
+    const questions = this.selectedJobStatus?.pending_questions ?? [];
+    return questions.every((q) => !q.required || (this.qaAnswers[q.id] ?? '').trim().length > 0);
   }
 
   onResearchReviewSubmit(request: ResearchAndReviewRequest): void {

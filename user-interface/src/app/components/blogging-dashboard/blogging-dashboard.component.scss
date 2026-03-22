@@ -462,3 +462,184 @@
     margin-top: 0.25rem;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Collaboration panels (title selection, story elicitation, Q&A)
+// ---------------------------------------------------------------------------
+
+.collaboration-card {
+  margin-bottom: 1rem;
+  border-left: 4px solid var(--mat-sys-primary, #1976d2);
+
+  mat-card-header {
+    mat-icon[mat-card-avatar] {
+      color: var(--mat-sys-primary, #1976d2);
+      font-size: 28px;
+      width: 40px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+  }
+}
+
+// Title selection
+.title-selection-card {
+  .title-candidates {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .title-candidate-btn {
+    width: 100%;
+    text-align: left;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    height: auto;
+    white-space: normal;
+    line-height: 1.4;
+
+    .title-text {
+      flex: 1;
+      word-break: break-word;
+    }
+
+    .title-prob {
+      flex-shrink: 0;
+      margin-left: 1rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--mat-sys-primary, #1976d2);
+      opacity: 0.85;
+    }
+
+    &:hover {
+      background: var(--mat-sys-primary-container, rgba(25, 118, 210, 0.08));
+      border-color: var(--mat-sys-primary, #1976d2);
+    }
+  }
+}
+
+// Story elicitation
+.story-elicitation-card {
+  .story-chat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    max-height: 280px;
+    overflow-y: auto;
+    padding: 0.5rem;
+    background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
+    border-radius: 6px;
+  }
+
+  .story-message {
+    padding: 0.5rem 0.75rem;
+    border-radius: 8px;
+    max-width: 85%;
+
+    .story-role {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      opacity: 0.7;
+      display: block;
+      margin-bottom: 0.2rem;
+    }
+
+    .story-content {
+      margin: 0;
+      font-size: 0.9rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+
+    &.story-message-agent {
+      background: var(--mat-sys-primary-container, rgba(25, 118, 210, 0.1));
+      align-self: flex-start;
+    }
+
+    &.story-message-user {
+      background: var(--mat-sys-secondary-container, rgba(0, 0, 0, 0.06));
+      align-self: flex-end;
+    }
+  }
+
+  .story-input-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .story-input-field {
+    width: 100%;
+  }
+
+  .story-input-actions {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+  }
+}
+
+// Q&A panel
+.qa-card {
+  .qa-question {
+    margin-bottom: 1.25rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.08));
+
+    &:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+
+    .qa-question-text {
+      margin: 0 0 0.25rem 0;
+      font-size: 0.9375rem;
+
+      .qa-required {
+        color: var(--mat-sys-error, #c62828);
+        margin-left: 0.2rem;
+      }
+    }
+
+    .qa-context {
+      margin: 0 0 0.5rem 0;
+      font-size: 0.8125rem;
+      color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+    }
+
+    .qa-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+
+      .qa-option-btn {
+        &.qa-option-selected {
+          background: var(--mat-sys-primary-container, rgba(25, 118, 210, 0.12));
+          border-color: var(--mat-sys-primary, #1976d2);
+          color: var(--mat-sys-primary, #1976d2);
+          font-weight: 600;
+        }
+      }
+    }
+
+    .qa-free-text {
+      width: 100%;
+      margin-top: 0.25rem;
+    }
+  }
+
+  .qa-submit-row {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 0.5rem;
+  }
+}

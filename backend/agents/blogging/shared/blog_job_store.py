@@ -104,6 +104,19 @@ def create_blog_job(
         "created_at": now,
         "started_at": None,
         "completed_at": None,
+        # Title selection
+        "waiting_for_title_selection": False,
+        "selected_title": None,
+        # Story elicitation
+        "waiting_for_story_input": False,
+        "story_gaps": [],
+        "current_story_gap_index": 0,
+        "story_chat_history": [],
+        "elicited_stories": [],
+        # General Q&A (mirrors SE team pattern)
+        "pending_questions": [],
+        "waiting_for_answers": False,
+        "submitted_answers": [],
     }
     # create_job(job_id, **fields) expects job_id as first arg; omit job_id from **data to avoid duplicate
     fields = {k: v for k, v in data.items() if k != "job_id"}
@@ -274,6 +287,146 @@ def delete_blog_job(
 ) -> bool:
     """Delete a job from the cache. Returns True if deleted, False if not found."""
     return _manager(cache_dir).delete_job(job_id)
+
+
+# ---------------------------------------------------------------------------
+# Title selection pause/resume
+# ---------------------------------------------------------------------------
+
+
+def submit_title_selection(
+    job_id: str,
+    title: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Store the selected title and resume the pipeline (clears waiting_for_title_selection)."""
+    def apply(data: Dict[str, Any]) -> None:
+        data["selected_title"] = title
+        data["waiting_for_title_selection"] = False
+
+    _manager(cache_dir).apply_to_job(job_id, apply)
+
+
+def is_waiting_for_title_selection(
+    job_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> bool:
+    """Return True if the pipeline is paused waiting for a title selection."""
+    job = _manager(cache_dir).get_job(job_id)
+    return bool(job.get("waiting_for_title_selection")) if job else False
+
+
+# ---------------------------------------------------------------------------
+# Story elicitation pause/resume
+# ---------------------------------------------------------------------------
+
+
+def add_story_agent_message(
+    job_id: str,
+    content: str,
+    gap_index: int,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Append a ghost-writer agent message to the story chat history and pause for user input."""
+    def apply(data: Dict[str, Any]) -> None:
+        history: List[Dict[str, Any]] = data.get("story_chat_history", [])
+        history.append({"role": "agent", "content": content, "gap_index": gap_index})
+        data["story_chat_history"] = history
+        data["waiting_for_story_input"] = True
+
+    _manager(cache_dir).apply_to_job(job_id, apply)
+
+
+def submit_story_user_message(
+    job_id: str,
+    message: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Append a user message to the story chat history and resume the pipeline."""
+    def apply(data: Dict[str, Any]) -> None:
+        history: List[Dict[str, Any]] = data.get("story_chat_history", [])
+        history.append({"role": "user", "content": message})
+        data["story_chat_history"] = history
+        data["waiting_for_story_input"] = False
+
+    _manager(cache_dir).apply_to_job(job_id, apply)
+
+
+def skip_current_story_gap(
+    job_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Skip the current story gap and advance to the next one (clears waiting flag)."""
+    def apply(data: Dict[str, Any]) -> None:
+        data["current_story_gap_index"] = data.get("current_story_gap_index", 0) + 1
+        data["waiting_for_story_input"] = False
+
+    _manager(cache_dir).apply_to_job(job_id, apply)
+
+
+def complete_story_elicitation(
+    job_id: str,
+    elicited_stories: List[str],
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Store compiled elicited story narratives; clears all story-wait flags."""
+    def apply(data: Dict[str, Any]) -> None:
+        data["elicited_stories"] = elicited_stories
+        data["waiting_for_story_input"] = False
+
+    _manager(cache_dir).apply_to_job(job_id, apply)
+
+
+def is_waiting_for_story_input(
+    job_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> bool:
+    """Return True if the pipeline is paused waiting for a story message."""
+    job = _manager(cache_dir).get_job(job_id)
+    return bool(job.get("waiting_for_story_input")) if job else False
+
+
+# ---------------------------------------------------------------------------
+# General Q&A pause/resume (mirrors SE team pattern)
+# ---------------------------------------------------------------------------
+
+
+def add_blog_pending_questions(
+    job_id: str,
+    questions: List[Dict[str, Any]],
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Store pending questions and pause the pipeline for answers."""
+    def apply(data: Dict[str, Any]) -> None:
+        data["pending_questions"] = questions
+        data["waiting_for_answers"] = True
+
+    _manager(cache_dir).apply_to_job(job_id, apply)
+
+
+def submit_blog_answers(
+    job_id: str,
+    answers: List[Dict[str, Any]],
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Store submitted answers, clear pending questions, and resume the pipeline."""
+    def apply(data: Dict[str, Any]) -> None:
+        existing: List[Dict[str, Any]] = data.get("submitted_answers", [])
+        existing.extend(answers)
+        data["submitted_answers"] = existing
+        data["pending_questions"] = []
+        data["waiting_for_answers"] = False
+
+    _manager(cache_dir).apply_to_job(job_id, apply)
+
+
+def is_waiting_for_blog_answers(
+    job_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> bool:
+    """Return True if the pipeline is paused waiting for Q&A answers."""
+    job = _manager(cache_dir).get_job(job_id)
+    return bool(job.get("waiting_for_answers")) if job else False
 
 
 # Start stale job monitor when module is loaded (e.g. when blogging API is mounted)

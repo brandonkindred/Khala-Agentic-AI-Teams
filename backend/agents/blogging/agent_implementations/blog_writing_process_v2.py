@@ -11,6 +11,7 @@ Supports job_updater callback for UI phase tracking.
 from . import _path_setup  # noqa: F401
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Tuple, Union
 
@@ -224,6 +225,7 @@ def run_pipeline(
     max_rewrite_iterations: int = MAX_REWRITE_ITERATIONS,
     run_gates: bool = True,
     job_updater: Optional[JobUpdater] = None,
+    job_id: Optional[str] = None,
     length_policy: Optional[LengthPolicy] = None,
     content_profile: Optional[ContentProfile] = None,
     series_context: Optional[SeriesContext] = None,
@@ -310,6 +312,130 @@ def run_pipeline(
     )
     plan = planning_phase_result.content_plan
 
+    # ------------------------------------------------------------------
+    # Title selection: pause until the author picks a title
+    # ------------------------------------------------------------------
+    selected_title: Optional[str] = None
+    if job_id is not None and job_updater is not None:
+        try:
+            from shared.blog_job_store import (
+                get_blog_job,
+                is_waiting_for_title_selection,
+                update_blog_job,
+            )
+
+            title_choices = [
+                {"title": tc.title, "probability_of_success": tc.probability_of_success}
+                for tc in plan.title_candidates
+            ]
+            update_blog_job(
+                job_id,
+                waiting_for_title_selection=True,
+                title_choices=title_choices,
+            )
+            job_updater(
+                phase="title_selection",
+                progress=25,
+                status_text=f"Waiting for title selection ({len(title_choices)} candidates)...",
+            )
+
+            while is_waiting_for_title_selection(job_id):
+                job_data = get_blog_job(job_id)
+                if job_data and job_data.get("status") in ("failed", "cancelled"):
+                    return research_result, planning_phase_result, None, "FAIL"
+                time.sleep(2)
+
+            job_data = get_blog_job(job_id)
+            selected_title = (job_data or {}).get("selected_title")
+            logger.info("Title selected: %r", selected_title)
+            job_updater(
+                phase="title_selection",
+                progress=26,
+                status_text=f"Title selected: {selected_title}",
+            )
+        except Exception as e:
+            logger.warning("Title selection phase error (skipping): %s", e)
+
+    # ------------------------------------------------------------------
+    # Story elicitation: ghost writer surfaces personal anecdotes
+    # ------------------------------------------------------------------
+    elicited_stories_text: Optional[str] = None
+    if job_id is not None and job_updater is not None:
+        try:
+            from ghost_writer_agent import GhostWriterElicitationAgent
+            from shared.blog_job_store import (
+                add_story_agent_message,
+                complete_story_elicitation,
+                get_blog_job,
+                is_waiting_for_story_input,
+                update_blog_job,
+            )
+
+            ghost_agent = GhostWriterElicitationAgent(llm_client=llm_client)
+            job_updater(
+                phase="story_elicitation",
+                progress=27,
+                status_text="Identifying story opportunities in the content plan...",
+            )
+            story_gaps = ghost_agent.find_story_gaps(plan)
+
+            if story_gaps:
+                gap_dicts = [g.model_dump() for g in story_gaps]
+                update_blog_job(job_id, story_gaps=gap_dicts, current_story_gap_index=0)
+                collected_narratives: list[str] = []
+
+                for idx, gap in enumerate(story_gaps):
+                    job_data = get_blog_job(job_id)
+                    if job_data and job_data.get("status") in ("failed", "cancelled"):
+                        break
+
+                    job_updater(
+                        phase="story_elicitation",
+                        progress=27 + idx,
+                        status_text=f"Gathering story for section: {gap.section_title} ({idx + 1}/{len(story_gaps)})",
+                    )
+                    update_blog_job(job_id, current_story_gap_index=idx)
+
+                    # Post seed question and wait for first user response
+                    add_story_agent_message(job_id, gap.seed_question, idx)
+
+                    result = ghost_agent.conduct_interview(
+                        gap=gap,
+                        job_id=job_id,
+                        gap_index=idx,
+                        job_updater=job_updater,
+                    )
+                    if result.narrative:
+                        collected_narratives.append(
+                            f"[Story for section: {gap.section_title}]\n{result.narrative}"
+                        )
+
+                if collected_narratives:
+                    elicited_stories_text = "\n\n".join(collected_narratives)
+                    complete_story_elicitation(job_id, elicited_stories=collected_narratives)
+
+                update_blog_job(
+                    job_id,
+                    waiting_for_story_input=False,
+                    current_story_gap_index=len(story_gaps),
+                )
+                job_updater(
+                    phase="story_elicitation",
+                    progress=30,
+                    status_text=(
+                        f"Story gathering complete: {len(collected_narratives)} narrative(s) collected"
+                        if collected_narratives else "Story gathering complete (no stories collected)"
+                    ),
+                )
+            else:
+                job_updater(
+                    phase="story_elicitation",
+                    progress=30,
+                    status_text="No personal story opportunities identified — proceeding to draft",
+                )
+        except Exception as e:
+            logger.warning("Story elicitation phase error (skipping): %s", e)
+
     # Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
     brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
@@ -349,6 +475,8 @@ def run_pipeline(
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
+                    selected_title=selected_title or None,
+                    elicited_stories=elicited_stories_text or None,
                 )
                 draft_output_path = (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
                 draft_result = draft_agent.run(
@@ -429,6 +557,8 @@ def run_pipeline(
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
+                    selected_title=selected_title or None,
+                    elicited_stories=elicited_stories_text or None,
                 )
                 previous_feedback_items = copy_editor_result.feedback_items
                 draft_output_path = (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
@@ -591,6 +721,8 @@ def run_pipeline(
                     allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
+                    selected_title=selected_title or None,
+                    elicited_stories=elicited_stories_text or None,
                 )
                 draft_output_path = Path(work_dir) / f"draft_rewrite_{rewrite_iter + 1}.md"
                 draft_result = draft_agent.revise(

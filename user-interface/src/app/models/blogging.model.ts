@@ -104,6 +104,30 @@ export interface BlogJobListItem {
   job_type?: string | null;
 }
 
+/** A story gap opportunity identified by the ghost writer agent. */
+export interface BlogStoryGap {
+  section_title: string;
+  section_context: string;
+  seed_question: string;
+}
+
+/** A message in the story elicitation chat. */
+export interface BlogStoryChatMessage {
+  role: 'agent' | 'user';
+  content: string;
+  gap_index?: number;
+}
+
+/** A pending question from a pipeline agent waiting for author input. */
+export interface BlogPendingQuestion {
+  id: string;
+  question_text: string;
+  context?: string;
+  options?: Array<{ id: string; label: string; description?: string }>;
+  required?: boolean;
+  allow_multiple?: boolean;
+}
+
 /** Full status for GET /job/{job_id} (blog pipeline job polling). */
 export interface BlogJobStatusResponse {
   job_id: string;
@@ -132,6 +156,18 @@ export interface BlogJobStatusResponse {
   planning_wall_ms_total?: number;
   /** When failed during planning, machine-readable reason (e.g. parse_failure). */
   planning_failure_reason?: string;
+  // Title selection
+  waiting_for_title_selection?: boolean;
+  selected_title?: string;
+  // Story elicitation
+  waiting_for_story_input?: boolean;
+  story_gaps?: BlogStoryGap[];
+  current_story_gap_index?: number;
+  story_chat_history?: BlogStoryChatMessage[];
+  elicited_stories?: string[];
+  // General Q&A
+  pending_questions?: BlogPendingQuestion[];
+  waiting_for_answers?: boolean;
 }
 
 /** Metadata for a single artifact (from GET /job/{id}/artifacts). */

@@ -268,6 +268,19 @@ class BlogDraftAgent:
             "---",
             outline,
         ])
+        if draft_input.selected_title:
+            prompt_parts.append("")
+            prompt_parts.append("---")
+            prompt_parts.append(
+                f"AUTHOR-CHOSEN TITLE (NON-NEGOTIABLE): Use this exact string as the H1 heading at the top of the post — do not rephrase, shorten, or change it:\n{draft_input.selected_title}"
+            )
+        if draft_input.elicited_stories:
+            prompt_parts.append("")
+            prompt_parts.append("---")
+            prompt_parts.append(
+                "AUTHOR'S PERSONAL STORIES (use these in the relevant sections — do not invent new details beyond what is provided):\n"
+                + draft_input.elicited_stories
+            )
         if draft_input.audience:
             prompt_parts.append("")
             prompt_parts.append(f"Audience: {draft_input.audience}")
@@ -394,6 +407,18 @@ class BlogDraftAgent:
                 claims_text,
             ])
             prompt_parts.insert(len(prompt_parts) - 5, block)
+        if revise_input.selected_title:
+            prompt_parts.extend([
+                "",
+                "---",
+                f"AUTHOR-CHOSEN TITLE (preserve this exact H1): {revise_input.selected_title}",
+            ])
+        if revise_input.elicited_stories:
+            prompt_parts.extend([
+                "",
+                "---",
+                "AUTHOR'S PERSONAL STORIES (preserve these in the revision):\n" + revise_input.elicited_stories,
+            ])
         if revise_input.research_document:
             research = revise_input.research_document.strip()
             research_snippet = research[:3000] + ("..." if len(research) > 3000 else "")
@@ -497,6 +522,18 @@ class BlogDraftAgent:
                 claims_text,
             ])
             prompt_parts.insert(len(prompt_parts) - 5, block)
+        if revise_input.selected_title:
+            prompt_parts.extend([
+                "",
+                "---",
+                f"AUTHOR-CHOSEN TITLE (preserve this exact H1): {revise_input.selected_title}",
+            ])
+        if revise_input.elicited_stories:
+            prompt_parts.extend([
+                "",
+                "---",
+                "AUTHOR'S PERSONAL STORIES (preserve these in the revision):\n" + revise_input.elicited_stories,
+            ])
         if revise_input.research_document:
             research = revise_input.research_document.strip()
             research_snippet = research[:3000] + ("..." if len(research) > 3000 else "")

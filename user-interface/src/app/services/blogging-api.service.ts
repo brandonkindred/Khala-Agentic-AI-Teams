@@ -181,4 +181,48 @@ export class BloggingApiService {
   getJobArtifactDownloadUrl(jobId: string, artifactName: string): string {
     return `${this.baseUrl}/job/${jobId}/artifacts/${encodeURIComponent(artifactName)}?download=true`;
   }
+
+  /**
+   * POST /job/{job_id}/select-title
+   * Submit the author-chosen title to resume the pipeline.
+   */
+  selectTitle(jobId: string, title: string): Observable<BlogJobStatusResponse> {
+    return this.http.post<BlogJobStatusResponse>(
+      `${this.baseUrl}/job/${jobId}/select-title`,
+      { title }
+    );
+  }
+
+  /**
+   * POST /job/{job_id}/story-response
+   * Send a message in the story elicitation conversation.
+   */
+  submitStoryResponse(jobId: string, message: string): Observable<BlogJobStatusResponse> {
+    return this.http.post<BlogJobStatusResponse>(
+      `${this.baseUrl}/job/${jobId}/story-response`,
+      { message }
+    );
+  }
+
+  /**
+   * POST /job/{job_id}/skip-story-gap
+   * Skip the current story gap.
+   */
+  skipStoryGap(jobId: string): Observable<BlogJobStatusResponse> {
+    return this.http.post<BlogJobStatusResponse>(
+      `${this.baseUrl}/job/${jobId}/skip-story-gap`,
+      {}
+    );
+  }
+
+  /**
+   * POST /job/{job_id}/answers
+   * Submit answers to pipeline Q&A questions.
+   */
+  submitBlogAnswers(jobId: string, answers: object[]): Observable<BlogJobStatusResponse> {
+    return this.http.post<BlogJobStatusResponse>(
+      `${this.baseUrl}/job/${jobId}/answers`,
+      { answers }
+    );
+  }
 }
