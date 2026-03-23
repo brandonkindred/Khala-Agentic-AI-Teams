@@ -1,18 +1,28 @@
 """Tests for the Product Requirements Analysis agent."""
 
+import json
 import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from product_requirements_analysis_agent import ProductRequirementsAnalysisAgent
-from product_requirements_analysis_agent.agent import _context_discovery_fallback_questions
+from product_requirements_analysis_agent.agent import (
+    SOP_PHASE1_QUESTIONS,
+    _context_discovery_fallback_questions,
+    _sop_phase1_fallback_questions,
+)
 from product_requirements_analysis_agent.models import (
     AnsweredQuestion,
+    ArchitectureAnalysisResult,
     OpenQuestion,
     QuestionOption,
+    SOPDecision,
+    SOPSubPhase,
     SpecCleanupResult,
     SpecReviewResult,
+    ToolGapAnalysis,
+    ToolRecommendation,
 )
 
 
@@ -266,17 +276,18 @@ def test_run_workflow_uses_next_version_after_existing_v6(tmp_path: Path) -> Non
             AnsweredQuestion(question_id="q1", question_text="Which framework?", selected_answer="React")
         ]
         with patch.object(agent, "_run_spec_review", side_effect=run_spec_review):
-            with patch.object(agent, "_run_context_constraints_discovery", return_value=[]):
-                with patch.object(agent, "_run_spec_cleanup", return_value=SpecCleanupResult(
-                    is_valid=True, validation_issues=[], cleaned_spec="# Cleaned", summary="Done"
-                )):
-                    with patch.object(agent, "_generate_prd_document", return_value="# PRD"):
-                        result = agent.run_workflow(
-                            spec_content="# Spec",
-                            repo_path=tmp_path,
-                            job_id="test-job",
-                            job_updater=lambda **kw: None,
-                        )
+            with patch.object(agent, "_run_sop_phase1", return_value=([], "# Spec", [])):
+                with patch.object(agent, "_run_sop_phase2_architecture", return_value=(MagicMock(), "# Spec")):
+                    with patch.object(agent, "_run_spec_cleanup", return_value=SpecCleanupResult(
+                        is_valid=True, validation_issues=[], cleaned_spec="# Cleaned", summary="Done"
+                    )):
+                        with patch.object(agent, "_generate_prd_document", return_value="# PRD"):
+                            result = agent.run_workflow(
+                                spec_content="# Spec",
+                                repo_path=tmp_path,
+                                job_id="test-job",
+                                job_updater=lambda **kw: None,
+                            )
 
     assert result.success
     assert len(update_spec_calls) >= 1, "_update_spec should be called with version"
@@ -317,20 +328,21 @@ def test_run_workflow_re_runs_spec_review_after_clarification(
             return spec_review_with_question, "# Clarified spec"
         return spec_review_no_questions, "# Clarified spec"
 
-    with patch.object(agent, "_run_context_constraints_discovery", return_value=[]):
-        with patch.object(agent, "_run_spec_review", side_effect=run_spec_review):
-            with patch.object(agent, "_communicate_with_user") as mock_comm:
-                mock_comm.return_value = [
-                    AnsweredQuestion(question_id="q1", question_text="Which OAuth provider?", selected_answer="GitHub")
-                ]
-                with patch.object(agent, "_run_spec_cleanup", return_value=cleanup_result):
-                    with patch.object(agent, "_generate_prd_document", return_value="# PRD"):
-                        result = agent.run_workflow(
-                            spec_content="# Original spec",
-                            repo_path=tmp_path,
-                            job_id="test-job",
-                            job_updater=lambda **kw: None,
-                        )
+    with patch.object(agent, "_run_sop_phase1", return_value=([], "# Original spec", [])):
+        with patch.object(agent, "_run_sop_phase2_architecture", return_value=(MagicMock(), "# Original spec")):
+            with patch.object(agent, "_run_spec_review", side_effect=run_spec_review):
+                with patch.object(agent, "_communicate_with_user") as mock_comm:
+                    mock_comm.return_value = [
+                        AnsweredQuestion(question_id="q1", question_text="Which OAuth provider?", selected_answer="GitHub")
+                    ]
+                    with patch.object(agent, "_run_spec_cleanup", return_value=cleanup_result):
+                        with patch.object(agent, "_generate_prd_document", return_value="# PRD"):
+                            result = agent.run_workflow(
+                                spec_content="# Original spec",
+                                repo_path=tmp_path,
+                                job_id="test-job",
+                                job_updater=lambda **kw: None,
+                            )
 
     assert result.success
     assert len(run_spec_review_calls) == 2, "Should call _run_spec_review twice (initial + re-run after clarification)"
@@ -384,18 +396,19 @@ def test_run_workflow_renames_validated_spec_when_needs_more_detail(tmp_path: Pa
             AnsweredQuestion(question_id="q1", question_text="Which framework?", selected_answer="React")
         ]
         with patch.object(agent, "_run_spec_review", side_effect=run_spec_review):
-            with patch.object(agent, "_run_context_constraints_discovery", return_value=[]):
-                with patch.object(agent, "_run_spec_cleanup", return_value=SpecCleanupResult(
-                    is_valid=True, validation_issues=[], cleaned_spec="# Cleaned", summary="Done"
-                )):
-                    with patch.object(agent, "_generate_prd_document", return_value="# PRD"):
-                        result = agent.run_workflow(
-                            spec_content="# Validated content",
-                            repo_path=tmp_path,
-                            job_id="test-job",
-                            job_updater=lambda **kw: None,
-                            initial_spec_path=validated,
-                        )
+            with patch.object(agent, "_run_sop_phase1", return_value=([], "# Validated content", [])):
+                with patch.object(agent, "_run_sop_phase2_architecture", return_value=(MagicMock(), "# Validated content")):
+                    with patch.object(agent, "_run_spec_cleanup", return_value=SpecCleanupResult(
+                        is_valid=True, validation_issues=[], cleaned_spec="# Cleaned", summary="Done"
+                    )):
+                        with patch.object(agent, "_generate_prd_document", return_value="# PRD"):
+                            result = agent.run_workflow(
+                                spec_content="# Validated content",
+                                repo_path=tmp_path,
+                                job_id="test-job",
+                                job_updater=lambda **kw: None,
+                                initial_spec_path=validated,
+                            )
 
     assert result.success
     v1 = tmp_path / "plan" / "product_analysis" / "updated_spec_v1.md"
@@ -425,16 +438,17 @@ def test_run_workflow_writes_validated_spec_and_prd_separately(tmp_path: Path) -
     llm = MagicMock()
     agent = ProductRequirementsAnalysisAgent(llm)
 
-    with patch.object(agent, "_run_context_constraints_discovery", return_value=[]):
-        with patch.object(agent, "_run_spec_review", return_value=(spec_review_no_questions, "# Spec")):
-            with patch.object(agent, "_run_spec_cleanup", return_value=cleanup_result):
-                with patch.object(agent, "_generate_prd_document", return_value=prd_content):
-                    result = agent.run_workflow(
-                        spec_content="# Spec",
-                        repo_path=tmp_path,
-                        job_id="test-job",
-                        job_updater=lambda **kw: None,
-                    )
+    with patch.object(agent, "_run_sop_phase1", return_value=([], "# Spec", [])):
+        with patch.object(agent, "_run_sop_phase2_architecture", return_value=(MagicMock(), "# Spec")):
+            with patch.object(agent, "_run_spec_review", return_value=(spec_review_no_questions, "# Spec")):
+                with patch.object(agent, "_run_spec_cleanup", return_value=cleanup_result):
+                    with patch.object(agent, "_generate_prd_document", return_value=prd_content):
+                        result = agent.run_workflow(
+                            spec_content="# Spec",
+                            repo_path=tmp_path,
+                            job_id="test-job",
+                            job_updater=lambda **kw: None,
+                        )
 
     assert result.success
     validated_path = tmp_path / "plan" / "product_analysis" / "validated_spec.md"
@@ -910,7 +924,7 @@ def test_inject_context_answers_into_spec_prepends_section(tmp_path: Path) -> No
 
 
 def test_run_workflow_skips_context_discovery_when_no_job_id(tmp_path: Path) -> None:
-    """run_workflow with job_id=None does not call _run_context_constraints_discovery; proceeds to spec review."""
+    """run_workflow with job_id=None does not call _run_sop_phase1; proceeds to spec review."""
     (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
     spec_review_no_questions = SpecReviewResult(
         summary="Complete", issues=[], gaps=[], open_questions=[]
@@ -920,7 +934,7 @@ def test_run_workflow_skips_context_discovery_when_no_job_id(tmp_path: Path) -> 
     )
     llm = MagicMock()
     agent = ProductRequirementsAnalysisAgent(llm)
-    with patch.object(agent, "_run_context_constraints_discovery") as mock_context:
+    with patch.object(agent, "_run_sop_phase1") as mock_sop:
         with patch.object(agent, "_run_spec_review", return_value=(spec_review_no_questions, "# Spec")):
             with patch.object(agent, "_run_spec_cleanup", return_value=cleanup_result):
                 with patch.object(agent, "_generate_prd_document", return_value="# PRD"):
@@ -930,22 +944,15 @@ def test_run_workflow_skips_context_discovery_when_no_job_id(tmp_path: Path) -> 
                         job_id=None,
                         job_updater=lambda **kw: None,
                     )
-    mock_context.assert_not_called()
+    mock_sop.assert_not_called()
 
 
-def test_run_workflow_with_context_discovery_injects_into_spec(tmp_path: Path) -> None:
-    """With job_id set, context discovery runs; first spec review receives spec that includes injected context section."""
+def test_run_workflow_with_sop_phase1_injects_into_spec(tmp_path: Path) -> None:
+    """With job_id set, SOP Phase 1 runs; first spec review receives spec that includes injected context section."""
     (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
-    context_questions = [
-        OpenQuestion(
-            id="ctx_deploy",
-            question_text="Where to deploy?",
-            options=[QuestionOption(id="opt_cloud", label="Cloud", is_default=True, rationale="", confidence=0.8)],
-        )
-    ]
-    context_answered = [
+    sop_answered = [
         AnsweredQuestion(
-            question_id="ctx_deploy",
+            question_id="P1.deploy.a",
             question_text="Where to deploy?",
             selected_answer="Cloud",
         )
@@ -965,8 +972,9 @@ def test_run_workflow_with_context_discovery_injects_into_spec(tmp_path: Path) -
         spec_review_received_specs.append(spec)
         return spec_review_no_questions, spec
 
-    with patch.object(agent, "_run_context_constraints_discovery", return_value=context_questions):
-        with patch.object(agent, "_communicate_with_user", return_value=context_answered):
+    injected_spec = "## Project context and constraints\n\nQ: Where to deploy?\nA: Cloud\n\n---\n\n# Original"
+    with patch.object(agent, "_run_sop_phase1", return_value=([], injected_spec, sop_answered)):
+        with patch.object(agent, "_run_sop_phase2_architecture", return_value=(MagicMock(), injected_spec)):
             with patch.object(agent, "_run_spec_review", side_effect=capture_spec_review):
                 with patch.object(agent, "_run_spec_cleanup", return_value=cleanup_result):
                     with patch.object(agent, "_generate_prd_document", return_value="# PRD"):
@@ -979,13 +987,252 @@ def test_run_workflow_with_context_discovery_injects_into_spec(tmp_path: Path) -
     assert result.success
     assert len(spec_review_received_specs) >= 1
     first_spec = spec_review_received_specs[0]
-    assert first_spec.startswith("## Project context and constraints")
+    assert "Project context and constraints" in first_spec
     assert "Where to deploy?" in first_spec
     assert "Cloud" in first_spec
-    # qa_history should contain context Q&A (iteration 0)
-    qa_file = tmp_path / "plan" / "product_analysis" / "qa_history.md"
-    assert qa_file.exists()
-    content = qa_file.read_text(encoding="utf-8")
-    assert "Where to deploy?" in content
-    assert "Cloud" in content
-    assert "Iteration 0" in content
+
+
+# ---------------------------------------------------------------------------
+# SOP Phase 1 & 2 Tests
+# ---------------------------------------------------------------------------
+
+
+def test_sop_phase1_questions_registry_complete() -> None:
+    """All 10 SOPSubPhase values have entries in SOP_PHASE1_QUESTIONS."""
+    for sub_phase in SOPSubPhase:
+        assert sub_phase in SOP_PHASE1_QUESTIONS, f"Missing registry entry for {sub_phase.value}"
+        assert len(SOP_PHASE1_QUESTIONS[sub_phase]) > 0, f"Empty question list for {sub_phase.value}"
+
+
+def test_sop_phase1_questions_unique_ids() -> None:
+    """All SOP question IDs are unique across all sub-phases."""
+    all_ids = []
+    for q_defs in SOP_PHASE1_QUESTIONS.values():
+        for q_def in q_defs:
+            all_ids.append(q_def["sop_id"])
+    assert len(all_ids) == len(set(all_ids)), f"Duplicate SOP IDs found: {[x for x in all_ids if all_ids.count(x) > 1]}"
+
+
+def test_sop_phase1_fallback_questions() -> None:
+    """Fallback covers all 10 sub-phases and skips conditional questions."""
+    fallback = _sop_phase1_fallback_questions()
+    assert len(fallback) > 0
+
+    # All root sub-phases should be represented
+    sub_phases_covered = {q.sop_sub_phase for q in fallback}
+    for sub_phase in SOPSubPhase:
+        assert sub_phase.value in sub_phases_covered, f"Fallback missing sub-phase: {sub_phase.value}"
+
+    # No conditional questions (depends_on != None) should be in fallback
+    conditional_ids = set()
+    for q_defs in SOP_PHASE1_QUESTIONS.values():
+        for q_def in q_defs:
+            if q_def.get("depends_on") is not None:
+                conditional_ids.add(q_def["sop_id"])
+    for q in fallback:
+        assert q.id not in conditional_ids, f"Conditional question {q.id} should not be in fallback"
+
+
+def test_evaluate_sop_conditionals_no_depends() -> None:
+    """Questions without depends_on should always be asked."""
+    q_def = {"sop_id": "P1.deploy.a", "depends_on": None}
+    result = ProductRequirementsAnalysisAgent._evaluate_sop_conditionals(q_def, {})
+    assert result is True
+
+
+def test_evaluate_sop_conditionals_parent_not_answered() -> None:
+    """Questions whose parent isn't answered yet should be deferred (None)."""
+    q_def = {"sop_id": "P1.deploy.b", "depends_on": {"P1.deploy.a": ["Cloud"]}}
+    result = ProductRequirementsAnalysisAgent._evaluate_sop_conditionals(q_def, {})
+    assert result is None
+
+
+def test_evaluate_sop_conditionals_condition_met() -> None:
+    """Questions whose parent answer matches should be asked."""
+    q_def = {"sop_id": "P1.deploy.b", "depends_on": {"P1.deploy.a": ["Cloud", "Hybrid"]}}
+    result = ProductRequirementsAnalysisAgent._evaluate_sop_conditionals(q_def, {"P1.deploy.a": "Cloud"})
+    assert result is True
+
+
+def test_evaluate_sop_conditionals_condition_not_met() -> None:
+    """Questions whose parent answer doesn't match should be skipped."""
+    q_def = {"sop_id": "P1.deploy.b", "depends_on": {"P1.deploy.a": ["Cloud"]}}
+    result = ProductRequirementsAnalysisAgent._evaluate_sop_conditionals(q_def, {"P1.deploy.a": "On-prem"})
+    assert result is False
+
+
+def test_extract_sop_decisions_from_spec_empty_spec() -> None:
+    """Empty spec should return empty decisions list."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    result = agent._extract_sop_decisions_from_spec("")
+    assert result == []
+    llm.complete_text.assert_not_called()
+
+
+def test_extract_sop_decisions_from_spec_success() -> None:
+    """LLM returns valid decisions; verify SOPDecision parsing."""
+    llm = MagicMock()
+    llm.complete_text.return_value = json.dumps({
+        "extracted_decisions": [
+            {"sop_id": "P1.deploy.a", "decision": "Cloud", "confidence": 0.95, "spec_excerpt": "Deploy on AWS"},
+            {"sop_id": "P1.coding.b", "decision": "Python", "confidence": 0.9, "spec_excerpt": "Built with Python"},
+        ]
+    })
+    agent = ProductRequirementsAnalysisAgent(llm)
+    decisions = agent._extract_sop_decisions_from_spec("Deploy on AWS. Built with Python.")
+    assert len(decisions) == 2
+    assert decisions[0].sop_id == "P1.deploy.a"
+    assert decisions[0].decision == "Cloud"
+    assert decisions[0].source == "spec"
+    assert decisions[1].sop_id == "P1.coding.b"
+
+
+def test_extract_sop_decisions_from_spec_low_confidence_filtered() -> None:
+    """Low-confidence extractions should be filtered out."""
+    llm = MagicMock()
+    llm.complete_text.return_value = json.dumps({
+        "extracted_decisions": [
+            {"sop_id": "P1.deploy.a", "decision": "Cloud", "confidence": 0.95},
+            {"sop_id": "P1.data.b", "decision": "Maybe", "confidence": 0.3},
+        ]
+    })
+    agent = ProductRequirementsAnalysisAgent(llm)
+    decisions = agent._extract_sop_decisions_from_spec("Some spec content")
+    assert len(decisions) == 1
+    assert decisions[0].sop_id == "P1.deploy.a"
+
+
+def test_extract_sop_decisions_from_spec_llm_failure() -> None:
+    """LLM failure should return empty list, not raise."""
+    llm = MagicMock()
+    llm.complete_text.side_effect = RuntimeError("LLM unavailable")
+    agent = ProductRequirementsAnalysisAgent(llm)
+    decisions = agent._extract_sop_decisions_from_spec("Some spec content")
+    assert decisions == []
+
+
+def test_build_architecture_approval_questions() -> None:
+    """Architecture approval builds questions for type + gaps."""
+    llm = MagicMock()
+    agent = ProductRequirementsAnalysisAgent(llm)
+    arch_result = ArchitectureAnalysisResult(
+        architecture_type="3-tier",
+        architecture_rationale="Good separation of concerns",
+        tool_gaps=[
+            ToolGapAnalysis(
+                gap_description="No monitoring",
+                recommendations=[
+                    ToolRecommendation(name="Datadog", description="Full stack monitoring"),
+                    ToolRecommendation(name="Prometheus", description="Open source metrics"),
+                ],
+            ),
+        ],
+    )
+    questions = agent._build_architecture_approval_questions(arch_result)
+    assert len(questions) == 2  # 1 architecture type + 1 gap
+    assert questions[0].id == "arch_type_approval"
+    assert "3-tier" in questions[0].question_text
+    assert questions[1].id == "gap_0_selection"
+
+
+def test_apply_architecture_approval_approve() -> None:
+    """Approving architecture should keep original type."""
+    arch_result = ArchitectureAnalysisResult(architecture_type="3-tier")
+    answered = [
+        AnsweredQuestion(
+            question_id="arch_type_approval",
+            question_text="Approve?",
+            selected_answer="Approve 3-tier architecture",
+        )
+    ]
+    ProductRequirementsAnalysisAgent._apply_architecture_approval(arch_result, answered)
+    assert arch_result.architecture_type == "3-tier"
+
+
+def test_apply_architecture_approval_modify() -> None:
+    """Selecting 'different' with other_text should update type."""
+    arch_result = ArchitectureAnalysisResult(architecture_type="3-tier")
+    answered = [
+        AnsweredQuestion(
+            question_id="arch_type_approval",
+            question_text="Approve?",
+            selected_answer="Suggest a different architecture",
+            other_text="microservices",
+        )
+    ]
+    ProductRequirementsAnalysisAgent._apply_architecture_approval(arch_result, answered)
+    assert arch_result.architecture_type == "microservices"
+
+
+def test_apply_architecture_approval_gap_selection() -> None:
+    """Gap selection should be recorded."""
+    arch_result = ArchitectureAnalysisResult(
+        tool_gaps=[
+            ToolGapAnalysis(
+                gap_description="No monitoring",
+                recommendations=[
+                    ToolRecommendation(name="Datadog"),
+                    ToolRecommendation(name="Prometheus"),
+                ],
+            ),
+        ],
+    )
+    answered = [
+        AnsweredQuestion(
+            question_id="gap_0_selection",
+            question_text="Which monitoring?",
+            selected_answer="Prometheus",
+        )
+    ]
+    ProductRequirementsAnalysisAgent._apply_architecture_approval(arch_result, answered)
+    assert arch_result.tool_gaps[0].selected_recommendation == "Prometheus"
+
+
+def test_format_architecture_document() -> None:
+    """Architecture document should contain key sections."""
+    arch_result = ArchitectureAnalysisResult(
+        architecture_type="3-tier",
+        architecture_rationale="Good for this project",
+        data_types_and_storage=[{"data_type": "User profiles", "recommended_store": "PostgreSQL", "rationale": "Relational"}],
+        task_types=[{"task": "API handling", "classification": "IO-bound", "compute_needs": "standard"}],
+        tool_gaps=[
+            ToolGapAnalysis(
+                gap_description="No CI/CD",
+                recommendations=[ToolRecommendation(name="GitHub Actions", description="Built-in CI")],
+                selected_recommendation="GitHub Actions",
+            ),
+        ],
+        diagrams={"overview": "```mermaid\ngraph TD\n  A-->B\n```\n\nSystem overview."},
+        summary="A 3-tier architecture is recommended.",
+    )
+    doc = ProductRequirementsAnalysisAgent._format_architecture_document(arch_result)
+    assert "# Architecture Analysis" in doc
+    assert "3-tier" in doc
+    assert "PostgreSQL" in doc
+    assert "IO-bound" in doc
+    assert "GitHub Actions" in doc
+    assert "mermaid" in doc
+    assert "3-tier architecture is recommended" in doc
+
+
+def test_sop_models_basic() -> None:
+    """Basic SOPDecision, ToolRecommendation, ToolGapAnalysis, ArchitectureAnalysisResult instantiation."""
+    decision = SOPDecision(
+        sop_id="P1.deploy.a",
+        sub_phase=SOPSubPhase.DEPLOYMENT,
+        question_text="Where deployed?",
+        decision="Cloud",
+        source="spec",
+    )
+    assert decision.confidence == 1.0
+
+    rec = ToolRecommendation(name="Datadog", description="Monitoring")
+    assert rec.why_recommended == ""
+
+    gap = ToolGapAnalysis(gap_description="No monitoring", recommendations=[rec])
+    assert gap.selected_recommendation is None
+
+    arch = ArchitectureAnalysisResult()
+    assert arch.architecture_type == ""
+    assert arch.diagrams == {}

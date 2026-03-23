@@ -32,10 +32,15 @@ from .models import (
     AnalysisPhase,
     AnalysisWorkflowResult,
     AnsweredQuestion,
+    ArchitectureAnalysisResult,
     OpenQuestion,
     QuestionOption,
+    SOPDecision,
+    SOPSubPhase,
     SpecCleanupResult,
     SpecReviewResult,
+    ToolGapAnalysis,
+    ToolRecommendation,
 )
 from .prompts import (
     CONSOLIDATE_QUESTIONS_PROMPT,
@@ -43,6 +48,8 @@ from .prompts import (
     GENERATE_QUESTION_RECOMMENDATIONS_PROMPT,
     PRD_PROMPT,
     REVIEW_QUESTIONS_ALIGNMENT_PROMPT,
+    SOP_ARCHITECTURE_ANALYSIS_PROMPT,
+    SOP_SPEC_EXTRACTION_PROMPT,
     SPEC_CLEANUP_CHUNK_PROMPT,
     SPEC_CLEANUP_PROMPT,
     SPEC_CONSISTENCY_CLARIFICATION_PROMPT,
@@ -160,6 +167,479 @@ def _context_discovery_fallback_questions() -> List[OpenQuestion]:
             category="business",
         ),
     ]
+
+
+# ---------------------------------------------------------------------------
+# SOP Phase 1: Structured Question Registry
+# ---------------------------------------------------------------------------
+# Each sub-phase maps to a list of question definitions. Questions with
+# ``depends_on`` are conditional — they are only asked when the parent
+# question's answer matches one of the listed values.
+
+MAX_SOP_ROUNDS = 5  # Safety limit for multi-round SOP Phase 1
+
+SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
+    SOPSubPhase.DEPLOYMENT: [
+        {
+            "sop_id": "P1.deploy.a",
+            "question_text": "Where will this be deployed?",
+            "category": "infrastructure",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_onprem", "label": "On-prem", "rationale": "For air-gapped or regulated environments."},
+                {"id": "opt_cloud", "label": "Cloud", "rationale": "Most common for new applications.", "is_default": True},
+                {"id": "opt_paas", "label": "PaaS", "rationale": "Managed platform (Heroku, Render, etc.)"},
+                {"id": "opt_hybrid", "label": "Hybrid", "rationale": "Mix of cloud and on-prem."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.deploy.b",
+            "question_text": "Which cloud provider?",
+            "category": "infrastructure",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_aws", "label": "AWS", "rationale": "Widely used, broad service set.", "is_default": True},
+                {"id": "opt_gcp", "label": "GCP", "rationale": "Strong data/ML offerings."},
+                {"id": "opt_azure", "label": "Azure", "rationale": "Good for Microsoft ecosystem."},
+                {"id": "opt_rackspace", "label": "RackSpace", "rationale": "Managed hosting specialist."},
+                {"id": "opt_digitalocean", "label": "DigitalOcean", "rationale": "Simple, developer-friendly."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your provider."},
+            ],
+            "depends_on": {"P1.deploy.a": ["Cloud", "Hybrid"]},
+        },
+        {
+            "sop_id": "P1.deploy.c",
+            "question_text": "Should the application use serverless compute?",
+            "category": "infrastructure",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_yes", "label": "Yes", "rationale": "Reduce ops overhead, scale to zero."},
+                {"id": "opt_no", "label": "No", "rationale": "Full control with containers/VMs.", "is_default": True},
+                {"id": "opt_partial", "label": "Partially", "rationale": "Mix serverless and traditional compute."},
+            ],
+            "depends_on": {"P1.deploy.a": ["Cloud", "Hybrid"]},
+        },
+        {
+            "sop_id": "P1.deploy.d",
+            "question_text": "Which PaaS platform?",
+            "category": "infrastructure",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_heroku", "label": "Heroku", "rationale": "Well-known, easy to use.", "is_default": True},
+                {"id": "opt_supabase", "label": "Supabase", "rationale": "Open-source Firebase alternative with Postgres."},
+                {"id": "opt_vercel", "label": "Vercel", "rationale": "Great for frontend-heavy apps."},
+                {"id": "opt_render", "label": "Render", "rationale": "Modern PaaS, simple pricing."},
+                {"id": "opt_railway", "label": "Railway", "rationale": "Developer-friendly, fast deploys."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your PaaS."},
+            ],
+            "depends_on": {"P1.deploy.a": ["PaaS"]},
+        },
+    ],
+    SOPSubPhase.REGULATIONS: [
+        {
+            "sop_id": "P1.regulations.a",
+            "question_text": "Is this project subject to any regulatory requirements?",
+            "category": "business",
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_gdpr", "label": "GDPR", "rationale": "EU data protection regulation."},
+                {"id": "opt_ccpa", "label": "CCPA", "rationale": "California consumer privacy."},
+                {"id": "opt_hipaa", "label": "HIPAA", "rationale": "US health data regulation."},
+                {"id": "opt_pci", "label": "PCI-DSS", "rationale": "Payment card industry standard."},
+                {"id": "opt_none", "label": "None", "rationale": "No specific regulatory requirements.", "is_default": True},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your regulatory requirements."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.regulations.b",
+            "question_text": "Do you need any enterprise certifications?",
+            "category": "business",
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_soc2", "label": "SOC2", "rationale": "Common for SaaS products."},
+                {"id": "opt_iso27001", "label": "ISO 27001", "rationale": "International information security standard."},
+                {"id": "opt_fedramp", "label": "FedRAMP", "rationale": "US federal cloud security."},
+                {"id": "opt_none", "label": "None", "rationale": "No enterprise certification needed.", "is_default": True},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your certification."},
+            ],
+            "depends_on": None,
+        },
+    ],
+    SOPSubPhase.TOOL_PREFERENCES: [
+        {
+            "sop_id": "P1.tools.a",
+            "question_text": "Do you have a preference for open source or proprietary tools/services?",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_open", "label": "Open Source", "rationale": "Community-driven, no license costs."},
+                {"id": "opt_proprietary", "label": "Proprietary", "rationale": "Commercial support and SLAs."},
+                {"id": "opt_none", "label": "No preference", "rationale": "Best tool for the job regardless.", "is_default": True},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.tools.b",
+            "question_text": "What existing proprietary licenses or tools do you already have?",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [],
+            "depends_on": {"P1.tools.a": ["Proprietary"]},
+        },
+        {
+            "sop_id": "P1.tools.c",
+            "question_text": "What open source tools/frameworks are you already familiar with?",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [],
+            "depends_on": {"P1.tools.a": ["Open Source"]},
+        },
+    ],
+    SOPSubPhase.CODING_PREFERENCES: [
+        {
+            "sop_id": "P1.coding.a",
+            "question_text": "Where will the source code be stored?",
+            "category": "infrastructure",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_github", "label": "GitHub", "rationale": "Most popular, great ecosystem.", "is_default": True},
+                {"id": "opt_gitlab", "label": "GitLab", "rationale": "Built-in CI/CD, self-hostable."},
+                {"id": "opt_bitbucket", "label": "BitBucket", "rationale": "Atlassian integration."},
+                {"id": "opt_codeberg", "label": "Codeberg", "rationale": "Open-source Gitea-based."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your repository host."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.coding.b",
+            "question_text": "What programming language(s) do you prefer?",
+            "category": "architecture",
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_java", "label": "Java", "rationale": "Enterprise-grade, mature ecosystem."},
+                {"id": "opt_rust", "label": "Rust", "rationale": "Memory safety, high performance."},
+                {"id": "opt_python", "label": "Python", "rationale": "Versatile, great for APIs and data.", "is_default": True},
+                {"id": "opt_js", "label": "JavaScript", "rationale": "Universal web language."},
+                {"id": "opt_ts", "label": "TypeScript", "rationale": "Type-safe JavaScript."},
+                {"id": "opt_go", "label": "Go", "rationale": "Simple, fast, great for services."},
+                {"id": "opt_ruby", "label": "Ruby", "rationale": "Developer happiness, Rails ecosystem."},
+                {"id": "opt_cpp", "label": "C/C++", "rationale": "Systems programming, maximum performance."},
+                {"id": "opt_erlang", "label": "Erlang", "rationale": "Fault-tolerant, distributed systems."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your language."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.coding.c",
+            "question_text": "Do you have any framework preferences?",
+            "category": "architecture",
+            "allow_multiple": False,
+            "options": [],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.coding.d",
+            "question_text": "Do you have a package management preference?",
+            "category": "architecture",
+            "allow_multiple": False,
+            "options": [],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.coding.e",
+            "question_text": "What CI/CD pipeline service do you prefer?",
+            "category": "infrastructure",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_gh_actions", "label": "GitHub Actions", "rationale": "Native to GitHub, easy setup.", "is_default": True},
+                {"id": "opt_gitlab_ci", "label": "GitLab CI", "rationale": "Built into GitLab, powerful."},
+                {"id": "opt_aws_cp", "label": "AWS CodePipeline", "rationale": "Native AWS CI/CD."},
+                {"id": "opt_circleci", "label": "CircleCI", "rationale": "Fast builds, good caching."},
+                {"id": "opt_jenkins", "label": "Jenkins", "rationale": "Highly customizable, self-hosted."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your CI/CD."},
+            ],
+            "depends_on": None,
+        },
+    ],
+    SOPSubPhase.DATA: [
+        {
+            "sop_id": "P1.data.a",
+            "question_text": "What kinds of data will need to be stored?",
+            "category": "architecture",
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_files", "label": "Files / blobs", "rationale": "Binary files, images, documents."},
+                {"id": "opt_structured", "label": "Structured / relational", "rationale": "Tables, relations, SQL.", "is_default": True},
+                {"id": "opt_timeseries", "label": "Time series", "rationale": "Metrics, events over time."},
+                {"id": "opt_events", "label": "Events / logs", "rationale": "Audit logs, activity streams."},
+                {"id": "opt_graph", "label": "Graph", "rationale": "Relationships, social networks."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your data type."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.data.a.1",
+            "question_text": "Do you have a preferred data storage tool or service?",
+            "category": "architecture",
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_postgres", "label": "PostgreSQL", "rationale": "Full-featured relational DB.", "is_default": True},
+                {"id": "opt_mysql", "label": "MySQL", "rationale": "Widely used relational DB."},
+                {"id": "opt_mongodb", "label": "MongoDB", "rationale": "Document-oriented NoSQL."},
+                {"id": "opt_opensearch", "label": "OpenSearch", "rationale": "Search and analytics engine."},
+                {"id": "opt_es", "label": "ElasticSearch", "rationale": "Full-text search and analytics."},
+                {"id": "opt_s3", "label": "S3 / object storage", "rationale": "Scalable file/blob storage."},
+                {"id": "opt_gcs", "label": "Google Cloud Storage", "rationale": "GCP object storage."},
+                {"id": "opt_neptune", "label": "Neptune", "rationale": "AWS managed graph DB."},
+                {"id": "opt_couchdb", "label": "CouchDB", "rationale": "Distributed document DB."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.data.b",
+            "question_text": "Does the system use events or data streaming?",
+            "category": "architecture",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_yes", "label": "Yes", "rationale": "System needs event/message streaming."},
+                {"id": "opt_no", "label": "No", "rationale": "No streaming requirements.", "is_default": True},
+                {"id": "opt_unsure", "label": "Unsure", "rationale": "Need to evaluate."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.data.b.1",
+            "question_text": "Which streaming tool/service do you prefer?",
+            "category": "architecture",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_kafka", "label": "Kafka", "rationale": "Industry standard for high-throughput streaming.", "is_default": True},
+                {"id": "opt_rabbitmq", "label": "RabbitMQ", "rationale": "Flexible message broker."},
+                {"id": "opt_kinesis", "label": "AWS Kinesis", "rationale": "Native AWS streaming."},
+                {"id": "opt_redis_streams", "label": "Redis Streams", "rationale": "Lightweight, integrated with Redis."},
+                {"id": "opt_nats", "label": "NATS", "rationale": "Lightweight, cloud-native messaging."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
+            ],
+            "depends_on": {"P1.data.b": ["Yes"]},
+        },
+        {
+            "sop_id": "P1.data.b.2",
+            "question_text": "Does or should the system use event sourcing?",
+            "category": "architecture",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_yes", "label": "Yes", "rationale": "Full audit trail, replay capability."},
+                {"id": "opt_no", "label": "No", "rationale": "Traditional CRUD is sufficient.", "is_default": True},
+                {"id": "opt_considering", "label": "Considering it", "rationale": "Need more analysis."},
+            ],
+            "depends_on": {"P1.data.b": ["Yes"]},
+        },
+    ],
+    SOPSubPhase.SECURITY: [
+        {
+            "sop_id": "P1.security.a",
+            "question_text": "What auth/authorization service do you prefer?",
+            "category": "security",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_auth0", "label": "Auth0", "rationale": "Full-featured identity platform.", "is_default": True},
+                {"id": "opt_cognito", "label": "AWS Cognito", "rationale": "Native AWS auth service."},
+                {"id": "opt_keycloak", "label": "Keycloak", "rationale": "Open-source identity management."},
+                {"id": "opt_firebase", "label": "Firebase Auth", "rationale": "Simple auth for mobile/web."},
+                {"id": "opt_custom", "label": "Custom", "rationale": "Build your own auth system."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.security.b",
+            "question_text": "What security tools do you prefer?",
+            "category": "security",
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_sentry", "label": "Sentry", "rationale": "Error tracking and monitoring."},
+                {"id": "opt_waf", "label": "AWS WAF", "rationale": "Web application firewall."},
+                {"id": "opt_cloudflare", "label": "Cloudflare", "rationale": "CDN, DDoS protection, WAF."},
+                {"id": "opt_snyk", "label": "Snyk", "rationale": "Dependency vulnerability scanning.", "is_default": True},
+                {"id": "opt_sonarqube", "label": "SonarQube", "rationale": "Code quality and security analysis."},
+                {"id": "opt_checkmarx", "label": "Checkmarx", "rationale": "SAST/DAST scanning."},
+                {"id": "opt_veracode", "label": "Veracode", "rationale": "Application security testing."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.security.c.1",
+            "question_text": "What key/secrets management solution do you prefer?",
+            "category": "security",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_vault", "label": "HashiCorp Vault", "rationale": "Industry standard secrets management.", "is_default": True},
+                {"id": "opt_aws_sm", "label": "AWS Secrets Manager", "rationale": "Native AWS secrets store."},
+                {"id": "opt_gcp_sm", "label": "Google Secret Manager", "rationale": "Native GCP secrets store."},
+                {"id": "opt_azure_kv", "label": "Azure Key Vault", "rationale": "Native Azure secrets store."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.security.c.2",
+            "question_text": "Do you prefer self-managed or cloud-managed key management?",
+            "category": "security",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_self", "label": "Self-managed", "rationale": "Full control over keys."},
+                {"id": "opt_cloud", "label": "Cloud-managed", "rationale": "Lower operational burden.", "is_default": True},
+                {"id": "opt_hybrid", "label": "Hybrid", "rationale": "Mix of self and cloud managed."},
+            ],
+            "depends_on": None,
+        },
+    ],
+    SOPSubPhase.OBSERVABILITY: [
+        {
+            "sop_id": "P1.observability.a",
+            "question_text": "What observability tools do you prefer?",
+            "category": "infrastructure",
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_prometheus", "label": "Prometheus", "rationale": "Open-source metrics collection."},
+                {"id": "opt_grafana", "label": "Grafana", "rationale": "Visualization and dashboards.", "is_default": True},
+                {"id": "opt_xray", "label": "AWS X-Ray", "rationale": "Distributed tracing for AWS."},
+                {"id": "opt_cloudwatch", "label": "CloudWatch", "rationale": "Native AWS monitoring."},
+                {"id": "opt_gcp_logging", "label": "Google Cloud Logging", "rationale": "Native GCP logging."},
+                {"id": "opt_datadog", "label": "Datadog", "rationale": "Full-stack monitoring platform."},
+                {"id": "opt_newrelic", "label": "New Relic", "rationale": "APM and observability."},
+                {"id": "opt_elk", "label": "ELK Stack", "rationale": "Open-source log analytics."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
+            ],
+            "depends_on": None,
+        },
+    ],
+    SOPSubPhase.SLA: [
+        {
+            "sop_id": "P1.sla.latency",
+            "question_text": "What response time requirements or SLAs apply?",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_1s", "label": "< 1 second", "rationale": "Fast interactive experience."},
+                {"id": "opt_5s", "label": "< 5 seconds", "rationale": "Acceptable for most web apps.", "is_default": True},
+                {"id": "opt_15s", "label": "< 15 seconds", "rationale": "For batch or heavy operations."},
+                {"id": "opt_realtime", "label": "Real-time", "rationale": "Sub-100ms, WebSocket/SSE."},
+                {"id": "opt_none", "label": "No specific requirement", "rationale": "Standard best-effort."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.sla.robustness",
+            "question_text": "What uptime and data loss requirements apply?",
+            "category": "business",
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_99_9", "label": "99.9% uptime", "rationale": "~8.7h downtime/year."},
+                {"id": "opt_99_99", "label": "99.99% uptime", "rationale": "~52min downtime/year."},
+                {"id": "opt_rpo_4h", "label": "RPO < 4 hours", "rationale": "Max 4h data loss on failure."},
+                {"id": "opt_rpo_1h", "label": "RPO < 1 hour", "rationale": "Max 1h data loss on failure."},
+                {"id": "opt_rto_5m", "label": "RTO < 5 minutes", "rationale": "Rapid recovery from failure."},
+                {"id": "opt_none", "label": "No specific requirement", "rationale": "Standard best-effort.", "is_default": True},
+            ],
+            "depends_on": None,
+        },
+    ],
+    SOPSubPhase.BUDGET: [
+        {
+            "sop_id": "P1.budget.a",
+            "question_text": "Is there a budget constraint for infrastructure/tooling?",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_yes", "label": "Yes", "rationale": "Budget is a factor in decisions."},
+                {"id": "opt_no", "label": "No", "rationale": "No specific budget constraint.", "is_default": True},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.budget.b",
+            "question_text": "Is the budget flexible or rigid?",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [
+                {"id": "opt_flexible", "label": "Flexible (can exceed if justified)", "rationale": "Budget is a guideline.", "is_default": True},
+                {"id": "opt_rigid", "label": "Rigid (hard maximum spend)", "rationale": "Cannot exceed budget."},
+            ],
+            "depends_on": {"P1.budget.a": ["Yes"]},
+        },
+    ],
+    SOPSubPhase.PRIORITIES: [
+        {
+            "sop_id": "P1.priorities.a",
+            "question_text": "What are the project priorities?",
+            "category": "business",
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_resiliency", "label": "Resiliency", "rationale": "System reliability and fault tolerance."},
+                {"id": "opt_performance", "label": "Performance", "rationale": "Speed and throughput."},
+                {"id": "opt_frugality", "label": "Frugality", "rationale": "Cost optimization."},
+                {"id": "opt_simplicity", "label": "Simplicity", "rationale": "Easy to build and maintain.", "is_default": True},
+                {"id": "opt_security", "label": "Security", "rationale": "Data protection and compliance."},
+                {"id": "opt_scalability", "label": "Scalability", "rationale": "Handle growth."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your priority."},
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.priorities.b",
+            "question_text": "Please rank your selected priorities from most to least important.",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [],
+            "depends_on": None,
+        },
+    ],
+}
+
+
+def _sop_phase1_fallback_questions() -> List[OpenQuestion]:
+    """Hardcoded fallback covering root questions from all 10 SOP sub-phases.
+
+    Used when LLM-based spec extraction AND question generation both fail.
+    Only includes root questions (no conditional follow-ups).
+    """
+    fallback: List[OpenQuestion] = []
+    for sub_phase, questions in SOP_PHASE1_QUESTIONS.items():
+        for q_def in questions:
+            if q_def.get("depends_on") is not None:
+                continue  # Skip conditional questions in fallback
+            options = []
+            for i, opt in enumerate(q_def.get("options", [])):
+                options.append(
+                    QuestionOption(
+                        id=opt.get("id", f"opt{i}"),
+                        label=opt["label"],
+                        is_default=opt.get("is_default", False),
+                        rationale=opt.get("rationale", ""),
+                        confidence=0.5,
+                    )
+                )
+            if not options:
+                continue  # Skip free-text-only questions in fallback
+            fallback.append(
+                OpenQuestion(
+                    id=q_def["sop_id"],
+                    question_text=q_def["question_text"],
+                    context="",
+                    category=q_def.get("category", "general"),
+                    priority="high",
+                    allow_multiple=q_def.get("allow_multiple", False),
+                    source="sop_phase1",
+                    sop_sub_phase=sub_phase.value,
+                    options=options,
+                )
+            )
+    return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -566,38 +1046,39 @@ class ProductRequirementsAnalysisAgent:
                         latest_spec_file = max(candidates, key=_spec_sort_key)
                         current_spec = latest_spec_file.read_text(encoding="utf-8")
             if not skip_context_discovery:
-                result.current_phase = AnalysisPhase.CONTEXT_DISCOVERY
+                # SOP Phase 1: Structured environment/constraint questions
+                result.current_phase = AnalysisPhase.SOP_PHASE1
                 _update_job(
-                    current_phase=AnalysisPhase.CONTEXT_DISCOVERY.value,
+                    current_phase=AnalysisPhase.SOP_PHASE1.value,
                     progress=2,
-                    message="Gathering project context and constraints...",
-                    status_text="Gathering project context and constraints...",
+                    message="Gathering environment constraints (SOP Phase 1)...",
+                    status_text="Gathering environment constraints (SOP Phase 1)...",
                 )
-                context_questions = self._run_context_constraints_discovery(
-                    current_spec, repo_path
-                )
-                if context_questions:
-                    _update_job(
-                        status_text=f"Waiting for answers to {len(context_questions)} context/constraint question(s)",
+                try:
+                    sop_decisions, current_spec, sop_answered = self._run_sop_phase1(
+                        current_spec, repo_path, job_id, _update_job,
                     )
-                    try:
-                        context_answered = self._communicate_with_user(
-                            job_id=job_id,
-                            open_questions=context_questions,
-                            repo_path=repo_path,
-                            iteration=0,
-                        )
-                    except Exception as exc:
-                        result.failure_reason = f"Context discovery communication failed: {exc}"
-                        logger.error("Product Requirements Analysis: %s", result.failure_reason)
-                        return result
-                    if context_answered:
-                        current_spec = self._inject_context_answers_into_spec(
-                            current_spec, context_answered, repo_path
-                        )
-                        all_answered_questions.extend(context_answered)
-                        self._record_answers(repo_path, context_answered, iteration=0)
-                # If no context questions or no answers, proceed with current_spec unchanged
+                    all_answered_questions.extend(sop_answered)
+                except Exception as exc:
+                    result.failure_reason = f"SOP Phase 1 failed: {exc}"
+                    logger.error("Product Requirements Analysis: %s", result.failure_reason)
+                    return result
+
+                # SOP Phase 2: Architecture analysis (autonomous + approval)
+                result.current_phase = AnalysisPhase.SOP_PHASE2_ARCHITECTURE
+                _update_job(
+                    current_phase=AnalysisPhase.SOP_PHASE2_ARCHITECTURE.value,
+                    progress=8,
+                    message="Analyzing architecture (SOP Phase 2)...",
+                    status_text="Analyzing architecture (SOP Phase 2)...",
+                )
+                try:
+                    arch_result, current_spec = self._run_sop_phase2_architecture(
+                        current_spec, sop_decisions, repo_path, job_id, _update_job,
+                    )
+                    result.architecture_analysis = arch_result
+                except Exception as exc:
+                    logger.warning("SOP Phase 2 failed (non-fatal): %s", str(exc)[:200])
         else:
             logger.info("job_id is None; skipping context discovery")
 
@@ -1517,6 +1998,504 @@ Previously Answered Questions:
             status="open",
             asked_via=[],
         )
+
+    # ------------------------------------------------------------------
+    # SOP Phase 1 & 2 methods
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_llm_json(raw: str) -> Optional[dict]:
+        """Parse JSON from LLM output, stripping markdown code fences if present."""
+        text = raw.strip()
+        if "```" in text:
+            for part in text.split("```"):
+                part = part.strip()
+                if part.lower().startswith("json"):
+                    part = part[4:].strip()
+                if part.startswith("{"):
+                    try:
+                        return json.loads(part)
+                    except json.JSONDecodeError:
+                        continue
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+    @staticmethod
+    def _evaluate_sop_conditionals(
+        question_def: Dict[str, Any],
+        decisions_map: Dict[str, str],
+    ) -> Optional[bool]:
+        """Evaluate whether a conditional SOP question should be asked.
+
+        Returns:
+            True  – question should be asked (condition met or no condition).
+            False – question should NOT be asked (condition not met).
+            None  – parent not yet answered; defer to a later round.
+        """
+        depends_on = question_def.get("depends_on")
+        if not depends_on:
+            return True  # No condition — always ask
+        for parent_id, required_values in depends_on.items():
+            if parent_id not in decisions_map:
+                return None  # Parent not answered yet — defer
+            parent_answer = decisions_map[parent_id]
+            # Check if the parent answer matches any required value (case-insensitive)
+            parent_lower = parent_answer.lower().strip()
+            if not any(v.lower().strip() in parent_lower or parent_lower in v.lower().strip() for v in required_values):
+                return False  # Condition not met
+        return True
+
+    def _extract_sop_decisions_from_spec(self, spec_content: str) -> List[SOPDecision]:
+        """Scan the spec for answers to SOP Phase 1 questions using an LLM call.
+
+        Returns SOPDecision objects with source='spec' for questions clearly answered
+        by the specification. Returns an empty list on LLM failure.
+        """
+        if not spec_content or not spec_content.strip():
+            return []
+
+        # Build a compact JSON summary of all SOP questions for the prompt
+        questions_summary = []
+        for sub_phase, q_defs in SOP_PHASE1_QUESTIONS.items():
+            for q_def in q_defs:
+                option_labels = [o["label"] for o in q_def.get("options", []) if "label" in o]
+                questions_summary.append({
+                    "sop_id": q_def["sop_id"],
+                    "sub_phase": sub_phase.value,
+                    "question": q_def["question_text"],
+                    "options": option_labels,
+                })
+
+        prompt = SOP_SPEC_EXTRACTION_PROMPT.format(
+            sop_questions_json=json.dumps(questions_summary, indent=2),
+            spec_content=spec_content[:8000],
+        )
+
+        try:
+            raw = self.llm.complete_text(prompt)
+            if not raw or not raw.strip():
+                return []
+            parsed = self._parse_llm_json(raw)
+            if not isinstance(parsed, dict):
+                return []
+            extracted = parsed.get("extracted_decisions", [])
+            if not isinstance(extracted, list):
+                return []
+
+            decisions: List[SOPDecision] = []
+            # Build a reverse lookup for sop_id -> sub_phase
+            id_to_sub_phase: Dict[str, SOPSubPhase] = {}
+            id_to_question: Dict[str, str] = {}
+            for sp, q_defs in SOP_PHASE1_QUESTIONS.items():
+                for q_def in q_defs:
+                    id_to_sub_phase[q_def["sop_id"]] = sp
+                    id_to_question[q_def["sop_id"]] = q_def["question_text"]
+
+            for item in extracted:
+                sop_id = str(item.get("sop_id", ""))
+                if sop_id not in id_to_sub_phase:
+                    continue
+                confidence = float(item.get("confidence", 0.0))
+                if confidence < 0.7:
+                    continue  # Skip low-confidence extractions
+                decisions.append(
+                    SOPDecision(
+                        sop_id=sop_id,
+                        sub_phase=id_to_sub_phase[sop_id],
+                        question_text=id_to_question.get(sop_id, ""),
+                        decision=str(item.get("decision", "")),
+                        source="spec",
+                        confidence=confidence,
+                    )
+                )
+            return decisions
+        except Exception as exc:
+            logger.warning("SOP spec extraction failed, will ask all questions: %s", str(exc)[:200])
+            return []
+
+    def _run_sop_phase1(
+        self,
+        spec_content: str,
+        repo_path: Path,
+        job_id: str,
+        job_updater: Callable,
+    ) -> Tuple[List[SOPDecision], str, List[AnsweredQuestion]]:
+        """Run SOP Phase 1: Environment Constraints & Requirements.
+
+        Multi-round approach:
+        1. Extract answers already present in the spec.
+        2. For each round, collect all currently-askable questions (root Qs + conditional
+           Qs whose parents are answered). Present them to the user in one batch.
+        3. Repeat until no new questions emerge (max MAX_SOP_ROUNDS rounds).
+
+        Returns (all_decisions, updated_spec, answered_questions).
+        """
+        # Step 1: Extract decisions from spec
+        spec_decisions = self._extract_sop_decisions_from_spec(spec_content)
+        decisions_map: Dict[str, str] = {d.sop_id: d.decision for d in spec_decisions}
+        all_decisions = list(spec_decisions)
+        all_answered: List[AnsweredQuestion] = []
+
+        if spec_decisions:
+            logger.info(
+                "SOP Phase 1: Extracted %d decisions from spec: %s",
+                len(spec_decisions),
+                [d.sop_id for d in spec_decisions],
+            )
+
+        # Step 2: Multi-round question loop
+        for round_num in range(1, MAX_SOP_ROUNDS + 1):
+            round_questions: List[OpenQuestion] = []
+
+            for sub_phase in SOPSubPhase:
+                q_defs = SOP_PHASE1_QUESTIONS.get(sub_phase, [])
+                for q_def in q_defs:
+                    sop_id = q_def["sop_id"]
+                    if sop_id in decisions_map:
+                        continue  # Already answered
+
+                    cond_result = self._evaluate_sop_conditionals(q_def, decisions_map)
+                    if cond_result is False:
+                        continue  # Condition not met
+                    if cond_result is None:
+                        continue  # Parent not answered yet — defer
+
+                    # Build OpenQuestion from the definition
+                    options = []
+                    for i, opt in enumerate(q_def.get("options", [])):
+                        options.append(
+                            QuestionOption(
+                                id=opt.get("id", f"opt{i}"),
+                                label=opt["label"],
+                                is_default=opt.get("is_default", False),
+                                rationale=opt.get("rationale", ""),
+                                confidence=0.5,
+                            )
+                        )
+
+                    if not options:
+                        # Free-text question — still include with minimal options
+                        options = [
+                            QuestionOption(id="opt_text", label="(Please type your answer)", is_default=True, rationale="", confidence=0.5),
+                        ]
+
+                    round_questions.append(
+                        OpenQuestion(
+                            id=sop_id,
+                            question_text=q_def["question_text"],
+                            context="",
+                            category=q_def.get("category", "general"),
+                            priority="high",
+                            allow_multiple=q_def.get("allow_multiple", False),
+                            source="sop_phase1",
+                            sop_sub_phase=sub_phase.value,
+                            options=options,
+                        )
+                    )
+
+            if not round_questions:
+                logger.info("SOP Phase 1: All questions answered after round %d", round_num - 1)
+                break
+
+            logger.info("SOP Phase 1 round %d: asking %d questions", round_num, len(round_questions))
+            job_updater(
+                status_text=f"SOP Phase 1 round {round_num}: waiting for answers to {len(round_questions)} question(s)",
+            )
+
+            try:
+                answered = self._communicate_with_user(
+                    job_id=job_id,
+                    open_questions=round_questions,
+                    repo_path=repo_path,
+                    iteration=0,
+                )
+            except Exception as exc:
+                logger.error("SOP Phase 1 communication failed: %s", exc)
+                raise
+
+            if not answered:
+                logger.info("SOP Phase 1: No answers received in round %d", round_num)
+                break
+
+            # Record answers as SOPDecision objects
+            for aq in answered:
+                # Map question_id back to sub_phase
+                sub_phase_val = ""
+                for sp, q_defs in SOP_PHASE1_QUESTIONS.items():
+                    for q_def in q_defs:
+                        if q_def["sop_id"] == aq.question_id:
+                            sub_phase_val = sp
+                            break
+                    if sub_phase_val:
+                        break
+
+                if sub_phase_val:
+                    decision = SOPDecision(
+                        sop_id=aq.question_id,
+                        sub_phase=sub_phase_val,
+                        question_text=aq.question_text,
+                        decision=aq.selected_answer,
+                        source="user",
+                        confidence=1.0,
+                    )
+                    all_decisions.append(decision)
+                    decisions_map[aq.question_id] = aq.selected_answer
+
+            all_answered.extend(answered)
+            self._record_answers(repo_path, answered, iteration=0)
+
+        # Step 3: Inject all decisions into spec
+        if all_answered:
+            spec_content = self._inject_context_answers_into_spec(spec_content, all_answered, repo_path)
+
+        return all_decisions, spec_content, all_answered
+
+    def _run_sop_phase2_architecture(
+        self,
+        spec_content: str,
+        sop_decisions: List[SOPDecision],
+        repo_path: Path,
+        job_id: str,
+        job_updater: Callable,
+    ) -> Tuple[ArchitectureAnalysisResult, str]:
+        """Run SOP Phase 2: Architecture Analysis.
+
+        Autonomously analyzes architecture based on spec + Phase 1 decisions,
+        then presents results for user approval.
+
+        Returns (architecture_result, updated_spec).
+        """
+        arch_result = ArchitectureAnalysisResult()
+
+        # Format Phase 1 decisions for the prompt
+        decisions_json = json.dumps(
+            [
+                {
+                    "sop_id": d.sop_id,
+                    "sub_phase": d.sub_phase.value if isinstance(d.sub_phase, SOPSubPhase) else str(d.sub_phase),
+                    "question": d.question_text,
+                    "decision": d.decision,
+                    "source": d.source,
+                }
+                for d in sop_decisions
+            ],
+            indent=2,
+        )
+
+        # Step 1: Architecture analysis LLM call
+        job_updater(status_text="Analyzing architecture based on requirements...")
+        prompt = SOP_ARCHITECTURE_ANALYSIS_PROMPT.format(
+            spec_content=spec_content[:12000],
+            phase1_decisions_json=decisions_json,
+        )
+
+        try:
+            raw = self.llm.complete_text(prompt)
+            if raw and raw.strip():
+                parsed = self._parse_llm_json(raw)
+                if isinstance(parsed, dict):
+                    arch_result = ArchitectureAnalysisResult(
+                        architecture_type=str(parsed.get("architecture_type", "")),
+                        architecture_rationale=str(parsed.get("architecture_rationale", "")),
+                        data_types_and_storage=parsed.get("data_types_and_storage", []),
+                        task_types=parsed.get("task_types", []),
+                        tool_gaps=[
+                            ToolGapAnalysis(
+                                gap_description=g.get("gap_description", ""),
+                                recommendations=[
+                                    ToolRecommendation(
+                                        name=r.get("name", ""),
+                                        description=r.get("description", ""),
+                                        why_recommended=r.get("why_recommended", ""),
+                                    )
+                                    for r in g.get("recommendations", [])
+                                ],
+                            )
+                            for g in parsed.get("tool_gaps", [])
+                        ],
+                        diagrams=parsed.get("diagrams", {}),
+                        summary=str(parsed.get("summary", "")),
+                    )
+        except Exception as exc:
+            logger.warning("SOP Phase 2 architecture analysis failed: %s", str(exc)[:200])
+
+        # Step 2: Generate approval questions
+        if arch_result.architecture_type or arch_result.tool_gaps:
+            job_updater(status_text="Preparing architecture recommendations for approval...")
+            approval_questions = self._build_architecture_approval_questions(arch_result)
+
+            if approval_questions:
+                try:
+                    answered = self._communicate_with_user(
+                        job_id=job_id,
+                        open_questions=approval_questions,
+                        repo_path=repo_path,
+                        iteration=0,
+                    )
+                    if answered:
+                        self._apply_architecture_approval(arch_result, answered)
+                        self._record_answers(repo_path, answered, iteration=0)
+                except Exception as exc:
+                    logger.warning("SOP Phase 2 approval communication failed: %s", str(exc)[:200])
+
+        # Step 3: Save architecture document
+        product_analysis_dir = repo_path / PRODUCT_ANALYSIS_SUBDIR
+        product_analysis_dir.mkdir(parents=True, exist_ok=True)
+        arch_doc_path = product_analysis_dir / "architecture_analysis.md"
+        try:
+            arch_doc_content = self._format_architecture_document(arch_result)
+            arch_doc_path.write_text(arch_doc_content, encoding="utf-8")
+            logger.info("Saved architecture analysis to %s", arch_doc_path)
+        except OSError as exc:
+            logger.warning("Failed to save architecture document: %s", exc)
+
+        # Step 4: Inject architecture summary into spec
+        if arch_result.summary:
+            arch_section = "\n\n## Architecture Analysis\n\n"
+            arch_section += arch_result.summary + "\n"
+            if arch_result.architecture_type:
+                arch_section += f"\n**Architecture Type:** {arch_result.architecture_type}\n"
+            spec_content = arch_section + "\n---\n\n" + spec_content
+
+        return arch_result, spec_content
+
+    def _build_architecture_approval_questions(
+        self, arch_result: ArchitectureAnalysisResult
+    ) -> List[OpenQuestion]:
+        """Build approval questions from architecture analysis results."""
+        questions: List[OpenQuestion] = []
+
+        # Architecture type approval
+        if arch_result.architecture_type:
+            options = [
+                QuestionOption(
+                    id="opt_approve",
+                    label=f"Approve {arch_result.architecture_type} architecture",
+                    is_default=True,
+                    rationale=arch_result.architecture_rationale[:200] if arch_result.architecture_rationale else "",
+                    confidence=0.8,
+                ),
+                QuestionOption(
+                    id="opt_modify",
+                    label="Suggest a different architecture",
+                    is_default=False,
+                    rationale="If the recommended architecture doesn't fit your needs.",
+                    confidence=0.2,
+                ),
+            ]
+            questions.append(
+                OpenQuestion(
+                    id="arch_type_approval",
+                    question_text=f"We recommend a {arch_result.architecture_type} architecture. Do you approve?",
+                    context=arch_result.architecture_rationale[:500] if arch_result.architecture_rationale else "",
+                    category="architecture",
+                    priority="high",
+                    options=options,
+                    source="sop_phase2",
+                )
+            )
+
+        # Gap tool selection questions
+        for i, gap in enumerate(arch_result.tool_gaps):
+            if len(gap.recommendations) <= 1:
+                continue  # No choice needed
+            options = []
+            for j, rec in enumerate(gap.recommendations):
+                options.append(
+                    QuestionOption(
+                        id=f"opt_gap{i}_{j}",
+                        label=rec.name,
+                        is_default=j == 0,
+                        rationale=rec.why_recommended or rec.description,
+                        confidence=0.7 if j == 0 else 0.4,
+                    )
+                )
+            questions.append(
+                OpenQuestion(
+                    id=f"gap_{i}_selection",
+                    question_text=f"Which tool do you prefer for: {gap.gap_description}?",
+                    context=gap.gap_description,
+                    category="infrastructure",
+                    priority="medium",
+                    options=options,
+                    source="sop_phase2",
+                )
+            )
+
+        return questions
+
+    @staticmethod
+    def _apply_architecture_approval(
+        arch_result: ArchitectureAnalysisResult,
+        answered: List[AnsweredQuestion],
+    ) -> None:
+        """Apply user approval answers to the architecture result."""
+        for aq in answered:
+            if aq.question_id == "arch_type_approval" and "different" in aq.selected_answer.lower():
+                # User wants a different architecture — note it but keep original as reference
+                if aq.other_text:
+                    arch_result.architecture_type = aq.other_text
+            elif aq.question_id.startswith("gap_") and aq.question_id.endswith("_selection"):
+                # Extract gap index from question_id like "gap_0_selection"
+                try:
+                    gap_idx = int(aq.question_id.split("_")[1])
+                    if 0 <= gap_idx < len(arch_result.tool_gaps):
+                        arch_result.tool_gaps[gap_idx].selected_recommendation = aq.selected_answer
+                except (ValueError, IndexError):
+                    pass
+
+    @staticmethod
+    def _format_architecture_document(arch_result: ArchitectureAnalysisResult) -> str:
+        """Format architecture analysis result as a Markdown document."""
+        lines = ["# Architecture Analysis\n"]
+
+        if arch_result.architecture_type:
+            lines.append(f"## Architecture Type: {arch_result.architecture_type}\n")
+            if arch_result.architecture_rationale:
+                lines.append(arch_result.architecture_rationale + "\n")
+
+        if arch_result.data_types_and_storage:
+            lines.append("\n## Data Types and Storage\n")
+            for item in arch_result.data_types_and_storage:
+                dt = item.get("data_type", "Unknown")
+                store = item.get("recommended_store", "TBD")
+                rat = item.get("rationale", "")
+                lines.append(f"- **{dt}** → {store}" + (f" — {rat}" if rat else "") + "\n")
+
+        if arch_result.task_types:
+            lines.append("\n## Task Types\n")
+            for item in arch_result.task_types:
+                task = item.get("task", "Unknown")
+                cls = item.get("classification", "")
+                needs = item.get("compute_needs", "")
+                lines.append(f"- **{task}**: {cls}" + (f" ({needs})" if needs else "") + "\n")
+
+        if arch_result.tool_gaps:
+            lines.append("\n## Gap Analysis\n")
+            for gap in arch_result.tool_gaps:
+                lines.append(f"\n### {gap.gap_description}\n")
+                if gap.selected_recommendation:
+                    lines.append(f"**Selected:** {gap.selected_recommendation}\n")
+                for rec in gap.recommendations:
+                    marker = " ✓" if rec.name == gap.selected_recommendation else ""
+                    lines.append(f"- **{rec.name}**{marker}: {rec.description}")
+                    if rec.why_recommended:
+                        lines.append(f"  — {rec.why_recommended}")
+                    lines.append("\n")
+
+        if arch_result.diagrams:
+            lines.append("\n## Architecture Diagrams\n")
+            for name, content in arch_result.diagrams.items():
+                lines.append(f"\n### {name}\n")
+                lines.append(content + "\n")
+
+        if arch_result.summary:
+            lines.append("\n## Summary\n")
+            lines.append(arch_result.summary + "\n")
+
+        return "\n".join(lines)
 
     def _run_context_constraints_discovery(
         self, spec_content: str, repo_path: Path
