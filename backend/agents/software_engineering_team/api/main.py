@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -125,11 +126,24 @@ def create_project_workspace(project_name: str, spec_content: bytes) -> Path:
     return workspace
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Start Temporal worker on startup if TEMPORAL_ADDRESS is set."""
+    try:
+        from software_engineering_team.temporal.worker import start_se_temporal_worker_thread
+
+        start_se_temporal_worker_thread()
+    except Exception as e:
+        logger.warning("Could not start SE Temporal worker: %s", e)
+    yield
+
+
 app = FastAPI(
     title="Software Engineering Team API",
     description="Async API: POST /run-team with work folder path returns job_id. "
     "GET /run-team/{job_id} polls status. Tech Lead orchestrates the full pipeline.",
     version="0.3.0",
+    lifespan=_lifespan,
 )
 
 app.add_middleware(
@@ -139,17 +153,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-def _startup_se_temporal_worker() -> None:
-    """When SE API runs standalone, start Temporal worker if TEMPORAL_ADDRESS is set."""
-    try:
-        from software_engineering_team.temporal.worker import start_se_temporal_worker_thread
-
-        start_se_temporal_worker_thread()
-    except Exception as e:
-        logger.warning("Could not start SE Temporal worker: %s", e)
 
 
 class RunTeamRequest(BaseModel):
