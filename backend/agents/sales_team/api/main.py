@@ -11,6 +11,14 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from job_service_client import (
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    JobServiceClient,
+    start_stale_job_monitor,
+)
 from sales_team.learning_engine import LearningEngine
 from sales_team.models import (
     CoachingRequest,
@@ -36,14 +44,6 @@ from sales_team.outcome_store import (
     record_deal_outcome,
     record_stage_outcome,
 )
-from shared_job_management import (
-    JOB_STATUS_COMPLETED,
-    JOB_STATUS_FAILED,
-    JOB_STATUS_PENDING,
-    JOB_STATUS_RUNNING,
-    CentralJobManager,
-    start_stale_job_monitor,
-)
 
 app = FastAPI(
     title="AI Sales Team API",
@@ -57,7 +57,7 @@ app = FastAPI(
 )
 
 logger = logging.getLogger(__name__)
-_job_manager = CentralJobManager(team="sales_team")
+_job_manager = JobServiceClient(team="sales_team")
 _stale_monitor_stop = start_stale_job_monitor(
     _job_manager,
     interval_seconds=15.0,
@@ -281,9 +281,7 @@ def cancel_pipeline_job(job_id: str) -> CancelJobResponse:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     current = job.get("status", JOB_STATUS_PENDING)
     if current not in (JOB_STATUS_PENDING, JOB_STATUS_RUNNING):
-        raise HTTPException(
-            status_code=400, detail=f"Job is already in terminal state: {current}"
-        )
+        raise HTTPException(status_code=400, detail=f"Job is already in terminal state: {current}")
     _job_manager.update_job(job_id, status="cancelled", heartbeat=False)
     return CancelJobResponse(job_id=job_id)
 

@@ -16,15 +16,15 @@ from blog_research_agent.tools.web_search import OllamaWebSearch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from llm_service import get_client
-from shared_job_management import (
+from job_service_client import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
-    CentralJobManager,
+    JobServiceClient,
     start_stale_job_monitor,
 )
+from llm_service import get_client
 from social_media_marketing_team.models import (
     BrandGoals,
     CampaignPerformanceSnapshot,
@@ -39,7 +39,7 @@ from social_media_marketing_team.trend_models import TrendDigest
 app = FastAPI(title="Social Media Marketing Team API", version="1.0.0")
 
 logger = logging.getLogger(__name__)
-_job_manager = CentralJobManager(team="social_media_marketing_team")
+_job_manager = JobServiceClient(team="social_media_marketing_team")
 _stale_monitor_stop = start_stale_job_monitor(
     _job_manager,
     interval_seconds=15.0,
@@ -55,8 +55,12 @@ _scheduler: Optional[BackgroundScheduler] = None
 
 
 class RunMarketingTeamRequest(BaseModel):
-    brand_guidelines_path: str = Field(..., max_length=4096, description="Path to brand guidelines document")
-    brand_objectives_path: str = Field(..., max_length=4096, description="Path to brand objectives document")
+    brand_guidelines_path: str = Field(
+        ..., max_length=4096, description="Path to brand guidelines document"
+    )
+    brand_objectives_path: str = Field(
+        ..., max_length=4096, description="Path to brand objectives document"
+    )
     llm_model_name: str = Field(..., max_length=256, description="Name of local LLM model to use")
     brand_name: str = Field(default="Brand", max_length=256)
     target_audience: str = Field(default="general audience", max_length=5000)
@@ -145,7 +149,9 @@ def _run_team_job(job_id: str, request: RunMarketingTeamRequest) -> None:
         guidelines_text = _read_text_file(request.brand_guidelines_path)
         objectives_text = _read_text_file(request.brand_objectives_path)
 
-        _update_job(job_id, current_stage="building_campaign_proposal", progress=50, eta_hint="~1 minute")
+        _update_job(
+            job_id, current_stage="building_campaign_proposal", progress=50, eta_hint="~1 minute"
+        )
         orchestrator = SocialMediaMarketingOrchestrator(llm_model_name=request.llm_model_name)
         goals = BrandGoals(
             brand_name=request.brand_name,
@@ -188,7 +194,9 @@ def _run_team_job(job_id: str, request: RunMarketingTeamRequest) -> None:
             result=result.model_dump(),
         )
     except Exception as exc:
-        _update_job(job_id, status=JOB_STATUS_FAILED, current_stage="failed", error=str(exc), eta_hint=None)
+        _update_job(
+            job_id, status=JOB_STATUS_FAILED, current_stage="failed", error=str(exc), eta_hint=None
+        )
 
 
 @app.post("/social-marketing/run", response_model=RunMarketingTeamResponse)
@@ -221,6 +229,7 @@ def run_marketing_team(request: RunMarketingTeamRequest) -> RunMarketingTeamResp
     try:
         from social_media_marketing_team.temporal.client import is_temporal_enabled
         from social_media_marketing_team.temporal.start_workflow import start_team_job_workflow
+
         if is_temporal_enabled():
             start_team_job_workflow(job_id, request.model_dump())
             return RunMarketingTeamResponse(
@@ -263,19 +272,25 @@ def ingest_performance(job_id: str, payload: PerformanceIngestRequest) -> Perfor
 
 
 @app.post("/social-marketing/revise/{job_id}", response_model=RunMarketingTeamResponse)
-def revise_marketing_team(job_id: str, request: ReviseMarketingTeamRequest) -> RunMarketingTeamResponse:
+def revise_marketing_team(
+    job_id: str, request: ReviseMarketingTeamRequest
+) -> RunMarketingTeamResponse:
     job = _job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     original_payload = job.get("request_payload")
     if not isinstance(original_payload, dict):
-        raise HTTPException(status_code=400, detail="Original run payload not available for revision")
+        raise HTTPException(
+            status_code=400, detail="Original run payload not available for revision"
+        )
 
     original_request = RunMarketingTeamRequest(**original_payload)
-    revised = original_request.model_copy(update={
-        "human_feedback": request.feedback,
-        "human_approved_for_testing": request.approved_for_testing,
-    })
+    revised = original_request.model_copy(
+        update={
+            "human_feedback": request.feedback,
+            "human_approved_for_testing": request.approved_for_testing,
+        }
+    )
     revision_history = job.get("revision_history", [])
     revision_history.append(request.feedback)
     _job_manager.update_job(
@@ -293,6 +308,7 @@ def revise_marketing_team(job_id: str, request: ReviseMarketingTeamRequest) -> R
     try:
         from social_media_marketing_team.temporal.client import is_temporal_enabled
         from social_media_marketing_team.temporal.start_workflow import start_team_job_workflow
+
         if is_temporal_enabled():
             start_team_job_workflow(job_id, revised.model_dump())
             return RunMarketingTeamResponse(
@@ -340,7 +356,9 @@ def get_marketing_job_status(job_id: str) -> MarketingJobStatusResponse:
     job = _job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    return MarketingJobStatusResponse(**{k: v for k, v in job.items() if k in MarketingJobStatusResponse.model_fields})
+    return MarketingJobStatusResponse(
+        **{k: v for k, v in job.items() if k in MarketingJobStatusResponse.model_fields}
+    )
 
 
 class CancelMarketingJobResponse(BaseModel):
@@ -436,7 +454,9 @@ def run_trend_discovery() -> TrendRunResponse:
     """Trigger trend discovery immediately (runs in background, returns at once)."""
     thread = threading.Thread(target=_run_trend_job, daemon=True, name="trend_discovery_manual")
     thread.start()
-    return TrendRunResponse(message="Trend discovery started. Poll GET /social-marketing/trends/latest for results.")
+    return TrendRunResponse(
+        message="Trend discovery started. Poll GET /social-marketing/trends/latest for results."
+    )
 
 
 @app.get("/social-marketing/trends/latest", response_model=TrendLatestResponse)

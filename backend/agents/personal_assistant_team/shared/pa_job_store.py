@@ -1,19 +1,15 @@
 """
-Job store for Personal Assistant API: persists job status and progress via CentralJobManager.
-
-Jobs are stored under {cache_dir}/personal_assistant_team/jobs/{job_id}.json
+Job store for Personal Assistant API: persists job status and progress via the job service.
 """
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared_job_management import CentralJobManager
+from job_service_client import JobServiceClient
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +22,8 @@ PA_JOB_STATUS_CANCELLED = "cancelled"
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache")).resolve()
 
 
-def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
-    return CentralJobManager(team="personal_assistant_team", cache_dir=cache_dir)
+def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
+    return JobServiceClient(team="personal_assistant_team", cache_dir=str(cache_dir))
 
 
 def create_job(
@@ -38,12 +34,12 @@ def create_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     context: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Create a new job with pending status and persist to cache."""
+    """Create a new job with pending status."""
+    from datetime import datetime, timezone
+
     now = datetime.now(timezone.utc).isoformat()
     data: Dict[str, Any] = {
-        "job_id": job_id,
         "user_id": user_id,
-        "status": PA_JOB_STATUS_PENDING,
         "request_type": request_type,
         "request_message": message,
         "context": context or {},
@@ -53,17 +49,17 @@ def create_job(
         "error": None,
         "created_at": now,
         "updated_at": now,
+        "events": [],
     }
-    _manager(cache_dir).create_job(job_id, status=PA_JOB_STATUS_PENDING, **data)
+    _client(cache_dir).create_job(job_id, status=PA_JOB_STATUS_PENDING, **data)
 
 
 def get_job(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> Optional[Dict[str, Any]]:
-    """Get job data from cache, or None if not found."""
-    data = _manager(cache_dir).get_job(job_id)
-    return copy.deepcopy(data) if data else None
+    """Get job data, or None if not found."""
+    return _client(cache_dir).get_job(job_id)
 
 
 def update_job(
@@ -71,8 +67,8 @@ def update_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     **kwargs: Any,
 ) -> None:
-    """Update job fields. Merges with existing data and persists to cache."""
-    _manager(cache_dir).update_job(job_id, **kwargs)
+    """Update job fields. Merges with existing data."""
+    _client(cache_dir).update_job(job_id, **kwargs)
 
 
 def list_jobs(
@@ -81,25 +77,27 @@ def list_jobs(
     running_only: bool = False,
     limit: int = 50,
 ) -> List[Dict[str, Any]]:
-    """List jobs from cache. Optionally filter by user_id and running status."""
+    """List jobs. Optionally filter by user_id and running status."""
     statuses: Optional[List[str]] = (
         [PA_JOB_STATUS_PENDING, PA_JOB_STATUS_RUNNING] if running_only else None
     )
-    raw = _manager(cache_dir).list_jobs(statuses=statuses)
+    raw = _client(cache_dir).list_jobs(statuses=statuses)
     result: List[Dict[str, Any]] = []
     for data in raw:
         if user_id is not None and data.get("user_id") != user_id:
             continue
-        result.append({
-            "job_id": data.get("job_id"),
-            "user_id": data.get("user_id"),
-            "status": data.get("status", PA_JOB_STATUS_PENDING),
-            "request_type": data.get("request_type"),
-            "progress": data.get("progress", 0),
-            "status_text": data.get("status_text"),
-            "created_at": data.get("created_at"),
-            "updated_at": data.get("updated_at"),
-        })
+        result.append(
+            {
+                "job_id": data.get("job_id"),
+                "user_id": data.get("user_id"),
+                "status": data.get("status", PA_JOB_STATUS_PENDING),
+                "request_type": data.get("request_type"),
+                "progress": data.get("progress", 0),
+                "status_text": data.get("status_text"),
+                "created_at": data.get("created_at"),
+                "updated_at": data.get("updated_at"),
+            }
+        )
     return result[:limit]
 
 
@@ -109,11 +107,7 @@ def mark_all_running_jobs_failed(
 ) -> None:
     """Mark all pending or running PA jobs as failed (e.g. on server shutdown)."""
     try:
-        jobs = list_jobs(cache_dir=cache_dir, running_only=True, limit=10000)
-        for job in jobs:
-            job_id = job.get("job_id")
-            if job_id:
-                update_job(job_id, status=PA_JOB_STATUS_FAILED, error=reason, cache_dir=cache_dir)
+        _client(cache_dir).mark_all_active_jobs_failed(reason)
     except Exception as e:
         logger.warning("mark_all_running_jobs_failed: %s", e)
 
@@ -129,7 +123,7 @@ def cancel_job(
     status = data.get("status")
     if status not in (PA_JOB_STATUS_PENDING, PA_JOB_STATUS_RUNNING):
         return False
-    _manager(cache_dir).update_job(
+    _client(cache_dir).update_job(
         job_id,
         status=PA_JOB_STATUS_CANCELLED,
         status_text="Job cancelled by user",
@@ -151,5 +145,5 @@ def delete_job(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
-    """Delete a job from the cache. Returns True if deleted, False if not found."""
-    return _manager(cache_dir).delete_job(job_id)
+    """Delete a job. Returns True if deleted, False if not found."""
+    return _client(cache_dir).delete_job(job_id)
