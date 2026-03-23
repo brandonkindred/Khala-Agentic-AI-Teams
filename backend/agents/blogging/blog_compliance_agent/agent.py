@@ -9,12 +9,17 @@ All errors are raised explicitly - no silent failures.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
 from llm_service import LLMClient
+from llm_service.interface import (
+    LLMError as LLMServiceError,
+)
+from llm_service.interface import (
+    LLMJsonParseError as LLMServiceJsonParseError,
+)
 
 from .models import ComplianceReport, Violation
 from .prompts import COMPLIANCE_PROMPT
@@ -33,6 +38,8 @@ except ImportError:
         pass
     class LLMError(Exception):
         pass
+
+_MAX_JSON_RETRIES = 2
 
 logger = logging.getLogger(__name__)
 
@@ -70,26 +77,68 @@ class BlogComplianceAgent:
             ComplianceReport with status PASS or FAIL.
         """
         brand_summary = (brand_spec_prompt or "").strip()
-        validator_str = json.dumps(validator_report, indent=2) if validator_report else "{}"
+
+        # Pass only a concise summary of the validator report to avoid LLM echoing
+        # long markdown content that breaks JSON parsing.
+        if validator_report:
+            checks = validator_report.get("checks", [])
+            failed = [c.get("name", "unknown") for c in checks if c.get("status") == "FAIL"]
+            validator_summary = (
+                f"Overall: {validator_report.get('status', 'unknown')}. "
+                f"Failed checks: {', '.join(failed) or 'none'}."
+            )
+        else:
+            validator_summary = "No validator report available."
 
         prompt = COMPLIANCE_PROMPT.format(
             brand_spec_summary=brand_summary,
-            validator_report=validator_str,
+            validator_summary=validator_summary,
             draft=draft[:15000],
         )
 
         if on_llm_request:
             on_llm_request("Checking compliance with brand guidelines...")
-        try:
-            data = self.llm.complete_json(prompt, temperature=0.1)
-        except LLMError:
-            raise
-        except Exception as e:
-            logger.error("Compliance check failed: %s", e)
-            raise ComplianceError(
-                f"Compliance check failed: {e}",
-                cause=e,
-            ) from e
+
+        data = None
+        for attempt in range(_MAX_JSON_RETRIES):
+            current_prompt = prompt
+            if attempt > 0:
+                current_prompt = prompt + (
+                    "\n\nCRITICAL: Your previous response contained invalid JSON. "
+                    "Output ONLY a single valid JSON object. Do NOT embed code blocks, "
+                    "markdown formatting, or literal newlines inside string values. "
+                    "Keep evidence_quotes to under 80 characters each."
+                )
+            try:
+                data = self.llm.complete_json(current_prompt, temperature=0.1)
+                break
+            except LLMServiceJsonParseError as e:
+                logger.warning(
+                    "Compliance JSON parse failed (attempt %d/%d): %s",
+                    attempt + 1, _MAX_JSON_RETRIES, e,
+                )
+                continue
+            except (LLMServiceError, LLMError):
+                raise
+            except Exception as e:
+                logger.error("Compliance check failed: %s", e)
+                raise ComplianceError(f"Compliance check failed: {e}", cause=e) from e
+
+        if data is None:
+            logger.warning(
+                "Compliance JSON parse failed after %d attempts; using fallback FAIL report",
+                _MAX_JSON_RETRIES,
+            )
+            report = ComplianceReport(
+                status="FAIL",
+                violations=[],
+                required_fixes=["Could not parse compliance check result; re-run compliance."],
+                notes=f"Fallback report: JSON parse failed after {_MAX_JSON_RETRIES} attempts.",
+            )
+            if work_dir and write_artifact:
+                write_artifact(work_dir, "compliance_report.json", report.to_dict())
+                logger.info("Wrote compliance_report.json: status=FAIL (fallback)")
+            return report
 
         status = (data.get("status") or "FAIL").upper()
         if status not in ("PASS", "FAIL"):
