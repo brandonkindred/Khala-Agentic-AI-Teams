@@ -8,7 +8,7 @@ import { vi } from 'vitest';
 
 vi.mock('rxjs', async (importOriginal) => {
   const rxjs = await importOriginal<typeof import('rxjs')>();
-  return { ...rxjs, timer: vi.fn((..._args: unknown[]) => rxjs.of(0)) };
+  return { ...rxjs, timer: vi.fn(() => rxjs.of(0)) };
 });
 
 describe('BloggingDashboardComponent', () => {

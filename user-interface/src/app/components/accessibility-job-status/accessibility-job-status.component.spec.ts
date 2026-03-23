@@ -6,7 +6,7 @@ import { AccessibilityJobStatusComponent } from './accessibility-job-status.comp
 
 vi.mock('rxjs', async (importOriginal) => {
   const rxjs = await importOriginal<typeof import('rxjs')>();
-  return { ...rxjs, timer: vi.fn((..._args: unknown[]) => rxjs.of(0)) };
+  return { ...rxjs, timer: vi.fn(() => rxjs.of(0)) };
 });
 
 describe('AccessibilityJobStatusComponent', () => {

@@ -6,7 +6,7 @@ import { JobStatusComponent } from './job-status.component';
 
 vi.mock('rxjs', async (importOriginal) => {
   const rxjs = await importOriginal<typeof import('rxjs')>();
-  return { ...rxjs, timer: vi.fn((..._args: unknown[]) => rxjs.of(0)) };
+  return { ...rxjs, timer: vi.fn(() => rxjs.of(0)) };
 });
 
 describe('JobStatusComponent', () => {
