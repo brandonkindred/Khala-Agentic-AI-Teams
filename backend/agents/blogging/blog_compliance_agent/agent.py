@@ -9,7 +9,6 @@ All errors are raised explicitly - no silent failures.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from pathlib import Path
@@ -99,11 +98,22 @@ class BlogComplianceAgent:
             ComplianceReport with status PASS or FAIL.
         """
         brand_summary = (brand_spec_prompt or "").strip()
-        validator_str = json.dumps(validator_report, indent=2) if validator_report else "{}"
+
+        # Pass only a concise summary of the validator report to avoid LLM echoing
+        # long markdown content that breaks JSON parsing.
+        if validator_report:
+            checks = validator_report.get("checks", [])
+            failed = [c.get("name", "unknown") for c in checks if c.get("status") == "FAIL"]
+            validator_summary = (
+                f"Overall: {validator_report.get('status', 'unknown')}. "
+                f"Failed checks: {', '.join(failed) or 'none'}."
+            )
+        else:
+            validator_summary = "No validator report available."
 
         prompt = COMPLIANCE_PROMPT.format(
             brand_spec_summary=brand_summary,
-            validator_report=validator_str,
+            validator_summary=validator_summary,
             draft=draft[:15000],
         )
 

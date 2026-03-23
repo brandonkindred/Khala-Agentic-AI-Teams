@@ -734,32 +734,93 @@ def run_pipeline(
                 rewrite_iterations=rewrite_iter + 1,
             )
             
-            feedback_items = [
-                FeedbackItem(
-                    category="compliance",
-                    severity="must_fix",
-                    location=None,
-                    issue=fix,
-                    suggestion=fix,
+            # --- Build feedback from ALL gates ---
+            feedback_items: list[FeedbackItem] = []
+
+            # 1. Validator failed checks
+            if validator_report.status == "FAIL":
+                for check in validator_report.checks:
+                    if check.status == "FAIL":
+                        details_str = ""
+                        if check.details:
+                            if "matches" in check.details:
+                                details_str = f" Found: {', '.join(str(m) for m in check.details['matches'][:3])}"
+                            elif "violations" in check.details:
+                                details_str = f" Violations: {', '.join(str(v) for v in check.details['violations'][:3])}"
+                            elif "fk_grade" in check.details:
+                                details_str = f" FK grade: {check.details['fk_grade']}"
+                        feedback_items.append(
+                            FeedbackItem(
+                                category="validator",
+                                severity="must_fix",
+                                location=None,
+                                issue=f"Validator check '{check.name}' failed.{details_str}",
+                                suggestion=f"Fix the '{check.name}' violation identified by the deterministic validator.",
+                            )
+                        )
+
+            # 2. Fact-check failures
+            if fact_report.claims_status == "FAIL" or fact_report.risk_status == "FAIL":
+                for flag in fact_report.risk_flags:
+                    feedback_items.append(
+                        FeedbackItem(
+                            category="fact_check",
+                            severity="must_fix",
+                            location=None,
+                            issue=f"Risk flag: {flag}",
+                            suggestion=f"Address risk flag: {flag}",
+                        )
+                    )
+                for disclaimer in fact_report.required_disclaimers:
+                    feedback_items.append(
+                        FeedbackItem(
+                            category="fact_check",
+                            severity="must_fix",
+                            location=None,
+                            issue=f"Missing required disclaimer: {disclaimer}",
+                            suggestion=f"Add disclaimer: {disclaimer}",
+                        )
+                    )
+
+            # 3. Compliance fixes
+            for fix in compliance_report.required_fixes:
+                feedback_items.append(
+                    FeedbackItem(
+                        category="compliance",
+                        severity="must_fix",
+                        location=None,
+                        issue=fix,
+                        suggestion=fix,
+                    )
                 )
-                for fix in compliance_report.required_fixes
-            ]
+
             if not feedback_items:
                 feedback_items = [
                     FeedbackItem(
                         category="compliance",
                         severity="must_fix",
                         location=None,
-                        issue="Validator or compliance check failed; see validator_report.json and compliance_report.json",
-                        suggestion="Address all violations and re-run.",
+                        issue="Validator, fact-check, or compliance check failed; see reports for details.",
+                        suggestion="Address all violations from validator_report.json, fact_check_report.json, and compliance_report.json.",
                     )
                 ]
-            
+
+            # Build a summary reflecting all gate failures
+            gate_failures = []
+            if validator_report.status == "FAIL":
+                failed_checks = [c.name for c in validator_report.checks if c.status == "FAIL"]
+                gate_failures.append(f"Validator FAIL ({', '.join(failed_checks)})")
+            if fact_report.claims_status == "FAIL" or fact_report.risk_status == "FAIL":
+                gate_failures.append(f"Fact-check FAIL (claims={fact_report.claims_status}, risk={fact_report.risk_status})")
+            if compliance_report.status == "FAIL":
+                gate_failures.append(f"Compliance FAIL ({len(compliance_report.violations)} violations)")
+            feedback_summary = "; ".join(gate_failures) if gate_failures else "Gates failed"
+
             try:
                 revise_input = ReviseDraftInput(
                     draft=draft_result.draft,
                     feedback_items=feedback_items,
-                    feedback_summary=f"Compliance FAIL: {len(compliance_report.violations)} violations. Apply required_fixes.",
+                    feedback_summary=feedback_summary,
                     research_document=research_document,
                     content_plan=plan,
                     audience=brief.audience,

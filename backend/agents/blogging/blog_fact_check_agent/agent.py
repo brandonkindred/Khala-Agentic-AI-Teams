@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from llm_service import LLMClient
+from llm_service.interface import (
+    LLMError as LLMServiceError,
+)
+from llm_service.interface import (
+    LLMJsonParseError as LLMServiceJsonParseError,
+)
 
 from .models import FactCheckReport
 from .prompts import FACT_CHECK_PROMPT
@@ -30,6 +36,8 @@ except ImportError:
         pass
     class LLMError(Exception):
         pass
+
+_MAX_JSON_RETRIES = 2
 
 logger = logging.getLogger(__name__)
 
@@ -79,16 +87,47 @@ class BlogFactCheckAgent:
 
         if on_llm_request:
             on_llm_request("Checking facts and claims...")
-        try:
-            data = self.llm.complete_json(prompt, temperature=0.1)
-        except LLMError:
-            raise
-        except Exception as e:
-            logger.error("Fact-check failed: %s", e)
-            raise FactCheckError(
-                f"Fact-check failed: {e}",
-                cause=e,
-            ) from e
+
+        data = None
+        for attempt in range(_MAX_JSON_RETRIES):
+            current_prompt = prompt
+            if attempt > 0:
+                current_prompt = prompt + (
+                    "\n\nCRITICAL: Your previous response contained invalid JSON. "
+                    "Output ONLY a single valid JSON object. No code blocks or markdown in values."
+                )
+            try:
+                data = self.llm.complete_json(current_prompt, temperature=0.1)
+                break
+            except LLMServiceJsonParseError as e:
+                logger.warning(
+                    "Fact-check JSON parse failed (attempt %d/%d): %s",
+                    attempt + 1, _MAX_JSON_RETRIES, e,
+                )
+                continue
+            except (LLMServiceError, LLMError):
+                raise
+            except Exception as e:
+                logger.error("Fact-check failed: %s", e)
+                raise FactCheckError(f"Fact-check failed: {e}", cause=e) from e
+
+        if data is None:
+            logger.warning(
+                "Fact-check JSON parse failed after %d attempts; using fallback FAIL report",
+                _MAX_JSON_RETRIES,
+            )
+            report = FactCheckReport(
+                claims_status="FAIL",
+                risk_status="FAIL",
+                risk_flags=["Could not parse fact-check result; re-run fact check."],
+                required_disclaimers=[],
+                notes=f"Fallback report: JSON parse failed after {_MAX_JSON_RETRIES} attempts.",
+            )
+            if work_dir and write_artifact:
+                fc_data = report.dict() if hasattr(report, "dict") else report.model_dump()
+                write_artifact(work_dir, "fact_check_report.json", fc_data)
+                logger.info("Wrote fact_check_report.json: claims=FAIL risk=FAIL (fallback)")
+            return report
 
         claims_status = (data.get("claims_status") or "PASS").upper()
         if claims_status not in ("PASS", "FAIL"):

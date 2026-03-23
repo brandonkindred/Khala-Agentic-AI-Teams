@@ -5,8 +5,9 @@ from unittest.mock import MagicMock
 
 import pytest
 from blog_compliance_agent import BlogComplianceAgent
-from llm_service import DummyLLMClient, LLMTemporaryError
 from shared.brand_spec import load_brand_spec_prompt
+
+from llm_service import DummyLLMClient, LLMJsonParseError, LLMTemporaryError
 
 
 @pytest.fixture
@@ -61,4 +62,30 @@ def test_compliance_fallback_when_llm_exhausts_transient_retries(monkeypatch, br
     assert report.required_fixes
     assert report.notes and "tooling" in report.notes.lower()
     assert llm.complete_json.call_count == 3
+    assert (tmp_path / "compliance_report.json").exists()
+
+
+def test_compliance_json_parse_retry_then_success(brand_spec_prompt):
+    """On first JSON parse failure, retries and succeeds on second attempt."""
+    llm = MagicMock()
+    llm.complete_json = MagicMock(
+        side_effect=[
+            LLMJsonParseError("bad json"),
+            {"status": "PASS", "violations": [], "required_fixes": [], "notes": "ok"},
+        ]
+    )
+    agent = BlogComplianceAgent(llm_client=llm)
+    report = agent.run("Test draft.", brand_spec_prompt)
+    assert report.status == "PASS"
+    assert llm.complete_json.call_count == 2
+
+
+def test_compliance_json_parse_all_retries_fail_returns_fallback(brand_spec_prompt, tmp_path):
+    """When all JSON parse retries fail, returns a fallback FAIL report."""
+    llm = MagicMock()
+    llm.complete_json = MagicMock(side_effect=LLMJsonParseError("bad json"))
+    agent = BlogComplianceAgent(llm_client=llm)
+    report = agent.run("Test draft.", brand_spec_prompt, work_dir=tmp_path)
+    assert report.status == "FAIL"
+    assert report.required_fixes
     assert (tmp_path / "compliance_report.json").exists()

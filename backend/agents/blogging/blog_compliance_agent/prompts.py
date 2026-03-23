@@ -28,14 +28,19 @@ If there are NO violations, set status to "PASS" and leave violations and requir
 Output JSON only, in this exact format:
 {{"status": "PASS" or "FAIL", "violations": [{{"rule_id": "...", "description": "...", "evidence_quotes": ["..."], "location_hint": "..."}}], "required_fixes": ["...", "..."], "notes": "..."}}
 
+IMPORTANT OUTPUT RULES:
+- evidence_quotes: each quote MUST be under 80 characters. Truncate with "..." if needed.
+- Do NOT include code blocks, markdown fences, or literal newlines inside any JSON string value.
+- notes must be a single short sentence.
+
 BRAND SPEC:
 ---
 {brand_spec_summary}
 ---
 
-VALIDATOR REPORT (already run):
+VALIDATOR REPORT SUMMARY (deterministic checks already run — do NOT re-check these):
 ---
-{validator_report}
+{validator_summary}
 ---
 
 DRAFT:
