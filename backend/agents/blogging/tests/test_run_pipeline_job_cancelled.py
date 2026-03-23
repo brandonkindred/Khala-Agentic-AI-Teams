@@ -8,6 +8,7 @@ from typing import Any
 def test_run_blog_full_pipeline_job_marks_cancelled_on_temporal_cancel(monkeypatch) -> None:
     """Temporal cancellation should mark job cancelled, not failed."""
     from agent_implementations import blog_writing_process_v2
+
     from blogging.shared import blog_job_store as blogging_job_store
     from shared import blog_job_store
     from shared.run_pipeline_job import run_blog_full_pipeline_job
