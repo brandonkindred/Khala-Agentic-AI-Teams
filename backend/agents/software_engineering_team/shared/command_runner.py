@@ -370,8 +370,9 @@ def run_command_with_nvm(  # pragma: no cover
     )
     script = (
         f"{nvm_prefix} && "
-        f"{{ nvm install {node_version} --no-progress && nvm use {node_version}; }} || "
-        f"{{ nvm install {NVM_NODE_FALLBACK_VERSION} --no-progress && nvm use {NVM_NODE_FALLBACK_VERSION}; }} && "
+        f"{{ {{ nvm install {node_version} --no-progress && nvm use {node_version}; }} || "
+        f"{{ nvm install {NVM_NODE_FALLBACK_VERSION} --no-progress && nvm use {NVM_NODE_FALLBACK_VERSION}; }} || "
+        f"nvm use system; }} && "
         f"{version_check} && "
         f"{shlex.join(cmd)}"
     )
