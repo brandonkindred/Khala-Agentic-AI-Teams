@@ -789,3 +789,211 @@ If issues are found, fix them in the output. Keep response concise.
   "summary": "Brief summary of changes"
 }}
 """
+
+# ---------------------------------------------------------------------------
+# SOP Phase 1: Spec Extraction — Identify answers already present in the spec
+# ---------------------------------------------------------------------------
+
+SOP_SPEC_EXTRACTION_PROMPT = """You are an expert Product Analyst. You are given a product specification and a structured list of SOP questions about environment constraints and requirements.
+
+Your task: Scan the specification and identify which SOP questions are ALREADY CLEARLY ANSWERED by the spec content. Only extract decisions you are highly confident about (confidence > 0.7). If the spec is ambiguous or only hints at an answer without being explicit, do NOT extract it — we will ask the user.
+
+SOP Questions (organized by sub-phase):
+---
+{sop_questions_json}
+---
+
+Product Specification:
+---
+{spec_content}
+---
+
+For each question that IS clearly answered in the spec, extract the decision. Include the exact excerpt from the spec that supports your extraction.
+
+Respond with a JSON object only, no markdown:
+{{
+  "extracted_decisions": [
+    {{
+      "sop_id": "P1.deploy.a",
+      "decision": "Cloud",
+      "confidence": 0.95,
+      "spec_excerpt": "The application will be deployed on AWS cloud infrastructure..."
+    }}
+  ]
+}}
+
+If no questions are answered by the spec, return:
+{{
+  "extracted_decisions": []
+}}
+"""
+
+# ---------------------------------------------------------------------------
+# SOP Phase 1: Round Prompt — Generate questions for unanswered SOP items
+# ---------------------------------------------------------------------------
+
+SOP_PHASE1_ROUND_PROMPT = """You are an expert Product Analyst. Generate well-crafted open questions for the following SOP sub-phase items that have NOT yet been answered.
+
+Context: We are systematically gathering environment constraints and requirements before detailed spec review. Some questions have already been answered (from the spec or prior rounds). You must generate questions ONLY for the unanswered items listed below.
+
+Previously collected decisions (from spec extraction and prior user answers):
+---
+{prior_decisions}
+---
+
+Unanswered SOP items to generate questions for:
+---
+{sub_phase_questions}
+---
+
+Specification excerpt (for context):
+---
+{spec_excerpt}
+---
+
+For each unanswered item, generate a well-crafted question with:
+- Clear, specific question text contextualized by any prior decisions (e.g., if user chose Python, ask about Python-specific frameworks)
+- 2-6 answer options with id, label, is_default (exactly one true), rationale, and confidence
+- Appropriate category and priority
+- The sop_sub_phase field set to the sub-phase name
+- For multi-select questions, set allow_multiple: true
+
+Respond with a JSON object only, no markdown:
+{{
+  "open_questions": [
+    {{
+      "id": "P1.deploy.a",
+      "question_text": "Where will this application be deployed?",
+      "context": "Deployment model affects infrastructure, cost, and operational complexity.",
+      "category": "infrastructure",
+      "priority": "high",
+      "allow_multiple": false,
+      "sop_sub_phase": "deployment",
+      "constraint_domain": "",
+      "constraint_layer": 0,
+      "options": [
+        {{ "id": "opt_cloud", "label": "Cloud (AWS, GCP, Azure, etc.)", "is_default": true, "rationale": "Most common for new applications.", "confidence": 0.7 }},
+        {{ "id": "opt_onprem", "label": "On-premises", "is_default": false, "rationale": "For air-gapped or regulated environments.", "confidence": 0.3 }}
+      ]
+    }}
+  ]
+}}
+"""
+
+# ---------------------------------------------------------------------------
+# SOP Phase 2: Architecture Analysis
+# ---------------------------------------------------------------------------
+
+SOP_ARCHITECTURE_ANALYSIS_PROMPT = """You are an expert Solutions Architect. Based on the product specification and the environment/constraint decisions collected during Phase 1, perform a comprehensive architecture analysis.
+
+Product Specification:
+---
+{spec_content}
+---
+
+Phase 1 Decisions (environment constraints and requirements):
+---
+{phase1_decisions_json}
+---
+
+Perform the following analysis:
+
+1. **Architecture Type**: Recommend an architecture type (2-tier, 3-tier, N-tier, serverless, event-driven, microservices, monolith, etc.) with clear rationale based on the requirements and constraints.
+
+2. **Data Types and Storage**: Identify the types of data the system will handle and recommend appropriate storage services for each, considering the user's stated preferences.
+
+3. **Task Types**: Classify the computational tasks (IO-bound, CPU-intensive, memory-intensive, GPU, real-time, batch, etc.) and note their compute requirements.
+
+4. **Gap Analysis**: Identify service/tool gaps — areas where the specification and Phase 1 decisions do not yet specify a needed tool or service. For each gap, provide 3-5 recommendations with rationale. Focus on gaps that are material to the project (CI/CD, monitoring, logging, caching, search, message queues, etc.).
+
+5. **Architecture Diagrams**: Produce architecture diagrams at multiple granularity levels:
+   - System overview (high-level components and their interactions)
+   - Data flow diagram (how data moves through the system)
+   Use Mermaid syntax for each diagram, followed by a textual description.
+
+6. **Summary**: A concise overall architecture summary.
+
+Respond with a JSON object only, no markdown:
+{{
+  "architecture_type": "3-tier",
+  "architecture_rationale": "A 3-tier architecture separates concerns between presentation, business logic, and data layers, which aligns with the team's preference for simplicity and the moderate scale requirements...",
+  "data_types_and_storage": [
+    {{ "data_type": "User profiles and accounts", "recommended_store": "PostgreSQL", "rationale": "Structured relational data with ACID requirements" }},
+    {{ "data_type": "Session data", "recommended_store": "Redis", "rationale": "Fast key-value access for ephemeral session state" }}
+  ],
+  "task_types": [
+    {{ "task": "API request handling", "classification": "IO-bound", "compute_needs": "Standard compute, scales horizontally" }},
+    {{ "task": "Report generation", "classification": "CPU-intensive", "compute_needs": "May need dedicated worker nodes" }}
+  ],
+  "tool_gaps": [
+    {{
+      "gap_description": "No monitoring or observability solution specified",
+      "recommendations": [
+        {{ "name": "Datadog", "description": "Full-stack monitoring with APM, logs, and metrics", "why_recommended": "Comprehensive all-in-one solution, easy setup" }},
+        {{ "name": "Prometheus + Grafana", "description": "Open-source metrics collection and visualization", "why_recommended": "Free, industry standard, highly customizable" }},
+        {{ "name": "AWS CloudWatch", "description": "Native AWS monitoring service", "why_recommended": "Tight integration with AWS services, no additional setup" }}
+      ]
+    }}
+  ],
+  "diagrams": {{
+    "system_overview": "```mermaid\\ngraph TD\\n  Client[Web Browser] --> LB[Load Balancer]\\n  LB --> API[API Server]\\n  API --> DB[(PostgreSQL)]\\n  API --> Cache[(Redis)]\\n```\\n\\n**Textual Description:** The system follows a 3-tier architecture. Client browsers connect through a load balancer to the API server tier. The API tier communicates with PostgreSQL for persistent storage and Redis for caching and session management.",
+    "data_flow": "```mermaid\\nsequenceDiagram\\n  Client->>API: HTTP Request\\n  API->>Cache: Check cache\\n  Cache-->>API: Cache miss\\n  API->>DB: Query data\\n  DB-->>API: Return results\\n  API->>Cache: Update cache\\n  API-->>Client: Response\\n```\\n\\n**Textual Description:** Requests flow from the client to the API layer, which first checks the Redis cache. On cache miss, data is fetched from PostgreSQL, cached in Redis, and returned to the client."
+  }},
+  "summary": "The recommended architecture is a 3-tier system using..."
+}}
+"""
+
+# ---------------------------------------------------------------------------
+# SOP Phase 2: Architecture Approval — Format results for user approval
+# ---------------------------------------------------------------------------
+
+SOP_ARCHITECTURE_APPROVAL_PROMPT = """You are an expert Product Analyst. The architecture analysis is complete. Format the results as approval questions for the user.
+
+Architecture Analysis Results:
+---
+{architecture_results_json}
+---
+
+Generate approval questions:
+1. One question for the overall architecture type recommendation (approve or suggest alternative)
+2. One question per tool gap that has multiple recommendations (user selects preferred option)
+
+For the architecture approval question, provide the recommended type as the default option plus 2-3 alternatives.
+For gap questions, list all recommendations as options with the first as default.
+
+Respond with a JSON object only, no markdown:
+{{
+  "open_questions": [
+    {{
+      "id": "arch_type_approval",
+      "question_text": "We recommend a 3-tier architecture for this project. Do you approve this approach?",
+      "context": "Rationale: A 3-tier architecture separates concerns...",
+      "category": "architecture",
+      "priority": "high",
+      "allow_multiple": false,
+      "sop_sub_phase": "",
+      "constraint_domain": "",
+      "constraint_layer": 0,
+      "options": [
+        {{ "id": "opt_approve", "label": "Approve 3-tier architecture", "is_default": true, "rationale": "Recommended based on requirements analysis.", "confidence": 0.8 }},
+        {{ "id": "opt_alt1", "label": "Use microservices instead", "is_default": false, "rationale": "Better for independent scaling of services.", "confidence": 0.4 }}
+      ]
+    }},
+    {{
+      "id": "gap_monitoring",
+      "question_text": "Which monitoring solution do you prefer?",
+      "context": "No monitoring solution was specified. This is needed for production readiness.",
+      "category": "infrastructure",
+      "priority": "medium",
+      "allow_multiple": false,
+      "sop_sub_phase": "",
+      "constraint_domain": "",
+      "constraint_layer": 0,
+      "options": [
+        {{ "id": "opt_datadog", "label": "Datadog", "is_default": true, "rationale": "Comprehensive all-in-one solution.", "confidence": 0.7 }},
+        {{ "id": "opt_prometheus", "label": "Prometheus + Grafana", "is_default": false, "rationale": "Open-source, highly customizable.", "confidence": 0.6 }}
+      ]
+    }}
+  ]
+}}
+"""

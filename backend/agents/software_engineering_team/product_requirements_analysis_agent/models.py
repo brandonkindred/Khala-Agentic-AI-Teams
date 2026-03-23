@@ -7,7 +7,7 @@ Enhanced question models with rationale and confidence for auto-answering.
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -15,11 +15,28 @@ from pydantic import BaseModel, Field
 class AnalysisPhase(str, Enum):
     """Phases of the Product Requirements Analysis workflow."""
 
-    CONTEXT_DISCOVERY = "context_discovery"
+    CONTEXT_DISCOVERY = "context_discovery"  # deprecated, kept for backward compat
+    SOP_PHASE1 = "sop_phase1"
+    SOP_PHASE2_ARCHITECTURE = "sop_phase2_architecture"
     SPEC_REVIEW = "spec_review"
     COMMUNICATE = "communicate"
     SPEC_UPDATE = "spec_update"
     SPEC_CLEANUP = "spec_cleanup"
+
+
+class SOPSubPhase(str, Enum):
+    """Sub-phases of SOP Phase 1: Environment Constraints & Requirements."""
+
+    DEPLOYMENT = "deployment"
+    REGULATIONS = "regulations"
+    TOOL_PREFERENCES = "tool_preferences"
+    CODING_PREFERENCES = "coding_preferences"
+    DATA = "data"
+    SECURITY = "security"
+    OBSERVABILITY = "observability"
+    SLA = "sla"
+    BUDGET = "budget"
+    PRIORITIES = "priorities"
 
 
 class QuestionOption(BaseModel):
@@ -110,6 +127,10 @@ class OpenQuestion(BaseModel):
         default_factory=list,
         description="Delivery channels used for this question (slack, email, web_ui, etc.)",
     )
+    sop_sub_phase: str = Field(
+        default="",
+        description="SOP sub-phase this question belongs to (e.g. 'deployment', 'regulations')",
+    )
 
 
 class AnsweredQuestion(BaseModel):
@@ -170,6 +191,53 @@ class AutoAnswerResult(BaseModel):
     )
 
 
+class SOPDecision(BaseModel):
+    """A decision tracked during SOP Phase 1, either extracted from the spec or answered by the user."""
+
+    sop_id: str = Field(description="SOP question identifier, e.g. 'P1.deploy.a'")
+    sub_phase: SOPSubPhase
+    question_text: str = Field(description="The question that was answered")
+    decision: str = Field(description="The answer/decision text")
+    source: str = Field(description="Origin: 'spec' (extracted from spec) or 'user' (asked and answered)")
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Confidence in this decision")
+
+
+class ToolRecommendation(BaseModel):
+    """A tool/service recommendation for a gap identified in Phase 2."""
+
+    name: str = Field(description="Tool or service name")
+    description: str = Field(default="", description="Brief description of the tool")
+    why_recommended: str = Field(default="", description="Why this tool is recommended for the gap")
+
+
+class ToolGapAnalysis(BaseModel):
+    """A gap identified during Phase 2 architecture analysis with 3-5 recommendations."""
+
+    gap_description: str = Field(description="Description of the service/tool gap")
+    recommendations: List[ToolRecommendation] = Field(default_factory=list)
+    selected_recommendation: Optional[str] = Field(
+        default=None, description="Name of the recommendation selected by user"
+    )
+
+
+class ArchitectureAnalysisResult(BaseModel):
+    """Output of SOP Phase 2: Architecture Analysis."""
+
+    architecture_type: str = Field(default="", description="E.g. '2-tier', '3-tier', 'N-tier', 'serverless'")
+    architecture_rationale: str = Field(default="", description="Why this architecture type was recommended")
+    data_types_and_storage: List[Dict[str, str]] = Field(
+        default_factory=list, description="Each: {data_type, recommended_store, rationale}"
+    )
+    task_types: List[Dict[str, str]] = Field(
+        default_factory=list, description="Each: {task, classification, compute_needs}"
+    )
+    tool_gaps: List[ToolGapAnalysis] = Field(default_factory=list)
+    diagrams: Dict[str, str] = Field(
+        default_factory=dict, description="Name -> Mermaid + textual description content"
+    )
+    summary: str = Field(default="", description="Overall architecture summary")
+
+
 class SpecReviewResult(BaseModel):
     """Output of Spec Review phase."""
 
@@ -218,4 +286,7 @@ class AnalysisWorkflowResult(BaseModel):
     )
     final_spec_content: Optional[str] = Field(
         default=None, description="Final validated spec content"
+    )
+    architecture_analysis: Optional[ArchitectureAnalysisResult] = Field(
+        default=None, description="Phase 2 architecture analysis result"
     )

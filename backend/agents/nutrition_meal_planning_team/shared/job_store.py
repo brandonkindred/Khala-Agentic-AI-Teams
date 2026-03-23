@@ -1,16 +1,15 @@
 """
-Job store for Nutrition & Meal Planning team: persists async job status via CentralJobManager.
+Job store for Nutrition & Meal Planning team: persists async job status via the job service.
 """
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared_job_management import CentralJobManager
+from job_service_client import JobServiceClient
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +21,17 @@ JOB_STATUS_CANCELLED = "cancelled"
 
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
 
-_manager_instance: Optional[CentralJobManager] = None
+_client_instance: Optional[JobServiceClient] = None
 
 
-def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
-    global _manager_instance
-    if _manager_instance is None:
-        _manager_instance = CentralJobManager(
+def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
+    global _client_instance
+    if _client_instance is None:
+        _client_instance = JobServiceClient(
             team="nutrition_meal_planning_team",
-            cache_dir=cache_dir,
+            cache_dir=str(cache_dir),
         )
-    return _manager_instance
+    return _client_instance
 
 
 def create_job(
@@ -41,7 +40,7 @@ def create_job(
     **fields: Any,
 ) -> None:
     """Create a new job with pending status."""
-    _manager(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **fields)
+    _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **fields)
 
 
 def get_job(
@@ -49,8 +48,7 @@ def get_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> Optional[Dict[str, Any]]:
     """Get job data, or None if not found."""
-    data = _manager(cache_dir).get_job(job_id)
-    return copy.deepcopy(data) if data else None
+    return _client(cache_dir).get_job(job_id)
 
 
 def update_job(
@@ -59,7 +57,7 @@ def update_job(
     **fields: Any,
 ) -> None:
     """Update job fields."""
-    _manager(cache_dir).update_job(job_id, **fields)
+    _client(cache_dir).update_job(job_id, **fields)
 
 
 def list_jobs(
@@ -67,7 +65,7 @@ def list_jobs(
     statuses: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """List jobs, optionally filtered by status."""
-    return _manager(cache_dir).list_jobs(statuses=statuses)
+    return _client(cache_dir).list_jobs(statuses=statuses)
 
 
 def cancel_job(
@@ -78,7 +76,7 @@ def cancel_job(
     data = get_job(job_id, cache_dir=cache_dir)
     if not data:
         return False
-    _manager(cache_dir).update_job(job_id, status=JOB_STATUS_CANCELLED, heartbeat=False)
+    _client(cache_dir).update_job(job_id, status=JOB_STATUS_CANCELLED, heartbeat=False)
     return True
 
 
@@ -97,10 +95,6 @@ def mark_all_running_jobs_failed(
 ) -> None:
     """Mark all pending or running jobs as failed (e.g. on server shutdown)."""
     try:
-        jobs = list_jobs(cache_dir=cache_dir, statuses=[JOB_STATUS_PENDING, JOB_STATUS_RUNNING])
-        for job in jobs:
-            job_id = job.get("job_id")
-            if job_id:
-                update_job(job_id, status=JOB_STATUS_FAILED, error=reason, cache_dir=cache_dir)
+        _client(cache_dir).mark_all_active_jobs_failed(reason)
     except Exception as e:
         logger.warning("mark_all_running_jobs_failed: %s", e)

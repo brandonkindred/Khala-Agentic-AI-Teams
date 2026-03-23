@@ -1,10 +1,9 @@
 """
-Job store for async API: persists job status and progress per job in a cache directory.
+Job store for async API: persists job status and progress via the centralized job service.
 
-Uses AGENT_CACHE environment variable when set (otherwise .agent_cache), resolved to an
-absolute path so list/create use the same directory regardless of process CWD. Each job
-is stored under {cache_dir}/software_engineering_team/jobs/{job_id}.json via
-CentralJobManager so state survives process restarts.
+Uses ``JobServiceClient`` to communicate with the job service container over
+HTTP when ``JOB_SERVICE_URL`` is set, falling back to a local
+``CentralJobManager`` for non-Docker development.
 
 Stale jobs: JOB_STALE_AFTER_SECONDS (env JOB_STALE_AFTER_SECONDS, default 1800) is the
 age in seconds after which a pending/running job with no recent heartbeat is marked failed.
@@ -14,7 +13,6 @@ POST /run-team/{job_id}/resume (the workflow may still be running or can be rest
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 import threading
@@ -23,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared_job_management import CentralJobManager
+from job_service_client import JobServiceClient
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +36,10 @@ JOB_STATUS_AGENT_CRASH = "agent_crash"
 JOB_STATUS_PAUSED_LLM_CONNECTIVITY = "paused_llm_connectivity"
 
 # Sentinel failure reason when LLM is unreachable after 3 attempts (frontend team retry + circuit breaker)
-LLM_UNREACHABLE_AFTER_RETRIES = (
-    "LLM unreachable after 3 attempts with exponential backoff. Check connectivity and resume when ready."
-)
+LLM_UNREACHABLE_AFTER_RETRIES = "LLM unreachable after 3 attempts with exponential backoff. Check connectivity and resume when ready."
 
 DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache"))
+
 
 # Seconds after which a pending/running job with no recent heartbeat is marked failed.
 # Set via env JOB_STALE_AFTER_SECONDS (default 1800).
@@ -56,13 +53,14 @@ def get_stale_after_seconds() -> float:
 _jobs_path_logged = False
 
 
-def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
+def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
     global _jobs_path_logged
     if not _jobs_path_logged:
-        jobs_dir = Path(cache_dir) / "software_engineering_team" / "jobs"
-        logger.info("Software engineering job store path: %s", jobs_dir)
+        logger.info(
+            "Software engineering job store using JobServiceClient (team=software_engineering_team)"
+        )
         _jobs_path_logged = True
-    return CentralJobManager(team="software_engineering_team", cache_dir=cache_dir)
+    return JobServiceClient(team="software_engineering_team", cache_dir=str(cache_dir))
 
 
 def create_job(
@@ -71,11 +69,9 @@ def create_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     job_type: Optional[str] = None,
 ) -> None:
-    """Create a new job with pending status and persist to cache."""
+    """Create a new job with pending status and persist to the job service."""
     data: Dict[str, Any] = {
-        "job_id": job_id,
         "repo_path": repo_path,
-        "status": JOB_STATUS_PENDING,
         "progress": 0,
         "current_task": None,
         "status_text": None,
@@ -88,11 +84,11 @@ def create_job(
         "waiting_for_answers": False,
         "submitted_answers": [],
         "cancel_requested": False,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "events": [],
     }
     if job_type is not None:
         data["job_type"] = job_type
-    _manager(cache_dir).create_job(**data)
+    _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **data)
 
 
 def reset_job(
@@ -103,11 +99,7 @@ def reset_job(
 ) -> None:
     """Reset an existing job to initial state (same job_id). Preserves created_at so job order is unchanged."""
     existing = get_job(job_id, cache_dir)
-    created_at = (
-        existing.get("created_at")
-        if existing
-        else datetime.now(timezone.utc).isoformat()
-    )
+    created_at = existing.get("created_at") if existing else datetime.now(timezone.utc).isoformat()
     now = datetime.now(timezone.utc).isoformat()
     data: Dict[str, Any] = {
         "job_id": job_id,
@@ -133,16 +125,15 @@ def reset_job(
     }
     if job_type is not None:
         data["job_type"] = job_type
-    _manager(cache_dir).replace_job(job_id, data)
+    _client(cache_dir).replace_job(job_id, data)
 
 
 def get_job(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> Optional[Dict[str, Any]]:
-    """Get job data from cache, or None if not found."""
-    data = _manager(cache_dir).get_job(job_id)
-    return copy.deepcopy(data) if data else None
+    """Get job data, or None if not found."""
+    return _client(cache_dir).get_job(job_id)
 
 
 def delete_job(
@@ -150,7 +141,7 @@ def delete_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Remove the job from the store. Returns True if removed, False if not found."""
-    return _manager(cache_dir).delete_job(job_id)
+    return _client(cache_dir).delete_job(job_id)
 
 
 def list_jobs(
@@ -158,22 +149,24 @@ def list_jobs(
     running_only: bool = False,
     job_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """List jobs from cache. If running_only is True, only include pending or running.
+    """List jobs. If running_only is True, only include pending or running.
     If job_type is set, only include jobs with that job_type."""
-    running_statuses = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING)
+    running_statuses = [JOB_STATUS_PENDING, JOB_STATUS_RUNNING]
+    statuses = running_statuses if running_only else None
+    jobs = _client(cache_dir).list_jobs(statuses=statuses)
     result: List[Dict[str, Any]] = []
-    statuses = list(running_statuses) if running_only else None
-    jobs = _manager(cache_dir).list_jobs(statuses=statuses)
     for data in jobs:
         if job_type is not None and data.get("job_type") != job_type:
             continue
-        result.append({
-            "job_id": data.get("job_id", ""),
-            "status": data.get("status", JOB_STATUS_PENDING),
-            "repo_path": data.get("repo_path"),
-            "job_type": data.get("job_type"),
-            "created_at": data.get("created_at"),
-        })
+        result.append(
+            {
+                "job_id": data.get("job_id", ""),
+                "status": data.get("status", JOB_STATUS_PENDING),
+                "repo_path": data.get("repo_path"),
+                "job_type": data.get("job_type"),
+                "created_at": data.get("created_at"),
+            }
+        )
     return result
 
 
@@ -183,11 +176,7 @@ def mark_all_running_jobs_failed(
 ) -> None:
     """Mark all pending or running jobs as failed (e.g. on server shutdown)."""
     try:
-        jobs = list_jobs(cache_dir=cache_dir, running_only=True)
-        for job in jobs:
-            job_id = job.get("job_id")
-            if job_id:
-                update_job(job_id, status=JOB_STATUS_FAILED, error=reason, cache_dir=cache_dir)
+        _client(cache_dir).mark_all_active_jobs_failed(reason)
     except Exception as e:
         logger.warning("mark_all_running_jobs_failed: %s", e)
 
@@ -198,7 +187,7 @@ def mark_stale_jobs_failed(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> List[str]:
     """Mark stale pending/running jobs as failed unless they are waiting for answers."""
-    return _manager(cache_dir).mark_stale_active_jobs_failed(
+    return _client(cache_dir).mark_stale_active_jobs_failed(
         stale_after_seconds=stale_after_seconds,
         reason=reason,
     )
@@ -209,8 +198,8 @@ def update_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     **kwargs: Any,
 ) -> None:
-    """Update job fields. Merges with existing data and persists to cache."""
-    _manager(cache_dir).update_job(job_id, **kwargs)
+    """Update job fields. Merges with existing data."""
+    _client(cache_dir).update_job(job_id, **kwargs)
 
 
 def start_job_heartbeat_thread(
@@ -232,10 +221,9 @@ def start_job_heartbeat_thread(
                     return
                 if data.get("status") not in active_statuses:
                     return
-                update_job(job_id, cache_dir=cache_dir)
+                _client(cache_dir).heartbeat(job_id)
             except Exception as exc:
                 logger.warning("Job heartbeat thread for %s: %s", job_id, exc)
-                # Continue loop so one failure does not kill the thread
 
     thread = threading.Thread(
         target=_heartbeat_loop,
@@ -252,11 +240,7 @@ def update_task_state(
     **kwargs: Any,
 ) -> None:
     """Update state for a single task. Merges kwargs into job["task_states"][task_id]."""
-    def merge(data: Dict[str, Any]) -> None:
-        task_states = data.setdefault("task_states", {})
-        existing = task_states.get(task_id, {})
-        task_states[task_id] = {**existing, **kwargs}
-    _manager(cache_dir).apply_to_job(job_id, merge)
+    _client(cache_dir).merge_nested(job_id, f"task_states.{task_id}", kwargs)
 
 
 def update_job_team_progress(
@@ -266,11 +250,7 @@ def update_job_team_progress(
     **kwargs: Any,
 ) -> None:
     """Update progress for a single team. Merges kwargs into job["team_progress"][team_id]."""
-    def merge(data: Dict[str, Any]) -> None:
-        team_progress = data.setdefault("team_progress", {})
-        existing = team_progress.get(team_id, {})
-        team_progress[team_id] = {**existing, **kwargs}
-    _manager(cache_dir).apply_to_job(job_id, merge)
+    _client(cache_dir).merge_nested(job_id, f"team_progress.{team_id}", kwargs)
 
 
 def add_task_result(
@@ -278,12 +258,8 @@ def add_task_result(
     result: Dict[str, Any],
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
-    """Append a task result to the job and persist to cache."""
-    def append(data: Dict[str, Any]) -> None:
-        results = data.get("task_results", [])
-        results.append(result)
-        data["task_results"] = results
-    _manager(cache_dir).apply_to_job(job_id, append)
+    """Append a task result to the job."""
+    _client(cache_dir).append_to_list(job_id, "task_results", [result])
 
 
 def add_pending_questions(
@@ -292,12 +268,11 @@ def add_pending_questions(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Add pending questions and set waiting_for_answers=True to pause job."""
-    def add(data: Dict[str, Any]) -> None:
-        existing = data.get("pending_questions", [])
-        existing.extend(questions)
-        data["pending_questions"] = existing
-        data["waiting_for_answers"] = True
-    _manager(cache_dir).apply_to_job(job_id, add)
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={"waiting_for_answers": True},
+        append_to={"pending_questions": questions},
+    )
 
 
 def submit_answers(
@@ -306,13 +281,11 @@ def submit_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Store submitted answers, clear pending questions, and resume job."""
-    def apply(data: Dict[str, Any]) -> None:
-        existing_answers = data.get("submitted_answers", [])
-        existing_answers.extend(answers)
-        data["submitted_answers"] = existing_answers
-        data["pending_questions"] = []
-        data["waiting_for_answers"] = False
-    _manager(cache_dir).apply_to_job(job_id, apply)
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={"pending_questions": [], "waiting_for_answers": False},
+        append_to={"submitted_answers": answers},
+    )
 
 
 def is_waiting_for_answers(
@@ -320,7 +293,7 @@ def is_waiting_for_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Check if job is waiting for user answers."""
-    data = _manager(cache_dir).get_job(job_id)
+    data = _client(cache_dir).get_job(job_id)
     return bool(data.get("waiting_for_answers", False)) if data else False
 
 
@@ -329,7 +302,7 @@ def get_submitted_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> List[Dict[str, Any]]:
     """Get submitted answers for a job."""
-    data = _manager(cache_dir).get_job(job_id)
+    data = _client(cache_dir).get_job(job_id)
     return list(data.get("submitted_answers", [])) if data else []
 
 
@@ -343,19 +316,21 @@ def request_cancel(
     Returns False if the job was not found or is already in a terminal state.
     """
     terminal_statuses = (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_CANCELLED)
-    data = _manager(cache_dir).get_job(job_id)
+    data = _client(cache_dir).get_job(job_id)
     if data is None:
         return False
     current_status = data.get("status", JOB_STATUS_PENDING)
     if current_status in terminal_statuses:
         return False
 
-    def set_cancelled(d: Dict[str, Any]) -> None:
-        d["cancel_requested"] = True
-        d["status"] = JOB_STATUS_CANCELLED
-        d["cancelled_at"] = datetime.now(timezone.utc).isoformat()
-
-    _manager(cache_dir).apply_to_job(job_id, set_cancelled)
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={
+            "cancel_requested": True,
+            "status": JOB_STATUS_CANCELLED,
+            "cancelled_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
     logger.info("Job %s cancellation requested", job_id)
     return True
 
@@ -365,5 +340,5 @@ def is_cancel_requested(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Check if cancellation has been requested for a job."""
-    data = _manager(cache_dir).get_job(job_id)
+    data = _client(cache_dir).get_job(job_id)
     return bool(data.get("cancel_requested", False)) if data else False

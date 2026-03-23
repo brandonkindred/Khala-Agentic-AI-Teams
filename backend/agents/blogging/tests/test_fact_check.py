@@ -5,8 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from blog_fact_check_agent import BlogFactCheckAgent
 
-from llm_service import DummyLLMClient
-from llm_service.interface import LLMError as LLMServiceError
+from llm_service import DummyLLMClient, LLMError
 from llm_service.interface import LLMJsonParseError as LLMServiceJsonParseError
 
 
@@ -55,9 +54,9 @@ def test_fact_check_json_parse_all_retries_fail_returns_fallback(tmp_path):
 
 
 def test_fact_check_llm_service_error_propagates():
-    """LLMServiceError from the LLM client propagates without wrapping."""
+    """LLMError from the LLM client propagates without wrapping."""
     llm = MagicMock()
-    llm.complete_json = MagicMock(side_effect=LLMServiceError("rate limit"))
+    llm.complete_json = MagicMock(side_effect=LLMError("rate limit"))
     agent = BlogFactCheckAgent(llm_client=llm)
-    with pytest.raises(LLMServiceError, match="rate limit"):
+    with pytest.raises(LLMError, match="rate limit"):
         agent.run("Test draft.")

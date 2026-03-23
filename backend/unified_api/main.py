@@ -98,33 +98,37 @@ class SecurityErrorResponse(BaseModel):
 # Track mounted routers for health checks
 _mounted_teams: dict[str, bool] = {}
 
-# Team keys that have async jobs: on shutdown, call their mark_all_running_jobs_failed(reason).
-# Maps team_key -> (module_dot_path, function_name).
-SHUTDOWN_HOOKS: dict[str, tuple] = {
-    "blogging": ("blogging.shared.blog_job_store", "mark_all_running_jobs_failed"),
-    "software_engineering": ("software_engineering_team.shared.job_store", "mark_all_running_jobs_failed"),
-    "personal_assistant": ("personal_assistant_team.shared.pa_job_store", "mark_all_running_jobs_failed"),
-    "agent_provisioning": ("agent_provisioning_team.shared.job_store", "mark_all_running_jobs_failed"),
-    "ai_systems": ("ai_systems_team.shared.job_store", "mark_all_running_jobs_failed"),
-    "soc2_compliance": ("soc2_compliance_team.api.main", "mark_all_running_jobs_failed"),
-    "social_marketing": ("social_media_marketing_team.api.main", "mark_all_running_jobs_failed"),
-    "accessibility_audit": ("accessibility_audit_team.api.main", "mark_all_running_jobs_failed"),
-    "nutrition_meal_planning": ("nutrition_meal_planning_team.shared.job_store", "mark_all_running_jobs_failed"),
-    "planning_v3": ("planning_v3_team.shared.job_store", "mark_all_running_jobs_failed"),
-    "sales_team": ("sales_team.api.main", "mark_all_running_jobs_failed"),
-    "road_trip_planning": ("road_trip_planning_team.shared.job_store", "mark_all_running_jobs_failed"),
+# Team keys that have async jobs: on shutdown, mark all running jobs as failed via the job service.
+# Maps team_key -> team name used in the job service.
+SHUTDOWN_HOOKS: dict[str, str] = {
+    "blogging": "blogging_team",
+    "software_engineering": "software_engineering_team",
+    "personal_assistant": "personal_assistant_team",
+    "agent_provisioning": "agent_provisioning_team",
+    "ai_systems": "ai_systems_team",
+    "soc2_compliance": "soc2_compliance_team",
+    "social_marketing": "social_media_marketing_team",
+    "accessibility_audit": "accessibility_audit_team",
+    "nutrition_meal_planning": "nutrition_meal_planning_team",
+    "planning_v3": "planning_v3_team",
+    "sales_team": "sales_team",
+    "road_trip_planning": "road_trip_planning_team",
 }
 
 
 def _run_shutdown_hooks(reason: str) -> None:
-    """Call each mounted team's mark_all_running_jobs_failed(reason). Used by lifespan and atexit."""
-    for team_key, (module_path, func_name) in SHUTDOWN_HOOKS.items():
+    """Mark all running jobs as failed for each mounted team via the job service. Used by lifespan and atexit."""
+    try:
+        from job_service_client import JobServiceClient
+    except ImportError:
+        logger.warning("job_service_client not available; skipping shutdown hooks")
+        return
+    for team_key, team_name in SHUTDOWN_HOOKS.items():
         if not _mounted_teams.get(team_key):
             continue
         try:
-            mod = importlib.import_module(module_path)
-            fn = getattr(mod, func_name)
-            fn(reason)
+            client = JobServiceClient(team=team_name)
+            client.mark_all_active_jobs_failed(reason)
         except Exception as e:
             logger.warning("Shutdown hook for team %s failed: %s", team_key, e)
 
@@ -434,10 +438,19 @@ async def lifespan(app: FastAPI):
         "personal_assistant": ("personal_assistant_team.temporal.worker", "start_pa_temporal_worker_thread"),
         "ai_systems": ("ai_systems_team.temporal.worker", "start_ai_systems_temporal_worker_thread"),
         "planning_v3": ("planning_v3_team.temporal.worker", "start_planning_v3_temporal_worker_thread"),
-        "agent_provisioning": ("agent_provisioning_team.temporal.worker", "start_agent_provisioning_temporal_worker_thread"),
-        "nutrition_meal_planning": ("nutrition_meal_planning_team.temporal.worker", "start_nutrition_temporal_worker_thread"),
+        "agent_provisioning": (
+            "agent_provisioning_team.temporal.worker",
+            "start_agent_provisioning_temporal_worker_thread",
+        ),
+        "nutrition_meal_planning": (
+            "nutrition_meal_planning_team.temporal.worker",
+            "start_nutrition_temporal_worker_thread",
+        ),
         "soc2_compliance": ("soc2_compliance_team.temporal.worker", "start_soc2_temporal_worker_thread"),
-        "social_marketing": ("social_media_marketing_team.temporal.worker", "start_social_marketing_temporal_worker_thread"),
+        "social_marketing": (
+            "social_media_marketing_team.temporal.worker",
+            "start_social_marketing_temporal_worker_thread",
+        ),
     }
     for team_key, (mod_path, func_name) in _temporal_worker_starters.items():
         if not _mounted_teams.get(team_key):

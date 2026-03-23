@@ -1,8 +1,9 @@
 """
-Job store for blogging pipeline: persists job status and progress via CentralJobManager.
+Job store for blogging pipeline: persists job status and progress via the job service.
 
-Jobs are stored under {cache_dir}/blogging_team/jobs/{job_id}.json so state survives
-process restarts. This enables async API endpoints with polling for UI progress tracking.
+Uses ``JobServiceClient`` to communicate with the job service container over
+HTTP when ``JOB_SERVICE_URL`` is set, falling back to a local
+``CentralJobManager`` for non-Docker development.
 
 Note: Jobs created before migration from the legacy store (under .agent_cache/blog_jobs/)
 are not automatically migrated. New jobs use the central store only. Historical jobs
@@ -11,14 +12,13 @@ in the old path are not read by this module.
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared_job_management import CentralJobManager, start_stale_job_monitor
+from job_service_client import JobServiceClient, start_stale_job_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ def _start_blog_stale_monitor() -> None:
         return
     try:
         _blog_stale_monitor_stop = start_stale_job_monitor(
-            _manager(DEFAULT_CACHE_DIR),
+            _client(DEFAULT_CACHE_DIR),
             interval_seconds=300.0,
             stale_after_seconds=3600.0,
             reason="Blog pipeline job heartbeat stale (pending/running too long without progress)",
@@ -40,6 +40,7 @@ def _start_blog_stale_monitor() -> None:
         logger.info("Started blog job stale monitor (stale_after=3600s)")
     except Exception as e:
         logger.warning("Could not start blog stale job monitor: %s", e)
+
 
 # Job status constants
 JOB_STATUS_PENDING = "pending"
@@ -52,8 +53,8 @@ JOB_STATUS_NEEDS_REVIEW = "needs_human_review"
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache")).resolve()
 
 
-def _manager(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> CentralJobManager:
-    return CentralJobManager(team="blogging_team", cache_dir=cache_dir)
+def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
+    return JobServiceClient(team="blogging_team", cache_dir=str(cache_dir))
 
 
 def medium_stats_run_dir(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> Path:
@@ -80,16 +81,14 @@ def create_blog_job(
     job_type: Optional[str] = None,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
-    """Create a new blog job with pending status and persist to cache."""
+    """Create a new blog job with pending status."""
     now = datetime.now(timezone.utc).isoformat()
-    data: Dict[str, Any] = {
-        "job_id": job_id,
+    fields: Dict[str, Any] = {
         "brief": brief,
         "audience": audience,
         "tone_or_purpose": tone_or_purpose,
         "work_dir": work_dir,
         "job_type": job_type,
-        "status": JOB_STATUS_PENDING,
         "phase": None,
         "progress": 0,
         "status_text": "Initializing...",
@@ -117,41 +116,41 @@ def create_blog_job(
         "pending_questions": [],
         "waiting_for_answers": False,
         "submitted_answers": [],
+        "events": [],
     }
-    # create_job(job_id, **fields) expects job_id as first arg; omit job_id from **data to avoid duplicate
-    fields = {k: v for k, v in data.items() if k != "job_id"}
-    _manager(cache_dir).create_job(job_id, **fields)
+    _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **fields)
 
 
 def get_blog_job(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> Optional[Dict[str, Any]]:
-    """Get job data from cache, or None if not found."""
-    data = _manager(cache_dir).get_job(job_id)
-    return copy.deepcopy(data) if data else None
+    """Get job data, or None if not found."""
+    return _client(cache_dir).get_job(job_id)
 
 
 def list_blog_jobs(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     running_only: bool = False,
 ) -> List[Dict[str, Any]]:
-    """List blog jobs from cache. If running_only is True, only include pending or running."""
+    """List blog jobs. If running_only is True, only include pending or running."""
     statuses: Optional[List[str]] = (
         [JOB_STATUS_PENDING, JOB_STATUS_RUNNING] if running_only else None
     )
-    raw = _manager(cache_dir).list_jobs(statuses=statuses)
+    raw = _client(cache_dir).list_jobs(statuses=statuses)
     result: List[Dict[str, Any]] = []
     for data in raw:
-        result.append({
-            "job_id": data.get("job_id", ""),
-            "status": data.get("status", JOB_STATUS_PENDING),
-            "brief": (data.get("brief") or "")[:100],
-            "phase": data.get("phase"),
-            "progress": data.get("progress", 0),
-            "created_at": data.get("created_at"),
-            "job_type": data.get("job_type"),
-        })
+        result.append(
+            {
+                "job_id": data.get("job_id", ""),
+                "status": data.get("status", JOB_STATUS_PENDING),
+                "brief": (data.get("brief") or "")[:100],
+                "phase": data.get("phase"),
+                "progress": data.get("progress", 0),
+                "created_at": data.get("created_at"),
+                "job_type": data.get("job_type"),
+            }
+        )
     return result
 
 
@@ -160,8 +159,8 @@ def update_blog_job(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     **kwargs: Any,
 ) -> None:
-    """Update job fields. Merges with existing data and persists to cache."""
-    _manager(cache_dir).update_job(job_id, **kwargs)
+    """Update job fields. Merges with existing data."""
+    _client(cache_dir).update_job(job_id, **kwargs)
 
 
 def start_blog_job(
@@ -195,7 +194,9 @@ def complete_blog_job(
         "status": status,
         "phase": "finalize",
         "progress": 100,
-        "status_text": "Pipeline complete" if status == JOB_STATUS_COMPLETED else "Needs human review",
+        "status_text": "Pipeline complete"
+        if status == JOB_STATUS_COMPLETED
+        else "Needs human review",
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
     if title_choices is not None:
@@ -241,11 +242,7 @@ def mark_all_running_jobs_failed(
 ) -> None:
     """Mark all pending or running blog jobs as failed (e.g. on server shutdown)."""
     try:
-        jobs = list_blog_jobs(cache_dir=cache_dir, running_only=True)
-        for job in jobs:
-            job_id = job.get("job_id")
-            if job_id:
-                fail_blog_job(job_id, error=reason, cache_dir=cache_dir)
+        _client(cache_dir).mark_all_active_jobs_failed(reason)
     except Exception as e:
         logger.warning("mark_all_running_jobs_failed: %s", e)
 
@@ -285,8 +282,8 @@ def delete_blog_job(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
-    """Delete a job from the cache. Returns True if deleted, False if not found."""
-    return _manager(cache_dir).delete_job(job_id)
+    """Delete a job from the store. Returns True if deleted, False if not found."""
+    return _client(cache_dir).delete_job(job_id)
 
 
 # ---------------------------------------------------------------------------
@@ -300,11 +297,10 @@ def submit_title_selection(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Store the selected title and resume the pipeline (clears waiting_for_title_selection)."""
-    def apply(data: Dict[str, Any]) -> None:
-        data["selected_title"] = title
-        data["waiting_for_title_selection"] = False
-
-    _manager(cache_dir).apply_to_job(job_id, apply)
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={"selected_title": title, "waiting_for_title_selection": False},
+    )
 
 
 def is_waiting_for_title_selection(
@@ -312,7 +308,7 @@ def is_waiting_for_title_selection(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Return True if the pipeline is paused waiting for a title selection."""
-    job = _manager(cache_dir).get_job(job_id)
+    job = _client(cache_dir).get_job(job_id)
     return bool(job.get("waiting_for_title_selection")) if job else False
 
 
@@ -328,13 +324,13 @@ def add_story_agent_message(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Append a ghost-writer agent message to the story chat history and pause for user input."""
-    def apply(data: Dict[str, Any]) -> None:
-        history: List[Dict[str, Any]] = data.get("story_chat_history", [])
-        history.append({"role": "agent", "content": content, "gap_index": gap_index})
-        data["story_chat_history"] = history
-        data["waiting_for_story_input"] = True
-
-    _manager(cache_dir).apply_to_job(job_id, apply)
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={"waiting_for_story_input": True},
+        append_to={
+            "story_chat_history": [{"role": "agent", "content": content, "gap_index": gap_index}]
+        },
+    )
 
 
 def submit_story_user_message(
@@ -343,25 +339,26 @@ def submit_story_user_message(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Append a user message to the story chat history and resume the pipeline."""
-    def apply(data: Dict[str, Any]) -> None:
-        history: List[Dict[str, Any]] = data.get("story_chat_history", [])
-        history.append({"role": "user", "content": message})
-        data["story_chat_history"] = history
-        data["waiting_for_story_input"] = False
-
-    _manager(cache_dir).apply_to_job(job_id, apply)
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={"waiting_for_story_input": False},
+        append_to={"story_chat_history": [{"role": "user", "content": message}]},
+    )
 
 
 def skip_current_story_gap(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
-    """Skip the current story gap and advance to the next one (clears waiting flag)."""
-    def apply(data: Dict[str, Any]) -> None:
-        data["current_story_gap_index"] = data.get("current_story_gap_index", 0) + 1
-        data["waiting_for_story_input"] = False
+    """Skip the current story gap and advance to the next one (clears waiting flag).
 
-    _manager(cache_dir).apply_to_job(job_id, apply)
+    Uses an atomic increment so concurrent skip requests cannot lose an update.
+    """
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={"waiting_for_story_input": False},
+        increment={"current_story_gap_index": 1},
+    )
 
 
 def complete_story_elicitation(
@@ -370,11 +367,10 @@ def complete_story_elicitation(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Store compiled elicited story narratives; clears all story-wait flags."""
-    def apply(data: Dict[str, Any]) -> None:
-        data["elicited_stories"] = elicited_stories
-        data["waiting_for_story_input"] = False
-
-    _manager(cache_dir).apply_to_job(job_id, apply)
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={"elicited_stories": elicited_stories, "waiting_for_story_input": False},
+    )
 
 
 def is_waiting_for_story_input(
@@ -382,7 +378,7 @@ def is_waiting_for_story_input(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Return True if the pipeline is paused waiting for a story message."""
-    job = _manager(cache_dir).get_job(job_id)
+    job = _client(cache_dir).get_job(job_id)
     return bool(job.get("waiting_for_story_input")) if job else False
 
 
@@ -397,11 +393,10 @@ def add_blog_pending_questions(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Store pending questions and pause the pipeline for answers."""
-    def apply(data: Dict[str, Any]) -> None:
-        data["pending_questions"] = questions
-        data["waiting_for_answers"] = True
-
-    _manager(cache_dir).apply_to_job(job_id, apply)
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={"pending_questions": questions, "waiting_for_answers": True},
+    )
 
 
 def submit_blog_answers(
@@ -410,14 +405,11 @@ def submit_blog_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Store submitted answers, clear pending questions, and resume the pipeline."""
-    def apply(data: Dict[str, Any]) -> None:
-        existing: List[Dict[str, Any]] = data.get("submitted_answers", [])
-        existing.extend(answers)
-        data["submitted_answers"] = existing
-        data["pending_questions"] = []
-        data["waiting_for_answers"] = False
-
-    _manager(cache_dir).apply_to_job(job_id, apply)
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={"pending_questions": [], "waiting_for_answers": False},
+        append_to={"submitted_answers": answers},
+    )
 
 
 def is_waiting_for_blog_answers(
@@ -425,7 +417,7 @@ def is_waiting_for_blog_answers(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
     """Return True if the pipeline is paused waiting for Q&A answers."""
-    job = _manager(cache_dir).get_job(job_id)
+    job = _client(cache_dir).get_job(job_id)
     return bool(job.get("waiting_for_answers")) if job else False
 
 

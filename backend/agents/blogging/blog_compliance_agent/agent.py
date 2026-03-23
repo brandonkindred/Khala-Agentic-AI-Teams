@@ -10,15 +10,17 @@ All errors are raised explicitly - no silent failures.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
-from llm_service import LLMClient
-from llm_service.interface import (
-    LLMError as LLMServiceError,
-)
-from llm_service.interface import (
-    LLMJsonParseError as LLMServiceJsonParseError,
+from llm_service import (
+    LLMClient,
+    LLMJsonParseError,
+    LLMPermanentError,
+    LLMRateLimitError,
+    LLMTemporaryError,
+    LLMTruncatedError,
 )
 
 from .models import ComplianceReport, Violation
@@ -32,16 +34,35 @@ except ImportError:
     load_brand_spec_prompt = None
 
 try:
-    from shared.errors import ComplianceError, LLMError
+    from shared.errors import ComplianceError
 except ImportError:
     class ComplianceError(Exception):
         pass
-    class LLMError(Exception):
-        pass
-
-_MAX_JSON_RETRIES = 2
 
 logger = logging.getLogger(__name__)
+
+# After llm_service exhausts HTTP retries, re-run complete_json a few times; then use a safe fallback report.
+_MAX_COMPLIANCE_LLM_ROUNDS = 3
+_JSON_RETRY_SUFFIX = (
+    "\n\nRespond with a single JSON object only (no markdown, no code fences). "
+    'Keys: "status", "violations", "required_fixes", "notes".'
+)
+
+
+def _fallback_compliance_report(exc: Exception) -> ComplianceReport:
+    """When the LLM cannot return parseable JSON, fail closed with actionable guidance (no crash)."""
+    return ComplianceReport(
+        status="FAIL",
+        violations=[],
+        required_fixes=[
+            "Automated brand compliance did not complete (LLM error). Re-run when the model is available, "
+            "or review the draft against your brand spec manually."
+        ],
+        notes=(
+            "Compliance check could not run to completion. This reflects a tooling/LLM failure, "
+            f"not a verified brand finding. Error: {exc}"
+        ),
+    )
 
 
 class BlogComplianceAgent:
@@ -99,45 +120,72 @@ class BlogComplianceAgent:
         if on_llm_request:
             on_llm_request("Checking compliance with brand guidelines...")
 
-        data = None
-        for attempt in range(_MAX_JSON_RETRIES):
-            current_prompt = prompt
-            if attempt > 0:
-                current_prompt = prompt + (
-                    "\n\nCRITICAL: Your previous response contained invalid JSON. "
-                    "Output ONLY a single valid JSON object. Do NOT embed code blocks, "
-                    "markdown formatting, or literal newlines inside string values. "
-                    "Keep evidence_quotes to under 80 characters each."
-                )
-            try:
-                data = self.llm.complete_json(current_prompt, temperature=0.1)
+        data: Optional[Dict[str, Any]] = None
+        base_prompt = prompt
+        working_prompt = prompt
+        for llm_round in range(_MAX_COMPLIANCE_LLM_ROUNDS):
+            for json_attempt in range(2):
+                try:
+                    data = self.llm.complete_json(working_prompt, temperature=0.1)
+                    break
+                except LLMJsonParseError as e:
+                    if json_attempt == 0:
+                        logger.warning(
+                            "Compliance JSON parse failed (attempt 1), retrying with strict instruction: %s",
+                            e,
+                        )
+                        working_prompt = base_prompt + _JSON_RETRY_SUFFIX
+                    else:
+                        logger.warning(
+                            "Compliance JSON parse failed after retry; using fallback report: %s",
+                            e,
+                        )
+                        report = _fallback_compliance_report(e)
+                        if work_dir and write_artifact:
+                            write_artifact(work_dir, "compliance_report.json", report.to_dict())
+                            logger.info("Wrote compliance_report.json (fallback): status=%s", report.status)
+                        return report
+                except (LLMTemporaryError, LLMRateLimitError) as e:
+                    if llm_round >= _MAX_COMPLIANCE_LLM_ROUNDS - 1:
+                        logger.warning(
+                            "Compliance LLM still failing after agent retries; using fallback report: %s",
+                            e,
+                        )
+                        report = _fallback_compliance_report(e)
+                        if work_dir and write_artifact:
+                            write_artifact(work_dir, "compliance_report.json", report.to_dict())
+                            logger.info("Wrote compliance_report.json (fallback): status=%s", report.status)
+                        return report
+                    wait = min(60.0, 15.0 * (llm_round + 1))
+                    logger.warning(
+                        "Compliance LLM transport/transient error (round %d/%d, json attempt %d): %s — "
+                        "sleeping %.0fs and retrying.",
+                        llm_round + 1,
+                        _MAX_COMPLIANCE_LLM_ROUNDS,
+                        json_attempt + 1,
+                        e,
+                        wait,
+                    )
+                    time.sleep(wait)
+                    working_prompt = base_prompt
+                    break
+                except (LLMPermanentError, LLMTruncatedError) as e:
+                    logger.warning("Compliance LLM permanent/truncation error; using fallback report: %s", e)
+                    report = _fallback_compliance_report(e)
+                    if work_dir and write_artifact:
+                        write_artifact(work_dir, "compliance_report.json", report.to_dict())
+                        logger.info("Wrote compliance_report.json (fallback): status=%s", report.status)
+                    return report
+            if data is not None:
                 break
-            except LLMServiceJsonParseError as e:
-                logger.warning(
-                    "Compliance JSON parse failed (attempt %d/%d): %s",
-                    attempt + 1, _MAX_JSON_RETRIES, e,
-                )
-                continue
-            except (LLMServiceError, LLMError):
-                raise
-            except Exception as e:
-                logger.error("Compliance check failed: %s", e)
-                raise ComplianceError(f"Compliance check failed: {e}", cause=e) from e
 
-        if data is None:
-            logger.warning(
-                "Compliance JSON parse failed after %d attempts; using fallback FAIL report",
-                _MAX_JSON_RETRIES,
-            )
-            report = ComplianceReport(
-                status="FAIL",
-                violations=[],
-                required_fixes=["Could not parse compliance check result; re-run compliance."],
-                notes=f"Fallback report: JSON parse failed after {_MAX_JSON_RETRIES} attempts.",
+        if not data:
+            report = _fallback_compliance_report(
+                RuntimeError("No compliance JSON after retries"),
             )
             if work_dir and write_artifact:
                 write_artifact(work_dir, "compliance_report.json", report.to_dict())
-                logger.info("Wrote compliance_report.json: status=FAIL (fallback)")
+                logger.info("Wrote compliance_report.json (fallback): status=%s", report.status)
             return report
 
         status = (data.get("status") or "FAIL").upper()

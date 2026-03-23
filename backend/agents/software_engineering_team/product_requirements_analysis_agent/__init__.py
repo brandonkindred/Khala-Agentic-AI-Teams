@@ -15,11 +15,16 @@ from .models import (
     AnalysisPhase,
     AnalysisWorkflowResult,
     AnsweredQuestion,
+    ArchitectureAnalysisResult,
     AutoAnswerResult,
     OpenQuestion,
     QuestionOption,
+    SOPDecision,
+    SOPSubPhase,
     SpecCleanupResult,
     SpecReviewResult,
+    ToolGapAnalysis,
+    ToolRecommendation,
 )
 
 __all__ = [
@@ -30,9 +35,14 @@ __all__ = [
     "AnalysisPhase",
     "AnalysisWorkflowResult",
     "AnsweredQuestion",
+    "ArchitectureAnalysisResult",
     "AutoAnswerResult",
     "OpenQuestion",
     "QuestionOption",
+    "SOPDecision",
+    "SOPSubPhase",
     "SpecCleanupResult",
     "SpecReviewResult",
+    "ToolGapAnalysis",
+    "ToolRecommendation",
 ]

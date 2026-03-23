@@ -66,6 +66,38 @@ services:
       stack:
         ipv4_address: 172.28.0.4
 
+  job-service:
+    build:
+      context: ../backend/job_service
+      dockerfile: Dockerfile
+    image: strands-job-service
+    container_name: strands-job-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: strands
+      POSTGRES_PASSWORD: strands
+      POSTGRES_DB: strands_jobs
+      PYTHONUNBUFFERED: "1"
+    extra_hosts:
+      - "postgres:172.28.0.2"
+    ports:
+      - "8585:8085"
+    networks:
+      stack:
+        ipv4_address: 172.28.0.5
+        aliases:
+          - job-service
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   strands-agents:
     build:
       context: ../backend
@@ -77,6 +109,8 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
+      job-service:
+        condition: service_healthy
     volumes:
       - agents_workspace:/workspace
     ports:
@@ -104,9 +138,11 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       ENABLE_LOG_API: ${ENABLE_LOG_API:-0}
       TEMPORAL_ADDRESS: temporal:7233
+      JOB_SERVICE_URL: http://job-service:8085
     extra_hosts:
       - "postgres:172.28.0.2"
       - "temporal:172.28.0.3"
+      - "job-service:172.28.0.5"
     networks:
       stack:
         ipv4_address: 172.28.0.6

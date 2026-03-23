@@ -9,11 +9,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
-from shared_job_management import (
+from job_service_client import (
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
-    CentralJobManager,
+    JobServiceClient,
     start_stale_job_monitor,
 )
 
@@ -33,7 +33,7 @@ from ..orchestrator import AccessibilityAuditOrchestrator
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-_job_manager = CentralJobManager(team="accessibility_audit_team")
+_job_manager = JobServiceClient(team="accessibility_audit_team")
 _stale_monitor_stop = start_stale_job_monitor(
     _job_manager,
     interval_seconds=15.0,
@@ -63,6 +63,7 @@ def get_orchestrator() -> AccessibilityAuditOrchestrator:
     global _orchestrator
     if _orchestrator is None:
         from llm_service import get_client
+
         _orchestrator = AccessibilityAuditOrchestrator(llm_client=get_client("accessibility_audit"))
     return _orchestrator
 
@@ -81,19 +82,13 @@ class CreateAuditRequest(BaseModel):
         default_factory=list,
         description="Mobile apps: [{platform, name, version, build}]",
     )
-    critical_journeys: List[str] = Field(
-        default_factory=list, description="Critical user journeys"
-    )
-    timebox_hours: Optional[int] = Field(
-        default=None, description="Maximum hours for the audit"
-    )
+    critical_journeys: List[str] = Field(default_factory=list, description="Critical user journeys")
+    timebox_hours: Optional[int] = Field(default=None, description="Maximum hours for the audit")
     auth_required: bool = Field(default=False)
     max_pages: Optional[int] = Field(default=None)
     sampling_strategy: str = Field(default="journey_based")
     wcag_levels: List[str] = Field(default_factory=lambda: ["A", "AA"])
-    tech_stack: Dict[str, str] = Field(
-        default_factory=lambda: {"web": "other", "mobile": "other"}
-    )
+    tech_stack: Dict[str, str] = Field(default_factory=lambda: {"web": "other", "mobile": "other"})
 
 
 class RetestRequest(BaseModel):
@@ -206,7 +201,9 @@ async def create_audit(
     # Run audit in background
     async def run_audit_task():
         try:
-            _job_manager.update_job(job_id, status=JOB_STATUS_RUNNING, current_phase="discovery", progress=20)
+            _job_manager.update_job(
+                job_id, status=JOB_STATUS_RUNNING, current_phase="discovery", progress=20
+            )
             orchestrator = get_orchestrator()
             result = await orchestrator.run_audit(audit_request, request.tech_stack)
             _job_manager.update_job(
@@ -220,7 +217,9 @@ async def create_audit(
                 error=result.failure_reason if result and not result.success else None,
             )
             if not result.success:
-                _job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=result.failure_reason)
+                _job_manager.update_job(
+                    job_id, status=JOB_STATUS_FAILED, error=result.failure_reason
+                )
         except Exception as e:
             _job_manager.update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
 

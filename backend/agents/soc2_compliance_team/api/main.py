@@ -7,11 +7,12 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from job_service_client import JobServiceClient, start_stale_job_monitor
 from soc2_compliance_team.models import SOC2AuditResult
 from soc2_compliance_team.orchestrator import SOC2AuditOrchestrator
 
@@ -24,8 +25,13 @@ app = FastAPI(
     version="1.0.0",
 )
 
-_jobs: Dict[str, dict] = {}
-_jobs_lock = threading.Lock()
+_job_manager = JobServiceClient(team="soc2_compliance_team")
+_stale_monitor_stop = start_stale_job_monitor(
+    _job_manager,
+    interval_seconds=15.0,
+    stale_after_seconds=300.0,
+    reason="Job heartbeat stale while pending/running",
+)
 
 
 def _now() -> str:
@@ -59,29 +65,24 @@ class AuditStatusResponse(BaseModel):
         description="pending | running | completed | failed",
     )
     repo_path: Optional[str] = Field(None, description="Repository path being audited.")
-    current_stage: Optional[str] = Field(None, description="Current audit stage (e.g. Security TSC).")
+    current_stage: Optional[str] = Field(
+        None, description="Current audit stage (e.g. Security TSC)."
+    )
     last_updated_at: Optional[str] = Field(None, description="Last status update (ISO).")
     error: Optional[str] = Field(None, description="Error message if failed.")
-    result: Optional[SOC2AuditResult] = Field(None, description="Full audit result when status is completed.")
+    result: Optional[SOC2AuditResult] = Field(
+        None, description="Full audit result when status is completed."
+    )
 
 
 def _update_job(job_id: str, **fields: Any) -> None:
-    with _jobs_lock:
-        if job_id in _jobs:
-            _jobs[job_id].update(fields)
-            _jobs[job_id]["last_updated_at"] = _now()
+    _job_manager.update_job(job_id, **fields)
 
 
 def mark_all_running_jobs_failed(reason: str) -> None:
     """Mark all pending or running SOC2 audit jobs as failed (e.g. on server shutdown)."""
     try:
-        with _jobs_lock:
-            for job_id, job in list(_jobs.items()):
-                if job.get("status") in ("pending", "running"):
-                    job["status"] = "failed"
-                    job["error"] = reason
-                    job["current_stage"] = "Failed"
-                    job["last_updated_at"] = _now()
+        _job_manager.mark_all_active_jobs_failed(reason)
     except Exception as e:
         logger.warning("mark_all_running_jobs_failed: %s", e)
 
@@ -118,23 +119,25 @@ def run_audit(request: RunAuditRequest) -> RunAuditResponse:
     """Start a SOC2 compliance audit on the given repository path."""
     repo_path = Path(request.repo_path).expanduser().resolve()
     if not repo_path.is_dir():
-        raise HTTPException(status_code=400, detail=f"Repository path is not a directory: {request.repo_path}")
+        raise HTTPException(
+            status_code=400, detail=f"Repository path is not a directory: {request.repo_path}"
+        )
 
     job_id = str(uuid.uuid4())
-    with _jobs_lock:
-        _jobs[job_id] = {
-            "job_id": job_id,
-            "status": "pending",
-            "repo_path": str(repo_path),
-            "current_stage": None,
-            "last_updated_at": _now(),
-            "error": None,
-            "result": None,
-        }
+    _job_manager.create_job(
+        job_id,
+        status="pending",
+        repo_path=str(repo_path),
+        current_stage=None,
+        error=None,
+        result=None,
+        events=[],
+    )
 
     try:
         from soc2_compliance_team.temporal.client import is_temporal_enabled
         from soc2_compliance_team.temporal.start_workflow import start_audit_workflow
+
         if is_temporal_enabled():
             start_audit_workflow(job_id, str(repo_path))
             return RunAuditResponse(
@@ -164,8 +167,7 @@ def run_audit(request: RunAuditRequest) -> RunAuditResponse:
 )
 def get_audit_status(job_id: str) -> AuditStatusResponse:
     """Get the status and result of an audit job."""
-    with _jobs_lock:
-        job = _jobs.get(job_id)
+    job = _job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
@@ -178,7 +180,7 @@ def get_audit_status(job_id: str) -> AuditStatusResponse:
         status=job.get("status", "pending"),
         repo_path=job.get("repo_path"),
         current_stage=job.get("current_stage"),
-        last_updated_at=job.get("last_updated_at"),
+        last_updated_at=job.get("updated_at"),
         error=job.get("error"),
         result=result,
     )
