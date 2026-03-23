@@ -28,9 +28,11 @@ TEST_TIMEOUT = 120   # pytest
 
 # Node version for modern frontend frameworks. NVM installs and uses this for frontend commands.
 # Angular CLI v19+ requires Node v20.19+ or v22.12+; React/Vue work with v18+.
-FRONTEND_NODE_VERSION = "22.12"
-# Fallback Node version if FRONTEND_NODE_VERSION install fails (e.g. 22 = latest v22).
-NVM_NODE_FALLBACK_VERSION = "22"
+# Using "22" (latest v22.x) avoids pinning to a specific patch that may have corrupted
+# NVM cache entries on CI runners.
+FRONTEND_NODE_VERSION = "22"
+# Fallback Node version if FRONTEND_NODE_VERSION install fails (e.g. lts/* = current LTS).
+NVM_NODE_FALLBACK_VERSION = "lts/*"
 
 # Legacy alias for backwards compatibility
 ANGULAR_NODE_VERSION = FRONTEND_NODE_VERSION
