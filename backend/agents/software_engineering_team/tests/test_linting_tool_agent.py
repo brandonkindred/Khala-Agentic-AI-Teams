@@ -58,7 +58,8 @@ def test_lint_tool_output_construction() -> None:
 
 def test_detect_linter_defaults_to_ruff(tmp_path: Path) -> None:
     """When no config files exist, default to ruff for backend."""
-    plan = detect_linter(tmp_path, "backend")
+    with patch("linting_tool_agent.linter_runner._is_command_available", return_value=True):
+        plan = detect_linter(tmp_path, "backend")
     assert plan.linter_name == "ruff"
     assert plan.linter_command == ["ruff", "check", "."]
     assert plan.config_file is None
@@ -66,21 +67,24 @@ def test_detect_linter_defaults_to_ruff(tmp_path: Path) -> None:
 
 def test_detect_linter_ruff_toml(tmp_path: Path) -> None:
     (tmp_path / "ruff.toml").write_text("[lint]\nselect = ['E']\n")
-    plan = detect_linter(tmp_path, "backend")
+    with patch("linting_tool_agent.linter_runner._is_command_available", return_value=True):
+        plan = detect_linter(tmp_path, "backend")
     assert plan.linter_name == "ruff"
     assert plan.config_file == "ruff.toml"
 
 
 def test_detect_linter_pyproject_ruff(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[tool.ruff]\nline-length = 120\n")
-    plan = detect_linter(tmp_path, "backend")
+    with patch("linting_tool_agent.linter_runner._is_command_available", return_value=True):
+        plan = detect_linter(tmp_path, "backend")
     assert plan.linter_name == "ruff"
     assert plan.config_file == "pyproject.toml"
 
 
 def test_detect_linter_flake8(tmp_path: Path) -> None:
     (tmp_path / ".flake8").write_text("[flake8]\nmax-line-length = 120\n")
-    plan = detect_linter(tmp_path, "backend")
+    with patch("linting_tool_agent.linter_runner._is_command_available", side_effect=lambda cmd: cmd == "flake8"):
+        plan = detect_linter(tmp_path, "backend")
     assert plan.linter_name == "flake8"
     assert plan.linter_command == ["flake8", "."]
 
@@ -159,7 +163,8 @@ def test_agent_run_lint_passes(tmp_path: Path) -> None:
     mock_llm = MagicMock()
     agent = LintingToolAgent(mock_llm)
 
-    with patch("linting_tool_agent.linter_runner.run_command") as mock_cmd:
+    with patch("linting_tool_agent.linter_runner._is_command_available", return_value=True), \
+            patch("linting_tool_agent.linter_runner.run_command") as mock_cmd:
         mock_cmd.return_value = MagicMock(success=True, output="", stdout="", stderr="")
         result = agent.run(LintToolInput(repo_path=str(tmp_path), agent_type="backend"))
 
@@ -189,7 +194,8 @@ def test_agent_run_lint_fails_and_produces_edits(tmp_path: Path) -> None:
     agent = LintingToolAgent(mock_llm)
 
     lint_output = "app/main.py:1:1: F401 `os` imported but unused\n"
-    with patch("linting_tool_agent.linter_runner.run_command") as mock_cmd:
+    with patch("linting_tool_agent.linter_runner._is_command_available", return_value=True), \
+            patch("linting_tool_agent.linter_runner.run_command") as mock_cmd:
         mock_cmd.return_value = MagicMock(
             success=False, output=lint_output, stdout=lint_output, stderr="",
             exit_code=1
@@ -214,7 +220,8 @@ def test_agent_run_llm_failure_is_non_blocking(tmp_path: Path) -> None:
     agent = LintingToolAgent(mock_llm)
 
     lint_output = "app/main.py:1:1: F401 `os` imported but unused\n"
-    with patch("linting_tool_agent.linter_runner.run_command") as mock_cmd:
+    with patch("linting_tool_agent.linter_runner._is_command_available", return_value=True), \
+            patch("linting_tool_agent.linter_runner.run_command") as mock_cmd:
         mock_cmd.return_value = MagicMock(
             success=False, output=lint_output, stdout=lint_output, stderr="",
             exit_code=1
