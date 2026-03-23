@@ -41,7 +41,7 @@ def resolve_medium_stats_storage_state() -> Tuple[Optional[Dict[str, Any]], str,
             get_medium_session_storage_state_json,
             set_medium_session_storage_state_json,
         )
-    except BaseException as e:
+    except Exception as e:
         logger.warning("Medium integration modules unavailable: %s", e)
         return None, "", (
             "Medium integration is not available (run the Unified API from the backend repo "
