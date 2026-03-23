@@ -529,7 +529,8 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   }
 
   canStopJob(job: DashboardRow): boolean {
-    if (job.unified.source !== 'software_engineering') return false;
+    const stoppableSources = ['software_engineering', 'blogging', 'agent_provisioning', 'ai_systems', 'social_marketing'];
+    if (!stoppableSources.includes(job.unified.source)) return false;
     const status = job.unified.status;
     return status === 'running' || status === 'pending';
   }

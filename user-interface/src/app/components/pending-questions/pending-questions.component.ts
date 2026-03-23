@@ -18,7 +18,7 @@ import type { PendingQuestion, AnswerSubmission, JobStatusResponse, PlanningV3St
 import { QuestionCardComponent } from './question-card/question-card.component';
 
 /** Endpoint type determines which API to call for submitting answers. */
-export type SubmitEndpointType = 'run-team' | 'planning-v3' | 'product-analysis';
+export type SubmitEndpointType = 'run-team' | 'planning-v2' | 'planning-v3' | 'product-analysis';
 
 interface QuestionAnswer {
   questionId: string;
@@ -299,6 +299,11 @@ export class PendingQuestionsComponent implements OnChanges {
         other_text: a.other_text ?? undefined,
       }));
       this.planningV3Api.submitAnswers(this.jobId, body).subscribe({
+        next: handleSuccess,
+        error: handleError,
+      });
+    } else if (this.submitEndpoint === 'planning-v2') {
+      this.api.submitPlanningV2Answers(this.jobId, request).subscribe({
         next: handleSuccess,
         error: handleError,
       });

@@ -2,6 +2,8 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
+import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { PersonalAssistantApiService } from '../../services/personal-assistant-api.service';
 import { PersonalAssistantDashboardComponent } from './personal-assistant-dashboard.component';
 
@@ -10,10 +12,29 @@ describe('PersonalAssistantDashboardComponent', () => {
   let fixture: ComponentFixture<PersonalAssistantDashboardComponent>;
 
   beforeEach(async () => {
-    const apiSpy = { health: vi.fn().mockReturnValue(of({ status: 'ok' })) };
+    const apiSpy = {
+      health: vi.fn().mockReturnValue(of({ status: 'ok' })),
+      getProfile: vi.fn().mockReturnValue(of({})),
+      updateProfile: vi.fn().mockReturnValue(of({})),
+      getTasks: vi.fn().mockReturnValue(of([])),
+      addTasksFromText: vi.fn().mockReturnValue(of({})),
+      updateTaskItem: vi.fn().mockReturnValue(of({})),
+      getWishlist: vi.fn().mockReturnValue(of([])),
+      removeFromWishlist: vi.fn().mockReturnValue(of({})),
+      searchDeals: vi.fn().mockReturnValue(of([])),
+      getReservations: vi.fn().mockReturnValue(of([])),
+      createReservationFromText: vi.fn().mockReturnValue(of({})),
+      getDocuments: vi.fn().mockReturnValue(of([])),
+      sendMessage: vi.fn().mockReturnValue(of({})),
+      createEventFromText: vi.fn().mockReturnValue(of({})),
+    };
     await TestBed.configureTestingModule({
       imports: [PersonalAssistantDashboardComponent, NoopAnimationsModule],
-      providers: [{ provide: PersonalAssistantApiService, useValue: apiSpy }],
+      providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
+        { provide: PersonalAssistantApiService, useValue: apiSpy },
+      ],
     }).compileComponents();
 
     localStorage.removeItem('pa_user_id');

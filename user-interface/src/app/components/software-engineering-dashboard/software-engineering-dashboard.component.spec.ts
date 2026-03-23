@@ -7,6 +7,11 @@ import { SoftwareEngineeringApiService } from '../../services/software-engineeri
 import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
 import { SoftwareEngineeringDashboardComponent } from './software-engineering-dashboard.component';
 
+vi.mock('rxjs', async (importOriginal) => {
+  const rxjs = await importOriginal<typeof import('rxjs')>();
+  return { ...rxjs, timer: vi.fn((..._args: unknown[]) => rxjs.of(0)) };
+});
+
 describe('SoftwareEngineeringDashboardComponent', () => {
   let component: SoftwareEngineeringDashboardComponent;
   let fixture: ComponentFixture<SoftwareEngineeringDashboardComponent>;

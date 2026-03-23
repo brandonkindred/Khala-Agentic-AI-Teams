@@ -4,6 +4,11 @@ import { vi } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { JobStatusComponent } from './job-status.component';
 
+vi.mock('rxjs', async (importOriginal) => {
+  const rxjs = await importOriginal<typeof import('rxjs')>();
+  return { ...rxjs, timer: vi.fn((..._args: unknown[]) => rxjs.of(0)) };
+});
+
 describe('JobStatusComponent', () => {
   let component: JobStatusComponent;
   let fixture: ComponentFixture<JobStatusComponent>;
@@ -30,15 +35,17 @@ describe('JobStatusComponent', () => {
 
     fixture = TestBed.createComponent(JobStatusComponent);
     component = fixture.componentInstance;
-    component.jobId = 'j1';
-    fixture.detectChanges();
   });
 
   it('should create', () => {
+    component.jobId = 'j1';
+    fixture.detectChanges();
     expect(component).toBeTruthy();
   });
 
   it('should start polling when jobId is set', () => {
+    component.jobId = 'j1';
+    fixture.detectChanges();
     expect(apiSpy.getJobStatus).toHaveBeenCalledWith('j1');
     expect(component.status).toBeTruthy();
     expect(component.status?.job_id).toBe('j1');

@@ -9,12 +9,31 @@ import { IntegrationsDashboardComponent } from './integrations-dashboard.compone
 describe('IntegrationsDashboardComponent', () => {
   let component: IntegrationsDashboardComponent;
   let fixture: ComponentFixture<IntegrationsDashboardComponent>;
-  let apiSpy: { getSlackConfig: ReturnType<typeof vi.fn>; updateSlackConfig: ReturnType<typeof vi.fn> };
+  let apiSpy: {
+    getSlackConfig: ReturnType<typeof vi.fn>;
+    updateSlackConfig: ReturnType<typeof vi.fn>;
+    getGoogleBrowserLoginStatus: ReturnType<typeof vi.fn>;
+    getMediumConfig: ReturnType<typeof vi.fn>;
+    updateMediumConfig: ReturnType<typeof vi.fn>;
+    mediumBrowserLoginSession: ReturnType<typeof vi.fn>;
+    getSlackOAuthUrl: ReturnType<typeof vi.fn>;
+    disconnectSlack: ReturnType<typeof vi.fn>;
+    putGoogleBrowserLoginCredentials: ReturnType<typeof vi.fn>;
+    deleteGoogleBrowserLoginCredentials: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(async () => {
     apiSpy = {
       getSlackConfig: vi.fn(),
       updateSlackConfig: vi.fn(),
+      getGoogleBrowserLoginStatus: vi.fn(),
+      getMediumConfig: vi.fn(),
+      updateMediumConfig: vi.fn(),
+      mediumBrowserLoginSession: vi.fn(),
+      getSlackOAuthUrl: vi.fn(),
+      disconnectSlack: vi.fn(),
+      putGoogleBrowserLoginCredentials: vi.fn(),
+      deleteGoogleBrowserLoginCredentials: vi.fn(),
     };
     apiSpy.getSlackConfig.mockReturnValue(of({
       enabled: false,
@@ -25,6 +44,8 @@ describe('IntegrationsDashboardComponent', () => {
       notify_open_questions: true,
       notify_pa_responses: true,
     }));
+    apiSpy.getGoogleBrowserLoginStatus.mockReturnValue(of({ configured: false }));
+    apiSpy.getMediumConfig.mockReturnValue(of({ enabled: false }));
 
     await TestBed.configureTestingModule({
       imports: [IntegrationsDashboardComponent, NoopAnimationsModule],
@@ -45,14 +66,14 @@ describe('IntegrationsDashboardComponent', () => {
   it('should load Slack config on init', () => {
     expect(apiSpy.getSlackConfig).toHaveBeenCalled();
     expect(component.slackEnabled).toBe(false);
-    expect(component.loading).toBe(false);
+    expect(component.loadingSlack).toBe(false);
   });
 
   it('should set error when loadSlackConfig fails', () => {
     apiSpy.getSlackConfig.mockReturnValue(throwError(() => ({ error: { detail: 'Network error' } })));
     component.loadSlackConfig();
     expect(component.error).toBeTruthy();
-    expect(component.loading).toBe(false);
+    expect(component.loadingSlack).toBe(false);
   });
 
   it('webhookUrlInvalid returns true for short or invalid URL', () => {
@@ -79,7 +100,7 @@ describe('IntegrationsDashboardComponent', () => {
       notify_open_questions: true,
       notify_pa_responses: true,
     }));
-    component.saveSlack();
+    component.saveAdvanced();
     expect(apiSpy.updateSlackConfig).toHaveBeenCalledWith(expect.objectContaining({
       enabled: true,
       channel_display_name: '#eng',
@@ -90,7 +111,7 @@ describe('IntegrationsDashboardComponent', () => {
 
   it('should set error when save fails', () => {
     apiSpy.updateSlackConfig.mockReturnValue(throwError(() => ({ error: { detail: 'Save failed' } })));
-    component.saveSlack();
+    component.saveAdvanced();
     expect(component.error).toBeTruthy();
     expect(component.saving).toBe(false);
   });
@@ -99,7 +120,7 @@ describe('IntegrationsDashboardComponent', () => {
     component.slackEnabled = true;
     component.webhookConfigured = false;
     component.webhookUrl = 'bad';
-    component.saveSlack();
+    component.saveAdvanced();
     expect(component.error).toContain('Webhook URL');
     expect(apiSpy.updateSlackConfig).not.toHaveBeenCalled();
   });

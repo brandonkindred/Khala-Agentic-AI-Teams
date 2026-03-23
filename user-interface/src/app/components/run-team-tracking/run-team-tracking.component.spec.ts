@@ -1,9 +1,16 @@
+import { TestBed } from '@angular/core/testing';
+import { vi } from 'vitest';
+import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { RunTeamTrackingComponent } from './run-team-tracking.component';
 import type { JobStatusResponse, TaskStateEntry, PlanningHierarchy } from '../../models';
 
 describe('RunTeamTrackingComponent work tree fallback initiative behavior', () => {
   const createComponent = (): RunTeamTrackingComponent => {
-    return new RunTeamTrackingComponent({} as never);
+    const apiSpy = { getJobStatus: vi.fn() };
+    TestBed.configureTestingModule({
+      providers: [{ provide: SoftwareEngineeringApiService, useValue: apiSpy }],
+    });
+    return TestBed.runInInjectionContext(() => new RunTeamTrackingComponent());
   };
 
   const baseStatus = (): JobStatusResponse => ({

@@ -10,7 +10,7 @@ describe('InvestmentWorkflowComponent', () => {
   let fixture: ComponentFixture<InvestmentWorkflowComponent>;
 
   beforeEach(async () => {
-    const apiSpy = { getWorkflowStatus: vi.fn().mockReturnValue(of({ status: 'idle' })) };
+    const apiSpy = { getWorkflowStatus: vi.fn().mockReturnValue(of({ mode: 'idle', audit_log: [], queue_counts: {} })) };
     await TestBed.configureTestingModule({
       imports: [InvestmentWorkflowComponent, NoopAnimationsModule],
       providers: [{ provide: InvestmentApiService, useValue: apiSpy }],

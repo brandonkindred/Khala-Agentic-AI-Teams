@@ -101,6 +101,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
   architectResults: ArchitectDesignResponse | null = null;
   backendCodeV2JobId: string | null = null;
   frontendCodeV2JobId: string | null = null;
+  planningV2JobId: string | null = null;
   planningV3JobId: string | null = null;
   productAnalysisJobId: string | null = null;
 
@@ -258,9 +259,25 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
       product_analysis: 'Product Analysis',
       backend_code_v2: 'Backend (v2)',
       frontend_code_v2: 'Frontend (v2)',
+      planning_v2: 'Planning (v2)',
       planning_v3: 'Planning',
     };
     return labels[jobType] ?? jobType;
+  }
+
+  onPlanningV2Submit(req: { repo_path: string; goal: string }): void {
+    this.loading = true;
+    this.error = null;
+    this.api.runPlanningV2(req).subscribe({
+      next: (res) => {
+        this.planningV2JobId = res.job_id;
+        this.loading = false;
+      },
+      error: (err: { error?: { detail?: string }; message?: string }) => {
+        this.error = err?.error?.detail ?? err?.message ?? 'Failed to run planning v2';
+        this.loading = false;
+      },
+    });
   }
 
   onRunTeamSubmit(response: RunTeamResponse): void {

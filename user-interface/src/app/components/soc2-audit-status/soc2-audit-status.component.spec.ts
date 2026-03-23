@@ -4,6 +4,11 @@ import { vi } from 'vitest';
 import { Soc2ComplianceApiService } from '../../services/soc2-compliance-api.service';
 import { Soc2AuditStatusComponent } from './soc2-audit-status.component';
 
+vi.mock('rxjs', async (importOriginal) => {
+  const rxjs = await importOriginal<typeof import('rxjs')>();
+  return { ...rxjs, timer: vi.fn((..._args: unknown[]) => rxjs.of(0)) };
+});
+
 describe('Soc2AuditStatusComponent', () => {
   let component: Soc2AuditStatusComponent;
   let fixture: ComponentFixture<Soc2AuditStatusComponent>;
@@ -17,15 +22,17 @@ describe('Soc2AuditStatusComponent', () => {
 
     fixture = TestBed.createComponent(Soc2AuditStatusComponent);
     component = fixture.componentInstance;
-    component.jobId = 'j1';
-    fixture.detectChanges();
   });
 
   it('should create', () => {
+    component.jobId = 'j1';
+    fixture.detectChanges();
     expect(component).toBeTruthy();
   });
 
   it('should poll and set status when jobId set', () => {
+    component.jobId = 'j1';
+    fixture.detectChanges();
     expect(component.status).toBeTruthy();
     expect(component.status?.job_id).toBe('j1');
   });

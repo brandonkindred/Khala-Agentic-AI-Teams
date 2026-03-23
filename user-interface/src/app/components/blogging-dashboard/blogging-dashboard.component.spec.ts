@@ -6,6 +6,11 @@ import { BloggingDashboardComponent } from './blogging-dashboard.component';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
 
+vi.mock('rxjs', async (importOriginal) => {
+  const rxjs = await importOriginal<typeof import('rxjs')>();
+  return { ...rxjs, timer: vi.fn((..._args: unknown[]) => rxjs.of(0)) };
+});
+
 describe('BloggingDashboardComponent', () => {
   let component: BloggingDashboardComponent;
   let fixture: ComponentFixture<BloggingDashboardComponent>;
@@ -16,6 +21,7 @@ describe('BloggingDashboardComponent', () => {
     getJobStatus: ReturnType<typeof vi.fn>;
     getJobArtifacts: ReturnType<typeof vi.fn>;
     getJobArtifactContent: ReturnType<typeof vi.fn>;
+    health: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(async () => {
@@ -26,8 +32,11 @@ describe('BloggingDashboardComponent', () => {
       getJobStatus: vi.fn(),
       getJobArtifacts: vi.fn(),
       getJobArtifactContent: vi.fn(),
+      health: vi.fn(),
     };
     apiSpy.getJobs.mockReturnValue(of([]));
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'x', status: 'running' }));
+    apiSpy.health.mockReturnValue(of({ brand_spec_configured: false }));
 
     await TestBed.configureTestingModule({
       imports: [BloggingDashboardComponent, NoopAnimationsModule],

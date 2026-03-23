@@ -42,7 +42,7 @@ describe('PendingQuestionsComponent', () => {
     fixture = TestBed.createComponent(PendingQuestionsComponent);
     component = fixture.componentInstance;
     component.jobId = 'job-1';
-    component.questions = [mockQuestion as any];
+    fixture.componentRef.setInput('questions', [mockQuestion as any]);
     fixture.detectChanges();
   });
 
