@@ -9,6 +9,7 @@ all worker processes share the same on-disk database.
 from __future__ import annotations
 
 import contextlib
+import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from typing import Iterator, List, Optional
 from uuid import uuid4
 
 from branding_team.models import BrandingMission, TeamOutput
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversations (
@@ -214,6 +217,23 @@ class BrandingConversationStore:
                 (brand_id, ts, conversation_id),
             )
         return result.rowcount > 0
+
+    def adopt_unattached_conversations(self, brand_id: str) -> int:
+        """Bulk-assign all conversations with ``brand_id IS NULL`` to *brand_id*.
+
+        Used when the first brand is created so that every prior conversation
+        is automatically associated with it.  Returns the number of rows updated.
+        """
+        ts = datetime.now(tz=timezone.utc).isoformat()
+        with self._db() as conn:
+            result = conn.execute(
+                "UPDATE conversations SET brand_id = ?, updated_at = ? WHERE brand_id IS NULL",
+                (brand_id, ts),
+            )
+        count = result.rowcount
+        if count:
+            logger.info("Adopted %d unattached conversation(s) → brand %s", count, brand_id)
+        return count
 
     def list_conversations(self, brand_id: Optional[str] = None) -> List[ConversationSummary]:
         with self._db() as conn:

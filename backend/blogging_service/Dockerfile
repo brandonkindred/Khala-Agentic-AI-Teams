@@ -45,7 +45,7 @@ COPY agents/blogging /app/blogging
 COPY blogging_service/entrypoint.py /app/entrypoint.py
 
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/app/blogging
 EXPOSE 8090
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 \

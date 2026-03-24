@@ -453,9 +453,20 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
         existing_brand_material=payload.existing_brand_material,
         wiki_path=payload.wiki_path,
     )
+    # Check if this will be the first brand across all clients (for orphan adoption).
+    existing_brand_count = sum(
+        len(branding_store.list_brands_for_client(c.id)) for c in branding_store.list_clients()
+    )
+
     brand = branding_store.create_brand(client_id=client_id, mission=mission, name=payload.name)
     if not brand:
         raise HTTPException(status_code=404, detail="Client not found")
+
+    # When the very first brand is created, adopt all unattached conversations so
+    # prior chats are automatically associated with this brand.
+    if existing_brand_count == 0:
+        conversation_store.adopt_unattached_conversations(brand.id)
+
     return brand
 
 
@@ -751,6 +762,16 @@ def create_branding_conversation(
     if brand_id:
         if not _brand_exists(brand_id):
             raise HTTPException(status_code=404, detail="Brand not found")
+
+    # When no brand_id is provided and exactly one brand exists, auto-assign the
+    # conversation to that brand so all chats stay associated.
+    if not brand_id:
+        all_brands = []
+        for client in branding_store.list_clients():
+            all_brands.extend(branding_store.list_brands_for_client(client.id))
+        if len(all_brands) == 1:
+            brand_id = all_brands[0].id
+
     conversation_id = conversation_store.create(brand_id=brand_id)
     initial_message = (req.initial_message or "").strip()
     suggested_questions: List[str] = []
