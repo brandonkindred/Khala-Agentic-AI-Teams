@@ -2,6 +2,7 @@ import { Component, EventEmitter, Input, Output, ChangeDetectionStrategy } from 
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatCheckboxModule } from '@angular/material/checkbox';
+import { MatRadioModule } from '@angular/material/radio';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
@@ -17,6 +18,7 @@ import type { PendingQuestion, AutoAnswerResponse } from '../../../models';
     CommonModule,
     FormsModule,
     MatCheckboxModule,
+    MatRadioModule,
     MatButtonModule,
     MatIconModule,
     MatProgressSpinnerModule,
@@ -44,8 +46,17 @@ export class QuestionCardComponent {
   wasAutoAnswered = false;
   autoAnswerConfidence = 0;
 
+  get isMultiSelect(): boolean {
+    return this.question.allow_multiple !== false;
+  }
+
   onOptionToggle(optionId: string, checked: boolean): void {
-    if (checked) {
+    if (!this.isMultiSelect && checked) {
+      // Single-select: clear all other selections, then set the new one.
+      this.selectedOptionIds.clear();
+      this.otherText = '';
+      this.selectedOptionIds.add(optionId);
+    } else if (checked) {
       this.selectedOptionIds.add(optionId);
     } else {
       this.selectedOptionIds.delete(optionId);
@@ -55,6 +66,14 @@ export class QuestionCardComponent {
     }
     this.wasAutoAnswered = false;
     this.optionToggled.emit({ optionId, checked });
+  }
+
+  onRadioChange(optionId: string): void {
+    this.selectedOptionIds.clear();
+    this.otherText = '';
+    this.selectedOptionIds.add(optionId);
+    this.wasAutoAnswered = false;
+    this.optionToggled.emit({ optionId, checked: true });
   }
 
   isOptionSelected(optionId: string): boolean {
