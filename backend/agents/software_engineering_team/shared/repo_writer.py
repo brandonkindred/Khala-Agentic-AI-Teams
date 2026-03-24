@@ -36,18 +36,46 @@ _VERB_PREFIX_RE = re.compile(
 )
 
 # Pattern that detects filler words embedded in path segments
-_FILLER_WORD_RE = re.compile(
-    r"[_-](the|that|with|using|which|for|and|a|an)[_-]"
-)
+_FILLER_WORD_RE = re.compile(r"[_-](the|that|with|using|which|for|and|a|an)[_-]")
 
 # Well-known directory names that are always allowed regardless of other rules
-_ALLOWED_DIRS = frozenset({
-    "src", "app", "lib", "tests", "test", "spec", "components", "services",
-    "models", "schemas", "routers", "controllers", "guards", "pipes", "shared",
-    "pages", "features", "assets", "styles", "environments", "infrastructure",
-    "config", "utils", "helpers", "middleware", "interceptors", "directives",
-    "modules", "repository", "main", "node_modules", "dist", "build",
-})
+_ALLOWED_DIRS = frozenset(
+    {
+        "src",
+        "app",
+        "lib",
+        "tests",
+        "test",
+        "spec",
+        "components",
+        "services",
+        "models",
+        "schemas",
+        "routers",
+        "controllers",
+        "guards",
+        "pipes",
+        "shared",
+        "pages",
+        "features",
+        "assets",
+        "styles",
+        "environments",
+        "infrastructure",
+        "config",
+        "utils",
+        "helpers",
+        "middleware",
+        "interceptors",
+        "directives",
+        "modules",
+        "repository",
+        "main",
+        "node_modules",
+        "dist",
+        "build",
+    }
+)
 
 
 def _validate_paths(files: Dict[str, str], subdir: str = "") -> Tuple[Dict[str, str], List[str]]:
@@ -84,9 +112,11 @@ def _validate_paths(files: Dict[str, str], subdir: str = "") -> Tuple[Dict[str, 
             if name_part.lower() in _ALLOWED_DIRS:
                 continue
             # Test files (test_*.py) may have longer descriptive names
-            max_len = MAX_TEST_FILE_SEGMENT_LENGTH if (
-                name_part.startswith("test_") and seg.endswith(".py")
-            ) else MAX_SEGMENT_LENGTH
+            max_len = (
+                MAX_TEST_FILE_SEGMENT_LENGTH
+                if (name_part.startswith("test_") and seg.endswith(".py"))
+                else MAX_SEGMENT_LENGTH
+            )
             if len(name_part) > max_len:
                 warnings.append(
                     f"REJECTED: path segment '{seg}' is {len(name_part)} chars "
@@ -193,7 +223,9 @@ def merge_gitignore_entries(repo_path: Path, new_entries: List[str]) -> Tuple[st
     existing = gitignore_file.read_text(encoding="utf-8") if gitignore_file.exists() else ""
     existing_lines = existing.splitlines()
     # Normalize non-empty, non-comment lines for dedup
-    seen = {line.strip() for line in existing_lines if line.strip() and not line.strip().startswith("#")}
+    seen = {
+        line.strip() for line in existing_lines if line.strip() and not line.strip().startswith("#")
+    }
     added: List[str] = []
     for entry in new_entries:
         e = entry.strip()
@@ -237,7 +269,11 @@ def write_agent_output(
         gitignore_entries = output.get("gitignore_entries") or []
     else:
         files = _output_to_files_dict(output, subdir)
-        commit_message = commit_message or getattr(output, "suggested_commit_message", None) or "chore: agent output"
+        commit_message = (
+            commit_message
+            or getattr(output, "suggested_commit_message", None)
+            or "chore: agent output"
+        )
         gitignore_entries = getattr(output, "gitignore_entries", None) or []
 
     # Merge agent-provided gitignore patterns into repo root .gitignore
@@ -262,7 +298,9 @@ def write_agent_output(
     if len(validated_files) < len(files):
         logger.warning(
             "repo_writer: %s of %s files passed validation (rejected %s)",
-            len(validated_files), len(files), len(files) - len(validated_files),
+            len(validated_files),
+            len(files),
+            len(files) - len(validated_files),
         )
 
     return write_files_and_commit(Path(repo_path).resolve(), validated_files, commit_message)

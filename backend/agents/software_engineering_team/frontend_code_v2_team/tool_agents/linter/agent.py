@@ -18,7 +18,10 @@ class LinterToolAgent:
         return ToolAgentOutput(summary="Linter stub — no changes applied.")
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(recommendations=["Include lint rules and format in the plan."], summary="Linter planning stub.")
+        return ToolAgentPhaseOutput(
+            recommendations=["Include lint rules and format in the plan."],
+            summary="Linter planning stub.",
+        )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(summary="Linter review stub.")

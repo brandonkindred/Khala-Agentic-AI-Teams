@@ -17,12 +17,17 @@ _DOC_EXTENSIONS = {".md", ".rst", ".txt"}
 _RELEVANT_EXTENSIONS = _CODE_EXTENSIONS | _CONFIG_EXTENSIONS | _DOC_EXTENSIONS
 
 # Directories to skip when scanning
-_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".angular", "vendor"}
-
-# Max total characters to send to agents (avoid token limits)
-MAX_REPO_CONTEXT_CHARS = 120_000
-MAX_README_CHARS = 15_000
-MAX_CODE_SUMMARY_CHARS = MAX_REPO_CONTEXT_CHARS - MAX_README_CHARS
+_SKIP_DIRS = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".angular",
+    "vendor",
+}
 
 
 def _should_skip(path: Path, repo_root: Path) -> bool:
@@ -46,8 +51,6 @@ def load_repo_context(repo_path: str | Path) -> RepoContext:
     file_list: List[str] = []
     code_parts: List[str] = []
     readme_content = ""
-    total_chars = 0
-    code_cap = MAX_CODE_SUMMARY_CHARS
 
     for f in root.rglob("*"):
         if not f.is_file():
@@ -68,25 +71,16 @@ def load_repo_context(repo_path: str | Path) -> RepoContext:
 
         # Prefer README at root for overview
         if rel_path.lower().startswith("readme") and not readme_content:
-            readme_content = text[:MAX_README_CHARS]
-            if len(text) > MAX_README_CHARS:
-                readme_content += "\n\n... [truncated]"
+            readme_content = text
 
         # Add to code summary with a header
         if f.suffix.lower() in _CODE_EXTENSIONS | _CONFIG_EXTENSIONS:
-            block = f"### {rel_path} ###\n{text}"
-            if total_chars + len(block) > code_cap:
-                remaining = code_cap - total_chars
-                if remaining > 500:
-                    block = block[:remaining] + "\n\n... [truncated]"
-                    code_parts.append(block)
-                    total_chars = code_cap
-                break
-            code_parts.append(block)
-            total_chars += len(block)
+            code_parts.append(f"### {rel_path} ###\n{text}")
 
-    code_summary = "\n\n".join(code_parts) if code_parts else "# No relevant code or config files found."
-    file_list = sorted(file_list)[:500]  # Cap list size
+    code_summary = (
+        "\n\n".join(code_parts) if code_parts else "# No relevant code or config files found."
+    )
+    file_list = sorted(file_list)
 
     # Infer tech stack from extensions
     exts: Set[str] = set()

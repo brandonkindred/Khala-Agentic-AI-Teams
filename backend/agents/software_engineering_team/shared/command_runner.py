@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 # Default timeouts (seconds)
 BUILD_TIMEOUT = 120  # frontend build, python -m pytest
-SERVE_TIMEOUT = 30   # dev server (just wait for it to start, then kill)
-TEST_TIMEOUT = 120   # pytest
+SERVE_TIMEOUT = 30  # dev server (just wait for it to start, then kill)
+TEST_TIMEOUT = 120  # pytest
 
 # Node version for modern frontend frameworks. NVM installs and uses this for frontend commands.
 # Angular CLI v19+ requires Node v20.19+ or v22.12+; React/Vue work with v18+.
@@ -60,19 +60,16 @@ class CommandResult:
 
     @property
     def error_summary(self) -> str:
-        """Short error summary suitable for agent feedback."""
+        """Full error summary suitable for agent feedback."""
         if self.success:
             return ""
         if self.timed_out:
             return "Command timed out"
         # Prefer stderr for error messages, fall back to stdout
         text = self.stderr.strip() if self.stderr and self.stderr.strip() else self.stdout.strip()
-        # Truncate long output
-        if len(text) > 4000:
-            text = text[:4000] + "\n... [truncated]"
         return text
 
-    def pytest_error_summary(self, max_chars: int = 2500) -> str:
+    def pytest_error_summary(self, max_chars: int = 200_000) -> str:
         """
         For pytest runs: extract the failure/error section so agents see the real
         error (e.g. ImportError, assertion) not the session header (rootdir: ...).
@@ -85,14 +82,9 @@ class CommandResult:
             idx = text.find(marker)
             if idx != -1:
                 excerpt = text[idx:].strip()
-                if len(excerpt) > max_chars:
-                    excerpt = excerpt[:max_chars] + "\n... [truncated]"
                 return excerpt
-        # No marker: return tail of output (where pytest usually puts the failure)
-        text = text.strip()
-        if len(text) > max_chars:
-            text = "...\n" + text[-max_chars:]
-        return text
+        # No marker: return full output
+        return text.strip()
 
     def parsed_failures(self, command_kind: str = "pytest") -> list:
         """
@@ -105,6 +97,7 @@ class CommandResult:
             return []
         try:
             from software_engineering_team.shared.error_parsing import parse_command_failure
+
             return parse_command_failure(command_kind, self.stdout or "", self.stderr or "")
         except Exception as e:
             logger.debug("Error parsing failures: %s", e)
@@ -164,9 +157,17 @@ def run_command(
         stdout_val = ""
         stderr_val = ""
         if hasattr(e, "stdout") and e.stdout:
-            stdout_val = e.stdout.decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else e.stdout
+            stdout_val = (
+                e.stdout.decode("utf-8", errors="replace")
+                if isinstance(e.stdout, bytes)
+                else e.stdout
+            )
         if hasattr(e, "stderr") and e.stderr:
-            stderr_val = e.stderr.decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else e.stderr
+            stderr_val = (
+                e.stderr.decode("utf-8", errors="replace")
+                if isinstance(e.stderr, bytes)
+                else e.stderr
+            )
         return CommandResult(
             success=False,
             exit_code=-1,
@@ -195,16 +196,17 @@ def run_command(
 def detect_frontend_framework(project_path: str | Path) -> str:
     """
     Detect the frontend framework from project files.
-    
+
     Returns: "angular", "react", "vue", or "unknown"
     """
     import json
+
     cwd = Path(project_path).resolve()
-    
+
     # Check for Angular-specific config
     if (cwd / "angular.json").exists():
         return "angular"
-    
+
     # Check package.json for framework dependencies
     pkg_path = cwd / "package.json"
     if pkg_path.exists():
@@ -214,7 +216,7 @@ def detect_frontend_framework(project_path: str | Path) -> str:
                 **data.get("dependencies", {}),
                 **data.get("devDependencies", {}),
             }
-            
+
             if "@angular/core" in all_deps or "@angular/common" in all_deps:
                 return "angular"
             if "react" in all_deps or "react-dom" in all_deps:
@@ -223,13 +225,13 @@ def detect_frontend_framework(project_path: str | Path) -> str:
                 return "vue"
         except (json.JSONDecodeError, Exception):
             pass
-    
+
     # Check for Vue-specific files
     if (cwd / "vue.config.js").exists():
         return "vue"
     if any(cwd.rglob("*.vue")):
         return "vue"
-    
+
     return "unknown"
 
 
@@ -326,7 +328,8 @@ def ensure_nvm_installed() -> NvmInstallResult:  # pragma: no cover
         logger.warning(
             "NVM install failed. Recovery summary: 1) Tried curl, 2) Tried wget, "
             "both failed. exit_code=%s stderr=%s",
-            result.returncode, stderr[:200],
+            result.returncode,
+            stderr[:200],
         )
         return NvmInstallResult(success=False, stderr=stderr)
 
@@ -362,10 +365,10 @@ def run_command_with_nvm(  # pragma: no cover
         )
     # Version check: fail fast if Node is below modern frontend minimum (v18+)
     version_check = (
-        "node -e 'var v=process.versions.node.split(\".\").map(Number);"
+        'node -e \'var v=process.versions.node.split(".").map(Number);'
         "var maj=v[0];"
         "if(maj>=18)process.exit(0);"
-        "console.error(\"Node \"+process.version+\" is below minimum v18 for modern frontend frameworks\");"
+        'console.error("Node "+process.version+" is below minimum v18 for modern frontend frameworks");'
         "process.exit(1);'"
     )
     # Try all instant `nvm use` options before any slow `nvm install`.
@@ -421,7 +424,10 @@ def run_command_with_nvm(  # pragma: no cover
         logger.warning(
             "Command with NVM timed out after %ss: %s. Recovery summary: "
             "1) Attempted Node %s, 2) Fallback to Node %s, 3) Command execution timeout",
-            timeout, " ".join(cmd), node_version, NVM_NODE_FALLBACK_VERSION,
+            timeout,
+            " ".join(cmd),
+            node_version,
+            NVM_NODE_FALLBACK_VERSION,
         )
         return CommandResult(
             success=False,
@@ -440,20 +446,22 @@ def run_command_with_nvm(  # pragma: no cover
         )
 
 
-def run_frontend_build(project_path: str | Path, framework: str = "") -> CommandResult:  # pragma: no cover
+def run_frontend_build(
+    project_path: str | Path, framework: str = ""
+) -> CommandResult:  # pragma: no cover
     """
     Run the appropriate build command for the detected or specified frontend framework.
-    
+
     Args:
         project_path: Path to the frontend project
         framework: Optional framework hint ("angular", "react", "vue"). If not provided,
                    will be auto-detected from project files.
-    
+
     Returns CommandResult with build status and any errors.
     """
     cwd = Path(project_path).resolve()
     detected_framework = framework or detect_frontend_framework(cwd)
-    
+
     if detected_framework == "angular":
         return run_ng_build_with_nvm_fallback(cwd)
     elif detected_framework in ("react", "vue", "unknown"):
@@ -468,7 +476,7 @@ def run_npm_build_with_nvm(project_path: str | Path) -> CommandResult:  # pragma
     Uses NVM when available for consistent Node version.
     """
     cwd = Path(project_path).resolve()
-    
+
     if _get_nvm_script_prefix() is not None:
         logger.info("Running npm run build with NVM (node %s)", FRONTEND_NODE_VERSION)
         return run_command_with_nvm(
@@ -477,7 +485,7 @@ def run_npm_build_with_nvm(project_path: str | Path) -> CommandResult:  # pragma
             node_version=FRONTEND_NODE_VERSION,
             timeout=BUILD_TIMEOUT,
         )
-    
+
     # Try without NVM
     return run_command(["npm", "run", "build"], cwd=cwd, timeout=BUILD_TIMEOUT)
 
@@ -538,6 +546,7 @@ def _ensure_angular_common_in_package_json(cwd: Path) -> None:
     Repairs projects where package.json was overwritten or is missing this dep.
     """
     import json
+
     pkg_path = cwd / "package.json"
     if not pkg_path.exists():
         return
@@ -558,6 +567,7 @@ def _ensure_angular_material_in_package_json(cwd: Path) -> None:
     Repairs projects where package.json was overwritten or is missing these deps.
     """
     import json
+
     pkg_path = cwd / "package.json"
     if not pkg_path.exists():
         return
@@ -584,6 +594,7 @@ def _ensure_tsconfig_module_resolution(cwd: Path) -> None:
     Fixes 'Cannot find module @angular/common/http' when resolution was 'node'.
     """
     import json
+
     ts_path = cwd / "tsconfig.json"
     if not ts_path.exists():
         return
@@ -594,7 +605,9 @@ def _ensure_tsconfig_module_resolution(cwd: Path) -> None:
             opts["moduleResolution"] = "bundler"
             data["compilerOptions"] = opts
             ts_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            logger.info("Repaired tsconfig.json: moduleResolution node -> bundler for Angular compatibility")
+            logger.info(
+                "Repaired tsconfig.json: moduleResolution node -> bundler for Angular compatibility"
+            )
     except Exception as e:
         logger.warning("Could not repair tsconfig.json: %s", e)
 
@@ -610,7 +623,9 @@ def _ensure_material_theme_in_styles(cwd: Path) -> None:
             continue
         try:
             content = styles_path.read_text(encoding="utf-8")
-            if "material" in content.lower() and ("prebuilt-themes" in content or "indigo-pink" in content):
+            if "material" in content.lower() and (
+                "prebuilt-themes" in content or "indigo-pink" in content
+            ):
                 return
             theme_line = "@use '@angular/material/prebuilt-themes/indigo-pink.css';\n"
             new_content = theme_line + content if content.strip() else theme_line
@@ -688,8 +703,11 @@ def _ensure_app_config_di_token_imports(cwd: Path) -> None:
                 continue
             # Already imported if token appears in an import from the expected module
             already_imported = re.search(
-                r"import\s*\{[^}]*\b" + re.escape(token) + r"\b[^}]*\}\s*from\s*['\"]"
-                + re.escape(module) + r"['\"]",
+                r"import\s*\{[^}]*\b"
+                + re.escape(token)
+                + r"\b[^}]*\}\s*from\s*['\"]"
+                + re.escape(module)
+                + r"['\"]",
                 content,
             )
             if already_imported:
@@ -741,7 +759,9 @@ def _normalize_double_at_angular(cwd: Path) -> None:
                 content = path.read_text(encoding="utf-8")
                 if "@@angular" not in content:
                     continue
-                new_content = content.replace("'@@angular", "'@angular").replace('"@@angular', '"@angular')
+                new_content = content.replace("'@@angular", "'@angular").replace(
+                    '"@@angular', '"@angular'
+                )
                 if new_content != content:
                     path.write_text(new_content, encoding="utf-8")
                     logger.info("Repaired %s: normalized @@angular to @angular", path.name)
@@ -761,7 +781,11 @@ def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
     for html_path in src.rglob("*.component.html"):
         try:
             html_content = html_path.read_text(encoding="utf-8")
-            if "formGroup" not in html_content and "formControlName" not in html_content and "formArrayName" not in html_content:
+            if (
+                "formGroup" not in html_content
+                and "formControlName" not in html_content
+                and "formArrayName" not in html_content
+            ):
                 continue
             ts_path = html_path.with_suffix(".ts")
             if not ts_path.exists():
@@ -775,7 +799,12 @@ def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
                 for i, line in enumerate(lines):
                     if line.strip().startswith("import "):
                         insert_idx = i + 1
-                    elif insert_idx > 0 and not line.strip().startswith("import ") and line.strip() and not line.strip().startswith("//"):
+                    elif (
+                        insert_idx > 0
+                        and not line.strip().startswith("import ")
+                        and line.strip()
+                        and not line.strip().startswith("//")
+                    ):
                         break
                 lines.insert(insert_idx, "import { ReactiveFormsModule } from '@angular/forms';")
                 ts_content = "\n".join(lines)
@@ -783,8 +812,10 @@ def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
             if not imports_match:
                 continue
             pos = imports_match.end()
-            after_bracket = ts_content[pos:pos + 80]
-            if "ReactiveFormsModule" in after_bracket or re.search(r"ReactiveFormsModule\s*[,\)]", ts_content[pos:pos + 200]):
+            after_bracket = ts_content[pos : pos + 80]
+            if "ReactiveFormsModule" in after_bracket or re.search(
+                r"ReactiveFormsModule\s*[,\)]", ts_content[pos : pos + 200]
+            ):
                 continue
             ts_content = ts_content[:pos] + "ReactiveFormsModule,\n    " + ts_content[pos:]
             ts_path.write_text(ts_content, encoding="utf-8")
@@ -793,20 +824,22 @@ def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
             logger.warning("Could not repair %s for ReactiveFormsModule: %s", html_path.name, e)
 
 
-def ensure_frontend_dependencies_installed(project_path: str | Path, framework: str = "") -> CommandResult:
+def ensure_frontend_dependencies_installed(
+    project_path: str | Path, framework: str = ""
+) -> CommandResult:
     """
     Run npm install so dependencies are installed before the frontend agent runs.
     Uses NVM when available for consistent Node version. If package.json does not
     exist, returns success (no-op) so callers do not block.
-    
+
     For Angular projects, also applies Angular-specific fixes (ensuring @angular/common, etc.).
     """
     cwd = Path(project_path).resolve()
     if not (cwd / "package.json").exists():
         return CommandResult(success=True, exit_code=0, stdout="", stderr="")
-    
+
     detected_framework = framework or detect_frontend_framework(cwd)
-    
+
     # Apply Angular-specific fixes only for Angular projects
     if detected_framework == "angular":
         _ensure_angular_common_in_package_json(cwd)
@@ -817,7 +850,7 @@ def ensure_frontend_dependencies_installed(project_path: str | Path, framework: 
         _ensure_app_config_di_token_imports(cwd)
         _ensure_reactive_forms_module_in_components(cwd)
         _normalize_double_at_angular(cwd)
-    
+
     if _get_nvm_script_prefix() is not None:  # pragma: no cover
         return run_command_with_nvm(
             ["npm", "install"],
@@ -828,17 +861,19 @@ def ensure_frontend_dependencies_installed(project_path: str | Path, framework: 
     return run_command(["npm", "install"], cwd=cwd, timeout=BUILD_TIMEOUT)
 
 
-def run_frontend_serve_smoke_test(project_path: str | Path, port: int = 4299, framework: str = "") -> CommandResult:
+def run_frontend_serve_smoke_test(
+    project_path: str | Path, port: int = 4299, framework: str = ""
+) -> CommandResult:
     """
     Start a frontend dev server briefly to confirm the app compiles and starts.
     Runs for SERVE_TIMEOUT seconds, then kills the process.
-    
+
     This is a smoke test - it just confirms the app starts without errors.
     Returns CommandResult where success=True means the server started.
     """
     cwd = Path(project_path).resolve()
     detected_framework = framework or detect_frontend_framework(cwd)
-    
+
     if detected_framework == "angular":
         return run_ng_serve_smoke_test(cwd, port)
     else:
@@ -852,9 +887,10 @@ def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> Comm
     """
     cwd = Path(project_path).resolve()
     logger.info("Starting npm start smoke test on port %s in %s", port, cwd)
-    
+
     # Try to determine the right start command from package.json
     import json
+
     start_cmd = "start"
     try:
         pkg_data = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
@@ -865,7 +901,7 @@ def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> Comm
             start_cmd = "start"
     except Exception:
         pass
-    
+
     nvm_prefix = _get_nvm_script_prefix()
     if nvm_prefix is not None:
         script = (
@@ -878,7 +914,7 @@ def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> Comm
         logger.info("Using NVM (node %s) for npm %s smoke test", FRONTEND_NODE_VERSION, start_cmd)
     else:
         run_cmd = ["npm", "run", start_cmd]
-    
+
     try:
         proc = subprocess.Popen(
             run_cmd,
@@ -888,7 +924,7 @@ def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> Comm
             text=True,
             preexec_fn=os.setsid,
         )
-        
+
         try:
             stdout, stderr = proc.communicate(timeout=SERVE_TIMEOUT)
             return CommandResult(
@@ -949,7 +985,11 @@ def run_ng_serve_smoke_test(project_path: str | Path, port: int = 4299) -> Comma
             f"npx ng serve --port {port} --no-open"
         )
         run_cmd: list[str] = ["bash", "-c", script]
-        logger.info("Using NVM (node %s, fallback %s) for ng serve smoke test", FRONTEND_NODE_VERSION, NVM_NODE_FALLBACK_VERSION)
+        logger.info(
+            "Using NVM (node %s, fallback %s) for ng serve smoke test",
+            FRONTEND_NODE_VERSION,
+            NVM_NODE_FALLBACK_VERSION,
+        )
     else:
         run_cmd = ["npx", "ng", "serve", "--port", str(port), "--no-open"]
 
@@ -1689,6 +1729,7 @@ def _scaffold_react_project(cwd: Path) -> CommandResult:
     if pkg_path.exists():
         try:
             import json
+
             pkg_data = json.loads(pkg_path.read_text(encoding="utf-8"))
             pkg_data["scripts"] = {
                 "dev": "vite",
@@ -1795,7 +1836,9 @@ def health():
 """
 
 
-def ensure_backend_project_initialized(backend_dir: str | Path) -> CommandResult:  # pragma: no cover
+def ensure_backend_project_initialized(
+    backend_dir: str | Path,
+) -> CommandResult:  # pragma: no cover
     """Ensure a minimal FastAPI backend project exists at *backend_dir*.
 
     Creates (if missing):
@@ -1872,9 +1915,7 @@ def ensure_backend_project_initialized(backend_dir: str | Path) -> CommandResult
             timeout=120,
         )
         if not result.success:
-            logger.warning(
-                "pip install failed (non-blocking): %s", result.error_summary
-            )
+            logger.warning("pip install failed (non-blocking): %s", result.error_summary)
     except Exception as e:
         logger.warning("pip install failed (non-blocking): %s", e)
 

@@ -65,6 +65,7 @@ def test_load_spec_from_repo(tmp_path) -> None:
 def test_load_spec_from_repo_raises_when_missing(tmp_path) -> None:
     """load_spec_from_repo raises FileNotFoundError when spec missing."""
     import pytest
+
     with pytest.raises(FileNotFoundError, match="not found"):
         load_spec_from_repo(tmp_path)
 
@@ -244,6 +245,7 @@ def test_get_newest_spec_path_returns_most_recent_by_mtime(tmp_path) -> None:
     older.write_text("# validated")
     newer.write_text("# v2")
     import time
+
     time.sleep(0.02)
     newer.write_text("# v2 updated")
     got = get_newest_spec_path(tmp_path)

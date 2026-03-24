@@ -57,13 +57,21 @@ def temp_repo(tmp_path: Path) -> Path:
         capture_output=True,
         check=True,
     )
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=repo, capture_output=True, check=True
+    )
     subprocess.run(
         ["git", "commit", "-m", "Initial spec"],
         cwd=repo,
         capture_output=True,
         check=True,
-        env={**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@test.com", "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@test.com"},
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@test.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@test.com",
+        },
     )
     return repo
 
@@ -107,9 +115,11 @@ def test_architect_design_success(client: TestClient) -> None:
 
     fake_reqs = ProductRequirements(title="Task Manager", description="Task manager API")
 
-    with patch("spec_parser.parse_spec_with_llm", return_value=fake_reqs), \
-         patch("architecture_expert.ArchitectureExpertAgent", return_value=mock_agent), \
-         patch("llm_service.get_client"):
+    with (
+        patch("spec_parser.parse_spec_with_llm", return_value=fake_reqs),
+        patch("architecture_expert.ArchitectureExpertAgent", return_value=mock_agent),
+        patch("llm_service.get_client"),
+    ):
         r = client.post("/architect/design", json={"spec": spec})
 
     assert r.status_code == 200
@@ -228,7 +238,9 @@ def test_run_team_poll_status(client: TestClient, temp_work_path: Path) -> None:
         work_path = temp_work_path
         backend_dir = work_path / "backend"
         devops_dir = work_path / "devops"
-        assert backend_dir.exists() or devops_dir.exists(), "Agent output should create backend or devops dirs"
+        assert backend_dir.exists() or devops_dir.exists(), (
+            "Agent output should create backend or devops dirs"
+        )
         if backend_dir.exists():
             assert any(backend_dir.rglob("*.py")), "Backend should have added Python files"
 
@@ -267,7 +279,10 @@ def test_resume_400_when_status_completed(client: TestClient, temp_work_path: Pa
 
     r = client.post(f"/run-team/{job_id}/resume")
     assert r.status_code == 400
-    assert "cannot be resumed" in r.json().get("detail", "").lower() or "status" in r.json().get("detail", "").lower()
+    assert (
+        "cannot be resumed" in r.json().get("detail", "").lower()
+        or "status" in r.json().get("detail", "").lower()
+    )
 
 
 def test_resume_200_when_status_failed(client: TestClient, temp_work_path: Path) -> None:
@@ -315,7 +330,10 @@ def test_resume_400_when_job_type_not_run_team(client: TestClient, temp_work_pat
 
     r = client.post(f"/run-team/{job_id}/resume")
     assert r.status_code == 400
-    assert "run_team" in r.json().get("detail", "").lower() or "job_type" in r.json().get("detail", "").lower()
+    assert (
+        "run_team" in r.json().get("detail", "").lower()
+        or "job_type" in r.json().get("detail", "").lower()
+    )
 
 
 def test_resume_200_when_pending(client: TestClient, temp_work_path: Path) -> None:
@@ -403,7 +421,10 @@ def test_job_store_single_path_composite_update_visible(tmp_path: Path) -> None:
 
     job_data = get_job(job_id, cache_dir=cache_dir)
     assert job_data is not None
-    assert job_data.get("task_states", {}).get("task_1") == {"status": "done", "assignee": "backend"}
+    assert job_data.get("task_states", {}).get("task_1") == {
+        "status": "done",
+        "assignee": "backend",
+    }
 
     jobs = list_jobs(cache_dir=cache_dir, running_only=False)
     assert any(j.get("job_id") == job_id for j in jobs)
@@ -428,7 +449,10 @@ def test_restart_400_when_status_running(client: TestClient, temp_work_path: Pat
 
     r = client.post(f"/run-team/{job_id}/restart")
     assert r.status_code == 400
-    assert "cannot be restarted" in r.json().get("detail", "").lower() or "status" in r.json().get("detail", "").lower()
+    assert (
+        "cannot be restarted" in r.json().get("detail", "").lower()
+        or "status" in r.json().get("detail", "").lower()
+    )
 
 
 def test_restart_400_when_job_type_not_run_team(client: TestClient, temp_work_path: Path) -> None:
@@ -469,7 +493,11 @@ def test_planning_v2_status_returns_status_text(client: TestClient, temp_work_pa
 
     job_id = str(uuid.uuid4())
     create_job(job_id, str(temp_work_path), job_type="planning_v2")
-    update_job(job_id, status="running", status_text="Fixing 3 issues: 2 user story, 1 architecture (iteration 1).")
+    update_job(
+        job_id,
+        status="running",
+        status_text="Fixing 3 issues: 2 user story, 1 architecture (iteration 1).",
+    )
 
     r = client.get(f"/planning-v2/status/{job_id}")
     assert r.status_code == 200

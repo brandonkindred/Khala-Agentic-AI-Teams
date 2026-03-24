@@ -86,7 +86,9 @@ class FrontendDevelopmentAgent:
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
 
-    def _build_tool_runners(self, tool_agents: Dict[ToolAgentKind, Any]) -> Dict[ToolAgentKind, Callable[[ToolAgentInput], ToolAgentOutput]]:
+    def _build_tool_runners(
+        self, tool_agents: Dict[ToolAgentKind, Any]
+    ) -> Dict[ToolAgentKind, Callable[[ToolAgentInput], ToolAgentOutput]]:
         runners = {}
         for k, ag in tool_agents.items():
             if hasattr(ag, "run"):
@@ -98,14 +100,28 @@ class FrontendDevelopmentAgent:
     @staticmethod
     def _read_repo_code(repo_path: Path, max_chars: int = 30_000) -> str:
         """Read frontend source files from repo into a single string."""
-        extensions = {".ts", ".tsx", ".js", ".jsx", ".html", ".css", ".scss", ".json", ".yaml", ".yml"}
+        extensions = {
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".html",
+            ".css",
+            ".scss",
+            ".json",
+            ".yaml",
+            ".yml",
+        }
         parts: List[str] = []
         total = 0
         try:
             for f in sorted(repo_path.rglob("*")):
                 if not f.is_file() or f.suffix not in extensions:
                     continue
-                if any(skip in f.parts for skip in ("node_modules", ".git", "dist", "build", ".angular")):
+                if any(
+                    skip in f.parts
+                    for skip in ("node_modules", ".git", "dist", "build", ".angular")
+                ):
                     continue
                 try:
                     content = f.read_text(encoding="utf-8", errors="replace")
@@ -153,7 +169,9 @@ class FrontendDevelopmentAgent:
                 except Exception:
                     pass
 
-        logger.info("[%s] WORKFLOW START: Frontend Development Agent (per-microtask review gates)", task_id)
+        logger.info(
+            "[%s] WORKFLOW START: Frontend Development Agent (per-microtask review gates)", task_id
+        )
 
         existing_code = self._read_repo_code(repo_path)
         tool_agents = _build_tool_agents(self.llm)
@@ -161,7 +179,11 @@ class FrontendDevelopmentAgent:
 
         logger.info("[%s] Next step -> Starting Phase: Planning", task_id)
         result.current_phase = Phase.PLANNING
-        _update_job(current_phase="planning", progress=5, status_text="Analyzing task and creating implementation plan...")
+        _update_job(
+            current_phase="planning",
+            progress=5,
+            status_text="Analyzing task and creating implementation plan...",
+        )
 
         try:
             planning_result = run_planning(
@@ -191,7 +213,9 @@ class FrontendDevelopmentAgent:
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
         if git_agent is not None and hasattr(git_agent, "create_feature_branch"):
             try:
-                ok, branch_name = git_agent.create_feature_branch(repo_path, task_id, task.title or "")
+                ok, branch_name = git_agent.create_feature_branch(
+                    repo_path, task_id, task.title or ""
+                )
                 if ok and branch_name:
                     feature_branch_name = branch_name
             except Exception as exc:
@@ -199,9 +223,21 @@ class FrontendDevelopmentAgent:
 
         logger.info("[%s] Next step -> Starting Phase: Execution", task_id)
         result.current_phase = Phase.EXECUTION
-        _update_job(current_phase="execution", current_microtask="", progress=15, status_text="Starting code implementation...")
+        _update_job(
+            current_phase="execution",
+            current_microtask="",
+            progress=15,
+            status_text="Starting code implementation...",
+        )
 
-        def _progress_cb(current_index: int, done: int, total: int, title: str, microtask_phase: str = "coding", phase_detail: str = "") -> None:
+        def _progress_cb(
+            current_index: int,
+            done: int,
+            total: int,
+            title: str,
+            microtask_phase: str = "coding",
+            phase_detail: str = "",
+        ) -> None:
             phase_labels = {
                 "coding": "Writing code",
                 "code_review": "Code review",
@@ -212,7 +248,9 @@ class FrontendDevelopmentAgent:
                 "problem_solving": "Fixing issues",
                 "completed": "Completed",
             }
-            phase_label = phase_labels.get(microtask_phase, microtask_phase.replace("_", " ").title())
+            phase_label = phase_labels.get(
+                microtask_phase, microtask_phase.replace("_", " ").title()
+            )
             status = f"{phase_label}: {title} ({current_index}/{total})"
             if phase_detail:
                 status = f"{status} — {phase_detail}"
@@ -254,7 +292,9 @@ class FrontendDevelopmentAgent:
             )
             result.execution_result = exec_result
         except MicrotaskReviewFailedError as err:
-            result.failure_reason = f"Microtask {err.microtask.id} failed review: {err.review_result.summary}"
+            result.failure_reason = (
+                f"Microtask {err.microtask.id} failed review: {err.review_result.summary}"
+            )
             logger.error("[%s] %s", task_id, result.failure_reason)
             return result
         except Exception as exc:
@@ -267,13 +307,23 @@ class FrontendDevelopmentAgent:
             result.failure_reason = "Execution produced no files."
             return result
 
-        completed_count = sum(1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.COMPLETED)
-        failed_count = sum(1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.REVIEW_FAILED)
+        completed_count = sum(
+            1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.COMPLETED
+        )
+        failed_count = sum(
+            1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.REVIEW_FAILED
+        )
         result.iterations_used = completed_count
 
-        if feature_branch_name and git_agent is not None and hasattr(git_agent, "commit_current_changes"):
+        if (
+            feature_branch_name
+            and git_agent is not None
+            and hasattr(git_agent, "commit_current_changes")
+        ):
             try:
-                git_agent.commit_current_changes(repo_path, f"feat: {completed_count} microtasks completed")
+                git_agent.commit_current_changes(
+                    repo_path, f"feat: {completed_count} microtasks completed"
+                )
             except Exception as exc:
                 logger.warning("[%s] Git agent commit_current_changes raised: %s", task_id, exc)
 
@@ -282,7 +332,11 @@ class FrontendDevelopmentAgent:
         # ── Phase: Documentation ────────────────────────────────────────
         logger.info("[%s] Next step -> Starting Phase: Documentation", task_id)
         result.current_phase = Phase.DOCUMENTATION
-        _update_job(current_phase="documentation", progress=80, status_text="Generating documentation and API docs...")
+        _update_job(
+            current_phase="documentation",
+            progress=80,
+            status_text="Generating documentation and API docs...",
+        )
 
         from .phases.documentation import run_documentation_phase
 
@@ -303,13 +357,18 @@ class FrontendDevelopmentAgent:
         except Exception as exc:
             logger.warning(
                 "[%s] Documentation phase failed: %s. Next step -> Continuing to Deliver phase",
-                task_id, exc,
+                task_id,
+                exc,
             )
 
         # ── Phase: Deliver ───────────────────────────────────────────
         logger.info("[%s] Next step -> Starting Phase: Deliver", task_id)
         result.current_phase = Phase.DELIVER
-        _update_job(current_phase="deliver", progress=90, status_text="Committing changes and preparing delivery...")
+        _update_job(
+            current_phase="deliver",
+            progress=90,
+            status_text="Committing changes and preparing delivery...",
+        )
 
         try:
             deliver_result = run_deliver(
@@ -333,11 +392,23 @@ class FrontendDevelopmentAgent:
             logger.error("[%s] %s", task_id, result.failure_reason)
             return result
 
-        final_status = "Frontend task complete" if result.success else "Frontend task completed with issues"
-        _update_job(current_phase="deliver", progress=100 if result.success else 95, status_text=final_status)
+        final_status = (
+            "Frontend task complete" if result.success else "Frontend task completed with issues"
+        )
+        _update_job(
+            current_phase="deliver",
+            progress=100 if result.success else 95,
+            status_text=final_status,
+        )
         elapsed = time.monotonic() - start_time
-        logger.info("[%s] WORKFLOW %s in %.1fs (%d microtasks completed, %d failed review)",
-                    task_id, "SUCCEEDED" if result.success else "PARTIAL", elapsed, completed_count, failed_count)
+        logger.info(
+            "[%s] WORKFLOW %s in %.1fs (%d microtasks completed, %d failed review)",
+            task_id,
+            "SUCCEEDED" if result.success else "PARTIAL",
+            elapsed,
+            completed_count,
+            failed_count,
+        )
         return result
 
 

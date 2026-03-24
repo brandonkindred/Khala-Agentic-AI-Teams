@@ -142,7 +142,7 @@ Complete updated file content here.
 class DevOpsToolAgent:
     """
     DevOps tool agent: CI/CD pipelines, infrastructure, deployment planning.
-    
+
     Participates in Planning and Implementation phases per the matrix.
     """
 
@@ -156,7 +156,7 @@ class DevOpsToolAgent:
                 summary="DevOps planning skipped (no LLM).",
                 recommendations=["Define CI/CD pipeline", "Plan infrastructure"],
             )
-        
+
         plan_summary = ""
         if inp.spec_review_result:
             plan_summary = getattr(inp.spec_review_result, "plan_summary", "") or ""
@@ -167,23 +167,24 @@ class DevOpsToolAgent:
             plan_summary=plan_summary[:2000],
         )
         raw_text = complete_text_with_continuation(
-            self.llm, prompt, agent_name="DevOps",
+            self.llm,
+            prompt,
+            agent_name="DevOps",
         )
         data = parse_devops_planning_output(raw_text)
-        
+
         recommendations = data.get("recommendations") or []
         if not isinstance(recommendations, list):
             recommendations = [str(recommendations)]
-        
+
         needs_clarification = data.get("needs_clarification", False)
         clarification_questions = data.get("clarification_questions", [])
-        
+
         if needs_clarification and clarification_questions:
             logger.warning(
-                "DevOps planning requires clarification: %s",
-                "; ".join(clarification_questions[:3])
+                "DevOps planning requires clarification: %s", "; ".join(clarification_questions[:3])
             )
-        
+
         return ToolAgentPhaseOutput(
             summary=data.get("summary", "DevOps planning complete."),
             recommendations=recommendations,
@@ -205,12 +206,25 @@ class DevOpsToolAgent:
         fixes_applied: List[str] = []
         files_written: List[str] = []
         current_files: Dict[str, str] = dict(inp.current_files or {})
-        
+
         devops_issues = [
-            i for i in inp.review_issues
-            if any(kw in i.lower() for kw in ["devops", "ci/cd", "pipeline", "infrastructure", "deployment", "monitoring", "security", "cicd"])
+            i
+            for i in inp.review_issues
+            if any(
+                kw in i.lower()
+                for kw in [
+                    "devops",
+                    "ci/cd",
+                    "pipeline",
+                    "infrastructure",
+                    "deployment",
+                    "monitoring",
+                    "security",
+                    "cicd",
+                ]
+            )
         ]
-        
+
         if devops_issues and self.llm:
             logger.info(
                 "DevOps: handling %d review issue(s) (will apply fixes in one update and write to disk).",
@@ -238,8 +252,10 @@ class DevOpsToolAgent:
                 "DevOps: fixed %d review issue(s) in one update (all fixes written to planning artifacts).",
                 len(devops_issues),
             )
-        
-        existing_doc = inp.current_files.get(planning_asset_path("devops.md")) if inp.current_files else None
+
+        existing_doc = (
+            inp.current_files.get(planning_asset_path("devops.md")) if inp.current_files else None
+        )
         if existing_doc and not devops_issues:
             return ToolAgentPhaseOutput(
                 summary="DevOps artifacts unchanged (file exists, no review issues).",
@@ -257,42 +273,42 @@ class DevOpsToolAgent:
                 recommendations=fixes_applied if fixes_applied else [],
                 files_written=files_written,
             )
-        
+
         pipeline_stages = inp.metadata.get("pipeline_stages", []) if inp.metadata else []
         infrastructure = inp.metadata.get("infrastructure", {}) if inp.metadata else {}
         deployment_strategy = inp.metadata.get("deployment_strategy", "") if inp.metadata else ""
         monitoring = inp.metadata.get("monitoring", []) if inp.metadata else []
         security = inp.metadata.get("security", []) if inp.metadata else []
-        
+
         content_parts = ["# DevOps Plan\n\n"]
-        
+
         if pipeline_stages:
             content_parts.append("## CI/CD Pipeline Stages\n")
             for i, stage in enumerate(pipeline_stages, 1):
                 content_parts.append(f"{i}. {stage}\n")
             content_parts.append("\n")
-        
+
         if infrastructure:
             content_parts.append("## Infrastructure\n")
             for key, value in infrastructure.items():
                 content_parts.append(f"- **{key}:** {value}\n")
             content_parts.append("\n")
-        
+
         if deployment_strategy:
             content_parts.append(f"## Deployment Strategy\n{deployment_strategy}\n\n")
-        
+
         if monitoring:
             content_parts.append("## Monitoring\n")
             for item in monitoring:
                 content_parts.append(f"- {item}\n")
             content_parts.append("\n")
-        
+
         if security:
             content_parts.append("## Security\n")
             for item in security:
                 content_parts.append(f"- {item}\n")
             content_parts.append("\n")
-        
+
         if pipeline_stages or infrastructure:
             rel_path = planning_asset_path("devops.md")
             content = "".join(content_parts)
@@ -301,7 +317,7 @@ class DevOpsToolAgent:
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content, encoding="utf-8")
             files_written.append(rel_path)
-        
+
         return ToolAgentPhaseOutput(
             summary="DevOps artifacts generated.",
             files={},
@@ -335,13 +351,17 @@ class DevOpsToolAgent:
 
         prompt = DEVOPS_FIX_SINGLE_ISSUE_PROMPT.format(
             issue=issue,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="DevOps_FixSingleIssue",
+                self.llm,
+                prompt,
+                agent_name="DevOps_FixSingleIssue",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -358,11 +378,18 @@ class DevOpsToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "DevOps_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "DevOps_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(devops_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(devops_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("devops.md")] = updated_content
                         logger.info("DevOps: fix applied after continuation (single-issue).")
@@ -375,25 +402,44 @@ class DevOpsToolAgent:
                     logger.info("DevOps: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
                         logger.info("DevOps: fix applied (single-issue) — %s", fix_desc[:120])
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "DevOps_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "DevOps_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(devops_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(devops_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("devops.md")] = uc
                         logger.info("DevOps: fix applied after continuation (single-issue).")
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
-                                logger.info("DevOps: fix applied after continuation (single-issue).")
+                                logger.info(
+                                    "DevOps: fix applied after continuation (single-issue)."
+                                )
                                 break
                         else:
                             logger.warning(
@@ -414,9 +460,7 @@ class DevOpsToolAgent:
                 resolved=False,
             )
 
-    def fix_all_issues(
-        self, issues: List[str], inp: ToolAgentPhaseInput
-    ) -> ToolAgentPhaseOutput:
+    def fix_all_issues(self, issues: List[str], inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Fix all listed DevOps issues in one LLM call."""
         if not issues:
             return ToolAgentPhaseOutput(
@@ -441,13 +485,17 @@ class DevOpsToolAgent:
         issues_list = "\n".join(f"{i + 1}. {issue}" for i, issue in enumerate(issues))
         prompt = DEVOPS_FIX_ALL_ISSUES_PROMPT.format(
             issues_list=issues_list,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="DevOps_FixAllIssues",
+                self.llm,
+                prompt,
+                agent_name="DevOps_FixAllIssues",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -464,11 +512,18 @@ class DevOpsToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "DevOps_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "DevOps_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(devops_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(devops_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("devops.md")] = updated_content
                     else:
@@ -479,21 +534,38 @@ class DevOpsToolAgent:
                     files[planning_asset_path("devops.md")] = updated_content
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "DevOps_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "DevOps_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(devops_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(devops_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("devops.md")] = uc
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
                                 break
                         else:

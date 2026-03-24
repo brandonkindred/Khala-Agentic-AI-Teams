@@ -128,9 +128,12 @@ depends_on:
 # Execution phase
 # ---------------------------------------------------------------------------
 
-EXECUTION_PROMPT = """You are an expert Senior Backend Software Engineer implementing production-quality code.
+EXECUTION_PROMPT = (
+    """You are an expert Senior Backend Software Engineer implementing production-quality code.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 {language_conventions}
 
@@ -170,6 +173,7 @@ what you implemented
 - All imports must be valid; all referenced modules must be included.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+)
 
 # ---------------------------------------------------------------------------
 # Review phase
@@ -219,12 +223,15 @@ overall assessment
 # Problem-solving phase
 # ---------------------------------------------------------------------------
 
-PROBLEM_SOLVING_PROMPT = """You are an expert Problem-Solving Specialist for a backend project.
+PROBLEM_SOLVING_PROMPT = (
+    """You are an expert Problem-Solving Specialist for a backend project.
 
 Given the issues found during review, produce fixes. Each fix should be a complete
 updated file that resolves the issue.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 {language_conventions}
 
@@ -257,11 +264,15 @@ overview of all fixes
 - Use "## FILE <path> ##" for each file; "---" to separate each fix block.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+)
 
 # Single-issue problem-solving: one issue at a time to keep prompts small.
-PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = """You are an expert Problem-Solving Specialist. Fix exactly ONE issue.
+PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = (
+    """You are an expert Problem-Solving Specialist. Fix exactly ONE issue.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 {language_conventions}
 
@@ -298,6 +309,7 @@ one sentence: what you changed
 - Output only the file(s) you change. Use "## FILE <path> ##" for each.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+)
 
 # ---------------------------------------------------------------------------
 # QA tool agent: review (find issues from testing/QA perspective)
@@ -508,9 +520,12 @@ what documentation you fixed
 # Batch fix prompt: all issues from a review phase at once
 # ---------------------------------------------------------------------------
 
-BATCH_FIX_PROMPT = """You are an expert Senior Backend Software Engineer responsible for fixing all issues identified by the review team.
+BATCH_FIX_PROMPT = (
+    """You are an expert Senior Backend Software Engineer responsible for fixing all issues identified by the review team.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 {language_conventions}
 
@@ -560,6 +575,7 @@ Overview of all fixes applied
 - List each issue you addressed with its index (1-based) and a brief description.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+)
 
 # ---------------------------------------------------------------------------
 # Documentation self-review prompt: iterative refinement

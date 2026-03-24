@@ -12,10 +12,13 @@ if str(_agents_dir) not in sys.path:
 def test_run_workflow_minimal_no_adapters(tmp_path):
     """Run workflow with use_product_analysis=False, use_planning_v2=False so adapters are not called."""
     from planning_v3_team.orchestrator import run_workflow
+
     repo = str(tmp_path)
     job_updates = []
+
     def capture(**kwargs):
         job_updates.append(kwargs)
+
     result = run_workflow(
         repo_path=repo,
         initial_brief="Build a small app",
@@ -33,6 +36,7 @@ def test_run_workflow_minimal_no_adapters(tmp_path):
 def test_run_workflow_with_llm_no_pra(tmp_path):
     """Run with a dummy LLM; PRA and Planning V2 disabled so no HTTP calls."""
     from planning_v3_team.orchestrator import run_workflow
+
     repo = str(tmp_path)
     mock_llm = MagicMock()
     mock_llm.complete_text.return_value = '{"problem_summary": "Need X", "opportunity_statement": "Y", "target_users": ["u1"], "success_criteria": ["c1"], "assumptions": []}'

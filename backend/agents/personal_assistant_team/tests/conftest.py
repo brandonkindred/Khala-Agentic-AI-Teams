@@ -34,7 +34,7 @@ class DummyLLM:
 
     def complete_json(self, prompt, **kwargs):
         self.calls.append(("complete_json", prompt, kwargs))
-        
+
         if "intent" in prompt.lower():
             return {
                 "primary_intent": "general",
@@ -42,13 +42,13 @@ class DummyLLM:
                 "entities": {},
                 "confidence": 0.8,
             }
-        
+
         if "extract" in prompt.lower():
             return {
                 "extracted_info": [],
                 "reasoning": "No info extracted",
             }
-        
+
         return self.responses.get("complete_json", {"status": "ok"})
 
 

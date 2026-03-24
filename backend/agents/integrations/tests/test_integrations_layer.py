@@ -33,7 +33,9 @@ def test_registry_filters_enabled_providers() -> None:
     registry = IntegrationRegistry(
         [
             ProviderConfig(name="jira", transport="api", capabilities=["ticketing.create"]),
-            ProviderConfig(name="trello", transport="api", capabilities=["ticketing.create"], enabled=False),
+            ProviderConfig(
+                name="trello", transport="api", capabilities=["ticketing.create"], enabled=False
+            ),
         ]
     )
 
@@ -65,7 +67,9 @@ def test_router_uses_preferred_provider_when_available() -> None:
 
 
 def test_service_returns_normalized_execution_plan() -> None:
-    registry = IntegrationRegistry([ProviderConfig(name="slack", transport="mcp", capabilities=["chat.notify"])])
+    registry = IntegrationRegistry(
+        [ProviderConfig(name="slack", transport="mcp", capabilities=["chat.notify"])]
+    )
     router = CapabilityRouter(registry)
     service = IntegrationService(router=router, adapter=ApiMcpAdapter())
 
@@ -170,7 +174,9 @@ def test_discover_integrations_exposes_mcp_tools() -> None:
     catalog = service.discover_integrations()
 
     assert "mcp_tools" in catalog
-    post_message_tool = next(tool for tool in catalog["mcp_tools"] if tool["name"] == "post_message")
+    post_message_tool = next(
+        tool for tool in catalog["mcp_tools"] if tool["name"] == "post_message"
+    )
     assert post_message_tool["provider"] == "slack"
 
 

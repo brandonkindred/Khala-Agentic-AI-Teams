@@ -121,7 +121,9 @@ def test_blog_copy_editor_agent_run() -> None:
 def test_blog_copy_editor_agent_empty_draft() -> None:
     """BlogCopyEditorAgent returns minimal feedback for empty draft."""
     llm = DummyLLMClient()
-    agent = BlogCopyEditorAgent(llm_client=llm, writing_style_guide_content="", brand_spec_content="")
+    agent = BlogCopyEditorAgent(
+        llm_client=llm, writing_style_guide_content="", brand_spec_content=""
+    )
 
     result = agent.run(CopyEditorInput(draft=""))
 
@@ -192,7 +194,9 @@ def test_blog_copy_editor_agent_no_path_no_file(tmp_path: Path) -> None:
 def test_blog_copy_editor_agent_empty_draft_writes_file(tmp_path: Path) -> None:
     """Empty draft with feedback_output_path set still writes a file with summary and empty feedback_items."""
     llm = DummyLLMClient()
-    agent = BlogCopyEditorAgent(llm_client=llm, writing_style_guide_content="", brand_spec_content="")
+    agent = BlogCopyEditorAgent(
+        llm_client=llm, writing_style_guide_content="", brand_spec_content=""
+    )
     feedback_file = tmp_path / "empty_feedback.json"
 
     result = agent.run(CopyEditorInput(draft=""), feedback_output_path=str(feedback_file))

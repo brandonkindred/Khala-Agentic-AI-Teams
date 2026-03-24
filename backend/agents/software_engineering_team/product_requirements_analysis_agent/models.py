@@ -44,9 +44,7 @@ class QuestionOption(BaseModel):
 
     id: str = Field(description="Unique option identifier")
     label: str = Field(description="Display text for this option")
-    is_default: bool = Field(
-        default=False, description="Whether this is the recommended default"
-    )
+    is_default: bool = Field(default=False, description="Whether this is the recommended default")
     rationale: str = Field(
         default="",
         description="Why this option is recommended based on industry best practices",
@@ -64,9 +62,7 @@ class OpenQuestion(BaseModel):
 
     id: str = Field(description="Unique question identifier")
     question_text: str = Field(description="The question text")
-    context: str = Field(
-        default="", description="Additional context explaining why this matters"
-    )
+    context: str = Field(default="", description="Additional context explaining why this matters")
     recommendation: str = Field(
         default="",
         description="Short recommendation: which option to choose and why, considering alternatives.",
@@ -78,9 +74,7 @@ class OpenQuestion(BaseModel):
         default=False,
         description="Whether user can select multiple options for this question",
     )
-    source: str = Field(
-        default="spec_review", description="Origin of this question"
-    )
+    source: str = Field(default="spec_review", description="Origin of this question")
     category: str = Field(
         default="general",
         description="Category: architecture, security, ux, performance, business, etc.",
@@ -89,7 +83,7 @@ class OpenQuestion(BaseModel):
         default="medium",
         description="Priority: high, medium, low",
     )
-    
+
     # Constraint drilling fields for systematic technology decision tracking
     constraint_domain: str = Field(
         default="",
@@ -146,21 +140,15 @@ class AnsweredQuestion(BaseModel):
         description="IDs of selected options (for multi-select questions)",
     )
     selected_answer: str = Field(description="Text of the selected answer(s)")
-    was_auto_answered: bool = Field(
-        default=False, description="Whether auto-answer was used"
-    )
+    was_auto_answered: bool = Field(default=False, description="Whether auto-answer was used")
     was_default: bool = Field(
         default=False, description="Whether the default was applied (fallback)"
     )
     rationale: str = Field(
         default="", description="Rationale for the answer (from auto-answer or user)"
     )
-    confidence: float = Field(
-        default=0.0, description="Confidence score if auto-answered"
-    )
-    other_text: str = Field(
-        default="", description="Custom text if 'other' was selected"
-    )
+    confidence: float = Field(default=0.0, description="Confidence score if auto-answered")
+    other_text: str = Field(default="", description="Custom text if 'other' was selected")
 
 
 class AutoAnswerResult(BaseModel):
@@ -169,9 +157,7 @@ class AutoAnswerResult(BaseModel):
     question_id: str = Field(description="ID of the question being answered")
     selected_option_id: str = Field(description="ID of the selected option")
     selected_answer: str = Field(description="Text of the selected answer")
-    rationale: str = Field(
-        description="Detailed explanation of why this is the best choice"
-    )
+    rationale: str = Field(description="Detailed explanation of why this is the best choice")
     confidence: float = Field(
         ge=0.0,
         le=1.0,
@@ -198,8 +184,12 @@ class SOPDecision(BaseModel):
     sub_phase: SOPSubPhase
     question_text: str = Field(description="The question that was answered")
     decision: str = Field(description="The answer/decision text")
-    source: str = Field(description="Origin: 'spec' (extracted from spec) or 'user' (asked and answered)")
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Confidence in this decision")
+    source: str = Field(
+        description="Origin: 'spec' (extracted from spec) or 'user' (asked and answered)"
+    )
+    confidence: float = Field(
+        default=1.0, ge=0.0, le=1.0, description="Confidence in this decision"
+    )
 
 
 class ToolRecommendation(BaseModel):
@@ -223,8 +213,12 @@ class ToolGapAnalysis(BaseModel):
 class ArchitectureAnalysisResult(BaseModel):
     """Output of SOP Phase 2: Architecture Analysis."""
 
-    architecture_type: str = Field(default="", description="E.g. '2-tier', '3-tier', 'N-tier', 'serverless'")
-    architecture_rationale: str = Field(default="", description="Why this architecture type was recommended")
+    architecture_type: str = Field(
+        default="", description="E.g. '2-tier', '3-tier', 'N-tier', 'serverless'"
+    )
+    architecture_rationale: str = Field(
+        default="", description="Why this architecture type was recommended"
+    )
     data_types_and_storage: List[Dict[str, str]] = Field(
         default_factory=list, description="Each: {data_type, recommended_store, rationale}"
     )
@@ -241,12 +235,8 @@ class ArchitectureAnalysisResult(BaseModel):
 class SpecReviewResult(BaseModel):
     """Output of Spec Review phase."""
 
-    issues: List[str] = Field(
-        default_factory=list, description="Issues identified in the spec"
-    )
-    gaps: List[str] = Field(
-        default_factory=list, description="Gaps or missing requirements"
-    )
+    issues: List[str] = Field(default_factory=list, description="Issues identified in the spec")
+    gaps: List[str] = Field(default_factory=list, description="Gaps or missing requirements")
     open_questions: List[OpenQuestion] = Field(
         default_factory=list, description="Questions requiring clarification"
     )
@@ -256,15 +246,11 @@ class SpecReviewResult(BaseModel):
 class SpecCleanupResult(BaseModel):
     """Output of Spec Cleanup phase."""
 
-    is_valid: bool = Field(
-        default=False, description="Whether the spec passed validation"
-    )
+    is_valid: bool = Field(default=False, description="Whether the spec passed validation")
     validation_issues: List[str] = Field(
         default_factory=list, description="Issues found during validation"
     )
-    cleaned_spec: str = Field(
-        default="", description="The cleaned and validated spec content"
-    )
+    cleaned_spec: str = Field(default="", description="The cleaned and validated spec content")
     summary: str = Field(default="", description="Summary of cleanup actions")
 
 
@@ -278,9 +264,7 @@ class AnalysisWorkflowResult(BaseModel):
     spec_review_result: Optional[SpecReviewResult] = None
     spec_cleanup_result: Optional[SpecCleanupResult] = None
     answered_questions: List[AnsweredQuestion] = Field(default_factory=list)
-    iterations: int = Field(
-        default=0, description="Number of spec review iterations performed"
-    )
+    iterations: int = Field(default=0, description="Number of spec review iterations performed")
     validated_spec_path: Optional[str] = Field(
         default=None, description="Path to the validated spec file"
     )

@@ -15,12 +15,8 @@ class RegressionTest(BaseModel):
     name: str = Field(..., description="Test name")
     test_type: Literal["automated", "manual"] = Field(default="automated")
     steps: List[str] = Field(default_factory=list)
-    script_ref: str = Field(
-        default="", description="Reference to test script file"
-    )
-    script_content: str = Field(
-        default="", description="Inline test script if brief"
-    )
+    script_ref: str = Field(default="", description="Reference to test script file")
+    script_content: str = Field(default="", description="Inline test script if brief")
 
 
 class GenerateRegressionChecksInput(BaseModel):
@@ -28,15 +24,11 @@ class GenerateRegressionChecksInput(BaseModel):
 
     audit_id: str = Field(..., description="Audit identifier")
     component: str = Field(..., description="Component to test")
-    issue_types: List[str] = Field(
-        default_factory=list, description="Issue types to cover"
-    )
+    issue_types: List[str] = Field(default_factory=list, description="Issue types to cover")
     preferred_runner: Literal["playwright", "cypress", "detox", "other"] = Field(
         default="playwright"
     )
-    generate_scripts: bool = Field(
-        default=True, description="Generate executable test scripts"
-    )
+    generate_scripts: bool = Field(default=True, description="Generate executable test scripts")
 
 
 class GenerateRegressionChecksOutput(BaseModel):

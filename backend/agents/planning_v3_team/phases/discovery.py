@@ -85,7 +85,11 @@ def run_discovery(
             "assumptions": ["LLM extraction failed; using raw input."],
         }
 
-    prev = client_context.model_dump() if hasattr(client_context, "model_dump") else (client_context or {})
+    prev = (
+        client_context.model_dump()
+        if hasattr(client_context, "model_dump")
+        else (client_context or {})
+    )
     assumptions = list(prev.get("assumptions") or [])
     assumptions.extend(data.get("assumptions", []))
 

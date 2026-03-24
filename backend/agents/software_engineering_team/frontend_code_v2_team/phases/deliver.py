@@ -95,7 +95,9 @@ def run_deliver(
                 logger.info("[%s] Deliver (Git agent): %s", task_id, result.summary)
                 return result
             except Exception as exc:
-                logger.warning("[%s] Git agent deliver() failed, falling back to inline: %s", task_id, exc)
+                logger.warning(
+                    "[%s] Git agent deliver() failed, falling back to inline: %s", task_id, exc
+                )
 
     if not deliver_files:
         result.summary = "No files to deliver."

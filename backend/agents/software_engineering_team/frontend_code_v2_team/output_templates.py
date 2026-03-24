@@ -52,14 +52,14 @@ def _section(text: str, start_marker: str, end_marker: str) -> str:
 
 def _normalize_file_path(path: str) -> str:
     """Strip redundant frontend/ prefix from path.
-    
+
     The frontend team operates within the frontend directory, so LLM output
     paths like 'frontend/src/app/...' should be normalized to 'src/app/...'.
     """
     prefixes_to_strip = ("frontend/", "./frontend/")
     for prefix in prefixes_to_strip:
         if path.startswith(prefix):
-            return path[len(prefix):]
+            return path[len(prefix) :]
     return path
 
 
@@ -249,7 +249,12 @@ def parse_problem_solving_template(text: str) -> Dict[str, Any]:
     summary_sec = _section(text, MARKER_PS_SUMMARY, MARKER_END_PS_SUMMARY)
     if summary_sec:
         summary = summary_sec.strip().split("\n")[0].strip()[:1000]
-    return {"files": files, "fixes_applied": fixes_applied, "summary": summary, "resolved": resolved}
+    return {
+        "files": files,
+        "fixes_applied": fixes_applied,
+        "summary": summary,
+        "resolved": resolved,
+    }
 
 
 def parse_problem_solving_single_issue_template(text: str) -> Dict[str, Any]:
@@ -267,7 +272,12 @@ def parse_problem_solving_single_issue_template(text: str) -> Dict[str, Any]:
     summary_sec = _section(text, MARKER_PS_SUMMARY, MARKER_END_PS_SUMMARY)
     if summary_sec:
         summary = summary_sec.strip().split("\n")[0].strip()[:1000]
-    return {"files": files, "root_cause": root_cause or "", "resolved": resolved, "summary": summary}
+    return {
+        "files": files,
+        "root_cause": root_cause or "",
+        "resolved": resolved,
+        "summary": summary,
+    }
 
 
 # ---------------------------------------------------------------------------

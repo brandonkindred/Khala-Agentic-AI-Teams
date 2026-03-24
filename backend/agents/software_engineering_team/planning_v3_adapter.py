@@ -70,7 +70,9 @@ def adapt_planning_v3_result(
         ValueError: If result.success is False or handoff is missing.
     """
     if not result.get("success", False):
-        reason = result.get("failure_reason") or "Planning V3 workflow did not complete successfully."
+        reason = (
+            result.get("failure_reason") or "Planning V3 workflow did not complete successfully."
+        )
         raise ValueError(reason)
 
     handoff_raw = result.get("handoff_package")
@@ -95,7 +97,11 @@ def adapt_planning_v3_result(
         description_parts.append(validated_spec)
     if prd_content:
         description_parts.append(prd_content)
-    description = "\n\n".join(description_parts) if description_parts else "See Planning V3 handoff artifacts."
+    description = (
+        "\n\n".join(description_parts)
+        if description_parts
+        else "See Planning V3 handoff artifacts."
+    )
 
     acceptance_criteria: List[str] = []
     if client_context and client_context.get("success_criteria"):
@@ -117,17 +123,27 @@ def adapt_planning_v3_result(
         features_doc_parts.append(prd_content)
     if client_context:
         if client_context.get("problem_summary"):
-            features_doc_parts.append("## Problem summary\n" + (client_context["problem_summary"] or ""))
+            features_doc_parts.append(
+                "## Problem summary\n" + (client_context["problem_summary"] or "")
+            )
         if client_context.get("opportunity_statement"):
-            features_doc_parts.append("## Opportunity\n" + (client_context["opportunity_statement"] or ""))
+            features_doc_parts.append(
+                "## Opportunity\n" + (client_context["opportunity_statement"] or "")
+            )
         if client_context.get("target_users"):
             features_doc_parts.append(
                 "## Target users\n" + "\n".join(f"- {u}" for u in client_context["target_users"])
             )
     features_and_functionality_doc = "\n\n".join(features_doc_parts) if features_doc_parts else ""
     goals = ""
-    if client_context and (client_context.get("problem_summary") or client_context.get("opportunity_statement")):
-        goals = (client_context.get("problem_summary") or "") + "\n" + (client_context.get("opportunity_statement") or "")
+    if client_context and (
+        client_context.get("problem_summary") or client_context.get("opportunity_statement")
+    ):
+        goals = (
+            (client_context.get("problem_summary") or "")
+            + "\n"
+            + (client_context.get("opportunity_statement") or "")
+        )
     if not goals and handoff.get("summary"):
         goals = handoff["summary"]
 

@@ -121,6 +121,7 @@ async def test_artifact_store_list_artifacts(artifact_store):
 
 def test_get_artifact_store_returns_instance():
     import accessibility_audit_team.artifact_store as mod
+
     # Reset singleton
     mod._artifact_store = None
     store = get_artifact_store()

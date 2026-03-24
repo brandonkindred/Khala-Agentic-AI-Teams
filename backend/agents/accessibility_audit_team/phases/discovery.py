@@ -77,7 +77,9 @@ async def run_discovery_phase(
                     ScanResult(
                         tool="axe",
                         url=sr.url,
-                        violations=[v.model_dump() for v in sr.tool_results[0].violations] if sr.tool_results else [],
+                        violations=[v.model_dump() for v in sr.tool_results[0].violations]
+                        if sr.tool_results
+                        else [],
                         raw_ref=sr.raw_ref,
                     )
                 )

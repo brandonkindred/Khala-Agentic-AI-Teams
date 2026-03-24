@@ -44,9 +44,9 @@ def run_account_provisioning(
 ) -> AccountProvisioningResult:
     """
     Execute the account provisioning phase.
-    
+
     Creates accounts/resources in each tool defined in the manifest.
-    
+
     Args:
         agent_id: Unique identifier for the agent
         manifest: Loaded tool manifest
@@ -55,46 +55,50 @@ def run_account_provisioning(
         provisioners: Dict of provisioner instances (keyed by provisioner name)
         environment_store: Store for tracking tool provisioning
         progress_callback: Callback(done, total, tool_name) for progress updates
-    
+
     Returns:
         AccountProvisioningResult with per-tool results
     """
     provs = provisioners or _build_provisioners()
     env_store = environment_store or EnvironmentStore()
-    
+
     tools = manifest.tools
     total = len(tools)
     tool_results: List[ToolProvisionResult] = []
     completed = 0
-    
+
     for idx, tool in enumerate(tools):
         tool_name = tool.name
         provisioner_name = tool.provisioner
-        
+
         if progress_callback:
             progress_callback(idx, total, tool_name)
-        
+
         provisioner = provs.get(provisioner_name)
         if provisioner is None:
-            tool_results.append(ToolProvisionResult(
-                tool_name=tool_name,
-                success=False,
-                error=f"Unknown provisioner: {provisioner_name}",
-            ))
+            tool_results.append(
+                ToolProvisionResult(
+                    tool_name=tool_name,
+                    success=False,
+                    error=f"Unknown provisioner: {provisioner_name}",
+                )
+            )
             continue
-        
+
         tool_creds = credentials.get(tool_name)
         if tool_creds is None:
-            tool_results.append(ToolProvisionResult(
-                tool_name=tool_name,
-                success=False,
-                error=f"No credentials generated for {tool_name}",
-            ))
+            tool_results.append(
+                ToolProvisionResult(
+                    tool_name=tool_name,
+                    success=False,
+                    error=f"No credentials generated for {tool_name}",
+                )
+            )
             continue
-        
+
         tool_access_level = tool.access_level
         tool_tier = _map_access_level_to_tier(tool_access_level, access_tier)
-        
+
         try:
             result = provisioner.provision(
                 agent_id=agent_id,
@@ -102,25 +106,27 @@ def run_account_provisioning(
                 credentials=tool_creds,
                 access_tier=tool_tier,
             )
-            
+
             tool_results.append(result)
-            
+
             if result.success:
                 env_store.add_tool(agent_id, tool_name)
                 completed += 1
-        
+
         except Exception as e:
-            tool_results.append(ToolProvisionResult(
-                tool_name=tool_name,
-                success=False,
-                error=str(e),
-            ))
-    
+            tool_results.append(
+                ToolProvisionResult(
+                    tool_name=tool_name,
+                    success=False,
+                    error=str(e),
+                )
+            )
+
     if progress_callback:
         progress_callback(total, total, "complete")
-    
+
     all_success = all(r.success for r in tool_results)
-    
+
     return AccountProvisioningResult(
         success=all_success,
         tool_results=tool_results,
@@ -155,18 +161,18 @@ def deprovision_tools(
 ) -> Dict[str, bool]:
     """
     Deprovision tools for an agent.
-    
+
     Args:
         agent_id: Agent identifier
         tool_names: Specific tools to deprovision (None = all)
         provisioners: Provisioner instances
-    
+
     Returns:
         Dict of tool_name -> success status
     """
     provs = provisioners or _build_provisioners()
     results: Dict[str, bool] = {}
-    
+
     for name, provisioner in provs.items():
         if tool_names is None or name in tool_names:
             try:
@@ -174,5 +180,5 @@ def deprovision_tools(
                 results[name] = result.success
             except Exception:
                 results[name] = False
-    
+
     return results

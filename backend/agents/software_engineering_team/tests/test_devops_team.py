@@ -24,14 +24,28 @@ from devops_team.task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClari
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _base_task_spec(**overrides) -> DevOpsTaskSpec:
     defaults = dict(
         task_id="DO-2207",
         title="Add CI/CD pipeline and deployment flow",
-        platform_scope={"cloud": "aws", "runtime": "eks", "environments": ["dev", "staging", "production"]},
-        repo_context={"app_repo": "billing-service", "infra_repo": "platform-infra", "pipeline_repo": "billing-service"},
-        goal={"summary": "Build secure CI/CD workflow for build/test/scan/deploy with staged promotion."},
-        scope={"included": ["build image", "deploy staging", "prod approval"], "excluded": ["cluster provisioning"]},
+        platform_scope={
+            "cloud": "aws",
+            "runtime": "eks",
+            "environments": ["dev", "staging", "production"],
+        },
+        repo_context={
+            "app_repo": "billing-service",
+            "infra_repo": "platform-infra",
+            "pipeline_repo": "billing-service",
+        },
+        goal={
+            "summary": "Build secure CI/CD workflow for build/test/scan/deploy with staged promotion."
+        },
+        scope={
+            "included": ["build image", "deploy staging", "prod approval"],
+            "excluded": ["cluster provisioning"],
+        },
         constraints={
             "iac": {"preferred": "terraform"},
             "ci_cd": {"platform": "github_actions"},
@@ -52,14 +66,36 @@ def _mock_llm_for_happy_path() -> MagicMock:
     mock = MagicMock()
     mock.complete_json.side_effect = [
         {"approved_for_execution": True, "checklist": []},
-        {"artifacts": {"infra/main.tf": "resource {}"}, "summary": "iac ok", "destructive_changes_detected": False},
-        {"artifacts": {".github/workflows/ci.yml": "on: push"}, "summary": "cicd ok", "required_gates_present": True},
-        {"artifacts": {"deploy/values.yaml": "replicas: 2"}, "summary": "deploy ok", "strategy": "rolling", "rollback_plan": ["helm rollback"]},
+        {
+            "artifacts": {"infra/main.tf": "resource {}"},
+            "summary": "iac ok",
+            "destructive_changes_detected": False,
+        },
+        {
+            "artifacts": {".github/workflows/ci.yml": "on: push"},
+            "summary": "cicd ok",
+            "required_gates_present": True,
+        },
+        {
+            "artifacts": {"deploy/values.yaml": "replicas: 2"},
+            "summary": "deploy ok",
+            "strategy": "rolling",
+            "rollback_plan": ["helm rollback"],
+        },
         # Debug agent (execution tools fail because terraform CLI is not installed)
-        {"errors": [{"error_type": "runtime", "error_message": "terraform not found"}], "summary": "cli missing", "fixable": False},
+        {
+            "errors": [{"error_type": "runtime", "error_message": "terraform not found"}],
+            "summary": "cli missing",
+            "fixable": False,
+        },
         {"approved": True, "findings": [], "summary": "sec ok"},
         {"approved": True, "findings": [], "summary": "review ok"},
-        {"approved": True, "quality_gates": {"iac_validate": "pass", "policy_checks": "pass"}, "acceptance_trace": [], "summary": "validation ok"},
+        {
+            "approved": True,
+            "quality_gates": {"iac_validate": "pass", "policy_checks": "pass"},
+            "acceptance_trace": [],
+            "summary": "validation ok",
+        },
         {"files": {"docs/runbook.md": "# Runbook"}, "summary": "doc ok"},
     ]
     return mock
@@ -304,12 +340,14 @@ class TestTaskClarifier:
         assert any("acceptance" in r.lower() for r in out.clarification_requests)
 
     def test_blocks_missing_secret_source(self) -> None:
-        spec = _base_task_spec(constraints={
-            "iac": {"preferred": "terraform"},
-            "ci_cd": {"platform": "github_actions"},
-            "deployment": {"strategy": "rolling"},
-            "secrets": {"source": ""},
-        })
+        spec = _base_task_spec(
+            constraints={
+                "iac": {"preferred": "terraform"},
+                "ci_cd": {"platform": "github_actions"},
+                "deployment": {"strategy": "rolling"},
+                "secrets": {"source": ""},
+            }
+        )
         out = self._agent().run(DevOpsTaskClarifierInput(task_spec=spec))
         assert not out.approved_for_execution
         assert any("secret" in r.lower() for r in out.clarification_requests)
@@ -328,7 +366,11 @@ class TestTaskClarifier:
 
     def test_approves_complete_spec(self) -> None:
         mock_llm = MagicMock()
-        mock_llm.complete_json.return_value = {"approved_for_execution": True, "checklist": [], "gaps": []}
+        mock_llm.complete_json.return_value = {
+            "approved_for_execution": True,
+            "checklist": [],
+            "gaps": [],
+        }
         agent = DevOpsTaskClarifierAgent(mock_llm)
         spec = _base_task_spec()
         out = agent.run(DevOpsTaskClarifierInput(task_spec=spec))
@@ -348,6 +390,7 @@ class TestTaskClarifier:
 class TestRepoNavigatorToolAgent:
     def test_detects_terraform_files(self) -> None:
         from devops_team.tool_agents import RepoNavigatorInput, RepoNavigatorToolAgent
+
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "infra").mkdir()
             (Path(tmp) / "infra" / "main.tf").write_text("resource {}")
@@ -356,6 +399,7 @@ class TestRepoNavigatorToolAgent:
 
     def test_detects_github_workflows(self) -> None:
         from devops_team.tool_agents import RepoNavigatorInput, RepoNavigatorToolAgent
+
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -365,6 +409,7 @@ class TestRepoNavigatorToolAgent:
 
     def test_detects_helm_charts(self) -> None:
         from devops_team.tool_agents import RepoNavigatorInput, RepoNavigatorToolAgent
+
         with tempfile.TemporaryDirectory() as tmp:
             helm_dir = Path(tmp) / "deploy" / "helm" / "myapp"
             helm_dir.mkdir(parents=True)
@@ -374,6 +419,7 @@ class TestRepoNavigatorToolAgent:
 
     def test_empty_repo(self) -> None:
         from devops_team.tool_agents import RepoNavigatorInput, RepoNavigatorToolAgent
+
         with tempfile.TemporaryDirectory() as tmp:
             out = RepoNavigatorToolAgent().run(RepoNavigatorInput(repo_path=tmp))
             assert out.detected_iac_paths == []
@@ -384,6 +430,7 @@ class TestRepoNavigatorToolAgent:
 class TestIaCValidationToolAgent:
     def test_skipped_when_no_tf_files(self) -> None:
         from devops_team.tool_agents import IaCValidationInput, IaCValidationToolAgent
+
         with tempfile.TemporaryDirectory() as tmp:
             out = IaCValidationToolAgent().run(IaCValidationInput(repo_path=tmp))
             assert out.checks["iac_validate"] == "skipped"
@@ -394,6 +441,7 @@ class TestIaCValidationToolAgent:
 class TestPolicyAsCodeToolAgent:
     def test_skipped_when_checkov_missing(self) -> None:
         from devops_team.tool_agents import PolicyAsCodeInput, PolicyAsCodeToolAgent
+
         with tempfile.TemporaryDirectory() as tmp:
             out = PolicyAsCodeToolAgent().run(PolicyAsCodeInput(repo_path=tmp))
             assert out.checks["policy_checks"] == "skipped"
@@ -403,16 +451,20 @@ class TestPolicyAsCodeToolAgent:
 class TestCICDLintToolAgent:
     def test_pass_valid_workflow(self) -> None:
         from devops_team.tool_agents import CICDLintInput, CICDLintPipelineValidationToolAgent
+
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
-            (wf_dir / "ci.yml").write_text("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps: []")
+            (wf_dir / "ci.yml").write_text(
+                "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps: []"
+            )
             out = CICDLintPipelineValidationToolAgent().run(CICDLintInput(repo_path=tmp))
             assert out.checks["pipeline_lint"] == "pass"
             assert out.success is True
 
     def test_fail_missing_jobs(self) -> None:
         from devops_team.tool_agents import CICDLintInput, CICDLintPipelineValidationToolAgent
+
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -423,15 +475,19 @@ class TestCICDLintToolAgent:
 
     def test_fail_prod_deploy_without_approval(self) -> None:
         from devops_team.tool_agents import CICDLintInput, CICDLintPipelineValidationToolAgent
+
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
-            (wf_dir / "deploy.yml").write_text("on: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: []\n# deploy to production")
+            (wf_dir / "deploy.yml").write_text(
+                "on: push\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps: []\n# deploy to production"
+            )
             out = CICDLintPipelineValidationToolAgent().run(CICDLintInput(repo_path=tmp))
             assert out.checks["pipeline_gate_check"] == "fail"
 
     def test_skipped_no_workflows(self) -> None:
         from devops_team.tool_agents import CICDLintInput, CICDLintPipelineValidationToolAgent
+
         with tempfile.TemporaryDirectory() as tmp:
             out = CICDLintPipelineValidationToolAgent().run(CICDLintInput(repo_path=tmp))
             assert out.checks["pipeline_lint"] == "skipped"
@@ -441,6 +497,7 @@ class TestCICDLintToolAgent:
 class TestDeploymentDryRunToolAgent:
     def test_skipped_no_chart(self) -> None:
         from devops_team.tool_agents import DeploymentDryRunInput, DeploymentDryRunPlanToolAgent
+
         with tempfile.TemporaryDirectory() as tmp:
             out = DeploymentDryRunPlanToolAgent().run(DeploymentDryRunInput(repo_path=tmp))
             assert out.checks["deployment_dry_run"] == "skipped"
@@ -455,6 +512,7 @@ class TestDeploymentDryRunToolAgent:
 class TestInfrastructureAsCodeAgent:
     def test_run_returns_artifacts(self) -> None:
         from devops_team.iac_agent import IaCAgentInput, InfrastructureAsCodeAgent
+
         mock = MagicMock()
         mock.complete_json.return_value = {
             "artifacts": {"infra/main.tf": "resource {}"},
@@ -469,6 +527,7 @@ class TestInfrastructureAsCodeAgent:
 
     def test_handles_destructive_flag(self) -> None:
         from devops_team.iac_agent import IaCAgentInput, InfrastructureAsCodeAgent
+
         mock = MagicMock()
         mock.complete_json.return_value = {
             "artifacts": {},
@@ -485,6 +544,7 @@ class TestInfrastructureAsCodeAgent:
 class TestCICDPipelineAgent:
     def test_run_returns_artifacts(self) -> None:
         from devops_team.cicd_pipeline_agent import CICDPipelineAgent, CICDPipelineAgentInput
+
         mock = MagicMock()
         mock.complete_json.return_value = {
             "artifacts": {".github/workflows/ci.yml": "on: push"},
@@ -504,6 +564,7 @@ class TestDeploymentStrategyAgent:
             DeploymentStrategyAgent,
             DeploymentStrategyAgentInput,
         )
+
         mock = MagicMock()
         mock.complete_json.return_value = {
             "artifacts": {"deploy/values.yaml": "replicas: 2"},
@@ -523,10 +584,19 @@ class TestDeploymentStrategyAgent:
 class TestDevSecOpsReviewAgent:
     def test_blocks_on_high_severity(self) -> None:
         from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+
         mock = MagicMock()
         mock.complete_json.return_value = {
             "approved": False,
-            "findings": [{"finding_id": "F1", "severity": "high", "area": "iam", "issue": "wildcard", "blocking": True}],
+            "findings": [
+                {
+                    "finding_id": "F1",
+                    "severity": "high",
+                    "area": "iam",
+                    "issue": "wildcard",
+                    "blocking": True,
+                }
+            ],
             "summary": "blocked",
         }
         agent = DevSecOpsReviewAgent(mock)
@@ -537,6 +607,7 @@ class TestDevSecOpsReviewAgent:
 
     def test_approves_clean_artifacts(self) -> None:
         from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
+
         mock = MagicMock()
         mock.complete_json.return_value = {"approved": True, "findings": [], "summary": "all good"}
         agent = DevSecOpsReviewAgent(mock)
@@ -550,6 +621,7 @@ class TestDevOpsTestValidationAgent:
             DevOpsTestValidationAgent,
             DevOpsTestValidationInput,
         )
+
         mock = MagicMock()
         mock.complete_json.return_value = {
             "approved": True,
@@ -558,10 +630,12 @@ class TestDevOpsTestValidationAgent:
             "summary": "ok",
         }
         agent = DevOpsTestValidationAgent(mock)
-        out = agent.run(DevOpsTestValidationInput(
-            acceptance_criteria=["test"],
-            tool_results={"iac": {"iac_validate": "pass"}},
-        ))
+        out = agent.run(
+            DevOpsTestValidationInput(
+                acceptance_criteria=["test"],
+                tool_results={"iac": {"iac_validate": "pass"}},
+            )
+        )
         assert out.approved
         assert out.quality_gates["iac_validate"] == "pass"
 
@@ -570,6 +644,7 @@ class TestDevOpsTestValidationAgent:
             DevOpsTestValidationAgent,
             DevOpsTestValidationInput,
         )
+
         mock = MagicMock()
         mock.complete_json.return_value = {
             "approved": True,
@@ -584,6 +659,7 @@ class TestDevOpsTestValidationAgent:
 class TestChangeReviewAgent:
     def test_approves(self) -> None:
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
         mock = MagicMock()
         mock.complete_json.return_value = {"approved": True, "findings": [], "summary": "ok"}
         agent = ChangeReviewAgent(mock)
@@ -592,10 +668,13 @@ class TestChangeReviewAgent:
 
     def test_blocks_on_finding(self) -> None:
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
+
         mock = MagicMock()
         mock.complete_json.return_value = {
             "approved": True,
-            "findings": [{"finding_id": "F1", "severity": "medium", "blocking": True, "issue": "brittle"}],
+            "findings": [
+                {"finding_id": "F1", "severity": "medium", "blocking": True, "issue": "brittle"}
+            ],
             "summary": "blocked",
         }
         agent = ChangeReviewAgent(mock)
@@ -609,18 +688,21 @@ class TestDocumentationRunbookAgent:
             DocumentationRunbookAgent,
             DocumentationRunbookInput,
         )
+
         mock = MagicMock()
         mock.complete_json.return_value = {
             "files": {"docs/runbook.md": "# Runbook"},
             "summary": "done",
         }
         agent = DocumentationRunbookAgent(mock)
-        out = agent.run(DocumentationRunbookInput(
-            task_id="DO-1",
-            task_title="test",
-            artifacts={"a.tf": "resource"},
-            quality_gates={"iac_validate": "pass"},
-        ))
+        out = agent.run(
+            DocumentationRunbookInput(
+                task_id="DO-1",
+                task_title="test",
+                artifacts={"a.tf": "resource"},
+                quality_gates={"iac_validate": "pass"},
+            )
+        )
         assert out.completion_package.task_id == "DO-1"
         assert "docs/runbook.md" in out.files
 
@@ -637,9 +719,21 @@ class TestDevOpsTeamLeadAgentIntegration:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
             subprocess.run(["git", "init"], cwd=path, capture_output=True, check=False)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=path, capture_output=True, check=False)
-            subprocess.run(["git", "config", "user.name", "T"], cwd=path, capture_output=True, check=False)
-            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=path, capture_output=True, check=False)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=path,
+                capture_output=True,
+                check=False,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "T"], cwd=path, capture_output=True, check=False
+            )
+            subprocess.run(
+                ["git", "config", "commit.gpgsign", "false"],
+                cwd=path,
+                capture_output=True,
+                check=False,
+            )
             result = agent.run_workflow(
                 repo_path=path,
                 task_description="Add backend deployment automation",
@@ -693,7 +787,13 @@ class TestDevOpsTeamLeadAgentIntegration:
             {"artifacts": {}, "summary": "iac"},
             {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
             {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ["rb"]},
-            {"approved": False, "findings": [{"finding_id": "F1", "severity": "high", "blocking": True, "issue": "bad iam"}], "summary": "blocked"},
+            {
+                "approved": False,
+                "findings": [
+                    {"finding_id": "F1", "severity": "high", "blocking": True, "issue": "bad iam"}
+                ],
+                "summary": "blocked",
+            },
             {"approved": True, "findings": [], "summary": "ok"},
             {"approved": True, "quality_gates": {"iac_validate": "pass"}, "summary": "ok"},
         ]
@@ -758,9 +858,21 @@ class TestDevOpsTeamLeadAgentIntegration:
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
             subprocess.run(["git", "init"], cwd=tmp, capture_output=True, check=False)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp, capture_output=True, check=False)
-            subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, capture_output=True, check=False)
-            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp, capture_output=True, check=False)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=tmp,
+                capture_output=True,
+                check=False,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "T"], cwd=tmp, capture_output=True, check=False
+            )
+            subprocess.run(
+                ["git", "config", "commit.gpgsign", "false"],
+                cwd=tmp,
+                capture_output=True,
+                check=False,
+            )
             result = agent.run_workflow(
                 repo_path=Path(tmp),
                 task_description="Deploy",
@@ -769,7 +881,9 @@ class TestDevOpsTeamLeadAgentIntegration:
                 task_id="devops-bv-fail",
             )
         assert not result.success
-        assert "Build verification failed" in (result.failure_reason or "") or "Docker build failed" in (result.failure_reason or "")
+        assert "Build verification failed" in (
+            result.failure_reason or ""
+        ) or "Docker build failed" in (result.failure_reason or "")
 
 
 # ===========================================================================
@@ -783,9 +897,21 @@ class TestBackwardCompatibility:
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
             subprocess.run(["git", "init"], cwd=tmp, capture_output=True, check=False)
-            subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp, capture_output=True, check=False)
-            subprocess.run(["git", "config", "user.name", "T"], cwd=tmp, capture_output=True, check=False)
-            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp, capture_output=True, check=False)
+            subprocess.run(
+                ["git", "config", "user.email", "t@t.com"],
+                cwd=tmp,
+                capture_output=True,
+                check=False,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "T"], cwd=tmp, capture_output=True, check=False
+            )
+            subprocess.run(
+                ["git", "config", "commit.gpgsign", "false"],
+                cwd=tmp,
+                capture_output=True,
+                check=False,
+            )
             result = agent.run_workflow(
                 repo_path=Path(tmp),
                 task_description="Add CI/CD",
@@ -876,6 +1002,7 @@ class TestMainOrchestratorRegistration:
     def test_devops_team_lead_registered(self) -> None:
         """Verify the main orchestrator registers DevOpsTeamLeadAgent."""
         import importlib
+
         mod = importlib.import_module("orchestrator")
         source = Path(mod.__file__).read_text()
         assert "DevOpsTeamLeadAgent" in source
@@ -884,6 +1011,7 @@ class TestMainOrchestratorRegistration:
     def test_build_fix_specialist_registered(self) -> None:
         """Verify the main orchestrator registers BuildFixSpecialistAgent."""
         import importlib
+
         mod = importlib.import_module("orchestrator")
         source = Path(mod.__file__).read_text()
         assert "build_fix_specialist" in source

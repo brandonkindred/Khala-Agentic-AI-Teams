@@ -41,8 +41,8 @@ import type {
  * Shows Jobs panel (running and completed) with job details and produced assets.
  */
 const TERMINAL_STATUSES = ['completed', 'needs_human_review', 'failed'] as const;
-const POLL_JOBS_MS = 12000;
-const POLL_STATUS_MS = 2000; // Poll selected job status every 2s for frequent status updates
+const POLL_JOBS_MS = 15000;
+const POLL_STATUS_MS = 12000; // Poll selected job status — pipeline jobs are long-running
 
 export function artifactLabel(name: string): string {
   const labels: Record<string, string> = {

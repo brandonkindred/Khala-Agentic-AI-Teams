@@ -8,9 +8,9 @@ from .router import CapabilityRouter
 
 
 class ProviderAdapter(Protocol):
-    def execute(self, provider: ProviderConfig, request: IntegrationRequest) -> IntegrationResponse: ...
-
-
+    def execute(
+        self, provider: ProviderConfig, request: IntegrationRequest
+    ) -> IntegrationResponse: ...
 
 
 class McpToolGateway:
@@ -45,8 +45,11 @@ class McpToolGateway:
     def add_tool(self, provider_name: str, tool: McpToolConfig) -> McpToolConfig:
         return self.registry.add_mcp_tool(provider_name, tool)
 
-    def configure_tool(self, provider_name: str, tool_name: str, config: dict[str, Any]) -> McpToolConfig:
+    def configure_tool(
+        self, provider_name: str, tool_name: str, config: dict[str, Any]
+    ) -> McpToolConfig:
         return self.registry.update_mcp_tool(provider_name, tool_name, config=config)
+
 
 class IntegrationService:
     """Single entry point agents can use for tool integrations."""
@@ -70,8 +73,12 @@ class IntegrationService:
     def add_mcp_tool(self, provider_name: str, tool: McpToolConfig) -> McpToolConfig:
         return self.mcp_gateway.add_tool(provider_name=provider_name, tool=tool)
 
-    def configure_mcp_tool(self, provider_name: str, tool_name: str, config: dict[str, Any]) -> McpToolConfig:
-        return self.mcp_gateway.configure_tool(provider_name=provider_name, tool_name=tool_name, config=config)
+    def configure_mcp_tool(
+        self, provider_name: str, tool_name: str, config: dict[str, Any]
+    ) -> McpToolConfig:
+        return self.mcp_gateway.configure_tool(
+            provider_name=provider_name, tool_name=tool_name, config=config
+        )
 
     def discover_integrations(self) -> dict[str, Any]:
         """Expose enabled integrations and capabilities so agents can plan tool usage."""

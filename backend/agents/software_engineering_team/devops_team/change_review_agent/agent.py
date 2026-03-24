@@ -16,8 +16,12 @@ class ChangeReviewAgent:
         self.llm = llm_client
 
     def run(self, input_data: ChangeReviewInput) -> ChangeReviewOutput:
-        context = f"task={input_data.task_description}\nartifacts={list(input_data.artifacts.keys())}\n"
-        data = self.llm.complete_json(CHANGE_REVIEW_PROMPT + "\n\n---\n\n" + context, temperature=0.0)
+        context = (
+            f"task={input_data.task_description}\nartifacts={list(input_data.artifacts.keys())}\n"
+        )
+        data = self.llm.complete_json(
+            CHANGE_REVIEW_PROMPT + "\n\n---\n\n" + context, temperature=0.0
+        )
         findings = [ReviewFinding(**f) for f in (data.get("findings") or []) if isinstance(f, dict)]
         blocking = any(f.blocking for f in findings)
         return ChangeReviewOutput(

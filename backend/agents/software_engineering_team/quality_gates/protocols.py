@@ -20,4 +20,5 @@ class ReviewResult(Protocol):
     - approved: bool — True when code passes (no blocking issues)
     - An issues-like list (attribute name varies: issues, bugs_found, vulnerabilities)
     """
+
     approved: bool

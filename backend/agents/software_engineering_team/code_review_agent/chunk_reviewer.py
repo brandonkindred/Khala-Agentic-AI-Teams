@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from llm_service import LLMClient
+from llm_service import LLMClient, compact_text
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_chunk_chars,
@@ -19,12 +19,6 @@ from .prompts import CODE_REVIEW_PROMPT
 logger = logging.getLogger(__name__)
 
 CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review only the code below. Report issues with file_path set to the path provided for this chunk.\n"
-
-
-def _truncate(s: str, max_chars: int) -> str:
-    if not s or len(s) <= max_chars:
-        return s or ""
-    return s[:max_chars] + "\n\n... [truncated]"
 
 
 class ChunkReviewAgent:
@@ -51,11 +45,13 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     max_spec = compute_code_review_spec_excerpt_chars(llm)
     max_arch = compute_code_review_arch_overview_chars(llm)
     max_existing = compute_code_review_existing_codebase_chars(llm)
-    code_chunk = _truncate(input_data.code_chunk, max_chunk_chars)
-    spec_excerpt = _truncate(input_data.spec_excerpt, max_spec)
-    architecture_overview = _truncate(input_data.architecture_overview, max_arch)
-    existing_codebase_excerpt = _truncate(
-        input_data.existing_codebase_excerpt or "", max_existing
+    code_chunk = compact_text(input_data.code_chunk, max_chunk_chars, llm, "code chunk")
+    spec_excerpt = compact_text(input_data.spec_excerpt, max_spec, llm, "specification excerpt")
+    architecture_overview = compact_text(
+        input_data.architecture_overview, max_arch, llm, "architecture overview"
+    )
+    existing_codebase_excerpt = compact_text(
+        input_data.existing_codebase_excerpt or "", max_existing, llm, "existing codebase excerpt"
     )
 
     context_parts = [
@@ -67,36 +63,44 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     if input_data.task_requirements:
         context_parts.extend(["", "**Task requirements:**", input_data.task_requirements])
     if input_data.acceptance_criteria:
-        context_parts.extend([
-            "",
-            "**Acceptance criteria (code MUST meet all of these):**",
-            *[f"- {c}" for c in input_data.acceptance_criteria],
-        ])
+        context_parts.extend(
+            [
+                "",
+                "**Acceptance criteria (code MUST meet all of these):**",
+                *[f"- {c}" for c in input_data.acceptance_criteria],
+            ]
+        )
     if spec_excerpt:
-        context_parts.extend([
-            "",
-            "**Project specification (excerpt):**",
-            "---",
-            spec_excerpt,
-            "---",
-        ])
+        context_parts.extend(
+            [
+                "",
+                "**Project specification (excerpt):**",
+                "---",
+                spec_excerpt,
+                "---",
+            ]
+        )
     if architecture_overview:
         context_parts.extend(["", "**Architecture:**", architecture_overview])
     if existing_codebase_excerpt:
-        context_parts.extend([
+        context_parts.extend(
+            [
+                "",
+                "**Existing codebase (excerpt):**",
+                "---",
+                existing_codebase_excerpt,
+                "---",
+            ]
+        )
+    context_parts.extend(
+        [
             "",
-            "**Existing codebase (excerpt):**",
-            "---",
-            existing_codebase_excerpt,
-            "---",
-        ])
-    context_parts.extend([
-        "",
-        "**Code to review:**",
-        "```",
-        code_chunk,
-        "```",
-    ])
+            "**Code to review:**",
+            "```",
+            code_chunk,
+            "```",
+        ]
+    )
 
     prompt = CODE_REVIEW_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
     data = llm.complete_json(prompt, temperature=0.1)
@@ -105,13 +109,15 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     for issue_data in data.get("issues") or []:
         if isinstance(issue_data, dict) and issue_data.get("description"):
             fp = issue_data.get("file_path") or input_data.file_path_or_label
-            issues.append({
-                "severity": issue_data.get("severity", "major"),
-                "category": issue_data.get("category", "general"),
-                "file_path": fp,
-                "description": issue_data.get("description", ""),
-                "suggestion": issue_data.get("suggestion", ""),
-            })
+            issues.append(
+                {
+                    "severity": issue_data.get("severity", "major"),
+                    "category": issue_data.get("category", "general"),
+                    "file_path": fp,
+                    "description": issue_data.get("description", ""),
+                    "suggestion": issue_data.get("suggestion", ""),
+                }
+            )
 
     return {
         "approved": bool(data.get("approved", False)),

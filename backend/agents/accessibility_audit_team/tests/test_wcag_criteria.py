@@ -1,6 +1,5 @@
 """Tests for WCAG 2.2 criteria module."""
 
-
 from accessibility_audit_team.wcag_criteria import (
     WCAG_22_CRITERIA,
     SuccessCriterion,
@@ -66,26 +65,19 @@ def test_get_criteria_by_level_aaa():
 
 def test_get_criteria_by_principle_perceivable():
     perceivable = [
-        sc for sc in WCAG_22_CRITERIA.values()
-        if sc.principle == WCAGPrinciple.PERCEIVABLE
+        sc for sc in WCAG_22_CRITERIA.values() if sc.principle == WCAGPrinciple.PERCEIVABLE
     ]
     assert len(perceivable) > 0
     assert all(sc.principle == WCAGPrinciple.PERCEIVABLE for sc in perceivable)
 
 
 def test_get_criteria_by_principle_operable():
-    operable = [
-        sc for sc in WCAG_22_CRITERIA.values()
-        if sc.principle == WCAGPrinciple.OPERABLE
-    ]
+    operable = [sc for sc in WCAG_22_CRITERIA.values() if sc.principle == WCAGPrinciple.OPERABLE]
     assert len(operable) >= 0
 
 
 def test_get_level_a_aa_criteria_excludes_aaa():
-    a_and_aa = [
-        sc for sc in WCAG_22_CRITERIA.values()
-        if sc.level in (WCAGLevel.A, WCAGLevel.AA)
-    ]
+    a_and_aa = [sc for sc in WCAG_22_CRITERIA.values() if sc.level in (WCAGLevel.A, WCAGLevel.AA)]
     for sc in a_and_aa:
         assert sc.level != WCAGLevel.AAA
 

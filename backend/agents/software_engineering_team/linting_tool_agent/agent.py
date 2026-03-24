@@ -82,8 +82,7 @@ class LintingToolAgent:
         edits = self._generate_fixes(execution_result.issues, affected_code)
 
         summary = (
-            f"Found {execution_result.issue_count} lint issue(s), "
-            f"produced {len(edits)} fix edit(s)"
+            f"Found {execution_result.issue_count} lint issue(s), produced {len(edits)} fix edit(s)"
         )
         logger.info("[%s] Lint review: %s", input_data.task_id or "lint", summary)
 

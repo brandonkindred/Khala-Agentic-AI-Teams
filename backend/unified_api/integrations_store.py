@@ -508,6 +508,8 @@ def get_integrations_list() -> list[dict[str, Any]]:
             "id": "medium",
             "type": "medium",
             "enabled": bool(medium.get("enabled", False)),
-            "channel": str(medium.get("linked_email", "")).strip() or str(medium.get("oauth_provider", "")).strip() or None,
+            "channel": str(medium.get("linked_email", "")).strip()
+            or str(medium.get("oauth_provider", "")).strip()
+            or None,
         },
     ]

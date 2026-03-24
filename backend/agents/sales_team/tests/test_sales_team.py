@@ -153,7 +153,7 @@ class TestParsers:
         assert result == []
 
     def test_parse_json_strips_markdown_fences(self):
-        raw = "```json\n{\"key\": 1}\n```"
+        raw = '```json\n{"key": 1}\n```'
         result = _parse_json(raw, {})
         assert result == {"key": 1}
 
@@ -229,8 +229,7 @@ class TestAgentStubs:
 
     def test_proposal_returns_parseable_json(self, orchestrator, sample_prospect):
         raw = orchestrator.proposal.write(
-            sample_prospect.model_dump_json(), "TestProduct", "We help X",
-            25000.0, "", "", ""
+            sample_prospect.model_dump_json(), "TestProduct", "We help X", 25000.0, "", "", ""
         )
         data = json.loads(raw)
         assert "executive_summary" in data
@@ -524,7 +523,11 @@ class TestOutcomeStore:
             result=OutcomeResult.WON,
             win_factor="Champion + EB both engaged from discovery",
             close_technique_used=CloseType.SUMMARY,
-            stages_completed=[PipelineStage.PROSPECTING, PipelineStage.OUTREACH, PipelineStage.QUALIFICATION],
+            stages_completed=[
+                PipelineStage.PROSPECTING,
+                PipelineStage.OUTREACH,
+                PipelineStage.QUALIFICATION,
+            ],
             icp_match_score=0.88,
             qualification_score=0.79,
             sales_cycle_days=34,
@@ -541,11 +544,13 @@ class TestOutcomeStore:
         from sales_team.outcome_store import load_stage_outcomes, record_stage_outcome
 
         for i in range(3):
-            record_stage_outcome(StageOutcome(
-                company_name=f"Co{i}",
-                stage=PipelineStage.QUALIFICATION,
-                outcome=OutcomeResult.STALLED,
-            ))
+            record_stage_outcome(
+                StageOutcome(
+                    company_name=f"Co{i}",
+                    stage=PipelineStage.QUALIFICATION,
+                    outcome=OutcomeResult.STALLED,
+                )
+            )
         loaded = load_stage_outcomes()
         assert len(loaded) == 3
 
@@ -556,9 +561,11 @@ class TestOutcomeStore:
         )
 
         assert outcome_counts()["stage_outcomes"] == 0
-        record_stage_outcome(StageOutcome(
-            company_name="A", stage=PipelineStage.OUTREACH, outcome=OutcomeResult.CONVERTED
-        ))
+        record_stage_outcome(
+            StageOutcome(
+                company_name="A", stage=PipelineStage.OUTREACH, outcome=OutcomeResult.CONVERTED
+            )
+        )
         assert outcome_counts()["stage_outcomes"] == 1
 
     def test_save_and_load_insights(self):
@@ -662,14 +669,19 @@ class TestHeuristicLearning:
     def test_stage_conversion_rates(self):
         from sales_team.outcome_store import compute_heuristic_insights
 
-        stages = (
-            [StageOutcome(
+        stages = [
+            StageOutcome(
                 company_name=f"Co{i}", stage=PipelineStage.OUTREACH, outcome=OutcomeResult.CONVERTED
-            ) for i in range(3)]
-            + [StageOutcome(
-                company_name=f"Co{i+3}", stage=PipelineStage.OUTREACH, outcome=OutcomeResult.STALLED
-            ) for i in range(1)]
-        )
+            )
+            for i in range(3)
+        ] + [
+            StageOutcome(
+                company_name=f"Co{i + 3}",
+                stage=PipelineStage.OUTREACH,
+                outcome=OutcomeResult.STALLED,
+            )
+            for i in range(1)
+        ]
         insights = compute_heuristic_insights(stages, [])
         assert "outreach" in insights.stage_conversion_rates
         assert insights.stage_conversion_rates["outreach"] == pytest.approx(0.75)
@@ -707,17 +719,24 @@ class TestLearningEngine:
         from sales_team.learning_engine import LearningEngine
         from sales_team.outcome_store import record_deal_outcome, record_stage_outcome
 
-        record_stage_outcome(StageOutcome(
-            company_name="A", stage=PipelineStage.OUTREACH, outcome=OutcomeResult.CONVERTED,
-            subject_line_used="Funding trigger hook"
-        ))
-        record_deal_outcome(DealOutcome(
-            company_name="A", industry="SaaS",
-            final_stage_reached=PipelineStage.NEGOTIATION,
-            result=OutcomeResult.WON,
-            close_technique_used=CloseType.SUMMARY,
-            sales_cycle_days=30,
-        ))
+        record_stage_outcome(
+            StageOutcome(
+                company_name="A",
+                stage=PipelineStage.OUTREACH,
+                outcome=OutcomeResult.CONVERTED,
+                subject_line_used="Funding trigger hook",
+            )
+        )
+        record_deal_outcome(
+            DealOutcome(
+                company_name="A",
+                industry="SaaS",
+                final_stage_reached=PipelineStage.NEGOTIATION,
+                result=OutcomeResult.WON,
+                close_technique_used=CloseType.SUMMARY,
+                sales_cycle_days=30,
+            )
+        )
 
         engine = LearningEngine()
         insights = engine.refresh()

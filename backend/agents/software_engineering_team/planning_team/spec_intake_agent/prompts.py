@@ -10,8 +10,11 @@ STRUCTURED_SPEC_TEMPLATE = """
 - **Open questions:** Items needing stakeholder clarification
 """
 
-SPEC_INTAKE_PROMPT = """You are a Spec Intake and Validation Agent. Your job is to read a software specification, detect ambiguity and contradictions, normalize terms, and produce a validated "workable spec" snapshot in a compact, structured form.
-""" + STRUCTURED_SPEC_TEMPLATE + """
+SPEC_INTAKE_PROMPT = (
+    """You are a Spec Intake and Validation Agent. Your job is to read a software specification, detect ambiguity and contradictions, normalize terms, and produce a validated "workable spec" snapshot in a compact, structured form.
+"""
+    + STRUCTURED_SPEC_TEMPLATE
+    + """
 **Input:**
 - Raw specification content (initial_spec.md)
 
@@ -44,3 +47,4 @@ Return a single JSON object with:
 - If the spec is well-formed, spec_lint_report can note "No significant issues found" with minor suggestions
 
 Respond with valid JSON only. No explanatory text, markdown, or code fences."""
+)

@@ -21,12 +21,26 @@ from .interface import (
 )
 
 # Keys used when trying code-block fallback (optional filter)
-_DEFAULT_EXPECTED_KEYS = frozenset({
-    "files", "summary", "code", "overview", "issues", "approved", "components",
-    "architecture_document", "diagrams", "decisions",
-    "tasks", "execution_order",
-    "bugs_found", "integration_tests", "unit_tests", "readme_content",
-})
+_DEFAULT_EXPECTED_KEYS = frozenset(
+    {
+        "files",
+        "summary",
+        "code",
+        "overview",
+        "issues",
+        "approved",
+        "components",
+        "architecture_document",
+        "diagrams",
+        "decisions",
+        "tasks",
+        "execution_order",
+        "bugs_found",
+        "integration_tests",
+        "unit_tests",
+        "readme_content",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +63,16 @@ def call_llm_with_retries(
             return fn()
         except (LLMPermanentError, LLMRateLimitError, LLMUnreachableAfterRetriesError):
             raise
-        except (LLMTemporaryError, httpx.ConnectError, httpx.TimeoutException, httpx.ReadTimeout, LLMError) as e:
+        except (
+            LLMTemporaryError,
+            httpx.ConnectError,
+            httpx.TimeoutException,
+            httpx.ReadTimeout,
+            LLMError,
+        ) as e:
             last_error = e
             if attempt < max_attempts - 1:
-                wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                wait = min(backoff_base**attempt + random.uniform(0, 1), backoff_max)
                 logger.warning(
                     "LLM call failed (attempt %d/%d): %s. Next step -> Retrying in %.1fs",
                     attempt + 1,
@@ -75,7 +95,7 @@ def call_llm_with_retries(
         except Exception as e:
             last_error = e
             if attempt < max_attempts - 1:
-                wait = min(backoff_base ** attempt + random.uniform(0, 1), backoff_max)
+                wait = min(backoff_base**attempt + random.uniform(0, 1), backoff_max)
                 logger.warning(
                     "LLM call failed (attempt %d/%d): %s. Next step -> Retrying in %.1fs",
                     attempt + 1,
@@ -127,7 +147,9 @@ def extract_json_from_response(
     if json_block_match:
         text = json_block_match.group(1).strip()
     else:
-        fenced_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+        fenced_match = re.search(
+            r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.DOTALL | re.IGNORECASE
+        )
         if fenced_match:
             block_content = fenced_match.group(1).strip()
             if block_content.lstrip().startswith(("{", "[")):

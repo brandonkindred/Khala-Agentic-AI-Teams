@@ -15,7 +15,9 @@ from linting_tool_agent.models import LintExecutionResult, LintPlan
 
 
 def test_lint_issue_construction() -> None:
-    issue = LintIssue(file_path="app/main.py", line=10, column=1, rule="E501", message="Line too long")
+    issue = LintIssue(
+        file_path="app/main.py", line=10, column=1, rule="E501", message="Line too long"
+    )
     assert issue.file_path == "app/main.py"
     assert issue.line == 10
     assert issue.severity == "warning"
@@ -83,7 +85,10 @@ def test_detect_linter_pyproject_ruff(tmp_path: Path) -> None:
 
 def test_detect_linter_flake8(tmp_path: Path) -> None:
     (tmp_path / ".flake8").write_text("[flake8]\nmax-line-length = 120\n")
-    with patch("linting_tool_agent.linter_runner._is_command_available", side_effect=lambda cmd: cmd == "flake8"):
+    with patch(
+        "linting_tool_agent.linter_runner._is_command_available",
+        side_effect=lambda cmd: cmd == "flake8",
+    ):
         plan = detect_linter(tmp_path, "backend")
     assert plan.linter_name == "flake8"
     assert plan.linter_command == ["flake8", "."]
@@ -163,8 +168,10 @@ def test_agent_run_lint_passes(tmp_path: Path) -> None:
     mock_llm = MagicMock()
     agent = LintingToolAgent(mock_llm)
 
-    with patch("linting_tool_agent.linter_runner._is_command_available", return_value=True), \
-            patch("linting_tool_agent.linter_runner.run_command") as mock_cmd:
+    with (
+        patch("linting_tool_agent.linter_runner._is_command_available", return_value=True),
+        patch("linting_tool_agent.linter_runner.run_command") as mock_cmd,
+    ):
         mock_cmd.return_value = MagicMock(success=True, output="", stdout="", stderr="")
         result = agent.run(LintToolInput(repo_path=str(tmp_path), agent_type="backend"))
 
@@ -194,11 +201,12 @@ def test_agent_run_lint_fails_and_produces_edits(tmp_path: Path) -> None:
     agent = LintingToolAgent(mock_llm)
 
     lint_output = "app/main.py:1:1: F401 `os` imported but unused\n"
-    with patch("linting_tool_agent.linter_runner._is_command_available", return_value=True), \
-            patch("linting_tool_agent.linter_runner.run_command") as mock_cmd:
+    with (
+        patch("linting_tool_agent.linter_runner._is_command_available", return_value=True),
+        patch("linting_tool_agent.linter_runner.run_command") as mock_cmd,
+    ):
         mock_cmd.return_value = MagicMock(
-            success=False, output=lint_output, stdout=lint_output, stderr="",
-            exit_code=1
+            success=False, output=lint_output, stdout=lint_output, stderr="", exit_code=1
         )
         result = agent.run(LintToolInput(repo_path=str(tmp_path), agent_type="backend"))
 
@@ -220,11 +228,12 @@ def test_agent_run_llm_failure_is_non_blocking(tmp_path: Path) -> None:
     agent = LintingToolAgent(mock_llm)
 
     lint_output = "app/main.py:1:1: F401 `os` imported but unused\n"
-    with patch("linting_tool_agent.linter_runner._is_command_available", return_value=True), \
-            patch("linting_tool_agent.linter_runner.run_command") as mock_cmd:
+    with (
+        patch("linting_tool_agent.linter_runner._is_command_available", return_value=True),
+        patch("linting_tool_agent.linter_runner.run_command") as mock_cmd,
+    ):
         mock_cmd.return_value = MagicMock(
-            success=False, output=lint_output, stdout=lint_output, stderr="",
-            exit_code=1
+            success=False, output=lint_output, stdout=lint_output, stderr="", exit_code=1
         )
         result = agent.run(LintToolInput(repo_path=str(tmp_path), agent_type="backend"))
 
@@ -246,24 +255,54 @@ def test_backend_workflow_calls_linting_tool_agent(tmp_path: Path) -> None:
 
     # Set up a minimal git repo
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "README.md").write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True
+    )
 
     mock_llm = MagicMock()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.side_effect = [
         # Planning step
-        {"feature_intent": "Test", "what_changes": ["app/main.py"], "algorithms_data_structures": "", "tests_needed": ""},
+        {
+            "feature_intent": "Test",
+            "what_changes": ["app/main.py"],
+            "algorithms_data_structures": "",
+            "tests_needed": "",
+        },
         # Code generation step
-        {"code": "", "language": "python", "summary": "test", "files": {"app/main.py": "print('hello')\n"}, "tests": "", "suggested_commit_message": "feat: test"},
+        {
+            "code": "",
+            "language": "python",
+            "summary": "test",
+            "files": {"app/main.py": "print('hello')\n"},
+            "tests": "",
+            "suggested_commit_message": "feat: test",
+        },
     ] + [
         # Additional calls for fix loops
-        {"code": "", "language": "python", "summary": "fix", "files": {"app/main.py": "print('hello')\n"}, "tests": "", "suggested_commit_message": "fix: test"}
+        {
+            "code": "",
+            "language": "python",
+            "summary": "fix",
+            "files": {"app/main.py": "print('hello')\n"},
+            "tests": "",
+            "suggested_commit_message": "fix: test",
+        }
         for _ in range(10)
     ]
 

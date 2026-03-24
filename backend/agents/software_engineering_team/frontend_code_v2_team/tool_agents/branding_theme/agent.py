@@ -110,13 +110,17 @@ class BrandingThemeToolAgent:
         if data.get("component_library_plan"):
             recommendations.append(f"Component Library: {data['component_library_plan'][:500]}")
         if data.get("token_implementation_plan"):
-            recommendations.append(f"Token Implementation: {data['token_implementation_plan'][:500]}")
+            recommendations.append(
+                f"Token Implementation: {data['token_implementation_plan'][:500]}"
+            )
         if data.get("a11y_in_components"):
             recommendations.append(f"A11y in Components: {data['a11y_in_components'][:500]}")
         if data.get("documentation_plan"):
             recommendations.append(f"Documentation: {data['documentation_plan'][:500]}")
         return ToolAgentPhaseOutput(
-            recommendations=recommendations if recommendations else ["Consider design tokens and theme compliance."],
+            recommendations=recommendations
+            if recommendations
+            else ["Consider design tokens and theme compliance."],
             summary=data.get("summary", "Branding/Theme planning complete."),
         )
 

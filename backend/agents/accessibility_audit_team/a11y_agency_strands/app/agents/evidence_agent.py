@@ -4,9 +4,7 @@ from .base import ToolContext, tool
 
 
 @tool(context=True)
-def run_evidence_curation(
-    finding_id: str, target: str, tool_context: ToolContext
-) -> dict:
+def run_evidence_curation(finding_id: str, target: str, tool_context: ToolContext) -> dict:
     bundle = EvidenceBundle(
         finding_id=finding_id,
         screenshot_path=capture_screenshot(target),

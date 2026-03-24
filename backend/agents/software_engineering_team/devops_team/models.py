@@ -211,4 +211,3 @@ class DevOpsTeamResult(BaseModel):
     failure_reason: str = ""
     iterations: int = 1
     completion_package: Optional[DevOpsCompletionPackage] = None
-

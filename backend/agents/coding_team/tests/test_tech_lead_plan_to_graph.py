@@ -21,8 +21,18 @@ def test_tech_lead_plan_to_task_graph_output_structure() -> None:
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {
         "tasks": [
-            {"id": "t1", "title": "Backend API", "description": "Implement endpoints", "dependencies": []},
-            {"id": "t2", "title": "Frontend UI", "description": "Implement UI", "dependencies": ["t1"]},
+            {
+                "id": "t1",
+                "title": "Backend API",
+                "description": "Implement endpoints",
+                "dependencies": [],
+            },
+            {
+                "id": "t2",
+                "title": "Frontend UI",
+                "description": "Implement UI",
+                "dependencies": ["t1"],
+            },
         ],
         "stacks": [
             {"name": "backend", "tools_services": ["Python", "FastAPI"]},

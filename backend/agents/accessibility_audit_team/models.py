@@ -125,12 +125,8 @@ class EnvironmentInfo(BaseModel):
     surface: Surface
     browser_or_device: str = Field(default="", description="e.g., Chrome 120, iPhone 15")
     os_version: str = Field(default="", description="e.g., macOS 14.2, iOS 17.2")
-    viewport_or_scale: str = Field(
-        default="", description="e.g., 1920x1080, 200% zoom, large text"
-    )
-    assistive_tech: Optional[str] = Field(
-        default=None, description="e.g., NVDA 2024.1, VoiceOver"
-    )
+    viewport_or_scale: str = Field(default="", description="e.g., 1920x1080, 200% zoom, large text")
+    assistive_tech: Optional[str] = Field(default=None, description="e.g., NVDA 2024.1, VoiceOver")
 
 
 class EvidencePack(BaseModel):
@@ -154,9 +150,7 @@ class WCAGMapping(BaseModel):
 
     sc: str = Field(..., description="Success criterion, e.g., 2.4.7")
     name: str = Field(default="", description="SC name, e.g., Focus Visible")
-    confidence: float = Field(
-        ..., ge=0.0, le=1.0, description="Confidence in this mapping"
-    )
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in this mapping")
     rationale: str = Field(default="", description="Why this SC applies")
 
 
@@ -180,21 +174,15 @@ class Finding(BaseModel):
     issue_type: IssueType
     severity: Severity
     scope: Scope
-    confidence: float = Field(
-        ..., ge=0.0, le=1.0, description="Overall confidence in this finding"
-    )
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Overall confidence in this finding")
 
     # Core finding details
     title: str = Field(..., description="Short, descriptive title")
     summary: str = Field(..., description="Brief summary of the issue")
-    repro_steps: List[str] = Field(
-        default_factory=list, description="Steps to reproduce"
-    )
+    repro_steps: List[str] = Field(default_factory=list, description="Steps to reproduce")
     expected: str = Field(..., description="Expected accessible behavior")
     actual: str = Field(..., description="Actual observed behavior")
-    user_impact: str = Field(
-        ..., description="Who is harmed and how (user impact statement)"
-    )
+    user_impact: str = Field(..., description="Who is harmed and how (user impact statement)")
 
     # Standards mapping
     wcag_mappings: List[WCAGMapping] = Field(
@@ -205,45 +193,29 @@ class Finding(BaseModel):
     )
 
     # Evidence
-    evidence_pack_ref: Optional[str] = Field(
-        default=None, description="Reference to evidence pack"
-    )
+    evidence_pack_ref: Optional[str] = Field(default=None, description="Reference to evidence pack")
 
     # Remediation
-    root_cause_hypothesis: str = Field(
-        default="", description="Hypothesis about the root cause"
-    )
-    recommended_fix: List[str] = Field(
-        default_factory=list, description="Fix recipe steps"
-    )
+    root_cause_hypothesis: str = Field(default="", description="Hypothesis about the root cause")
+    recommended_fix: List[str] = Field(default_factory=list, description="Fix recipe steps")
     acceptance_criteria: List[str] = Field(
         default_factory=list, description="Testable acceptance criteria"
     )
-    test_plan: List[str] = Field(
-        default_factory=list, description="Verification test steps"
-    )
-    code_examples_ref: Optional[str] = Field(
-        default=None, description="Reference to code examples"
-    )
+    test_plan: List[str] = Field(default_factory=list, description="Verification test steps")
+    code_examples_ref: Optional[str] = Field(default=None, description="Reference to code examples")
 
     # Linking for pattern clustering
     pattern_id: Optional[str] = Field(
         default=None, description="Pattern cluster ID (assigned by QCR)"
     )
-    component_id: Optional[str] = Field(
-        default=None, description="Design system component ID"
-    )
-    duplicate_of: Optional[str] = Field(
-        default=None, description="ID of finding this duplicates"
-    )
+    component_id: Optional[str] = Field(default=None, description="Design system component ID")
+    duplicate_of: Optional[str] = Field(default=None, description="ID of finding this duplicates")
 
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     created_by: str = Field(default="", description="Agent that created this finding")
-    verified_by: Optional[str] = Field(
-        default=None, description="Agent that verified this finding"
-    )
+    verified_by: Optional[str] = Field(default=None, description="Agent that verified this finding")
 
 
 # ---------------------------------------------------------------------------
@@ -270,23 +242,17 @@ class AuditTargets(BaseModel):
 class AuditConstraints(BaseModel):
     """Constraints for the audit."""
 
-    timebox_hours: Optional[int] = Field(
-        default=None, description="Maximum hours for the audit"
-    )
+    timebox_hours: Optional[int] = Field(default=None, description="Maximum hours for the audit")
     environments: List[str] = Field(
         default_factory=lambda: ["prod"], description="Environments to test"
     )
-    auth_required: bool = Field(
-        default=False, description="Whether authentication is required"
-    )
+    auth_required: bool = Field(default=False, description="Whether authentication is required")
 
 
 class SamplingStrategy(BaseModel):
     """Sampling strategy for the audit."""
 
-    max_pages: Optional[int] = Field(
-        default=None, description="Maximum pages/screens to test"
-    )
+    max_pages: Optional[int] = Field(default=None, description="Maximum pages/screens to test")
     strategy: Literal["journey_based", "template_based", "risk_based"] = Field(
         default="journey_based"
     )
@@ -301,16 +267,10 @@ class TestRunConfig(BaseModel):
     viewports: List[Dict[str, int]] = Field(
         default_factory=lambda: [{"width": 1920, "height": 1080}]
     )
-    mobile_devices: List[str] = Field(
-        default_factory=list, description="Mobile devices to test"
-    )
-    assistive_technologies: List[str] = Field(
-        default_factory=lambda: ["nvda", "voiceover"]
-    )
+    mobile_devices: List[str] = Field(default_factory=list, description="Mobile devices to test")
+    assistive_technologies: List[str] = Field(default_factory=lambda: ["nvda", "voiceover"])
     wcag_version: str = Field(default="2.2")
-    wcag_levels: List[WCAGLevel] = Field(
-        default_factory=lambda: [WCAGLevel.A, WCAGLevel.AA]
-    )
+    wcag_levels: List[WCAGLevel] = Field(default_factory=lambda: [WCAGLevel.A, WCAGLevel.AA])
 
 
 class AuditPlan(BaseModel):
@@ -352,9 +312,7 @@ class CoverageRow(BaseModel):
     surfaces: List[Surface] = Field(default_factory=list)
     journeys: List[str] = Field(default_factory=list)
     depth: VerificationDepth = Field(default=VerificationDepth.SIGNAL)
-    status: Literal["not_started", "in_progress", "complete"] = Field(
-        default="not_started"
-    )
+    status: Literal["not_started", "in_progress", "complete"] = Field(default="not_started")
     findings_count: int = Field(default=0)
 
 
@@ -423,9 +381,7 @@ class ScanResult(BaseModel):
     violations: List[Dict[str, Any]] = Field(default_factory=list)
     passes: int = Field(default=0)
     incomplete: int = Field(default=0)
-    raw_ref: Optional[str] = Field(
-        default=None, description="Reference to raw results"
-    )
+    raw_ref: Optional[str] = Field(default=None, description="Reference to raw results")
 
 
 class DiscoveryResult(BaseModel):
@@ -532,9 +488,7 @@ class AccessibilityAuditResult(BaseModel):
 class AuditRequest(BaseModel):
     """Request to create and run an accessibility audit."""
 
-    audit_id: Optional[str] = Field(
-        default=None, description="Optional custom audit ID"
-    )
+    audit_id: Optional[str] = Field(default=None, description="Optional custom audit ID")
     name: str = Field(default="", description="Human-readable audit name")
     web_urls: List[str] = Field(default_factory=list)
     mobile_apps: List[MobileAppTarget] = Field(default_factory=list)
@@ -546,9 +500,7 @@ class AuditRequest(BaseModel):
     sampling_strategy: Literal["journey_based", "template_based", "risk_based"] = Field(
         default="journey_based"
     )
-    wcag_levels: List[WCAGLevel] = Field(
-        default_factory=lambda: [WCAGLevel.A, WCAGLevel.AA]
-    )
+    wcag_levels: List[WCAGLevel] = Field(default_factory=lambda: [WCAGLevel.A, WCAGLevel.AA])
 
 
 class AuditJobResponse(BaseModel):

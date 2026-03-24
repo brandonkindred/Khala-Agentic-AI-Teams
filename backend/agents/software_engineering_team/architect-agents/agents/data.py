@@ -56,4 +56,5 @@ Design the data architecture. Produce data store recommendations, data model, an
 
 def _get_sonnet_model() -> str:
     import os
+
     return os.environ.get("ARCHITECT_MODEL_SPECIALIST", "anthropic.claude-sonnet-4-20250514-v1:0")

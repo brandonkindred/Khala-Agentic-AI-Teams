@@ -40,7 +40,9 @@ class PolicyGuardianAgent:
 
         asset_class_weights: Dict[str, float] = {}
         for pos in proposal.positions:
-            asset_class_weights[pos.asset_class] = asset_class_weights.get(pos.asset_class, 0.0) + pos.weight_pct
+            asset_class_weights[pos.asset_class] = (
+                asset_class_weights.get(pos.asset_class, 0.0) + pos.weight_pct
+            )
 
             if pos.weight_pct > constraints.max_single_position_pct:
                 violations.append(
@@ -55,7 +57,9 @@ class PolicyGuardianAgent:
         for asset_class, weight in sorted(asset_class_weights.items()):
             class_cap = constraints.max_asset_class_pct.get(asset_class)
             if class_cap is not None and weight > class_cap:
-                violations.append(f"Asset class {asset_class} exceeds cap ({weight}% > {class_cap}%).")
+                violations.append(
+                    f"Asset class {asset_class} exceeds cap ({weight}% > {class_cap}%)."
+                )
 
         excluded_classes = set(ips.profile.preferences.excluded_asset_classes)
         for asset_class in sorted(excluded_classes):
@@ -64,10 +68,15 @@ class PolicyGuardianAgent:
 
         if not ips.profile.preferences.crypto_allowed and asset_class_weights.get("crypto", 0) > 0:
             violations.append("Crypto position present despite IPS disallowing crypto.")
-        if not ips.profile.preferences.options_allowed and asset_class_weights.get("options", 0) > 0:
+        if (
+            not ips.profile.preferences.options_allowed
+            and asset_class_weights.get("options", 0) > 0
+        ):
             violations.append("Options position present despite IPS disallowing options.")
 
-        speculative_weight = sum(pos.weight_pct for pos in proposal.positions if pos.asset_class in {"crypto", "options"})
+        speculative_weight = sum(
+            pos.weight_pct for pos in proposal.positions if pos.asset_class in {"crypto", "options"}
+        )
         if speculative_weight > ips.speculative_sleeve_cap_pct:
             violations.append(
                 f"Speculative sleeve exceeds IPS cap ({speculative_weight}% > {ips.speculative_sleeve_cap_pct}%)."
@@ -220,7 +229,9 @@ class PromotionGateAgent:
                 decided_by=approver.agent_id,
                 outcome=PromotionStage.PAPER,
                 rationale="IPS does not permit live trading; defaulting to paper mode.",
-                required_actions=["Obtain explicit human approval + IPS update for live promotion."],
+                required_actions=[
+                    "Obtain explicit human approval + IPS update for live promotion."
+                ],
                 gate_results=gate_results,
                 audit=build_audit(),
             )

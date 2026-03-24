@@ -1,6 +1,5 @@
 """Tests for accessibility_audit_team models."""
 
-
 from accessibility_audit_team.models import (
     AuditPlan,
     AuditRequest,

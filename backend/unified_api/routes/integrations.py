@@ -241,12 +241,14 @@ def _get_redirect_uri(request: Request) -> str:
 
 def _exchange_code(code: str, redirect_uri: str, client_id: str, client_secret: str) -> dict:
     """Exchange an OAuth authorization code for a bot token via Slack's API."""
-    body = urllib.parse.urlencode({
-        "code": code,
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "redirect_uri": redirect_uri,
-    }).encode()
+    body = urllib.parse.urlencode(
+        {
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+        }
+    ).encode()
     req = urllib.request.Request(
         _SLACK_TOKEN_URL,
         data=body,
@@ -281,13 +283,15 @@ def _get_medium_google_redirect_uri(request: Request) -> str:
 
 
 def _exchange_google_oauth_code(code: str, redirect_uri: str, client_id: str, client_secret: str) -> dict:
-    body = urllib.parse.urlencode({
-        "code": code,
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "redirect_uri": redirect_uri,
-        "grant_type": "authorization_code",
-    }).encode()
+    body = urllib.parse.urlencode(
+        {
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        }
+    ).encode()
     req = urllib.request.Request(
         _GOOGLE_TOKEN_URL,
         data=body,
@@ -400,12 +404,14 @@ async def slack_oauth_connect(request: Request) -> SlackOAuthConnectResponse:
     state = generate_oauth_state()
     redirect_uri = _get_redirect_uri(request)
 
-    params = urllib.parse.urlencode({
-        "client_id": client_id,
-        "scope": _SLACK_SCOPES,
-        "redirect_uri": redirect_uri,
-        "state": state,
-    })
+    params = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "scope": _SLACK_SCOPES,
+            "redirect_uri": redirect_uri,
+            "state": state,
+        }
+    )
     url = f"{_SLACK_AUTHORIZE_URL}?{params}"
 
     return SlackOAuthConnectResponse(url=url, client_id=client_id)
@@ -509,7 +515,9 @@ async def get_google_browser_login_status() -> GoogleBrowserLoginStatusResponse:
 
 
 @router.put("/google-browser-login", response_model=GoogleBrowserLoginStatusResponse)
-async def put_google_browser_login_credentials(body: GoogleBrowserLoginCredentialsBody) -> GoogleBrowserLoginStatusResponse:
+async def put_google_browser_login_credentials(
+    body: GoogleBrowserLoginCredentialsBody,
+) -> GoogleBrowserLoginStatusResponse:
     """Encrypt and store shared Gmail/Google email+password for browser automation across integrations."""
     try:
         set_google_browser_login_credentials(body.email, body.password)
@@ -585,15 +593,17 @@ async def medium_google_oauth_connect(request: Request) -> MediumGoogleOAuthConn
         )
     state = generate_medium_google_oauth_state()
     redirect_uri = _get_medium_google_redirect_uri(request)
-    params = urllib.parse.urlencode({
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": _GOOGLE_SCOPES,
-        "access_type": "offline",
-        "prompt": "consent",
-        "state": state,
-    })
+    params = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": _GOOGLE_SCOPES,
+            "access_type": "offline",
+            "prompt": "consent",
+            "state": state,
+        }
+    )
     url = f"{_GOOGLE_AUTH_URL}?{params}"
     return MediumGoogleOAuthConnectResponse(url=url)
 

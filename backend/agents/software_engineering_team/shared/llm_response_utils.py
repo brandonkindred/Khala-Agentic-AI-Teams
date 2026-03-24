@@ -85,8 +85,17 @@ def extract_task_assignment_from_content(content: str) -> Optional[Dict[str, Any
 
 # Extensions we treat as file paths (backend + frontend)
 _PATH_EXTENSIONS = (
-    ".py", ".ts", ".html", ".scss", ".css", ".json", ".md", ".yaml", ".yml",
-    ".js", ".spec.ts",
+    ".py",
+    ".ts",
+    ".html",
+    ".scss",
+    ".css",
+    ".json",
+    ".md",
+    ".yaml",
+    ".yml",
+    ".js",
+    ".spec.ts",
 )
 
 
@@ -135,7 +144,11 @@ def extract_files_from_content(content: str) -> Dict[str, str]:
         if end != -1:
             try:
                 parsed = json.loads(stripped[start : end + 1])
-                if isinstance(parsed, dict) and parsed.get("files") and isinstance(parsed["files"], dict):
+                if (
+                    isinstance(parsed, dict)
+                    and parsed.get("files")
+                    and isinstance(parsed["files"], dict)
+                ):
                     for k, v in parsed["files"].items():
                         if isinstance(k, str) and isinstance(v, str) and k and v.strip():
                             files[k] = v
@@ -204,7 +217,9 @@ def extract_files_from_content(content: str) -> Dict[str, str]:
     return files
 
 
-def heuristic_extract_files_from_content(content: str, extensions: tuple = (".py", ".ts", ".html", ".scss")) -> Dict[str, str]:
+def heuristic_extract_files_from_content(
+    content: str, extensions: tuple = (".py", ".ts", ".html", ".scss")
+) -> Dict[str, str]:
     """
     When extract_files_from_content returns nothing, try to recover files by splitting on path-like
     lines or "File:" / "path:" headers. Used so backend/frontend have something to write instead of
@@ -226,17 +241,28 @@ def heuristic_extract_files_from_content(content: str, extensions: tuple = (".py
         md_header_match = re.match(r"^#{1,6}\s+(.+)$", stripped)
         if md_header_match:
             header_content = md_header_match.group(1).strip()
-            if _looks_like_path(header_content) and any(header_content.endswith(ext) for ext in path_exts):
+            if _looks_like_path(header_content) and any(
+                header_content.endswith(ext) for ext in path_exts
+            ):
                 path_candidate = header_content
         elif re.match(r"^(?:File|path|filepath)\s*:\s*\S+", stripped, re.IGNORECASE):
             # "File: app/main.py" or "path: src/foo.ts"
             match = re.search(r":\s*(\S+)", stripped)
             if match:
                 path_candidate = match.group(1).strip("'\"").strip()
-        elif stripped and "/" in stripped and len(stripped) < 120 and any(stripped.endswith(ext) for ext in path_exts):
+        elif (
+            stripped
+            and "/" in stripped
+            and len(stripped) < 120
+            and any(stripped.endswith(ext) for ext in path_exts)
+        ):
             # Standalone path line
             path_candidate = stripped
-        if path_candidate and path_candidate not in files and any(path_candidate.endswith(ext) for ext in path_exts):
+        if (
+            path_candidate
+            and path_candidate not in files
+            and any(path_candidate.endswith(ext) for ext in path_exts)
+        ):
             # Collect content until next path-like line or blank separator
             body_lines: list = []
             i += 1
@@ -248,7 +274,12 @@ def heuristic_extract_files_from_content(content: str, extensions: tuple = (".py
                     continue
                 if re.match(r"^(?:File|path|filepath)\s*:\s*\S+", next_stripped, re.IGNORECASE):
                     break
-                if next_stripped and "/" in next_stripped and len(next_stripped) < 120 and any(next_stripped.endswith(ext) for ext in path_exts):
+                if (
+                    next_stripped
+                    and "/" in next_stripped
+                    and len(next_stripped) < 120
+                    and any(next_stripped.endswith(ext) for ext in path_exts)
+                ):
                     break
                 body_lines.append(next_line)
                 i += 1

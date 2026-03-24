@@ -122,9 +122,12 @@ depends_on:
 # Execution phase
 # ---------------------------------------------------------------------------
 
-EXECUTION_PROMPT = """You are an expert Senior Frontend Engineer implementing production-quality UI code.
+EXECUTION_PROMPT = (
+    """You are an expert Senior Frontend Engineer implementing production-quality UI code.
 
-""" + FRONTEND_CODING_STANDARDS + """
+"""
+    + FRONTEND_CODING_STANDARDS
+    + """
 
 **Your task:**
 Implement the microtask described below. Produce complete, runnable component/service files.
@@ -162,6 +165,7 @@ what you implemented
 - All imports must be valid; all referenced modules must be included.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+)
 
 # ---------------------------------------------------------------------------
 # Review phase
@@ -212,12 +216,15 @@ overall assessment
 # Problem-solving phase
 # ---------------------------------------------------------------------------
 
-PROBLEM_SOLVING_PROMPT = """You are an expert Problem-Solving Specialist for a frontend project.
+PROBLEM_SOLVING_PROMPT = (
+    """You are an expert Problem-Solving Specialist for a frontend project.
 
 Given the issues found during review, produce fixes. Each fix should be a complete
 updated file that resolves the issue.
 
-""" + FRONTEND_CODING_STANDARDS + """
+"""
+    + FRONTEND_CODING_STANDARDS
+    + """
 
 **Issues to resolve:**
 {issues}
@@ -248,10 +255,14 @@ overview of all fixes
 - Use "## FILE <path> ##" for each file; "---" to separate each fix block.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+)
 
-PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = """You are an expert Problem-Solving Specialist. Fix exactly ONE issue.
+PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = (
+    """You are an expert Problem-Solving Specialist. Fix exactly ONE issue.
 
-""" + FRONTEND_CODING_STANDARDS + """
+"""
+    + FRONTEND_CODING_STANDARDS
+    + """
 
 **Single issue to fix:**
 - Source: {source}
@@ -284,6 +295,7 @@ one sentence: what you changed
 - Output only the file(s) you change. Use "## FILE <path> ##" for each.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+)
 
 # ---------------------------------------------------------------------------
 # QA tool agent: review (find issues from testing/QA perspective)
@@ -476,9 +488,12 @@ what documentation you fixed
 # Batch fix prompt: all issues from a review phase at once
 # ---------------------------------------------------------------------------
 
-BATCH_FIX_PROMPT = """You are an expert Senior Frontend Software Engineer responsible for fixing all issues identified by the review team.
+BATCH_FIX_PROMPT = (
+    """You are an expert Senior Frontend Software Engineer responsible for fixing all issues identified by the review team.
 
-""" + FRONTEND_CODING_STANDARDS + """
+"""
+    + FRONTEND_CODING_STANDARDS
+    + """
 
 {language_conventions}
 
@@ -528,6 +543,7 @@ Overview of all fixes applied
 - List each issue you addressed with its index (1-based) and a brief description.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+)
 
 # ---------------------------------------------------------------------------
 # Documentation self-review prompt: iterative refinement

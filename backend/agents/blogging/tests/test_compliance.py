@@ -49,10 +49,14 @@ def test_compliance_agent_with_work_dir(brand_spec_prompt, tmp_path):
     assert (tmp_path / "compliance_report.json").exists()
 
 
-def test_compliance_fallback_when_llm_exhausts_transient_retries(monkeypatch, brand_spec_prompt, tmp_path):
+def test_compliance_fallback_when_llm_exhausts_transient_retries(
+    monkeypatch, brand_spec_prompt, tmp_path
+):
     """After transient LLM failures, agent returns FAIL fallback report and writes JSON (no crash)."""
     llm = MagicMock()
-    llm.complete_json.side_effect = LLMTemporaryError("Empty response from LLM; treating as transient for retry")
+    llm.complete_json.side_effect = LLMTemporaryError(
+        "Empty response from LLM; treating as transient for retry"
+    )
     monkeypatch.setattr("blog_compliance_agent.agent.time.sleep", lambda _s: None)
 
     agent = BlogComplianceAgent(llm_client=llm)

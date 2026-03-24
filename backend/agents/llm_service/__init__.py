@@ -8,6 +8,7 @@ and config (env vars, known context, per-agent defaults) are centralized here.
 
 from . import config as _config
 from .clients import DummyLLMClient, OllamaLLMClient
+from .compaction import compact_text
 from .factory import _clear_client_cache_for_testing, get_client
 from .interface import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
@@ -31,6 +32,7 @@ def get_llm_config_summary() -> str:
 __all__ = [
     "_clear_client_cache_for_testing",
     "call_llm_with_retries",
+    "compact_text",
     "extract_json_from_response",
     "get_client",
     "get_llm_config_summary",

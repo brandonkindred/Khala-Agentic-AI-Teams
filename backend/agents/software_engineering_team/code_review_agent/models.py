@@ -10,7 +10,9 @@ from software_engineering_team.shared.models import SystemArchitecture
 class ChunkReviewInput(BaseModel):
     """Input for reviewing one chunk of code (used by ChunkReviewAgent)."""
 
-    code_chunk: str = Field(description="Code to review (one or more files, sized per model context)")
+    code_chunk: str = Field(
+        description="Code to review (one or more files, sized per model context)"
+    )
     file_path_or_label: str = Field(
         default="",
         description="File path(s) in this chunk for issue reporting",

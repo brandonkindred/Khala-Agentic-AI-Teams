@@ -25,6 +25,7 @@ def _get_slack_config() -> dict[str, Any]:
     """Get Slack config from store (with env fallback). Safe to call from any thread."""
     try:
         from unified_api.integrations_store import get_slack_config
+
         return get_slack_config()
     except ImportError:
         return {
@@ -46,6 +47,7 @@ def _get_status_base_url() -> str:
 def _post_webhook_sync(url: str, payload: dict[str, Any]) -> None:
     try:
         import urllib.request
+
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -132,15 +134,19 @@ def _build_open_questions_blocks(
         if options:
             opt_lines = ["• " + (o.get("id") or o.get("text") or str(o)) for o in options[:10]]
             block_text += "\n" + "\n".join(opt_lines)
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": block_text[:2900]},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": block_text[:2900]},
+            }
+        )
     if len(questions) > 20:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"_... and {len(questions) - 20} more._"},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"_... and {len(questions) - 20} more._"},
+            }
+        )
     return blocks
 
 
@@ -185,15 +191,19 @@ def notify_pa_response(
         {"type": "section", "text": {"type": "mrkdwn", "text": text}},
     ]
     if actions_taken:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "Actions: " + ", ".join(actions_taken[:10])},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "Actions: " + ", ".join(actions_taken[:10])},
+            }
+        )
     if follow_ups:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "Follow-ups: " + ", ".join(follow_ups[:5])},
-        })
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "Follow-ups: " + ", ".join(follow_ups[:5])},
+            }
+        )
     payload = {"text": "Personal Assistant reply", "blocks": blocks}
 
     def _send() -> None:

@@ -7,7 +7,7 @@ Single source of truth for structure before the author draft; replaces BlogRevie
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -49,8 +49,12 @@ class RequirementsAnalysis(BaseModel):
         description="Where planned coverage is not supported by the research digest.",
     )
     fits_profile: bool = Field(default=True, description="Aligns with chosen content profile.")
-    gaps: List[str] = Field(default_factory=list, description="Structural or coverage gaps in the plan.")
-    risks: List[str] = Field(default_factory=list, description="Risks to clarity, flow, or feasibility.")
+    gaps: List[str] = Field(
+        default_factory=list, description="Structural or coverage gaps in the plan."
+    )
+    risks: List[str] = Field(
+        default_factory=list, description="Risks to clarity, flow, or feasibility."
+    )
     suggested_format_change: Optional[str] = Field(
         None,
         description="If scope is wrong for the brief, suggest a different format (e.g. deep_dive).",
@@ -84,7 +88,9 @@ class ContentPlan(BaseModel):
         ...,
         description="How the post progresses from opening to close (not only a list of headings).",
     )
-    sections: List[ContentPlanSection] = Field(..., min_length=1, description="Ordered sections with coverage.")
+    sections: List[ContentPlanSection] = Field(
+        ..., min_length=1, description="Ordered sections with coverage."
+    )
     title_candidates: List[TitleCandidate] = Field(
         default_factory=list,
         description="Ranked title options with probabilities.",
@@ -155,7 +161,14 @@ def content_plan_summary_text(plan: ContentPlan, *, max_chars: int = 800) -> str
 
 def content_plan_to_outline_markdown(plan: ContentPlan) -> str:
     """Flat outline string for API `outline` field and legacy-shaped prompts."""
-    lines: List[str] = [f"# {plan.overarching_topic}", "", "## Narrative flow", plan.narrative_flow, "", "## Sections"]
+    lines: List[str] = [
+        f"# {plan.overarching_topic}",
+        "",
+        "## Narrative flow",
+        plan.narrative_flow,
+        "",
+        "## Sections",
+    ]
     for sec in sorted(plan.sections, key=lambda s: s.order):
         lines.append(f"### {sec.title}")
         lines.append(sec.coverage_description)
@@ -184,9 +197,15 @@ def content_plan_to_content_brief_markdown(plan: ContentPlan) -> str:
     return brief
 
 
-def build_research_digest(research_document: str, *, max_chars: int = 24_000) -> str:
-    """Bounded digest for planning prompts (truncate with notice)."""
+def build_research_digest(
+    research_document: str, *, max_chars: int = 200_000, llm: Any = None
+) -> str:
+    """Bounded digest for planning prompts (compact with LLM when over budget)."""
     doc = (research_document or "").strip()
-    if len(doc) <= max_chars:
+    if not doc or len(doc) <= max_chars:
         return doc
-    return doc[:max_chars] + "\n\n[... research digest truncated for context ...]"
+    if llm is not None:
+        from llm_service import compact_text
+
+        return compact_text(doc, max_chars, llm, "research digest")
+    return doc

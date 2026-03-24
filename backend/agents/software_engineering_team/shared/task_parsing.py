@@ -48,48 +48,56 @@ def parse_hierarchy_from_data(data: Dict[str, Any]) -> PlanningHierarchy:
                     t_acc = task_data.get("acceptance_criteria") or []
                     if not isinstance(t_acc, list):
                         t_acc = [str(t_acc)] if t_acc else []
-                    task_plans.append(TaskPlan(
-                        id=task_data["id"],
-                        title=task_data.get("title") or "",
-                        description=task_data.get("description") or "",
-                        user_story=task_data.get("user_story") or "",
-                        assignee=task_data.get("assignee") or "backend",
-                        requirements=task_data.get("requirements") or "",
-                        dependencies=task_data.get("dependencies") or [],
-                        acceptance_criteria=t_acc,
-                        example=task_data.get("example"),
-                        metadata=task_data.get("metadata") or {},
-                    ))
-                stories.append(StoryPlan(
-                    id=story_data["id"],
-                    title=story_data.get("title") or "",
-                    description=story_data.get("description") or "",
-                    user_story=story_data.get("user_story") or "",
-                    requirements=story_data.get("requirements") or "",
-                    acceptance_criteria=acc,
-                    example=story_data.get("example"),
-                    tasks=task_plans,
-                    assignee=story_data.get("assignee") if not task_plans else None,
-                    dependencies=story_data.get("dependencies") or [],
-                    metadata=story_data.get("metadata") or {},
-                ))
+                    task_plans.append(
+                        TaskPlan(
+                            id=task_data["id"],
+                            title=task_data.get("title") or "",
+                            description=task_data.get("description") or "",
+                            user_story=task_data.get("user_story") or "",
+                            assignee=task_data.get("assignee") or "backend",
+                            requirements=task_data.get("requirements") or "",
+                            dependencies=task_data.get("dependencies") or [],
+                            acceptance_criteria=t_acc,
+                            example=task_data.get("example"),
+                            metadata=task_data.get("metadata") or {},
+                        )
+                    )
+                stories.append(
+                    StoryPlan(
+                        id=story_data["id"],
+                        title=story_data.get("title") or "",
+                        description=story_data.get("description") or "",
+                        user_story=story_data.get("user_story") or "",
+                        requirements=story_data.get("requirements") or "",
+                        acceptance_criteria=acc,
+                        example=story_data.get("example"),
+                        tasks=task_plans,
+                        assignee=story_data.get("assignee") if not task_plans else None,
+                        dependencies=story_data.get("dependencies") or [],
+                        metadata=story_data.get("metadata") or {},
+                    )
+                )
             acc = epic_data.get("acceptance_criteria") or []
             if not isinstance(acc, list):
                 acc = [str(acc)] if acc else []
-            epics.append(Epic(
-                id=epic_data.get("id") or "",
-                title=epic_data.get("title") or "",
-                description=epic_data.get("description") or "",
-                user_stories_summary=epic_data.get("user_stories_summary") or [],
-                acceptance_criteria=acc,
-                stories=stories,
-            ))
-        initiatives.append(Initiative(
-            id=init_data.get("id") or "",
-            title=init_data.get("title") or "",
-            description=init_data.get("description") or "",
-            epics=epics,
-        ))
+            epics.append(
+                Epic(
+                    id=epic_data.get("id") or "",
+                    title=epic_data.get("title") or "",
+                    description=epic_data.get("description") or "",
+                    user_stories_summary=epic_data.get("user_stories_summary") or [],
+                    acceptance_criteria=acc,
+                    stories=stories,
+                )
+            )
+        initiatives.append(
+            Initiative(
+                id=init_data.get("id") or "",
+                title=init_data.get("title") or "",
+                description=init_data.get("description") or "",
+                epics=epics,
+            )
+        )
 
     execution_order = data.get("execution_order") or []
     return PlanningHierarchy(
@@ -116,25 +124,27 @@ def flatten_hierarchy_to_assignment(hierarchy: PlanningHierarchy) -> TaskAssignm
                             continue
                         seen.add(tp.id)
                         task_type = _assignee_to_task_type(tp.assignee)
-                        tasks.append(Task(
-                            id=tp.id,
-                            type=task_type,
-                            title=tp.title,
-                            description=tp.description,
-                            user_story=tp.user_story,
-                            assignee=tp.assignee,
-                            requirements=tp.requirements,
-                            dependencies=tp.dependencies,
-                            acceptance_criteria=tp.acceptance_criteria,
-                            status=TaskStatus.PENDING,
-                            metadata={
-                                "epic_id": epic.id,
-                                "initiative_id": initiative.id,
-                                "story_id": story.id,
-                                "example": tp.example,
-                                **(tp.metadata or {}),
-                            },
-                        ))
+                        tasks.append(
+                            Task(
+                                id=tp.id,
+                                type=task_type,
+                                title=tp.title,
+                                description=tp.description,
+                                user_story=tp.user_story,
+                                assignee=tp.assignee,
+                                requirements=tp.requirements,
+                                dependencies=tp.dependencies,
+                                acceptance_criteria=tp.acceptance_criteria,
+                                status=TaskStatus.PENDING,
+                                metadata={
+                                    "epic_id": epic.id,
+                                    "initiative_id": initiative.id,
+                                    "story_id": story.id,
+                                    "example": tp.example,
+                                    **(tp.metadata or {}),
+                                },
+                            )
+                        )
                 else:
                     # Backward compat: story with no tasks → one task from story
                     assignee = story.assignee or "backend"
@@ -142,24 +152,26 @@ def flatten_hierarchy_to_assignment(hierarchy: PlanningHierarchy) -> TaskAssignm
                         continue
                     seen.add(story.id)
                     task_type = _assignee_to_task_type(assignee)
-                    tasks.append(Task(
-                        id=story.id,
-                        type=task_type,
-                        title=story.title,
-                        description=story.description,
-                        user_story=story.user_story,
-                        assignee=assignee,
-                        requirements=story.requirements,
-                        dependencies=story.dependencies,
-                        acceptance_criteria=story.acceptance_criteria,
-                        status=TaskStatus.PENDING,
-                        metadata={
-                            "epic_id": epic.id,
-                            "initiative_id": initiative.id,
-                            "story_id": story.id,
-                            **(story.metadata or {}),
-                        },
-                    ))
+                    tasks.append(
+                        Task(
+                            id=story.id,
+                            type=task_type,
+                            title=story.title,
+                            description=story.description,
+                            user_story=story.user_story,
+                            assignee=assignee,
+                            requirements=story.requirements,
+                            dependencies=story.dependencies,
+                            acceptance_criteria=story.acceptance_criteria,
+                            status=TaskStatus.PENDING,
+                            metadata={
+                                "epic_id": epic.id,
+                                "initiative_id": initiative.id,
+                                "story_id": story.id,
+                                **(story.metadata or {}),
+                            },
+                        )
+                    )
 
     valid_ids = {t.id for t in tasks}
     execution_order = [tid for tid in hierarchy.execution_order if tid in valid_ids]
@@ -238,5 +250,3 @@ def _assignee_to_task_type(assignee: str) -> TaskType:
         "devops": TaskType.DEVOPS,
     }
     return mapping.get(assignee, TaskType.BACKEND)
-
-

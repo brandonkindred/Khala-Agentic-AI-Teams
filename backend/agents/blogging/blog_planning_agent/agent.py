@@ -151,7 +151,9 @@ class BlogPlanningAgent:
         max_parse_retries: Optional[int] = None,
     ) -> PlanningPhaseResult:
         max_iter = max_iterations if max_iterations is not None else planning_max_iterations()
-        max_parse = max_parse_retries if max_parse_retries is not None else planning_max_parse_retries()
+        max_parse = (
+            max_parse_retries if max_parse_retries is not None else planning_max_parse_retries()
+        )
 
         t0 = time.monotonic()
         total_parse_retries = 0

@@ -41,6 +41,7 @@ def _get_psycopg():
         )
         return None
 
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS encrypted_integration_credentials (
     service TEXT NOT NULL,

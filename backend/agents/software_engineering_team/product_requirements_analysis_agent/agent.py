@@ -99,8 +99,20 @@ def _context_discovery_fallback_questions() -> List[OpenQuestion]:
             question_text="What type of organization or product context is this?",
             context="Shapes MVP scope and governance expectations.",
             options=[
-                QuestionOption(id="opt_startup", label="Startup / early-stage (agility, speed)", is_default=True, rationale="Common for new products.", confidence=0.6),
-                QuestionOption(id="opt_enterprise", label="Enterprise (governance, compliance)", is_default=False, rationale="For established orgs.", confidence=0.5),
+                QuestionOption(
+                    id="opt_startup",
+                    label="Startup / early-stage (agility, speed)",
+                    is_default=True,
+                    rationale="Common for new products.",
+                    confidence=0.6,
+                ),
+                QuestionOption(
+                    id="opt_enterprise",
+                    label="Enterprise (governance, compliance)",
+                    is_default=False,
+                    rationale="For established orgs.",
+                    confidence=0.5,
+                ),
             ],
             source="context_discovery",
             category="business",
@@ -110,9 +122,27 @@ def _context_discovery_fallback_questions() -> List[OpenQuestion]:
             question_text="Where will this be deployed?",
             context="Deployment model affects infrastructure and provider choices.",
             options=[
-                QuestionOption(id="opt_cloud", label="Cloud (AWS, GCP, Azure, etc.)", is_default=True, rationale="Most common for new apps.", confidence=0.7),
-                QuestionOption(id="opt_onprem", label="On-premises", is_default=False, rationale="For air-gapped or regulated environments.", confidence=0.3),
-                QuestionOption(id="opt_hybrid", label="Hybrid (cloud + on-prem)", is_default=False, rationale="Mix of cloud and on-prem.", confidence=0.4),
+                QuestionOption(
+                    id="opt_cloud",
+                    label="Cloud (AWS, GCP, Azure, etc.)",
+                    is_default=True,
+                    rationale="Most common for new apps.",
+                    confidence=0.7,
+                ),
+                QuestionOption(
+                    id="opt_onprem",
+                    label="On-premises",
+                    is_default=False,
+                    rationale="For air-gapped or regulated environments.",
+                    confidence=0.3,
+                ),
+                QuestionOption(
+                    id="opt_hybrid",
+                    label="Hybrid (cloud + on-prem)",
+                    is_default=False,
+                    rationale="Mix of cloud and on-prem.",
+                    confidence=0.4,
+                ),
             ],
             source="context_discovery",
             category="infrastructure",
@@ -122,10 +152,34 @@ def _context_discovery_fallback_questions() -> List[OpenQuestion]:
             question_text="If cloud: which provider (or primary provider)?",
             context="Affects service selection and constraints.",
             options=[
-                QuestionOption(id="opt_aws", label="AWS", is_default=True, rationale="Widely used, broad service set.", confidence=0.6),
-                QuestionOption(id="opt_gcp", label="GCP", is_default=False, rationale="Strong data/ML offerings.", confidence=0.5),
-                QuestionOption(id="opt_azure", label="Azure", is_default=False, rationale="Good for Microsoft ecosystem.", confidence=0.5),
-                QuestionOption(id="opt_other", label="Other (Rackspace, DigitalOcean, Heroku, etc.)", is_default=False, rationale="Varies by need.", confidence=0.3),
+                QuestionOption(
+                    id="opt_aws",
+                    label="AWS",
+                    is_default=True,
+                    rationale="Widely used, broad service set.",
+                    confidence=0.6,
+                ),
+                QuestionOption(
+                    id="opt_gcp",
+                    label="GCP",
+                    is_default=False,
+                    rationale="Strong data/ML offerings.",
+                    confidence=0.5,
+                ),
+                QuestionOption(
+                    id="opt_azure",
+                    label="Azure",
+                    is_default=False,
+                    rationale="Good for Microsoft ecosystem.",
+                    confidence=0.5,
+                ),
+                QuestionOption(
+                    id="opt_other",
+                    label="Other (Rackspace, DigitalOcean, Heroku, etc.)",
+                    is_default=False,
+                    rationale="Varies by need.",
+                    confidence=0.3,
+                ),
             ],
             source="context_discovery",
             category="infrastructure",
@@ -135,11 +189,41 @@ def _context_discovery_fallback_questions() -> List[OpenQuestion]:
             question_text="What architectural or product tenets must the build follow? (select all that apply)",
             context="Principles that shape technology and design decisions.",
             options=[
-                QuestionOption(id="opt_event_driven", label="Event-driven", is_default=False, rationale="Async, decoupled systems.", confidence=0.5),
-                QuestionOption(id="opt_api_driven", label="API-driven", is_default=True, rationale="Clear contracts, integrability.", confidence=0.7),
-                QuestionOption(id="opt_serverless", label="Serverless / managed services", is_default=False, rationale="Reduce ops, scale to zero.", confidence=0.5),
-                QuestionOption(id="opt_agility", label="Agility / ease of change", is_default=True, rationale="Fast iteration.", confidence=0.7),
-                QuestionOption(id="opt_security_first", label="Security-first", is_default=False, rationale="Compliance and risk focus.", confidence=0.5),
+                QuestionOption(
+                    id="opt_event_driven",
+                    label="Event-driven",
+                    is_default=False,
+                    rationale="Async, decoupled systems.",
+                    confidence=0.5,
+                ),
+                QuestionOption(
+                    id="opt_api_driven",
+                    label="API-driven",
+                    is_default=True,
+                    rationale="Clear contracts, integrability.",
+                    confidence=0.7,
+                ),
+                QuestionOption(
+                    id="opt_serverless",
+                    label="Serverless / managed services",
+                    is_default=False,
+                    rationale="Reduce ops, scale to zero.",
+                    confidence=0.5,
+                ),
+                QuestionOption(
+                    id="opt_agility",
+                    label="Agility / ease of change",
+                    is_default=True,
+                    rationale="Fast iteration.",
+                    confidence=0.7,
+                ),
+                QuestionOption(
+                    id="opt_security_first",
+                    label="Security-first",
+                    is_default=False,
+                    rationale="Compliance and risk focus.",
+                    confidence=0.5,
+                ),
             ],
             allow_multiple=True,
             source="context_discovery",
@@ -150,9 +234,27 @@ def _context_discovery_fallback_questions() -> List[OpenQuestion]:
             question_text="What availability/SLA target applies (if any)?",
             context="Organizational mandate for uptime.",
             options=[
-                QuestionOption(id="opt_none", label="None / standard", is_default=True, rationale="No formal SLA.", confidence=0.6),
-                QuestionOption(id="opt_three_nines", label="99.9% (three nines)", is_default=False, rationale="~8.7h downtime/year.", confidence=0.5),
-                QuestionOption(id="opt_five_nines", label="99.99% or higher (four/five nines)", is_default=False, rationale="High availability mandate.", confidence=0.4),
+                QuestionOption(
+                    id="opt_none",
+                    label="None / standard",
+                    is_default=True,
+                    rationale="No formal SLA.",
+                    confidence=0.6,
+                ),
+                QuestionOption(
+                    id="opt_three_nines",
+                    label="99.9% (three nines)",
+                    is_default=False,
+                    rationale="~8.7h downtime/year.",
+                    confidence=0.5,
+                ),
+                QuestionOption(
+                    id="opt_five_nines",
+                    label="99.99% or higher (four/five nines)",
+                    is_default=False,
+                    rationale="High availability mandate.",
+                    confidence=0.4,
+                ),
             ],
             source="context_discovery",
             category="business",
@@ -162,9 +264,27 @@ def _context_discovery_fallback_questions() -> List[OpenQuestion]:
             question_text="Any RTO/RPO or disaster-recovery mandates?",
             context="Recovery time and recovery point objectives.",
             options=[
-                QuestionOption(id="opt_none", label="None / standard backup", is_default=True, rationale="No strict RTO/RPO.", confidence=0.6),
-                QuestionOption(id="opt_moderate", label="Moderate (e.g. RTO 4h, RPO 1h)", is_default=False, rationale="Some DR requirements.", confidence=0.5),
-                QuestionOption(id="opt_strict", label="Strict (e.g. RTO <1h, RPO <15min)", is_default=False, rationale="Critical systems.", confidence=0.4),
+                QuestionOption(
+                    id="opt_none",
+                    label="None / standard backup",
+                    is_default=True,
+                    rationale="No strict RTO/RPO.",
+                    confidence=0.6,
+                ),
+                QuestionOption(
+                    id="opt_moderate",
+                    label="Moderate (e.g. RTO 4h, RPO 1h)",
+                    is_default=False,
+                    rationale="Some DR requirements.",
+                    confidence=0.5,
+                ),
+                QuestionOption(
+                    id="opt_strict",
+                    label="Strict (e.g. RTO <1h, RPO <15min)",
+                    is_default=False,
+                    rationale="Critical systems.",
+                    confidence=0.4,
+                ),
             ],
             source="context_discovery",
             category="business",
@@ -190,9 +310,22 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "infrastructure",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_onprem", "label": "On-prem", "rationale": "For air-gapped or regulated environments."},
-                {"id": "opt_cloud", "label": "Cloud", "rationale": "Most common for new applications.", "is_default": True},
-                {"id": "opt_paas", "label": "PaaS", "rationale": "Managed platform (Heroku, Render, etc.)"},
+                {
+                    "id": "opt_onprem",
+                    "label": "On-prem",
+                    "rationale": "For air-gapped or regulated environments.",
+                },
+                {
+                    "id": "opt_cloud",
+                    "label": "Cloud",
+                    "rationale": "Most common for new applications.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_paas",
+                    "label": "PaaS",
+                    "rationale": "Managed platform (Heroku, Render, etc.)",
+                },
                 {"id": "opt_hybrid", "label": "Hybrid", "rationale": "Mix of cloud and on-prem."},
             ],
             "depends_on": None,
@@ -203,11 +336,24 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "infrastructure",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_aws", "label": "AWS", "rationale": "Widely used, broad service set.", "is_default": True},
+                {
+                    "id": "opt_aws",
+                    "label": "AWS",
+                    "rationale": "Widely used, broad service set.",
+                    "is_default": True,
+                },
                 {"id": "opt_gcp", "label": "GCP", "rationale": "Strong data/ML offerings."},
                 {"id": "opt_azure", "label": "Azure", "rationale": "Good for Microsoft ecosystem."},
-                {"id": "opt_rackspace", "label": "RackSpace", "rationale": "Managed hosting specialist."},
-                {"id": "opt_digitalocean", "label": "DigitalOcean", "rationale": "Simple, developer-friendly."},
+                {
+                    "id": "opt_rackspace",
+                    "label": "RackSpace",
+                    "rationale": "Managed hosting specialist.",
+                },
+                {
+                    "id": "opt_digitalocean",
+                    "label": "DigitalOcean",
+                    "rationale": "Simple, developer-friendly.",
+                },
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your provider."},
             ],
             "depends_on": {"P1.deploy.a": ["Cloud", "Hybrid"]},
@@ -218,9 +364,22 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "infrastructure",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_yes", "label": "Yes", "rationale": "Reduce ops overhead, scale to zero."},
-                {"id": "opt_no", "label": "No", "rationale": "Full control with containers/VMs.", "is_default": True},
-                {"id": "opt_partial", "label": "Partially", "rationale": "Mix serverless and traditional compute."},
+                {
+                    "id": "opt_yes",
+                    "label": "Yes",
+                    "rationale": "Reduce ops overhead, scale to zero.",
+                },
+                {
+                    "id": "opt_no",
+                    "label": "No",
+                    "rationale": "Full control with containers/VMs.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_partial",
+                    "label": "Partially",
+                    "rationale": "Mix serverless and traditional compute.",
+                },
             ],
             "depends_on": {"P1.deploy.a": ["Cloud", "Hybrid"]},
         },
@@ -230,11 +389,32 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "infrastructure",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_heroku", "label": "Heroku", "rationale": "Well-known, easy to use.", "is_default": True},
-                {"id": "opt_supabase", "label": "Supabase", "rationale": "Open-source Firebase alternative with Postgres."},
-                {"id": "opt_vercel", "label": "Vercel", "rationale": "Great for frontend-heavy apps."},
-                {"id": "opt_render", "label": "Render", "rationale": "Modern PaaS, simple pricing."},
-                {"id": "opt_railway", "label": "Railway", "rationale": "Developer-friendly, fast deploys."},
+                {
+                    "id": "opt_heroku",
+                    "label": "Heroku",
+                    "rationale": "Well-known, easy to use.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_supabase",
+                    "label": "Supabase",
+                    "rationale": "Open-source Firebase alternative with Postgres.",
+                },
+                {
+                    "id": "opt_vercel",
+                    "label": "Vercel",
+                    "rationale": "Great for frontend-heavy apps.",
+                },
+                {
+                    "id": "opt_render",
+                    "label": "Render",
+                    "rationale": "Modern PaaS, simple pricing.",
+                },
+                {
+                    "id": "opt_railway",
+                    "label": "Railway",
+                    "rationale": "Developer-friendly, fast deploys.",
+                },
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your PaaS."},
             ],
             "depends_on": {"P1.deploy.a": ["PaaS"]},
@@ -250,9 +430,22 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
                 {"id": "opt_gdpr", "label": "GDPR", "rationale": "EU data protection regulation."},
                 {"id": "opt_ccpa", "label": "CCPA", "rationale": "California consumer privacy."},
                 {"id": "opt_hipaa", "label": "HIPAA", "rationale": "US health data regulation."},
-                {"id": "opt_pci", "label": "PCI-DSS", "rationale": "Payment card industry standard."},
-                {"id": "opt_none", "label": "None", "rationale": "No specific regulatory requirements.", "is_default": True},
-                {"id": "opt_other", "label": "Other", "rationale": "Specify your regulatory requirements."},
+                {
+                    "id": "opt_pci",
+                    "label": "PCI-DSS",
+                    "rationale": "Payment card industry standard.",
+                },
+                {
+                    "id": "opt_none",
+                    "label": "None",
+                    "rationale": "No specific regulatory requirements.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_other",
+                    "label": "Other",
+                    "rationale": "Specify your regulatory requirements.",
+                },
             ],
             "depends_on": None,
         },
@@ -263,9 +456,22 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "allow_multiple": True,
             "options": [
                 {"id": "opt_soc2", "label": "SOC2", "rationale": "Common for SaaS products."},
-                {"id": "opt_iso27001", "label": "ISO 27001", "rationale": "International information security standard."},
-                {"id": "opt_fedramp", "label": "FedRAMP", "rationale": "US federal cloud security."},
-                {"id": "opt_none", "label": "None", "rationale": "No enterprise certification needed.", "is_default": True},
+                {
+                    "id": "opt_iso27001",
+                    "label": "ISO 27001",
+                    "rationale": "International information security standard.",
+                },
+                {
+                    "id": "opt_fedramp",
+                    "label": "FedRAMP",
+                    "rationale": "US federal cloud security.",
+                },
+                {
+                    "id": "opt_none",
+                    "label": "None",
+                    "rationale": "No enterprise certification needed.",
+                    "is_default": True,
+                },
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your certification."},
             ],
             "depends_on": None,
@@ -278,9 +484,22 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "business",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_open", "label": "Open Source", "rationale": "Community-driven, no license costs."},
-                {"id": "opt_proprietary", "label": "Proprietary", "rationale": "Commercial support and SLAs."},
-                {"id": "opt_none", "label": "No preference", "rationale": "Best tool for the job regardless.", "is_default": True},
+                {
+                    "id": "opt_open",
+                    "label": "Open Source",
+                    "rationale": "Community-driven, no license costs.",
+                },
+                {
+                    "id": "opt_proprietary",
+                    "label": "Proprietary",
+                    "rationale": "Commercial support and SLAs.",
+                },
+                {
+                    "id": "opt_none",
+                    "label": "No preference",
+                    "rationale": "Best tool for the job regardless.",
+                    "is_default": True,
+                },
             ],
             "depends_on": None,
         },
@@ -322,10 +541,27 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "infrastructure",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_github", "label": "GitHub", "rationale": "Most popular, great ecosystem.", "is_default": True},
-                {"id": "opt_gitlab", "label": "GitLab", "rationale": "Built-in CI/CD, self-hostable."},
-                {"id": "opt_bitbucket", "label": "BitBucket", "rationale": "Atlassian integration."},
-                {"id": "opt_codeberg", "label": "Codeberg", "rationale": "Open-source Gitea-based."},
+                {
+                    "id": "opt_github",
+                    "label": "GitHub",
+                    "rationale": "Most popular, great ecosystem.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_gitlab",
+                    "label": "GitLab",
+                    "rationale": "Built-in CI/CD, self-hostable.",
+                },
+                {
+                    "id": "opt_bitbucket",
+                    "label": "BitBucket",
+                    "rationale": "Atlassian integration.",
+                },
+                {
+                    "id": "opt_codeberg",
+                    "label": "Codeberg",
+                    "rationale": "Open-source Gitea-based.",
+                },
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your repository host."},
             ],
             "depends_on": None,
@@ -336,15 +572,40 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "architecture",
             "allow_multiple": True,
             "options": [
-                {"id": "opt_java", "label": "Java", "rationale": "Enterprise-grade, mature ecosystem."},
-                {"id": "opt_rust", "label": "Rust", "rationale": "Memory safety, high performance."},
-                {"id": "opt_python", "label": "Python", "rationale": "Versatile, great for APIs and data.", "is_default": True},
+                {
+                    "id": "opt_java",
+                    "label": "Java",
+                    "rationale": "Enterprise-grade, mature ecosystem.",
+                },
+                {
+                    "id": "opt_rust",
+                    "label": "Rust",
+                    "rationale": "Memory safety, high performance.",
+                },
+                {
+                    "id": "opt_python",
+                    "label": "Python",
+                    "rationale": "Versatile, great for APIs and data.",
+                    "is_default": True,
+                },
                 {"id": "opt_js", "label": "JavaScript", "rationale": "Universal web language."},
                 {"id": "opt_ts", "label": "TypeScript", "rationale": "Type-safe JavaScript."},
                 {"id": "opt_go", "label": "Go", "rationale": "Simple, fast, great for services."},
-                {"id": "opt_ruby", "label": "Ruby", "rationale": "Developer happiness, Rails ecosystem."},
-                {"id": "opt_cpp", "label": "C/C++", "rationale": "Systems programming, maximum performance."},
-                {"id": "opt_erlang", "label": "Erlang", "rationale": "Fault-tolerant, distributed systems."},
+                {
+                    "id": "opt_ruby",
+                    "label": "Ruby",
+                    "rationale": "Developer happiness, Rails ecosystem.",
+                },
+                {
+                    "id": "opt_cpp",
+                    "label": "C/C++",
+                    "rationale": "Systems programming, maximum performance.",
+                },
+                {
+                    "id": "opt_erlang",
+                    "label": "Erlang",
+                    "rationale": "Fault-tolerant, distributed systems.",
+                },
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your language."},
             ],
             "depends_on": None,
@@ -390,11 +651,28 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "infrastructure",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_gh_actions", "label": "GitHub Actions", "rationale": "Native to GitHub, easy setup.", "is_default": True},
-                {"id": "opt_gitlab_ci", "label": "GitLab CI", "rationale": "Built into GitLab, powerful."},
+                {
+                    "id": "opt_gh_actions",
+                    "label": "GitHub Actions",
+                    "rationale": "Native to GitHub, easy setup.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_gitlab_ci",
+                    "label": "GitLab CI",
+                    "rationale": "Built into GitLab, powerful.",
+                },
                 {"id": "opt_aws_cp", "label": "AWS CodePipeline", "rationale": "Native AWS CI/CD."},
-                {"id": "opt_circleci", "label": "CircleCI", "rationale": "Fast builds, good caching."},
-                {"id": "opt_jenkins", "label": "Jenkins", "rationale": "Highly customizable, self-hosted."},
+                {
+                    "id": "opt_circleci",
+                    "label": "CircleCI",
+                    "rationale": "Fast builds, good caching.",
+                },
+                {
+                    "id": "opt_jenkins",
+                    "label": "Jenkins",
+                    "rationale": "Highly customizable, self-hosted.",
+                },
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your CI/CD."},
             ],
             "depends_on": None,
@@ -407,11 +685,32 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "architecture",
             "allow_multiple": True,
             "options": [
-                {"id": "opt_files", "label": "Files / blobs", "rationale": "Binary files, images, documents."},
-                {"id": "opt_structured", "label": "Structured / relational", "rationale": "Tables, relations, SQL.", "is_default": True},
-                {"id": "opt_timeseries", "label": "Time series", "rationale": "Metrics, events over time."},
-                {"id": "opt_events", "label": "Events / logs", "rationale": "Audit logs, activity streams."},
-                {"id": "opt_graph", "label": "Graph", "rationale": "Relationships, social networks."},
+                {
+                    "id": "opt_files",
+                    "label": "Files / blobs",
+                    "rationale": "Binary files, images, documents.",
+                },
+                {
+                    "id": "opt_structured",
+                    "label": "Structured / relational",
+                    "rationale": "Tables, relations, SQL.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_timeseries",
+                    "label": "Time series",
+                    "rationale": "Metrics, events over time.",
+                },
+                {
+                    "id": "opt_events",
+                    "label": "Events / logs",
+                    "rationale": "Audit logs, activity streams.",
+                },
+                {
+                    "id": "opt_graph",
+                    "label": "Graph",
+                    "rationale": "Relationships, social networks.",
+                },
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your data type."},
             ],
             "depends_on": None,
@@ -422,13 +721,34 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "architecture",
             "allow_multiple": True,
             "options": [
-                {"id": "opt_postgres", "label": "PostgreSQL", "rationale": "Full-featured relational DB.", "is_default": True},
+                {
+                    "id": "opt_postgres",
+                    "label": "PostgreSQL",
+                    "rationale": "Full-featured relational DB.",
+                    "is_default": True,
+                },
                 {"id": "opt_mysql", "label": "MySQL", "rationale": "Widely used relational DB."},
                 {"id": "opt_mongodb", "label": "MongoDB", "rationale": "Document-oriented NoSQL."},
-                {"id": "opt_opensearch", "label": "OpenSearch", "rationale": "Search and analytics engine."},
-                {"id": "opt_es", "label": "ElasticSearch", "rationale": "Full-text search and analytics."},
-                {"id": "opt_s3", "label": "S3 / object storage", "rationale": "Scalable file/blob storage."},
-                {"id": "opt_gcs", "label": "Google Cloud Storage", "rationale": "GCP object storage."},
+                {
+                    "id": "opt_opensearch",
+                    "label": "OpenSearch",
+                    "rationale": "Search and analytics engine.",
+                },
+                {
+                    "id": "opt_es",
+                    "label": "ElasticSearch",
+                    "rationale": "Full-text search and analytics.",
+                },
+                {
+                    "id": "opt_s3",
+                    "label": "S3 / object storage",
+                    "rationale": "Scalable file/blob storage.",
+                },
+                {
+                    "id": "opt_gcs",
+                    "label": "Google Cloud Storage",
+                    "rationale": "GCP object storage.",
+                },
                 {"id": "opt_neptune", "label": "Neptune", "rationale": "AWS managed graph DB."},
                 {"id": "opt_couchdb", "label": "CouchDB", "rationale": "Distributed document DB."},
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
@@ -441,8 +761,17 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "architecture",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_yes", "label": "Yes", "rationale": "System needs event/message streaming."},
-                {"id": "opt_no", "label": "No", "rationale": "No streaming requirements.", "is_default": True},
+                {
+                    "id": "opt_yes",
+                    "label": "Yes",
+                    "rationale": "System needs event/message streaming.",
+                },
+                {
+                    "id": "opt_no",
+                    "label": "No",
+                    "rationale": "No streaming requirements.",
+                    "is_default": True,
+                },
                 {"id": "opt_unsure", "label": "Unsure", "rationale": "Need to evaluate."},
             ],
             "depends_on": None,
@@ -453,11 +782,28 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "architecture",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_kafka", "label": "Kafka", "rationale": "Industry standard for high-throughput streaming.", "is_default": True},
-                {"id": "opt_rabbitmq", "label": "RabbitMQ", "rationale": "Flexible message broker."},
+                {
+                    "id": "opt_kafka",
+                    "label": "Kafka",
+                    "rationale": "Industry standard for high-throughput streaming.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_rabbitmq",
+                    "label": "RabbitMQ",
+                    "rationale": "Flexible message broker.",
+                },
                 {"id": "opt_kinesis", "label": "AWS Kinesis", "rationale": "Native AWS streaming."},
-                {"id": "opt_redis_streams", "label": "Redis Streams", "rationale": "Lightweight, integrated with Redis."},
-                {"id": "opt_nats", "label": "NATS", "rationale": "Lightweight, cloud-native messaging."},
+                {
+                    "id": "opt_redis_streams",
+                    "label": "Redis Streams",
+                    "rationale": "Lightweight, integrated with Redis.",
+                },
+                {
+                    "id": "opt_nats",
+                    "label": "NATS",
+                    "rationale": "Lightweight, cloud-native messaging.",
+                },
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
             ],
             "depends_on": {"P1.data.b": ["Yes"]},
@@ -468,9 +814,22 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "architecture",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_yes", "label": "Yes", "rationale": "Full audit trail, replay capability."},
-                {"id": "opt_no", "label": "No", "rationale": "Traditional CRUD is sufficient.", "is_default": True},
-                {"id": "opt_considering", "label": "Considering it", "rationale": "Need more analysis."},
+                {
+                    "id": "opt_yes",
+                    "label": "Yes",
+                    "rationale": "Full audit trail, replay capability.",
+                },
+                {
+                    "id": "opt_no",
+                    "label": "No",
+                    "rationale": "Traditional CRUD is sufficient.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_considering",
+                    "label": "Considering it",
+                    "rationale": "Need more analysis.",
+                },
             ],
             "depends_on": {"P1.data.b": ["Yes"]},
         },
@@ -482,10 +841,27 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "security",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_auth0", "label": "Auth0", "rationale": "Full-featured identity platform.", "is_default": True},
-                {"id": "opt_cognito", "label": "AWS Cognito", "rationale": "Native AWS auth service."},
-                {"id": "opt_keycloak", "label": "Keycloak", "rationale": "Open-source identity management."},
-                {"id": "opt_firebase", "label": "Firebase Auth", "rationale": "Simple auth for mobile/web."},
+                {
+                    "id": "opt_auth0",
+                    "label": "Auth0",
+                    "rationale": "Full-featured identity platform.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_cognito",
+                    "label": "AWS Cognito",
+                    "rationale": "Native AWS auth service.",
+                },
+                {
+                    "id": "opt_keycloak",
+                    "label": "Keycloak",
+                    "rationale": "Open-source identity management.",
+                },
+                {
+                    "id": "opt_firebase",
+                    "label": "Firebase Auth",
+                    "rationale": "Simple auth for mobile/web.",
+                },
                 {"id": "opt_custom", "label": "Custom", "rationale": "Build your own auth system."},
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
             ],
@@ -497,13 +873,34 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "security",
             "allow_multiple": True,
             "options": [
-                {"id": "opt_sentry", "label": "Sentry", "rationale": "Error tracking and monitoring."},
+                {
+                    "id": "opt_sentry",
+                    "label": "Sentry",
+                    "rationale": "Error tracking and monitoring.",
+                },
                 {"id": "opt_waf", "label": "AWS WAF", "rationale": "Web application firewall."},
-                {"id": "opt_cloudflare", "label": "Cloudflare", "rationale": "CDN, DDoS protection, WAF."},
-                {"id": "opt_snyk", "label": "Snyk", "rationale": "Dependency vulnerability scanning.", "is_default": True},
-                {"id": "opt_sonarqube", "label": "SonarQube", "rationale": "Code quality and security analysis."},
+                {
+                    "id": "opt_cloudflare",
+                    "label": "Cloudflare",
+                    "rationale": "CDN, DDoS protection, WAF.",
+                },
+                {
+                    "id": "opt_snyk",
+                    "label": "Snyk",
+                    "rationale": "Dependency vulnerability scanning.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_sonarqube",
+                    "label": "SonarQube",
+                    "rationale": "Code quality and security analysis.",
+                },
                 {"id": "opt_checkmarx", "label": "Checkmarx", "rationale": "SAST/DAST scanning."},
-                {"id": "opt_veracode", "label": "Veracode", "rationale": "Application security testing."},
+                {
+                    "id": "opt_veracode",
+                    "label": "Veracode",
+                    "rationale": "Application security testing.",
+                },
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
             ],
             "depends_on": None,
@@ -514,10 +911,27 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "security",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_vault", "label": "HashiCorp Vault", "rationale": "Industry standard secrets management.", "is_default": True},
-                {"id": "opt_aws_sm", "label": "AWS Secrets Manager", "rationale": "Native AWS secrets store."},
-                {"id": "opt_gcp_sm", "label": "Google Secret Manager", "rationale": "Native GCP secrets store."},
-                {"id": "opt_azure_kv", "label": "Azure Key Vault", "rationale": "Native Azure secrets store."},
+                {
+                    "id": "opt_vault",
+                    "label": "HashiCorp Vault",
+                    "rationale": "Industry standard secrets management.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_aws_sm",
+                    "label": "AWS Secrets Manager",
+                    "rationale": "Native AWS secrets store.",
+                },
+                {
+                    "id": "opt_gcp_sm",
+                    "label": "Google Secret Manager",
+                    "rationale": "Native GCP secrets store.",
+                },
+                {
+                    "id": "opt_azure_kv",
+                    "label": "Azure Key Vault",
+                    "rationale": "Native Azure secrets store.",
+                },
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
             ],
             "depends_on": None,
@@ -529,8 +943,17 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "allow_multiple": False,
             "options": [
                 {"id": "opt_self", "label": "Self-managed", "rationale": "Full control over keys."},
-                {"id": "opt_cloud", "label": "Cloud-managed", "rationale": "Lower operational burden.", "is_default": True},
-                {"id": "opt_hybrid", "label": "Hybrid", "rationale": "Mix of self and cloud managed."},
+                {
+                    "id": "opt_cloud",
+                    "label": "Cloud-managed",
+                    "rationale": "Lower operational burden.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_hybrid",
+                    "label": "Hybrid",
+                    "rationale": "Mix of self and cloud managed.",
+                },
             ],
             "depends_on": None,
         },
@@ -542,12 +965,37 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "infrastructure",
             "allow_multiple": True,
             "options": [
-                {"id": "opt_prometheus", "label": "Prometheus", "rationale": "Open-source metrics collection."},
-                {"id": "opt_grafana", "label": "Grafana", "rationale": "Visualization and dashboards.", "is_default": True},
-                {"id": "opt_xray", "label": "AWS X-Ray", "rationale": "Distributed tracing for AWS."},
-                {"id": "opt_cloudwatch", "label": "CloudWatch", "rationale": "Native AWS monitoring."},
-                {"id": "opt_gcp_logging", "label": "Google Cloud Logging", "rationale": "Native GCP logging."},
-                {"id": "opt_datadog", "label": "Datadog", "rationale": "Full-stack monitoring platform."},
+                {
+                    "id": "opt_prometheus",
+                    "label": "Prometheus",
+                    "rationale": "Open-source metrics collection.",
+                },
+                {
+                    "id": "opt_grafana",
+                    "label": "Grafana",
+                    "rationale": "Visualization and dashboards.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_xray",
+                    "label": "AWS X-Ray",
+                    "rationale": "Distributed tracing for AWS.",
+                },
+                {
+                    "id": "opt_cloudwatch",
+                    "label": "CloudWatch",
+                    "rationale": "Native AWS monitoring.",
+                },
+                {
+                    "id": "opt_gcp_logging",
+                    "label": "Google Cloud Logging",
+                    "rationale": "Native GCP logging.",
+                },
+                {
+                    "id": "opt_datadog",
+                    "label": "Datadog",
+                    "rationale": "Full-stack monitoring platform.",
+                },
                 {"id": "opt_newrelic", "label": "New Relic", "rationale": "APM and observability."},
                 {"id": "opt_elk", "label": "ELK Stack", "rationale": "Open-source log analytics."},
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
@@ -562,11 +1010,32 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "business",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_1s", "label": "< 1 second", "rationale": "Fast interactive experience."},
-                {"id": "opt_5s", "label": "< 5 seconds", "rationale": "Acceptable for most web apps.", "is_default": True},
-                {"id": "opt_15s", "label": "< 15 seconds", "rationale": "For batch or heavy operations."},
-                {"id": "opt_realtime", "label": "Real-time", "rationale": "Sub-100ms, WebSocket/SSE."},
-                {"id": "opt_none", "label": "No specific requirement", "rationale": "Standard best-effort."},
+                {
+                    "id": "opt_1s",
+                    "label": "< 1 second",
+                    "rationale": "Fast interactive experience.",
+                },
+                {
+                    "id": "opt_5s",
+                    "label": "< 5 seconds",
+                    "rationale": "Acceptable for most web apps.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_15s",
+                    "label": "< 15 seconds",
+                    "rationale": "For batch or heavy operations.",
+                },
+                {
+                    "id": "opt_realtime",
+                    "label": "Real-time",
+                    "rationale": "Sub-100ms, WebSocket/SSE.",
+                },
+                {
+                    "id": "opt_none",
+                    "label": "No specific requirement",
+                    "rationale": "Standard best-effort.",
+                },
             ],
             "depends_on": None,
         },
@@ -578,10 +1047,27 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "options": [
                 {"id": "opt_99_9", "label": "99.9% uptime", "rationale": "~8.7h downtime/year."},
                 {"id": "opt_99_99", "label": "99.99% uptime", "rationale": "~52min downtime/year."},
-                {"id": "opt_rpo_4h", "label": "RPO < 4 hours", "rationale": "Max 4h data loss on failure."},
-                {"id": "opt_rpo_1h", "label": "RPO < 1 hour", "rationale": "Max 1h data loss on failure."},
-                {"id": "opt_rto_5m", "label": "RTO < 5 minutes", "rationale": "Rapid recovery from failure."},
-                {"id": "opt_none", "label": "No specific requirement", "rationale": "Standard best-effort.", "is_default": True},
+                {
+                    "id": "opt_rpo_4h",
+                    "label": "RPO < 4 hours",
+                    "rationale": "Max 4h data loss on failure.",
+                },
+                {
+                    "id": "opt_rpo_1h",
+                    "label": "RPO < 1 hour",
+                    "rationale": "Max 1h data loss on failure.",
+                },
+                {
+                    "id": "opt_rto_5m",
+                    "label": "RTO < 5 minutes",
+                    "rationale": "Rapid recovery from failure.",
+                },
+                {
+                    "id": "opt_none",
+                    "label": "No specific requirement",
+                    "rationale": "Standard best-effort.",
+                    "is_default": True,
+                },
             ],
             "depends_on": None,
         },
@@ -594,8 +1080,12 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "allow_multiple": False,
             "options": [
                 {"id": "opt_yes", "label": "Yes", "rationale": "Budget is a factor in decisions."},
-                {"id": "opt_no", "label": "No", "rationale": "No specific budget constraint.", "is_default": True},
-                {"id": "opt_unsure", "label": "Unsure / Not yet determined", "rationale": "Budget still being finalized."},
+                {
+                    "id": "opt_no",
+                    "label": "No",
+                    "rationale": "No specific budget constraint.",
+                    "is_default": True,
+                },
             ],
             "depends_on": None,
         },
@@ -605,9 +1095,17 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "business",
             "allow_multiple": False,
             "options": [
-                {"id": "opt_flexible", "label": "Flexible (can exceed if justified)", "rationale": "Budget is a guideline.", "is_default": True},
-                {"id": "opt_rigid", "label": "Rigid (hard maximum spend)", "rationale": "Cannot exceed budget."},
-                {"id": "opt_phased", "label": "Phased (staged budget allocation)", "rationale": "Budget allocated in phases tied to milestones."},
+                {
+                    "id": "opt_flexible",
+                    "label": "Flexible (can exceed if justified)",
+                    "rationale": "Budget is a guideline.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_rigid",
+                    "label": "Rigid (hard maximum spend)",
+                    "rationale": "Cannot exceed budget.",
+                },
             ],
             "depends_on": {"P1.budget.a": ["Yes"]},
         },
@@ -619,11 +1117,28 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "category": "business",
             "allow_multiple": True,
             "options": [
-                {"id": "opt_resiliency", "label": "Resiliency", "rationale": "System reliability and fault tolerance."},
-                {"id": "opt_performance", "label": "Performance", "rationale": "Speed and throughput."},
+                {
+                    "id": "opt_resiliency",
+                    "label": "Resiliency",
+                    "rationale": "System reliability and fault tolerance.",
+                },
+                {
+                    "id": "opt_performance",
+                    "label": "Performance",
+                    "rationale": "Speed and throughput.",
+                },
                 {"id": "opt_frugality", "label": "Frugality", "rationale": "Cost optimization."},
-                {"id": "opt_simplicity", "label": "Simplicity", "rationale": "Easy to build and maintain.", "is_default": True},
-                {"id": "opt_security", "label": "Security", "rationale": "Data protection and compliance."},
+                {
+                    "id": "opt_simplicity",
+                    "label": "Simplicity",
+                    "rationale": "Easy to build and maintain.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_security",
+                    "label": "Security",
+                    "rationale": "Data protection and compliance.",
+                },
                 {"id": "opt_scalability", "label": "Scalability", "rationale": "Handle growth."},
                 {"id": "opt_other", "label": "Other", "rationale": "Specify your priority."},
             ],
@@ -710,32 +1225,67 @@ CONSTRAINT_DOMAINS_CONFIG = {
         "max_layer": 4,
         "indicators": {
             1: [  # Platform category
-                ("heroku", 2), ("render", 2), ("railway", 2),  # PaaS → skip to L2
-                ("aws", 2), ("gcp", 2), ("azure", 2), ("google cloud", 2),  # Cloud → L2
-                ("self-hosted", 2), ("on-premises", 2), ("docker", 2), ("kubernetes", 2),
-                ("vercel", 2), ("cloudflare", 2), ("netlify", 2),  # Edge → L2
-                ("paas", 1), ("platform as a service", 1),
-                ("cloud infrastructure", 1), ("cloud-based", 1),
-                ("edge", 1), ("serverless", 1),
+                ("heroku", 2),
+                ("render", 2),
+                ("railway", 2),  # PaaS → skip to L2
+                ("aws", 2),
+                ("gcp", 2),
+                ("azure", 2),
+                ("google cloud", 2),  # Cloud → L2
+                ("self-hosted", 2),
+                ("on-premises", 2),
+                ("docker", 2),
+                ("kubernetes", 2),
+                ("vercel", 2),
+                ("cloudflare", 2),
+                ("netlify", 2),  # Edge → L2
+                ("paas", 1),
+                ("platform as a service", 1),
+                ("cloud infrastructure", 1),
+                ("cloud-based", 1),
+                ("edge", 1),
+                ("serverless", 1),
             ],
             2: [  # Specific provider
-                ("heroku", 3), ("render", 3), ("railway", 3), ("fly.io", 3),
-                ("aws", 3), ("amazon web services", 3),
-                ("gcp", 3), ("google cloud platform", 3),
-                ("azure", 3), ("microsoft azure", 3),
-                ("digitalocean", 3), ("linode", 3),
-                ("vercel", 3), ("cloudflare workers", 3), ("netlify", 3),
+                ("heroku", 3),
+                ("render", 3),
+                ("railway", 3),
+                ("fly.io", 3),
+                ("aws", 3),
+                ("amazon web services", 3),
+                ("gcp", 3),
+                ("google cloud platform", 3),
+                ("azure", 3),
+                ("microsoft azure", 3),
+                ("digitalocean", 3),
+                ("linode", 3),
+                ("vercel", 3),
+                ("cloudflare workers", 3),
+                ("netlify", 3),
             ],
             3: [  # Compute model
-                ("lambda", 4), ("cloud functions", 4), ("serverless", 4),
-                ("ecs", 4), ("fargate", 4), ("cloud run", 4), ("container", 4),
-                ("ec2", 4), ("compute engine", 4), ("vm", 4), ("virtual machine", 4),
-                ("app runner", 4), ("elastic beanstalk", 4),
+                ("lambda", 4),
+                ("cloud functions", 4),
+                ("serverless", 4),
+                ("ecs", 4),
+                ("fargate", 4),
+                ("cloud run", 4),
+                ("container", 4),
+                ("ec2", 4),
+                ("compute engine", 4),
+                ("vm", 4),
+                ("virtual machine", 4),
+                ("app runner", 4),
+                ("elastic beanstalk", 4),
             ],
             4: [  # Specific services
-                ("lambda", 4), ("api gateway", 4), ("step functions", 4),
-                ("ecs fargate", 4), ("ecs ec2", 4),
-                ("cloud run", 4), ("app engine", 4),
+                ("lambda", 4),
+                ("api gateway", 4),
+                ("step functions", 4),
+                ("ecs fargate", 4),
+                ("ecs ec2", 4),
+                ("cloud run", 4),
+                ("app engine", 4),
                 ("app runner", 4),
             ],
         },
@@ -745,26 +1295,51 @@ CONSTRAINT_DOMAINS_CONFIG = {
         "max_layer": 4,
         "indicators": {
             1: [  # Rendering strategy
-                ("spa", 1), ("single page", 1), ("client-side", 1),
-                ("ssr", 1), ("server-side render", 1), ("server render", 1),
-                ("ssg", 1), ("static site", 1), ("static generation", 1),
+                ("spa", 1),
+                ("single page", 1),
+                ("client-side", 1),
+                ("ssr", 1),
+                ("server-side render", 1),
+                ("server render", 1),
+                ("ssg", 1),
+                ("static site", 1),
+                ("static generation", 1),
                 ("hybrid", 1),
-                ("no frontend", 4), ("api only", 4), ("headless", 4),
+                ("no frontend", 4),
+                ("api only", 4),
+                ("headless", 4),
             ],
             2: [  # Framework
-                ("react", 2), ("angular", 2), ("vue", 2), ("svelte", 2),
-                ("vanilla", 2), ("no framework", 2),
+                ("react", 2),
+                ("angular", 2),
+                ("vue", 2),
+                ("svelte", 2),
+                ("vanilla", 2),
+                ("no framework", 2),
             ],
             3: [  # Meta-framework
-                ("next.js", 3), ("nextjs", 3), ("remix", 3),
-                ("nuxt", 3), ("sveltekit", 3),
-                ("create react app", 3), ("cra", 3), ("vite", 3),
+                ("next.js", 3),
+                ("nextjs", 3),
+                ("remix", 3),
+                ("nuxt", 3),
+                ("sveltekit", 3),
+                ("create react app", 3),
+                ("cra", 3),
+                ("vite", 3),
                 ("angular cli", 3),
             ],
             4: [  # Styling
-                ("tailwind", 4), ("css modules", 4), ("styled-components", 4),
-                ("scss", 4), ("sass", 4), ("emotion", 4), ("css-in-js", 4),
-                ("bootstrap", 4), ("material ui", 4), ("mui", 4), ("chakra", 4),
+                ("tailwind", 4),
+                ("css modules", 4),
+                ("styled-components", 4),
+                ("scss", 4),
+                ("sass", 4),
+                ("emotion", 4),
+                ("css-in-js", 4),
+                ("bootstrap", 4),
+                ("material ui", 4),
+                ("mui", 4),
+                ("chakra", 4),
             ],
         },
     },
@@ -773,26 +1348,54 @@ CONSTRAINT_DOMAINS_CONFIG = {
         "max_layer": 4,
         "indicators": {
             1: [  # Architecture
-                ("monolith", 1), ("microservice", 1), ("serverless function", 1),
-                ("bff", 1), ("backend for frontend", 1),
+                ("monolith", 1),
+                ("microservice", 1),
+                ("serverless function", 1),
+                ("bff", 1),
+                ("backend for frontend", 1),
             ],
             2: [  # Language
-                ("python", 2), ("node", 2), ("nodejs", 2), ("typescript", 2),
-                ("java", 2), ("kotlin", 2), ("go", 2), ("golang", 2),
-                ("rust", 2), ("c#", 2), (".net", 2), ("ruby", 2),
+                ("python", 2),
+                ("node", 2),
+                ("nodejs", 2),
+                ("typescript", 2),
+                ("java", 2),
+                ("kotlin", 2),
+                ("go", 2),
+                ("golang", 2),
+                ("rust", 2),
+                ("c#", 2),
+                (".net", 2),
+                ("ruby", 2),
             ],
             3: [  # Framework
-                ("fastapi", 3), ("django", 3), ("flask", 3),
-                ("express", 3), ("nestjs", 3), ("fastify", 3), ("koa", 3),
-                ("spring", 3), ("spring boot", 3), ("quarkus", 3),
-                ("gin", 3), ("echo", 3), ("fiber", 3),
-                ("actix", 3), ("axum", 3), ("rocket", 3),
-                ("rails", 3), ("ruby on rails", 3),
+                ("fastapi", 3),
+                ("django", 3),
+                ("flask", 3),
+                ("express", 3),
+                ("nestjs", 3),
+                ("fastify", 3),
+                ("koa", 3),
+                ("spring", 3),
+                ("spring boot", 3),
+                ("quarkus", 3),
+                ("gin", 3),
+                ("echo", 3),
+                ("fiber", 3),
+                ("actix", 3),
+                ("axum", 3),
+                ("rocket", 3),
+                ("rails", 3),
+                ("ruby on rails", 3),
                 ("asp.net", 3),
             ],
             4: [  # API style
-                ("rest", 4), ("restful", 4), ("graphql", 4), ("grpc", 4),
-                ("trpc", 4), ("websocket", 4),
+                ("rest", 4),
+                ("restful", 4),
+                ("graphql", 4),
+                ("grpc", 4),
+                ("trpc", 4),
+                ("websocket", 4),
             ],
         },
     },
@@ -801,25 +1404,50 @@ CONSTRAINT_DOMAINS_CONFIG = {
         "max_layer": 4,
         "indicators": {
             1: [  # Type
-                ("relational", 1), ("sql", 1),
-                ("document", 1), ("nosql", 1),
-                ("key-value", 1), ("graph", 1), ("time-series", 1),
+                ("relational", 1),
+                ("sql", 1),
+                ("document", 1),
+                ("nosql", 1),
+                ("key-value", 1),
+                ("graph", 1),
+                ("time-series", 1),
             ],
             2: [  # Hosting model
-                ("rds", 2), ("cloud sql", 2), ("planetscale", 2), ("managed", 2),
-                ("self-managed", 2), ("self-hosted", 2),
-                ("serverless", 2), ("aurora serverless", 2), ("neon", 2),
+                ("rds", 2),
+                ("cloud sql", 2),
+                ("planetscale", 2),
+                ("managed", 2),
+                ("self-managed", 2),
+                ("self-hosted", 2),
+                ("serverless", 2),
+                ("aurora serverless", 2),
+                ("neon", 2),
             ],
             3: [  # Specific database
-                ("postgresql", 3), ("postgres", 3), ("mysql", 3), ("mariadb", 3),
-                ("mongodb", 3), ("dynamodb", 3), ("firestore", 3),
-                ("redis", 3), ("cassandra", 3), ("neo4j", 3),
-                ("sqlite", 3), ("supabase", 3),
+                ("postgresql", 3),
+                ("postgres", 3),
+                ("mysql", 3),
+                ("mariadb", 3),
+                ("mongodb", 3),
+                ("dynamodb", 3),
+                ("firestore", 3),
+                ("redis", 3),
+                ("cassandra", 3),
+                ("neo4j", 3),
+                ("sqlite", 3),
+                ("supabase", 3),
             ],
             4: [  # Additional stores
-                ("redis", 4), ("memcached", 4), ("caching", 4),
-                ("elasticsearch", 4), ("opensearch", 4), ("algolia", 4),
-                ("rabbitmq", 4), ("sqs", 4), ("kafka", 4), ("message queue", 4),
+                ("redis", 4),
+                ("memcached", 4),
+                ("caching", 4),
+                ("elasticsearch", 4),
+                ("opensearch", 4),
+                ("algolia", 4),
+                ("rabbitmq", 4),
+                ("sqs", 4),
+                ("kafka", 4),
+                ("message queue", 4),
             ],
         },
     },
@@ -828,27 +1456,49 @@ CONSTRAINT_DOMAINS_CONFIG = {
         "max_layer": 4,
         "indicators": {
             1: [  # Strategy
-                ("third-party auth", 1), ("auth provider", 1), ("external auth", 1),
-                ("custom auth", 1), ("self-built auth", 1),
+                ("third-party auth", 1),
+                ("auth provider", 1),
+                ("external auth", 1),
+                ("custom auth", 1),
+                ("self-built auth", 1),
                 ("hybrid auth", 1),
             ],
             2: [  # Provider
-                ("auth0", 2), ("clerk", 2), ("firebase auth", 2),
-                ("cognito", 2), ("aws cognito", 2),
-                ("supabase auth", 2), ("keycloak", 2),
-                ("okta", 2), ("fusionauth", 2),
+                ("auth0", 2),
+                ("clerk", 2),
+                ("firebase auth", 2),
+                ("cognito", 2),
+                ("aws cognito", 2),
+                ("supabase auth", 2),
+                ("keycloak", 2),
+                ("okta", 2),
+                ("fusionauth", 2),
             ],
             3: [  # Methods
-                ("oauth", 3), ("oidc", 3), ("openid", 3),
-                ("email/password", 3), ("email password", 3),
-                ("passwordless", 3), ("magic link", 3), ("otp", 3),
-                ("sso", 3), ("saml", 3), ("ldap", 3),
+                ("oauth", 3),
+                ("oidc", 3),
+                ("openid", 3),
+                ("email/password", 3),
+                ("email password", 3),
+                ("passwordless", 3),
+                ("magic link", 3),
+                ("otp", 3),
+                ("sso", 3),
+                ("saml", 3),
+                ("ldap", 3),
                 ("api key", 3),
             ],
             4: [  # Security features
-                ("mfa", 4), ("2fa", 4), ("two-factor", 4), ("multi-factor", 4),
-                ("session", 4), ("jwt", 4), ("token refresh", 4),
-                ("rbac", 4), ("role-based", 4), ("permissions", 4),
+                ("mfa", 4),
+                ("2fa", 4),
+                ("two-factor", 4),
+                ("multi-factor", 4),
+                ("session", 4),
+                ("jwt", 4),
+                ("token refresh", 4),
+                ("rbac", 4),
+                ("role-based", 4),
+                ("permissions", 4),
             ],
         },
     },
@@ -857,10 +1507,10 @@ CONSTRAINT_DOMAINS_CONFIG = {
 
 def _word_boundary_match(indicator: str, text: str) -> bool:
     """Check if indicator appears as a whole word/phrase in text.
-    
+
     Uses regex word boundaries to avoid false positives like 'gin' in 'login'.
     """
-    pattern = r'\b' + re.escape(indicator) + r'\b'
+    pattern = r"\b" + re.escape(indicator) + r"\b"
     return bool(re.search(pattern, text))
 
 
@@ -869,80 +1519,90 @@ def analyze_constraint_status(
     answered_questions: List[AnsweredQuestion],
 ) -> Dict[str, int]:
     """Analyze which constraint domains are resolved and to what layer.
-    
+
     Scans the spec content and answered questions to determine the current
     resolution level for each constraint domain.
-    
+
     Args:
         spec_content: The current specification content.
         answered_questions: List of questions that have been answered.
-        
+
     Returns:
         Dict mapping domain name to resolved layer (0 = unresolved, 1-4 = layer resolved).
     """
     status: Dict[str, int] = {domain: 0 for domain in CONSTRAINT_DOMAINS_CONFIG}
-    
+
     spec_lower = spec_content.lower()
-    
+
     # Also include answered questions in the analysis
     answers_text = ""
     for aq in answered_questions:
         answers_text += f" {aq.question_text} {aq.selected_answer} "
     answers_lower = answers_text.lower()
-    
+
     combined_text = spec_lower + " " + answers_lower
-    
+
     for domain, config in CONSTRAINT_DOMAINS_CONFIG.items():
         max_resolved = 0
         indicators = config.get("indicators", {})
-        
+
         # Check each layer's indicators using word boundary matching
         for layer in range(1, config["max_layer"] + 1):
             layer_indicators = indicators.get(layer, [])
             for indicator, resolves_to in layer_indicators:
                 if _word_boundary_match(indicator, combined_text):
                     max_resolved = max(max_resolved, resolves_to)
-        
+
         status[domain] = min(max_resolved, config["max_layer"])
-    
+
     return status
 
 
 def generate_constraint_hints(constraint_status: Dict[str, int]) -> str:
     """Generate hints for the LLM about which constraint layers need questions.
-    
+
     Args:
         constraint_status: Dict mapping domain to resolved layer.
-        
+
     Returns:
         Formatted string with hints about which domains need attention.
     """
     hints = []
-    
+
     for domain, resolved_layer in constraint_status.items():
         config = CONSTRAINT_DOMAINS_CONFIG.get(domain, {})
         max_layer = config.get("max_layer", 4)
         domain_name = config.get("name", domain)
-        
+
         if resolved_layer >= max_layer:
-            hints.append(f"- {domain_name}: FULLY RESOLVED (Layer {max_layer}/{max_layer}) - No questions needed")
+            hints.append(
+                f"- {domain_name}: FULLY RESOLVED (Layer {max_layer}/{max_layer}) - No questions needed"
+            )
         elif resolved_layer == 0:
-            hints.append(f"- {domain_name}: UNRESOLVED - Ask Layer 1 question (start from the beginning)")
+            hints.append(
+                f"- {domain_name}: UNRESOLVED - Ask Layer 1 question (start from the beginning)"
+            )
         else:
             next_layer = resolved_layer + 1
-            hints.append(f"- {domain_name}: Resolved to Layer {resolved_layer}/{max_layer} - Ask Layer {next_layer} question")
-    
+            hints.append(
+                f"- {domain_name}: Resolved to Layer {resolved_layer}/{max_layer} - Ask Layer {next_layer} question"
+            )
+
     if not hints:
         return ""
-    
-    return """## CONSTRAINT STATUS (from previous answers)
+
+    return (
+        """## CONSTRAINT STATUS (from previous answers)
 
 Based on analysis of the specification and previous answers, here is the current constraint resolution status:
 
-""" + "\n".join(hints) + """
+"""
+        + "\n".join(hints)
+        + """
 
 Focus your questions on domains that are NOT fully resolved. Ask ONLY the next layer question for each domain.
 """
+    )
 
 
 class ProductRequirementsAnalysisAgent:
@@ -983,7 +1643,9 @@ class ProductRequirementsAnalysisAgent:
         for p in pa_dir.iterdir():
             if p.is_file() and p.suffix == ".md":
                 name = p.name
-                if name == "updated_spec.md" or (name.startswith("updated_spec_v") and name.endswith(".md")):
+                if name == "updated_spec.md" or (
+                    name.startswith("updated_spec_v") and name.endswith(".md")
+                ):
                     return True
         return False
 
@@ -1091,6 +1753,7 @@ class ProductRequirementsAnalysisAgent:
                         elif name.startswith("updated_spec_v") and name.endswith(".md"):
                             candidates.append(p)
                     if candidates:
+
                         def _spec_sort_key(path: Path) -> Tuple[int, float]:
                             # Prefer higher version number; then mtime
                             name = path.stem
@@ -1101,6 +1764,7 @@ class ProductRequirementsAnalysisAgent:
                                 except (ValueError, IndexError):
                                     pass
                             return (0, path.stat().st_mtime)
+
                         latest_spec_file = max(candidates, key=_spec_sort_key)
                         current_spec = latest_spec_file.read_text(encoding="utf-8")
             if not skip_context_discovery:
@@ -1114,7 +1778,10 @@ class ProductRequirementsAnalysisAgent:
                 )
                 try:
                     sop_decisions, current_spec, sop_answered = self._run_sop_phase1(
-                        current_spec, repo_path, job_id, _update_job,
+                        current_spec,
+                        repo_path,
+                        job_id,
+                        _update_job,
                     )
                     all_answered_questions.extend(sop_answered)
                 except Exception as exc:
@@ -1132,7 +1799,11 @@ class ProductRequirementsAnalysisAgent:
                 )
                 try:
                     arch_result, current_spec = self._run_sop_phase2_architecture(
-                        current_spec, sop_decisions, repo_path, job_id, _update_job,
+                        current_spec,
+                        sop_decisions,
+                        repo_path,
+                        job_id,
+                        _update_job,
                     )
                     result.architecture_analysis = arch_result
                 except Exception as exc:
@@ -1154,10 +1825,14 @@ class ProductRequirementsAnalysisAgent:
             )
 
             try:
-                _update_job(status_text="Analyzing full specification for gaps and inconsistencies...")
+                _update_job(
+                    status_text="Analyzing full specification for gaps and inconsistencies..."
+                )
 
                 def _on_spec_review_progress(_chunk_index: int, _total_chunks: int) -> None:
-                    _update_job(status_text="Analyzing full specification for gaps and inconsistencies...")
+                    _update_job(
+                        status_text="Analyzing full specification for gaps and inconsistencies..."
+                    )
 
                 spec_before_review = current_spec
                 spec_review_result, current_spec = self._run_spec_review(
@@ -1434,7 +2109,9 @@ class ProductRequirementsAnalysisAgent:
                 if chunk_index < len(cleanup_titles) and cleanup_titles[chunk_index]:
                     status_text = f"Validating: {cleanup_titles[chunk_index]}..."
                 else:
-                    status_text = f"Validating specification (section {chunk_index + 1}/{total_chunks})..."
+                    status_text = (
+                        f"Validating specification (section {chunk_index + 1}/{total_chunks})..."
+                    )
                 _update_job(status_text=status_text)
 
             cleanup_result = self._run_spec_cleanup(
@@ -1468,9 +2145,7 @@ class ProductRequirementsAnalysisAgent:
             prd_path.write_text(prd_content, encoding="utf-8")
             logger.info("Product Requirements Analysis: PRD saved to %s", prd_path.name)
         except Exception as exc:
-            logger.warning(
-                "Product Requirements Analysis: Failed to write PRD alias file: %s", exc
-            )
+            logger.warning("Product Requirements Analysis: Failed to write PRD alias file: %s", exc)
 
         result.success = True
         result.summary = (
@@ -1487,15 +2162,11 @@ class ProductRequirementsAnalysisAgent:
         )
 
         elapsed = time.monotonic() - start_time
-        logger.info(
-            "Product Requirements Analysis Agent: WORKFLOW COMPLETE in %.1fs", elapsed
-        )
+        logger.info("Product Requirements Analysis Agent: WORKFLOW COMPLETE in %.1fs", elapsed)
 
         return result
 
-    def _merge_spec_review_results(
-        self, results: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+    def _merge_spec_review_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Combine issues, gaps, and questions from multiple chunk reviews.
 
         Kept for potential future chunked fallback; spec review currently uses
@@ -1525,14 +2196,10 @@ class ProductRequirementsAnalysisAgent:
             if r.get("summary"):
                 summaries.append(str(r["summary"]))
 
-        merged["summary"] = (
-            f"Reviewed {len(results)} sections. " + " ".join(summaries[:3])
-        )
+        merged["summary"] = f"Reviewed {len(results)} sections. " + " ".join(summaries[:3])
         return merged
 
-    def _merge_spec_cleanup_results(
-        self, results: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+    def _merge_spec_cleanup_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Combine cleanup results from multiple chunks.
 
         Args:
@@ -1565,13 +2232,14 @@ class ProductRequirementsAnalysisAgent:
         """Format context files for inclusion in the spec review prompt."""
         if not self._context_files:
             return ""
-        
+
         from spec_parser import format_context_for_prompt
+
         formatted = format_context_for_prompt(self._context_files)
-        
+
         if not formatted:
             return ""
-        
+
         return f"""
 
 ## Additional Context Files
@@ -1624,16 +2292,10 @@ The following additional files were provided in the project folder. Review these
             logger.debug("Capped qa_for_prompt to last 12k chars")
 
         # Analyze constraint status and generate hints for the LLM
-        constraint_status = analyze_constraint_status(
-            spec_content,
-            answered_questions or []
-        )
+        constraint_status = analyze_constraint_status(spec_content, answered_questions or [])
         constraint_hints = generate_constraint_hints(constraint_status)
 
-        logger.info(
-            "Constraint status: %s",
-            {d: f"L{lvl}" for d, lvl in constraint_status.items()}
-        )
+        logger.info("Constraint status: %s", {d: f"L{lvl}" for d, lvl in constraint_status.items()})
 
         # Build the full content including context files
         context_section = self._format_context_for_review()
@@ -1652,15 +2314,19 @@ The following additional files were provided in the project folder. Review these
                 spec_content=full_spec_content[:max_spec_chars],
                 constraint_hints=constraint_hints,
             )
-            prompt += """
+            prompt += (
+                """
 
 IMPORTANT: The following questions have ALREADY been answered. Do NOT ask these questions again or any variations of them. Only ask NEW questions about topics NOT covered below. The spec and this Q&A are the source of truth.
 
 Previously Answered Questions:
 ---
-""" + qa_for_prompt + """
+"""
+                + qa_for_prompt
+                + """
 ---
 """
+            )
         else:
             prompt = SPEC_REVIEW_PROMPT.format(
                 spec_content=full_spec_content[:max_spec_chars],
@@ -1678,9 +2344,7 @@ Previously Answered Questions:
         )
 
         if not raw:
-            logger.warning(
-                "PRA spec_review: No JSON recovered, will retry in next iteration"
-            )
+            logger.warning("PRA spec_review: No JSON recovered, will retry in next iteration")
             return (
                 SpecReviewResult(
                     summary="Spec review JSON parsing failed - will retry",
@@ -1710,9 +2374,7 @@ Previously Answered Questions:
                     duplicates, qa_for_prompt, spec_content, repo_path, spec_version
                 )
 
-        result.open_questions = self._filter_organizational_questions(
-            result.open_questions
-        )
+        result.open_questions = self._filter_organizational_questions(result.open_questions)
         return result, updated_spec
 
     def _format_answered_questions_for_prompt(
@@ -1755,11 +2417,11 @@ Previously Answered Questions:
         qa_history: str,
     ) -> tuple[List[OpenQuestion], List[OpenQuestion]]:
         """Filter out questions that appear to be duplicates of answered ones.
-        
+
         Uses normalized word stems (e.g. token/tokens, store/stored). Only filters
         as duplicate when match to qa_history is >= 95%; 50–95% similar questions
         are kept and may be consolidated elsewhere. Treats spec + Q&A as source of truth.
-        
+
         Returns:
             Tuple of (filtered_questions, duplicate_questions).
             - filtered_questions: Questions that are NOT duplicates (should be asked)
@@ -1817,9 +2479,7 @@ Previously Answered Questions:
 
         return filtered, duplicates
 
-    def _filter_organizational_questions(
-        self, questions: List[OpenQuestion]
-    ) -> List[OpenQuestion]:
+    def _filter_organizational_questions(self, questions: List[OpenQuestion]) -> List[OpenQuestion]:
         """Remove questions about organizational structure, approval processes, or decision hierarchy.
 
         The client/user is the source of truth; we do not ask who approves, how decisions
@@ -1866,64 +2526,66 @@ Previously Answered Questions:
         qa_history: str,
     ) -> Optional[AnsweredQuestion]:
         """Extract a previously recorded answer from qa_history.md for a duplicate question.
-        
+
         Parses the qa_history.md markdown format to find the best matching Q&A pair.
-        
+
         Args:
             question: The duplicate question to find an answer for.
             qa_history: Raw content of qa_history.md file.
-            
+
         Returns:
             AnsweredQuestion if a matching answer was found, None otherwise.
         """
         import re
-        
+
         if not qa_history:
             return None
-        
+
         q_text_lower = question.question_text.lower()
         key_words = [w for w in q_text_lower.split() if len(w) > 4]
-        
+
         if not key_words:
             return None
-        
+
         # Parse qa_history.md sections - format is:
         # ### Question text
         # **Answer:** Answer text
         # **Rationale:** Optional rationale
         # *(Auto-answered with X% confidence)* or *(Default applied)*
-        
+
         # Split into Q&A blocks by "### " headers
-        blocks = re.split(r'\n###\s+', qa_history)
-        
-        best_match: Optional[tuple[float, str, str, str]] = None  # (score, question, answer, rationale)
-        
+        blocks = re.split(r"\n###\s+", qa_history)
+
+        best_match: Optional[tuple[float, str, str, str]] = (
+            None  # (score, question, answer, rationale)
+        )
+
         for block in blocks[1:]:  # Skip first block (header)
-            lines = block.strip().split('\n')
+            lines = block.strip().split("\n")
             if not lines:
                 continue
-            
+
             recorded_question = lines[0].strip()
             recorded_question_lower = recorded_question.lower()
-            
+
             # Calculate match score
             matches = sum(1 for w in key_words if w in recorded_question_lower)
             match_ratio = matches / len(key_words) if key_words else 0
-            
+
             if match_ratio > 0.5:  # Good enough match
                 # Extract answer from block
                 answer = ""
                 rationale = ""
-                
+
                 for line in lines[1:]:
                     if line.startswith("**Answer:**"):
                         answer = line.replace("**Answer:**", "").strip()
                     elif line.startswith("**Rationale:**"):
                         rationale = line.replace("**Rationale:**", "").strip()
-                
+
                 if answer and (best_match is None or match_ratio > best_match[0]):
                     best_match = (match_ratio, recorded_question, answer, rationale)
-        
+
         if best_match:
             _, matched_q, answer, rationale = best_match
             logger.debug(
@@ -1941,12 +2603,12 @@ Previously Answered Questions:
                 rationale=rationale or f"Previously answered (matched: {matched_q[:50]})",
                 confidence=0.9,  # High confidence since it was user-answered before
             )
-        
+
         return None
 
     def _parse_spec_review_response(self, raw: Any) -> SpecReviewResult:
         """Parse LLM response into SpecReviewResult.
-        
+
         Applies deduplication and enforces max limits on issues/gaps to prevent
         runaway repetitive output from the LLM.
         """
@@ -1960,18 +2622,20 @@ Previously Answered Questions:
         # Deduplicate and limit issues/gaps to prevent repetitive LLM output
         issues = list(raw_issues) if isinstance(raw_issues, list) else []
         gaps = list(raw_gaps) if isinstance(raw_gaps, list) else []
-        
+
         original_issue_count = len(issues)
         original_gap_count = len(gaps)
-        
+
         issues = _dedupe_items(issues)[:MAX_ISSUES]
         gaps = _dedupe_items(gaps)[:MAX_GAPS]
-        
+
         if len(issues) < original_issue_count or len(gaps) < original_gap_count:
             logger.info(
                 "Deduplicated spec review results: issues %d->%d, gaps %d->%d",
-                original_issue_count, len(issues),
-                original_gap_count, len(gaps),
+                original_issue_count,
+                len(issues),
+                original_gap_count,
+                len(gaps),
             )
 
         open_questions = []
@@ -2101,7 +2765,10 @@ Previously Answered Questions:
             parent_answer = decisions_map[parent_id]
             # Check if the parent answer matches any required value (case-insensitive)
             parent_lower = parent_answer.lower().strip()
-            if not any(v.lower().strip() in parent_lower or parent_lower in v.lower().strip() for v in required_values):
+            if not any(
+                v.lower().strip() in parent_lower or parent_lower in v.lower().strip()
+                for v in required_values
+            ):
                 return False  # Condition not met
         return True
 
@@ -2119,12 +2786,14 @@ Previously Answered Questions:
         for sub_phase, q_defs in SOP_PHASE1_QUESTIONS.items():
             for q_def in q_defs:
                 option_labels = [o["label"] for o in q_def.get("options", []) if "label" in o]
-                questions_summary.append({
-                    "sop_id": q_def["sop_id"],
-                    "sub_phase": sub_phase.value,
-                    "question": q_def["question_text"],
-                    "options": option_labels,
-                })
+                questions_summary.append(
+                    {
+                        "sop_id": q_def["sop_id"],
+                        "sub_phase": sub_phase.value,
+                        "question": q_def["question_text"],
+                        "options": option_labels,
+                    }
+                )
 
         prompt = SOP_SPEC_EXTRACTION_PROMPT.format(
             sop_questions_json=json.dumps(questions_summary, indent=2),
@@ -2458,7 +3127,7 @@ Previously Answered Questions:
                         continue  # Condition not met
                     if cond_result is None:
                         continue  # Parent not answered yet — defer to next round within this sub-phase
-
+                        
                     # Build options ensuring at least 3 valid choices, informed by spec
                     options = self._build_question_options(q_def, spec_content, decisions_map)
 
@@ -2573,7 +3242,9 @@ Previously Answered Questions:
 
         # Step 3: Inject all decisions into spec
         if all_answered:
-            spec_content = self._inject_context_answers_into_spec(spec_content, all_answered, repo_path)
+            spec_content = self._inject_context_answers_into_spec(
+                spec_content, all_answered, repo_path
+            )
 
         return all_decisions, spec_content, all_answered
 
@@ -2599,7 +3270,9 @@ Previously Answered Questions:
             [
                 {
                     "sop_id": d.sop_id,
-                    "sub_phase": d.sub_phase.value if isinstance(d.sub_phase, SOPSubPhase) else str(d.sub_phase),
+                    "sub_phase": d.sub_phase.value
+                    if isinstance(d.sub_phase, SOPSubPhase)
+                    else str(d.sub_phase),
                     "question": d.question_text,
                     "decision": d.decision,
                     "source": d.source,
@@ -2699,7 +3372,9 @@ Previously Answered Questions:
                     id="opt_approve",
                     label=f"Approve {arch_result.architecture_type} architecture",
                     is_default=True,
-                    rationale=arch_result.architecture_rationale[:200] if arch_result.architecture_rationale else "",
+                    rationale=arch_result.architecture_rationale[:200]
+                    if arch_result.architecture_rationale
+                    else "",
                     confidence=0.8,
                 ),
                 QuestionOption(
@@ -2714,7 +3389,9 @@ Previously Answered Questions:
                 OpenQuestion(
                     id="arch_type_approval",
                     question_text=f"We recommend a {arch_result.architecture_type} architecture. Do you approve?",
-                    context=arch_result.architecture_rationale[:500] if arch_result.architecture_rationale else "",
+                    context=arch_result.architecture_rationale[:500]
+                    if arch_result.architecture_rationale
+                    else "",
                     category="architecture",
                     priority="high",
                     options=options,
@@ -2967,9 +3644,7 @@ Previously Answered Questions:
 
         return kept
 
-    def _consolidate_open_questions(
-        self, open_questions: List[OpenQuestion]
-    ) -> List[OpenQuestion]:
+    def _consolidate_open_questions(self, open_questions: List[OpenQuestion]) -> List[OpenQuestion]:
         """Merge duplicate or semantically equivalent questions before sending to user.
 
         Uses a single LLM call to identify questions that ask the same thing
@@ -3112,13 +3787,15 @@ Previously Answered Questions:
             recs = raw.get("recommendations", [])
             if not isinstance(recs, list):
                 return list(open_questions)
-            rec_by_id = {r.get("id"): str(r.get("recommendation", "") or "") for r in recs if isinstance(r, dict) and r.get("id")}
+            rec_by_id = {
+                r.get("id"): str(r.get("recommendation", "") or "")
+                for r in recs
+                if isinstance(r, dict) and r.get("id")
+            }
             result = []
             for q in open_questions:
                 rec = rec_by_id.get(q.id, "")
-                result.append(
-                    q.model_copy(update={"recommendation": rec})
-                )
+                result.append(q.model_copy(update={"recommendation": rec}))
             return result
         except Exception as e:
             logger.warning(
@@ -3151,6 +3828,7 @@ Previously Answered Questions:
         add_pending_questions(job_id, pending)
         try:
             from unified_api.slack_notifier import notify_open_questions
+
             notify_open_questions(job_id, pending, source="product-analysis")
         except ImportError:
             pass
@@ -3250,9 +3928,7 @@ Previously Answered Questions:
                     question_id=q.id,
                     question_text=q.question_text,
                     selected_option_id=default_opt.id if default_opt else "unknown",
-                    selected_answer=default_opt.label
-                    if default_opt
-                    else "No default available",
+                    selected_answer=default_opt.label if default_opt else "No default available",
                     was_default=True,
                     rationale=default_opt.rationale if default_opt else "",
                     confidence=default_opt.confidence if default_opt else 0.0,
@@ -3274,11 +3950,11 @@ Previously Answered Questions:
             if sub:
                 other_text = sub.get("other_text") or ""
                 was_auto = sub.get("was_auto_answered", False)
-                
+
                 # Handle multi-select questions
                 selected_ids = sub.get("selected_option_ids", [])
                 selected_id = sub.get("selected_option_id", "")
-                
+
                 if selected_ids:
                     # Multi-select: build combined answer from all selected options
                     selected_labels = []
@@ -3342,9 +4018,7 @@ Previously Answered Questions:
             return default
 
         if q.options:
-            sorted_by_confidence = sorted(
-                q.options, key=lambda o: o.confidence, reverse=True
-            )
+            sorted_by_confidence = sorted(q.options, key=lambda o: o.confidence, reverse=True)
             return sorted_by_confidence[0]
 
         return None
@@ -3400,7 +4074,6 @@ Previously Answered Questions:
             lines.append("")
         return "\n".join(lines)
 
-
     def _build_specialist_collaboration_plan(
         self,
         cleaned_spec: str,
@@ -3411,7 +4084,9 @@ Previously Answered Questions:
         This gives the PRD writer concrete handoff guidance for areas that often
         require cross-team collaboration (UX, architecture, risk, data, security).
         """
-        spec_text = (cleaned_spec + "\n" + self._format_answered_questions(answered_questions)).lower()
+        spec_text = (
+            cleaned_spec + "\n" + self._format_answered_questions(answered_questions)
+        ).lower()
 
         recommendations: List[str] = []
 
@@ -3419,30 +4094,100 @@ Previously Answered Questions:
             recommendations.append(f"- {label}: {reason}")
 
         # Always include these core spokes for higher-quality PRDs.
-        include("Requirements Analyst Agent", "Own FR/NFR decomposition, prioritization, and traceability mapping.")
-        include("QA and Acceptance Criteria Agent", "Ensure every Must requirement has verifiable acceptance criteria.")
-        include("PRD Critic (Gatekeeper) Agent", "Run completeness/consistency/testability/traceability/pragmatism gates before Final.")
+        include(
+            "Requirements Analyst Agent",
+            "Own FR/NFR decomposition, prioritization, and traceability mapping.",
+        )
+        include(
+            "QA and Acceptance Criteria Agent",
+            "Ensure every Must requirement has verifiable acceptance criteria.",
+        )
+        include(
+            "PRD Critic (Gatekeeper) Agent",
+            "Run completeness/consistency/testability/traceability/pragmatism gates before Final.",
+        )
 
-        if any(k in spec_text for k in ["ui", "ux", "screen", "design", "workflow", "journey", "persona", "onboarding"]):
-            include("UX and Flows Agent", "Define textual workflows, edge cases, accessibility baseline, and screen/IA notes.")
-            include("Design System Tool Agent", "Capture reusable component patterns, interaction states, and consistency rules.")
-            include("Branding Guidance Agent", "Document tone, visual direction, and brand constraints for product surfaces.")
+        if any(
+            k in spec_text
+            for k in [
+                "ui",
+                "ux",
+                "screen",
+                "design",
+                "workflow",
+                "journey",
+                "persona",
+                "onboarding",
+            ]
+        ):
+            include(
+                "UX and Flows Agent",
+                "Define textual workflows, edge cases, accessibility baseline, and screen/IA notes.",
+            )
+            include(
+                "Design System Tool Agent",
+                "Capture reusable component patterns, interaction states, and consistency rules.",
+            )
+            include(
+                "Branding Guidance Agent",
+                "Document tone, visual direction, and brand constraints for product surfaces.",
+            )
 
-        if any(k in spec_text for k in ["architecture", "api", "integration", "service", "event", "database", "deployment"]):
-            include("Architecture Agent", "Define high-level components, interfaces, and data flow boundaries.")
-            include("API and Integration Agent", "Specify integration contracts, failure modes, and auth patterns.")
+        if any(
+            k in spec_text
+            for k in [
+                "architecture",
+                "api",
+                "integration",
+                "service",
+                "event",
+                "database",
+                "deployment",
+            ]
+        ):
+            include(
+                "Architecture Agent",
+                "Define high-level components, interfaces, and data flow boundaries.",
+            )
+            include(
+                "API and Integration Agent",
+                "Specify integration contracts, failure modes, and auth patterns.",
+            )
 
-        if any(k in spec_text for k in ["risk", "assumption", "dependency", "migration", "rollout", "timeline"]):
-            include("Risk Analysis Agent", "Maintain risk register with owners, probabilities, impacts, and mitigations.")
-            include("Scope and Milestones Planner Agent", "Align MVP/V1/VNext scope to dependencies and timeline options.")
+        if any(
+            k in spec_text
+            for k in ["risk", "assumption", "dependency", "migration", "rollout", "timeline"]
+        ):
+            include(
+                "Risk Analysis Agent",
+                "Maintain risk register with owners, probabilities, impacts, and mitigations.",
+            )
+            include(
+                "Scope and Milestones Planner Agent",
+                "Align MVP/V1/VNext scope to dependencies and timeline options.",
+            )
 
-        if any(k in spec_text for k in ["security", "privacy", "compliance", "pii", "retention", "audit", "auth"]):
-            include("Security, Privacy, and Compliance Agent", "Define data handling, retention, authz, and compliance questions.")
+        if any(
+            k in spec_text
+            for k in ["security", "privacy", "compliance", "pii", "retention", "audit", "auth"]
+        ):
+            include(
+                "Security, Privacy, and Compliance Agent",
+                "Define data handling, retention, authz, and compliance questions.",
+            )
 
-        if any(k in spec_text for k in ["analytics", "kpi", "metric", "dashboard", "event tracking"]):
-            include("Data and Analytics Agent", "Define events, KPI ownership, and dashboards tied to goals.")
+        if any(
+            k in spec_text for k in ["analytics", "kpi", "metric", "dashboard", "event tracking"]
+        ):
+            include(
+                "Data and Analytics Agent",
+                "Define events, KPI ownership, and dashboards tied to goals.",
+            )
 
-        include("Question Concierge (Human Interface) Agent", "Bundle unresolved questions by owner/impact with due dates and escalation policy.")
+        include(
+            "Question Concierge (Human Interface) Agent",
+            "Bundle unresolved questions by owner/impact with due dates and escalation policy.",
+        )
 
         # Keep deterministic output order and avoid duplicates.
         seen = set()
@@ -3507,64 +4252,64 @@ Previously Answered Questions:
         version: int,
     ) -> str:
         """Update spec using answers from qa_history for duplicate questions.
-        
+
         When a question is re-asked but was previously answered, this indicates
         the spec wasn't updated clearly enough. This method extracts the existing
         answers and re-applies them with emphasis on clarity.
-        
+
         Args:
             duplicate_questions: Questions that were filtered as duplicates.
             qa_history: Raw content of qa_history.md file.
             current_spec: Current specification content.
             repo_path: Path to the repository.
             version: Version number for updated_spec_v{version}.md filename.
-            
+
         Returns:
             Updated specification content.
         """
         from .prompts import SPEC_CLARIFICATION_PROMPT
-        
+
         # Extract answers from qa_history for each duplicate
         extracted_answers: List[AnsweredQuestion] = []
         for q in duplicate_questions:
             answer = self._extract_answer_from_qa_history(q, qa_history)
             if answer:
                 extracted_answers.append(answer)
-        
+
         if not extracted_answers:
             logger.debug("No answers extracted from qa_history for duplicates")
             return current_spec
-        
+
         logger.info(
             "Clarifying spec with %d previously answered questions that were re-asked",
             len(extracted_answers),
         )
-        
+
         # Format the Q&A pairs for the clarification prompt
         qa_pairs = self._format_answered_questions(extracted_answers)
-        
+
         prompt = SPEC_CLARIFICATION_PROMPT.format(
             spec_content=current_spec,
             duplicate_qa_pairs=qa_pairs,
         )
-        
+
         try:
             clarified_spec = self.llm.complete_text(prompt)
         except Exception as e:
             logger.error("Failed to clarify spec with LLM: %s", e)
             return current_spec
-        
+
         # Save the clarified spec using the same versioned pattern as _update_spec
         plan_dir = repo_path / "plan" / "product_analysis"
         plan_dir.mkdir(parents=True, exist_ok=True)
-        
+
         spec_file = plan_dir / f"updated_spec_v{version}.md"
         spec_file.write_text(clarified_spec, encoding="utf-8")
         logger.info("Saved updated spec (clarification) to %s", spec_file)
-        
+
         latest_file = plan_dir / "updated_spec.md"
         latest_file.write_text(clarified_spec, encoding="utf-8")
-        
+
         return clarified_spec
 
     def _update_spec_for_consistency_and_clarity(
@@ -3607,9 +4352,7 @@ Previously Answered Questions:
         latest_file.write_text(updated_spec, encoding="utf-8")
         return updated_spec
 
-    def _parse_qa_history_blocks(
-        self, qa_history: str
-    ) -> List[Tuple[int, str, str, str]]:
+    def _parse_qa_history_blocks(self, qa_history: str) -> List[Tuple[int, str, str, str]]:
         """Parse qa_history.md content into blocks for pruning and rewriting.
 
         Returns:
@@ -3648,9 +4391,7 @@ Previously Answered Questions:
                     i += 1
                 full_block_text = "\n".join(block_lines)
                 if question_text or answer:
-                    blocks_out.append(
-                        (current_iteration, question_text, answer, full_block_text)
-                    )
+                    blocks_out.append((current_iteration, question_text, answer, full_block_text))
                 continue
             i += 1
         return blocks_out
@@ -3663,6 +4404,7 @@ Previously Answered Questions:
         new_norm = " ".join(new_question.lower().split())
         if existing_norm in new_norm or new_norm in existing_norm:
             return True
+
         # Word overlap ratio
         def words(t: str) -> set:
             return set(re.sub(r"[^\w\s]", " ", t.lower()).split()) - {"", "the", "a", "an"}
@@ -3768,9 +4510,7 @@ Previously Answered Questions:
 
         if not raw:
             # All recovery failed - return the original spec as valid
-            logger.warning(
-                "PRA spec_cleanup: No JSON recovered, returning original spec"
-            )
+            logger.warning("PRA spec_cleanup: No JSON recovered, returning original spec")
             return SpecCleanupResult(
                 is_valid=True,
                 cleaned_spec=spec_content,

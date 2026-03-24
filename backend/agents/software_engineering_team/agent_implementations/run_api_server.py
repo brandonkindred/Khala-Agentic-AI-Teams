@@ -42,6 +42,7 @@ if __name__ == "__main__":
     logger.info("LLM config: %s", get_llm_config_summary())
     # Use explicit path so we load software_engineering_team/api, not agents/api
     import api.main as app_module
+
     uvicorn.run(
         app_module.app,
         host="0.0.0.0",

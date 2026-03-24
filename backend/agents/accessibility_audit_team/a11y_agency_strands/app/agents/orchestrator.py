@@ -101,9 +101,7 @@ class EngagementOrchestrator:
         self._enforce_reporting_gate()
         findings = [{"finding_id": fid} for fid in self.state.findings_index]
         evidence = (
-            run_evidence_curation(
-                self.state.findings_index[0], "checkout", self.context
-            )
+            run_evidence_curation(self.state.findings_index[0], "checkout", self.context)
             if self.state.findings_index
             else None
         )
@@ -124,9 +122,7 @@ class EngagementOrchestrator:
         return result
 
     def request_human_approval(self, engagement_id: str) -> dict:
-        result = run_approval_and_comms(
-            engagement_id, "Delivery package ready", self.context
-        )
+        result = run_approval_and_comms(engagement_id, "Delivery package ready", self.context)
         self.state.pending_approvals.append(result["artifact"])
         self.state.approval_granted = bool(result.get("approved", False))
         if self.state.approval_granted:

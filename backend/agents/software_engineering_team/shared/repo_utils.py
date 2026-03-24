@@ -12,18 +12,35 @@ from pathlib import Path
 from typing import List, Optional
 
 # Directories excluded from repo scans (build artifacts, VCS, dependency caches)
-REPO_EXCLUDE_DIRS: frozenset[str] = frozenset({
-    ".git", "node_modules", "dist", ".angular",
-})
+REPO_EXCLUDE_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        "node_modules",
+        "dist",
+        ".angular",
+    }
+)
 
 # Default extensions per agent domain
 BACKEND_EXTENSIONS: List[str] = [".py", ".java"]
 FRONTEND_EXTENSIONS: List[str] = [".ts", ".tsx", ".html", ".scss"]
 FULL_STACK_EXTENSIONS: List[str] = [
-    ".py", ".ts", ".tsx", ".java", ".yml", ".yaml",
+    ".py",
+    ".ts",
+    ".tsx",
+    ".java",
+    ".yml",
+    ".yaml",
 ]
 DOCUMENTATION_EXTENSIONS: List[str] = [
-    ".py", ".ts", ".tsx", ".java", ".yml", ".yaml", ".html", ".scss",
+    ".py",
+    ".ts",
+    ".tsx",
+    ".java",
+    ".yml",
+    ".yaml",
+    ".html",
+    ".scss",
 ]
 
 
@@ -68,11 +85,17 @@ def read_repo_code(
     return "\n\n".join(parts) if parts else "# No code files found"
 
 
-def truncate_for_context(text: str, max_chars: int) -> str:
-    """Truncate *text* with a notice appended when trimmed."""
+def truncate_for_context(
+    text: str, max_chars: int, llm: object = None, content_description: str = "content"
+) -> str:
+    """Compact *text* with LLM when over budget; pass full text when no LLM available."""
     if not text or len(text) <= max_chars:
         return text or ""
-    return text[:max_chars] + f"\n\n... [truncated, {len(text) - max_chars} more chars]"
+    if llm is not None:
+        from llm_service import compact_text
+
+        return compact_text(text, max_chars, llm, content_description)
+    return text
 
 
 def int_env(name: str, default: int, min_val: int = 1) -> int:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from llm_service import LLMClient
+from llm_service import LLMClient, compact_text
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_chunk_chars,
     compute_code_review_total_chars,
@@ -40,10 +40,8 @@ class CodeReviewAgent:
                 single_call_limit,
             )
             max_total = compute_code_review_total_chars(self.llm)
-            if len(code) > max_total:
-                code = code[:max_total] + (
-                    f"\n\n... [truncated for code review, {len(code) - max_total} more chars]"
-                )
+            code = compact_text(code, max_total, self.llm, "code for review")
+            if code != input_data.code:
                 input_data = CodeReviewInput(
                     code=code,
                     spec_content=input_data.spec_content,
@@ -56,13 +54,7 @@ class CodeReviewAgent:
                 )
             return run_coordinator(self.llm, input_data)
         max_total = compute_code_review_total_chars(self.llm)
-        if len(code) > max_total:
-            logger.info(
-                "CodeReview: truncating code from %s to %s chars for review (model context)",
-                len(code),
-                max_total,
-            )
-            code = code[:max_total] + f"\n\n... [truncated for code review, {len(code) - max_total} more chars]"
+        code = compact_text(code, max_total, self.llm, "code for review")
 
         logger.info(
             "CodeReview: reviewing %s chars of %s code | task=%s | has_spec=%s | has_architecture=%s | acceptance_criteria=%s",
@@ -83,42 +75,52 @@ class CodeReviewAgent:
             context_parts.extend(["", "**Task requirements:**", input_data.task_requirements])
 
         if input_data.acceptance_criteria:
-            context_parts.extend([
-                "",
-                "**Acceptance criteria (code MUST meet all of these):**",
-                *[f"- {c}" for c in input_data.acceptance_criteria],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Acceptance criteria (code MUST meet all of these):**",
+                    *[f"- {c}" for c in input_data.acceptance_criteria],
+                ]
+            )
 
         if input_data.spec_content:
-            context_parts.extend([
-                "",
-                "**Project specification (source of truth for the application):**",
-                "---",
-                input_data.spec_content,
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Project specification (source of truth for the application):**",
+                    "---",
+                    input_data.spec_content,
+                    "---",
+                ]
+            )
 
         if input_data.architecture:
-            context_parts.extend([
-                "",
-                "**Architecture:**",
-                input_data.architecture.overview,
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Architecture:**",
+                    input_data.architecture.overview,
+                ]
+            )
 
         if input_data.existing_codebase:
-            context_parts.extend([
-                "",
-                "**Existing codebase (before the agent's changes):**",
-                input_data.existing_codebase,
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Existing codebase (before the agent's changes):**",
+                    input_data.existing_codebase,
+                ]
+            )
 
-        context_parts.extend([
-            "",
-            "**Code to review:**",
-            "```",
-            code,
-            "```",
-        ])
+        context_parts.extend(
+            [
+                "",
+                "**Code to review:**",
+                "```",
+                code,
+                "```",
+            ]
+        )
 
         prompt = CODE_REVIEW_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         data = self.llm.complete_json(prompt, temperature=0.1)

@@ -110,7 +110,7 @@ SPEC: --- {spec_excerpt} ---
 class UXDesignToolAgent:
     """
     UX Design tool agent: user experience, user flows, interaction design.
-    
+
     Participates in Implementation phase only per the matrix.
     """
 
@@ -123,19 +123,35 @@ class UXDesignToolAgent:
 
     def execute(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Implementation phase: generate or update UX design artifacts.
-        
+
         Writes to disk as fixes are applied; returns files_written so implementation phase does not overwrite.
         """
         fixes_applied: List[str] = []
         files_written: List[str] = []
         current_files: Dict[str, str] = dict(inp.current_files or {})
-        
-        existing_doc = inp.current_files.get(planning_asset_path("ux_design.md")) if inp.current_files else None
+
+        existing_doc = (
+            inp.current_files.get(planning_asset_path("ux_design.md"))
+            if inp.current_files
+            else None
+        )
         ux_issues = [
-            i for i in inp.review_issues
-            if any(kw in i.lower() for kw in ["ux", "persona", "journey", "flow", "usability", "user experience", "interaction"])
+            i
+            for i in inp.review_issues
+            if any(
+                kw in i.lower()
+                for kw in [
+                    "ux",
+                    "persona",
+                    "journey",
+                    "flow",
+                    "usability",
+                    "user experience",
+                    "interaction",
+                ]
+            )
         ]
-        
+
         if ux_issues and self.llm:
             logger.info(
                 "UXDesign: handling %d review issue(s) (will apply fixes in one update and write to disk).",
@@ -163,7 +179,7 @@ class UXDesignToolAgent:
                 "UXDesign: fixed %d review issue(s) in one update (all fixes written to planning artifacts).",
                 len(ux_issues),
             )
-        
+
         if existing_doc and not ux_issues:
             return ToolAgentPhaseOutput(
                 summary="UX Design artifacts preserved (no changes needed).",
@@ -181,20 +197,22 @@ class UXDesignToolAgent:
                 recommendations=fixes_applied if fixes_applied else [],
                 files_written=files_written,
             )
-        
+
         if not self.llm:
             return ToolAgentPhaseOutput(
                 summary="UX Design execute skipped (no LLM).",
                 recommendations=["Define user personas", "Map user journeys"],
                 files_written=[],
             )
-        
+
         spec_content = inp.spec_content or ""
         prompt = UX_DESIGN_IMPLEMENTATION_PROMPT.format(
             spec_content=spec_content[:6000],
         )
         raw_text = complete_text_with_continuation(
-            self.llm, prompt, agent_name="UXDesign",
+            self.llm,
+            prompt,
+            agent_name="UXDesign",
         )
         data = parse_planning_tool_output(raw_text)
         component_design = data.get("component_design") or []
@@ -226,7 +244,7 @@ class UXDesignToolAgent:
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content, encoding="utf-8")
             files_written.append(rel_path)
-        
+
         return ToolAgentPhaseOutput(
             summary=data.get("summary", "UX Design artifacts generated."),
             files={},
@@ -260,13 +278,17 @@ class UXDesignToolAgent:
 
         prompt = UX_DESIGN_FIX_SINGLE_ISSUE_PROMPT.format(
             issue=issue,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="UXDesign_FixSingleIssue",
+                self.llm,
+                prompt,
+                agent_name="UXDesign_FixSingleIssue",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -283,11 +305,18 @@ class UXDesignToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "UXDesign_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "UXDesign_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(ux_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(ux_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("ux_design.md")] = updated_content
                         logger.info("UXDesign: fix applied after continuation (single-issue).")
@@ -300,25 +329,44 @@ class UXDesignToolAgent:
                     logger.info("UXDesign: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
                         logger.info("UXDesign: fix applied (single-issue) — %s", fix_desc[:120])
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "UXDesign_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "UXDesign_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(ux_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(ux_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("ux_design.md")] = uc
                         logger.info("UXDesign: fix applied after continuation (single-issue).")
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
-                                logger.info("UXDesign: fix applied after continuation (single-issue).")
+                                logger.info(
+                                    "UXDesign: fix applied after continuation (single-issue)."
+                                )
                                 break
                         else:
                             logger.warning(
@@ -339,9 +387,7 @@ class UXDesignToolAgent:
                 resolved=False,
             )
 
-    def fix_all_issues(
-        self, issues: List[str], inp: ToolAgentPhaseInput
-    ) -> ToolAgentPhaseOutput:
+    def fix_all_issues(self, issues: List[str], inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Fix all listed UX design issues in one LLM call."""
         if not issues:
             return ToolAgentPhaseOutput(
@@ -366,13 +412,17 @@ class UXDesignToolAgent:
         issues_list = "\n".join(f"{i + 1}. {issue}" for i, issue in enumerate(issues))
         prompt = UX_DESIGN_FIX_ALL_ISSUES_PROMPT.format(
             issues_list=issues_list,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="UXDesign_FixAllIssues",
+                self.llm,
+                prompt,
+                agent_name="UXDesign_FixAllIssues",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -389,11 +439,18 @@ class UXDesignToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "UXDesign_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "UXDesign_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(ux_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(ux_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("ux_design.md")] = updated_content
                     else:
@@ -404,21 +461,38 @@ class UXDesignToolAgent:
                     files[planning_asset_path("ux_design.md")] = updated_content
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "UXDesign_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "UXDesign_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(ux_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(ux_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("ux_design.md")] = uc
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
                                 break
                         else:

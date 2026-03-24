@@ -9,7 +9,9 @@ from ..models import IntakeResult, Microtask, PlanningResult, ToolAgentKind
 from ..prompts import PLANNING_PROMPT
 
 
-def run_planning(*, llm: LLMClient, task: Task, intake_result: IntakeResult, spec_content: str) -> PlanningResult:
+def run_planning(
+    *, llm: LLMClient, task: Task, intake_result: IntakeResult, spec_content: str
+) -> PlanningResult:
     prompt = (
         f"{PLANNING_PROMPT}\n\n"
         f"Goal: {intake_result.system_goal}\n"

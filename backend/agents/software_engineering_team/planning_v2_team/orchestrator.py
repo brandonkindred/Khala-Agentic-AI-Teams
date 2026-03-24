@@ -132,10 +132,10 @@ def _convert_clarifications_to_pending_questions(
     clarification_questions: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Convert tool agent clarification questions to pending question format.
-    
+
     Tool agents produce questions in the format:
         {"source": "devops", "question_text": "What is the deployment target?"}
-    
+
     This converts them to the job_store pending question format with sensible defaults.
     """
     pending: List[Dict[str, Any]] = []
@@ -144,51 +144,139 @@ def _convert_clarifications_to_pending_questions(
         question_text = q.get("question_text", "")
         if not question_text:
             continue
-        
+
         question_id = f"clarify-{source}-{uuid.uuid4().hex[:8]}"
-        
+
         options = _generate_options_for_question(question_text, source)
-        
-        pending.append({
-            "id": question_id,
-            "question_text": question_text,
-            "context": f"This question was raised by the {source.upper()} agent during planning.",
-            "options": options,
-            "allow_multiple": False,
-            "required": True,
-            "source": f"planning_v2_{source}",
-            "category": "clarification",
-            "priority": "medium",
-        })
+
+        pending.append(
+            {
+                "id": question_id,
+                "question_text": question_text,
+                "context": f"This question was raised by the {source.upper()} agent during planning.",
+                "options": options,
+                "allow_multiple": False,
+                "required": True,
+                "source": f"planning_v2_{source}",
+                "category": "clarification",
+                "priority": "medium",
+            }
+        )
     return pending
 
 
 def _generate_options_for_question(question_text: str, source: str) -> List[Dict[str, Any]]:
     """Generate sensible default options based on the question content."""
     question_lower = question_text.lower()
-    
+
     if source == "devops":
         if "deployment" in question_lower or "deploy" in question_lower:
             return [
-                {"id": "aws", "label": "AWS (EC2/ECS/Lambda)", "is_default": False, "rationale": "Popular cloud provider", "confidence": 0.0},
-                {"id": "gcp", "label": "Google Cloud Platform", "is_default": False, "rationale": "Popular cloud provider", "confidence": 0.0},
-                {"id": "azure", "label": "Microsoft Azure", "is_default": False, "rationale": "Popular cloud provider", "confidence": 0.0},
-                {"id": "heroku", "label": "Heroku", "is_default": False, "rationale": "Simple PaaS option", "confidence": 0.0},
-                {"id": "digitalocean", "label": "DigitalOcean", "is_default": False, "rationale": "Developer-friendly hosting", "confidence": 0.0},
-                {"id": "vercel", "label": "Vercel", "is_default": False, "rationale": "Good for frontend/JAMstack", "confidence": 0.0},
-                {"id": "docker", "label": "Docker/Kubernetes (self-hosted)", "is_default": False, "rationale": "Container-based deployment", "confidence": 0.0},
-                {"id": "other", "label": "Other (specify in text field)", "is_default": False, "rationale": "", "confidence": 0.0},
+                {
+                    "id": "aws",
+                    "label": "AWS (EC2/ECS/Lambda)",
+                    "is_default": False,
+                    "rationale": "Popular cloud provider",
+                    "confidence": 0.0,
+                },
+                {
+                    "id": "gcp",
+                    "label": "Google Cloud Platform",
+                    "is_default": False,
+                    "rationale": "Popular cloud provider",
+                    "confidence": 0.0,
+                },
+                {
+                    "id": "azure",
+                    "label": "Microsoft Azure",
+                    "is_default": False,
+                    "rationale": "Popular cloud provider",
+                    "confidence": 0.0,
+                },
+                {
+                    "id": "heroku",
+                    "label": "Heroku",
+                    "is_default": False,
+                    "rationale": "Simple PaaS option",
+                    "confidence": 0.0,
+                },
+                {
+                    "id": "digitalocean",
+                    "label": "DigitalOcean",
+                    "is_default": False,
+                    "rationale": "Developer-friendly hosting",
+                    "confidence": 0.0,
+                },
+                {
+                    "id": "vercel",
+                    "label": "Vercel",
+                    "is_default": False,
+                    "rationale": "Good for frontend/JAMstack",
+                    "confidence": 0.0,
+                },
+                {
+                    "id": "docker",
+                    "label": "Docker/Kubernetes (self-hosted)",
+                    "is_default": False,
+                    "rationale": "Container-based deployment",
+                    "confidence": 0.0,
+                },
+                {
+                    "id": "other",
+                    "label": "Other (specify in text field)",
+                    "is_default": False,
+                    "rationale": "",
+                    "confidence": 0.0,
+                },
             ]
         if "ci" in question_lower or "continuous" in question_lower:
             return [
-                {"id": "github_actions", "label": "GitHub Actions", "is_default": False, "rationale": "Integrated with GitHub", "confidence": 0.0},
-                {"id": "gitlab_ci", "label": "GitLab CI/CD", "is_default": False, "rationale": "Integrated with GitLab", "confidence": 0.0},
-                {"id": "jenkins", "label": "Jenkins", "is_default": False, "rationale": "Traditional CI/CD server", "confidence": 0.0},
-                {"id": "circleci", "label": "CircleCI", "is_default": False, "rationale": "Cloud CI service", "confidence": 0.0},
-                {"id": "other", "label": "Other (specify in text field)", "is_default": False, "rationale": "", "confidence": 0.0},
+                {
+                    "id": "github_actions",
+                    "label": "GitHub Actions",
+                    "is_default": False,
+                    "rationale": "Integrated with GitHub",
+                    "confidence": 0.0,
+                },
+                {
+                    "id": "gitlab_ci",
+                    "label": "GitLab CI/CD",
+                    "is_default": False,
+                    "rationale": "Integrated with GitLab",
+                    "confidence": 0.0,
+                },
+                {
+                    "id": "jenkins",
+                    "label": "Jenkins",
+                    "is_default": False,
+                    "rationale": "Traditional CI/CD server",
+                    "confidence": 0.0,
+                },
+                {
+                    "id": "circleci",
+                    "label": "CircleCI",
+                    "is_default": False,
+                    "rationale": "Cloud CI service",
+                    "confidence": 0.0,
+                },
+                {
+                    "id": "other",
+                    "label": "Other (specify in text field)",
+                    "is_default": False,
+                    "rationale": "",
+                    "confidence": 0.0,
+                },
             ]
-    
-    return [{"id": "other", "label": "Provide answer in text field", "is_default": True, "rationale": "", "confidence": 0.0}]
+
+    return [
+        {
+            "id": "other",
+            "label": "Provide answer in text field",
+            "is_default": True,
+            "rationale": "",
+            "confidence": 0.0,
+        }
+    ]
 
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
@@ -217,14 +305,14 @@ def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:
 class PlanningV2PlanningAgent:
     """
     Layer 2: Planning Agent that orchestrates the 8 tool agents across 4 phases.
-    
+
     Phases: Planning -> Implementation -> Review -> Deliver
-    
+
     When Review finds issues, they are passed back to Implementation for fixing.
     Implementation agents decide how to handle fixes (batch, one-by-one, or all at once).
-    
+
     Called by PlanningV2ProductLead after initial spec intake.
-    
+
     This agent expects to receive a pre-validated, complete specification.
     No spec review or expansion is performed.
     """
@@ -245,12 +333,12 @@ class PlanningV2PlanningAgent:
         prd_content: Optional[str] = None,
     ) -> PlanningV2WorkflowResult:
         """Execute the planning workflow using tool agents.
-        
+
         The planning team expects (1) a spec and (2) a product requirements document
         (PRD). Both are written under plan/planning_team at init for downstream phases.
         Spec comes from spec_content or from disk (get_latest_spec_path); PRD from
         prd_content if provided, else copied from plan/product_analysis or plan/.
-        
+
         Args:
             spec_content: The pre-validated specification content to plan from.
                          This should be a complete spec that requires no expansion.
@@ -263,7 +351,7 @@ class PlanningV2PlanningAgent:
         """
         start_time = time.monotonic()
         result = PlanningV2WorkflowResult()
-        
+
         current_files: Dict[str, str] = {}
         hierarchy: Optional[PlanningHierarchy] = None
 
@@ -282,24 +370,34 @@ class PlanningV2PlanningAgent:
         validated_spec_src = repo_path / "plan" / "product_analysis" / "validated_spec.md"
         if validated_spec_src.exists():
             shutil.copy2(validated_spec_src, planning_team_dir / "updated_spec.md")
-            logger.info("Planning-v2: copied validated_spec from plan/product_analysis to plan/planning_team/updated_spec.md")
+            logger.info(
+                "Planning-v2: copied validated_spec from plan/product_analysis to plan/planning_team/updated_spec.md"
+            )
         else:
             try:
                 from spec_parser import get_latest_spec_path
+
                 src = get_latest_spec_path(repo_path)
                 shutil.copy2(src, planning_team_dir / "updated_spec.md")
-                logger.info("Planning-v2: copied latest spec to plan/planning_team/updated_spec.md (from %s)", src)
+                logger.info(
+                    "Planning-v2: copied latest spec to plan/planning_team/updated_spec.md (from %s)",
+                    src,
+                )
             except FileNotFoundError as e:
                 logger.warning("Planning-v2: no spec file to copy into plan/planning_team: %s", e)
         # PRD: use in-memory prd_content if provided, else copy from disk (product_analysis first, then plan root)
         if prd_content is not None and prd_content.strip():
-            (planning_team_dir / "product_requirements_document.md").write_text(prd_content, encoding="utf-8")
+            (planning_team_dir / "product_requirements_document.md").write_text(
+                prd_content, encoding="utf-8"
+            )
             logger.info("Planning-v2: wrote PRD from in-memory content to plan/planning_team/")
         else:
             prd_src = repo_path / "plan" / "product_analysis" / "product_requirements_document.md"
             if prd_src.exists():
                 shutil.copy2(prd_src, planning_team_dir / "product_requirements_document.md")
-                logger.info("Planning-v2: copied PRD from plan/product_analysis to plan/planning_team/")
+                logger.info(
+                    "Planning-v2: copied PRD from plan/product_analysis to plan/planning_team/"
+                )
             else:
                 prd_src = repo_path / "plan" / "product_requirements_document.md"
                 if prd_src.exists():
@@ -364,7 +462,7 @@ class PlanningV2PlanningAgent:
                     "Planning-v2: Sent %d clarification questions to Open Questions UI",
                     len(pending_questions),
                 )
-                
+
                 wait_start = time.time()
                 while time.time() - wait_start < MAX_CLARIFICATION_WAIT_SECONDS:
                     if not is_waiting_for_answers(job_id):
@@ -385,17 +483,22 @@ class PlanningV2PlanningAgent:
             if issue_count > 0:
                 logger.info(
                     "Planning-v2: Next step -> Starting Phase 2: Implementation (iteration %d/%d, fixing %d review issues)",
-                    iteration, MAX_REVIEW_ITERATIONS, issue_count,
+                    iteration,
+                    MAX_REVIEW_ITERATIONS,
+                    issue_count,
                 )
                 grouped = group_issues_by_agent(review_result.issues)
                 counts_segment, synopsis_segment = format_issues_breakdown_and_synopsis(grouped)
-                status_text = f"Fixing {issue_count} issues: {counts_segment} (iteration {iteration})"
+                status_text = (
+                    f"Fixing {issue_count} issues: {counts_segment} (iteration {iteration})"
+                )
                 if synopsis_segment:
                     status_text = f"{status_text}. {synopsis_segment}"
             else:
                 logger.info(
                     "Planning-v2: Next step -> Starting Phase 2: Implementation (iteration %d/%d)",
-                    iteration, MAX_REVIEW_ITERATIONS,
+                    iteration,
+                    MAX_REVIEW_ITERATIONS,
                 )
                 status_text = (
                     f"Writing system design, architecture, user stories, DevOps, UI design, "
@@ -422,9 +525,7 @@ class PlanningV2PlanningAgent:
                     review_result=review_result,
                 )
                 result.implementation_result = implementation_result
-                current_files.update({
-                    a: "" for a in implementation_result.assets_created
-                })
+                current_files.update({a: "" for a in implementation_result.assets_created})
             except Exception as exc:
                 result.failure_reason = f"Implementation failed (iter {iteration}): {exc}"
                 logger.error("Planning-v2: %s", result.failure_reason)
@@ -506,14 +607,14 @@ class PlanningV2PlanningAgent:
 class PlanningV2ProductLead:
     """
     Layer 1: Product Lead that handles spec intake, inspiration, and feedback.
-    
+
     Top layer of the 3-layer architecture. Delegates to PlanningV2PlanningAgent.
-    
+
     This team expects to receive a pre-validated, complete specification. Use the
     Product Requirements Analysis agent or similar upstream process to validate
     specs before passing them to Planning V2. The team will not expand or
     clarify the specification.
-    
+
     Optionally runs Product Requirements Analysis first to get a validated spec.
     """
 
@@ -535,18 +636,18 @@ class PlanningV2ProductLead:
     ) -> PlanningV2WorkflowResult:
         """
         Execute the full planning-v2 workflow.
-        
+
         The Product Lead handles initial spec intake and then delegates to
         the Planning Agent for the planning workflow.
-        
+
         The planning team expects (1) a spec (via spec_content/validated_spec_content
         or from disk) and (2) a product requirements document (PRD). Both are
         written under plan/planning_team at init. PRD can be passed as prd_content
         or is copied from plan/product_analysis or plan/ when present.
-        
+
         Important: This team expects a pre-validated, complete specification.
         No spec review or expansion is performed.
-        
+
         Args:
             spec_content: The pre-validated specification content to plan from.
                          This should be a complete spec that requires no expansion.
@@ -563,35 +664,37 @@ class PlanningV2ProductLead:
                          and written to plan/planning_team (skips disk copy).
         """
         logger.info("Planning-v2 Product Lead: starting workflow")
-        
+
         def _update_job(**kwargs: Any) -> None:
             if job_updater:
                 try:
                     job_updater(**kwargs)
                 except Exception:
                     pass
-        
+
         _update_job(current_phase="intake", progress=2, status_text="Ingesting specification")
-        
+
         # Use validated spec if provided, or run Product Analysis if requested
         final_spec = spec_content
-        
+
         if validated_spec_content:
             logger.info("Planning-v2: Using pre-validated spec content")
             final_spec = validated_spec_content
         elif use_product_analysis:
             logger.info("Planning-v2: Running Product Requirements Analysis first")
             _update_job(current_phase="product_analysis", progress=3)
-            
+
             try:
                 from product_requirements_analysis_agent import ProductRequirementsAnalysisAgent
                 from spec_parser import gather_context_files
-                
+
                 # Gather context files for PRA agent
                 context_files = gather_context_files(repo_path)
                 if context_files:
-                    logger.info("Planning-v2: Gathered %d context files for PRA", len(context_files))
-                
+                    logger.info(
+                        "Planning-v2: Gathered %d context files for PRA", len(context_files)
+                    )
+
                 analysis_agent = ProductRequirementsAnalysisAgent(self.llm)
                 analysis_result = analysis_agent.run_workflow(
                     spec_content=spec_content,
@@ -600,12 +703,10 @@ class PlanningV2ProductLead:
                     job_updater=job_updater,
                     context_files=context_files,
                 )
-                
+
                 if analysis_result.success and analysis_result.final_spec_content:
                     final_spec = analysis_result.final_spec_content
-                    logger.info(
-                        "Planning-v2: Product Analysis complete - using validated spec"
-                    )
+                    logger.info("Planning-v2: Product Analysis complete - using validated spec")
                 else:
                     logger.warning(
                         "Planning-v2: Product Analysis did not produce validated spec, "
@@ -621,7 +722,7 @@ class PlanningV2ProductLead:
                     "Planning-v2: Product Analysis failed (%s), proceeding with original spec",
                     exc,
                 )
-        
+
         # When no validated_spec_content was provided, try loading latest spec from repo (validated_spec, updated_spec, etc.)
         if not validated_spec_content:
             try:
@@ -636,10 +737,8 @@ class PlanningV2ProductLead:
             except FileNotFoundError:
                 pass  # Keep final_spec from spec_content or PRA result
             except Exception as exc:
-                logger.warning(
-                    "Planning-v2: Could not read latest spec from repo: %s", exc
-                )
-        
+                logger.warning("Planning-v2: Could not read latest spec from repo: %s", exc)
+
         planning_agent = PlanningV2PlanningAgent(self.llm)
         result = planning_agent.run_workflow(
             spec_content=final_spec,
@@ -649,8 +748,10 @@ class PlanningV2ProductLead:
             job_id=job_id,
             prd_content=prd_content,
         )
-        
-        logger.info("Planning-v2 Product Lead: workflow %s", "succeeded" if result.success else "failed")
+
+        logger.info(
+            "Planning-v2 Product Lead: workflow %s", "succeeded" if result.success else "failed"
+        )
         return result
 
 
@@ -658,7 +759,8 @@ class PlanningV2ProductLead:
 class PlanningV2TeamLead(PlanningV2ProductLead):
     """
     Backward-compatible alias for PlanningV2ProductLead.
-    
+
     Use PlanningV2ProductLead or PlanningV2PlanningAgent directly for new code.
     """
+
     pass

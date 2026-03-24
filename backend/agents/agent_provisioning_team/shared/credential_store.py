@@ -99,7 +99,7 @@ class CredentialStore:
     ) -> None:
         """Store credentials for a tool, encrypted at rest."""
         path = self._agent_file(agent_id)
-        
+
         existing: Dict[str, Dict[str, Any]] = {}
         if path.exists():
             try:
@@ -108,9 +108,9 @@ class CredentialStore:
                 existing = json.loads(decrypted.decode())
             except Exception:
                 existing = {}
-        
+
         existing[tool_name] = credentials
-        
+
         encrypted = self.fernet.encrypt(json.dumps(existing).encode())
         path.write_bytes(encrypted)
         path.chmod(0o600)
@@ -122,15 +122,15 @@ class CredentialStore:
     ) -> Optional[Dict[str, Any]]:
         """Retrieve credentials for an agent (all or specific tool)."""
         path = self._agent_file(agent_id)
-        
+
         if not path.exists():
             return None
-        
+
         try:
             encrypted = path.read_bytes()
             decrypted = self.fernet.decrypt(encrypted)
             all_creds = json.loads(decrypted.decode())
-            
+
             if tool_name:
                 return all_creds.get(tool_name)
             return all_creds
@@ -147,8 +147,4 @@ class CredentialStore:
 
     def list_agents(self) -> List[str]:
         """List all agent IDs with stored credentials."""
-        return [
-            f.stem
-            for f in self.storage_dir.glob("*.enc")
-            if f.is_file()
-        ]
+        return [f.stem for f in self.storage_dir.glob("*.enc") if f.is_file()]

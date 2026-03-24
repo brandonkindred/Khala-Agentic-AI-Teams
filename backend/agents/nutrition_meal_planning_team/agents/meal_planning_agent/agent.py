@@ -41,7 +41,9 @@ def _summarize_history(entries: List[MealHistoryEntry]) -> str:
         if e.feedback:
             if e.feedback.rating is not None and e.feedback.rating >= 4:
                 hits.append(name)
-            elif e.feedback.would_make_again is False or (e.feedback.rating is not None and e.feedback.rating <= 2):
+            elif e.feedback.would_make_again is False or (
+                e.feedback.rating is not None and e.feedback.rating <= 2
+            ):
                 misses.append(name)
     lines = []
     if hits:
@@ -80,7 +82,7 @@ class MealPlanningAgent:
             + str(period_days)
             + " days, meal types: "
             + ", ".join(meal_types)
-            + ". Output JSON: {\"suggestions\": [ ... ]} with each item having name, ingredients, portions_servings, prep_time_minutes, cook_time_minutes, rationale, meal_type, suggested_date."
+            + '. Output JSON: {"suggestions": [ ... ]} with each item having name, ingredients, portions_servings, prep_time_minutes, cook_time_minutes, rationale, meal_type, suggested_date.'
         )
 
         try:

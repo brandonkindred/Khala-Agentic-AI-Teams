@@ -73,7 +73,17 @@ FRONTEND_CODE_REVIEW_CHECKLIST = (
 )
 
 # Lightweight path: skip design for implementation-only or fix tasks
-LIGHTWEIGHT_KEYWORDS = ("fix", "resolve", "update", "patch", "correct", "remediate", "refactor", "adjust", "tweak")
+LIGHTWEIGHT_KEYWORDS = (
+    "fix",
+    "resolve",
+    "update",
+    "patch",
+    "correct",
+    "remediate",
+    "refactor",
+    "adjust",
+    "tweak",
+)
 LIGHTWEIGHT_MAX_DESC_LEN = 400
 
 
@@ -186,15 +196,15 @@ class FrontendOrchestratorAgent:
         from software_engineering_team.shared.command_runner import (
             ensure_frontend_dependencies_installed,
         )
+
         install_result = ensure_frontend_dependencies_installed(repo_path)
         if not install_result.success:
             checkout_branch(repo_path, DEVELOPMENT_BRANCH)
             return FrontendWorkflowResult(
                 task_id=task_id,
                 success=False,
-                failure_reason="Frontend dependency install failed: " + (
-                    install_result.error_summary or install_result.stderr or "unknown"
-                ),
+                failure_reason="Frontend dependency install failed: "
+                + (install_result.error_summary or install_result.stderr or "unknown"),
             )
 
         # --- Design phase (skip for lightweight tasks) ---
@@ -210,43 +220,53 @@ class FrontendOrchestratorAgent:
         spec_truncated = _truncate_for_context(spec_content, max_spec)
 
         if not use_lightweight:
-            logger.info("[%s] Frontend team: running design phase (UX -> UI -> Design System)", task_id)
-            ux_output = self.ux_designer.run(UXDesignerInput(
-                task_description=task.description,
-                task_id=task_id,
-                spec_content=spec_truncated,
-                architecture=architecture,
-                user_story=getattr(task, "user_story", "") or "",
-            ))
-            ui_output = self.ui_designer.run(UIDesignerInput(
+            logger.info(
+                "[%s] Frontend team: running design phase (UX -> UI -> Design System)", task_id
+            )
+            ux_output = self.ux_designer.run(
+                UXDesignerInput(
+                    task_description=task.description,
+                    task_id=task_id,
+                    spec_content=spec_truncated,
+                    architecture=architecture,
+                    user_story=getattr(task, "user_story", "") or "",
+                )
+            )
+            ui_output = self.ui_designer.run(
+                UIDesignerInput(
+                    task_description=task.description,
+                    task_id=task_id,
+                    spec_content=spec_truncated,
+                    architecture=architecture,
+                    user_story=getattr(task, "user_story", "") or "",
+                    ux_output=ux_output,
+                )
+            )
+            design_system_output = self.design_system.run(
+                DesignSystemInput(
+                    task_description=task.description,
+                    task_id=task_id,
+                    spec_content=spec_truncated,
+                    architecture=architecture,
+                    user_story=getattr(task, "user_story", "") or "",
+                    ui_output=ui_output,
+                )
+            )
+
+        # --- Architecture phase (always run) ---
+        logger.info("[%s] Frontend team: running architecture phase", task_id)
+        architect_output = self.frontend_architect.run(
+            FrontendArchitectInput(
                 task_description=task.description,
                 task_id=task_id,
                 spec_content=spec_truncated,
                 architecture=architecture,
                 user_story=getattr(task, "user_story", "") or "",
                 ux_output=ux_output,
-            ))
-            design_system_output = self.design_system.run(DesignSystemInput(
-                task_description=task.description,
-                task_id=task_id,
-                spec_content=spec_truncated,
-                architecture=architecture,
-                user_story=getattr(task, "user_story", "") or "",
                 ui_output=ui_output,
-            ))
-
-        # --- Architecture phase (always run) ---
-        logger.info("[%s] Frontend team: running architecture phase", task_id)
-        architect_output = self.frontend_architect.run(FrontendArchitectInput(
-            task_description=task.description,
-            task_id=task_id,
-            spec_content=spec_truncated,
-            architecture=architecture,
-            user_story=getattr(task, "user_story", "") or "",
-            ux_output=ux_output,
-            ui_output=ui_output,
-            design_system_output=design_system_output,
-        ))
+                design_system_output=design_system_output,
+            )
+        )
 
         artifact_context = build_feature_implementation_context(
             ux=ux_output,
@@ -290,31 +310,46 @@ class FrontendOrchestratorAgent:
                     existing_code=existing_code,
                     spec_content=spec_content,
                     architecture=architecture,
-                    api_endpoints=api_endpoints if api_endpoints != "# No code files found" else None,
+                    api_endpoints=api_endpoints
+                    if api_endpoints != "# No code files found"
+                    else None,
                 )
                 if plan_text:
-                    logger.info("[%s] Orchestrator: planning complete, plan length=%d chars", task_id, len(plan_text))
+                    logger.info(
+                        "[%s] Orchestrator: planning complete, plan length=%d chars",
+                        task_id,
+                        len(plan_text),
+                    )
 
-            result = self.feature_agent.run(FrontendInput(
-                task_description=current_task.description,
-                requirements=enriched_requirements,
-                user_story=getattr(current_task, "user_story", "") or "",
-                spec_content=spec_truncated,
-                architecture=architecture,
-                existing_code=existing_code if existing_code != "# No code files found" else None,
-                api_endpoints=api_endpoints if api_endpoints != "# No code files found" else None,
-                qa_issues=qa_issues,
-                security_issues=sec_issues,
-                accessibility_issues=a11y_issues,
-                code_review_issues=code_review_issues,
-                suggested_tests_from_qa=suggested_tests_from_qa,
-                task_plan=plan_text if plan_text else None,
-            ))
+            result = self.feature_agent.run(
+                FrontendInput(
+                    task_description=current_task.description,
+                    requirements=enriched_requirements,
+                    user_story=getattr(current_task, "user_story", "") or "",
+                    spec_content=spec_truncated,
+                    architecture=architecture,
+                    existing_code=existing_code
+                    if existing_code != "# No code files found"
+                    else None,
+                    api_endpoints=api_endpoints
+                    if api_endpoints != "# No code files found"
+                    else None,
+                    qa_issues=qa_issues,
+                    security_issues=sec_issues,
+                    accessibility_issues=a11y_issues,
+                    code_review_issues=code_review_issues,
+                    suggested_tests_from_qa=suggested_tests_from_qa,
+                    task_plan=plan_text if plan_text else None,
+                )
+            )
 
             if result.needs_clarification and result.clarification_requests:
                 if tech_lead and iteration_round < MAX_CLARIFICATION_REFINEMENTS:
                     current_task = tech_lead.refine_task(
-                        current_task, result.clarification_requests, spec_content, architecture,
+                        current_task,
+                        result.clarification_requests,
+                        spec_content,
+                        architecture,
                     )
                     code_review_issues = []
                     continue
@@ -345,19 +380,24 @@ class FrontendOrchestratorAgent:
                 if not install_res.success:
                     logger.warning(
                         "[%s] npm install for packages %s failed: %s",
-                        task_id, result.npm_packages_to_install, install_res.stderr[:500],
+                        task_id,
+                        result.npm_packages_to_install,
+                        install_res.stderr[:500],
                     )
 
             # ─── Lint verification (before build) ──────────────────────
             if linting_tool_agent is not None:
                 try:
                     from linting_tool_agent.models import LintToolInput as _LintInput
-                    lint_result = linting_tool_agent.run(_LintInput(
-                        repo_path=str(repo_path),
-                        agent_type="frontend",
-                        task_id=task_id,
-                        task_description=current_task.description,
-                    ))
+
+                    lint_result = linting_tool_agent.run(
+                        _LintInput(
+                            repo_path=str(repo_path),
+                            agent_type="frontend",
+                            task_id=task_id,
+                            task_description=current_task.description,
+                        )
+                    )
                     if not lint_result.execution_result.success:
                         logger.info(
                             "[%s] Orchestrator lint: %d issue(s), %d edit(s)",
@@ -389,7 +429,11 @@ class FrontendOrchestratorAgent:
                             if lint_files:
                                 write_agent_output(
                                     repo_path,
-                                    type("_LR", (), {"files": lint_files, "summary": lint_result.summary})(),
+                                    type(
+                                        "_LR",
+                                        (),
+                                        {"files": lint_files, "summary": lint_result.summary},
+                                    )(),
                                     subdir="",
                                 )
                         elif lint_result.linter_issues:
@@ -406,7 +450,8 @@ class FrontendOrchestratorAgent:
                 except Exception as lint_err:
                     logger.warning(
                         "[%s] Orchestrator lint step failed (non-blocking): %s",
-                        task_id, lint_err,
+                        task_id,
+                        lint_err,
                     )
 
             build_ok, build_errors = build_verifier(repo_path, "frontend", task_id)
@@ -439,67 +484,88 @@ class FrontendOrchestratorAgent:
                 if consecutive_same_build_failures >= 2 and build_fix_specialist is not None:
                     try:
                         from build_fix_specialist.models import BuildFixInput
+
                         affected_paths = _extract_affected_file_paths_from_frontend_build_errors(
-                            build_errors, repo_path,
+                            build_errors,
+                            repo_path,
                         )
-                        affected_code = _read_frontend_affected_files_code(repo_path, affected_paths)
-                        bf_result = build_fix_specialist.run(BuildFixInput(
-                            build_errors=build_errors[:4000],
-                            affected_files_code=affected_code,
-                            task_description=current_task.description,
-                        ))
+                        affected_code = _read_frontend_affected_files_code(
+                            repo_path, affected_paths
+                        )
+                        bf_result = build_fix_specialist.run(
+                            BuildFixInput(
+                                build_errors=build_errors[:4000],
+                                affected_files_code=affected_code,
+                                task_description=current_task.description,
+                            )
+                        )
                         if bf_result.edits:
                             ok_apply, msg_apply, files_dict = _apply_frontend_build_fix_edits(
-                                repo_path, bf_result.edits,
+                                repo_path,
+                                bf_result.edits,
                             )
                             if ok_apply and files_dict:
                                 ok_write, _ = write_agent_output(
                                     repo_path,
-                                    type("_BF", (), {"files": files_dict, "summary": bf_result.summary})(),
+                                    type(
+                                        "_BF",
+                                        (),
+                                        {"files": files_dict, "summary": bf_result.summary},
+                                    )(),
                                     subdir="",
                                 )
                                 if ok_write:
                                     logger.info(
                                         "[%s] WORKFLOW   BuildFixSpecialist applied %d edit(s), re-running build",
-                                        task_id, len(files_dict),
+                                        task_id,
+                                        len(files_dict),
                                     )
                                     continue
                     except Exception as bf_err:
                         logger.warning(
                             "[%s] WORKFLOW   BuildFixSpecialist failed (non-blocking): %s",
-                            task_id, bf_err,
+                            task_id,
+                            bf_err,
                         )
 
                 # Invoke testing sub-agent to analyze build errors and produce fix recommendations
                 code_on_branch = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
                 from qa_agent.models import QAInput as QAI
-                qa_fix_result = qa_agent.run(QAI(
-                    code=code_on_branch,
-                    language="typescript",
-                    task_description=current_task.description,
-                    architecture=architecture,
-                    build_errors=build_errors[:4000],
-                    request_mode="fix_build",
-                ))
+
+                qa_fix_result = qa_agent.run(
+                    QAI(
+                        code=code_on_branch,
+                        language="typescript",
+                        task_description=current_task.description,
+                        architecture=architecture,
+                        build_errors=build_errors[:4000],
+                        request_mode="fix_build",
+                    )
+                )
                 qa_issues = [
                     b.model_dump() if hasattr(b, "model_dump") else b.dict()
                     for b in (qa_fix_result.bugs_found or [])
                 ]
                 if not qa_issues:
-                    qa_issues = [{
-                        "severity": "critical",
-                        "description": f"Build failed: {build_errors[:2000]}",
-                        "recommendation": "Fix the compilation errors",
-                    }]
+                    qa_issues = [
+                        {
+                            "severity": "critical",
+                            "description": f"Build failed: {build_errors[:2000]}",
+                            "recommendation": "Fix the compilation errors",
+                        }
+                    ]
                 if consecutive_same_build_failures >= 2:
-                    qa_issues.insert(0, {
-                        "severity": "critical",
-                        "description": (
-                            f"ESCALATION: This build error has occurred {consecutive_same_build_failures} times. "
-                            "Focus ONLY on fixing this specific error. Make minimal, targeted changes."
-                        ),
-                        "recommendation": "Apply the minimal fix indicated by the error message.",
-                    })
+                    qa_issues.insert(
+                        0,
+                        {
+                            "severity": "critical",
+                            "description": (
+                                f"ESCALATION: This build error has occurred {consecutive_same_build_failures} times. "
+                                "Focus ONLY on fixing this specific error. Make minimal, targeted changes."
+                            ),
+                            "recommendation": "Apply the minimal fix indicated by the error message.",
+                        },
+                    )
                 code_review_issues = []
                 continue
 
@@ -511,13 +577,16 @@ class FrontendOrchestratorAgent:
                 write_tests_requested = True
                 code_on_branch = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
                 from qa_agent.models import QAInput as QAI
-                qa_tests_result = qa_agent.run(QAI(
-                    code=code_on_branch,
-                    language="typescript",
-                    task_description=current_task.description,
-                    architecture=architecture,
-                    request_mode="write_tests",
-                ))
+
+                qa_tests_result = qa_agent.run(
+                    QAI(
+                        code=code_on_branch,
+                        language="typescript",
+                        task_description=current_task.description,
+                        architecture=architecture,
+                        request_mode="write_tests",
+                    )
+                )
                 tests_dict = {}
                 if qa_tests_result.unit_tests:
                     tests_dict["unit_tests"] = qa_tests_result.unit_tests
@@ -533,26 +602,32 @@ class FrontendOrchestratorAgent:
                 compute_code_review_total_chars,
                 compute_existing_code_chars,
             )
+
             max_code = compute_existing_code_chars(self.feature_agent.llm)
             max_review = compute_code_review_total_chars(self.feature_agent.llm)
             existing_code_ctx = _truncate_for_context(code_on_branch, max_code)
             from code_review_agent.models import CodeReviewInput
+
             code_for_review = _truncate_for_context(code_on_branch, max_review)
 
             task_reqs_with_checklist = _task_requirements(current_task)
             if FRONTEND_CODE_REVIEW_CHECKLIST:
-                task_reqs_with_checklist += "\n\n**Frontend checklist:** " + FRONTEND_CODE_REVIEW_CHECKLIST
+                task_reqs_with_checklist += (
+                    "\n\n**Frontend checklist:** " + FRONTEND_CODE_REVIEW_CHECKLIST
+                )
 
-            review_result = code_review_agent.run(CodeReviewInput(
-                code=code_for_review,
-                spec_content=spec_content,
-                task_description=current_task.description,
-                task_requirements=task_reqs_with_checklist,
-                acceptance_criteria=getattr(current_task, "acceptance_criteria", []) or [],
-                language="typescript",
-                architecture=architecture,
-                existing_codebase=existing_code_ctx,
-            ))
+            review_result = code_review_agent.run(
+                CodeReviewInput(
+                    code=code_for_review,
+                    spec_content=spec_content,
+                    task_description=current_task.description,
+                    task_requirements=task_reqs_with_checklist,
+                    acceptance_criteria=getattr(current_task, "acceptance_criteria", []) or [],
+                    language="typescript",
+                    architecture=architecture,
+                    existing_codebase=existing_code_ctx,
+                )
+            )
             if not review_result.approved:
                 code_review_issues = [
                     i.model_dump() if hasattr(i, "model_dump") else i.dict()
@@ -571,14 +646,17 @@ class FrontendOrchestratorAgent:
                 code_for_verify = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
                 if code_for_verify and code_for_verify != "# No code files found":
                     from acceptance_verifier_agent.models import AcceptanceVerifierInput
-                    av_result = acceptance_verifier_agent.run(AcceptanceVerifierInput(
-                        code=code_for_verify,
-                        task_description=current_task.description,
-                        acceptance_criteria=current_task.acceptance_criteria,
-                        spec_content=spec_content,
-                        architecture=architecture,
-                        language="typescript",
-                    ))
+
+                    av_result = acceptance_verifier_agent.run(
+                        AcceptanceVerifierInput(
+                            code=code_for_verify,
+                            task_description=current_task.description,
+                            acceptance_criteria=current_task.acceptance_criteria,
+                            spec_content=spec_content,
+                            architecture=architecture,
+                            language="typescript",
+                        )
+                    )
                     if not av_result.all_satisfied:
                         unsatisfied = [c for c in av_result.per_criterion if not c.satisfied]
                         code_review_issues = [
@@ -604,67 +682,103 @@ class FrontendOrchestratorAgent:
             code_to_review = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
 
             # UX Engineer polish pass
-            ux_eng_result = self.ux_engineer.run(UXEngineerInput(
-                code=code_to_review[:30000],
-                task_description=current_task.description,
-                task_id=task_id,
-                architecture=architecture,
-            ))
+            ux_eng_result = self.ux_engineer.run(
+                UXEngineerInput(
+                    code=code_to_review[:30000],
+                    task_description=current_task.description,
+                    task_id=task_id,
+                    architecture=architecture,
+                )
+            )
             if not ux_eng_result.approved and ux_eng_result.issues:
                 code_review_issues = ux_eng_result.issues
                 if iteration_round < MAX_CODE_REVIEW_ITERATIONS - 1:
                     continue
 
             from qa_agent.models import QAInput
-            qa_result = qa_agent.run(QAInput(
-                code=code_to_review,
-                language="typescript",
-                task_description=current_task.description,
-                architecture=architecture,
-            ))
+
+            qa_result = qa_agent.run(
+                QAInput(
+                    code=code_to_review,
+                    language="typescript",
+                    task_description=current_task.description,
+                    architecture=architecture,
+                )
+            )
             from accessibility_agent.models import AccessibilityInput
+
             a11y_task_desc = current_task.description
             if FRONTEND_A11Y_CHECKLIST:
                 a11y_task_desc += "\n\n" + FRONTEND_A11Y_CHECKLIST
-            a11y_result = accessibility_agent.run(AccessibilityInput(
-                code=code_to_review,
-                language="typescript",
-                task_description=a11y_task_desc,
-                architecture=architecture,
-            ))
+            a11y_result = accessibility_agent.run(
+                AccessibilityInput(
+                    code=code_to_review,
+                    language="typescript",
+                    task_description=a11y_task_desc,
+                    architecture=architecture,
+                )
+            )
             from security_agent.models import SecurityInput
-            sec_result = security_agent.run(SecurityInput(
-                code=code_to_review,
-                language="typescript",
-                task_description=current_task.description,
-                architecture=architecture,
-                context=FRONTEND_SECURITY_CHECKLIST,
-            ))
 
-            qa_issues = [b.model_dump() if hasattr(b, "model_dump") else b.dict() for b in (qa_result.bugs_found or [])]
-            a11y_issues = [i.model_dump() if hasattr(i, "model_dump") else i.dict() for i in (a11y_result.issues or [])]
-            sec_issues = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in (sec_result.vulnerabilities or [])]
+            sec_result = security_agent.run(
+                SecurityInput(
+                    code=code_to_review,
+                    language="typescript",
+                    task_description=current_task.description,
+                    architecture=architecture,
+                    context=FRONTEND_SECURITY_CHECKLIST,
+                )
+            )
 
-            perf_result = self.performance_engineer.run(PerformanceEngineerInput(
-                code=code_to_review[:25000],
-                task_description=current_task.description,
-                task_id=task_id,
-                build_output="",
-                architecture=architecture,
-            ))
+            qa_issues = [
+                b.model_dump() if hasattr(b, "model_dump") else b.dict()
+                for b in (qa_result.bugs_found or [])
+            ]
+            a11y_issues = [
+                i.model_dump() if hasattr(i, "model_dump") else i.dict()
+                for i in (a11y_result.issues or [])
+            ]
+            sec_issues = [
+                v.model_dump() if hasattr(v, "model_dump") else v.dict()
+                for v in (sec_result.vulnerabilities or [])
+            ]
+
+            perf_result = self.performance_engineer.run(
+                PerformanceEngineerInput(
+                    code=code_to_review[:25000],
+                    task_description=current_task.description,
+                    task_id=task_id,
+                    build_output="",
+                    architecture=architecture,
+                )
+            )
             if not perf_result.approved and perf_result.issues:
                 code_review_issues = perf_result.issues
                 if iteration_round < MAX_CODE_REVIEW_ITERATIONS - 1:
                     continue
 
-            all_approved = qa_result.approved and a11y_result.approved and sec_result.approved and perf_result.approved
+            all_approved = (
+                qa_result.approved
+                and a11y_result.approved
+                and sec_result.approved
+                and perf_result.approved
+            )
             if not all_approved:
                 if not qa_result.approved and qa_result.bugs_found:
-                    qa_issues = [b.model_dump() if hasattr(b, "model_dump") else b.dict() for b in qa_result.bugs_found]
+                    qa_issues = [
+                        b.model_dump() if hasattr(b, "model_dump") else b.dict()
+                        for b in qa_result.bugs_found
+                    ]
                 if not a11y_result.approved and a11y_result.issues:
-                    a11y_issues = [i.model_dump() if hasattr(i, "model_dump") else i.dict() for i in a11y_result.issues]
+                    a11y_issues = [
+                        i.model_dump() if hasattr(i, "model_dump") else i.dict()
+                        for i in a11y_result.issues
+                    ]
                 if not sec_result.approved and sec_result.vulnerabilities:
-                    sec_issues = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in sec_result.vulnerabilities]
+                    sec_issues = [
+                        v.model_dump() if hasattr(v, "model_dump") else v.dict()
+                        for v in sec_result.vulnerabilities
+                    ]
                 if not perf_result.approved and perf_result.issues:
                     code_review_issues = list(perf_result.issues)
                 if iteration_round < MAX_CODE_REVIEW_ITERATIONS - 1:
@@ -678,7 +792,10 @@ class FrontendOrchestratorAgent:
 
             if all_tasks and append_backend_task_fn and tech_lead:
                 fix_tasks = tech_lead.evaluate_qa_and_create_fix_tasks(
-                    current_task, qa_result, spec_content, architecture,
+                    current_task,
+                    qa_result,
+                    spec_content,
+                    architecture,
                 )
                 if fix_tasks:
                     for ft in fix_tasks:
@@ -700,7 +817,12 @@ class FrontendOrchestratorAgent:
                 delete_branch(repo_path, branch_name)
                 checkout_branch(repo_path, DEVELOPMENT_BRANCH)
 
-                if doc_agent and completed_tasks is not None and remaining_tasks is not None and tech_lead:
+                if (
+                    doc_agent
+                    and completed_tasks is not None
+                    and remaining_tasks is not None
+                    and tech_lead
+                ):
                     task_update = TaskUpdate(
                         task_id=task_id,
                         agent_type="frontend",
@@ -737,14 +859,16 @@ class FrontendOrchestratorAgent:
                         )
 
                 code_for_br = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
-                build_release_result = self.build_release.run(BuildReleaseInput(
-                    task_description=task.description,
-                    task_id=task_id,
-                    spec_content=spec_truncated,
-                    architecture=architecture,
-                    existing_pipeline=_read_repo_code(repo_path, [".yml", ".yaml"]),
-                    repo_code_summary=f"Frontend application, {len(code_for_br)} chars of code",
-                ))
+                build_release_result = self.build_release.run(
+                    BuildReleaseInput(
+                        task_description=task.description,
+                        task_id=task_id,
+                        spec_content=spec_truncated,
+                        architecture=architecture,
+                        existing_pipeline=_read_repo_code(repo_path, [".yml", ".yaml"]),
+                        repo_code_summary=f"Frontend application, {len(code_for_br)} chars of code",
+                    )
+                )
                 try:
                     plan_dir = repo_path / "plan"
                     if not plan_dir.exists():
@@ -757,7 +881,9 @@ class FrontendOrchestratorAgent:
                             f"## Release and Rollback\n{build_release_result.release_rollback_plan}\n\n"
                             f"## Source Maps and Error Reporting\n{build_release_result.source_maps_error_reporting}\n"
                         )
-                        (plan_dir / "frontend_build_release.md").write_text(br_doc, encoding="utf-8")
+                        (plan_dir / "frontend_build_release.md").write_text(
+                            br_doc, encoding="utf-8"
+                        )
                 except Exception as e:
                     logger.debug("Could not persist build/release plan: %s", e)
 
@@ -799,12 +925,14 @@ class FrontendOrchestratorAgent:
             dbc_code = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
             if not dbc_code or dbc_code == "# No code files found":
                 return
-            dbc_result = dbc_agent.run(DbcCommentsInput(
-                code=dbc_code,
-                language="typescript",
-                task_description=task_description,
-                architecture=architecture,
-            ))
+            dbc_result = dbc_agent.run(
+                DbcCommentsInput(
+                    code=dbc_code,
+                    language="typescript",
+                    task_description=task_description,
+                    architecture=architecture,
+                )
+            )
             if not dbc_result.already_compliant and dbc_result.files:
                 write_files_and_commit(
                     repo_path,

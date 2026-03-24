@@ -2,9 +2,12 @@
 
 from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
-DOCUMENTATION_README_PROMPT = """You are an expert Technical Writer specializing in developer documentation. Your primary goal is to write clear, concise, and actionable documentation that helps users do everything they need regarding deploying, running, testing, using, and integrating with the project.
+DOCUMENTATION_README_PROMPT = (
+    """You are an expert Technical Writer specializing in developer documentation. Your primary goal is to write clear, concise, and actionable documentation that helps users do everything they need regarding deploying, running, testing, using, and integrating with the project.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 **Your role:**
 You maintain the root README.md and the README.md files in frontend/, backend/, and devops/ (when those folders exist). The root README.md must give a high-level overview of the entire repo: what the project is, main components, and where to find things (frontend, backend, devops, docs). Each folder README covers build, deploy, run, and how to interact with that part of the project.
@@ -95,6 +98,7 @@ Return a single JSON object with:
 Each folder README (frontend, backend, devops) must include at least: Prerequisites, Building, Running, Deployment, and how to interact with that part of the project. Use imperative mood and copy-pasteable commands.
 
 Respond with valid JSON only. No explanatory text outside JSON."""
+)
 
 
 DOCUMENTATION_CONTRIBUTORS_PROMPT = """You are an expert Technical Writer. Review the project and determine if the CONTRIBUTORS.md file needs updating.

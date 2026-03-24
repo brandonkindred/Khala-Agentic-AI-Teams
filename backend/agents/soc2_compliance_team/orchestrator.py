@@ -88,7 +88,9 @@ class SOC2AuditOrchestrator:
                 logger.info("Running %s TSC audit", name)
                 result = agent.run(self.llm, context)
                 tsc_results.append(result)
-                logger.info("%s: %s findings, compliant=%s", name, len(result.findings), result.compliant)
+                logger.info(
+                    "%s: %s findings, compliant=%s", name, len(result.findings), result.compliant
+                )
             except Exception as e:
                 logger.exception("TSC agent %s failed", name)
                 tsc_results.append(
@@ -102,7 +104,9 @@ class SOC2AuditOrchestrator:
 
         has_findings = any(
             not r.compliant
-            or any(f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH) for f in r.findings)
+            or any(
+                f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH) for f in r.findings
+            )
             for r in tsc_results
         )
 

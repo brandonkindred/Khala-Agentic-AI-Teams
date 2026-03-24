@@ -1,6 +1,5 @@
 """Tests for spec chunking utilities."""
 
-
 from planning_team.spec_chunking import chunk_spec_by_sections, chunk_spec_by_size
 
 
@@ -78,8 +77,11 @@ API content.
 
 def test_chunk_spec_by_sections_large_section_sub_splits() -> None:
     """Section exceeding max_chars is sub-split by size."""
-    spec = """## Big Section
-""" + "x" * 15000
+    spec = (
+        """## Big Section
+"""
+        + "x" * 15000
+    )
     result = chunk_spec_by_sections(spec, max_chars=5000)
     assert len(result) >= 2
     # Should have "Big Section (part 1)", "Big Section (part 2)", etc.

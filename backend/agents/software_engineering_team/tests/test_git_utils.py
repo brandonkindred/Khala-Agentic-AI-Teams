@@ -30,13 +30,26 @@ def test_clear_disposable_files_removes_test_db_when_blocking(tmp_path: Path) ->
 def test_checkout_branch_clears_test_db_when_blocking(tmp_path: Path) -> None:
     """checkout_branch removes test.db when it blocks checkout."""
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "f").write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "f"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "checkout", "-b", "other"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "checkout", "-b", "other"], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "test.db").write_bytes(b"x")
     subprocess.run(["git", "add", "test.db"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "add db"], cwd=tmp_path, check=True, capture_output=True)

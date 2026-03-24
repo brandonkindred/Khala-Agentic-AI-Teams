@@ -32,9 +32,10 @@ def planning_asset_path(filename: str) -> str:
 # Enums
 # ---------------------------------------------------------------------------
 
+
 class Phase(str, Enum):
     """Lifecycle phases of the planning-v2 workflow (4 phases).
-    
+
     The team expects a pre-validated specification - no spec review is performed.
     When review finds issues, they are passed back to Implementation for fixes.
     """
@@ -125,9 +126,7 @@ class QuestionOption(BaseModel):
 
     id: str = Field(description="Unique option identifier")
     label: str = Field(description="Display text for this option")
-    is_default: bool = Field(
-        default=False, description="Whether this is the recommended default"
-    )
+    is_default: bool = Field(default=False, description="Whether this is the recommended default")
     rationale: str = Field(
         default="",
         description="Why this option is recommended based on industry best practices",
@@ -145,9 +144,7 @@ class OpenQuestion(BaseModel):
 
     id: str = Field(description="Unique question identifier")
     question_text: str = Field(description="The question text")
-    context: str = Field(
-        default="", description="Additional context explaining why this matters"
-    )
+    context: str = Field(default="", description="Additional context explaining why this matters")
     options: List[QuestionOption] = Field(
         default_factory=list, description="2-3 selectable options"
     )
@@ -161,12 +158,8 @@ class AnsweredQuestion(BaseModel):
     question_text: str = Field(description="The question text")
     selected_option_id: str = Field(description="ID of the selected option")
     selected_answer: str = Field(description="Text of the selected answer")
-    was_default: bool = Field(
-        default=False, description="Whether the default was applied"
-    )
-    other_text: str = Field(
-        default="", description="Custom text if 'other' was selected"
-    )
+    was_default: bool = Field(default=False, description="Whether the default was applied")
+    other_text: str = Field(default="", description="Custom text if 'other' was selected")
 
 
 # ---------------------------------------------------------------------------
@@ -177,12 +170,8 @@ class AnsweredQuestion(BaseModel):
 class SpecReviewResult(BaseModel):
     """Output of Product Requirement Analysis phase."""
 
-    issues: List[str] = Field(
-        default_factory=list, description="Issues identified in the spec"
-    )
-    product_gaps: List[str] = Field(
-        default_factory=list, description="Product gaps highlighted"
-    )
+    issues: List[str] = Field(default_factory=list, description="Issues identified in the spec")
+    product_gaps: List[str] = Field(default_factory=list, description="Product gaps highlighted")
     open_questions: List[OpenQuestion] = Field(
         default_factory=list, description="Structured questions requiring clarification"
     )
@@ -194,23 +183,15 @@ class PlanningPhaseResult(BaseModel):
     """Output of Product Planning phase with structured sections."""
 
     goals_vision: str = Field(default="", description="Goals and vision statement")
-    constraints_limitations: str = Field(
-        default="", description="Constraints and limitations"
-    )
-    key_features: List[str] = Field(
-        default_factory=list, description="Key features list"
-    )
+    constraints_limitations: str = Field(default="", description="Constraints and limitations")
+    key_features: List[str] = Field(default_factory=list, description="Key features list")
     milestones: List[str] = Field(default_factory=list, description="Project milestones")
     architecture: str = Field(default="", description="Architecture overview")
-    maintainability: str = Field(
-        default="", description="Maintainability considerations"
-    )
+    maintainability: str = Field(default="", description="Maintainability considerations")
     security: str = Field(default="", description="Security requirements")
     file_system: str = Field(default="", description="File/folder structure plan")
     styling: str = Field(default="", description="UI/UX styling guidelines")
-    dependencies: List[str] = Field(
-        default_factory=list, description="External dependencies"
-    )
+    dependencies: List[str] = Field(default_factory=list, description="External dependencies")
     microservices: str = Field(default="", description="Microservices breakdown")
     others: str = Field(default="", description="Additional notes")
     summary: str = Field(default="", description="Overall planning summary")
@@ -239,7 +220,7 @@ class ReviewPhaseResult(BaseModel):
 
 class ProblemSolvingPhaseResult(BaseModel):
     """DEPRECATED: Problem-solving phase has been removed.
-    
+
     Review issues are now passed directly to Implementation phase.
     This model is kept for backward compatibility only.
     """

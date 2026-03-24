@@ -14,12 +14,8 @@ class ScanViolation(BaseModel):
 
     id: str = Field(..., description="Violation rule ID")
     description: str = Field(default="")
-    nodes: List[str] = Field(
-        default_factory=list, description="CSS selectors of affected nodes"
-    )
-    impact: Literal["minor", "moderate", "serious", "critical"] = Field(
-        default="moderate"
-    )
+    nodes: List[str] = Field(default_factory=list, description="CSS selectors of affected nodes")
+    impact: Literal["minor", "moderate", "serious", "critical"] = Field(default="moderate")
     help: str = Field(default="", description="Help text for the violation")
     help_url: str = Field(default="", description="URL to documentation")
 
@@ -42,9 +38,7 @@ class RunAutomatedScanInput(BaseModel):
     browser: Literal["chromium", "firefox", "webkit"] = Field(
         default="chromium", description="Browser to use"
     )
-    viewport: Dict[str, int] = Field(
-        default_factory=lambda: {"width": 1920, "height": 1080}
-    )
+    viewport: Dict[str, int] = Field(default_factory=lambda: {"width": 1920, "height": 1080})
     auth: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Authentication: {type: none|cookie|credentials, value: string}",
@@ -52,9 +46,7 @@ class RunAutomatedScanInput(BaseModel):
     tools: List[Literal["axe", "lighthouse", "pa11y"]] = Field(
         default_factory=lambda: ["axe"], description="Scanning tools to run"
     )
-    include_passing: bool = Field(
-        default=False, description="Include passing rules in output"
-    )
+    include_passing: bool = Field(default=False, description="Include passing rules in output")
 
 
 class RunAutomatedScanOutput(BaseModel):

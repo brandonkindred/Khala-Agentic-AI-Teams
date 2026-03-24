@@ -31,12 +31,12 @@ def run_deliver(
 ) -> DeliverResult:
     """
     Execute the deliver phase.
-    
+
     Finalizes the provisioning by:
     1. Updating environment status to 'ready'
     2. Recording final provisioning state
     3. Preparing the delivery timestamp
-    
+
     Args:
         agent_id: Unique identifier for the agent
         environment: Environment info from setup phase
@@ -46,21 +46,21 @@ def run_deliver(
         onboarding: Onboarding documentation
         environment_store: Store for updating environment
         progress_callback: Callback for progress updates
-    
+
     Returns:
         DeliverResult indicating success
     """
     env_store = environment_store or EnvironmentStore()
-    
+
     if progress_callback:
         progress_callback("Finalizing provisioning...")
-    
+
     if environment:
         env_store.update_status(agent_id, "ready")
-    
+
     if progress_callback:
         progress_callback("Provisioning complete")
-    
+
     return DeliverResult(
         success=True,
         finalized_at=datetime.now(timezone.utc),
@@ -78,7 +78,7 @@ def build_final_result(
 ) -> ProvisioningResult:
     """
     Build the final provisioning result from all phase outputs.
-    
+
     Args:
         agent_id: Agent identifier
         environment: Environment from setup
@@ -87,19 +87,19 @@ def build_final_result(
         access_audit: Access audit results
         onboarding: Onboarding documentation
         deliver_result: Deliver phase result
-    
+
     Returns:
         Complete ProvisioningResult
     """
     from ..models import Phase
-    
+
     all_success = (
-        (environment is not None) and
-        all(r.success for r in tool_results) and
-        (access_audit is None or access_audit.passed) and
-        deliver_result.success
+        (environment is not None)
+        and all(r.success for r in tool_results)
+        and (access_audit is None or access_audit.passed)
+        and deliver_result.success
     )
-    
+
     error = None
     if not all_success:
         errors: List[str] = []
@@ -111,7 +111,7 @@ def build_final_result(
         if access_audit and not access_audit.passed:
             errors.append("Access audit failed")
         error = "; ".join(errors) if errors else None
-    
+
     return ProvisioningResult(
         agent_id=agent_id,
         current_phase=Phase.DELIVER,
@@ -138,17 +138,17 @@ def redact_credentials_for_response(
 ) -> ProvisioningResult:
     """
     Create a copy of the result with sensitive credentials redacted.
-    
+
     Passwords and tokens are replaced with '***' for safe API responses.
-    
+
     Args:
         result: Original provisioning result
-    
+
     Returns:
         Copy with redacted credentials
     """
     redacted_creds: Dict[str, GeneratedCredentials] = {}
-    
+
     for tool_name, cred in result.credentials.items():
         redacted_creds[tool_name] = GeneratedCredentials(
             tool_name=cred.tool_name,
@@ -160,7 +160,7 @@ def redact_credentials_for_response(
             connection_string=_redact_connection_string(cred.connection_string),
             extra={k: v for k, v in cred.extra.items() if "password" not in k.lower()},
         )
-    
+
     return ProvisioningResult(
         agent_id=result.agent_id,
         current_phase=result.current_phase,
@@ -179,6 +179,7 @@ def _redact_connection_string(conn_str: Optional[str]) -> Optional[str]:
     """Redact password from a connection string."""
     if not conn_str:
         return None
-    
+
     import re
-    return re.sub(r':([^:@]+)@', ':***@', conn_str)
+
+    return re.sub(r":([^:@]+)@", ":***@", conn_str)

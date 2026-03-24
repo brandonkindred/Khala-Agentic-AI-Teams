@@ -99,7 +99,12 @@ def save_story(
             (story_id, narrative, section_title, section_context, kw_json, source_job_id, now),
         )
         conn.commit()
-        logger.info("Story bank: saved story %s (section=%s, keywords=%s)", story_id, section_title, keywords)
+        logger.info(
+            "Story bank: saved story %s (section=%s, keywords=%s)",
+            story_id,
+            section_title,
+            keywords,
+        )
         return story_id
     finally:
         conn.close()
@@ -141,7 +146,9 @@ def find_relevant_stories(
     scored.sort(key=lambda t: t[0], reverse=True)
     results = []
     for _, item in scored[:limit]:
-        item["keywords"] = json.loads(item["keywords"]) if isinstance(item["keywords"], str) else item["keywords"]
+        item["keywords"] = (
+            json.loads(item["keywords"]) if isinstance(item["keywords"], str) else item["keywords"]
+        )
         results.append(item)
     return results
 

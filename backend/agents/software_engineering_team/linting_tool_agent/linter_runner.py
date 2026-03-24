@@ -20,6 +20,7 @@ def _is_command_available(cmd: str) -> bool:
     """Check if a command is available on the system PATH."""
     return shutil.which(cmd) is not None
 
+
 logger = logging.getLogger(__name__)
 
 # Regex for ruff / flake8 output: ``file.py:10:1: E501 Line too long``
@@ -68,7 +69,7 @@ def detect_linter(repo_path: Path, agent_type: str) -> LintPlan:
 
 def _detect_python_linter(repo_path: Path) -> LintPlan:
     """Detect the Python linter for the project.
-    
+
     Checks for config files first, then verifies the linter is installed.
     Falls back to available linters if the preferred one is not installed.
     """
@@ -173,11 +174,14 @@ def execute_linter(plan: LintPlan, repo_path: Path, agent_type: str) -> LintExec
     # Handle skip case when no linter is available
     if plan.linter_name == "none" or not plan.linter_command:
         logger.info("No linter configured or available; skipping lint check.")
-        return LintExecutionResult(success=True, raw_output="Lint check skipped: no linter available.")
+        return LintExecutionResult(
+            success=True, raw_output="Lint check skipped: no linter available."
+        )
 
     if agent_type == "frontend" and plan.linter_name == "ng_lint":
         try:
             from software_engineering_team.shared.command_runner import run_command_with_nvm
+
             cmd_result = run_command_with_nvm(plan.linter_command, cwd=repo_path)
         except ImportError:
             cmd_result = run_command(plan.linter_command, cwd=repo_path)
@@ -219,14 +223,16 @@ def _parse_ruff_flake8(raw: str) -> List[LintIssue]:
         if m:
             rule = m.group("rule")
             severity = "error" if rule.startswith(("E", "F")) else "warning"
-            issues.append(LintIssue(
-                file_path=m.group("file"),
-                line=int(m.group("line")),
-                column=int(m.group("col")),
-                rule=rule,
-                message=m.group("msg").strip(),
-                severity=severity,
-            ))
+            issues.append(
+                LintIssue(
+                    file_path=m.group("file"),
+                    line=int(m.group("line")),
+                    column=int(m.group("col")),
+                    rule=rule,
+                    message=m.group("msg").strip(),
+                    severity=severity,
+                )
+            )
     return issues
 
 
@@ -241,26 +247,30 @@ def _parse_ng_lint(raw: str) -> List[LintIssue]:
             continue
         m = _NG_LINT_RE.match(stripped)
         if m:
-            issues.append(LintIssue(
-                file_path=m.group("file") or current_file,
-                line=int(m.group("line")),
-                column=int(m.group("col")),
-                rule=m.group("rule") or "",
-                message=m.group("msg").strip(),
-                severity=m.group("sev") or "warning",
-            ))
+            issues.append(
+                LintIssue(
+                    file_path=m.group("file") or current_file,
+                    line=int(m.group("line")),
+                    column=int(m.group("col")),
+                    rule=m.group("rule") or "",
+                    message=m.group("msg").strip(),
+                    severity=m.group("sev") or "warning",
+                )
+            )
             continue
         # Eslint-style lines within ng lint output
         m2 = _ESLINT_RE.match(line)
         if m2 and current_file:
-            issues.append(LintIssue(
-                file_path=current_file,
-                line=int(m2.group("line")),
-                column=int(m2.group("col")),
-                rule=m2.group("rule") or "",
-                message=m2.group("msg").strip(),
-                severity=m2.group("sev") or "warning",
-            ))
+            issues.append(
+                LintIssue(
+                    file_path=current_file,
+                    line=int(m2.group("line")),
+                    column=int(m2.group("col")),
+                    rule=m2.group("rule") or "",
+                    message=m2.group("msg").strip(),
+                    severity=m2.group("sev") or "warning",
+                )
+            )
     return issues
 
 
@@ -272,17 +282,23 @@ def _parse_eslint(raw: str) -> List[LintIssue]:
         if not stripped or stripped.startswith(("✖", "✓", "warning", "error")):
             continue
         # ESLint prints the absolute file path as a header line (no leading whitespace)
-        if not line.startswith(" ") and not line.startswith("\t") and ("/" in stripped or "\\" in stripped):
+        if (
+            not line.startswith(" ")
+            and not line.startswith("\t")
+            and ("/" in stripped or "\\" in stripped)
+        ):
             current_file = stripped
             continue
         m = _ESLINT_RE.match(line)
         if m and current_file:
-            issues.append(LintIssue(
-                file_path=current_file,
-                line=int(m.group("line")),
-                column=int(m.group("col")),
-                rule=m.group("rule") or "",
-                message=m.group("msg").strip(),
-                severity=m.group("sev") or "warning",
-            ))
+            issues.append(
+                LintIssue(
+                    file_path=current_file,
+                    line=int(m.group("line")),
+                    column=int(m.group("col")),
+                    rule=m.group("rule") or "",
+                    message=m.group("msg").strip(),
+                    severity=m.group("sev") or "warning",
+                )
+            )
     return issues

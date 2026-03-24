@@ -105,4 +105,3 @@ Return JSON with a single key "similar_topics" whose value is a list of objects,
 - "similarity_score": float between 0 and 1
 
 Sort by similarity_score descending. Keep topic phrases concise (under 60 characters)."""
-

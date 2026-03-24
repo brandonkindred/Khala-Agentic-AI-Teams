@@ -856,11 +856,15 @@ def get_branding_conversation(conversation_id: str) -> ConversationStateResponse
         raise HTTPException(status_code=404, detail="Conversation not found")
     messages, mission, latest_output = state
     brand_id = conversation_store.get_conversation_brand_id(conversation_id)
-    return _conversation_to_response(conversation_id, brand_id, messages, mission, latest_output, [])
+    return _conversation_to_response(
+        conversation_id, brand_id, messages, mission, latest_output, []
+    )
 
 
 @app.get("/conversations", response_model=List[ConversationSummaryResponse])
-def list_branding_conversations(brand_id: Optional[str] = None) -> List[ConversationSummaryResponse]:
+def list_branding_conversations(
+    brand_id: Optional[str] = None,
+) -> List[ConversationSummaryResponse]:
     summaries = conversation_store.list_conversations(brand_id=brand_id)
     brand_names: Dict[str, str] = {}
     for client in branding_store.list_clients():
@@ -891,7 +895,9 @@ def attach_conversation_to_brand(
         raise HTTPException(status_code=404, detail="Conversation not found")
     conversation_store.set_brand(conversation_id, brand_id)
     messages, mission, latest_output = state
-    return _conversation_to_response(conversation_id, brand_id, messages, mission, latest_output, [])
+    return _conversation_to_response(
+        conversation_id, brand_id, messages, mission, latest_output, []
+    )
 
 
 # ---------------------------------------------------------------------------

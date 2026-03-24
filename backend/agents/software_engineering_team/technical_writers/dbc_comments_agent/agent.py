@@ -101,19 +101,23 @@ class DbcCommentsAgent:
             context_parts.append(f"**Task description:** {input_data.task_description}")
 
         if input_data.architecture:
-            context_parts.extend([
-                "",
-                "**Architecture overview:**",
-                input_data.architecture.overview,
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Architecture overview:**",
+                    input_data.architecture.overview,
+                ]
+            )
 
-        context_parts.extend([
-            "",
-            "**Code to review and annotate with DbC comments:**",
-            "```",
-            code,
-            "```",
-        ])
+        context_parts.extend(
+            [
+                "",
+                "**Code to review and annotate with DbC comments:**",
+                "```",
+                code,
+                "```",
+            ]
+        )
 
         prompt = DBC_COMMENTS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
 

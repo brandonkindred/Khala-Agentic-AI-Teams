@@ -18,7 +18,9 @@ class ApiOpenApiToolAgent:
         return ToolAgentOutput(summary="API/OpenAPI stub — no changes applied.")
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(recommendations=["Consider API client and service layer."], summary="API planning stub.")
+        return ToolAgentPhaseOutput(
+            recommendations=["Consider API client and service layer."], summary="API planning stub."
+        )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(summary="API review stub.")

@@ -50,26 +50,26 @@ class AISystemsOrchestrator:
     ) -> AgentBlueprint:
         """
         Run the complete AI system generation workflow.
-        
+
         Args:
             project_name: Name for the AI system project
             spec_path: Path to the specification file
             constraints: Additional constraints
             output_dir: Directory to output artifacts
             job_updater: Callback for progress updates
-        
+
         Returns:
             AgentBlueprint with complete system design
         """
         logger.info("Starting AI system workflow for: %s", project_name)
-        
+
         constraints = constraints or {}
-        
+
         blueprint = AgentBlueprint(
             project_name=project_name,
             created_at=datetime.now(timezone.utc),
         )
-        
+
         try:
             spec_intake = run_spec_intake(
                 spec_path=spec_path,
@@ -78,26 +78,26 @@ class AISystemsOrchestrator:
             )
             blueprint.spec_intake = spec_intake
             blueprint.current_phase = Phase.SPEC_INTAKE
-            
+
             if not spec_intake.success:
                 blueprint.error = spec_intake.error
                 return blueprint
-            
+
             blueprint.completed_phases.append(Phase.SPEC_INTAKE)
-            
+
             architecture = run_architecture(
                 spec_intake=spec_intake,
                 job_updater=job_updater,
             )
             blueprint.architecture = architecture
             blueprint.current_phase = Phase.ARCHITECTURE
-            
+
             if not architecture.success:
                 blueprint.error = architecture.error
                 return blueprint
-            
+
             blueprint.completed_phases.append(Phase.ARCHITECTURE)
-            
+
             capabilities = run_capabilities(
                 spec_intake=spec_intake,
                 architecture=architecture,
@@ -105,26 +105,26 @@ class AISystemsOrchestrator:
             )
             blueprint.capabilities = capabilities
             blueprint.current_phase = Phase.CAPABILITIES
-            
+
             if not capabilities.success:
                 blueprint.error = capabilities.error
                 return blueprint
-            
+
             blueprint.completed_phases.append(Phase.CAPABILITIES)
-            
+
             evaluation = run_evaluation(
                 spec_intake=spec_intake,
                 job_updater=job_updater,
             )
             blueprint.evaluation = evaluation
             blueprint.current_phase = Phase.EVALUATION
-            
+
             if not evaluation.success:
                 blueprint.error = evaluation.error
                 return blueprint
-            
+
             blueprint.completed_phases.append(Phase.EVALUATION)
-            
+
             safety = run_safety(
                 spec_intake=spec_intake,
                 architecture=architecture,
@@ -132,13 +132,13 @@ class AISystemsOrchestrator:
             )
             blueprint.safety = safety
             blueprint.current_phase = Phase.SAFETY
-            
+
             if not safety.success:
                 blueprint.error = safety.error
                 return blueprint
-            
+
             blueprint.completed_phases.append(Phase.SAFETY)
-            
+
             build = run_build(
                 project_name=project_name,
                 spec_intake=spec_intake,
@@ -151,19 +151,19 @@ class AISystemsOrchestrator:
             )
             blueprint.build = build
             blueprint.current_phase = Phase.BUILD
-            
+
             if not build.success:
                 blueprint.error = build.error
                 return blueprint
-            
+
             blueprint.completed_phases.append(Phase.BUILD)
             blueprint.success = True
-            
+
             self._blueprints[project_name] = blueprint
-            
+
             logger.info("AI system workflow complete for: %s", project_name)
             return blueprint
-        
+
         except Exception as e:
             logger.error("Workflow failed: %s", e)
             blueprint.error = str(e)

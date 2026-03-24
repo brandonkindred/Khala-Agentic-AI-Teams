@@ -47,9 +47,7 @@ class TaskPlan(BaseModel):
                 changes = "\n".join(f"- {c}" for c in changes if c)
             parts.append(f"**What changes:**\n{changes}")
         if self.algorithms_data_structures:
-            parts.append(
-                f"**Algorithms/data structures:** {self.algorithms_data_structures}"
-            )
+            parts.append(f"**Algorithms/data structures:** {self.algorithms_data_structures}")
         if self.tests_needed:
             parts.append(f"**Tests needed:** {self.tests_needed}")
         return "\n\n".join(parts) if parts else ""
@@ -67,8 +65,6 @@ class TaskPlan(BaseModel):
         return cls(
             feature_intent=str(data.get("feature_intent", "") or ""),
             what_changes=what,
-            algorithms_data_structures=str(
-                data.get("algorithms_data_structures", "") or ""
-            ),
+            algorithms_data_structures=str(data.get("algorithms_data_structures", "") or ""),
             tests_needed=str(data.get("tests_needed", "") or ""),
         )

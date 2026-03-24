@@ -14,9 +14,11 @@ from temporalio.exceptions import CancelledError
 
 logger = logging.getLogger(__name__)
 
+
 # Base directory for run artifacts (must match api/main.py RUN_ARTIFACTS_BASE when used from API)
 def _get_run_artifacts_base() -> Path:
     import tempfile
+
     return Path(tempfile.gettempdir()) / "blogging_runs"
 
 
@@ -178,7 +180,9 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
             {"title": tc.title, "probability_of_success": tc.probability_of_success}
             for tc in plan.title_candidates
         ]
-        draft_preview = draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else "")
+        draft_preview = draft_result.draft[:2000] + (
+            "..." if len(draft_result.draft) > 2000 else ""
+        )
         final_status = JOB_STATUS_COMPLETED if status == "PASS" else JOB_STATUS_NEEDS_REVIEW
         if complete_blog_job is not None:
             complete_blog_job(
@@ -235,6 +239,7 @@ def _fail_job(
 ) -> None:
     try:
         from blogging.shared.blog_job_store import fail_blog_job as fn
+
         fn(
             job_id,
             error=error,
@@ -244,6 +249,7 @@ def _fail_job(
     except ImportError:
         try:
             from shared.blog_job_store import fail_blog_job as fn
+
             fn(
                 job_id,
                 error=error,

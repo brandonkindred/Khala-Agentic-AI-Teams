@@ -20,8 +20,13 @@ class MemoryRagToolAgent:
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         raw = self.llm.complete_json(
-            PROMPT.format(microtask=inp.microtask.description or inp.microtask.title, spec=inp.spec_context[:5000])
+            PROMPT.format(
+                microtask=inp.microtask.description or inp.microtask.title,
+                spec=inp.spec_context[:5000],
+            )
         )
         return ToolAgentOutput(
-            files=raw.get("files") or {}, recommendations=raw.get("recommendations") or [], summary=raw.get("summary", "")
+            files=raw.get("files") or {},
+            recommendations=raw.get("recommendations") or [],
+            summary=raw.get("summary", ""),
         )

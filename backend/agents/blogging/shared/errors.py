@@ -12,7 +12,7 @@ from typing import Optional
 
 class BloggingError(Exception):
     """Base exception for all blogging pipeline errors.
-    
+
     All blogging errors should inherit from this class to enable
     consistent error handling at the orchestrator level.
     """
@@ -37,7 +37,7 @@ class BloggingError(Exception):
 
 class LLMError(BloggingError):
     """LLM operation failed.
-    
+
     Raised when the LLM returns an error response or is unreachable.
     For code that calls llm_service directly, catch llm_service.LLMError (and
     subclasses such as LLMRateLimitError, LLMJsonParseError) instead; this class
@@ -70,7 +70,7 @@ class LLMUnreachableError(LLMError):
 
 class LLMJsonParseError(LLMError):
     """LLM returned invalid JSON after recovery attempts.
-    
+
     Includes the raw response preview for debugging.
     """
 
@@ -88,7 +88,7 @@ class LLMJsonParseError(LLMError):
 
 class ResearchError(BloggingError):
     """Research phase failed.
-    
+
     Raised when web search, arXiv search, or document fetching fails
     in a way that prevents the pipeline from continuing.
     """
@@ -148,7 +148,7 @@ class CopyEditError(BloggingError):
 
 class ComplianceError(BloggingError):
     """Compliance check failed with unrecoverable violations.
-    
+
     Raised when the compliance agent cannot evaluate the draft
     or when violations cannot be automatically resolved.
     """
@@ -166,7 +166,7 @@ class ComplianceError(BloggingError):
 
 class FactCheckError(BloggingError):
     """Fact-check identified high-risk claims or failed to run.
-    
+
     Raised when fact checking cannot complete or finds
     claims that cannot be verified against allowed sources.
     """

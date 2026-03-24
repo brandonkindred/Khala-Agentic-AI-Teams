@@ -35,6 +35,7 @@ def _ollama_auth_headers() -> Dict[str, str]:
         return {}
     return {"Authorization": f"Bearer {key}"}
 
+
 MAX_CONTINUATION_CYCLES = 10
 CONTINUATION_CONTEXT_CHARS = 150
 CONTINUATION_LOG_DIR = "continuation_logs"
@@ -114,7 +115,8 @@ class ResponseContinuator:
         self.max_cycles = max_cycles
         env_max = os.environ.get(ENV_LLM_MAX_TOKENS)
         self.num_predict = (
-            num_predict if num_predict is not None
+            num_predict
+            if num_predict is not None
             else (int(env_max) if env_max else DEFAULT_MAX_OUTPUT_TOKENS)
         )
 
@@ -267,15 +269,19 @@ class ResponseContinuator:
             messages.append({"role": "assistant", "content": partial})
 
             if i < len(partial_responses) - 1:
-                messages.append({
-                    "role": "user",
-                    "content": self._create_continuation_prompt(partial),
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": self._create_continuation_prompt(partial),
+                    }
+                )
             else:
-                messages.append({
-                    "role": "user",
-                    "content": self._create_continuation_prompt(partial),
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": self._create_continuation_prompt(partial),
+                    }
+                )
 
         return messages
 
@@ -352,8 +358,7 @@ class ResponseContinuator:
 
             if response.status_code != 200:
                 raise Exception(
-                    f"Chat request failed with status {response.status_code}: "
-                    f"{response.text[:200]}"
+                    f"Chat request failed with status {response.status_code}: {response.text[:200]}"
                 )
 
             data = response.json()

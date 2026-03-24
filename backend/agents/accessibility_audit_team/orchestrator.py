@@ -192,15 +192,11 @@ class AccessibilityAuditOrchestrator:
             result.critical_count = sum(
                 1 for f in result.final_findings if f.severity == Severity.CRITICAL
             )
-            result.high_count = sum(
-                1 for f in result.final_findings if f.severity == Severity.HIGH
-            )
+            result.high_count = sum(1 for f in result.final_findings if f.severity == Severity.HIGH)
             result.medium_count = sum(
                 1 for f in result.final_findings if f.severity == Severity.MEDIUM
             )
-            result.low_count = sum(
-                1 for f in result.final_findings if f.severity == Severity.LOW
-            )
+            result.low_count = sum(1 for f in result.final_findings if f.severity == Severity.LOW)
 
             result.summary = (
                 f"Audit complete. {result.total_findings} findings "
@@ -246,9 +242,7 @@ class AccessibilityAuditOrchestrator:
 
         # Get findings to retest
         if finding_ids:
-            findings_to_retest = [
-                f for f in result.final_findings if f.id in finding_ids
-            ]
+            findings_to_retest = [f for f in result.final_findings if f.id in finding_ids]
         else:
             findings_to_retest = result.final_findings
 
@@ -272,9 +266,7 @@ class AccessibilityAuditOrchestrator:
         # Update final findings
         if retest_result.updated_findings:
             finding_map = {f.id: f for f in retest_result.updated_findings}
-            result.final_findings = [
-                finding_map.get(f.id, f) for f in result.final_findings
-            ]
+            result.final_findings = [finding_map.get(f.id, f) for f in result.final_findings]
 
         result.summary = (
             f"Retest complete. {retest_result.findings_closed} findings closed, "

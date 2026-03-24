@@ -17,6 +17,7 @@ from software_engineering_team.shared.models import ToolRecommendation
 # Enums
 # ---------------------------------------------------------------------------
 
+
 class Phase(str, Enum):
     """Lifecycle phases of the frontend-code-v2 workflow."""
 
@@ -67,6 +68,7 @@ class ToolAgentKind(str, Enum):
 # Microtask
 # ---------------------------------------------------------------------------
 
+
 class Microtask(BaseModel):
     """A single unit of work inside the Planning phase output."""
 
@@ -78,17 +80,22 @@ class Microtask(BaseModel):
         description="Which tool agent should handle this microtask",
     )
     status: MicrotaskStatus = Field(default=MicrotaskStatus.PENDING)
-    depends_on: List[str] = Field(default_factory=list, description="IDs of prerequisite microtasks")
+    depends_on: List[str] = Field(
+        default_factory=list, description="IDs of prerequisite microtasks"
+    )
     output_files: Dict[str, str] = Field(
         default_factory=dict,
         description="Files produced by this microtask (path → content)",
     )
-    notes: str = Field(default="", description="Free-form notes or recommendations from the tool agent")
+    notes: str = Field(
+        default="", description="Free-form notes or recommendations from the tool agent"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Phase results
 # ---------------------------------------------------------------------------
+
 
 class SetupResult(BaseModel):
     """Output of the Setup phase (Frontend Tech Lead)."""
@@ -115,7 +122,9 @@ class ExecutionResult(BaseModel):
     """Aggregated output of the Execution phase."""
 
     files: Dict[str, str] = Field(default_factory=dict, description="All files produced")
-    microtasks: List[Microtask] = Field(default_factory=list, description="Microtasks with updated status")
+    microtasks: List[Microtask] = Field(
+        default_factory=list, description="Microtasks with updated status"
+    )
     summary: str = Field(default="")
 
 
@@ -155,7 +164,9 @@ class ProblemSolvingResult(BaseModel):
 class DocumentationPhaseResult(BaseModel):
     """Output of the Documentation phase."""
 
-    files: Dict[str, str] = Field(default_factory=dict, description="All files with documentation updates")
+    files: Dict[str, str] = Field(
+        default_factory=dict, description="All files with documentation updates"
+    )
     iterations: int = Field(default=0, description="Number of review/fix iterations")
     issues_fixed: int = Field(default=0, description="Total documentation issues fixed")
     summary: str = Field(default="")
@@ -207,6 +218,7 @@ class DeliverResult(BaseModel):
 # Workflow result
 # ---------------------------------------------------------------------------
 
+
 class FrontendCodeV2WorkflowResult(BaseModel):
     """
     Full result of the frontend-code-v2 team's autonomous workflow.
@@ -235,6 +247,7 @@ class FrontendCodeV2WorkflowResult(BaseModel):
 # ---------------------------------------------------------------------------
 # Tool-agent I/O base types
 # ---------------------------------------------------------------------------
+
 
 class ToolAgentInput(BaseModel):
     """Base input for all team-owned tool agents (Execution phase)."""
@@ -288,6 +301,7 @@ class ToolAgentOutput(BaseModel):
 # ---------------------------------------------------------------------------
 # Per-microtask review configuration
 # ---------------------------------------------------------------------------
+
 
 class MicrotaskReviewConfig(BaseModel):
     """Configuration for per-microtask review gates."""

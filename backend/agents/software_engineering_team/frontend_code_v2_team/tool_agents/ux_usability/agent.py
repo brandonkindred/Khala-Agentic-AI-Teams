@@ -190,7 +190,9 @@ class UxUsabilityToolAgent:
         if data.get("microcopy_guidelines"):
             recommendations.append(f"Microcopy: {data['microcopy_guidelines'][:500]}")
         return ToolAgentPhaseOutput(
-            recommendations=recommendations if recommendations else ["Consider user flows and interactions."],
+            recommendations=recommendations
+            if recommendations
+            else ["Consider user flows and interactions."],
             summary=data.get("summary", "UX planning complete."),
         )
 

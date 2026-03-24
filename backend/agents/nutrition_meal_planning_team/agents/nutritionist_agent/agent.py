@@ -41,7 +41,12 @@ class NutritionistAgent:
                 prompt,
                 temperature=0.3,
                 system_prompt=SYSTEM_PROMPT,
-                expected_keys=["daily_targets", "balance_guidelines", "foods_to_emphasize", "foods_to_avoid"],
+                expected_keys=[
+                    "daily_targets",
+                    "balance_guidelines",
+                    "foods_to_emphasize",
+                    "foods_to_avoid",
+                ],
             )
         except (LLMJsonParseError, LLMError) as e:
             logger.warning("Nutritionist LLM call failed, returning empty plan: %s", e)

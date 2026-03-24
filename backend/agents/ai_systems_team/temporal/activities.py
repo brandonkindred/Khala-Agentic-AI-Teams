@@ -21,6 +21,7 @@ def run_build_activity(
     """Run the AI system build (orchestrator) with job updates."""
     try:
         from ai_systems_team.api.main import _run_build_background
+
         _run_build_background(job_id, project_name, spec_path, constraints, output_dir)
     except Exception:
         logger.exception("AI Systems build activity failed for job %s", job_id)

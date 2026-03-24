@@ -92,7 +92,13 @@ class TestPlanningPhase:
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         (tmp_path / "angular.json").write_text("{}")
-        task = Task(id="t1", type=TaskType.FRONTEND, assignee="frontend-code-v2", status=TaskStatus.PENDING, description="build ui")
+        task = Task(
+            id="t1",
+            type=TaskType.FRONTEND,
+            assignee="frontend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build ui",
+        )
         assert _detect_language(tmp_path, task) == "angular"
 
     def test_language_detection_from_description(self, tmp_path):
@@ -100,7 +106,13 @@ class TestPlanningPhase:
 
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
-        task = Task(id="t1", type=TaskType.FRONTEND, assignee="frontend-code-v2", status=TaskStatus.PENDING, description="Use React and TypeScript")
+        task = Task(
+            id="t1",
+            type=TaskType.FRONTEND,
+            assignee="frontend-code-v2",
+            status=TaskStatus.PENDING,
+            description="Use React and TypeScript",
+        )
         assert _detect_language(tmp_path, task) == "react"
 
     def test_parse_planning_output(self):
@@ -108,8 +120,19 @@ class TestPlanningPhase:
 
         raw = {
             "microtasks": [
-                {"id": "mt-1", "title": "Add component", "tool_agent": "ui_design", "description": "create component"},
-                {"id": "mt-2", "title": "Add tests", "tool_agent": "testing_qa", "description": "unit tests", "depends_on": ["mt-1"]},
+                {
+                    "id": "mt-1",
+                    "title": "Add component",
+                    "tool_agent": "ui_design",
+                    "description": "create component",
+                },
+                {
+                    "id": "mt-2",
+                    "title": "Add tests",
+                    "tool_agent": "testing_qa",
+                    "description": "unit tests",
+                    "depends_on": ["mt-1"],
+                },
             ],
             "language": "angular",
             "summary": "Plan created",
@@ -131,7 +154,13 @@ class TestPlanningPhase:
             "## LANGUAGE ##\ntypescript\n## END LANGUAGE ##\n"
             "## SUMMARY ##\nempty\n## END SUMMARY ##"
         )
-        task = Task(id="t1", type=TaskType.FRONTEND, assignee="frontend-code-v2", status=TaskStatus.PENDING, description="build something")
+        task = Task(
+            id="t1",
+            type=TaskType.FRONTEND,
+            assignee="frontend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build something",
+        )
         result = run_planning(llm=mock_llm, task=task, repo_path=tmp_path)
         assert len(result.microtasks) == 1
         assert result.microtasks[0].id == "mt-implement-task"
@@ -157,13 +186,29 @@ class TestToolAgents:
         )
 
         subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
-        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True, check=True)
-        subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True, check=True)
-        subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "t@t.com"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True, check=True
+        )
+        subprocess.run(
+            ["git", "config", "commit.gpgsign", "false"],
+            cwd=tmp_path,
+            capture_output=True,
+            check=True,
+        )
         (tmp_path / "f").write_text("x")
         subprocess.run(["git", "add", "-A"], cwd=tmp_path, capture_output=True, check=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, check=True)
-        subprocess.run(["git", "branch", "-m", "development"], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True, check=True
+        )
+        subprocess.run(
+            ["git", "branch", "-m", "development"], cwd=tmp_path, capture_output=True, check=True
+        )
         agent = GitBranchManagementToolAgent()
         ok, name = agent.create_feature_branch(tmp_path, "task-1", "Login page")
         assert ok is True

@@ -57,7 +57,8 @@ Specification:
 ---
 """
 
-UI_DESIGN_FIX_SINGLE_ISSUE_PROMPT = """You are a UI Design expert. Fix this specific issue. Use this EXACT format:
+UI_DESIGN_FIX_SINGLE_ISSUE_PROMPT = (
+    """You are a UI Design expert. Fix this specific issue. Use this EXACT format:
 
 ## ROOT_CAUSE ##
 Why this issue exists.
@@ -74,7 +75,9 @@ true or false
 Output the complete updated file content; do not truncate. Include every section in full.
 
 ## FILE_UPDATES ##
-### """ + planning_asset_path("ui_design.md") + """ ###
+### """
+    + planning_asset_path("ui_design.md")
+    + """ ###
 Complete updated file content here.
 ### END FILE ###
 ## END FILE_UPDATES ##
@@ -94,8 +97,10 @@ SPEC CONTEXT:
 {spec_excerpt}
 ---
 """
+)
 
-UI_DESIGN_FIX_ALL_ISSUES_PROMPT = """You are a UI Design expert. Address ALL of the following issues in ONE coherent update. Use this EXACT format:
+UI_DESIGN_FIX_ALL_ISSUES_PROMPT = (
+    """You are a UI Design expert. Address ALL of the following issues in ONE coherent update. Use this EXACT format:
 
 ## ROOT_CAUSE ##
 Brief combined root cause for the issues.
@@ -112,7 +117,9 @@ true or false
 Output the complete updated file content; do not truncate. Include every section in full.
 
 ## FILE_UPDATES ##
-### """ + planning_asset_path("ui_design.md") + """ ###
+### """
+    + planning_asset_path("ui_design.md")
+    + """ ###
 Complete updated file content here.
 ### END FILE ###
 ## END FILE_UPDATES ##
@@ -132,12 +139,13 @@ SPEC CONTEXT:
 {spec_excerpt}
 ---
 """
+)
 
 
 class UIDesignToolAgent:
     """
     UI Design tool agent: visual design, component library, design system.
-    
+
     Participates in Planning and Implementation phases per the matrix.
     """
 
@@ -151,22 +159,26 @@ class UIDesignToolAgent:
                 summary="UI Design planning skipped (no LLM).",
                 recommendations=["Define design tokens", "Plan component library"],
             )
-        
+
         spec_content = inp.spec_content or ""
         prompt = UI_DESIGN_PLANNING_PROMPT.format(
             spec_content=spec_content[:6000],
         )
         raw_text = complete_text_with_continuation(
-            self.llm, prompt, agent_name="UIDesign",
+            self.llm,
+            prompt,
+            agent_name="UIDesign",
         )
         data = parse_planning_tool_output(raw_text)
-        
+
         recommendations = data.get("recommendations") or []
         if not isinstance(recommendations, list):
             recommendations = [str(recommendations)]
-        
+
         component_design = data.get("component_design") or []
-        components = [c.get("name", "") for c in component_design if isinstance(c, dict) and c.get("name")]
+        components = [
+            c.get("name", "") for c in component_design if isinstance(c, dict) and c.get("name")
+        ]
         return ToolAgentPhaseOutput(
             summary=data.get("summary", "UI Design planning complete."),
             recommendations=recommendations,
@@ -186,12 +198,25 @@ class UIDesignToolAgent:
         fixes_applied: List[str] = []
         files_written: List[str] = []
         current_files: Dict[str, str] = dict(inp.current_files or {})
-        
+
         ui_issues = [
-            i for i in inp.review_issues
-            if any(kw in i.lower() for kw in ["ui", "design token", "component", "layout", "breakpoint", "accessibility", "visual", "responsive"])
+            i
+            for i in inp.review_issues
+            if any(
+                kw in i.lower()
+                for kw in [
+                    "ui",
+                    "design token",
+                    "component",
+                    "layout",
+                    "breakpoint",
+                    "accessibility",
+                    "visual",
+                    "responsive",
+                ]
+            )
         ]
-        
+
         if ui_issues and self.llm:
             logger.info(
                 "UIDesign: handling %d review issue(s) (will apply fixes in one update and write to disk).",
@@ -219,8 +244,12 @@ class UIDesignToolAgent:
                 "UIDesign: fixed %d review issue(s) in one update (all fixes written to planning artifacts).",
                 len(ui_issues),
             )
-        
-        existing_doc = inp.current_files.get(planning_asset_path("ui_design.md")) if inp.current_files else None
+
+        existing_doc = (
+            inp.current_files.get(planning_asset_path("ui_design.md"))
+            if inp.current_files
+            else None
+        )
         if existing_doc and not ui_issues:
             return ToolAgentPhaseOutput(
                 summary="UI Design artifacts unchanged (file exists, no review issues).",
@@ -238,15 +267,15 @@ class UIDesignToolAgent:
                 recommendations=fixes_applied if fixes_applied else [],
                 files_written=files_written,
             )
-        
+
         design_tokens = inp.metadata.get("design_tokens", {}) if inp.metadata else {}
         components = inp.metadata.get("components", []) if inp.metadata else []
         layouts = inp.metadata.get("layouts", []) if inp.metadata else []
         breakpoints = inp.metadata.get("breakpoints", {}) if inp.metadata else {}
         accessibility = inp.metadata.get("accessibility", []) if inp.metadata else []
-        
+
         content_parts = ["# UI Design Plan\n\n"]
-        
+
         if design_tokens:
             content_parts.append("## Design Tokens\n")
             for category, tokens in design_tokens.items():
@@ -257,31 +286,31 @@ class UIDesignToolAgent:
                 else:
                     content_parts.append(f"- {tokens}\n")
             content_parts.append("\n")
-        
+
         if components:
             content_parts.append("## Component Library\n")
             for comp in components:
                 content_parts.append(f"- {comp}\n")
             content_parts.append("\n")
-        
+
         if layouts:
             content_parts.append("## Page Layouts\n")
             for layout in layouts:
                 content_parts.append(f"- {layout}\n")
             content_parts.append("\n")
-        
+
         if breakpoints:
             content_parts.append("## Responsive Breakpoints\n")
             for name, value in breakpoints.items():
                 content_parts.append(f"- **{name}:** {value}\n")
             content_parts.append("\n")
-        
+
         if accessibility:
             content_parts.append("## Accessibility\n")
             for item in accessibility:
                 content_parts.append(f"- {item}\n")
             content_parts.append("\n")
-        
+
         if design_tokens or components:
             rel_path = planning_asset_path("ui_design.md")
             content = "".join(content_parts)
@@ -290,7 +319,7 @@ class UIDesignToolAgent:
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content, encoding="utf-8")
             files_written.append(rel_path)
-        
+
         return ToolAgentPhaseOutput(
             summary="UI Design artifacts generated.",
             files={},
@@ -324,13 +353,17 @@ class UIDesignToolAgent:
 
         prompt = UI_DESIGN_FIX_SINGLE_ISSUE_PROMPT.format(
             issue=issue,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="UIDesign_FixSingleIssue",
+                self.llm,
+                prompt,
+                agent_name="UIDesign_FixSingleIssue",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -347,11 +380,18 @@ class UIDesignToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "UIDesign_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "UIDesign_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(ui_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(ui_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("ui_design.md")] = updated_content
                         logger.info("UIDesign: fix applied after continuation (single-issue).")
@@ -364,25 +404,44 @@ class UIDesignToolAgent:
                     logger.info("UIDesign: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
                         logger.info("UIDesign: fix applied (single-issue) — %s", fix_desc[:120])
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "UIDesign_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "UIDesign_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(ui_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(ui_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("ui_design.md")] = uc
                         logger.info("UIDesign: fix applied after continuation (single-issue).")
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
-                                logger.info("UIDesign: fix applied after continuation (single-issue).")
+                                logger.info(
+                                    "UIDesign: fix applied after continuation (single-issue)."
+                                )
                                 break
                         else:
                             logger.warning(
@@ -403,9 +462,7 @@ class UIDesignToolAgent:
                 resolved=False,
             )
 
-    def fix_all_issues(
-        self, issues: List[str], inp: ToolAgentPhaseInput
-    ) -> ToolAgentPhaseOutput:
+    def fix_all_issues(self, issues: List[str], inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Fix all listed UI design issues in one LLM call."""
         if not issues:
             return ToolAgentPhaseOutput(
@@ -430,13 +487,17 @@ class UIDesignToolAgent:
         issues_list = "\n".join(f"{i + 1}. {issue}" for i, issue in enumerate(issues))
         prompt = UI_DESIGN_FIX_ALL_ISSUES_PROMPT.format(
             issues_list=issues_list,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="UIDesign_FixAllIssues",
+                self.llm,
+                prompt,
+                agent_name="UIDesign_FixAllIssues",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -453,11 +514,18 @@ class UIDesignToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "UIDesign_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "UIDesign_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(ui_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(ui_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("ui_design.md")] = updated_content
                     else:
@@ -468,21 +536,38 @@ class UIDesignToolAgent:
                     files[planning_asset_path("ui_design.md")] = updated_content
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "UIDesign_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "UIDesign_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(ui_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(ui_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("ui_design.md")] = uc
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
                                 break
                         else:

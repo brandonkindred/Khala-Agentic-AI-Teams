@@ -4,9 +4,7 @@ from .base import ToolContext, tool
 
 
 @tool(context=True)
-def run_scoring_and_prioritization(
-    engagement_id: str, tool_context: ToolContext
-) -> dict:
+def run_scoring_and_prioritization(engagement_id: str, tool_context: ToolContext) -> dict:
     scorecard = Scorecard(
         component_score=88.0, page_score=82.0, site_score=84.5, priority_score=92.0
     )

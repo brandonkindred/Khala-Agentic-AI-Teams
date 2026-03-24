@@ -49,10 +49,23 @@ def _classify_issue(issue: str) -> ToolAgentKind:
     """
     issue_lower = issue.lower()
 
-    if any(kw in issue_lower for kw in ["architect", "layer", "module", "component", "integration"]):
+    if any(
+        kw in issue_lower for kw in ["architect", "layer", "module", "component", "integration"]
+    ):
         return ToolAgentKind.ARCHITECTURE
     # Check task classification before user story so "task team assignment" maps to classification
-    if any(kw in issue_lower for kw in ["classification", "team assignment", "task team", "frontend", "backend", "devops", "qa"]):
+    if any(
+        kw in issue_lower
+        for kw in [
+            "classification",
+            "team assignment",
+            "task team",
+            "frontend",
+            "backend",
+            "devops",
+            "qa",
+        ]
+    ):
         return ToolAgentKind.TASK_CLASSIFICATION
     if any(kw in issue_lower for kw in ["story", "task", "epic", "user", "acceptance", "criteria"]):
         return ToolAgentKind.USER_STORY
@@ -253,7 +266,10 @@ def run_problem_solving(
                             len(content),
                         )
                     batch_resolved = getattr(fix_result, "resolved", False) or True
-                    fix_summary = fix_result.summary or f"Addressed {len(agent_issues)} issue(s) via {agent_kind.value}"
+                    fix_summary = (
+                        fix_result.summary
+                        or f"Addressed {len(agent_issues)} issue(s) via {agent_kind.value}"
+                    )
             except Exception as e:
                 logger.warning(
                     "Planning-v2 Problem-solving: %s fix_all_issues failed: %s",
@@ -284,9 +300,7 @@ def run_problem_solving(
             )
 
             if detail_callback:
-                detail_callback(
-                    f"Fixing issue via {agent_kind.value}: {issue_short[:50]}..."
-                )
+                detail_callback(f"Fixing issue via {agent_kind.value}: {issue_short[:50]}...")
 
             issue_resolved = False
             fix_summary = ""

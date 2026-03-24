@@ -56,13 +56,21 @@ class ForecastCategory(str, Enum):
 class IdealCustomerProfile(BaseModel):
     """Defines the Ideal Customer Profile used to score and filter prospects."""
 
-    industry: List[str] = Field(default_factory=list, description="Target industries, e.g. ['SaaS', 'FinTech']")
+    industry: List[str] = Field(
+        default_factory=list, description="Target industries, e.g. ['SaaS', 'FinTech']"
+    )
     company_size_min: int = Field(default=10, description="Minimum employee count")
     company_size_max: int = Field(default=5000, description="Maximum employee count")
-    job_titles: List[str] = Field(default_factory=list, description="Target buyer titles, e.g. ['VP Sales', 'CRO']")
-    pain_points: List[str] = Field(default_factory=list, description="Core pains the product solves")
+    job_titles: List[str] = Field(
+        default_factory=list, description="Target buyer titles, e.g. ['VP Sales', 'CRO']"
+    )
+    pain_points: List[str] = Field(
+        default_factory=list, description="Core pains the product solves"
+    )
     budget_range_usd: str = Field(default="$10k–$100k/yr", description="Expected ACV range")
-    geographic_focus: List[str] = Field(default_factory=list, description="Target regions or countries")
+    geographic_focus: List[str] = Field(
+        default_factory=list, description="Target regions or countries"
+    )
     tech_stack_keywords: List[str] = Field(
         default_factory=list, description="Technologies the prospect likely uses"
     )
@@ -129,13 +137,17 @@ class BANTScore(BaseModel):
     budget: int = Field(..., ge=0, le=10, description="Does the prospect have budget? 0–10")
     authority: int = Field(..., ge=0, le=10, description="Is the contact a decision-maker? 0–10")
     need: int = Field(..., ge=0, le=10, description="Is there a confirmed, urgent need? 0–10")
-    timeline: int = Field(..., ge=0, le=10, description="Is there a defined purchase timeline? 0–10")
+    timeline: int = Field(
+        ..., ge=0, le=10, description="Is there a defined purchase timeline? 0–10"
+    )
 
 
 class MEDDICScore(BaseModel):
     """MEDDIC qualification framework signals."""
 
-    metrics_identified: bool = Field(default=False, description="Quantified business impact defined")
+    metrics_identified: bool = Field(
+        default=False, description="Quantified business impact defined"
+    )
     economic_buyer_known: bool = Field(default=False)
     decision_criteria_understood: bool = Field(default=False)
     decision_process_mapped: bool = Field(default=False)
@@ -150,12 +162,8 @@ class QualificationScore(BaseModel):
     bant: BANTScore
     meddic: MEDDICScore
     overall_score: float = Field(..., ge=0.0, le=1.0, description="Weighted composite 0–1")
-    value_creation_level: int = Field(
-        ..., ge=1, le=4, description="Iannarino Level 1–4 value tier"
-    )
-    recommended_action: str = Field(
-        ..., description="Next step: advance, nurture, or disqualify"
-    )
+    value_creation_level: int = Field(..., ge=1, le=4, description="Iannarino Level 1–4 value tier")
+    recommended_action: str = Field(..., description="Next step: advance, nurture, or disqualify")
     disqualification_reason: Optional[str] = None
     qualification_notes: str = Field(default="")
 
@@ -222,7 +230,9 @@ class DiscoveryPlan(BaseModel):
     )
     demo_agenda: List[str] = Field(default_factory=list, description="Ordered demo talking points")
     expected_objections: List[str] = Field(default_factory=list)
-    success_criteria_for_call: str = Field(default="", description="What a successful call looks like")
+    success_criteria_for_call: str = Field(
+        default="", description="What a successful call looks like"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +288,9 @@ class ClosingStrategy(BaseModel):
     recommended_close_technique: CloseType
     close_script: str
     objection_handlers: List[ObjectionHandler] = Field(default_factory=list)
-    urgency_framing: str = Field(default="", description="Legitimate urgency lever to accelerate decision")
+    urgency_framing: str = Field(
+        default="", description="Legitimate urgency lever to accelerate decision"
+    )
     walk_away_criteria: str = Field(
         default="", description="Conditions under which to disengage from the deal"
     )
@@ -305,7 +317,9 @@ class PipelineCoachingReport(BaseModel):
     prospects_reviewed: int
     deal_risk_signals: List[DealRiskSignal] = Field(default_factory=list)
     talk_listen_ratio_advice: str = Field(default="")
-    velocity_insights: str = Field(default="", description="Pipeline velocity and stage duration analysis")
+    velocity_insights: str = Field(
+        default="", description="Pipeline velocity and stage duration analysis"
+    )
     forecast_category: ForecastCategory = ForecastCategory.PIPELINE
     top_priority_deals: List[str] = Field(default_factory=list)
     recommended_next_actions: List[str] = Field(default_factory=list)
@@ -408,12 +422,12 @@ class CoachingRequest(BaseModel):
 class OutcomeResult(str, Enum):
     """What happened at a specific pipeline stage for a prospect."""
 
-    CONVERTED = "converted"        # Moved forward to next stage
-    STALLED = "stalled"            # No response / no movement
-    OBJECTION = "objection"        # Objection raised; outcome pending
+    CONVERTED = "converted"  # Moved forward to next stage
+    STALLED = "stalled"  # No response / no movement
+    OBJECTION = "objection"  # Objection raised; outcome pending
     DISQUALIFIED = "disqualified"  # Explicitly ruled out
-    WON = "won"                    # Deal closed won
-    LOST = "lost"                  # Deal closed lost
+    WON = "won"  # Deal closed won
+    LOST = "lost"  # Deal closed lost
 
 
 class DealResult(str, Enum):
@@ -442,9 +456,7 @@ class StageOutcome(BaseModel):
     subject_line_used: Optional[str] = Field(
         default=None, description="Subject line that drove the reply (outreach stage)"
     )
-    objection_text: Optional[str] = Field(
-        default=None, description="Objection raised, if any"
-    )
+    objection_text: Optional[str] = Field(default=None, description="Objection raised, if any")
     close_technique_used: Optional[CloseType] = Field(
         default=None, description="Close technique attempted (negotiation stage)"
     )
@@ -464,11 +476,9 @@ class DealOutcome(BaseModel):
     result: DealResult
     loss_reason: Optional[str] = Field(
         default=None,
-        description="Why the deal was lost (price, competitor, timing, no champion, etc.)"
+        description="Why the deal was lost (price, competitor, timing, no champion, etc.)",
     )
-    win_factor: Optional[str] = Field(
-        default=None, description="Primary reason the deal was won"
-    )
+    win_factor: Optional[str] = Field(default=None, description="Primary reason the deal was won")
     close_technique_used: Optional[CloseType] = None
     objections_raised: List[str] = Field(default_factory=list)
     stages_completed: List[PipelineStage] = Field(default_factory=list)
@@ -486,42 +496,36 @@ class LearningInsights(BaseModel):
     total_outcomes_analyzed: int = 0
     win_rate: float = Field(default=0.0, ge=0.0, le=1.0, description="Fraction of deals won")
     stage_conversion_rates: dict = Field(
-        default_factory=dict,
-        description="stage_name → conversion % to next stage"
+        default_factory=dict, description="stage_name → conversion % to next stage"
     )
     top_performing_industries: List[str] = Field(
-        default_factory=list,
-        description="Industries with highest win rates"
+        default_factory=list, description="Industries with highest win rates"
     )
     top_icp_signals: List[str] = Field(
-        default_factory=list,
-        description="ICP traits / trigger events that correlated with wins"
+        default_factory=list, description="ICP traits / trigger events that correlated with wins"
     )
     best_outreach_angles: List[str] = Field(
         default_factory=list,
-        description="Subject line patterns or email angles with high reply rates"
+        description="Subject line patterns or email angles with high reply rates",
     )
     common_objections: List[str] = Field(
-        default_factory=list,
-        description="Objections that appear most frequently across all deals"
+        default_factory=list, description="Objections that appear most frequently across all deals"
     )
     best_close_techniques: List[str] = Field(
-        default_factory=list,
-        description="Close techniques with highest observed win rates"
+        default_factory=list, description="Close techniques with highest observed win rates"
     )
     winning_patterns: List[str] = Field(
-        default_factory=list,
-        description="Behaviors / deal traits that consistently preceded wins"
+        default_factory=list, description="Behaviors / deal traits that consistently preceded wins"
     )
     losing_patterns: List[str] = Field(
         default_factory=list,
-        description="Behaviors / deal traits that consistently preceded losses"
+        description="Behaviors / deal traits that consistently preceded losses",
     )
     avg_deal_size_won_usd: Optional[float] = None
     avg_sales_cycle_days: Optional[float] = None
     actionable_recommendations: List[str] = Field(
         default_factory=list,
-        description="Specific, prioritized advice to improve the current pipeline"
+        description="Specific, prioritized advice to improve the current pipeline",
     )
     generated_at: str = Field(default="", description="ISO-8601 UTC timestamp of last refresh")
     insights_version: int = Field(default=0, description="Increments on each refresh")

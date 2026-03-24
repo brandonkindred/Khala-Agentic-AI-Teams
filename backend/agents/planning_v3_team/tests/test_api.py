@@ -59,7 +59,10 @@ def test_status_404(client):
 
 
 def test_status_after_run(client, temp_repo):
-    run_r = client.post("/run", json={"repo_path": temp_repo, "use_product_analysis": False, "use_planning_v2": False})
+    run_r = client.post(
+        "/run",
+        json={"repo_path": temp_repo, "use_product_analysis": False, "use_planning_v2": False},
+    )
     job_id = run_r.json()["job_id"]
     r = client.get(f"/status/{job_id}")
     assert r.status_code == 200

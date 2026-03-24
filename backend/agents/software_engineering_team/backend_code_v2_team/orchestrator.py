@@ -72,7 +72,9 @@ class BackendDevelopmentAgent:
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
 
-    def _build_tool_runners(self, tool_agents: Dict[ToolAgentKind, Any]) -> Dict[ToolAgentKind, Callable[[ToolAgentInput], ToolAgentOutput]]:
+    def _build_tool_runners(
+        self, tool_agents: Dict[ToolAgentKind, Any]
+    ) -> Dict[ToolAgentKind, Callable[[ToolAgentInput], ToolAgentOutput]]:
         """Build run callables from tool agent instances (for Execution phase)."""
         runners = {}
         for k, ag in tool_agents.items():
@@ -92,7 +94,10 @@ class BackendDevelopmentAgent:
             for f in sorted(repo_path.rglob("*")):
                 if not f.is_file() or f.suffix not in extensions:
                     continue
-                if any(skip in f.parts for skip in ("node_modules", ".git", "__pycache__", "venv", ".venv")):
+                if any(
+                    skip in f.parts
+                    for skip in ("node_modules", ".git", "__pycache__", "venv", ".venv")
+                ):
                     continue
                 try:
                     content = f.read_text(encoding="utf-8", errors="replace")
@@ -151,7 +156,9 @@ class BackendDevelopmentAgent:
                 except Exception:
                     pass
 
-        logger.info("[%s] WORKFLOW START: Backend Development Agent (per-microtask review gates)", task_id)
+        logger.info(
+            "[%s] WORKFLOW START: Backend Development Agent (per-microtask review gates)", task_id
+        )
 
         existing_code = self._read_repo_code(repo_path)
         tool_agents = _build_tool_agents(self.llm)
@@ -160,7 +167,11 @@ class BackendDevelopmentAgent:
         # ── Phase 1: Planning ──────────────────────────────────────────
         logger.info("[%s] Next step -> Starting Phase 1: Planning", task_id)
         result.current_phase = Phase.PLANNING
-        _update_job(current_phase="planning", progress=5, status_text="Analyzing task and creating implementation plan")
+        _update_job(
+            current_phase="planning",
+            progress=5,
+            status_text="Analyzing task and creating implementation plan",
+        )
 
         try:
             planning_result = run_planning(
@@ -190,7 +201,9 @@ class BackendDevelopmentAgent:
         feature_branch_name: Optional[str] = None
         git_agent = tool_agents.get(ToolAgentKind.GIT_BRANCH_MANAGEMENT)
         if git_agent is not None and hasattr(git_agent, "create_feature_branch"):
-            _update_job(current_phase="planning", progress=12, status_text="Creating feature branch...")
+            _update_job(
+                current_phase="planning", progress=12, status_text="Creating feature branch..."
+            )
             try:
                 ok, branch_name = git_agent.create_feature_branch(
                     repo_path, task_id, task.title or ""
@@ -198,18 +211,37 @@ class BackendDevelopmentAgent:
                 if ok and branch_name:
                     feature_branch_name = branch_name
                     logger.info("[%s] Created feature branch: %s", task_id, feature_branch_name)
-                    _update_job(current_phase="planning", progress=14, status_text=f"Branch {feature_branch_name} ready")
+                    _update_job(
+                        current_phase="planning",
+                        progress=14,
+                        status_text=f"Branch {feature_branch_name} ready",
+                    )
                 else:
-                    logger.warning("[%s] Git agent create_feature_branch failed, deliver will create branch", task_id)
+                    logger.warning(
+                        "[%s] Git agent create_feature_branch failed, deliver will create branch",
+                        task_id,
+                    )
             except Exception as exc:
                 logger.warning("[%s] Git agent create_feature_branch raised: %s", task_id, exc)
 
         # ── Phase 2: Execution with per-microtask review gates ─────────
         logger.info("[%s] Next step -> Starting Phase 2: Execution", task_id)
         result.current_phase = Phase.EXECUTION
-        _update_job(current_phase="execution", current_microtask="", progress=15, status_text="Starting code implementation")
+        _update_job(
+            current_phase="execution",
+            current_microtask="",
+            progress=15,
+            status_text="Starting code implementation",
+        )
 
-        def _progress_cb(current_index: int, done: int, total: int, title: str, microtask_phase: str = "coding", phase_detail: str = "") -> None:
+        def _progress_cb(
+            current_index: int,
+            done: int,
+            total: int,
+            title: str,
+            microtask_phase: str = "coding",
+            phase_detail: str = "",
+        ) -> None:
             phase_labels = {
                 "coding": "Writing code",
                 "code_review": "Code review",
@@ -220,7 +252,9 @@ class BackendDevelopmentAgent:
                 "problem_solving": "Fixing issues",
                 "completed": "Completed",
             }
-            phase_label = phase_labels.get(microtask_phase, microtask_phase.replace("_", " ").title())
+            phase_label = phase_labels.get(
+                microtask_phase, microtask_phase.replace("_", " ").title()
+            )
             status = f"{phase_label}: {title} ({current_index}/{total})"
             if phase_detail:
                 status = f"{status} — {phase_detail}"
@@ -262,7 +296,9 @@ class BackendDevelopmentAgent:
             )
             result.execution_result = exec_result
         except MicrotaskReviewFailedError as err:
-            result.failure_reason = f"Microtask {err.microtask.id} failed review: {err.review_result.summary}"
+            result.failure_reason = (
+                f"Microtask {err.microtask.id} failed review: {err.review_result.summary}"
+            )
             logger.error("[%s] %s", task_id, result.failure_reason)
             return result
         except Exception as exc:
@@ -275,13 +311,23 @@ class BackendDevelopmentAgent:
             result.failure_reason = "Execution produced no files."
             return result
 
-        completed_count = sum(1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.COMPLETED)
-        failed_count = sum(1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.REVIEW_FAILED)
+        completed_count = sum(
+            1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.COMPLETED
+        )
+        failed_count = sum(
+            1 for mt in exec_result.microtasks if mt.status == MicrotaskStatus.REVIEW_FAILED
+        )
         result.iterations_used = completed_count
 
-        if feature_branch_name and git_agent is not None and hasattr(git_agent, "commit_current_changes"):
+        if (
+            feature_branch_name
+            and git_agent is not None
+            and hasattr(git_agent, "commit_current_changes")
+        ):
             try:
-                git_agent.commit_current_changes(repo_path, f"feat: {completed_count} microtasks completed")
+                git_agent.commit_current_changes(
+                    repo_path, f"feat: {completed_count} microtasks completed"
+                )
             except Exception as exc:
                 logger.warning("[%s] Git agent commit_current_changes raised: %s", task_id, exc)
 
@@ -290,7 +336,11 @@ class BackendDevelopmentAgent:
         # ── Phase: Documentation ────────────────────────────────────────
         logger.info("[%s] Next step -> Starting Phase: Documentation", task_id)
         result.current_phase = Phase.DOCUMENTATION
-        _update_job(current_phase="documentation", progress=80, status_text="Generating documentation and API specs")
+        _update_job(
+            current_phase="documentation",
+            progress=80,
+            status_text="Generating documentation and API specs",
+        )
 
         from .phases.documentation import run_documentation_phase
 
@@ -311,13 +361,18 @@ class BackendDevelopmentAgent:
         except Exception as exc:
             logger.warning(
                 "[%s] Documentation phase failed: %s. Next step -> Continuing to Deliver phase",
-                task_id, exc,
+                task_id,
+                exc,
             )
 
         # ── Phase: Deliver ───────────────────────────────────────────
         logger.info("[%s] Next step -> Starting Phase: Deliver", task_id)
         result.current_phase = Phase.DELIVER
-        _update_job(current_phase="deliver", progress=90, status_text="Committing changes and preparing delivery")
+        _update_job(
+            current_phase="deliver",
+            progress=90,
+            status_text="Committing changes and preparing delivery",
+        )
 
         try:
             deliver_result = run_deliver(
@@ -342,8 +397,14 @@ class BackendDevelopmentAgent:
             return result
 
         elapsed = time.monotonic() - start_time
-        final_status = "Backend task complete" if result.success else "Backend task completed with issues"
-        _update_job(current_phase="deliver", progress=100 if result.success else 95, status_text=final_status)
+        final_status = (
+            "Backend task complete" if result.success else "Backend task completed with issues"
+        )
+        _update_job(
+            current_phase="deliver",
+            progress=100 if result.success else 95,
+            status_text=final_status,
+        )
         logger.info(
             "[%s] WORKFLOW %s in %.1fs (%d microtasks completed, %d failed review)",
             task_id,
@@ -406,7 +467,11 @@ class BackendCodeV2TeamLead:
 
         # ── Setup phase (Backend Tech Lead) ─────────────────────────────
         result.current_phase = Phase.SETUP
-        _update_job(current_phase="setup", progress=2, status_text="Setting up repository and development environment")
+        _update_job(
+            current_phase="setup",
+            progress=2,
+            status_text="Setting up repository and development environment",
+        )
         try:
             setup_result = run_setup(repo_path=repo_path, task_title=task.title or "")
             result.setup_result = setup_result

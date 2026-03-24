@@ -41,14 +41,23 @@ def _sample_ips() -> IPS:
         time_horizon_years=10,
         liquidity_needs=LiquidityNeeds(
             emergency_fund_months=6,
-            planned_large_expenses=[PlannedLargeExpense(name="car", amount=10000, date="2027-01-01T00:00:00Z")],
+            planned_large_expenses=[
+                PlannedLargeExpense(name="car", amount=10000, date="2027-01-01T00:00:00Z")
+            ],
         ),
         income=IncomeProfile(annual_gross=120000, stability="stable"),
         net_worth=NetWorth(total=300000, investable_assets=200000),
         savings_rate=SavingsRate(monthly=2000, annual=24000),
         tax_profile=TaxProfile(country="US", state="CA", account_types=["taxable"]),
         preferences=UserPreferences(),
-        goals=[UserGoal(name="retire", target_amount=1_000_000, target_date="2035-01-01T00:00:00Z", priority="high")],
+        goals=[
+            UserGoal(
+                name="retire",
+                target_amount=1_000_000,
+                target_date="2035-01-01T00:00:00Z",
+                priority="high",
+            )
+        ],
         constraints=PortfolioConstraints(
             max_single_position_pct=10,
             max_asset_class_pct={"equities": 70, "crypto": 10, "options": 10},
@@ -68,7 +77,9 @@ def _sample_validation() -> ValidationReport:
             ValidationCheck(name="backtest_quality", status=ValidationStatus.PASS, details="ok"),
             ValidationCheck(name="walk_forward", status=ValidationStatus.PASS, details="ok"),
             ValidationCheck(name="stress_test", status=ValidationStatus.PASS, details="ok"),
-            ValidationCheck(name="transaction_cost_model", status=ValidationStatus.PASS, details="ok"),
+            ValidationCheck(
+                name="transaction_cost_model", status=ValidationStatus.PASS, details="ok"
+            ),
             ValidationCheck(name="liquidity_impact", status=ValidationStatus.PASS, details="ok"),
         ],
     )
@@ -96,7 +107,13 @@ def test_policy_guardian_checks_aggregate_caps_and_speculative_sleeve() -> None:
 
 def test_promotion_gate_requires_human_approval_for_live() -> None:
     ips = _sample_ips()
-    strategy = StrategySpec(strategy_id="s1", authored_by="research", asset_class="equities", hypothesis="h", signal_definition="s")
+    strategy = StrategySpec(
+        strategy_id="s1",
+        authored_by="research",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+    )
     decision = PromotionGateAgent().decide(
         strategy=strategy,
         validation=_sample_validation(),
@@ -122,7 +139,13 @@ def test_orchestrator_degrades_to_monitor_only_on_integrity_failure() -> None:
 
 def test_promotion_gate_revises_when_validation_strategy_mismatch() -> None:
     ips = _sample_ips()
-    strategy = StrategySpec(strategy_id="s1", authored_by="research", asset_class="equities", hypothesis="h", signal_definition="s")
+    strategy = StrategySpec(
+        strategy_id="s1",
+        authored_by="research",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+    )
     validation = _sample_validation()
     validation.strategy_id = "other"
 
@@ -148,7 +171,9 @@ def test_policy_guardian_rejects_excluded_asset_class() -> None:
         ips_version="1.0",
         data_snapshot_id="snap-1",
         objective="balanced",
-        positions=[PortfolioPosition(symbol="BTC", asset_class="crypto", weight_pct=5, rationale="alpha")],
+        positions=[
+            PortfolioPosition(symbol="BTC", asset_class="crypto", weight_pct=5, rationale="alpha")
+        ],
     )
 
     violations = PolicyGuardianAgent().check_portfolio(ips, proposal)
@@ -177,7 +202,9 @@ def test_orchestrator_web_action_uses_optional_coordinator() -> None:
     )
     orch = InvestmentTeamOrchestrator(web_interface_coordinator=coordinator)
 
-    result = orch.run_web_action(action="capture_chart", payload={"symbol": "SPY"}, workspace_name="swing")
+    result = orch.run_web_action(
+        action="capture_chart", payload={"symbol": "SPY"}, workspace_name="swing"
+    )
 
     assert result["provider"] == "tradingview"
     assert result["results"]["open_workspace"]["details"]["workspace"] == "swing"
@@ -194,7 +221,9 @@ def test_orchestrator_web_action_accepts_protocol_compatible_coordinator() -> No
 
     orch = InvestmentTeamOrchestrator(web_interface_coordinator=_CoordinatorStub())
 
-    result = orch.run_web_action(action="capture_chart", payload={"symbol": "IWM"}, workspace_name="test")
+    result = orch.run_web_action(
+        action="capture_chart", payload={"symbol": "IWM"}, workspace_name="test"
+    )
 
     assert result["provider"] == "stub"
     assert result["workspace"] == "test"
@@ -254,13 +283,22 @@ def test_web_interface_coordinator_logs_out_when_action_fails() -> None:
             self.logged_out = False
 
         def login(self):
-            return type("Result", (), {"provider": "quantconnect", "action": "login", "status": "ok", "details": {}})()
+            return type(
+                "Result",
+                (),
+                {"provider": "quantconnect", "action": "login", "status": "ok", "details": {}},
+            )()
 
         def open_workspace(self, workspace_name=None):
             return type(
                 "Result",
                 (),
-                {"provider": "quantconnect", "action": "open_workspace", "status": "ok", "details": {}},
+                {
+                    "provider": "quantconnect",
+                    "action": "open_workspace",
+                    "status": "ok",
+                    "details": {},
+                },
             )()
 
         def run_action(self, action, payload=None):
@@ -271,7 +309,11 @@ def test_web_interface_coordinator_logs_out_when_action_fails() -> None:
 
         def logout(self):
             self.logged_out = True
-            return type("Result", (), {"provider": "quantconnect", "action": "logout", "status": "ok", "details": {}})()
+            return type(
+                "Result",
+                (),
+                {"provider": "quantconnect", "action": "logout", "status": "ok", "details": {}},
+            )()
 
     coordinator = InvestmentWebInterfaceCoordinator(
         provider="quantconnect",
@@ -284,7 +326,6 @@ def test_web_interface_coordinator_logs_out_when_action_fails() -> None:
         coordinator.execute_action(action="deploy_strategy", payload={"strategy_id": "s1"})
 
     assert failing_agent.logged_out is True
-
 
 
 def test_agent_catalog_includes_global_risk_manager() -> None:

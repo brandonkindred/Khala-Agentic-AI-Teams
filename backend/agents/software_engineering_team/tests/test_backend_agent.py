@@ -26,6 +26,7 @@ def test_problem_solver_cycle_constant_defaults_to_twenty() -> None:
     """Problem solver cycle budget is bounded and defaults to a sane range around 20."""
     assert 1 <= MAX_PROBLEM_SOLVER_CYCLES <= 20
 
+
 def test_max_prewrite_regenerations_constant_defaults_to_two() -> None:
     """MAX_PREWRITE_REGENERATIONS is 2 by default to cap pre-write loops and reduce LLM calls."""
     assert MAX_PREWRITE_REGENERATIONS >= 1
@@ -39,7 +40,7 @@ def test_build_code_review_issues_exception_handler_failure_returns_targeted_sug
         "= FAILURES =\n"
         "________________________ test_generic_exception_handler ________________________\n"
         "tests/test_error_handlers.py:108: in test_generic_exception_handler\n"
-        "    response = client.get(\"/test-generic-error\")"
+        '    response = client.get("/test-generic-error")'
     )
     issues = _build_code_review_issues_for_build_failure(build_errors)
     assert len(issues) == 1
@@ -123,9 +124,12 @@ def test_test_routes_missing_from_main_py_returns_empty_when_route_present(
 
 def test_extract_failing_test_file_from_build_errors() -> None:
     """_extract_failing_test_file_from_build_errors extracts tests/test_*.py path."""
-    assert _extract_failing_test_file_from_build_errors(
-        "[pytest_assertion] test_invalid_auth_header failed. Raw output: FAILED tests/test_auth_middleware.py::test_invalid"
-    ) == "tests/test_auth_middleware.py"
+    assert (
+        _extract_failing_test_file_from_build_errors(
+            "[pytest_assertion] test_invalid_auth_header failed. Raw output: FAILED tests/test_auth_middleware.py::test_invalid"
+        )
+        == "tests/test_auth_middleware.py"
+    )
     assert _extract_failing_test_file_from_build_errors("ImportError: no module") is None
 
 
@@ -173,7 +177,13 @@ def test_backend_agent_includes_problem_solving_header_when_issues_present() -> 
             task_description="Fix build",
             requirements="",
             code_review_issues=[
-                {"severity": "critical", "category": "build", "description": "Test failed", "suggestion": "Fix it", "file_path": "app/main.py"},
+                {
+                    "severity": "critical",
+                    "category": "build",
+                    "description": "Test failed",
+                    "suggestion": "Fix it",
+                    "file_path": "app/main.py",
+                },
             ],
         )
     )
@@ -225,7 +235,9 @@ def test_backend_agent_logs_llm_prompt(caplog: pytest.LogCaptureFixture) -> None
     }
     agent = BackendExpertAgent(llm_client=mock_llm)
     agent.run(BackendInput(task_description="Add API", requirements=""))
-    assert any("LLM call" in rec.message and "agent=Backend" in rec.message for rec in caplog.records)
+    assert any(
+        "LLM call" in rec.message and "agent=Backend" in rec.message for rec in caplog.records
+    )
     assert any("mode=initial" in rec.message for rec in caplog.records)
 
 
@@ -266,7 +278,9 @@ def test_backend_agent_logs_problem_solving_context_and_header_when_issues_prese
     assert any("mode=problem_solving" in rec.message for rec in caplog.records)
 
 
-def test_backend_agent_no_problem_solving_logs_when_no_issues(caplog: pytest.LogCaptureFixture) -> None:
+def test_backend_agent_no_problem_solving_logs_when_no_issues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Backend agent does not log problem-solving context/header when no issues."""
 
     import logging
@@ -284,7 +298,9 @@ def test_backend_agent_no_problem_solving_logs_when_no_issues(caplog: pytest.Log
     agent = BackendExpertAgent(llm_client=mock_llm)
     agent.run(BackendInput(task_description="Add API", requirements=""))
     assert not any("Backend problem-solving context" in rec.message for rec in caplog.records)
-    assert not any("Backend problem-solving header for LLM" in rec.message for rec in caplog.records)
+    assert not any(
+        "Backend problem-solving header for LLM" in rec.message for rec in caplog.records
+    )
 
 
 def test_backend_agent_content_only_with_code_block_raises_llm_permanent_error() -> None:
@@ -324,7 +340,13 @@ def test_backend_plan_task_returns_plan_markdown() -> None:
         "tests_needed": "tests/test_task_endpoints.py",
     }
     agent = BackendExpertAgent(llm_client=mock_llm)
-    task = Task(id="t1", type=TaskType.BACKEND, assignee="backend", title="Add tasks", description="Implement task CRUD")
+    task = Task(
+        id="t1",
+        type=TaskType.BACKEND,
+        assignee="backend",
+        title="Add tasks",
+        description="Implement task CRUD",
+    )
     plan_text, should_split = agent._plan_task(
         task=task,
         existing_code="# No code",
@@ -354,12 +376,16 @@ def test_regenerate_with_issues_passes_task_plan_to_backend_input(tmp_path: Path
         "suggested_commit_message": "fix: add route",
     }
     agent = BackendExpertAgent(llm_client=mock_llm)
-    task = type("Task", (), {
-        "id": "t1",
-        "description": "Add API",
-        "user_story": "",
-        "requirements": "",
-    })()
+    task = type(
+        "Task",
+        (),
+        {
+            "id": "t1",
+            "description": "Add API",
+            "user_story": "",
+            "requirements": "",
+        },
+    )()
     with patch.object(agent, "run") as mock_run:
         mock_run.return_value = type("Out", (), {"files": {"app/main.py": "x"}, "summary": ""})()
         agent._regenerate_with_issues(
@@ -367,7 +393,9 @@ def test_regenerate_with_issues_passes_task_plan_to_backend_input(tmp_path: Path
             current_task=task,
             spec_content="",
             architecture=None,
-            code_review_issues=[{"severity": "critical", "description": "Fix", "suggestion": "Add route"}],
+            code_review_issues=[
+                {"severity": "critical", "description": "Fix", "suggestion": "Add route"}
+            ],
             task_plan="**Feature intent:** Add /test-generic-error",
         )
         call_args = mock_run.call_args
@@ -424,10 +452,16 @@ def test_run_workflow_exits_at_five_same_build_failures_and_notifies_tech_lead(
         check=True,
         capture_output=True,
     )
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "app").mkdir(exist_ok=True)
-    (tmp_path / "app" / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
-    subprocess.run(["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "app" / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8"
+    )
+    subprocess.run(
+        ["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True
+    )
     subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
 
@@ -438,17 +472,46 @@ def test_run_workflow_exits_at_five_same_build_failures_and_notifies_tech_lead(
         title="Add API",
         description="Implement GET /health",
         acceptance_criteria=["returns 200"],
-        metadata={"goal": {"summary": "x"}, "scope": {"included": ["x"]}, "constraints": {"framework": "fastapi"}, "non_functional_requirements": {"latency_p95_ms": 300}, "inputs_outputs": {"input": "x", "output": "y"}},
+        metadata={
+            "goal": {"summary": "x"},
+            "scope": {"included": ["x"]},
+            "constraints": {"framework": "fastapi"},
+            "non_functional_requirements": {"latency_p95_ms": 300},
+            "inputs_outputs": {"input": "x", "output": "y"},
+        },
     )
     same_error = "ImportError: No module named 'foo'"
 
     mock_llm = MagicMock()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.side_effect = [
-        {"feature_intent": "Add health", "what_changes": ["app/main.py"], "algorithms_data_structures": "", "tests_needed": ""},
-        {"code": "", "language": "python", "summary": "Done", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"}, "tests": "", "suggested_commit_message": "feat: add"},
+        {
+            "feature_intent": "Add health",
+            "what_changes": ["app/main.py"],
+            "algorithms_data_structures": "",
+            "tests_needed": "",
+        },
+        {
+            "code": "",
+            "language": "python",
+            "summary": "Done",
+            "files": {
+                "app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"
+            },
+            "tests": "",
+            "suggested_commit_message": "feat: add",
+        },
     ] + [
-        {"code": "", "language": "python", "summary": "Fixed", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"}, "tests": "", "suggested_commit_message": "fix: build"}
+        {
+            "code": "",
+            "language": "python",
+            "summary": "Fixed",
+            "files": {
+                "app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"
+            },
+            "tests": "",
+            "suggested_commit_message": "fix: build",
+        }
         for _ in range(10)
     ]
 
@@ -458,7 +521,12 @@ def test_run_workflow_exits_at_five_same_build_failures_and_notifies_tech_lead(
 
     mock_qa.run.return_value = MagicMock(
         bugs_found=[
-            BugReport(severity="critical", description="Fix", location="app/main.py", recommendation="Fix the import"),
+            BugReport(
+                severity="critical",
+                description="Fix",
+                location="app/main.py",
+                recommendation="Fix the import",
+            ),
         ]
     )
     mock_tech_lead = MagicMock()
@@ -474,8 +542,14 @@ def test_run_workflow_exits_at_five_same_build_failures_and_notifies_tech_lead(
         architecture=None,
         qa_agent=mock_qa,
         security_agent=MagicMock(run=MagicMock(return_value=MagicMock(approved=True, issues=[]))),
-        dbc_agent=MagicMock(run=MagicMock(return_value=MagicMock(already_compliant=True, comments_added=0, comments_updated=0))),
-        code_review_agent=MagicMock(run=MagicMock(return_value=MagicMock(approved=True, issues=[]))),
+        dbc_agent=MagicMock(
+            run=MagicMock(
+                return_value=MagicMock(already_compliant=True, comments_added=0, comments_updated=0)
+            )
+        ),
+        code_review_agent=MagicMock(
+            run=MagicMock(return_value=MagicMock(approved=True, issues=[]))
+        ),
         tech_lead=mock_tech_lead,
         build_verifier=build_verifier,
     )
@@ -512,13 +586,17 @@ def test_run_workflow_invokes_build_fix_specialist_when_same_build_fails_twice(
         check=True,
         capture_output=True,
     )
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "app").mkdir(exist_ok=True)
     (tmp_path / "app" / "main.py").write_text(
         "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}",
         encoding="utf-8",
     )
-    subprocess.run(["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True
+    )
     subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
 
@@ -529,17 +607,46 @@ def test_run_workflow_invokes_build_fix_specialist_when_same_build_fails_twice(
         title="Add API",
         description="Implement GET /health",
         acceptance_criteria=["returns 200"],
-        metadata={"goal": {"summary": "x"}, "scope": {"included": ["x"]}, "constraints": {"framework": "fastapi"}, "non_functional_requirements": {"latency_p95_ms": 300}, "inputs_outputs": {"input": "x", "output": "y"}},
+        metadata={
+            "goal": {"summary": "x"},
+            "scope": {"included": ["x"]},
+            "constraints": {"framework": "fastapi"},
+            "non_functional_requirements": {"latency_p95_ms": 300},
+            "inputs_outputs": {"input": "x", "output": "y"},
+        },
     )
     same_error = "ImportError: No module named 'foo'"
 
     mock_llm = MagicMock()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.side_effect = [
-        {"feature_intent": "Add health", "what_changes": ["app/main.py"], "algorithms_data_structures": "", "tests_needed": ""},
-        {"code": "", "language": "python", "summary": "Done", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"}, "tests": "", "suggested_commit_message": "feat: add"},
+        {
+            "feature_intent": "Add health",
+            "what_changes": ["app/main.py"],
+            "algorithms_data_structures": "",
+            "tests_needed": "",
+        },
+        {
+            "code": "",
+            "language": "python",
+            "summary": "Done",
+            "files": {
+                "app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"
+            },
+            "tests": "",
+            "suggested_commit_message": "feat: add",
+        },
     ] + [
-        {"code": "", "language": "python", "summary": "Fixed", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"}, "tests": "", "suggested_commit_message": "fix: build"}
+        {
+            "code": "",
+            "language": "python",
+            "summary": "Fixed",
+            "files": {
+                "app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef h(): return {}"
+            },
+            "tests": "",
+            "suggested_commit_message": "fix: build",
+        }
         for _ in range(10)
     ]
 
@@ -549,7 +656,12 @@ def test_run_workflow_invokes_build_fix_specialist_when_same_build_fails_twice(
 
     mock_qa.run.return_value = MagicMock(
         bugs_found=[
-            BugReport(severity="critical", description="Fix", location="app/main.py", recommendation="Fix the import"),
+            BugReport(
+                severity="critical",
+                description="Fix",
+                location="app/main.py",
+                recommendation="Fix the import",
+            ),
         ]
     )
     mock_tech_lead = MagicMock()
@@ -587,7 +699,10 @@ def test_run_workflow_invokes_build_fix_specialist_when_same_build_fails_twice(
     mock_specialist.run.assert_called()
     call_input = mock_specialist.run.call_args[0][0]
     assert call_input.build_errors == same_error
-    assert "app/main.py" in call_input.affected_files_code or "main.py" in call_input.affected_files_code
+    assert (
+        "app/main.py" in call_input.affected_files_code
+        or "main.py" in call_input.affected_files_code
+    )
     main_content = (tmp_path / "app" / "main.py").read_text()
     assert "# fixed" in main_content
 
@@ -597,41 +712,78 @@ def test_run_workflow_skips_specialist_when_none(tmp_path: Path) -> None:
     from software_engineering_team.shared.models import Task, TaskType
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t.com"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "app").mkdir(exist_ok=True)
     (tmp_path / "app" / "main.py").write_text("print('hi')", encoding="utf-8")
-    subprocess.run(["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True
+    )
     subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
 
     task = Task(
-        id="t-none", type=TaskType.BACKEND, assignee="backend",
-        title="Add", description="Add",
+        id="t-none",
+        type=TaskType.BACKEND,
+        assignee="backend",
+        title="Add",
+        description="Add",
         acceptance_criteria=["ok"],
-        metadata={"goal": {"summary": "x"}, "scope": {"included": ["x"]},
-                   "constraints": {}, "non_functional_requirements": {},
-                   "inputs_outputs": {"input": "x", "output": "y"}},
+        metadata={
+            "goal": {"summary": "x"},
+            "scope": {"included": ["x"]},
+            "constraints": {},
+            "non_functional_requirements": {},
+            "inputs_outputs": {"input": "x", "output": "y"},
+        },
     )
 
     mock_llm = MagicMock()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.side_effect = [
-        {"feature_intent": "Add", "what_changes": ["app/main.py"], "algorithms_data_structures": "", "tests_needed": ""},
-        {"code": "", "language": "python", "summary": "Done",
-         "files": {"app/main.py": "print('hi')"}, "tests": "", "suggested_commit_message": "feat: add"},
+        {
+            "feature_intent": "Add",
+            "what_changes": ["app/main.py"],
+            "algorithms_data_structures": "",
+            "tests_needed": "",
+        },
+        {
+            "code": "",
+            "language": "python",
+            "summary": "Done",
+            "files": {"app/main.py": "print('hi')"},
+            "tests": "",
+            "suggested_commit_message": "feat: add",
+        },
     ] + [
-        {"code": "", "language": "python", "summary": "Fixed",
-         "files": {"app/main.py": "print('hi')"}, "tests": "", "suggested_commit_message": "fix: build"}
+        {
+            "code": "",
+            "language": "python",
+            "summary": "Fixed",
+            "files": {"app/main.py": "print('hi')"},
+            "tests": "",
+            "suggested_commit_message": "fix: build",
+        }
         for _ in range(10)
     ]
 
     agent = BackendExpertAgent(llm_client=mock_llm)
     mock_qa = MagicMock()
     from qa_agent.models import BugReport
+
     mock_qa.run.return_value = MagicMock(
-        bugs_found=[BugReport(severity="critical", description="Fix", location="app/main.py", recommendation="Fix")]
+        bugs_found=[
+            BugReport(
+                severity="critical", description="Fix", location="app/main.py", recommendation="Fix"
+            )
+        ]
     )
     mock_tech_lead = MagicMock()
     mock_tech_lead.review_progress.return_value = []
@@ -714,43 +866,97 @@ def test_run_workflow_uses_problem_solver_agent_on_build_failure(tmp_path: Path)
     from software_engineering_team.shared.models import Task, TaskType
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "app").mkdir(exist_ok=True)
-    (tmp_path / "app" / "main.py").write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
-    subprocess.run(["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "app" / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8"
+    )
+    subprocess.run(
+        ["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True
+    )
     subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
 
-    task = Task(id="tps", type=TaskType.BACKEND, assignee="backend", title="Fix build", description="Fix failing tests", acceptance_criteria=["build passes"], metadata={"goal": {"summary": "x"}, "scope": {"included": ["x"]}, "constraints": {"framework": "fastapi"}, "non_functional_requirements": {"latency_p95_ms": 300}, "inputs_outputs": {"input": "x", "output": "y"}})
+    task = Task(
+        id="tps",
+        type=TaskType.BACKEND,
+        assignee="backend",
+        title="Fix build",
+        description="Fix failing tests",
+        acceptance_criteria=["build passes"],
+        metadata={
+            "goal": {"summary": "x"},
+            "scope": {"included": ["x"]},
+            "constraints": {"framework": "fastapi"},
+            "non_functional_requirements": {"latency_p95_ms": 300},
+            "inputs_outputs": {"input": "x", "output": "y"},
+        },
+    )
 
     mock_llm = MagicMock()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.side_effect = [
-        {"feature_intent": "Fix build", "what_changes": ["app/main.py"], "algorithms_data_structures": "", "tests_needed": ""},
-        {"code": "", "language": "python", "summary": "Init", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n"}, "tests": "", "suggested_commit_message": "feat: init"},
-        {"code": "", "language": "python", "summary": "Patched", "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef health():\n    return {'ok': True}\n"}, "tests": "", "suggested_commit_message": "fix: patch"},
+        {
+            "feature_intent": "Fix build",
+            "what_changes": ["app/main.py"],
+            "algorithms_data_structures": "",
+            "tests_needed": "",
+        },
+        {
+            "code": "",
+            "language": "python",
+            "summary": "Init",
+            "files": {"app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n"},
+            "tests": "",
+            "suggested_commit_message": "feat: init",
+        },
+        {
+            "code": "",
+            "language": "python",
+            "summary": "Patched",
+            "files": {
+                "app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n@app.get('/health')\ndef health():\n    return {'ok': True}\n"
+            },
+            "tests": "",
+            "suggested_commit_message": "fix: patch",
+        },
     ]
     agent = BackendExpertAgent(llm_client=mock_llm)
 
     mock_problem_solver = MagicMock()
-    mock_problem_solver.run.return_value = type("PS", (), {
-        "plan": "Investigate failing assertion",
-        "execution_steps": "Patch route",
-        "review_checks": "Check response schema",
-        "testing_strategy": "Run pytest",
-        "fix_recommendation": "Add /health route",
-    })()
+    mock_problem_solver.run.return_value = type(
+        "PS",
+        (),
+        {
+            "plan": "Investigate failing assertion",
+            "execution_steps": "Patch route",
+            "review_checks": "Check response schema",
+            "testing_strategy": "Run pytest",
+            "fix_recommendation": "Add /health route",
+        },
+    )()
 
     mock_qa = MagicMock()
     mock_qa.run.return_value = MagicMock(bugs_found=[], unit_tests="", integration_tests="")
 
-    build_results = iter([
-        (False, "FAILED tests/test_health.py::test_health"),
-        (True, ""),
-        (True, ""),
-    ])
+    build_results = iter(
+        [
+            (False, "FAILED tests/test_health.py::test_health"),
+            (True, ""),
+            (True, ""),
+        ]
+    )
 
     def build_verifier(_repo_path, _agent_type, _task_id):
         return next(build_results)
@@ -762,9 +968,13 @@ def test_run_workflow_uses_problem_solver_agent_on_build_failure(tmp_path: Path)
             spec_content="# Spec",
             architecture=None,
             qa_agent=mock_qa,
-            security_agent=MagicMock(run=MagicMock(return_value=MagicMock(approved=True, issues=[]))),
+            security_agent=MagicMock(
+                run=MagicMock(return_value=MagicMock(approved=True, issues=[]))
+            ),
             dbc_agent=MagicMock(),
-            code_review_agent=MagicMock(run=MagicMock(return_value=MagicMock(approved=True, issues=[]))),
+            code_review_agent=MagicMock(
+                run=MagicMock(return_value=MagicMock(approved=True, issues=[]))
+            ),
             tech_lead=MagicMock(),
             build_verifier=build_verifier,
             problem_solver_agent=mock_problem_solver,
@@ -772,7 +982,6 @@ def test_run_workflow_uses_problem_solver_agent_on_build_failure(tmp_path: Path)
 
     assert result.success is True
     mock_problem_solver.run.assert_called()
-
 
 
 def test_validate_task_contract_flags_missing_contract_fields() -> None:

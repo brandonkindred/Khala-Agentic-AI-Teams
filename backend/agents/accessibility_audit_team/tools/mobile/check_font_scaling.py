@@ -35,12 +35,8 @@ class CheckFontScalingInput(BaseModel):
         default_factory=lambda: ["default", "large", "largest"],
         description="Font scales to test",
     )
-    screens: List[str] = Field(
-        default_factory=list, description="Screens to test"
-    )
-    capture: Dict[str, bool] = Field(
-        default_factory=lambda: {"screenshots": True}
-    )
+    screens: List[str] = Field(default_factory=list, description="Screens to test")
+    capture: Dict[str, bool] = Field(default_factory=lambda: {"screenshots": True})
 
 
 class CheckFontScalingOutput(BaseModel):

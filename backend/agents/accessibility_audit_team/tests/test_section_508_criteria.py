@@ -1,6 +1,5 @@
 """Tests for Section 508 criteria module."""
 
-
 from accessibility_audit_team.section_508_criteria import (
     SECTION_508_REQUIREMENTS,
     ApplicablePlatform,

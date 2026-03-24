@@ -2,9 +2,12 @@
 
 from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
-DBC_COMMENTS_PROMPT = """You are an expert Senior Technical Writer and Design by Contract (DbC) specialist. Your sole responsibility is to review code and ensure every method, function, class, and interface has comments that comply with Design by Contract principles.
+DBC_COMMENTS_PROMPT = (
+    """You are an expert Senior Technical Writer and Design by Contract (DbC) specialist. Your sole responsibility is to review code and ensure every method, function, class, and interface has comments that comply with Design by Contract principles.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 **Your role:**
 You review code produced by coding agents and add or update comments so they fully comply with Design by Contract. You do NOT change any logic, structure, imports, or functionality -- you ONLY add or update comments.
@@ -144,3 +147,4 @@ Return a single JSON object with:
 - "suggested_commit_message": string -- Conventional Commits format (e.g., "docs(dbc): add precondition and postcondition comments to user service")
 
 Respond with valid JSON only. No explanatory text outside JSON."""
+)

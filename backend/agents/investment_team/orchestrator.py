@@ -79,7 +79,9 @@ class InvestmentTeamOrchestrator:
             state.mode = WorkflowMode.MONITOR_ONLY
             state.audit_log.append("data_integrity_failed:degrade_to_monitor_only")
 
-    def check_proposal(self, state: WorkflowState, ips: IPS, proposal: PortfolioProposal) -> List[str]:
+    def check_proposal(
+        self, state: WorkflowState, ips: IPS, proposal: PortfolioProposal
+    ) -> List[str]:
         violations = self.policy_guardian.check_portfolio(ips, proposal)
         if violations:
             state.audit_log.append(f"proposal_rejected:{proposal.proposal_id}")
@@ -109,7 +111,10 @@ class InvestmentTeamOrchestrator:
         )
         state.audit_log.append(f"promotion:{strategy.strategy_id}:{decision.outcome.value}")
         if decision.outcome.value in {"reject", "revise"}:
-            self.enqueue(state, QueueItem(queue="escalation", payload_id=strategy.strategy_id, priority="high"))
+            self.enqueue(
+                state,
+                QueueItem(queue="escalation", payload_id=strategy.strategy_id, priority="high"),
+            )
         return decision
 
     def run_web_action(

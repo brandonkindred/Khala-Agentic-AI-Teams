@@ -43,7 +43,9 @@ def compute_planning_cache_key(
             {
                 "primary_goal": project_overview.get("primary_goal"),
                 "delivery_strategy": project_overview.get("delivery_strategy"),
-                "features_and_functionality_doc": (project_overview.get("features_and_functionality_doc") or "")[:2000],
+                "features_and_functionality_doc": (
+                    project_overview.get("features_and_functionality_doc") or ""
+                )[:2000],
             },
             sort_keys=True,
         )
@@ -87,7 +89,9 @@ def set_cached_plan(
     """
     cache_path = _cache_dir(plan_dir) / f"{cache_key}.json"
     try:
-        assignment_dict = assignment.model_dump() if hasattr(assignment, "model_dump") else assignment
+        assignment_dict = (
+            assignment.model_dump() if hasattr(assignment, "model_dump") else assignment
+        )
         data = {
             "cache_key": cache_key,
             "assignment": assignment_dict,

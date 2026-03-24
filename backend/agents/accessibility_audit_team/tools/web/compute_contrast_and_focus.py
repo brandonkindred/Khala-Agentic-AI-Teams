@@ -13,9 +13,7 @@ class ElementState(BaseModel):
     """Element state to test."""
 
     selector: str = Field(..., description="CSS selector")
-    state: Literal["default", "hover", "focus", "active", "disabled"] = Field(
-        default="default"
-    )
+    state: Literal["default", "hover", "focus", "active", "disabled"] = Field(default="default")
 
 
 class ContrastResult(BaseModel):
@@ -56,9 +54,7 @@ class FocusIndicatorResult(BaseModel):
     meets_2413_focus_appearance: bool = Field(
         default=False, description="Meets WCAG 2.4.13 Focus Appearance (AAA)"
     )
-    area_px: float = Field(
-        default=0.0, description="Focus indicator area in CSS px"
-    )
+    area_px: float = Field(default=0.0, description="Focus indicator area in CSS px")
     notes: str = Field(default="")
 
 

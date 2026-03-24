@@ -70,7 +70,9 @@ class DraftInput(BaseModel):
         has_doc = self.research_document and self.research_document.strip()
         has_refs = self.research_references and len(self.research_references) > 0
         if not has_doc and not has_refs:
-            raise ValueError("DraftInput requires either research_document or non-empty research_references")
+            raise ValueError(
+                "DraftInput requires either research_document or non-empty research_references"
+            )
         return self
 
 

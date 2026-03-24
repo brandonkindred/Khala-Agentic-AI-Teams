@@ -82,7 +82,7 @@ async def serve_ui():
             </body>
         </html>
         """,
-        status_code=200
+        status_code=200,
     )
 
 
@@ -349,7 +349,7 @@ def _run_assistant_job(
 async def start_assistant_job(user_id: str, body: AssistantJobRequest):
     """
     Start an async assistant job.
-    
+
     Returns a job_id that can be used to poll for status.
     If async_mode is False, runs synchronously and returns result directly.
     """
@@ -405,9 +405,12 @@ async def start_assistant_job(user_id: str, body: AssistantJobRequest):
     try:
         from personal_assistant_team.temporal.client import is_temporal_enabled
         from personal_assistant_team.temporal.start_workflow import start_assistant_workflow
+
         if is_temporal_enabled():
             start_assistant_workflow(
-                job_id, user_id, body.message,
+                job_id,
+                user_id,
+                body.message,
                 body.context if isinstance(body.context, dict) else (body.context or {}),
             )
             return AssistantJobResponse(job_id=job_id, status=PA_JOB_STATUS_RUNNING)
@@ -428,7 +431,7 @@ async def start_assistant_job(user_id: str, body: AssistantJobRequest):
 async def get_assistant_job_status(job_id: str):
     """
     Get the status of an assistant job.
-    
+
     Poll this endpoint to track progress and retrieve results when completed.
     """
     job_data = get_job(job_id)
@@ -454,7 +457,7 @@ async def get_assistant_job_status(job_id: str):
 async def cancel_assistant_job(job_id: str):
     """
     Cancel a running or pending job.
-    
+
     Returns success if the job was cancelled, or an error if it cannot be cancelled.
     """
     job_data = get_job(job_id)
@@ -489,11 +492,11 @@ async def list_user_assistant_jobs(
 ):
     """
     List assistant jobs for a user.
-    
+
     Use running_only=true to filter to only pending/running jobs.
     """
     jobs_data = list_jobs(user_id=user_id, running_only=running_only, limit=limit)
-    
+
     items = [
         AssistantJobListItem(
             job_id=j.get("job_id", ""),
@@ -515,7 +518,7 @@ async def list_user_assistant_jobs(
 async def assistant_request(user_id: str, body: AssistantRequestBody):
     """
     Send a free-form request to the personal assistant.
-    
+
     The assistant will classify the intent and route to the appropriate agent.
     """
     request = AssistantRequest(
@@ -524,7 +527,7 @@ async def assistant_request(user_id: str, body: AssistantRequestBody):
         message=body.message,
         context=body.context,
     )
-    
+
     response = orchestrator.handle_request(request)
     if slack_notify_pa_response:
         threading.Thread(
@@ -576,13 +579,15 @@ async def get_profile_summary(user_id: str):
 async def connect_email(user_id: str, body: EmailConnectBody):
     """Connect an email account."""
     from ..email_agent.models import ConnectEmailRequest
-    
+
     try:
-        result = orchestrator.email_agent.connect_email(ConnectEmailRequest(
-            user_id=user_id,
-            provider=body.provider,
-            credentials=body.credentials,
-        ))
+        result = orchestrator.email_agent.connect_email(
+            ConnectEmailRequest(
+                user_id=user_id,
+                provider=body.provider,
+                credentials=body.credentials,
+            )
+        )
         return {"success": result}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -592,16 +597,18 @@ async def connect_email(user_id: str, body: EmailConnectBody):
 async def get_inbox(user_id: str, limit: int = 20, unread_only: bool = False):
     """Fetch emails from inbox."""
     from ..email_agent.models import EmailReadRequest
-    
+
     if not orchestrator.email_agent.has_credentials(user_id):
         raise HTTPException(status_code=400, detail="Email not connected")
-    
+
     try:
-        emails = orchestrator.email_agent.read_emails(EmailReadRequest(
-            user_id=user_id,
-            limit=limit,
-            unread_only=unread_only,
-        ))
+        emails = orchestrator.email_agent.read_emails(
+            EmailReadRequest(
+                user_id=user_id,
+                limit=limit,
+                unread_only=unread_only,
+            )
+        )
         return {"emails": [e.model_dump() for e in emails]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -611,12 +618,14 @@ async def get_inbox(user_id: str, limit: int = 20, unread_only: bool = False):
 async def create_email_draft(user_id: str, body: EmailDraftBody):
     """Create an email draft."""
     from ..email_agent.models import EmailDraftRequest
-    
-    draft = orchestrator.email_agent.draft_email(EmailDraftRequest(
-        user_id=user_id,
-        intent=body.intent,
-        context=body.context,
-    ))
+
+    draft = orchestrator.email_agent.draft_email(
+        EmailDraftRequest(
+            user_id=user_id,
+            intent=body.intent,
+            context=body.context,
+        )
+    )
     return {"draft": draft.model_dump()}
 
 
@@ -629,17 +638,19 @@ async def list_calendar_events(
 ):
     """List calendar events."""
     from ..calendar_agent.models import ListEventsRequest
-    
+
     start = datetime.fromisoformat(start_date) if start_date else None
     end = datetime.fromisoformat(end_date) if end_date else None
-    
+
     try:
-        events = orchestrator.calendar_agent.list_events(ListEventsRequest(
-            user_id=user_id,
-            start_date=start,
-            end_date=end,
-            limit=limit,
-        ))
+        events = orchestrator.calendar_agent.list_events(
+            ListEventsRequest(
+                user_id=user_id,
+                start_date=start,
+                end_date=end,
+                limit=limit,
+            )
+        )
         return {"events": [e.model_dump() for e in events]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -649,18 +660,20 @@ async def list_calendar_events(
 async def create_calendar_event(user_id: str, body: CalendarEventCreateBody):
     """Create a calendar event."""
     from ..calendar_agent.models import CreateEventRequest
-    
+
     try:
-        event_id = orchestrator.calendar_agent.create_event(CreateEventRequest(
-            user_id=user_id,
-            title=body.title,
-            start_time=datetime.fromisoformat(body.start_time),
-            end_time=datetime.fromisoformat(body.end_time) if body.end_time else None,
-            duration_minutes=body.duration_minutes,
-            location=body.location,
-            description=body.description,
-            attendees=body.attendees,
-        ))
+        event_id = orchestrator.calendar_agent.create_event(
+            CreateEventRequest(
+                user_id=user_id,
+                title=body.title,
+                start_time=datetime.fromisoformat(body.start_time),
+                end_time=datetime.fromisoformat(body.end_time) if body.end_time else None,
+                duration_minutes=body.duration_minutes,
+                location=body.location,
+                description=body.description,
+                attendees=body.attendees,
+            )
+        )
         return {"event_id": event_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -688,12 +701,14 @@ async def list_task_lists(user_id: str):
 async def create_task_list(user_id: str, body: TaskListCreateBody):
     """Create a new task list."""
     from ..task_agent.models import CreateListRequest
-    
-    task_list = orchestrator.task_agent.create_list(CreateListRequest(
-        user_id=user_id,
-        name=body.name,
-        description=body.description,
-    ))
+
+    task_list = orchestrator.task_agent.create_list(
+        CreateListRequest(
+            user_id=user_id,
+            name=body.name,
+            description=body.description,
+        )
+    )
     return {"list": task_list.model_dump()}
 
 
@@ -711,16 +726,18 @@ async def add_task_item(user_id: str, list_id: str, body: TaskItemAddBody):
     """Add an item to a task list."""
     from ..models import Priority
     from ..task_agent.models import AddItemRequest
-    
-    item = orchestrator.task_agent.add_item(AddItemRequest(
-        user_id=user_id,
-        list_id=list_id,
-        description=body.description,
-        quantity=body.quantity,
-        priority=Priority(body.priority),
-        due_date=datetime.fromisoformat(body.due_date) if body.due_date else None,
-        notes=body.notes,
-    ))
+
+    item = orchestrator.task_agent.add_item(
+        AddItemRequest(
+            user_id=user_id,
+            list_id=list_id,
+            description=body.description,
+            quantity=body.quantity,
+            priority=Priority(body.priority),
+            due_date=datetime.fromisoformat(body.due_date) if body.due_date else None,
+            notes=body.notes,
+        )
+    )
     return {"item": item.model_dump()}
 
 
@@ -728,11 +745,13 @@ async def add_task_item(user_id: str, list_id: str, body: TaskItemAddBody):
 async def add_tasks_from_text(user_id: str, body: TasksFromTextBody):
     """Add tasks from natural language."""
     from ..task_agent.models import AddItemsFromTextRequest
-    
-    result = orchestrator.task_agent.add_items_from_text(AddItemsFromTextRequest(
-        user_id=user_id,
-        text=body.text,
-    ))
+
+    result = orchestrator.task_agent.add_items_from_text(
+        AddItemsFromTextRequest(
+            user_id=user_id,
+            text=body.text,
+        )
+    )
     return result
 
 
@@ -740,12 +759,14 @@ async def add_tasks_from_text(user_id: str, body: TasksFromTextBody):
 async def complete_task_item(user_id: str, list_id: str, item_id: str):
     """Mark a task item as completed."""
     from ..task_agent.models import CompleteItemRequest
-    
-    success = orchestrator.task_agent.complete_item(CompleteItemRequest(
-        user_id=user_id,
-        list_id=list_id,
-        item_id=item_id,
-    ))
+
+    success = orchestrator.task_agent.complete_item(
+        CompleteItemRequest(
+            user_id=user_id,
+            list_id=list_id,
+            item_id=item_id,
+        )
+    )
     return {"success": success}
 
 
@@ -760,12 +781,14 @@ async def get_pending_tasks(user_id: str):
 async def get_deals(user_id: str, query: Optional[str] = None, max_results: int = 10):
     """Search for deals."""
     from ..deal_finder_agent.models import SearchDealsRequest
-    
-    result = orchestrator.deal_finder.search_deals(SearchDealsRequest(
-        user_id=user_id,
-        query=query,
-        max_results=max_results,
-    ))
+
+    result = orchestrator.deal_finder.search_deals(
+        SearchDealsRequest(
+            user_id=user_id,
+            query=query,
+            max_results=max_results,
+        )
+    )
     return {"deals": [d.model_dump() for d in result.deals], "query": result.query_used}
 
 
@@ -787,13 +810,15 @@ async def get_wishlist(user_id: str):
 async def add_to_wishlist(user_id: str, body: WishlistAddBody):
     """Add an item to wishlist."""
     from ..deal_finder_agent.models import AddWishlistRequest
-    
-    item = orchestrator.deal_finder.add_to_wishlist(AddWishlistRequest(
-        user_id=user_id,
-        description=body.description,
-        target_price=body.target_price,
-        category=body.category,
-    ))
+
+    item = orchestrator.deal_finder.add_to_wishlist(
+        AddWishlistRequest(
+            user_id=user_id,
+            description=body.description,
+            target_price=body.target_price,
+            category=body.category,
+        )
+    )
     return {"item": item.model_dump()}
 
 
@@ -801,11 +826,13 @@ async def add_to_wishlist(user_id: str, body: WishlistAddBody):
 async def list_reservations(user_id: str, include_past: bool = False):
     """List user's reservations."""
     from ..reservation_agent.models import ListReservationsRequest
-    
-    reservations = orchestrator.reservation_agent.list_reservations(ListReservationsRequest(
-        user_id=user_id,
-        include_past=include_past,
-    ))
+
+    reservations = orchestrator.reservation_agent.list_reservations(
+        ListReservationsRequest(
+            user_id=user_id,
+            include_past=include_past,
+        )
+    )
     return {"reservations": [r.model_dump() for r in reservations]}
 
 
@@ -814,15 +841,17 @@ async def create_reservation(user_id: str, body: ReservationCreateBody):
     """Create a reservation."""
     from ..models import ReservationType
     from ..reservation_agent.models import MakeReservationRequest
-    
-    result = orchestrator.reservation_agent.make_reservation(MakeReservationRequest(
-        user_id=user_id,
-        reservation_type=ReservationType(body.reservation_type),
-        venue_name=body.venue_name,
-        datetime=datetime.fromisoformat(body.datetime),
-        party_size=body.party_size,
-        notes=body.notes,
-    ))
+
+    result = orchestrator.reservation_agent.make_reservation(
+        MakeReservationRequest(
+            user_id=user_id,
+            reservation_type=ReservationType(body.reservation_type),
+            venue_name=body.venue_name,
+            datetime=datetime.fromisoformat(body.datetime),
+            party_size=body.party_size,
+            notes=body.notes,
+        )
+    )
     return {"reservation": result.model_dump()}
 
 
@@ -850,13 +879,15 @@ async def recommend_restaurants(user_id: str, location: Optional[str] = None):
 async def generate_process_doc(user_id: str, body: DocumentGenerateBody):
     """Generate a process document."""
     from ..doc_generator_agent.models import GenerateDocRequest
-    
-    doc = orchestrator.doc_generator.generate_process_doc(GenerateDocRequest(
-        user_id=user_id,
-        doc_type=body.doc_type,
-        topic=body.topic,
-        context=body.context,
-    ))
+
+    doc = orchestrator.doc_generator.generate_process_doc(
+        GenerateDocRequest(
+            user_id=user_id,
+            doc_type=body.doc_type,
+            topic=body.topic,
+            context=body.context,
+        )
+    )
     return {"document": doc.model_dump()}
 
 
@@ -864,12 +895,14 @@ async def generate_process_doc(user_id: str, body: DocumentGenerateBody):
 async def generate_checklist(user_id: str, body: ChecklistGenerateBody):
     """Generate a checklist."""
     from ..doc_generator_agent.models import GenerateChecklistRequest
-    
-    checklist = orchestrator.doc_generator.generate_checklist(GenerateChecklistRequest(
-        user_id=user_id,
-        task=body.task,
-        include_time_estimates=body.include_time_estimates,
-    ))
+
+    checklist = orchestrator.doc_generator.generate_checklist(
+        GenerateChecklistRequest(
+            user_id=user_id,
+            task=body.task,
+            include_time_estimates=body.include_time_estimates,
+        )
+    )
     return {"checklist": checklist.model_dump()}
 
 

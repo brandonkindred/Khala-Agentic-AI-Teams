@@ -83,9 +83,7 @@ class AccessibilityMonitoringAgent:
         baseline_ref = f"baseline_{audit_id}_{uuid.uuid4().hex[:8]}"
 
         # In production, would run actual checks and capture snapshots
-        snapshot_refs = [
-            f"snapshot_{baseline_ref}_{i}" for i in range(len(targets))
-        ]
+        snapshot_refs = [f"snapshot_{baseline_ref}_{i}" for i in range(len(targets))]
 
         baseline = MonitoringBaseline(
             baseline_ref=baseline_ref,

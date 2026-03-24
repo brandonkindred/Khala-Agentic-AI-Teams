@@ -116,7 +116,9 @@ class BlogCopyEditorAgent:
             )
         if (copy_editor_input.length_guidance or "").strip():
             context_parts.append("")
-            context_parts.append("CONTENT PROFILE / LENGTH GUIDANCE (use when judging depth vs. length):")
+            context_parts.append(
+                "CONTENT PROFILE / LENGTH GUIDANCE (use when judging depth vs. length):"
+            )
             context_parts.append(copy_editor_input.length_guidance.strip())
         if copy_editor_input.audience:
             context_parts.append(f"Audience: {copy_editor_input.audience}")
@@ -129,7 +131,9 @@ class BlogCopyEditorAgent:
         if copy_editor_input.previous_feedback_items:
             context_parts.append("")
             context_parts.append("---")
-            context_parts.append("PREVIOUS PASS FEEDBACK (already sent to writer — do not re-raise resolved issues):")
+            context_parts.append(
+                "PREVIOUS PASS FEEDBACK (already sent to writer — do not re-raise resolved issues):"
+            )
             context_parts.append("---")
             for i, item in enumerate(copy_editor_input.previous_feedback_items, 1):
                 loc = f" [{item.location}]" if item.location else ""
@@ -138,42 +142,53 @@ class BlogCopyEditorAgent:
             context_parts.append("")
 
         if style_guide_text:
-            context_parts.extend([
-                "---",
-                "EVALUATION INSTRUCTION:",
-                "---",
-                "Evaluate the draft against the style guide below. Apply every rule in that guide.",
-                "",
-                "---",
-                "STYLE GUIDE (evaluate the draft against these rules):",
-                "---",
-                style_guide_text,
-                "",
-            ])
+            context_parts.extend(
+                [
+                    "---",
+                    "EVALUATION INSTRUCTION:",
+                    "---",
+                    "Evaluate the draft against the style guide below. Apply every rule in that guide.",
+                    "",
+                    "---",
+                    "STYLE GUIDE (evaluate the draft against these rules):",
+                    "---",
+                    style_guide_text,
+                    "",
+                ]
+            )
         else:
-            context_parts.extend([
-                "---",
-                "EVALUATION INSTRUCTION:",
-                "---",
-                "No style guidelines were provided. There is nothing to evaluate against; approve the draft or provide only optional high-level feedback if you wish.",
-                "",
-            ])
+            context_parts.extend(
+                [
+                    "---",
+                    "EVALUATION INSTRUCTION:",
+                    "---",
+                    "No style guidelines were provided. There is nothing to evaluate against; approve the draft or provide only optional high-level feedback if you wish.",
+                    "",
+                ]
+            )
 
-        if copy_editor_input.content_plan_context and copy_editor_input.content_plan_context.strip():
-            context_parts.extend([
-                "---",
-                "CONTENT PLAN (align feedback with this structure and section intent):",
-                "---",
-                copy_editor_input.content_plan_context.strip()[:12000],
-                "",
-            ])
+        if (
+            copy_editor_input.content_plan_context
+            and copy_editor_input.content_plan_context.strip()
+        ):
+            context_parts.extend(
+                [
+                    "---",
+                    "CONTENT PLAN (align feedback with this structure and section intent):",
+                    "---",
+                    copy_editor_input.content_plan_context.strip()[:12000],
+                    "",
+                ]
+            )
 
-        context_parts.extend([
-            "---",
-            "DRAFT TO REVIEW:",
-            "---",
-            draft,
-        ])
+        context_parts.extend(
+            [
+                "---",
+                "DRAFT TO REVIEW:",
+                "---",
+                draft,
+            ]
+        )
 
         prompt = COPY_EDITOR_PROMPT + "\n\n" + "\n".join(context_parts)
 
@@ -277,35 +292,45 @@ class BlogCopyEditorAgent:
                 + (f" (stay under ~{soft_max} if possible)" if soft_max is not None else "")
                 + ". Remove redundant examples, repeated points, and padded transitions."
             )
-            feedback_items.insert(0, FeedbackItem(
-                category="structure",
-                severity=severity,
-                location="entire draft",
-                issue=issue,
-                suggestion=suggestion,
-            ))
+            feedback_items.insert(
+                0,
+                FeedbackItem(
+                    category="structure",
+                    severity=severity,
+                    location="entire draft",
+                    issue=issue,
+                    suggestion=suggestion,
+                ),
+            )
             logger.info(
                 "Length check: draft=%d words, target=%d words, over_ratio=%.2f — injecting %s feedback",
-                actual_word_count, target_word_count, over_ratio, severity,
+                actual_word_count,
+                target_word_count,
+                over_ratio,
+                severity,
             )
         elif past_soft_ceiling and over_ratio > should_ratio:
-            feedback_items.append(FeedbackItem(
-                category="structure",
-                severity="should_fix",
-                location="entire draft",
-                issue=(
-                    f"Draft is {actual_word_count} words, somewhat over the ~{target_word_count}-word target "
-                    f"({over_ratio:.0%} of target). Consider tightening for readability."
-                ),
-                suggestion=(
-                    f"Look for redundant examples or long transitions; aim for approximately {target_word_count} words"
-                    + (f" (soft ceiling ~{cap_label})" if soft_max is not None else "")
-                    + "."
-                ),
-            ))
+            feedback_items.append(
+                FeedbackItem(
+                    category="structure",
+                    severity="should_fix",
+                    location="entire draft",
+                    issue=(
+                        f"Draft is {actual_word_count} words, somewhat over the ~{target_word_count}-word target "
+                        f"({over_ratio:.0%} of target). Consider tightening for readability."
+                    ),
+                    suggestion=(
+                        f"Look for redundant examples or long transitions; aim for approximately {target_word_count} words"
+                        + (f" (soft ceiling ~{cap_label})" if soft_max is not None else "")
+                        + "."
+                    ),
+                )
+            )
             logger.info(
                 "Length check: draft=%d words, target=%d words, over_ratio=%.2f — injecting should_fix feedback",
-                actual_word_count, target_word_count, over_ratio,
+                actual_word_count,
+                target_word_count,
+                over_ratio,
             )
 
         if (

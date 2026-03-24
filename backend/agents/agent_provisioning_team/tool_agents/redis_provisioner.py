@@ -19,6 +19,7 @@ from .base import BaseToolProvisioner
 
 try:
     import redis
+
     HAS_REDIS = True
 except ImportError:
     HAS_REDIS = False
@@ -44,7 +45,7 @@ class RedisProvisionerTool(BaseToolProvisioner):
         """Get a Redis client with admin privileges."""
         if not HAS_REDIS:
             raise RuntimeError("redis package is not installed")
-        
+
         return redis.Redis(
             host=self.host,
             port=self.port,
@@ -62,25 +63,25 @@ class RedisProvisionerTool(BaseToolProvisioner):
         """Create a Redis ACL user with key prefix restrictions."""
         if not HAS_REDIS:
             return self._make_error_result("redis package is not installed")
-        
+
         try:
             key_prefix = config.get("key_prefix", f"agent:{agent_id}:")
             username = credentials.username or f"agent_{agent_id}".replace("-", "_")
             password = credentials.password
-            
+
             if not password:
                 return self._make_error_result("No password provided in credentials")
-            
+
             client = self._get_admin_client()
-            
+
             permissions = get_permissions("redis", access_tier)
             acl_rules = self._build_acl_rules(permissions, key_prefix)
-            
+
             try:
                 client.acl_deluser(username)
             except redis.exceptions.ResponseError:
                 pass
-            
+
             client.acl_setuser(
                 username,
                 enabled=True,
@@ -88,20 +89,20 @@ class RedisProvisionerTool(BaseToolProvisioner):
                 keys=[f"{key_prefix}*"],
                 commands=acl_rules,
             )
-            
+
             connection_url = f"redis://{username}:{password}@{self.host}:{self.port}"
-            
+
             credentials.connection_string = connection_url
             credentials.extra["key_prefix"] = key_prefix
             credentials.extra["host"] = self.host
             credentials.extra["port"] = self.port
-            
+
             self._provisioned[agent_id] = {
                 "username": username,
                 "key_prefix": key_prefix,
                 "permissions": permissions,
             }
-            
+
             return self._make_success_result(
                 credentials=credentials,
                 permissions=permissions,
@@ -124,7 +125,7 @@ class RedisProvisionerTool(BaseToolProvisioner):
         """Build Redis ACL command rules from permission list."""
         if "+@all" in permissions:
             return ["+@all"]
-        
+
         command_map = {
             "GET": "+get",
             "SET": "+set",
@@ -137,16 +138,16 @@ class RedisProvisionerTool(BaseToolProvisioner):
             "PUBLISH": "+publish",
             "SUBSCRIBE": "+subscribe",
         }
-        
+
         rules = ["-@all"]
         for perm in permissions:
             if perm in command_map:
                 rules.append(command_map[perm])
-        
+
         rules.append("+ping")
         rules.append("+echo")
         rules.append("+auth")
-        
+
         return rules
 
     def verify_access(
@@ -156,7 +157,7 @@ class RedisProvisionerTool(BaseToolProvisioner):
     ) -> AccessVerification:
         """Verify Redis ACL access for the agent."""
         prov_info = self._provisioned.get(agent_id)
-        
+
         if not prov_info:
             return self._make_verification(
                 passed=False,
@@ -164,14 +165,14 @@ class RedisProvisionerTool(BaseToolProvisioner):
                 actual_permissions=[],
                 errors=[f"No Redis provisioning found for agent {agent_id}"],
             )
-        
+
         actual_permissions = prov_info.get("permissions", [])
         passed, warnings = validate_permissions(
             "redis",
             expected_tier,
             actual_permissions,
         )
-        
+
         return self._make_verification(
             passed=passed,
             expected_tier=expected_tier,
@@ -187,7 +188,7 @@ class RedisProvisionerTool(BaseToolProvisioner):
                 success=False,
                 error="redis package is not installed",
             )
-        
+
         prov_info = self._provisioned.get(agent_id)
         if not prov_info:
             return DeprovisionResult(
@@ -195,18 +196,18 @@ class RedisProvisionerTool(BaseToolProvisioner):
                 success=True,
                 details={"message": "No Redis ACL to remove"},
             )
-        
+
         try:
             client = self._get_admin_client()
             username = prov_info["username"]
-            
+
             try:
                 client.acl_deluser(username)
             except redis.exceptions.ResponseError:
                 pass
-            
+
             del self._provisioned[agent_id]
-            
+
             return DeprovisionResult(
                 tool_name=self.tool_name,
                 success=True,

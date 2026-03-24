@@ -36,9 +36,7 @@ class BuildModulesInput(BaseModel):
 
     audit_id: str
     patterns: List[PatternCluster]
-    target_roles: List[str] = Field(
-        default_factory=lambda: ["frontend", "mobile", "design", "qa"]
-    )
+    target_roles: List[str] = Field(default_factory=lambda: ["frontend", "mobile", "design", "qa"])
     stacks: Dict[str, str] = Field(default_factory=dict)
 
 
@@ -86,6 +84,7 @@ class AccessibilityTrainingAgent:
 
         Returns top N patterns suitable for training modules.
         """
+
         # Sort patterns by priority
         def priority_score(p: PatternCluster) -> tuple:
             severity_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
@@ -216,19 +215,19 @@ class AccessibilityTrainingAgent:
         - Testing checklist
         """
         # Get findings for this pattern
-        pattern_findings = [
-            f for f in findings if f.id in pattern.linked_finding_ids
-        ]
+        pattern_findings = [f for f in findings if f.id in pattern.linked_finding_ids]
 
         # Build examples
         examples = []
         for f in pattern_findings[:3]:  # Top 3 examples
-            examples.append({
-                "title": f.title,
-                "actual": f.actual,
-                "expected": f.expected,
-                "fix": f.recommended_fix,
-            })
+            examples.append(
+                {
+                    "title": f.title,
+                    "actual": f.actual,
+                    "expected": f.expected,
+                    "fix": f.recommended_fix,
+                }
+            )
 
         content = {
             "pattern_name": pattern.name,

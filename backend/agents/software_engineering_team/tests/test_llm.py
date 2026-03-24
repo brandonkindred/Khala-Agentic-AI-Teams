@@ -86,9 +86,11 @@ def test_ollama_200_returns_parsed_json() -> None:
     with patch("httpx.Client") as mock_client_cls:
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.iter_lines.return_value = iter([
-            'data: {"choices": [{"delta": {"content": "{\\"key\\": \\"value\\"}"},"finish_reason":"stop"}]}'
-        ])
+        mock_response.iter_lines.return_value = iter(
+            [
+                'data: {"choices": [{"delta": {"content": "{\\"key\\": \\"value\\"}"},"finish_reason":"stop"}]}'
+            ]
+        )
         mock_client = MagicMock()
         mock_client.stream.return_value.__enter__.return_value = mock_response
         mock_client_cls.return_value.__enter__.return_value = mock_client
@@ -105,9 +107,11 @@ def test_ollama_malformed_response_raises_permanent_error() -> None:
         mock_response = MagicMock()
         mock_response.status_code = 200
         # Stream returns non-JSON content → complete_json raises LLMPermanentError (LLMJsonParseError)
-        mock_response.iter_lines.return_value = iter([
-            'data: {"choices": [{"delta": {"content": "this is not valid json"},"finish_reason":"stop"}]}'
-        ])
+        mock_response.iter_lines.return_value = iter(
+            [
+                'data: {"choices": [{"delta": {"content": "this is not valid json"},"finish_reason":"stop"}]}'
+            ]
+        )
         mock_client = MagicMock()
         mock_client.stream.return_value.__enter__.return_value = mock_response
         mock_client_cls.return_value.__enter__.return_value = mock_client
@@ -178,7 +182,9 @@ def test_extract_json_truncated_json_not_repaired() -> None:
         client._extract_json(truncated)
 
 
-@pytest.mark.skip(reason="llm_service Ollama client does not implement continue-on-parse-error; use complete_json_with_continuation for truncation")
+@pytest.mark.skip(
+    reason="llm_service Ollama client does not implement continue-on-parse-error; use complete_json_with_continuation for truncation"
+)
 def test_complete_json_continue_on_parse_error_returns_merged() -> None:
     """When first response fails to parse, complete_json tries one 'continue' request and merges (legacy SE behavior)."""
     pass
@@ -201,7 +207,9 @@ def test_llm_json_parse_error_subclass_of_permanent() -> None:
 
 def test_qwen35_397b_cloud_uses_known_context_size() -> None:
     """qwen3.5:397b-cloud uses full 256K context (262144) without /api/show call."""
-    client = OllamaLLMClient(model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5)
+    client = OllamaLLMClient(
+        model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5
+    )
     assert client.get_max_context_tokens() == 262144
 
 
@@ -289,7 +297,7 @@ def test_extract_task_assignment_from_content_recovers_tasks() -> None:
         extract_task_assignment_from_content,
     )
 
-    content = '''Here is the task plan:
+    content = """Here is the task plan:
 
 ```json
 {
@@ -301,7 +309,7 @@ def test_extract_task_assignment_from_content_recovers_tasks() -> None:
   "rationale": "Standard order"
 }
 ```
-'''
+"""
     result = extract_task_assignment_from_content(content)
     assert result is not None
     assert len(result.get("tasks", [])) == 2

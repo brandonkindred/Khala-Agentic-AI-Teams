@@ -45,13 +45,15 @@ class PerformanceEngineerAgent:
         issues: List[Dict[str, Any]] = []
         for i in data.get("issues") or []:
             if isinstance(i, dict) and i.get("description"):
-                issues.append({
-                    "severity": i.get("severity", "medium"),
-                    "category": i.get("category", "performance"),
-                    "file_path": i.get("file_path", ""),
-                    "description": i["description"],
-                    "suggestion": i.get("suggestion", ""),
-                })
+                issues.append(
+                    {
+                        "severity": i.get("severity", "medium"),
+                        "category": i.get("category", "performance"),
+                        "file_path": i.get("file_path", ""),
+                        "description": i["description"],
+                        "suggestion": i.get("suggestion", ""),
+                    }
+                )
 
         critical = [x for x in issues if x.get("severity") == "critical"]
         approved = data.get("approved", len(critical) == 0)

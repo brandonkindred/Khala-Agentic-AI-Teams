@@ -36,6 +36,7 @@ _agents_dir = _project_root / "agents"
 # Load .env so OLLAMA_API_KEY etc. are available when running via make run (e.g. backend/.env or docker/.env)
 try:
     from dotenv import load_dotenv
+
     _backend_env = _project_root / ".env"
     _docker_env = _project_root.parent / "docker" / ".env"
     if _backend_env.exists():
@@ -125,12 +126,8 @@ def main() -> None:
     logger.info("Workers: %d", args.workers)
     logger.info("Log Level: %s", args.log_level)
     logger.info("")
-    logger.info("API Documentation: http://%s:%d/docs",
-                "localhost" if args.host == "0.0.0.0" else args.host,
-                args.port)
-    logger.info("Health Check: http://%s:%d/health",
-                "localhost" if args.host == "0.0.0.0" else args.host,
-                args.port)
+    logger.info("API Documentation: http://%s:%d/docs", "localhost" if args.host == "0.0.0.0" else args.host, args.port)
+    logger.info("Health Check: http://%s:%d/health", "localhost" if args.host == "0.0.0.0" else args.host, args.port)
     logger.info("=" * 60)
 
     uvicorn.run(

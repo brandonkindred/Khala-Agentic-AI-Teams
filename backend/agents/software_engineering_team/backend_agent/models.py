@@ -146,7 +146,9 @@ class BackendWorkflowResult(BaseModel):
 
     task_id: str = Field(description="ID of the task that was executed")
     success: bool = Field(default=False, description="True when code was merged to development")
-    branch_name: str = Field(default="", description="Feature branch name used (e.g. feature/task-id)")
+    branch_name: str = Field(
+        default="", description="Feature branch name used (e.g. feature/task-id)"
+    )
     iterations_used: int = Field(default=0, description="Number of review iterations completed")
     final_files: Dict[str, str] = Field(
         default_factory=dict,

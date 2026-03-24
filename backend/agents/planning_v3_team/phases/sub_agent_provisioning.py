@@ -88,6 +88,8 @@ def run_sub_agent_provisioning(
         context_update["sub_agent_blueprint"] = blueprint
         artifacts["sub_agent_blueprint"] = blueprint
     else:
-        artifacts["sub_agent_provisioning_error"] = result.get("error", "Build failed or no blueprint")
+        artifacts["sub_agent_provisioning_error"] = result.get(
+            "error", "Build failed or no blueprint"
+        )
 
     return context_update, artifacts

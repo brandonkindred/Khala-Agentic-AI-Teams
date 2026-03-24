@@ -116,7 +116,9 @@ class UiDesignToolAgent:
         if data.get("high_fidelity_summary"):
             recommendations.append(f"Layout: {data['high_fidelity_summary'][:500]}")
         return ToolAgentPhaseOutput(
-            recommendations=recommendations if recommendations else ["Consider layout and component structure."],
+            recommendations=recommendations
+            if recommendations
+            else ["Consider layout and component structure."],
             summary=data.get("summary", "UI Design planning complete."),
         )
 

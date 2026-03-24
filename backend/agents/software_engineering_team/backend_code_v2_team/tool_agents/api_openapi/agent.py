@@ -22,7 +22,8 @@ from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
 
-API_OPENAPI_PROMPT = """You are an API / OpenAPI specialist.
+API_OPENAPI_PROMPT = (
+    """You are an API / OpenAPI specialist.
 
 Given a microtask about REST endpoint design, OpenAPI specification, or
 service contract work, produce the required files (routers, schemas,
@@ -31,7 +32,9 @@ openapi.yaml fragments, etc.).
 **Microtask:** {description}
 **Language:** {language}
 **Existing code context:** {existing_code}
-""" + FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
+"""
+    + FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
+)
 
 
 class ApiOpenApiToolAgent:

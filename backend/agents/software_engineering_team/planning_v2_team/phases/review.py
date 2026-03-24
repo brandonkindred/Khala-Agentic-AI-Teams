@@ -58,16 +58,16 @@ def run_review(
 ) -> ReviewPhaseResult:
     """
     Run Review phase with participating tool agents.
-    
+
     Tool agents: System Design, Architecture, User Story, Task Dependency.
     """
     all_issues: list[str] = []
     current_files = _read_planning_artifacts(repo_path)
-    
+
     effective_hierarchy = hierarchy
     if planning_result and planning_result.hierarchy:
         effective_hierarchy = planning_result.hierarchy
-    
+
     tool_agent_input = ToolAgentPhaseInput(
         spec_content=spec_content,
         repo_path=str(repo_path),
@@ -77,7 +77,7 @@ def run_review(
         current_files=current_files,
         hierarchy=effective_hierarchy,
     )
-    
+
     participating_agents = [
         ToolAgentKind.SYSTEM_DESIGN,
         ToolAgentKind.ARCHITECTURE,
@@ -85,7 +85,9 @@ def run_review(
         ToolAgentKind.TASK_DEPENDENCY,
     ]
 
-    def _run_one_review(agent_kind: ToolAgentKind) -> Tuple[ToolAgentKind, Any, Optional[Exception]]:
+    def _run_one_review(
+        agent_kind: ToolAgentKind,
+    ) -> Tuple[ToolAgentKind, Any, Optional[Exception]]:
         agent = tool_agents.get(agent_kind) if tool_agents else None
         if agent and hasattr(agent, "review"):
             try:
@@ -98,8 +100,7 @@ def run_review(
     if tool_agents:
         with ThreadPoolExecutor(max_workers=len(participating_agents)) as executor:
             futures = {
-                executor.submit(_run_one_review, kind): kind
-                for kind in participating_agents
+                executor.submit(_run_one_review, kind): kind for kind in participating_agents
             }
             for future in as_completed(futures):
                 agent_kind, result, exc = future.result()
@@ -121,12 +122,11 @@ def run_review(
                                 file_name,
                                 len(content),
                             )
-    
+
     artifacts_text = "\n".join(
-        f"--- {path} ---\n{content[:2000]}"
-        for path, content in list(current_files.items())[:5]
+        f"--- {path} ---\n{content[:2000]}" for path, content in list(current_files.items())[:5]
     )[:6000]
-    
+
     prompt = REVIEW_PROMPT.format(
         spec_content=(spec_content or "")[:6000],
         artifacts=artifacts_text,
@@ -150,7 +150,9 @@ def run_review(
         return ReviewPhaseResult(
             passed=final_passed,
             issues=list(set(all_issues)),
-            summary=str(raw.get("summary", "") or f"Review complete. {len(all_issues)} issue(s) found."),
+            summary=str(
+                raw.get("summary", "") or f"Review complete. {len(all_issues)} issue(s) found."
+            ),
         )
     except Exception as e:
         logger.warning("Review LLM call failed, using tool agent results: %s", e)

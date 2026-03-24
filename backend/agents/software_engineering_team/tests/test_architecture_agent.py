@@ -42,6 +42,7 @@ def test_architecture_agent_produces_components(requirements: ProductRequirement
 def test_architecture_agent_with_existing_architecture(requirements: ProductRequirements) -> None:
     """Architecture Expert accepts existing_architecture for extension."""
     from software_engineering_team.shared.models import SystemArchitecture
+
     llm = DummyLLMClient()
     agent = ArchitectureExpertAgent(llm_client=llm)
     existing = SystemArchitecture(
@@ -69,7 +70,9 @@ def test_architecture_agent_produces_diagrams(requirements: ProductRequirements)
     assert "frontend_code_structure" in result.architecture.diagrams
 
 
-def test_write_architecture_plan_includes_mermaid_diagrams(requirements: ProductRequirements) -> None:
+def test_write_architecture_plan_includes_mermaid_diagrams(
+    requirements: ProductRequirements,
+) -> None:
     """Written architecture plan contains Diagrams section and Mermaid code blocks."""
     llm = DummyLLMClient()
     agent = ArchitectureExpertAgent(llm_client=llm)
@@ -83,7 +86,9 @@ def test_write_architecture_plan_includes_mermaid_diagrams(requirements: Product
     assert "```mermaid" in content
 
 
-def test_architecture_agent_builds_synthetic_when_parse_fails(requirements: ProductRequirements) -> None:
+def test_architecture_agent_builds_synthetic_when_parse_fails(
+    requirements: ProductRequirements,
+) -> None:
     """When LLM returns raw wrapper (parse failure), agent builds synthetic architecture."""
     mock_llm = MagicMock()
     mock_llm.complete_json.return_value = {"content": "Here is some non-JSON text from the model"}

@@ -18,7 +18,9 @@ logger = logging.getLogger(__name__)
 RPO_RTO_OPTIONS = [
     OpenQuestionOption(id="opt_none", label="None / standard backup", is_default=True),
     OpenQuestionOption(id="opt_moderate", label="Moderate (e.g. RTO 4h, RPO 1h)", is_default=False),
-    OpenQuestionOption(id="opt_strict", label="Strict (e.g. RTO <1h, RPO <15min)", is_default=False),
+    OpenQuestionOption(
+        id="opt_strict", label="Strict (e.g. RTO <1h, RPO <15min)", is_default=False
+    ),
 ]
 DEPLOYMENT_OPTIONS = [
     OpenQuestionOption(id="opt_cloud", label="Cloud (AWS, GCP, Azure, etc.)", is_default=True),
@@ -103,7 +105,9 @@ def run_requirements(
 
     open_questions: List[OpenQuestion] = []
     try:
-        response = llm.complete_text(REQUIREMENTS_PROMPT.format(input_text=input_text), temperature=0.0)
+        response = llm.complete_text(
+            REQUIREMENTS_PROMPT.format(input_text=input_text), temperature=0.0
+        )
         text = (response or "").strip()
         if text.startswith("```"):
             text = text.split("```")[1]
@@ -112,7 +116,14 @@ def run_requirements(
             text = text.strip()
         data = json.loads(text)
         for q in data.get("questions", [])[:10]:
-            opts = [OpenQuestionOption(id=o.get("id", ""), label=o.get("label", ""), is_default=o.get("is_default", False)) for o in q.get("options", [])]
+            opts = [
+                OpenQuestionOption(
+                    id=o.get("id", ""),
+                    label=o.get("label", ""),
+                    is_default=o.get("is_default", False),
+                )
+                for o in q.get("options", [])
+            ]
             open_questions.append(
                 OpenQuestion(
                     id=q.get("id", "q"),

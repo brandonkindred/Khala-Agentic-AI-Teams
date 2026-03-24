@@ -29,7 +29,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _parse_tool_recommendations(raw_recommendations: List[Dict[str, Any]]) -> List[ToolRecommendation]:
+def _parse_tool_recommendations(
+    raw_recommendations: List[Dict[str, Any]],
+) -> List[ToolRecommendation]:
     """Parse raw tool recommendation dicts into ToolRecommendation models."""
     parsed = []
     for rec in raw_recommendations:
@@ -264,7 +266,7 @@ Complete updated file content here.
 class ArchitectureToolAgent:
     """
     Architecture tool agent: high-level architecture, technology choices, structural decisions.
-    
+
     Participates in all 6 phases per the matrix.
     """
 
@@ -278,7 +280,7 @@ class ArchitectureToolAgent:
                 summary="Architecture planning skipped (no LLM).",
                 recommendations=["Define architecture style", "Choose technology stack"],
             )
-        
+
         prior_analysis = ""
         if inp.spec_review_result:
             prior_analysis = getattr(inp.spec_review_result, "plan_summary", "") or ""
@@ -289,7 +291,9 @@ class ArchitectureToolAgent:
             prior_analysis=prior_analysis[:2000],
         )
         raw_text = complete_text_with_continuation(
-            self.llm, prompt, agent_name="Architecture",
+            self.llm,
+            prompt,
+            agent_name="Architecture",
         )
         data = parse_architecture_planning_output(raw_text)
         recommendations = data.get("recommendations") or []
@@ -314,16 +318,20 @@ class ArchitectureToolAgent:
         """
         if not self.llm:
             return ToolAgentPhaseOutput(summary="Architecture execute skipped (no LLM).")
-        
+
         fixes_applied: List[str] = []
         files_written: List[str] = []
         current_files: Dict[str, str] = dict(inp.current_files or {})
-        
+
         arch_issues = [
-            i for i in inp.review_issues
-            if any(kw in i.lower() for kw in ["architect", "layer", "module", "component", "integration", "deployment"])
+            i
+            for i in inp.review_issues
+            if any(
+                kw in i.lower()
+                for kw in ["architect", "layer", "module", "component", "integration", "deployment"]
+            )
         ]
-        
+
         if arch_issues:
             logger.info(
                 "Architecture: handling %d review issue(s) (will apply fixes in one update and write to disk).",
@@ -351,7 +359,7 @@ class ArchitectureToolAgent:
                 "Architecture: fixed %d review issue(s) in one update (all fixes written to planning artifacts).",
                 len(arch_issues),
             )
-        
+
         existing_arch = (inp.current_files or {}).get(planning_asset_path("architecture.md"))
         if existing_arch and not arch_issues:
             return ToolAgentPhaseOutput(
@@ -360,17 +368,17 @@ class ArchitectureToolAgent:
                 recommendations=fixes_applied if fixes_applied else [],
                 files_written=[],
             )
-        
+
         arch_style = inp.metadata.get("architecture_style", "")
         layers = inp.metadata.get("layers", [])
         cross_cutting = inp.metadata.get("cross_cutting", [])
         deployment_model = inp.metadata.get("deployment_model", "")
-        
+
         content_parts = ["# Architecture\n"]
-        
+
         if arch_style:
             content_parts.append(f"## Architecture Style\n{arch_style}\n\n")
-        
+
         if layers:
             content_parts.append("## Layers\n")
             for layer in layers:
@@ -381,16 +389,16 @@ class ArchitectureToolAgent:
                     content_parts.append(f"### {name}\n")
                     content_parts.append(f"**Technologies:** {', '.join(techs)}\n")
                     content_parts.append(f"**Responsibilities:** {resp}\n\n")
-        
+
         if cross_cutting:
             content_parts.append("## Cross-Cutting Concerns\n")
             for concern in cross_cutting:
                 content_parts.append(f"- {concern}\n")
             content_parts.append("\n")
-        
+
         if deployment_model:
             content_parts.append(f"## Deployment Model\n{deployment_model}\n\n")
-        
+
         if (arch_style or layers) and planning_asset_path("architecture.md") not in files_written:
             rel_path = planning_asset_path("architecture.md")
             content = "".join(content_parts)
@@ -399,11 +407,11 @@ class ArchitectureToolAgent:
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content, encoding="utf-8")
             files_written.append(rel_path)
-        
+
         summary = "Architecture artifacts generated."
         if fixes_applied:
             summary = f"Architecture artifacts generated. Fixed {len(arch_issues)} review issue(s) in one update."
-        
+
         return ToolAgentPhaseOutput(
             summary=summary,
             files={},
@@ -415,31 +423,32 @@ class ArchitectureToolAgent:
         """Review phase: check architecture coherence."""
         if not self.llm:
             return ToolAgentPhaseOutput(summary="Architecture review skipped (no LLM).")
-        
+
         artifacts = "\n".join(
-            f"--- {path} ---\n{content}"
-            for path, content in list(inp.current_files.items())[:10]
+            f"--- {path} ---\n{content}" for path, content in list(inp.current_files.items())[:10]
         )[:8000]
-        
+
         if not artifacts.strip():
             return ToolAgentPhaseOutput(
                 summary="Architecture review skipped (no artifacts).",
                 issues=[],
             )
-        
+
         prompt = ARCHITECTURE_REVIEW_PROMPT.format(artifacts=artifacts)
         raw_text = complete_text_with_continuation(
-            self.llm, prompt, agent_name="Architecture",
+            self.llm,
+            prompt,
+            agent_name="Architecture",
         )
         data = parse_review_output(raw_text)
         issues = data.get("issues") or []
         if not isinstance(issues, list):
             issues = [str(issues)] if issues else []
-        
+
         recommendations = data.get("recommendations") or []
         if not isinstance(recommendations, list):
             recommendations = [str(recommendations)] if recommendations else []
-        
+
         return ToolAgentPhaseOutput(
             summary=data.get("summary", "Architecture review complete."),
             issues=issues,
@@ -451,13 +460,16 @@ class ArchitectureToolAgent:
         if not self.llm:
             return ToolAgentPhaseOutput(summary="Architecture problem_solve skipped (no LLM).")
 
-        arch_issues = [i for i in inp.review_issues if "architect" in i.lower() or "layer" in i.lower()]
+        arch_issues = [
+            i for i in inp.review_issues if "architect" in i.lower() or "layer" in i.lower()
+        ]
         if not arch_issues:
             return ToolAgentPhaseOutput(summary="No architecture issues to resolve.")
 
         result = self.fix_all_issues(arch_issues, inp)
         return ToolAgentPhaseOutput(
-            summary=result.summary or f"Architecture: addressed {len(arch_issues)} issue(s) in one update.",
+            summary=result.summary
+            or f"Architecture: addressed {len(arch_issues)} issue(s) in one update.",
             recommendations=[result.summary] if result.summary else [],
             files=result.files or {},
             resolved=result.resolved or bool(result.files),
@@ -488,13 +500,17 @@ class ArchitectureToolAgent:
 
         prompt = ARCHITECTURE_FIX_SINGLE_ISSUE_PROMPT.format(
             issue=issue,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="Architecture_FixSingleIssue",
+                self.llm,
+                prompt,
+                agent_name="Architecture_FixSingleIssue",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -511,11 +527,18 @@ class ArchitectureToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "Architecture_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "Architecture_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(architecture_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(architecture_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("architecture.md")] = updated_content
                         logger.info("Architecture: fix applied after continuation (single-issue).")
@@ -528,25 +551,44 @@ class ArchitectureToolAgent:
                     logger.info("Architecture: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
                         logger.info("Architecture: fix applied (single-issue) — %s", fix_desc[:120])
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "Architecture_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "Architecture_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(architecture_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(architecture_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("architecture.md")] = uc
                         logger.info("Architecture: fix applied after continuation (single-issue).")
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
-                                logger.info("Architecture: fix applied after continuation (single-issue).")
+                                logger.info(
+                                    "Architecture: fix applied after continuation (single-issue)."
+                                )
                                 break
                         else:
                             logger.warning(
@@ -567,9 +609,7 @@ class ArchitectureToolAgent:
                 resolved=False,
             )
 
-    def fix_all_issues(
-        self, issues: List[str], inp: ToolAgentPhaseInput
-    ) -> ToolAgentPhaseOutput:
+    def fix_all_issues(self, issues: List[str], inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Fix all listed architecture issues in one LLM call."""
         if not issues:
             return ToolAgentPhaseOutput(
@@ -592,13 +632,17 @@ class ArchitectureToolAgent:
         issues_list = "\n".join(f"{i + 1}. {issue}" for i, issue in enumerate(issues))
         prompt = ARCHITECTURE_FIX_ALL_ISSUES_PROMPT.format(
             issues_list=issues_list,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="Architecture_FixAllIssues",
+                self.llm,
+                prompt,
+                agent_name="Architecture_FixAllIssues",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -615,11 +659,18 @@ class ArchitectureToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "Architecture_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "Architecture_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(architecture_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(architecture_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("architecture.md")] = updated_content
                     else:
@@ -630,21 +681,38 @@ class ArchitectureToolAgent:
                     files[planning_asset_path("architecture.md")] = updated_content
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "Architecture_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "Architecture_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(architecture_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(architecture_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("architecture.md")] = uc
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
                                 break
                         else:
@@ -682,12 +750,14 @@ class ArchitectureToolAgent:
                 summary="Architecture spec review skipped (no LLM).",
                 recommendations=["Review spec for architecture patterns"],
             )
-        
+
         prompt = ARCHITECTURE_SPEC_REVIEW_PROMPT.format(
             spec_content=(inp.spec_content or "")[:10000],
         )
         raw_text = complete_text_with_continuation(
-            self.llm, prompt, agent_name="Architecture",
+            self.llm,
+            prompt,
+            agent_name="Architecture",
         )
         data = parse_spec_review_output(raw_text)
         gaps = data.get("gaps") or []

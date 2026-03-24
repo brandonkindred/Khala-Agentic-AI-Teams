@@ -19,7 +19,9 @@ def _plan_text(plan: CodingTeamPlanInput) -> str:
     """Build plan text for the LLM from plan input."""
     parts = [
         f"Title: {plan.requirements_title}",
-        f"Description: {plan.requirements_description[:8000]}" if plan.requirements_description else "",
+        f"Description: {plan.requirements_description[:8000]}"
+        if plan.requirements_description
+        else "",
     ]
     if plan.project_overview:
         parts.append("Project overview: " + json.dumps(plan.project_overview, indent=2)[:4000])
@@ -57,12 +59,14 @@ class TechLeadAgent:
         tasks = []
         for t in tasks_raw:
             if isinstance(t, dict) and t.get("id"):
-                tasks.append({
-                    "id": str(t["id"]),
-                    "title": t.get("title", t["id"]),
-                    "description": t.get("description", ""),
-                    "dependencies": list(t.get("dependencies") or []),
-                })
+                tasks.append(
+                    {
+                        "id": str(t["id"]),
+                        "title": t.get("title", t["id"]),
+                        "description": t.get("description", ""),
+                        "dependencies": list(t.get("dependencies") or []),
+                    }
+                )
         stacks = []
         for s in stacks_raw:
             if isinstance(s, dict):
@@ -138,7 +142,13 @@ class TechLeadAgent:
             logger.warning("Tech Lead assignments LLM failed: %s", e)
             return {"assignments": []}
         assignments = data.get("assignments") or []
-        return {"assignments": [a for a in assignments if isinstance(a, dict) and a.get("agent_id") and a.get("task_id")]}
+        return {
+            "assignments": [
+                a
+                for a in assignments
+                if isinstance(a, dict) and a.get("agent_id") and a.get("task_id")
+            ]
+        }
 
     def run_code_review(
         self,

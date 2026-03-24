@@ -28,7 +28,9 @@ logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
 _CACHE_ROOT = Path(os.getenv("AGENT_CACHE_DIR", ".agent_cache")) / "sales_team" / "outcomes"
-_INSIGHTS_PATH = Path(os.getenv("AGENT_CACHE_DIR", ".agent_cache")) / "sales_team" / "insights" / "current.json"
+_INSIGHTS_PATH = (
+    Path(os.getenv("AGENT_CACHE_DIR", ".agent_cache")) / "sales_team" / "insights" / "current.json"
+)
 
 
 def _now() -> str:
@@ -66,7 +68,9 @@ def record_stage_outcome(outcome: StageOutcome) -> StageOutcome:
         filled = outcome.model_copy(update={"outcome_id": oid, "recorded_at": ts})
         path = _CACHE_ROOT / "stage" / f"{oid}.json"
         _atomic_write(path, filled.model_dump())
-        logger.debug("Recorded stage outcome %s for %s @ %s", oid, outcome.company_name, outcome.stage)
+        logger.debug(
+            "Recorded stage outcome %s for %s @ %s", oid, outcome.company_name, outcome.stage
+        )
         return filled
 
 
@@ -78,7 +82,9 @@ def record_deal_outcome(outcome: DealOutcome) -> DealOutcome:
         filled = outcome.model_copy(update={"outcome_id": oid, "recorded_at": ts})
         path = _CACHE_ROOT / "deal" / f"{oid}.json"
         _atomic_write(path, filled.model_dump())
-        logger.debug("Recorded deal outcome %s for %s: %s", oid, outcome.company_name, outcome.result)
+        logger.debug(
+            "Recorded deal outcome %s for %s: %s", oid, outcome.company_name, outcome.result
+        )
         return filled
 
 
@@ -137,7 +143,11 @@ def save_insights(insights: LearningInsights) -> None:
     """Persist a refreshed LearningInsights snapshot."""
     with _LOCK:
         _atomic_write(_INSIGHTS_PATH, insights.model_dump())
-        logger.info("Saved learning insights v%d (%d outcomes)", insights.insights_version, insights.total_outcomes_analyzed)
+        logger.info(
+            "Saved learning insights v%d (%d outcomes)",
+            insights.insights_version,
+            insights.total_outcomes_analyzed,
+        )
 
 
 def outcome_counts() -> dict:
@@ -205,8 +215,7 @@ def compute_heuristic_insights(
         if s.outcome.value == "converted":
             stage_converts[s.stage.value] += 1
     conversion_rates = {
-        stage: round(stage_converts[stage] / stage_counts[stage], 3)
-        for stage in stage_counts
+        stage: round(stage_converts[stage] / stage_counts[stage], 3) for stage in stage_counts
     }
 
     # Win / loss patterns
@@ -238,21 +247,33 @@ def compute_heuristic_insights(
     icp_signals: List[str] = []
     high_score_wins = [d for d in won if d.icp_match_score and d.icp_match_score >= 0.75]
     if high_score_wins:
-        icp_signals.append(f"ICP match ≥ 0.75 correlated with {len(high_score_wins)}/{len(won)} wins")
+        icp_signals.append(
+            f"ICP match ≥ 0.75 correlated with {len(high_score_wins)}/{len(won)} wins"
+        )
     low_score_losses = [d for d in lost if d.icp_match_score and d.icp_match_score < 0.5]
     if low_score_losses:
-        icp_signals.append(f"ICP match < 0.5 → {len(low_score_losses)}/{len(lost)} losses; tighten ICP filter")
+        icp_signals.append(
+            f"ICP match < 0.5 → {len(low_score_losses)}/{len(lost)} losses; tighten ICP filter"
+        )
 
     # Actionable recommendations
     recs: List[str] = []
     if win_rate < 0.3 and total >= 5:
-        recs.append(f"Win rate is {win_rate:.0%} — review qualification criteria; disqualify low-BANT leads earlier")
+        recs.append(
+            f"Win rate is {win_rate:.0%} — review qualification criteria; disqualify low-BANT leads earlier"
+        )
     if common_objections:
-        recs.append(f"Most common objection: '{common_objections[0]}' — prepare a pre-emptive response in proposals")
+        recs.append(
+            f"Most common objection: '{common_objections[0]}' — prepare a pre-emptive response in proposals"
+        )
     if best_closes:
-        recs.append(f"'{best_closes[0]}' close has highest win association — default to it for similar deals")
+        recs.append(
+            f"'{best_closes[0]}' close has highest win association — default to it for similar deals"
+        )
     if top_industries:
-        recs.append(f"Focus prospecting on {', '.join(top_industries)} — highest win rates observed")
+        recs.append(
+            f"Focus prospecting on {', '.join(top_industries)} — highest win rates observed"
+        )
     if not recs:
         recs.append(
             f"Pipeline has {total} recorded deal outcomes. "

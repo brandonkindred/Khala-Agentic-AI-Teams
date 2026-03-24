@@ -35,10 +35,10 @@ def run_deliver(
 ) -> DeliverPhaseResult:
     """
     Run Deliver phase with participating tool agents.
-    
+
     Tool agents: System Design, Architecture, User Story.
     Finalizes planning artifacts and optionally commits to git.
-    
+
     Also finalizes the spec by:
     - Renaming updated_spec.md to product_spec.md
     - Deleting intermediate updated_spec_v*.md files
@@ -46,20 +46,20 @@ def run_deliver(
     committed = False
     summaries: list[str] = []
     final_spec_content: Optional[str] = None
-    
+
     tool_agent_input = ToolAgentPhaseInput(
         spec_content=spec_content,
         repo_path=str(repo_path),
         implementation_result=implementation_result,
         hierarchy=hierarchy,
     )
-    
+
     participating_agents = [
         ToolAgentKind.SYSTEM_DESIGN,
         ToolAgentKind.ARCHITECTURE,
         ToolAgentKind.USER_STORY,
     ]
-    
+
     if tool_agents:
         for agent_kind in participating_agents:
             agent = tool_agents.get(agent_kind)
@@ -72,13 +72,14 @@ def run_deliver(
                 except Exception as e:
                     logger.warning(
                         "Deliver: %s failed: %s. Next step -> Continuing with other agents",
-                        agent_kind.value, e,
+                        agent_kind.value,
+                        e,
                     )
-    
+
     # Finalize the product spec: rename updated_spec.md to product_spec.md
     # and clean up intermediate versioned files
     final_spec_content = _finalize_product_spec(repo_path, spec_content)
-    
+
     try:
         if (repo_path / ".git").exists():
             subprocess.run(
@@ -87,7 +88,7 @@ def run_deliver(
                 check=False,
                 capture_output=True,
             )
-            
+
             if (repo_path / "plan").exists():
                 subprocess.run(
                     ["git", "add", "plan/*"],
@@ -95,7 +96,7 @@ def run_deliver(
                     check=False,
                     capture_output=True,
                 )
-            
+
             r = subprocess.run(
                 ["git", "commit", "-m", "chore: planning artifacts"],
                 cwd=repo_path,
@@ -113,26 +114,30 @@ def run_deliver(
             "Deliver git commit failed (non-fatal): %s. Next step -> Continuing to build summary",
             e,
         )
-    
+
     hierarchy_summary = ""
     if hierarchy:
         init_count = len(hierarchy.initiatives)
         epic_count = sum(len(i.epics) for i in hierarchy.initiatives)
         story_count = sum(len(e.stories) for i in hierarchy.initiatives for e in i.epics)
-        task_count = sum(len(s.tasks) for i in hierarchy.initiatives for e in i.epics for s in e.stories)
+        task_count = sum(
+            len(s.tasks) for i in hierarchy.initiatives for e in i.epics for s in e.stories
+        )
         hierarchy_summary = f" Hierarchy: {init_count} initiatives, {epic_count} epics, {story_count} stories, {task_count} tasks."
-    
+
     summary = "Planning-v2 artifacts delivered."
     if implementation_result and implementation_result.assets_created:
-        summary = f"Deliver complete. Assets: {', '.join(implementation_result.assets_created[:5])}."
+        summary = (
+            f"Deliver complete. Assets: {', '.join(implementation_result.assets_created[:5])}."
+        )
         if len(implementation_result.assets_created) > 5:
             summary += f" (+{len(implementation_result.assets_created) - 5} more)"
-    
+
     summary += hierarchy_summary
-    
+
     if committed:
         summary += " Changes committed."
-    
+
     return DeliverPhaseResult(
         committed=committed,
         summary=summary,
@@ -146,7 +151,7 @@ def _finalize_product_spec(repo_path: Path, fallback_spec: str) -> str:
     1. Reading the final updated_spec.md from plan/planning_team
     2. Writing it to product_spec.md in plan/planning_team
     3. Deleting updated_spec_v*.md only under plan/planning_team
-    
+
     Returns the final spec content.
     """
     plan_dir = repo_path / PLAN_PLANNING_TEAM_DIR
@@ -166,7 +171,9 @@ def _finalize_product_spec(repo_path: Path, fallback_spec: str) -> str:
             logger.warning("Deliver: Failed to read updated_spec.md: %s", e)
             final_content = fallback_spec
     else:
-        logger.info("Deliver: No updated_spec.md in plan/planning_team, using original spec content")
+        logger.info(
+            "Deliver: No updated_spec.md in plan/planning_team, using original spec content"
+        )
         final_content = fallback_spec
 
     # Write to product_spec.md under plan/planning_team

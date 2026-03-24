@@ -117,8 +117,15 @@ def run_document_production(
             if final.get("status") == "completed":
                 validated_spec_path = final.get("validated_spec_path")
                 if not validated_spec_path:
-                    validated_spec_path = str(Path(repo_path) / "plan" / "product_analysis" / "validated_spec.md")
-                prd_path = str(Path(repo_path) / "plan" / "product_analysis" / "product_requirements_document.md")
+                    validated_spec_path = str(
+                        Path(repo_path) / "plan" / "product_analysis" / "validated_spec.md"
+                    )
+                prd_path = str(
+                    Path(repo_path)
+                    / "plan"
+                    / "product_analysis"
+                    / "product_requirements_document.md"
+                )
             else:
                 logger.warning("PRA did not complete: %s", final.get("error"))
         else:
@@ -138,7 +145,12 @@ def run_document_production(
                 p2_result = get_planning_v2_result_fn(p2_job_id)
                 if p2_result:
                     plan_dir = Path(repo_path) / "plan"
-                    for name in ["architecture.md", "task_breakdown.md", "user_stories.md", "file_structure.md"]:
+                    for name in [
+                        "architecture.md",
+                        "task_breakdown.md",
+                        "user_stories.md",
+                        "file_structure.md",
+                    ]:
                         p = plan_dir / name
                         if p.exists():
                             planning_v2_artifact_paths[name] = str(p)
@@ -155,8 +167,6 @@ def run_document_production(
     arch_path = planning_v2_artifact_paths.get("architecture.md")
     if arch_path:
         architecture_overview = _read_if_exists(arch_path)
-        if architecture_overview and len(architecture_overview) > 8000:
-            architecture_overview = architecture_overview[:8000] + "\n\n(truncated)"
     if architecture_overview is None and run_architecture_fn:
         try:
             spec_content_for_arch = _read_if_exists(validated_spec_path) or spec_to_use

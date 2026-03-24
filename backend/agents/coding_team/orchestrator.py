@@ -35,9 +35,20 @@ def _read_repo_context(repo_path: Path, max_chars: int = 4000) -> str:
     total = 0
     try:
         for f in sorted(repo_path.rglob("*"))[:80]:
-            if not f.is_file() or f.suffix not in {".py", ".ts", ".js", ".java", ".html", ".json", ".yaml", ".yml"}:
+            if not f.is_file() or f.suffix not in {
+                ".py",
+                ".ts",
+                ".js",
+                ".java",
+                ".html",
+                ".json",
+                ".yaml",
+                ".yml",
+            }:
                 continue
-            if any(skip in f.parts for skip in ("node_modules", ".git", "__pycache__", "venv", ".venv")):
+            if any(
+                skip in f.parts for skip in ("node_modules", ".git", "__pycache__", "venv", ".venv")
+            ):
                 continue
             try:
                 content = f.read_text(encoding="utf-8", errors="replace")[:500]
@@ -72,7 +83,11 @@ def run_coding_team_orchestrator(
     path = Path(repo_path).resolve()
     _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
-    llm_getter = get_llm or (lambda key: __import__("llm_service.factory", fromlist=["get_client"]).get_client(key or "coding_team"))
+    llm_getter = get_llm or (
+        lambda key: __import__("llm_service.factory", fromlist=["get_client"]).get_client(
+            key or "coding_team"
+        )
+    )
 
     def _check_cancel() -> bool:
         data = _get_job(job_id)
@@ -131,12 +146,19 @@ def run_coding_team_orchestrator(
 
         # Ready tasks: status TO_DO and dependencies satisfied
         all_tasks = graph.get_tasks()
-        ready = [t for t in all_tasks if t.status == TaskStatus.TO_DO and graph._dependencies_satisfied(t.id)]
+        ready = [
+            t
+            for t in all_tasks
+            if t.status == TaskStatus.TO_DO and graph._dependencies_satisfied(t.id)
+        ]
         free_agents = [aid for aid in agent_ids if graph.get_task_for_agent(aid) is None]
         if free_agents and ready:
             assignments = tech_lead.run_assignments(
                 agent_ids=agent_ids,
-                ready_tasks=[{"id": t.id, "title": t.title, "assignee": t.assigned_agent_id or "unassigned"} for t in ready],
+                ready_tasks=[
+                    {"id": t.id, "title": t.title, "assignee": t.assigned_agent_id or "unassigned"}
+                    for t in ready
+                ],
                 free_agents=free_agents,
             )
             for a in assignments.get("assignments") or []:
@@ -158,7 +180,9 @@ def run_coding_team_orchestrator(
                 graph.update_task(task.id, feature_branch=result.get("feature_branch"))
                 graph.set_task_in_review(task.id)
             elif result.get("status") == "failed":
-                logger.warning("Senior SWE %s task %s failed: %s", swe.agent_id, task.id, result.get("error"))
+                logger.warning(
+                    "Senior SWE %s task %s failed: %s", swe.agent_id, task.id, result.get("error")
+                )
         _persist_graph()
 
         # Tech Lead: review in_review tasks and merge if approved
@@ -176,12 +200,15 @@ def run_coding_team_orchestrator(
                         DEVELOPMENT_BRANCH,
                         merge_branch,
                     )
+
                     branch = task.feature_branch or f"feature/{task.id}"
                     ok, _ = merge_branch(path, branch, DEVELOPMENT_BRANCH)
                     if ok:
                         graph.mark_branch_merged(task.id)
                 except Exception as e:
-                    logger.warning("Merge failed for %s: %s; marking merged in graph anyway", task.id, e)
+                    logger.warning(
+                        "Merge failed for %s: %s; marking merged in graph anyway", task.id, e
+                    )
                     graph.mark_branch_merged(task.id)
         _persist_graph()
 

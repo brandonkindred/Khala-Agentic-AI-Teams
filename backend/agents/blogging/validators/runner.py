@@ -40,6 +40,7 @@ def check_claims_policy(
 
     # Find all [CLAIM:xxx] references in draft
     import re
+
     refs = re.findall(r"\[CLAIM:(\w+)\]", draft)
     unknown = [r for r in refs if r not in allowed_ids]
     if unknown:

@@ -18,7 +18,10 @@ class StateManagementToolAgent:
         return ToolAgentOutput(summary="State Management stub — no changes applied.")
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(recommendations=["Consider state shape and data flow."], summary="State Management planning stub.")
+        return ToolAgentPhaseOutput(
+            recommendations=["Consider state shape and data flow."],
+            summary="State Management planning stub.",
+        )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(summary="State Management review stub.")

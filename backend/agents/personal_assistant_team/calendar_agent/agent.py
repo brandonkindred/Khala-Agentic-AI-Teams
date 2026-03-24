@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 class CalendarAgent:
     """
     Agent for managing calendar events.
-    
+
     Capabilities:
     - Create, update, delete events
     - Extract events from text/emails
@@ -44,7 +44,7 @@ class CalendarAgent:
     ) -> None:
         """
         Initialize the Calendar Agent.
-        
+
         Args:
             llm: LLM client for parsing and suggestions
             credential_store: Credential storage
@@ -62,10 +62,10 @@ class CalendarAgent:
     def list_events(self, request: ListEventsRequest) -> List[CalendarEvent]:
         """
         List calendar events.
-        
+
         Args:
             request: List events request
-            
+
         Returns:
             List of calendar events
         """
@@ -79,17 +79,17 @@ class CalendarAgent:
     def create_event(self, request: CreateEventRequest) -> str:
         """
         Create a calendar event.
-        
+
         Args:
             request: Create event request
-            
+
         Returns:
             Created event ID
         """
         end_time = request.end_time
         if end_time is None:
             end_time = request.start_time + timedelta(minutes=request.duration_minutes)
-        
+
         event = CalendarEvent(
             event_id=str(uuid4())[:8],
             title=request.title,
@@ -100,7 +100,7 @@ class CalendarAgent:
             attendees=request.attendees,
             reminders=request.reminders,
         )
-        
+
         return self.calendar_tool.create_event(request.user_id, event)
 
     def update_event(
@@ -111,12 +111,12 @@ class CalendarAgent:
     ) -> bool:
         """
         Update a calendar event.
-        
+
         Args:
             user_id: The user ID
             event_id: Event to update
             updates: Fields to update
-            
+
         Returns:
             True if successful
         """
@@ -125,11 +125,11 @@ class CalendarAgent:
     def delete_event(self, user_id: str, event_id: str) -> bool:
         """
         Delete a calendar event.
-        
+
         Args:
             user_id: The user ID
             event_id: Event to delete
-            
+
         Returns:
             True if successful
         """
@@ -138,10 +138,10 @@ class CalendarAgent:
     def parse_event_from_text(self, request: EventFromTextRequest) -> EventFromTextResult:
         """
         Parse event details from natural language.
-        
+
         Args:
             request: Parse request with text
-            
+
         Returns:
             Parsed event details
         """
@@ -149,13 +149,13 @@ class CalendarAgent:
         timezone = "UTC"
         if profile and profile.identity.timezone:
             timezone = profile.identity.timezone
-        
+
         prompt = PARSE_EVENT_PROMPT.format(
             text=request.text,
             current_datetime=datetime.utcnow().isoformat(),
             timezone=timezone,
         )
-        
+
         try:
             data = self.llm.complete_json(
                 prompt,
@@ -172,14 +172,14 @@ class CalendarAgent:
         except Exception as e:
             logger.error("Failed to parse event from text: %s", e)
             return EventFromTextResult(events=[], needs_confirmation=True)
-        
+
         events = data.get("events", [])
         ambiguities = data.get("ambiguities", [])
-        
+
         needs_confirmation = len(ambiguities) > 0 or any(
             e.get("confidence", 0) < 0.8 for e in events
         )
-        
+
         return EventFromTextResult(
             events=events,
             ambiguities=ambiguities,
@@ -194,26 +194,28 @@ class CalendarAgent:
     ) -> Dict[str, Any]:
         """
         Parse and optionally create an event from text.
-        
+
         Args:
             user_id: The user ID
             text: Natural language event description
             auto_create: Create without confirmation if confident
-            
+
         Returns:
             Result with created event or pending confirmation
         """
-        result = self.parse_event_from_text(EventFromTextRequest(
-            user_id=user_id,
-            text=text,
-        ))
-        
+        result = self.parse_event_from_text(
+            EventFromTextRequest(
+                user_id=user_id,
+                text=text,
+            )
+        )
+
         if not result.events:
             return {
                 "success": False,
                 "message": "Could not parse any events from the text",
             }
-        
+
         if auto_create and not result.needs_confirmation:
             created_ids = []
             for event_data in result.events:
@@ -222,7 +224,7 @@ class CalendarAgent:
                     end_time = event_data.get("end_time")
                     if end_time:
                         end_time = datetime.fromisoformat(end_time)
-                    
+
                     request = CreateEventRequest(
                         user_id=user_id,
                         title=event_data.get("title", "Untitled Event"),
@@ -233,18 +235,18 @@ class CalendarAgent:
                         description=event_data.get("description", ""),
                         attendees=event_data.get("attendees", []),
                     )
-                    
+
                     event_id = self.create_event(request)
                     created_ids.append(event_id)
                 except Exception as e:
                     logger.error("Failed to create event: %s", e)
-            
+
             return {
                 "success": True,
                 "created_event_ids": created_ids,
                 "events": result.events,
             }
-        
+
         return {
             "success": True,
             "needs_confirmation": True,
@@ -260,12 +262,12 @@ class CalendarAgent:
     ) -> List[Dict[str, datetime]]:
         """
         Find free time slots on a given day.
-        
+
         Args:
             user_id: The user ID
             date: Date to check
             duration_minutes: Required slot duration
-            
+
         Returns:
             List of available slots
         """
@@ -283,12 +285,12 @@ class CalendarAgent:
     ) -> bool:
         """
         Check if a time slot is available.
-        
+
         Args:
             user_id: The user ID
             start_time: Start of slot
             end_time: End of slot
-            
+
         Returns:
             True if slot is free
         """
@@ -297,21 +299,21 @@ class CalendarAgent:
     def suggest_schedule(self, request: ScheduleRequest) -> List[ScheduleSuggestion]:
         """
         Suggest optimal times for scheduling.
-        
+
         Args:
             request: Schedule request
-            
+
         Returns:
             List of suggested time slots
         """
         date = request.preferred_date or datetime.utcnow() + timedelta(days=1)
-        
+
         available_slots = self.find_free_slots(
             user_id=request.user_id,
             date=date,
             duration_minutes=request.duration_minutes,
         )
-        
+
         if not available_slots:
             for i in range(1, 8):
                 check_date = date + timedelta(days=i)
@@ -322,15 +324,14 @@ class CalendarAgent:
                 )
                 if available_slots:
                     break
-        
+
         if not available_slots:
             return []
-        
-        slots_text = "\n".join([
-            f"- {s['start'].isoformat()} to {s['end'].isoformat()}"
-            for s in available_slots
-        ])
-        
+
+        slots_text = "\n".join(
+            [f"- {s['start'].isoformat()} to {s['end'].isoformat()}" for s in available_slots]
+        )
+
         prompt = SCHEDULE_SUGGESTION_PROMPT.format(
             title=request.title,
             duration_minutes=request.duration_minutes,
@@ -341,7 +342,7 @@ class CalendarAgent:
             available_slots=slots_text,
             schedule_patterns="No historical data available",
         )
-        
+
         try:
             data = self.llm.complete_json(
                 prompt,
@@ -352,49 +353,57 @@ class CalendarAgent:
             logger.error("Failed to generate schedule suggestions (JSON extraction failed):\n%s", e)
             suggestions = []
             for slot in available_slots[:3]:
-                suggestions.append(ScheduleSuggestion(
-                    start_time=slot["start"],
-                    end_time=slot["start"] + timedelta(minutes=request.duration_minutes),
-                    score=0.7,
-                    reason="Available slot (fallback due to JSON extraction failure)",
-                ))
+                suggestions.append(
+                    ScheduleSuggestion(
+                        start_time=slot["start"],
+                        end_time=slot["start"] + timedelta(minutes=request.duration_minutes),
+                        score=0.7,
+                        reason="Available slot (fallback due to JSON extraction failure)",
+                    )
+                )
             return suggestions
         except Exception as e:
             logger.error("Failed to generate schedule suggestions: %s", e)
             suggestions = []
             for slot in available_slots[:3]:
-                suggestions.append(ScheduleSuggestion(
-                    start_time=slot["start"],
-                    end_time=slot["start"] + timedelta(minutes=request.duration_minutes),
-                    score=0.7,
-                    reason="Available slot",
-                ))
+                suggestions.append(
+                    ScheduleSuggestion(
+                        start_time=slot["start"],
+                        end_time=slot["start"] + timedelta(minutes=request.duration_minutes),
+                        score=0.7,
+                        reason="Available slot",
+                    )
+                )
             return suggestions
-        
+
         suggestions = []
         for item in data.get("suggestions", [])[:3]:
             try:
-                suggestions.append(ScheduleSuggestion(
-                    start_time=datetime.fromisoformat(item.get("start_time", "")),
-                    end_time=datetime.fromisoformat(item.get("end_time", "")),
-                    score=float(item.get("score", 0.5)),
-                    reason=item.get("reason", ""),
-                ))
+                suggestions.append(
+                    ScheduleSuggestion(
+                        start_time=datetime.fromisoformat(item.get("start_time", "")),
+                        end_time=datetime.fromisoformat(item.get("end_time", "")),
+                        score=float(item.get("score", 0.5)),
+                        reason=item.get("reason", ""),
+                    )
+                )
             except Exception:
                 continue
-        
+
         return suggestions
 
     def get_today_events(self, user_id: str) -> List[CalendarEvent]:
         """Get events for today."""
         today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         tomorrow = today + timedelta(days=1)
-        
-        return self.list_events(ListEventsRequest(
-            user_id=user_id,
-            start_date=today,
-            end_date=tomorrow,
-        ))
+
+        return self.list_events(
+            ListEventsRequest(
+                user_id=user_id,
+                start_date=today,
+                end_date=tomorrow,
+            )
+        )
 
     def get_upcoming_events(
         self,
@@ -404,9 +413,11 @@ class CalendarAgent:
         """Get events for the next N days."""
         now = datetime.utcnow()
         end = now + timedelta(days=days)
-        
-        return self.list_events(ListEventsRequest(
-            user_id=user_id,
-            start_date=now,
-            end_date=end,
-        ))
+
+        return self.list_events(
+            ListEventsRequest(
+                user_id=user_id,
+                start_date=now,
+                end_date=end,
+            )
+        )

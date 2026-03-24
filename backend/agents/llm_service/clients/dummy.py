@@ -13,28 +13,97 @@ from typing import Any, Dict, Optional
 from ..interface import LLMClient
 
 _STRIP_VERBS = {
-    "implement", "create", "build", "add", "setup", "set", "up", "configure",
-    "make", "define", "develop", "write", "design", "establish", "generate",
-    "fetches", "displays", "handles", "manages", "processes", "returns",
-    "provides", "supports", "includes", "enables", "renders",
+    "implement",
+    "create",
+    "build",
+    "add",
+    "setup",
+    "set",
+    "up",
+    "configure",
+    "make",
+    "define",
+    "develop",
+    "write",
+    "design",
+    "establish",
+    "generate",
+    "fetches",
+    "displays",
+    "handles",
+    "manages",
+    "processes",
+    "returns",
+    "provides",
+    "supports",
+    "includes",
+    "enables",
+    "renders",
 }
 _STRIP_FILLERS = {
-    "the", "that", "with", "using", "which", "for", "and", "a", "an", "to",
-    "of", "in", "on", "by", "from", "into", "as", "via", "its", "all",
-    "application", "system", "project", "based", "proper", "production",
-    "quality", "complete", "full", "new", "existing",
-    "angular", "react", "vue", "spring", "fastapi", "flask", "django",
+    "the",
+    "that",
+    "with",
+    "using",
+    "which",
+    "for",
+    "and",
+    "a",
+    "an",
+    "to",
+    "of",
+    "in",
+    "on",
+    "by",
+    "from",
+    "into",
+    "as",
+    "via",
+    "its",
+    "all",
+    "application",
+    "system",
+    "project",
+    "based",
+    "proper",
+    "production",
+    "quality",
+    "complete",
+    "full",
+    "new",
+    "existing",
+    "angular",
+    "react",
+    "vue",
+    "spring",
+    "fastapi",
+    "flask",
+    "django",
 }
 _STRIP_SUFFIXES = {
-    "component", "service", "module", "endpoint", "endpoints", "middleware",
-    "guard", "pipe", "directive", "interceptor", "controller", "repository",
+    "component",
+    "service",
+    "module",
+    "endpoint",
+    "endpoints",
+    "middleware",
+    "guard",
+    "pipe",
+    "directive",
+    "interceptor",
+    "controller",
+    "repository",
 }
 
 
 def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 25) -> str:
     expanded = re.sub(r"([a-z])([A-Z])", r"\1 \2", hint)
     words = re.sub(r"[^a-z0-9\s]+", " ", expanded.lower()).split()
-    filtered = [w for w in words if w not in _STRIP_VERBS and w not in _STRIP_FILLERS and w not in _STRIP_SUFFIXES]
+    filtered = [
+        w
+        for w in words
+        if w not in _STRIP_VERBS and w not in _STRIP_FILLERS and w not in _STRIP_SUFFIXES
+    ]
     name_words = filtered[:3] if filtered else words[:2]
     result = separator.join(name_words)
     if len(result) > max_length:
@@ -96,40 +165,134 @@ class DummyLLMClient(LLMClient):
             return {
                 "overview": "API backend + WebApp frontend (Dummy architecture).",
                 "architecture_document": "# System Architecture (Dummy)\n\nPlaceholder architecture.",
-                "components": [{"name": "API", "type": "backend"}, {"name": "WebApp", "type": "frontend"}],
+                "components": [
+                    {"name": "API", "type": "backend"},
+                    {"name": "WebApp", "type": "frontend"},
+                ],
                 "diagrams": {
                     "client_server_architecture": "graph LR\n  Browser-->API\n  API-->DB",
                     "frontend_code_structure": "graph TD\n  App-->Components\n  App-->Services",
                 },
-                "decisions": [{"decision": "Use REST API", "context": "Standard web stack", "consequences": "Simple integration"}],
+                "decisions": [
+                    {
+                        "decision": "Use REST API",
+                        "context": "Standard web stack",
+                        "consequences": "Simple integration",
+                    }
+                ],
             }
         elif "codebase audit" in lowered and "files_inventory" in lowered:
             return {
-                "files_inventory": [{"path": "initial_spec.md", "language": "markdown", "purpose": "Project specification", "key_exports": []}],
-                "frameworks": {"backend": "unknown", "frontend": "unknown", "database": "unknown", "testing": "unknown", "cicd": "unknown", "other": []},
+                "files_inventory": [
+                    {
+                        "path": "initial_spec.md",
+                        "language": "markdown",
+                        "purpose": "Project specification",
+                        "key_exports": [],
+                    }
+                ],
+                "frameworks": {
+                    "backend": "unknown",
+                    "frontend": "unknown",
+                    "database": "unknown",
+                    "testing": "unknown",
+                    "cicd": "unknown",
+                    "other": [],
+                },
                 "existing_functionality": ["Project specification document exists"],
                 "partial_implementations": [],
-                "gaps": ["No application code exists yet", "No backend framework set up", "No frontend framework set up", "No CI/CD pipeline", "No database configuration", "No tests"],
-                "code_conventions": {"naming": "unknown", "structure": "flat", "config_approach": "unknown"},
+                "gaps": [
+                    "No application code exists yet",
+                    "No backend framework set up",
+                    "No frontend framework set up",
+                    "No CI/CD pipeline",
+                    "No database configuration",
+                    "No tests",
+                ],
+                "code_conventions": {
+                    "naming": "unknown",
+                    "structure": "flat",
+                    "config_approach": "unknown",
+                },
                 "summary": "The repository contains only the project specification (initial_spec.md). No application code, infrastructure, or tests exist yet. The entire application needs to be built from scratch according to the spec.",
             }
         elif "deep analysis" in lowered and "total_deliverable_count" in lowered:
             return {
-                "data_entities": [{"name": "User", "attributes": ["id", "email", "password_hash", "created_at"], "relationships": [], "validation_rules": ["email must be valid", "password required"]}],
+                "data_entities": [
+                    {
+                        "name": "User",
+                        "attributes": ["id", "email", "password_hash", "created_at"],
+                        "relationships": [],
+                        "validation_rules": ["email must be valid", "password required"],
+                    }
+                ],
                 "api_endpoints": [
-                    {"method": "POST", "path": "/auth/signup", "description": "Create new user account", "auth_required": False},
-                    {"method": "POST", "path": "/auth/login", "description": "Authenticate user and return JWT", "auth_required": False},
-                    {"method": "POST", "path": "/auth/refresh", "description": "Refresh access token", "auth_required": True},
-                    {"method": "GET", "path": "/api/users/me", "description": "Get current user profile", "auth_required": True},
+                    {
+                        "method": "POST",
+                        "path": "/auth/signup",
+                        "description": "Create new user account",
+                        "auth_required": False,
+                    },
+                    {
+                        "method": "POST",
+                        "path": "/auth/login",
+                        "description": "Authenticate user and return JWT",
+                        "auth_required": False,
+                    },
+                    {
+                        "method": "POST",
+                        "path": "/auth/refresh",
+                        "description": "Refresh access token",
+                        "auth_required": True,
+                    },
+                    {
+                        "method": "GET",
+                        "path": "/api/users/me",
+                        "description": "Get current user profile",
+                        "auth_required": True,
+                    },
                 ],
                 "ui_screens": [
-                    {"name": "Login Page", "description": "User login form", "components": ["LoginForm", "ErrorDisplay"], "states": ["idle", "loading", "error", "success"]},
-                    {"name": "Registration Page", "description": "User registration form", "components": ["RegistrationForm", "ErrorDisplay"], "states": ["idle", "loading", "error", "success"]},
-                    {"name": "Dashboard", "description": "Main authenticated view", "components": ["Navbar", "UserProfile"], "states": ["loading", "loaded"]},
+                    {
+                        "name": "Login Page",
+                        "description": "User login form",
+                        "components": ["LoginForm", "ErrorDisplay"],
+                        "states": ["idle", "loading", "error", "success"],
+                    },
+                    {
+                        "name": "Registration Page",
+                        "description": "User registration form",
+                        "components": ["RegistrationForm", "ErrorDisplay"],
+                        "states": ["idle", "loading", "error", "success"],
+                    },
+                    {
+                        "name": "Dashboard",
+                        "description": "Main authenticated view",
+                        "components": ["Navbar", "UserProfile"],
+                        "states": ["loading", "loaded"],
+                    },
                 ],
                 "user_flows": [
-                    {"name": "User Registration", "steps": ["Navigate to signup", "Fill form", "Submit", "Receive confirmation", "Redirect to login"]},
-                    {"name": "User Login", "steps": ["Navigate to login", "Enter credentials", "Submit", "Receive JWT", "Redirect to dashboard"]},
+                    {
+                        "name": "User Registration",
+                        "steps": [
+                            "Navigate to signup",
+                            "Fill form",
+                            "Submit",
+                            "Receive confirmation",
+                            "Redirect to login",
+                        ],
+                    },
+                    {
+                        "name": "User Login",
+                        "steps": [
+                            "Navigate to login",
+                            "Enter credentials",
+                            "Submit",
+                            "Receive JWT",
+                            "Redirect to dashboard",
+                        ],
+                    },
                 ],
                 "non_functional": [
                     {"category": "security", "requirement": "Passwords must be hashed with bcrypt"},
@@ -149,20 +312,49 @@ class DummyLLMClient(LLMClient):
         elif "run security review now" in lowered and "90%" in lowered:
             return {"run_security": False, "rationale": "Code coverage not yet at 90% (dummy)."}
         elif "reviewing the progress" in lowered and "spec_compliance_pct" in lowered:
-            return {"tasks": [], "spec_compliance_pct": 50, "gaps_identified": [], "rationale": "Progress review complete. Current tasks cover the planned scope (dummy)."}
+            return {
+                "tasks": [],
+                "spec_compliance_pct": 50,
+                "gaps_identified": [],
+                "rationale": "Progress review complete. Current tasks cover the planned scope (dummy).",
+            }
         elif "clarification questions from specialist" in lowered:
             return {
                 "title": "Refined Task Title",
                 "description": "Refined task description with additional details from spec. The implementation should follow Angular best practices using standalone components and reactive forms. All public methods must have JSDoc documentation. Error states must be handled with user-friendly messages.",
                 "user_story": "As a user, I want refined functionality so that the feature works as specified in the requirements.",
                 "requirements": "Detailed requirements addressing clarification questions. Use Angular Material for UI components. Implement loading spinners during async operations. Handle HTTP errors with retry logic.",
-                "acceptance_criteria": ["Criterion 1: Component renders without errors", "Criterion 2: User interactions trigger correct API calls", "Criterion 3: Error states display meaningful messages"],
+                "acceptance_criteria": [
+                    "Criterion 1: Component renders without errors",
+                    "Criterion 2: User interactions trigger correct API calls",
+                    "Criterion 3: Error states display meaningful messages",
+                ],
             }
         elif ("execution_order" in lowered or "task_assignments" in lowered) and "tasks" in lowered:
             return {
                 "tasks": [
-                    {"id": "git-setup", "title": "Initialize Git Development Branch", "type": "git_setup", "description": "Ensure the development branch exists.", "user_story": "As a developer, I want a dedicated development branch.", "assignee": "devops", "requirements": "Create development branch from main if missing.", "acceptance_criteria": ["Development branch exists and is checked out"], "dependencies": []},
-                    {"id": "devops-dockerfile", "title": "Multi-Stage Dockerfile", "type": "devops", "description": "Create a multi-stage Dockerfile.", "user_story": "As a developer, I want a multi-stage Dockerfile.", "assignee": "devops", "requirements": "Multi-stage Dockerfile.", "acceptance_criteria": ["Dockerfile builds successfully"], "dependencies": ["git-setup"]},
+                    {
+                        "id": "git-setup",
+                        "title": "Initialize Git Development Branch",
+                        "type": "git_setup",
+                        "description": "Ensure the development branch exists.",
+                        "user_story": "As a developer, I want a dedicated development branch.",
+                        "assignee": "devops",
+                        "requirements": "Create development branch from main if missing.",
+                        "acceptance_criteria": ["Development branch exists and is checked out"],
+                        "dependencies": [],
+                    },
+                    {
+                        "id": "devops-dockerfile",
+                        "title": "Multi-Stage Dockerfile",
+                        "type": "devops",
+                        "description": "Create a multi-stage Dockerfile.",
+                        "user_story": "As a developer, I want a multi-stage Dockerfile.",
+                        "assignee": "devops",
+                        "requirements": "Multi-stage Dockerfile.",
+                        "acceptance_criteria": ["Dockerfile builds successfully"],
+                        "dependencies": ["git-setup"],
+                    },
                 ],
                 "execution_order": ["git-setup", "devops-dockerfile"],
                 "rationale": "Granular plan (dummy).",
@@ -171,24 +363,39 @@ class DummyLLMClient(LLMClient):
                 "clarification_questions": [],
             }
         elif "senior code reviewer" in lowered and ("approved" in lowered or "issues" in lowered):
-            return {"approved": True, "issues": [], "summary": "Code review passed (dummy).", "spec_compliance_notes": "Code aligns with task requirements.", "suggested_commit_message": ""}
+            return {
+                "approved": True,
+                "issues": [],
+                "summary": "Code review passed (dummy).",
+                "spec_compliance_notes": "Code aligns with task requirements.",
+                "suggested_commit_message": "",
+            }
         elif "security" in lowered and "vulnerabilities" in lowered:
             return {"vulnerabilities": [], "summary": "No security issues found (dummy)"}
         elif "accessibility" in lowered and "wcag" in lowered and "issues" in lowered:
             return {"issues": [], "summary": "No WCAG 2.2 accessibility issues found (dummy)"}
         elif "senior backend software engineer" in lowered:
-            slug = _extract_name_from_hint(task_hint, separator="_", max_length=25) or f"module_{counter}"
+            slug = (
+                _extract_name_from_hint(task_hint, separator="_", max_length=25)
+                or f"module_{counter}"
+            )
             slug.title().replace("_", "")
             return {
                 "code": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
                 "language": "python",
                 "summary": f"Backend implementation for: {task_hint}",
-                "files": {f"app/routers/{slug}.py": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n', f"tests/test_{slug}.py": f'"""Tests for {task_hint}."""\ndef test_{slug}():\n    assert True\n'},
+                "files": {
+                    f"app/routers/{slug}.py": f'"""Backend module: {task_hint}"""\nfrom fastapi import APIRouter\nrouter = APIRouter()\n',
+                    f"tests/test_{slug}.py": f'"""Tests for {task_hint}."""\ndef test_{slug}():\n    assert True\n',
+                },
                 "tests": f'"""Tests for {task_hint}."""\ndef test_{slug}():\n    assert True\n',
                 "suggested_commit_message": f"feat(api): implement {slug.replace('_', ' ')}",
             }
         elif "senior frontend software engineer" in lowered:
-            slug = _extract_name_from_hint(task_hint, separator="-", max_length=25) or f"component-{counter}"
+            slug = (
+                _extract_name_from_hint(task_hint, separator="-", max_length=25)
+                or f"component-{counter}"
+            )
             class_name = "".join(w.capitalize() for w in slug.split("-")) + "Component"
             selector = f"app-{slug}"
             return {
@@ -210,35 +417,124 @@ class DummyLLMClient(LLMClient):
                 "summary": f"DevOps configuration generated for: {task_hint[:60]}",
                 "suggested_commit_message": f"ci: add devops configuration (task #{counter})",
             }
-        elif "technical writer" in lowered and "readme_content" in lowered and "readme_changed" in lowered:
-            return {"readme_content": f"# Project\n\nAuto-generated documentation (task #{counter}).\n", "readme_changed": True, "summary": f"Updated README (task #{counter})", "suggested_commit_message": f"docs(readme): update (task #{counter})"}
-        elif "contributors.md" in lowered and "contributors_content" in lowered:
-            return {"contributors_content": "# Contributors\n| Agent | Role |\n|-------|------|\n", "contributors_changed": True, "summary": "Updated contributors list (dummy)"}
-        elif "documentation update needed" in lowered and "should_update_docs" in lowered:
-            return {"should_update_docs": True, "rationale": "Task completed with code changes (dummy)."}
-        elif "design by contract" in lowered and "comments_added" in lowered and "already_compliant" in lowered:
-            return {"files": {}, "comments_added": 0, "comments_updated": 0, "already_compliant": True, "summary": "All code fully complies with Design by Contract.", "suggested_commit_message": "docs(dbc): verify Design by Contract compliance"}
-        elif "integration_test" in lowered or "readme_content" in lowered or ("bugs_found" in lowered and "test_plan" in lowered):
-            return {"bugs_found": [], "integration_tests": "# Dummy integration test", "unit_tests": "# Dummy unit tests", "test_plan": "Dummy test plan", "summary": "Dummy QA assessment", "live_test_notes": "Dummy notes", "readme_content": "# Dummy README", "suggested_commit_message": "test: add integration tests", "approved": True}
-        elif "acceptance_criteria" in lowered and "specification" in lowered:
-            return {"title": "Software Project", "description": "Project specification (parsed from initial_spec.md).", "acceptance_criteria": ["See specification document"], "constraints": [], "priority": "medium"}
-        elif "integration expert" in lowered and "backend code" in lowered and "frontend code" in lowered:
-            return {"issues": [], "passed": True, "summary": "Backend and frontend API contract aligned (dummy).", "fix_task_suggestions": []}
-        elif "acceptance criteria verifier" in lowered and "per_criterion" in lowered:
-            return {"per_criterion": [{"criterion": "Criterion 1", "satisfied": True, "evidence": "Code implements the requirement."}], "all_satisfied": True, "summary": "All acceptance criteria satisfied (dummy)."}
-        # Nutrition & Meal Planning: intake profile prompt
-        elif "client profile" in lowered and ("dietary_needs" in lowered or "household" in lowered or "produce a single complete client profile" in lowered):
+        elif (
+            "technical writer" in lowered
+            and "readme_content" in lowered
+            and "readme_changed" in lowered
+        ):
             return {
-                "household": {"number_of_people": 2, "description": "couple", "ages_if_relevant": []},
+                "readme_content": f"# Project\n\nAuto-generated documentation (task #{counter}).\n",
+                "readme_changed": True,
+                "summary": f"Updated README (task #{counter})",
+                "suggested_commit_message": f"docs(readme): update (task #{counter})",
+            }
+        elif "contributors.md" in lowered and "contributors_content" in lowered:
+            return {
+                "contributors_content": "# Contributors\n| Agent | Role |\n|-------|------|\n",
+                "contributors_changed": True,
+                "summary": "Updated contributors list (dummy)",
+            }
+        elif "documentation update needed" in lowered and "should_update_docs" in lowered:
+            return {
+                "should_update_docs": True,
+                "rationale": "Task completed with code changes (dummy).",
+            }
+        elif (
+            "design by contract" in lowered
+            and "comments_added" in lowered
+            and "already_compliant" in lowered
+        ):
+            return {
+                "files": {},
+                "comments_added": 0,
+                "comments_updated": 0,
+                "already_compliant": True,
+                "summary": "All code fully complies with Design by Contract.",
+                "suggested_commit_message": "docs(dbc): verify Design by Contract compliance",
+            }
+        elif (
+            "integration_test" in lowered
+            or "readme_content" in lowered
+            or ("bugs_found" in lowered and "test_plan" in lowered)
+        ):
+            return {
+                "bugs_found": [],
+                "integration_tests": "# Dummy integration test",
+                "unit_tests": "# Dummy unit tests",
+                "test_plan": "Dummy test plan",
+                "summary": "Dummy QA assessment",
+                "live_test_notes": "Dummy notes",
+                "readme_content": "# Dummy README",
+                "suggested_commit_message": "test: add integration tests",
+                "approved": True,
+            }
+        elif "acceptance_criteria" in lowered and "specification" in lowered:
+            return {
+                "title": "Software Project",
+                "description": "Project specification (parsed from initial_spec.md).",
+                "acceptance_criteria": ["See specification document"],
+                "constraints": [],
+                "priority": "medium",
+            }
+        elif (
+            "integration expert" in lowered
+            and "backend code" in lowered
+            and "frontend code" in lowered
+        ):
+            return {
+                "issues": [],
+                "passed": True,
+                "summary": "Backend and frontend API contract aligned (dummy).",
+                "fix_task_suggestions": [],
+            }
+        elif "acceptance criteria verifier" in lowered and "per_criterion" in lowered:
+            return {
+                "per_criterion": [
+                    {
+                        "criterion": "Criterion 1",
+                        "satisfied": True,
+                        "evidence": "Code implements the requirement.",
+                    }
+                ],
+                "all_satisfied": True,
+                "summary": "All acceptance criteria satisfied (dummy).",
+            }
+        # Nutrition & Meal Planning: intake profile prompt
+        elif "client profile" in lowered and (
+            "dietary_needs" in lowered
+            or "household" in lowered
+            or "produce a single complete client profile" in lowered
+        ):
+            return {
+                "household": {
+                    "number_of_people": 2,
+                    "description": "couple",
+                    "ages_if_relevant": [],
+                },
                 "dietary_needs": ["vegetarian"],
                 "allergies_and_intolerances": [],
-                "lifestyle": {"max_cooking_time_minutes": 30, "lunch_context": "remote", "equipment_constraints": [], "other_constraints": ""},
-                "preferences": {"cuisines_liked": [], "cuisines_disliked": [], "ingredients_disliked": [], "preferences_free_text": ""},
+                "lifestyle": {
+                    "max_cooking_time_minutes": 30,
+                    "lunch_context": "remote",
+                    "equipment_constraints": [],
+                    "other_constraints": "",
+                },
+                "preferences": {
+                    "cuisines_liked": [],
+                    "cuisines_disliked": [],
+                    "ingredients_disliked": [],
+                    "preferences_free_text": "",
+                },
                 "goals": {"goal_type": "maintain", "notes": ""},
             }
         # Nutrition: nutrition plan / meal planning prompts (minimal valid structure)
         elif "nutrition" in lowered and "plan" in lowered:
-            return {"daily_calories": 2000, "macros": {"protein": 100, "carbs": 200, "fat": 67}, "meals_per_day": 3, "notes": "Dummy nutrition plan."}
+            return {
+                "daily_calories": 2000,
+                "macros": {"protein": 100, "carbs": 200, "fat": 67},
+                "meals_per_day": 3,
+                "notes": "Dummy nutrition plan.",
+            }
         elif "meal" in lowered and ("suggestions" in lowered or "recommendations" in lowered):
             return {"suggestions": [{"meal": "Dummy meal", "reason": "Dummy reason"}]}
         # Blogging: structured content plan JSON (planning agent; token in user prompt)
@@ -277,7 +573,10 @@ class DummyLLMClient(LLMClient):
                     },
                 ],
                 "title_candidates": [
-                    {"title": "Dummy Title: Why This Topic Matters", "probability_of_success": 0.72},
+                    {
+                        "title": "Dummy Title: Why This Topic Matters",
+                        "probability_of_success": 0.72,
+                    },
                     {"title": "A Practical Take on the Topic", "probability_of_success": 0.58},
                 ],
                 "requirements_analysis": {

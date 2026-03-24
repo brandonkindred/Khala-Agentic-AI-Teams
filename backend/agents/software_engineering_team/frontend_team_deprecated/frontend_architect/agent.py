@@ -64,7 +64,8 @@ class FrontendArchitectAgent:
             context_parts.append(f"**Architecture:**\n{input_data.architecture.overview}")
             if input_data.architecture.components:
                 context_parts.append(
-                    "**Components:**\n" + "\n".join(
+                    "**Components:**\n"
+                    + "\n".join(
                         f"- {c.name} ({c.type}): {c.description}"
                         for c in input_data.architecture.components
                         if c.type in ("frontend", "ui", "client")

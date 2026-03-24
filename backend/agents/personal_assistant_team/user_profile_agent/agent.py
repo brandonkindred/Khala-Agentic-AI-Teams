@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class UserProfileAgent:
     """
     Agent for managing user profiles and learning preferences.
-    
+
     This agent:
     - Maintains comprehensive user profile documents
     - Extracts preferences from conversations and interactions
@@ -43,7 +43,7 @@ class UserProfileAgent:
     ) -> None:
         """
         Initialize the User Profile Agent.
-        
+
         Args:
             llm: LLM client for extractions
             user_id: The user ID this agent manages
@@ -52,7 +52,7 @@ class UserProfileAgent:
         self.llm = llm
         self.user_id = user_id
         self.profile_store = profile_store or UserProfileStore()
-        
+
         if not self.profile_store.profile_exists(user_id):
             self.profile_store.create_profile(user_id)
 
@@ -71,10 +71,10 @@ class UserProfileAgent:
     def update_profile(self, request: ProfileUpdateRequest) -> ProfileUpdateResult:
         """
         Update the user's profile with new data.
-        
+
         Args:
             request: The update request
-            
+
         Returns:
             ProfileUpdateResult indicating success/failure
         """
@@ -85,7 +85,7 @@ class UserProfileAgent:
                 data=request.data,
                 merge=request.merge,
             )
-            
+
             return ProfileUpdateResult(
                 success=True,
                 updated_fields=list(request.data.keys()),
@@ -101,15 +101,15 @@ class UserProfileAgent:
     def extract_preferences(self, text: str) -> ProfileExtractionResult:
         """
         Extract preferences and personal information from text.
-        
+
         Args:
             text: Text to analyze (conversation, email, etc.)
-            
+
         Returns:
             Extracted preferences with confidence scores
         """
         prompt = PROFILE_EXTRACTION_PROMPT.format(text=text)
-        
+
         try:
             data = self.llm.complete_json(
                 prompt,
@@ -120,25 +120,27 @@ class UserProfileAgent:
             logger.error("Failed to extract preferences (JSON extraction failed):\n%s", e)
             return ProfileExtractionResult(
                 extracted_info=[],
-                reasoning=f"JSON extraction failed after multiple recovery attempts. Error: {e.args[0]}"
+                reasoning=f"JSON extraction failed after multiple recovery attempts. Error: {e.args[0]}",
             )
         except Exception as e:
             logger.error("Failed to extract preferences: %s", e)
             return ProfileExtractionResult(extracted_info=[], reasoning=str(e))
-        
+
         extracted = []
         for item in data.get("extracted_info", []):
             try:
-                extracted.append(ExtractedPreference(
-                    category=item.get("category", ""),
-                    field=item.get("field", ""),
-                    value=item.get("value"),
-                    confidence=float(item.get("confidence", 0.0)),
-                    source_text=text[:200],
-                ))
+                extracted.append(
+                    ExtractedPreference(
+                        category=item.get("category", ""),
+                        field=item.get("field", ""),
+                        value=item.get("value"),
+                        confidence=float(item.get("confidence", 0.0)),
+                        source_text=text[:200],
+                    )
+                )
             except Exception as e:
                 logger.warning("Failed to parse extracted preference: %s", e)
-        
+
         return ProfileExtractionResult(
             extracted_info=extracted,
             reasoning=data.get("reasoning", ""),
@@ -147,18 +149,18 @@ class UserProfileAgent:
     def learn_from_text(self, request: LearnFromTextRequest) -> LearnFromTextResult:
         """
         Learn about the user from a piece of text.
-        
+
         Args:
             request: The learning request
-            
+
         Returns:
             What was extracted and what was applied
         """
         extraction = self.extract_preferences(request.text)
-        
+
         applied = []
         pending = []
-        
+
         for pref in extraction.extracted_info:
             if pref.confidence >= self.CONFIDENCE_THRESHOLD:
                 if request.auto_apply:
@@ -168,7 +170,7 @@ class UserProfileAgent:
                     pending.append(pref)
             else:
                 pending.append(pref)
-        
+
         return LearnFromTextResult(
             extracted=extraction.extracted_info,
             applied=applied,
@@ -179,7 +181,7 @@ class UserProfileAgent:
         """Apply a single extracted preference to the profile."""
         try:
             value = pref.value
-            
+
             if isinstance(value, str):
                 self.profile_store.add_to_list(
                     user_id=self.user_id,
@@ -201,23 +203,22 @@ class UserProfileAgent:
                     data={pref.field: value},
                     merge=True,
                 )
-            
-            logger.info(
-                "Applied preference: %s.%s = %s",
-                pref.category, pref.field, pref.value
-            )
+
+            logger.info("Applied preference: %s.%s = %s", pref.category, pref.field, pref.value)
             return True
         except Exception as e:
             logger.error("Failed to apply preference: %s", e)
             return False
 
-    def confirm_and_apply(self, preferences: List[ExtractedPreference]) -> List[ExtractedPreference]:
+    def confirm_and_apply(
+        self, preferences: List[ExtractedPreference]
+    ) -> List[ExtractedPreference]:
         """
         Apply a list of confirmed preferences.
-        
+
         Args:
             preferences: Preferences confirmed by the user
-            
+
         Returns:
             List of successfully applied preferences
         """
@@ -230,21 +231,21 @@ class UserProfileAgent:
     def query_profile(self, request: ProfileQueryRequest) -> str:
         """
         Query the profile using natural language.
-        
+
         Args:
             request: The query request
-            
+
         Returns:
             Natural language response based on profile
         """
         profile = self.get_profile()
         profile_text = self._format_profile_for_query(profile, request.categories)
-        
+
         prompt = PROFILE_QUERY_PROMPT.format(
             profile=profile_text,
             query=request.query,
         )
-        
+
         return self.llm.complete(prompt, temperature=0.3)
 
     def _format_profile_for_query(
@@ -254,14 +255,21 @@ class UserProfileAgent:
     ) -> str:
         """Format profile data for inclusion in a query prompt."""
         profile_dict = profile.model_dump()
-        
+
         if not categories:
             categories = [
-                "identity", "preferences", "goals", "lifestyle",
-                "professional", "relationships", "financial",
-                "health", "travel", "shopping"
+                "identity",
+                "preferences",
+                "goals",
+                "lifestyle",
+                "professional",
+                "relationships",
+                "financial",
+                "health",
+                "travel",
+                "shopping",
             ]
-        
+
         lines = []
         for cat in categories:
             if cat in profile_dict:
@@ -278,7 +286,7 @@ class UserProfileAgent:
                                         lines.append(f"- {key}.{k}: {v}")
                             elif isinstance(value, str) and value:
                                 lines.append(f"- {key}: {value}")
-        
+
         return "\n".join(lines) if lines else "No profile data available."
 
     def add_food_like(self, food: str) -> ProfileUpdateResult:
@@ -319,30 +327,30 @@ class UserProfileAgent:
         from uuid import uuid4
 
         from ..models import Goal, Priority
-        
+
         goal = Goal(
             goal_id=str(uuid4())[:8],
             title=title,
             description=description,
             priority=Priority.MEDIUM,
         )
-        
+
         profile = self.get_profile()
         profile_dict = profile.model_dump()
-        
+
         field = "long_term_goals" if is_long_term else "short_term_goals"
         if field not in profile_dict["goals"]:
             profile_dict["goals"][field] = []
-        
+
         profile_dict["goals"][field].append(goal.model_dump())
-        
+
         self.profile_store.update_category(
             user_id=self.user_id,
             category="goals",
             data=profile_dict["goals"],
             merge=False,
         )
-        
+
         return ProfileUpdateResult(
             success=True,
             updated_fields=[field],
@@ -366,17 +374,17 @@ class UserProfileAgent:
             data["email"] = email
         if timezone:
             data["timezone"] = timezone
-        
+
         if not data:
             return ProfileUpdateResult(success=False, message="No data provided")
-        
+
         self.profile_store.update_category(
             user_id=self.user_id,
             category="identity",
             data=data,
             merge=True,
         )
-        
+
         return ProfileUpdateResult(
             success=True,
             updated_fields=list(data.keys()),
@@ -386,16 +394,18 @@ class UserProfileAgent:
     def process_signal(self, signal: ProfileUpdateSignal) -> LearnFromTextResult:
         """
         Process a profile update signal from another agent.
-        
+
         Args:
             signal: The update signal
-            
+
         Returns:
             Learning result
         """
-        return self.learn_from_text(LearnFromTextRequest(
-            user_id=self.user_id,
-            text=signal.raw_text,
-            source=signal.source,
-            auto_apply=signal.confidence >= 0.9,
-        ))
+        return self.learn_from_text(
+            LearnFromTextRequest(
+                user_id=self.user_id,
+                text=signal.raw_text,
+                source=signal.source,
+                auto_apply=signal.confidence >= 0.9,
+            )
+        )

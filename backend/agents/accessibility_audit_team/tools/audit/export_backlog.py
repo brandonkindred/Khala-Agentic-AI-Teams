@@ -16,21 +16,11 @@ class ExportBacklogInput(BaseModel):
     """Input for exporting the findings backlog."""
 
     audit_id: str = Field(..., description="Audit identifier")
-    findings: List[Finding] = Field(
-        default_factory=list, description="Findings to export"
-    )
-    patterns: List[PatternCluster] = Field(
-        default_factory=list, description="Pattern clusters"
-    )
-    format: Literal["json", "csv"] = Field(
-        default="json", description="Export format"
-    )
-    include_evidence_refs: bool = Field(
-        default=True, description="Include evidence references"
-    )
-    include_patterns: bool = Field(
-        default=True, description="Include pattern clustering info"
-    )
+    findings: List[Finding] = Field(default_factory=list, description="Findings to export")
+    patterns: List[PatternCluster] = Field(default_factory=list, description="Pattern clusters")
+    format: Literal["json", "csv"] = Field(default="json", description="Export format")
+    include_evidence_refs: bool = Field(default=True, description="Include evidence references")
+    include_patterns: bool = Field(default=True, description="Include pattern clustering info")
 
 
 class ExportBacklogOutput(BaseModel):
@@ -106,22 +96,22 @@ async def export_backlog(input_data: ExportBacklogInput) -> ExportBacklogOutput:
 
         if input_data.include_patterns:
             for pattern in patterns:
-                export_data["patterns"].append({
-                    "pattern_id": pattern.pattern_id,
-                    "name": pattern.name,
-                    "description": pattern.description,
-                    "severity": pattern.severity.value,
-                    "scope": pattern.scope.value,
-                    "linked_finding_ids": pattern.linked_finding_ids,
-                    "fix_priority": pattern.fix_priority,
-                })
+                export_data["patterns"].append(
+                    {
+                        "pattern_id": pattern.pattern_id,
+                        "name": pattern.name,
+                        "description": pattern.description,
+                        "severity": pattern.severity.value,
+                        "scope": pattern.scope.value,
+                        "linked_finding_ids": pattern.linked_finding_ids,
+                        "fix_priority": pattern.fix_priority,
+                    }
+                )
 
         content = json.dumps(export_data, indent=2, default=str)
 
     else:  # CSV format
-        lines = [
-            "id,title,severity,scope,surface,target,issue_type,wcag_scs,user_impact"
-        ]
+        lines = ["id,title,severity,scope,surface,target,issue_type,wcag_scs,user_impact"]
         for finding in findings:
             wcag_scs = ";".join(m.sc for m in finding.wcag_mappings)
             line = f'"{finding.id}","{finding.title}","{finding.severity.value}","{finding.scope.value}","{finding.surface.value}","{finding.target}","{finding.issue_type.value}","{wcag_scs}","{finding.user_impact}"'

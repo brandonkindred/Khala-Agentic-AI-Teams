@@ -36,7 +36,10 @@ ARTIFACT_NAMES = (
 
 # Static metadata: which pipeline phase/agent produces each artifact (for API list response)
 ARTIFACT_PRODUCER: dict[str, dict[str, str]] = {
-    "brand_spec_prompt.md": {"producer_phase": "draft_initial", "producer_agent": "Pipeline (brand load)"},
+    "brand_spec_prompt.md": {
+        "producer_phase": "draft_initial",
+        "producer_agent": "Pipeline (brand load)",
+    },
     "content_brief.md": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
     "content_plan.json": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
     "content_plan.md": {"producer_phase": "planning", "producer_agent": "BlogPlanningAgent"},
@@ -46,12 +49,24 @@ ARTIFACT_PRODUCER: dict[str, dict[str, str]] = {
     "draft_v1.md": {"producer_phase": "draft_initial", "producer_agent": "BlogDraftAgent"},
     "draft_v2.md": {"producer_phase": "copy_edit", "producer_agent": "BlogCopyEditorAgent"},
     "final.md": {"producer_phase": "finalize", "producer_agent": "BlogCopyEditorAgent"},
-    "compliance_report.json": {"producer_phase": "compliance", "producer_agent": "BlogComplianceAgent"},
-    "fact_check_report.json": {"producer_phase": "fact_check", "producer_agent": "BlogFactCheckAgent"},
+    "compliance_report.json": {
+        "producer_phase": "compliance",
+        "producer_agent": "BlogComplianceAgent",
+    },
+    "fact_check_report.json": {
+        "producer_phase": "fact_check",
+        "producer_agent": "BlogFactCheckAgent",
+    },
     "validator_report.json": {"producer_phase": "compliance", "producer_agent": "Validators"},
     "publishing_pack.json": {"producer_phase": "finalize", "producer_agent": "Pipeline"},
-    "editor_feedback.json": {"producer_phase": "copy_edit", "producer_agent": "BlogCopyEditorAgent"},
-    "medium_stats_report.json": {"producer_phase": "medium_stats", "producer_agent": "BlogMediumStatsAgent"},
+    "editor_feedback.json": {
+        "producer_phase": "copy_edit",
+        "producer_agent": "BlogCopyEditorAgent",
+    },
+    "medium_stats_report.json": {
+        "producer_phase": "medium_stats",
+        "producer_agent": "BlogMediumStatsAgent",
+    },
 }
 
 

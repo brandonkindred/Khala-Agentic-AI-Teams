@@ -38,9 +38,7 @@ class CreatePackInput(BaseModel):
 
     audit_id: str = Field(..., description="Audit identifier")
     finding_id: str = Field(..., description="Finding this evidence supports")
-    artifacts: List[ArtifactInput] = Field(
-        default_factory=list, description="Artifacts to include"
-    )
+    artifacts: List[ArtifactInput] = Field(default_factory=list, description="Artifacts to include")
     environment: EnvironmentInput = Field(default_factory=EnvironmentInput)
     notes: str = Field(default="")
 

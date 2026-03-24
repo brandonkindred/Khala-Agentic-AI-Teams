@@ -79,6 +79,7 @@ _truncate_for_context = truncate_for_context
 # Build-fix helpers (frontend-specific, analogous to backend_agent helpers)
 # ---------------------------------------------------------------------------
 
+
 def _extract_affected_file_paths_from_frontend_build_errors(
     build_errors: str, repo_path: Path
 ) -> List[str]:
@@ -105,9 +106,7 @@ def _extract_affected_file_paths_from_frontend_build_errors(
     return paths[:10]
 
 
-def _read_frontend_affected_files_code(
-    repo_path: Path, file_paths: List[str]
-) -> str:
+def _read_frontend_affected_files_code(repo_path: Path, file_paths: List[str]) -> str:
     """Read content of affected frontend files for BuildFixSpecialist context."""
     parts: List[str] = []
     total = 0
@@ -154,7 +153,8 @@ def _apply_frontend_build_fix_edits(
         for edit in edit_list:
             if edit.old_text not in content:
                 logger.warning(
-                    "BuildFixSpecialist old_text not found in %s", file_path,
+                    "BuildFixSpecialist old_text not found in %s",
+                    file_path,
                 )
                 return False, f"old_text not found in {file_path}", {}
             content = content.replace(edit.old_text, edit.new_text, 1)
@@ -168,40 +168,74 @@ def _apply_frontend_build_fix_edits(
 # Validation constants
 MAX_PATH_SEGMENT_LENGTH = 30
 ANGULAR_PATH_PATTERN = re.compile(r"^src/")
-BAD_NAME_PATTERN = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[a-z]+")  # 4+ hyphenated words = likely sentence
+BAD_NAME_PATTERN = re.compile(
+    r"^[a-z]+-[a-z]+-[a-z]+-[a-z]+"
+)  # 4+ hyphenated words = likely sentence
 VERB_PREFIX_PATTERN = re.compile(
     r"^(implement|create|build|setup|configure|add|make|define|develop|write|design|establish)-"
 )
 FILLER_WORD_PATTERN = re.compile(r"-(the|that|with|using|which|for|and|a|an)-")
 
 # Well-known directory names that are always allowed
-_ALLOWED_DIRS = frozenset({
-    "src", "app", "lib", "components", "services", "models", "guards", "pipes",
-    "shared", "pages", "features", "assets", "styles", "environments", "modules",
-    "interceptors", "directives", "utils", "helpers", "test", "spec", "dist", "node_modules",
-})
+_ALLOWED_DIRS = frozenset(
+    {
+        "src",
+        "app",
+        "lib",
+        "components",
+        "services",
+        "models",
+        "guards",
+        "pipes",
+        "shared",
+        "pages",
+        "features",
+        "assets",
+        "styles",
+        "environments",
+        "modules",
+        "interceptors",
+        "directives",
+        "utils",
+        "helpers",
+        "test",
+        "spec",
+        "dist",
+        "node_modules",
+    }
+)
 
 # Browser-compatible and frontend-build file extensions (JS runs in browser; .env* loaded at build time)
-_ALLOWED_EXTENSIONS = frozenset({
-    ".ts", ".tsx", ".js", ".jsx",
-    ".html", ".scss", ".css", ".json",
-    ".env",  # .env.* (e.g. .env.local) allowed via basename check in _validate_file_paths
-})
+_ALLOWED_EXTENSIONS = frozenset(
+    {
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".html",
+        ".scss",
+        ".css",
+        ".json",
+        ".env",  # .env.* (e.g. .env.local) allowed via basename check in _validate_file_paths
+    }
+)
 # Fallback when llm_client is None: only these root paths are allowed. When llm_client is
 # provided, root paths are validated by the LLM instead (any framework: Vite, Angular, Jest, etc.).
-_ALLOWED_ROOT_FILES = frozenset({
-    "angular.json",
-    "package.json",
-    "package-lock.json",
-    "tsconfig.json",
-    "tsconfig.app.json",
-    "tsconfig.spec.json",
-    "vite.config.ts",
-    "vite.config.js",
-    "index.html",
-    "vitest.config.ts",
-    "vitest.config.js",
-})
+_ALLOWED_ROOT_FILES = frozenset(
+    {
+        "angular.json",
+        "package.json",
+        "package-lock.json",
+        "tsconfig.json",
+        "tsconfig.app.json",
+        "tsconfig.spec.json",
+        "vite.config.ts",
+        "vite.config.js",
+        "index.html",
+        "vitest.config.ts",
+        "vitest.config.js",
+    }
+)
 _ANGULAR_ROOT_FILES = _ALLOWED_ROOT_FILES  # backward compatibility
 
 
@@ -321,9 +355,7 @@ def _validate_file_paths(
                 continue
             else:
                 # Path has slash but not under src/ (e.g. "other/dir/file.ts")
-                warnings.append(
-                    f"Path must be under 'src/' or a known root config file: '{path}'"
-                )
+                warnings.append(f"Path must be under 'src/' or a known root config file: '{path}'")
                 continue
 
         # Reject non-browser / non-frontend-build file extensions (e.g. .py, .java)
@@ -332,7 +364,9 @@ def _validate_file_paths(
         is_env_file = basename.startswith(".env")  # .env, .env.local, .env.example, etc.
         if ext not in _ALLOWED_EXTENSIONS and not is_env_file:
             if llm_client is None:
-                warnings.append(f"File extension '{ext}' is not a browser-compatible frontend file (LLM required): '{path}'")
+                warnings.append(
+                    f"File extension '{ext}' is not a browser-compatible frontend file (LLM required): '{path}'"
+                )
                 continue
             unknown_ext_files.append((path, content, ext))
             continue
@@ -347,19 +381,27 @@ def _validate_file_paths(
             if name_part.lower() in _ALLOWED_DIRS:
                 continue
             if len(name_part) > MAX_PATH_SEGMENT_LENGTH:
-                warnings.append(f"Path segment too long (likely task description as name): '{seg}' in '{path}'")
+                warnings.append(
+                    f"Path segment too long (likely task description as name): '{seg}' in '{path}'"
+                )
                 bad_segment = True
                 break
             if BAD_NAME_PATTERN.match(name_part):
-                warnings.append(f"Path segment looks like a sentence (4+ hyphenated words): '{seg}' in '{path}'")
+                warnings.append(
+                    f"Path segment looks like a sentence (4+ hyphenated words): '{seg}' in '{path}'"
+                )
                 bad_segment = True
                 break
             if VERB_PREFIX_PATTERN.match(name_part):
-                warnings.append(f"Path segment starts with a verb (task description as name): '{seg}' in '{path}'")
+                warnings.append(
+                    f"Path segment starts with a verb (task description as name): '{seg}' in '{path}'"
+                )
                 bad_segment = True
                 break
             if FILLER_WORD_PATTERN.search(name_part):
-                warnings.append(f"Path segment contains filler words (task description as name): '{seg}' in '{path}'")
+                warnings.append(
+                    f"Path segment contains filler words (task description as name): '{seg}' in '{path}'"
+                )
                 bad_segment = True
                 break
         if bad_segment:
@@ -395,7 +437,12 @@ def _validate_file_paths(
                 name_part = seg.split(".")[0] if seg else ""
                 if not name_part or name_part.lower() in _ALLOWED_DIRS:
                     continue
-                if len(name_part) > MAX_PATH_SEGMENT_LENGTH or BAD_NAME_PATTERN.match(name_part) or VERB_PREFIX_PATTERN.match(name_part) or FILLER_WORD_PATTERN.search(name_part):
+                if (
+                    len(name_part) > MAX_PATH_SEGMENT_LENGTH
+                    or BAD_NAME_PATTERN.match(name_part)
+                    or VERB_PREFIX_PATTERN.match(name_part)
+                    or FILLER_WORD_PATTERN.search(name_part)
+                ):
                     bad_segment = True
                     break
             if bad_segment or not content or not content.strip():
@@ -413,11 +460,15 @@ def _validate_file_paths(
         )
         for path, content, ext in unknown_ext_files:
             if ext not in llm_allowed:
-                warnings.append(f"File extension '{ext}' is not a browser-compatible frontend file: '{path}'")
+                warnings.append(
+                    f"File extension '{ext}' is not a browser-compatible frontend file: '{path}'"
+                )
                 continue
             # Same path/segment/empty checks as above (src/ or static list or LLM-allowed root)
             is_src_file = bool(ANGULAR_PATH_PATTERN.match(path))
-            is_allowed_root_file = "/" not in path and (path in _ALLOWED_ROOT_FILES or path in allowed_root_paths)
+            is_allowed_root_file = "/" not in path and (
+                path in _ALLOWED_ROOT_FILES or path in allowed_root_paths
+            )
             if not is_src_file and not is_allowed_root_file:
                 continue
             segments = path.split("/")
@@ -426,7 +477,12 @@ def _validate_file_paths(
                 name_part = seg.split(".")[0] if seg else ""
                 if not name_part or name_part.lower() in _ALLOWED_DIRS:
                     continue
-                if len(name_part) > MAX_PATH_SEGMENT_LENGTH or BAD_NAME_PATTERN.match(name_part) or VERB_PREFIX_PATTERN.match(name_part) or FILLER_WORD_PATTERN.search(name_part):
+                if (
+                    len(name_part) > MAX_PATH_SEGMENT_LENGTH
+                    or BAD_NAME_PATTERN.match(name_part)
+                    or VERB_PREFIX_PATTERN.match(name_part)
+                    or FILLER_WORD_PATTERN.search(name_part)
+                ):
                     bad_segment = True
                     break
             if bad_segment or not content or not content.strip():
@@ -475,30 +531,42 @@ class FrontendExpertAgent:
         if getattr(task, "user_story", None):
             context_parts.append(f"**User Story:** {task.user_story}")
         if spec_content:
-            context_parts.extend([
-                "",
-                "**Project Specification:**",
-                _truncate_for_context(spec_content, 15_000),
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Project Specification:**",
+                    _truncate_for_context(spec_content, 15_000),
+                ]
+            )
         if architecture:
-            context_parts.extend([
-                "",
-                "**Architecture:**",
-                architecture.overview,
-                *[f"- {c.name} ({c.type})" for c in architecture.components if c.type == "frontend"],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Architecture:**",
+                    architecture.overview,
+                    *[
+                        f"- {c.name} ({c.type})"
+                        for c in architecture.components
+                        if c.type == "frontend"
+                    ],
+                ]
+            )
         if api_endpoints and api_endpoints != "# No code files found":
-            context_parts.extend([
-                "",
-                "**API endpoints (from backend):**",
-                _truncate_for_context(api_endpoints, 8_000),
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**API endpoints (from backend):**",
+                    _truncate_for_context(api_endpoints, 8_000),
+                ]
+            )
         if existing_code and existing_code != "# No code files found":
-            context_parts.extend([
-                "",
-                "**Existing codebase:**",
-                _truncate_for_context(existing_code, 25_000),
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Existing codebase:**",
+                    _truncate_for_context(existing_code, 25_000),
+                ]
+            )
         prompt = FRONTEND_PLANNING_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         log_llm_prompt(logger, "Frontend", "planning", (task.description or "")[:80], prompt)
         try:
@@ -535,13 +603,25 @@ class FrontendExpertAgent:
         )
         qa_count = len(input_data.qa_issues) if input_data.qa_issues else 0
         security_count = len(input_data.security_issues) if input_data.security_issues else 0
-        accessibility_count = len(input_data.accessibility_issues) if input_data.accessibility_issues else 0
-        code_review_count = len(input_data.code_review_issues) if input_data.code_review_issues else 0
-        has_issues = qa_count > 0 or security_count > 0 or accessibility_count > 0 or code_review_count > 0
+        accessibility_count = (
+            len(input_data.accessibility_issues) if input_data.accessibility_issues else 0
+        )
+        code_review_count = (
+            len(input_data.code_review_issues) if input_data.code_review_issues else 0
+        )
+        has_issues = (
+            qa_count > 0 or security_count > 0 or accessibility_count > 0 or code_review_count > 0
+        )
 
         framework_target = (input_data.framework_target or "react").lower().strip()
-        framework_labels = {"react": "Frontend / React", "angular": "Frontend / Angular", "vue": "Frontend / Vue"}
-        framework_label = framework_labels.get(framework_target, f"Frontend / {framework_target.title()}")
+        framework_labels = {
+            "react": "Frontend / React",
+            "angular": "Frontend / Angular",
+            "vue": "Frontend / Vue",
+        }
+        framework_label = framework_labels.get(
+            framework_target, f"Frontend / {framework_target.title()}"
+        )
 
         context_parts: List[str] = [f"**Framework target:** {framework_target}"]
         if has_issues:
@@ -556,13 +636,21 @@ class FrontendExpertAgent:
                 issue_summaries["code review issues"] = code_review_count
             desc_lines: List[str] = []
             for i in input_data.qa_issues or []:
-                desc_lines.append(f"  - QA: {i.get('description', '')} (location: {i.get('location', '')})")
+                desc_lines.append(
+                    f"  - QA: {i.get('description', '')} (location: {i.get('location', '')})"
+                )
             for i in input_data.security_issues or []:
-                desc_lines.append(f"  - Security [{i.get('category', '')}]: {i.get('description', '')} (location: {i.get('location', '')})")
+                desc_lines.append(
+                    f"  - Security [{i.get('category', '')}]: {i.get('description', '')} (location: {i.get('location', '')})"
+                )
             for i in input_data.accessibility_issues or []:
-                desc_lines.append(f"  - Accessibility: {i.get('description', '')} (location: {i.get('location', '')})")
+                desc_lines.append(
+                    f"  - Accessibility: {i.get('description', '')} (location: {i.get('location', '')})"
+                )
             for i in input_data.code_review_issues or []:
-                desc_lines.append(f"  - Code review [{i.get('category', 'general')}]: {i.get('description', '')} (file: {i.get('file_path', 'unknown')})")
+                desc_lines.append(
+                    f"  - Code review [{i.get('category', 'general')}]: {i.get('description', '')} (file: {i.get('file_path', 'unknown')})"
+                )
             issue_descriptions = "\n".join(desc_lines) if desc_lines else None
             if getattr(input_data, "convergence_hint", None):
                 issue_descriptions = (
@@ -592,19 +680,25 @@ class FrontendExpertAgent:
                     qa_lines.append(
                         f"- [{i.get('severity')}] {desc} (location: {i.get('location', '')})\n  Recommendation: {rec}"
                     )
-                problem_block_parts.extend(["", "**QA issues to fix (implement these):**", "\n".join(qa_lines)])
+                problem_block_parts.extend(
+                    ["", "**QA issues to fix (implement these):**", "\n".join(qa_lines)]
+                )
             if input_data.security_issues:
                 sec_text = "\n".join(
                     f"- [{i.get('severity')}] {i.get('category')}: {i.get('description')} (location: {i.get('location')})\n  Recommendation: {i.get('recommendation')}"
                     for i in input_data.security_issues
                 )
-                problem_block_parts.extend(["", "**Security issues to fix (implement these):**", sec_text])
+                problem_block_parts.extend(
+                    ["", "**Security issues to fix (implement these):**", sec_text]
+                )
             if input_data.accessibility_issues:
                 a11y_text = "\n".join(
                     f"- [{i.get('severity')}] WCAG {i.get('wcag_criterion', '')}: {i.get('description')} (location: {i.get('location')})\n  Recommendation: {i.get('recommendation')}"
                     for i in input_data.accessibility_issues
                 )
-                problem_block_parts.extend(["", "**Accessibility issues to fix (implement these):**", a11y_text])
+                problem_block_parts.extend(
+                    ["", "**Accessibility issues to fix (implement these):**", a11y_text]
+                )
             if input_data.code_review_issues:
                 cr_lines = []
                 for i in input_data.code_review_issues:
@@ -617,7 +711,9 @@ class FrontendExpertAgent:
                         f"- [{i.get('severity')}] {i.get('category', 'general')}: {desc} "
                         f"(file: {i.get('file_path', 'unknown')})\n  Suggestion: {sug}"
                     )
-                problem_block_parts.extend(["", "**Code review issues to resolve:**", "\n".join(cr_lines)])
+                problem_block_parts.extend(
+                    ["", "**Code review issues to resolve:**", "\n".join(cr_lines)]
+                )
             problem_block_parts.extend(["", "---"])
             context_parts.append("\n".join(problem_block_parts))
             logger.info(
@@ -638,37 +734,66 @@ class FrontendExpertAgent:
                 "**Implementation plan:**\n" + input_data.task_plan
             )
             context_parts.append(plan_instruction)
-        context_parts.extend([
-            f"**Task:** {input_data.task_description}",
-            f"**Requirements:** {input_data.requirements}",
-        ])
+        context_parts.extend(
+            [
+                f"**Task:** {input_data.task_description}",
+                f"**Requirements:** {input_data.requirements}",
+            ]
+        )
         if input_data.user_story:
             context_parts.extend(["", f"**User Story:** {input_data.user_story}"])
         if input_data.spec_content:
-            context_parts.extend([
-                "",
-                "**Project Specification (full spec for the application being built):**",
-                "---",
-                input_data.spec_content,
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Project Specification (full spec for the application being built):**",
+                    "---",
+                    input_data.spec_content,
+                    "---",
+                ]
+            )
         if input_data.architecture:
-            context_parts.extend([
-                "",
-                "**Architecture:**",
-                input_data.architecture.overview,
-                *[f"- {c.name} ({c.type})" for c in input_data.architecture.components if c.type == "frontend"],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Architecture:**",
+                    input_data.architecture.overview,
+                    *[
+                        f"- {c.name} ({c.type})"
+                        for c in input_data.architecture.components
+                        if c.type == "frontend"
+                    ],
+                ]
+            )
         if input_data.existing_code:
             context_parts.extend(["", "**Existing code:**", input_data.existing_code])
         if input_data.api_endpoints:
             context_parts.extend(["", "**API endpoints:**", input_data.api_endpoints])
         if input_data.suggested_tests_from_qa:
-            tests_block = ["", "**Suggested tests from QA/testing sub-agent – integrate these into your .spec.ts and e2e files:**"]
+            tests_block = [
+                "",
+                "**Suggested tests from QA/testing sub-agent – integrate these into your .spec.ts and e2e files:**",
+            ]
             if input_data.suggested_tests_from_qa.get("unit_tests"):
-                tests_block.extend(["", "**Unit tests:**", "```", input_data.suggested_tests_from_qa["unit_tests"], "```"])
+                tests_block.extend(
+                    [
+                        "",
+                        "**Unit tests:**",
+                        "```",
+                        input_data.suggested_tests_from_qa["unit_tests"],
+                        "```",
+                    ]
+                )
             if input_data.suggested_tests_from_qa.get("integration_tests"):
-                tests_block.extend(["", "**Integration tests:**", "```", input_data.suggested_tests_from_qa["integration_tests"], "```"])
+                tests_block.extend(
+                    [
+                        "",
+                        "**Integration tests:**",
+                        "```",
+                        input_data.suggested_tests_from_qa["integration_tests"],
+                        "```",
+                    ]
+                )
             context_parts.extend(tests_block)
 
         prompt = FRONTEND_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
@@ -708,12 +833,16 @@ class FrontendExpertAgent:
                 raw_files = {}
 
             # Validate file paths - reject bad names/empty files (optional LLM fallback for unknown extensions)
-            validated_files, validation_warnings = _validate_file_paths(raw_files, llm_client=self.llm)
+            validated_files, validation_warnings = _validate_file_paths(
+                raw_files, llm_client=self.llm
+            )
             for warn in validation_warnings:
                 logger.warning("Frontend output validation: %s", warn)
 
             # Guard: 0 files and 0 code -> retry once with explicit rejection message
-            total_chars = sum(len(c or "") for c in (validated_files or {}).values()) + len(code or "")
+            total_chars = sum(len(c or "") for c in (validated_files or {}).values()) + len(
+                code or ""
+            )
             if not data.get("needs_clarification", False) and total_chars == 0 and attempt == 0:
                 logger.warning(
                     "Frontend: produced no files and no code (failure_class=empty_completion); re-prompting once",
@@ -752,6 +881,7 @@ class FrontendExpertAgent:
         # Fail fast when LLM produces no valid output
         if not validated_files and not data.get("needs_clarification", False):
             from llm_service import LLMPermanentError
+
             if raw_files:
                 raise LLMPermanentError(
                     f"Frontend: LLM returned {len(raw_files)} files but all were rejected by validation. "
@@ -774,7 +904,11 @@ class FrontendExpertAgent:
 
         logger.info(
             "Frontend: done, code=%s chars, files=%s (validated from %s), summary=%s chars, needs_clarification=%s",
-            len(code), len(validated_files), len(raw_files), len(summary), needs_clarification,
+            len(code),
+            len(validated_files),
+            len(raw_files),
+            len(summary),
+            needs_clarification,
         )
         npm_packages = data.get("npm_packages_to_install") or []
         if not isinstance(npm_packages, list):
@@ -790,7 +924,9 @@ class FrontendExpertAgent:
             suggested_commit_message=data.get("suggested_commit_message", ""),
             needs_clarification=needs_clarification,
             clarification_requests=clarification_requests,
-            gitignore_entries=[str(e).strip() for e in (data.get("gitignore_entries") or []) if str(e).strip()],
+            gitignore_entries=[
+                str(e).strip() for e in (data.get("gitignore_entries") or []) if str(e).strip()
+            ],
             npm_packages_to_install=npm_packages,
         )
 
@@ -859,15 +995,15 @@ class FrontendExpertAgent:
         from software_engineering_team.shared.command_runner import (
             ensure_frontend_dependencies_installed,
         )
+
         install_result = ensure_frontend_dependencies_installed(repo_path)
         if not install_result.success:
             checkout_branch(repo_path, DEVELOPMENT_BRANCH)
             return FrontendWorkflowResult(
                 task_id=task_id,
                 success=False,
-                failure_reason="Frontend dependency install failed: " + (
-                    install_result.error_summary or install_result.stderr or "unknown"
-                ),
+                failure_reason="Frontend dependency install failed: "
+                + (install_result.error_summary or install_result.stderr or "unknown"),
             )
 
         qa_issues: List[Dict[str, Any]] = []
@@ -902,7 +1038,7 @@ class FrontendExpertAgent:
                     _read_repo_code(backend_dir, [".py"]),
                     max_api,
                 )
-    
+
                 plan_text = ""
                 if not qa_issues and not sec_issues and not a11y_issues and not code_review_issues:
                     plan_text = self._plan_task(
@@ -910,10 +1046,16 @@ class FrontendExpertAgent:
                         existing_code=existing_code,
                         spec_content=spec_content,
                         architecture=architecture,
-                        api_endpoints=api_endpoints if api_endpoints != "# No code files found" else None,
+                        api_endpoints=api_endpoints
+                        if api_endpoints != "# No code files found"
+                        else None,
                     )
                     if plan_text:
-                        logger.info("[%s] WORKFLOW   Planning complete, plan length=%d chars", task_id, len(plan_text))
+                        logger.info(
+                            "[%s] WORKFLOW   Planning complete, plan length=%d chars",
+                            task_id,
+                            len(plan_text),
+                        )
                         plan_dir = repo_path.parent / "plan"
                         if not plan_dir.exists():
                             plan_dir = repo_path / "plan"
@@ -924,34 +1066,51 @@ class FrontendExpertAgent:
                                     f"# Frontend task plan: {task_id}\n\n{plan_text}",
                                     encoding="utf-8",
                                 )
-                                logger.info("[%s] WORKFLOW   Persisted plan to %s", task_id, plan_file)
+                                logger.info(
+                                    "[%s] WORKFLOW   Persisted plan to %s", task_id, plan_file
+                                )
                             except Exception as e:
-                                logger.warning("[%s] Failed to persist plan (non-blocking): %s", task_id, e)
-    
-                result = self.run(FrontendInput(
-                    framework_target=_resolved_framework_for_implementation(
-                        current_task.metadata, spec_content
-                    ),
-                    task_description=current_task.description,
-                    requirements=_task_requirements_with_route_expectations(current_task, repo_path),
-                    user_story=getattr(current_task, "user_story", "") or "",
-                    spec_content=_truncate_for_context(spec_content, compute_spec_content_chars(self.llm)),
-                    architecture=architecture,
-                    existing_code=existing_code if existing_code != "# No code files found" else None,
-                    api_endpoints=api_endpoints if api_endpoints != "# No code files found" else None,
-                    qa_issues=qa_issues,
-                    security_issues=sec_issues,
-                    accessibility_issues=a11y_issues,
-                    code_review_issues=code_review_issues,
-                    suggested_tests_from_qa=suggested_tests_from_qa,
-                    task_plan=plan_text if plan_text else None,
-                    convergence_hint=convergence_hint,
-                ))
-    
+                                logger.warning(
+                                    "[%s] Failed to persist plan (non-blocking): %s", task_id, e
+                                )
+
+                result = self.run(
+                    FrontendInput(
+                        framework_target=_resolved_framework_for_implementation(
+                            current_task.metadata, spec_content
+                        ),
+                        task_description=current_task.description,
+                        requirements=_task_requirements_with_route_expectations(
+                            current_task, repo_path
+                        ),
+                        user_story=getattr(current_task, "user_story", "") or "",
+                        spec_content=_truncate_for_context(
+                            spec_content, compute_spec_content_chars(self.llm)
+                        ),
+                        architecture=architecture,
+                        existing_code=existing_code
+                        if existing_code != "# No code files found"
+                        else None,
+                        api_endpoints=api_endpoints
+                        if api_endpoints != "# No code files found"
+                        else None,
+                        qa_issues=qa_issues,
+                        security_issues=sec_issues,
+                        accessibility_issues=a11y_issues,
+                        code_review_issues=code_review_issues,
+                        suggested_tests_from_qa=suggested_tests_from_qa,
+                        task_plan=plan_text if plan_text else None,
+                        convergence_hint=convergence_hint,
+                    )
+                )
+
                 if result.needs_clarification and result.clarification_requests:
                     if iteration_round < MAX_CLARIFICATION_REFINEMENTS:
                         current_task = tech_lead.refine_task(
-                            current_task, result.clarification_requests, spec_content, architecture,
+                            current_task,
+                            result.clarification_requests,
+                            spec_content,
+                            architecture,
                         )
                         code_review_issues = []
                         continue
@@ -961,7 +1120,7 @@ class FrontendExpertAgent:
                         success=False,
                         failure_reason="Agent needs clarification after max refinements",
                     )
-    
+
                 ok, write_msg = write_agent_output(repo_path, result, subdir="")
                 if not ok:
                     checkout_branch(repo_path, DEVELOPMENT_BRANCH)
@@ -975,30 +1134,36 @@ class FrontendExpertAgent:
                         success=False,
                         failure_reason=failure_reason,
                     )
-    
+
                 if result.npm_packages_to_install:
                     install_cmd = ["npm", "install", "--save"] + result.npm_packages_to_install
                     install_res = run_command_with_nvm(install_cmd, cwd=repo_path)
                     if not install_res.success:
                         logger.warning(
                             "[%s] npm install for packages %s failed: %s",
-                            task_id, result.npm_packages_to_install, install_res.stderr[:500],
+                            task_id,
+                            result.npm_packages_to_install,
+                            install_res.stderr[:500],
                         )
-    
+
                 # ─── Lint verification (before build) ──────────────────────
                 if linting_tool_agent is not None:
                     try:
                         from linting_tool_agent.models import LintToolInput as _LintInput
-                        lint_result = linting_tool_agent.run(_LintInput(
-                            repo_path=str(repo_path),
-                            agent_type="frontend",
-                            task_id=task_id,
-                            task_description=current_task.description,
-                        ))
+
+                        lint_result = linting_tool_agent.run(
+                            _LintInput(
+                                repo_path=str(repo_path),
+                                agent_type="frontend",
+                                task_id=task_id,
+                                task_description=current_task.description,
+                            )
+                        )
                         if not lint_result.execution_result.success:
                             logger.info(
                                 "[%s] WORKFLOW   [%d] Lint found %d issue(s), %d edit(s)",
-                                task_id, iteration_round,
+                                task_id,
+                                iteration_round,
                                 lint_result.execution_result.issue_count,
                                 len(lint_result.edits),
                             )
@@ -1006,6 +1171,7 @@ class FrontendExpertAgent:
                                 from software_engineering_team.shared.repo_writer import (
                                     write_agent_output as _write_lint,
                                 )
+
                                 lint_files: Dict[str, str] = {}
                                 repo_root = repo_path.resolve()
                                 for e in lint_result.edits:
@@ -1029,7 +1195,11 @@ class FrontendExpertAgent:
                                 if lint_files:
                                     _write_lint(
                                         repo_path,
-                                        type("_LR", (), {"files": lint_files, "summary": lint_result.summary})(),
+                                        type(
+                                            "_LR",
+                                            (),
+                                            {"files": lint_files, "summary": lint_result.summary},
+                                        )(),
                                         subdir="",
                                     )
                             elif lint_result.linter_issues:
@@ -1046,9 +1216,10 @@ class FrontendExpertAgent:
                     except Exception as lint_err:
                         logger.warning(
                             "[%s] WORKFLOW   Lint step failed (non-blocking): %s",
-                            task_id, lint_err,
+                            task_id,
+                            lint_err,
                         )
-    
+
                 build_ok, build_errors = build_verifier(repo_path, "frontend", task_id)
                 if not build_ok:
                     if build_errors.startswith("ENV:"):
@@ -1056,7 +1227,8 @@ class FrontendExpertAgent:
                         return FrontendWorkflowResult(
                             task_id=task_id,
                             success=False,
-                            failure_reason="Unsupported environment: " + build_errors[4:].strip()[:500],
+                            failure_reason="Unsupported environment: "
+                            + build_errors[4:].strip()[:500],
                         )
                     build_error_sig = (build_errors[:800] or build_errors).strip()
                     if build_error_sig == last_build_error_sig:
@@ -1074,94 +1246,121 @@ class FrontendExpertAgent:
                                 f"Last error: {build_errors[:500]}"
                             ),
                         )
-    
+
                     # Try BuildFixSpecialist for minimal targeted fix before QA fallback
                     if consecutive_same_build_failures >= 2 and build_fix_specialist is not None:
                         try:
                             from build_fix_specialist.models import BuildFixInput
-                            affected_paths = _extract_affected_file_paths_from_frontend_build_errors(
-                                build_errors, repo_path,
+
+                            affected_paths = (
+                                _extract_affected_file_paths_from_frontend_build_errors(
+                                    build_errors,
+                                    repo_path,
+                                )
                             )
-                            affected_code = _read_frontend_affected_files_code(repo_path, affected_paths)
-                            bf_result = build_fix_specialist.run(BuildFixInput(
-                                build_errors=build_errors[:4000],
-                                affected_files_code=affected_code,
-                                task_description=current_task.description,
-                            ))
+                            affected_code = _read_frontend_affected_files_code(
+                                repo_path, affected_paths
+                            )
+                            bf_result = build_fix_specialist.run(
+                                BuildFixInput(
+                                    build_errors=build_errors[:4000],
+                                    affected_files_code=affected_code,
+                                    task_description=current_task.description,
+                                )
+                            )
                             if bf_result.edits:
                                 ok_apply, msg_apply, files_dict = _apply_frontend_build_fix_edits(
-                                    repo_path, bf_result.edits,
+                                    repo_path,
+                                    bf_result.edits,
                                 )
                                 if ok_apply and files_dict:
                                     from software_engineering_team.shared.repo_writer import (
                                         write_agent_output as _write_bf,
                                     )
+
                                     ok_write, _ = _write_bf(
                                         repo_path,
-                                        type("_BF", (), {"files": files_dict, "summary": bf_result.summary})(),
+                                        type(
+                                            "_BF",
+                                            (),
+                                            {"files": files_dict, "summary": bf_result.summary},
+                                        )(),
                                         subdir="",
                                     )
                                     if ok_write:
                                         logger.info(
                                             "[%s] WORKFLOW   BuildFixSpecialist applied %d edit(s), re-running build",
-                                            task_id, len(files_dict),
+                                            task_id,
+                                            len(files_dict),
                                         )
                                         continue
                         except Exception as bf_err:
                             logger.warning(
                                 "[%s] WORKFLOW   BuildFixSpecialist failed (non-blocking): %s",
-                                task_id, bf_err,
+                                task_id,
+                                bf_err,
                             )
-    
+
                     # Invoke testing sub-agent to analyze build errors and produce fix recommendations
                     code_on_branch = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
                     from qa_agent.models import QAInput as QAI
-                    qa_fix_result = qa_agent.run(QAI(
-                        code=code_on_branch,
-                        language="typescript",
-                        task_description=current_task.description,
-                        architecture=architecture,
-                        build_errors=build_errors[:4000],
-                        request_mode="fix_build",
-                    ))
+
+                    qa_fix_result = qa_agent.run(
+                        QAI(
+                            code=code_on_branch,
+                            language="typescript",
+                            task_description=current_task.description,
+                            architecture=architecture,
+                            build_errors=build_errors[:4000],
+                            request_mode="fix_build",
+                        )
+                    )
                     qa_issues = [
                         b.model_dump() if hasattr(b, "model_dump") else b.dict()
                         for b in (qa_fix_result.bugs_found or [])
                     ]
                     if not qa_issues:
                         # Fallback to generic code_review_issues if QA returns nothing
-                        qa_issues = [{
-                            "severity": "critical",
-                            "description": f"Build failed: {build_errors[:2000]}",
-                            "recommendation": "Fix the compilation errors",
-                        }]
+                        qa_issues = [
+                            {
+                                "severity": "critical",
+                                "description": f"Build failed: {build_errors[:2000]}",
+                                "recommendation": "Fix the compilation errors",
+                            }
+                        ]
                     if consecutive_same_build_failures >= 2:
-                        qa_issues.insert(0, {
-                            "severity": "critical",
-                            "description": (
-                                f"ESCALATION: This build error has occurred {consecutive_same_build_failures} times. "
-                                "Focus ONLY on fixing this specific error. Make minimal, targeted changes."
-                            ),
-                            "recommendation": "Apply the minimal fix indicated by the error message.",
-                        })
+                        qa_issues.insert(
+                            0,
+                            {
+                                "severity": "critical",
+                                "description": (
+                                    f"ESCALATION: This build error has occurred {consecutive_same_build_failures} times. "
+                                    "Focus ONLY on fixing this specific error. Make minimal, targeted changes."
+                                ),
+                                "recommendation": "Apply the minimal fix indicated by the error message.",
+                            },
+                        )
                     code_review_issues = []
                     continue
-    
+
                 consecutive_same_build_failures = 0
                 last_build_error_sig = ""
-    
+
                 # After first successful build: have testing sub-agent write unit and integration tests
                 if not write_tests_requested:
                     write_tests_requested = True
                     code_on_branch = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
                     from qa_agent.models import QAInput as QAI
-                    qa_tests_result = qa_agent.run(QAI(
-                        code=code_on_branch,
-                        language="typescript",
-                        task_description=current_task.description,
-                        architecture=architecture,
-                        request_mode="write_tests",
-                    ))
+
+                    qa_tests_result = qa_agent.run(
+                        QAI(
+                            code=code_on_branch,
+                            language="typescript",
+                            task_description=current_task.description,
+                            architecture=architecture,
+                            request_mode="write_tests",
+                        )
+                    )
                     tests_dict = {}
                     if qa_tests_result.unit_tests:
                         tests_dict["unit_tests"] = qa_tests_result.unit_tests
@@ -1170,13 +1369,16 @@ class FrontendExpertAgent:
                     if tests_dict:
                         suggested_tests_from_qa = tests_dict
                         continue
-    
-                suggested_tests_from_qa = None  # Clear after use so we don't re-pass on code review loop
+
+                suggested_tests_from_qa = (
+                    None  # Clear after use so we don't re-pass on code review loop
+                )
                 code_on_branch = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
                 from software_engineering_team.shared.context_sizing import (
                     compute_code_review_total_chars,
                     compute_existing_code_chars,
                 )
+
                 max_code = compute_existing_code_chars(self.llm)
                 max_review = compute_code_review_total_chars(self.llm)
                 existing_code_ctx = _truncate_for_context(code_on_branch, max_code)
@@ -1214,20 +1416,23 @@ class FrontendExpertAgent:
                         success=False,
                         failure_reason="Code review did not approve after max iterations",
                     )
-    
+
                 # Acceptance criteria verification (optional)
                 if acceptance_verifier_agent and getattr(current_task, "acceptance_criteria", None):
                     code_for_verify = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
                     if code_for_verify and code_for_verify != "# No code files found":
                         from acceptance_verifier_agent.models import AcceptanceVerifierInput
-                        av_result = acceptance_verifier_agent.run(AcceptanceVerifierInput(
-                            code=code_for_verify,
-                            task_description=current_task.description,
-                            acceptance_criteria=current_task.acceptance_criteria,
-                            spec_content=spec_content,
-                            architecture=architecture,
-                            language="typescript",
-                        ))
+
+                        av_result = acceptance_verifier_agent.run(
+                            AcceptanceVerifierInput(
+                                code=code_for_verify,
+                                task_description=current_task.description,
+                                acceptance_criteria=current_task.acceptance_criteria,
+                                spec_content=spec_content,
+                                architecture=architecture,
+                                language="typescript",
+                            )
+                        )
                         if not av_result.all_satisfied:
                             unsatisfied = [c for c in av_result.per_criterion if not c.satisfied]
                             code_review_issues = [
@@ -1248,36 +1453,54 @@ class FrontendExpertAgent:
                                 success=False,
                                 failure_reason="Acceptance criteria not satisfied after max iterations",
                             )
-    
+
                 code_review_issues = []
                 code_to_review = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
-    
+
                 from qa_agent.models import QAInput
-                qa_result = qa_agent.run(QAInput(
-                    code=code_to_review,
-                    language="typescript",
-                    task_description=current_task.description,
-                    architecture=architecture,
-                ))
+
+                qa_result = qa_agent.run(
+                    QAInput(
+                        code=code_to_review,
+                        language="typescript",
+                        task_description=current_task.description,
+                        architecture=architecture,
+                    )
+                )
                 from accessibility_agent.models import AccessibilityInput
-                a11y_result = accessibility_agent.run(AccessibilityInput(
-                    code=code_to_review,
-                    language="typescript",
-                    task_description=current_task.description,
-                    architecture=architecture,
-                ))
+
+                a11y_result = accessibility_agent.run(
+                    AccessibilityInput(
+                        code=code_to_review,
+                        language="typescript",
+                        task_description=current_task.description,
+                        architecture=architecture,
+                    )
+                )
                 from security_agent.models import SecurityInput
-                sec_result = security_agent.run(SecurityInput(
-                    code=code_to_review,
-                    language="typescript",
-                    task_description=current_task.description,
-                    architecture=architecture,
-                ))
-    
-                qa_issues = [b.model_dump() if hasattr(b, "model_dump") else b.dict() for b in (qa_result.bugs_found or [])]
-                a11y_issues = [i.model_dump() if hasattr(i, "model_dump") else i.dict() for i in (a11y_result.issues or [])]
-                sec_issues = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in (sec_result.vulnerabilities or [])]
-    
+
+                sec_result = security_agent.run(
+                    SecurityInput(
+                        code=code_to_review,
+                        language="typescript",
+                        task_description=current_task.description,
+                        architecture=architecture,
+                    )
+                )
+
+                qa_issues = [
+                    b.model_dump() if hasattr(b, "model_dump") else b.dict()
+                    for b in (qa_result.bugs_found or [])
+                ]
+                a11y_issues = [
+                    i.model_dump() if hasattr(i, "model_dump") else i.dict()
+                    for i in (a11y_result.issues or [])
+                ]
+                sec_issues = [
+                    v.model_dump() if hasattr(v, "model_dump") else v.dict()
+                    for v in (sec_result.vulnerabilities or [])
+                ]
+
                 all_approved = qa_result.approved and a11y_result.approved and sec_result.approved
                 if not all_approved:
                     if iteration_round < MAX_CODE_REVIEW_ITERATIONS - 1:
@@ -1288,17 +1511,20 @@ class FrontendExpertAgent:
                         success=False,
                         failure_reason="QA, accessibility, or security did not approve after max iterations",
                     )
-    
+
                 if all_tasks and append_backend_task_fn:
                     fix_tasks = tech_lead.evaluate_qa_and_create_fix_tasks(
-                        current_task, qa_result, spec_content, architecture,
+                        current_task,
+                        qa_result,
+                        spec_content,
+                        architecture,
                     )
                     if fix_tasks:
                         for ft in fix_tasks:
                             if getattr(ft, "assignee", None) == "backend":
                                 all_tasks[ft.id] = ft
                                 append_backend_task_fn(ft)
-    
+
                 self._run_dbc_review(
                     dbc_agent=dbc_agent,
                     repo_path=repo_path,
@@ -1306,12 +1532,12 @@ class FrontendExpertAgent:
                     task_description=current_task.description,
                     architecture=architecture,
                 )
-    
+
                 merge_ok, merge_msg = merge_branch(repo_path, branch_name, DEVELOPMENT_BRANCH)
                 if merge_ok:
                     delete_branch(repo_path, branch_name)
                     checkout_branch(repo_path, DEVELOPMENT_BRANCH)
-    
+
                     if doc_agent and completed_tasks is not None and remaining_tasks is not None:
                         task_update = TaskUpdate(
                             task_id=task_id,
@@ -1347,7 +1573,7 @@ class FrontendExpertAgent:
                                 architecture=architecture,
                                 codebase_summary=codebase_summary,
                             )
-    
+
                     return FrontendWorkflowResult(
                         task_id=task_id,
                         success=True,
@@ -1388,16 +1614,19 @@ class FrontendExpertAgent:
     ) -> Any:
         """Invoke the code review agent on frontend code."""
         from code_review_agent.models import CodeReviewInput
-        return code_review_agent.run(CodeReviewInput(
-            code=code,
-            spec_content=spec_content,
-            task_description=task.description,
-            task_requirements=_task_requirements(task),
-            acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
-            language="typescript",
-            architecture=architecture,
-            existing_codebase=existing_code,
-        ))
+
+        return code_review_agent.run(
+            CodeReviewInput(
+                code=code,
+                spec_content=spec_content,
+                task_description=task.description,
+                task_requirements=_task_requirements(task),
+                acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
+                language="typescript",
+                architecture=architecture,
+                existing_codebase=existing_code,
+            )
+        )
 
     @staticmethod
     def _run_dbc_review(
@@ -1417,12 +1646,14 @@ class FrontendExpertAgent:
             dbc_code = _read_repo_code(repo_path, [".ts", ".tsx", ".html", ".scss"])
             if not dbc_code or dbc_code == "# No code files found":
                 return
-            dbc_result = dbc_agent.run(DbcCommentsInput(
-                code=dbc_code,
-                language="typescript",
-                task_description=task_description,
-                architecture=architecture,
-            ))
+            dbc_result = dbc_agent.run(
+                DbcCommentsInput(
+                    code=dbc_code,
+                    language="typescript",
+                    task_description=task_description,
+                    architecture=architecture,
+                )
+            )
             if not dbc_result.already_compliant and dbc_result.files:
                 write_files_and_commit(
                     repo_path,

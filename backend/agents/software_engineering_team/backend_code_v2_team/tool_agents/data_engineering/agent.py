@@ -27,7 +27,8 @@ from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
 
-DATA_ENGINEERING_PROMPT = """You are an expert Data Engineering specialist.
+DATA_ENGINEERING_PROMPT = (
+    """You are an expert Data Engineering specialist.
 
 Given a microtask about database schema, data models, or data integrity,
 produce the required files (models, seed data, etc.).
@@ -39,7 +40,9 @@ For new/greenfield projects, create models and schemas directly without migratio
 **Microtask:** {description}
 **Language:** {language}
 **Existing code context:** {existing_code}
-""" + FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
+"""
+    + FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
+)
 
 
 class DataEngineeringToolAgent:
@@ -69,7 +72,9 @@ class DataEngineeringToolAgent:
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Recommend how data/schema work should be reflected in the microtask plan."""
         return ToolAgentPhaseOutput(
-            recommendations=["Consider data models and integrity checks. Only add migrations if modifying existing schema."],
+            recommendations=[
+                "Consider data models and integrity checks. Only add migrations if modifying existing schema."
+            ],
             summary="Data engineering planning input provided.",
         )
 

@@ -111,7 +111,9 @@ def test_build_agent_feedback():
 
 def test_get_failure_class_tag():
     assert get_failure_class_tag(FailureClass.IMPORT_ERROR) == "failure_class=import_error"
-    assert get_failure_class_tag(FailureClass.SQL_NO_SUCH_TABLE) == "failure_class=sql_no_such_table"
+    assert (
+        get_failure_class_tag(FailureClass.SQL_NO_SUCH_TABLE) == "failure_class=sql_no_such_table"
+    )
 
 
 def test_parse_pytest_assertion_401_includes_playbook():
@@ -131,7 +133,9 @@ E         -401
     assert failures[0].failure_class == FailureClass.PYTEST_ASSERTION
     assert "401" in failures[0].playbook_hint
     assert "auth" in failures[0].playbook_hint.lower()
-    assert "test client" in failures[0].playbook_hint.lower() or "test " in failures[0].playbook_hint
+    assert (
+        "test client" in failures[0].playbook_hint.lower() or "test " in failures[0].playbook_hint
+    )
 
 
 def test_build_agent_feedback_includes_interpretation_for_401():
@@ -175,7 +179,9 @@ E         -401
     assert failures[0].file_path == "tests/test_task_endpoints.py"
     # All failing tests listed in message or suggestion
     assert "test_task_endpoints" in (failures[0].message or "")
-    assert "test_auth_middleware" in (failures[0].message or "") or "test_auth_middleware" in (failures[0].suggestion or "")
+    assert "test_auth_middleware" in (failures[0].message or "") or "test_auth_middleware" in (
+        failures[0].suggestion or ""
+    )
     assert failures[0].failing_tests is not None
     assert len(failures[0].failing_tests) >= 2
     assert any("test_task_endpoints" in ft for ft in failures[0].failing_tests)

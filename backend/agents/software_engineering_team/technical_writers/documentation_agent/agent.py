@@ -34,6 +34,7 @@ MAX_WORKFLOW_SECONDS = 300
 # Maximum characters of codebase content to send to the LLM
 MAX_CODEBASE_CHARS = 40000
 
+
 def _read_repo_code(repo_path: Path, extensions: List[str] | None = None) -> str:
     """Read code files from repo, concatenated. Delegates to shared.repo_utils."""
     if extensions is None:
@@ -119,80 +120,97 @@ class DocumentationAgent:
             ]
 
             if input_data.existing_readme:
-                readme_context.extend([
-                    "",
-                    "**Current root README.md:**",
-                    "---",
-                    input_data.existing_readme,
-                    "---",
-                ])
+                readme_context.extend(
+                    [
+                        "",
+                        "**Current root README.md:**",
+                        "---",
+                        input_data.existing_readme,
+                        "---",
+                    ]
+                )
             else:
                 readme_context.append("\n**Current root README.md:** (none -- create from scratch)")
 
             if input_data.has_frontend_folder:
                 if input_data.existing_readme_frontend:
-                    readme_context.extend([
-                        "",
-                        "**Current frontend/README.md:**",
-                        "---",
-                        input_data.existing_readme_frontend,
-                        "---",
-                    ])
+                    readme_context.extend(
+                        [
+                            "",
+                            "**Current frontend/README.md:**",
+                            "---",
+                            input_data.existing_readme_frontend,
+                            "---",
+                        ]
+                    )
                 else:
-                    readme_context.append("\n**Current frontend/README.md:** (none -- create if appropriate)")
+                    readme_context.append(
+                        "\n**Current frontend/README.md:** (none -- create if appropriate)"
+                    )
             if input_data.has_backend_folder:
                 if input_data.existing_readme_backend:
-                    readme_context.extend([
-                        "",
-                        "**Current backend/README.md:**",
-                        "---",
-                        input_data.existing_readme_backend,
-                        "---",
-                    ])
+                    readme_context.extend(
+                        [
+                            "",
+                            "**Current backend/README.md:**",
+                            "---",
+                            input_data.existing_readme_backend,
+                            "---",
+                        ]
+                    )
                 else:
-                    readme_context.append("\n**Current backend/README.md:** (none -- create if appropriate)")
+                    readme_context.append(
+                        "\n**Current backend/README.md:** (none -- create if appropriate)"
+                    )
             if input_data.has_devops_folder:
                 if input_data.existing_readme_devops:
-                    readme_context.extend([
-                        "",
-                        "**Current devops/README.md:**",
-                        "---",
-                        input_data.existing_readme_devops,
-                        "---",
-                    ])
+                    readme_context.extend(
+                        [
+                            "",
+                            "**Current devops/README.md:**",
+                            "---",
+                            input_data.existing_readme_devops,
+                            "---",
+                        ]
+                    )
                 else:
-                    readme_context.append("\n**Current devops/README.md:** (none -- create if appropriate)")
+                    readme_context.append(
+                        "\n**Current devops/README.md:** (none -- create if appropriate)"
+                    )
             readme_context.append(
                 f"\n**Folders present in repo:** frontend={input_data.has_frontend_folder}, "
                 f"backend={input_data.has_backend_folder}, devops={input_data.has_devops_folder}"
             )
 
             if input_data.spec_content:
-                spec_excerpt = input_data.spec_content
-                if len(spec_excerpt) > 12000:
-                    spec_excerpt = spec_excerpt[:12000] + "..."
-                readme_context.extend([
-                    "",
-                    "**Project specification:**",
-                    "---",
-                    spec_excerpt,
-                    "---",
-                ])
+                readme_context.extend(
+                    [
+                        "",
+                        "**Project specification:**",
+                        "---",
+                        input_data.spec_content,
+                        "---",
+                    ]
+                )
 
             if input_data.architecture:
-                readme_context.extend([
-                    "",
-                    "**Architecture overview:**",
-                    input_data.architecture.overview,
-                ])
+                readme_context.extend(
+                    [
+                        "",
+                        "**Architecture overview:**",
+                        input_data.architecture.overview,
+                    ]
+                )
 
-            readme_context.extend([
-                "",
-                "**Full codebase:**",
-                "---",
-                codebase,
-                "---",
-            ])
+            readme_context.extend(
+                [
+                    "",
+                    "**Full codebase:**",
+                    "---",
+                    codebase,
+                    "---",
+                ]
+            )
 
             readme_prompt = DOCUMENTATION_README_PROMPT
             if getattr(input_data, "is_final_review", False):
@@ -252,24 +270,28 @@ class DocumentationAgent:
                 )
 
             if input_data.existing_contributors:
-                contrib_context.extend([
-                    "",
-                    "**Current CONTRIBUTORS.md:**",
-                    "---",
-                    input_data.existing_contributors,
-                    "---",
-                ])
+                contrib_context.extend(
+                    [
+                        "",
+                        "**Current CONTRIBUTORS.md:**",
+                        "---",
+                        input_data.existing_contributors,
+                        "---",
+                    ]
+                )
             else:
                 contrib_context.append(
                     "\n**Current CONTRIBUTORS.md:** (none -- create if appropriate)"
                 )
 
             if input_data.spec_content:
-                contrib_context.extend([
-                    "",
-                    "**Project specification (excerpt):**",
-                    (input_data.spec_content or "")[:4000],
-                ])
+                contrib_context.extend(
+                    [
+                        "",
+                        "**Project specification:**",
+                        input_data.spec_content,
+                    ]
+                )
 
             contrib_prompt = DOCUMENTATION_CONTRIBUTORS_PROMPT
             if getattr(input_data, "is_final_review", False):
@@ -397,9 +419,15 @@ class DocumentationAgent:
             frontend_dir = path / "frontend"
             backend_dir = path / "backend"
             devops_dir = path / "devops"
-            existing_readme_frontend = self._read_file(frontend_dir / "README.md") if frontend_dir.is_dir() else ""
-            existing_readme_backend = self._read_file(backend_dir / "README.md") if backend_dir.is_dir() else ""
-            existing_readme_devops = self._read_file(devops_dir / "README.md") if devops_dir.is_dir() else ""
+            existing_readme_frontend = (
+                self._read_file(frontend_dir / "README.md") if frontend_dir.is_dir() else ""
+            )
+            existing_readme_backend = (
+                self._read_file(backend_dir / "README.md") if backend_dir.is_dir() else ""
+            )
+            existing_readme_devops = (
+                self._read_file(devops_dir / "README.md") if devops_dir.is_dir() else ""
+            )
             readme_missing = not existing_readme
 
             # Step 3: Generate documentation
@@ -440,11 +468,23 @@ class DocumentationAgent:
             files_to_write: Dict[str, str] = {}
             if result.readme_changed and result.readme_content:
                 files_to_write["README.md"] = result.readme_content
-            if path.joinpath("frontend").is_dir() and result.readme_frontend_changed and result.readme_frontend_content:
+            if (
+                path.joinpath("frontend").is_dir()
+                and result.readme_frontend_changed
+                and result.readme_frontend_content
+            ):
                 files_to_write["frontend/README.md"] = result.readme_frontend_content
-            if path.joinpath("backend").is_dir() and result.readme_backend_changed and result.readme_backend_content:
+            if (
+                path.joinpath("backend").is_dir()
+                and result.readme_backend_changed
+                and result.readme_backend_content
+            ):
                 files_to_write["backend/README.md"] = result.readme_backend_content
-            if path.joinpath("devops").is_dir() and result.readme_devops_changed and result.readme_devops_content:
+            if (
+                path.joinpath("devops").is_dir()
+                and result.readme_devops_changed
+                and result.readme_devops_content
+            ):
                 files_to_write["devops/README.md"] = result.readme_devops_content
             if result.contributors_changed and result.contributors_content:
                 files_to_write["CONTRIBUTORS.md"] = result.contributors_content
@@ -544,19 +584,13 @@ class DocumentationAgent:
             len(completed_task_ids),
         )
         try:
-            from software_engineering_team.shared.context_sizing import compute_existing_code_chars
             extensions = [".py"] if repo_name == "backend" else [".ts", ".tsx", ".html", ".scss"]
-            raw_code = _read_repo_code(path, extensions)
-            max_chars = compute_existing_code_chars(self.llm)
-            codebase_content = raw_code
-            if len(raw_code) > max_chars:
-                codebase_content = (
-                    raw_code[:max_chars]
-                    + f"\n\n... [truncated, {len(raw_code) - max_chars} more chars]"
-                )
+            codebase_content = _read_repo_code(path, extensions)
         except Exception as e:
             logger.warning("DocAgent [%s]: failed to read codebase: %s", task_id, e)
-            return DocumentationOutput(summary=f"Final review skipped: could not read codebase ({e})")
+            return DocumentationOutput(
+                summary=f"Final review skipped: could not read codebase ({e})"
+            )
 
         return self.run_full_workflow(
             repo_path=path,

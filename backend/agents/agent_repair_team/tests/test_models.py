@@ -28,7 +28,12 @@ def test_repair_output_defaults():
 
 
 def test_repair_output_with_fixes():
-    fix = {"file_path": "agents/foo.py", "line_start": 10, "line_end": 10, "replacement_content": "x = 1\n"}
+    fix = {
+        "file_path": "agents/foo.py",
+        "line_start": 10,
+        "line_end": 10,
+        "replacement_content": "x = 1\n",
+    }
     out = RepairOutput(suggested_fixes=[fix], summary="Fixed NameError", applied=True)
     assert len(out.suggested_fixes) == 1
     assert out.suggested_fixes[0]["file_path"] == "agents/foo.py"
@@ -52,7 +57,12 @@ def test_repair_input_field_types():
 def test_repair_output_multiple_fixes():
     fixes = [
         {"file_path": "a.py", "line_start": 1, "line_end": 1, "replacement_content": "import x\n"},
-        {"file_path": "b.py", "line_start": 5, "line_end": 7, "replacement_content": "def foo():\n    pass\n"},
+        {
+            "file_path": "b.py",
+            "line_start": 5,
+            "line_end": 7,
+            "replacement_content": "def foo():\n    pass\n",
+        },
     ]
     out = RepairOutput(suggested_fixes=fixes, summary="Two fixes applied")
     assert len(out.suggested_fixes) == 2

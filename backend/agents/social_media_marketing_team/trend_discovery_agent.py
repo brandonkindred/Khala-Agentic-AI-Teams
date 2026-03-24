@@ -23,7 +23,16 @@ from .trend_models import TrendDigest, TrendingTopic
 
 logger = logging.getLogger(__name__)
 
-PLATFORMS_SEARCHED = ["X/Twitter", "LinkedIn", "TikTok", "Instagram", "Facebook", "Bluesky", "Reddit", "Threads"]
+PLATFORMS_SEARCHED = [
+    "X/Twitter",
+    "LinkedIn",
+    "TikTok",
+    "Instagram",
+    "Facebook",
+    "Bluesky",
+    "Reddit",
+    "Threads",
+]
 
 _SYNTHESIS_PROMPT = """\
 You are a social media analyst. Below are web search snippets collected from searches about trending topics \
@@ -124,10 +133,16 @@ class TrendDiscoveryAgent:
                         seen_urls.add(url_str)
                         all_results.append(result)
 
-        logger.info("TrendDiscoveryAgent: collected %d unique results across %d queries", len(all_results), len(queries))
+        logger.info(
+            "TrendDiscoveryAgent: collected %d unique results across %d queries",
+            len(all_results),
+            len(queries),
+        )
 
         if not all_results:
-            logger.warning("TrendDiscoveryAgent: all searches returned no results; returning empty digest")
+            logger.warning(
+                "TrendDiscoveryAgent: all searches returned no results; returning empty digest"
+            )
             return TrendDigest(
                 generated_at=generated_at,
                 topics=[],
@@ -153,15 +168,19 @@ class TrendDiscoveryAgent:
                 sources = [str(s) for s in (item.get("sources") or []) if s][:3]
                 score = float(item.get("relevance_score") or 0.0)
                 score = max(0.0, min(1.0, score))
-                topics.append(TrendingTopic(
-                    title=title,
-                    summary=summary,
-                    platforms=platforms,
-                    sources=sources,
-                    relevance_score=score,
-                ))
+                topics.append(
+                    TrendingTopic(
+                        title=title,
+                        summary=summary,
+                        platforms=platforms,
+                        sources=sources,
+                        relevance_score=score,
+                    )
+                )
         except (LLMJsonParseError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-            logger.warning("TrendDiscoveryAgent: LLM synthesis failed: %s; returning empty topic list", exc)
+            logger.warning(
+                "TrendDiscoveryAgent: LLM synthesis failed: %s; returning empty topic list", exc
+            )
 
         logger.info("TrendDiscoveryAgent: identified %d trending topics", len(topics))
         return TrendDigest(

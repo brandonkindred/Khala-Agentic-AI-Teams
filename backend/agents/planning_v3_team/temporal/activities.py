@@ -24,6 +24,7 @@ def run_planning_v3_activity(
     """Run the Planning V3 workflow (discovery and requirements)."""
     try:
         from planning_v3_team.api.main import _run_workflow_background
+
         _run_workflow_background(
             job_id,
             repo_path,

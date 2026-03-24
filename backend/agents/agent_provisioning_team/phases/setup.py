@@ -27,7 +27,7 @@ def run_setup(
 ) -> SetupResult:
     """
     Execute the setup phase: create Docker container for the agent.
-    
+
     Args:
         agent_id: Unique identifier for the agent
         manifest: Loaded tool manifest
@@ -35,16 +35,16 @@ def run_setup(
         environment_store: Store for tracking environments
         docker_provisioner: Docker provisioner instance
         progress_callback: Optional callback for progress updates
-    
+
     Returns:
         SetupResult with environment info
     """
     env_store = environment_store or EnvironmentStore()
     docker = docker_provisioner or DockerProvisionerTool()
-    
+
     if progress_callback:
         progress_callback("Checking for existing environment...")
-    
+
     existing = env_store.get(agent_id)
     if existing and existing.status == "running":
         return SetupResult(
@@ -58,37 +58,37 @@ def run_setup(
                 status="running",
             ),
         )
-    
+
     if progress_callback:
         progress_callback("Creating Docker container...")
-    
+
     docker_config: Dict[str, Any] = {
         "base_image": manifest.base_image,
         "workspace_path": f"/workspace/{agent_id}",
         "environment": manifest.environment,
         "expose_ssh": True,
     }
-    
+
     credentials = GeneratedCredentials(
         tool_name="docker",
     )
-    
+
     result = docker.provision(
         agent_id=agent_id,
         config=docker_config,
         credentials=credentials,
         access_tier=access_tier,
     )
-    
+
     if not result.success:
         return SetupResult(
             success=False,
             error=result.error or "Docker container creation failed",
         )
-    
+
     if progress_callback:
         progress_callback("Registering environment...")
-    
+
     env_info = EnvironmentInfo(
         container_id=result.details.get("container_id", ""),
         container_name=result.details.get("container_name", f"agent-{agent_id}"),
@@ -97,19 +97,22 @@ def run_setup(
         workspace_path=result.details.get("workspace_path", f"/workspace/{agent_id}"),
         status="running",
     )
-    
+
     from ..shared.environment_store import EnvironmentInfo as EnvInfoClass
-    env_store.register(EnvInfoClass(
-        agent_id=agent_id,
-        container_id=env_info.container_id,
-        container_name=env_info.container_name,
-        ssh_host=env_info.ssh_host,
-        ssh_port=env_info.ssh_port,
-        workspace_path=env_info.workspace_path,
-        status="running",
-        tools_provisioned=[],
-    ))
-    
+
+    env_store.register(
+        EnvInfoClass(
+            agent_id=agent_id,
+            container_id=env_info.container_id,
+            container_name=env_info.container_name,
+            ssh_host=env_info.ssh_host,
+            ssh_port=env_info.ssh_port,
+            workspace_path=env_info.workspace_path,
+            status="running",
+            tools_provisioned=[],
+        )
+    )
+
     return SetupResult(
         success=True,
         environment=env_info,
@@ -123,14 +126,14 @@ def cleanup_setup(
 ) -> bool:
     """
     Clean up a failed setup by removing any partially created resources.
-    
+
     Returns:
         True if cleanup successful
     """
     env_store = environment_store or EnvironmentStore()
     docker = docker_provisioner or DockerProvisionerTool()
-    
+
     docker.deprovision(agent_id)
     env_store.remove(agent_id)
-    
+
     return True

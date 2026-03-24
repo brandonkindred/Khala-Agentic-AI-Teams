@@ -83,6 +83,7 @@ def _ensure_readme_with_title(path: Path, title: str) -> None:
     readme.write_text(content, encoding="utf-8")
     try:
         from software_engineering_team.shared.git_utils import write_files_and_commit
+
         write_files_and_commit(path, {"README.md": content}, "docs: add README with project title")
     except Exception as e:
         logger.warning("Could not commit README: %s", e)

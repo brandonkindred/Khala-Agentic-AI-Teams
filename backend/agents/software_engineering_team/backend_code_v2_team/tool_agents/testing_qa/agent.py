@@ -135,7 +135,9 @@ class TestingQAToolAgent:
             try:
                 raw = self.llm.complete_text(prompt)
             except Exception as e:
-                logger.warning("Testing/QA fix for issue %s failed: %s", (issue.description or "")[:50], e)
+                logger.warning(
+                    "Testing/QA fix for issue %s failed: %s", (issue.description or "")[:50], e
+                )
                 continue
             parsed = parse_problem_solving_single_issue_template(raw)
             fixed_files = parsed.get("files") or {}

@@ -3,9 +3,7 @@ from .base import ToolContext, tool
 
 
 @tool(context=True)
-def run_approval_and_comms(
-    engagement_id: str, summary: str, tool_context: ToolContext
-) -> dict:
+def run_approval_and_comms(engagement_id: str, summary: str, tool_context: ToolContext) -> dict:
     approval = request_human_approval(engagement_id, summary)
     artifact = persist_artifact(
         f"{tool_context.invocation_state['artifact_root']}/approval.json",

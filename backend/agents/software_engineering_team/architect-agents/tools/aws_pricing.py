@@ -30,7 +30,9 @@ _FALLBACK_PRICES: dict[str, dict[str, Any]] = {
 }
 
 
-def _get_pricing_from_api(service: str, region: str, instance_type: str | None = None) -> dict[str, Any] | None:
+def _get_pricing_from_api(
+    service: str, region: str, instance_type: str | None = None
+) -> dict[str, Any] | None:
     """Attempt to get pricing from AWS Pricing API. Returns None on failure."""
     try:
         import boto3
@@ -41,7 +43,11 @@ def _get_pricing_from_api(service: str, region: str, instance_type: str | None =
             response = client.get_products(
                 ServiceCode="AmazonEC2",
                 Filters=[
-                    {"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_type or "t3.micro"},
+                    {
+                        "Type": "TERM_MATCH",
+                        "Field": "instanceType",
+                        "Value": instance_type or "t3.micro",
+                    },
                     {"Type": "TERM_MATCH", "Field": "operatingSystem", "Value": "Linux"},
                     {"Type": "TERM_MATCH", "Field": "tenancy", "Value": "Shared"},
                     {"Type": "TERM_MATCH", "Field": "preInstalledSw", "Value": "NA"},

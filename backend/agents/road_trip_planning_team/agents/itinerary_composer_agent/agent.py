@@ -78,22 +78,28 @@ class ItineraryComposerAgent:
         stops_info = []
         for stop in route.ordered_stops:
             stop_acts = next((a for a in activities_per_stop if a.location == stop.location), None)
-            stops_info.append({
-                "location": stop.location,
-                "stop_type": stop.stop_type,
-                "recommended_nights": stop.recommended_nights,
-                "driving_from": stop.driving_from,
-                "driving_miles": stop.estimated_driving_miles,
-                "driving_hours": stop.estimated_driving_hours,
-                "notes": stop.notes,
-                "activities": stop_acts.activities[:5] if stop_acts else [],
-                "dining": stop_acts.dining[:3] if stop_acts else [],
-                "location_tips": stop_acts.tips[:3] if stop_acts else [],
-                "logistics": next(
-                    (lg for lg in logistics.stop_logistics if lg.get("location") == stop.location),
-                    {},
-                ),
-            })
+            stops_info.append(
+                {
+                    "location": stop.location,
+                    "stop_type": stop.stop_type,
+                    "recommended_nights": stop.recommended_nights,
+                    "driving_from": stop.driving_from,
+                    "driving_miles": stop.estimated_driving_miles,
+                    "driving_hours": stop.estimated_driving_hours,
+                    "notes": stop.notes,
+                    "activities": stop_acts.activities[:5] if stop_acts else [],
+                    "dining": stop_acts.dining[:3] if stop_acts else [],
+                    "location_tips": stop_acts.tips[:3] if stop_acts else [],
+                    "logistics": next(
+                        (
+                            lg
+                            for lg in logistics.stop_logistics
+                            if lg.get("location") == stop.location
+                        ),
+                        {},
+                    ),
+                }
+            )
 
         prompt = (
             f"Trip: {trip.start_location} → {', '.join(trip.required_stops)} → {trip.end_location or trip.start_location}\n"
@@ -166,16 +172,18 @@ class ItineraryComposerAgent:
         result = []
         for item in raw:
             if isinstance(item, dict):
-                result.append(Activity(
-                    name=item.get("name", ""),
-                    description=item.get("description", ""),
-                    duration_hours=item.get("duration_hours"),
-                    activity_type=item.get("activity_type", ""),
-                    address=item.get("address"),
-                    tips=item.get("tips") or [],
-                    good_for=item.get("good_for") or [],
-                    approximate_cost=item.get("approximate_cost"),
-                ))
+                result.append(
+                    Activity(
+                        name=item.get("name", ""),
+                        description=item.get("description", ""),
+                        duration_hours=item.get("duration_hours"),
+                        activity_type=item.get("activity_type", ""),
+                        address=item.get("address"),
+                        tips=item.get("tips") or [],
+                        good_for=item.get("good_for") or [],
+                        approximate_cost=item.get("approximate_cost"),
+                    )
+                )
         return result
 
     def _parse_accommodation(self, raw: object) -> Accommodation | None:
@@ -205,25 +213,32 @@ class ItineraryComposerAgent:
                 continue
             for night in range(max(1, stop.recommended_nights)):
                 logistics_entry = next(
-                    (lg for lg in logistics.stop_logistics if lg.get("location") == stop.location), {}
+                    (lg for lg in logistics.stop_logistics if lg.get("location") == stop.location),
+                    {},
                 )
                 acc_data = logistics_entry.get("accommodation") or {}
-                accommodation = Accommodation(
-                    name=acc_data.get("name", "Local accommodation"),
-                    accommodation_type=acc_data.get("accommodation_type", "hotel"),
-                    amenities=acc_data.get("amenities") or [],
-                    booking_tips=acc_data.get("booking_tips", ""),
-                ) if night == 0 else None
+                accommodation = (
+                    Accommodation(
+                        name=acc_data.get("name", "Local accommodation"),
+                        accommodation_type=acc_data.get("accommodation_type", "hotel"),
+                        amenities=acc_data.get("amenities") or [],
+                        booking_tips=acc_data.get("booking_tips", ""),
+                    )
+                    if night == 0
+                    else None
+                )
 
-                days.append(DayPlan(
-                    day_number=day_num,
-                    location=stop.location,
-                    driving_from=stop.driving_from if day_num == 1 or night == 0 else None,
-                    driving_distance_miles=stop.estimated_driving_miles if night == 0 else None,
-                    driving_time_hours=stop.estimated_driving_hours if night == 0 else None,
-                    day_summary=f"Day {day_num} in {stop.location}",
-                    accommodation=accommodation,
-                ))
+                days.append(
+                    DayPlan(
+                        day_number=day_num,
+                        location=stop.location,
+                        driving_from=stop.driving_from if day_num == 1 or night == 0 else None,
+                        driving_distance_miles=stop.estimated_driving_miles if night == 0 else None,
+                        driving_time_hours=stop.estimated_driving_hours if night == 0 else None,
+                        day_summary=f"Day {day_num} in {stop.location}",
+                        accommodation=accommodation,
+                    )
+                )
                 day_num += 1
 
         return TripItinerary(

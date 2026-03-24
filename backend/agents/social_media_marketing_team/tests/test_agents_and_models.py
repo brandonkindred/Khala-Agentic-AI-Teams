@@ -45,7 +45,9 @@ def _proposal() -> CampaignProposal:
 def test_platform_specialist_branches() -> None:
     goals = _goals()
     for platform in (Platform.LINKEDIN, Platform.FACEBOOK, Platform.INSTAGRAM, Platform.X):
-        plan = PlatformSpecialistAgent(platform).create_execution_plan(goals, "Campaign", ideas_count=10)
+        plan = PlatformSpecialistAgent(platform).create_execution_plan(
+            goals, "Campaign", ideas_count=10
+        )
         assert plan.platform == platform
         assert len(plan.posting_guidelines) == 3
         assert len(plan.kpi_focus) == 3
@@ -75,7 +77,11 @@ def test_content_concept_generation_has_goal_links_and_platforms() -> None:
     assert all(isinstance(idea, ConceptIdea) for idea in ideas)
     assert all(idea.linked_goals for idea in ideas)
     assert all(idea.estimated_engagement_probability >= 0.70 for idea in ideas)
-    assert all(set(idea.target_platforms) == {Platform.LINKEDIN, Platform.FACEBOOK, Platform.INSTAGRAM, Platform.X} for idea in ideas)
+    assert all(
+        set(idea.target_platforms)
+        == {Platform.LINKEDIN, Platform.FACEBOOK, Platform.INSTAGRAM, Platform.X}
+        for idea in ideas
+    )
 
 
 def test_experiment_design_agent_creates_control_and_variants() -> None:

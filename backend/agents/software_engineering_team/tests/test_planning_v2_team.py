@@ -86,7 +86,7 @@ def sample_spec() -> str:
 
 class TestToolAgentKindEnum:
     """Tests for ToolAgentKind enum."""
-    
+
     def test_all_8_tool_agents_defined(self):
         """Verify all 8 tool agents are in the enum."""
         expected = {
@@ -101,7 +101,7 @@ class TestToolAgentKindEnum:
         }
         actual = {k.value for k in ToolAgentKind}
         assert actual == expected
-    
+
     def test_tool_agent_kind_values(self):
         """Test enum value access."""
         assert ToolAgentKind.SYSTEM_DESIGN.value == "system_design"
@@ -110,7 +110,7 @@ class TestToolAgentKindEnum:
 
 class TestToolAgentPhaseInputOutput:
     """Tests for tool agent input/output models."""
-    
+
     def test_phase_input_defaults(self):
         """Test ToolAgentPhaseInput has sensible defaults."""
         inp = ToolAgentPhaseInput()
@@ -118,7 +118,7 @@ class TestToolAgentPhaseInputOutput:
         assert inp.current_files == {}
         assert inp.review_issues == []
         assert inp.hierarchy is None
-    
+
     def test_phase_input_with_values(self):
         """Test ToolAgentPhaseInput with provided values."""
         inp = ToolAgentPhaseInput(
@@ -129,7 +129,7 @@ class TestToolAgentPhaseInputOutput:
         assert inp.spec_content == "Test spec"
         assert inp.repo_path == "/test/repo"
         assert "test.py" in inp.current_files
-    
+
     def test_phase_output_defaults(self):
         """Test ToolAgentPhaseOutput has sensible defaults."""
         out = ToolAgentPhaseOutput()
@@ -137,7 +137,7 @@ class TestToolAgentPhaseInputOutput:
         assert out.recommendations == []
         assert out.issues == []
         assert out.files == {}
-    
+
     def test_phase_output_with_values(self):
         """Test ToolAgentPhaseOutput with provided values."""
         out = ToolAgentPhaseOutput(
@@ -153,19 +153,19 @@ class TestToolAgentPhaseInputOutput:
 
 class TestBuildToolAgents:
     """Tests for _build_tool_agents factory function."""
-    
+
     def test_builds_all_8_agents(self, mock_llm: MagicMock):
         """Verify all 8 tool agents are built."""
         agents = _build_tool_agents(mock_llm)
         assert len(agents) == 8
         for kind in ToolAgentKind:
             assert kind in agents
-    
+
     def test_agents_have_required_methods(self, mock_llm: MagicMock):
         """Verify tool agents have the required phase methods."""
         agents = _build_tool_agents(mock_llm)
         required_methods = ["plan", "execute", "review", "problem_solve", "deliver"]
-        
+
         for kind, agent in agents.items():
             for method in required_methods:
                 assert hasattr(agent, method), f"{kind.value} missing {method}"
@@ -173,24 +173,24 @@ class TestBuildToolAgents:
 
 class TestSystemDesignToolAgent:
     """Tests for SystemDesignToolAgent."""
-    
+
     def test_spec_review_method(self, mock_llm: MagicMock):
         """Test spec_review returns issues."""
         from planning_v2_team.tool_agents.system_design import SystemDesignToolAgent
-        
+
         agent = SystemDesignToolAgent(mock_llm)
         inp = ToolAgentPhaseInput(spec_content="Test spec")
-        
+
         result = agent.spec_review(inp)
         assert isinstance(result, ToolAgentPhaseOutput)
-    
+
     def test_plan_method(self, mock_llm: MagicMock):
         """Test plan returns recommendations."""
         from planning_v2_team.tool_agents.system_design import SystemDesignToolAgent
-        
+
         agent = SystemDesignToolAgent(mock_llm)
         inp = ToolAgentPhaseInput(spec_content="Test spec")
-        
+
         result = agent.plan(inp)
         assert isinstance(result, ToolAgentPhaseOutput)
 
@@ -213,7 +213,9 @@ class TestSystemDesignToolAgent:
         agent = SystemDesignToolAgent(mock_llm)
         inp = ToolAgentPhaseInput(
             spec_content="Test spec",
-            current_files={planning_asset_path("system_design.md"): "# System Design\n\nOld content."},
+            current_files={
+                planning_asset_path("system_design.md"): "# System Design\n\nOld content."
+            },
         )
         result = agent.fix_all_issues(["design issue one", "design issue two"], inp)
 
@@ -227,7 +229,7 @@ class TestSystemDesignToolAgent:
 
 class TestUserStoryToolAgent:
     """Tests for UserStoryToolAgent."""
-    
+
     def test_plan_creates_hierarchy(self, mock_llm: MagicMock):
         """Test plan method creates hierarchy from text template output."""
         from planning_v2_team.tool_agents.user_story import UserStoryToolAgent
@@ -252,28 +254,26 @@ class TestUserStoryToolAgent:
 
 class TestTaskDependencyToolAgent:
     """Tests for TaskDependencyToolAgent."""
-    
+
     def test_review_analyzes_dependencies(self, mock_llm: MagicMock):
         """Test review returns dependency analysis."""
         from planning_v2_team.tool_agents.task_dependency import TaskDependencyToolAgent
-        
+
         mock_llm.complete_json.return_value = {
-            "dependencies": [
-                {"from_task": "TASK-1", "to_task": "TASK-2", "type": "blocks"}
-            ],
+            "dependencies": [{"from_task": "TASK-1", "to_task": "TASK-2", "type": "blocks"}],
             "circular_risks": [],
             "critical_path": ["TASK-1", "TASK-2"],
             "parallelizable": [],
             "issues": [],
-            "summary": "Analyzed dependencies"
+            "summary": "Analyzed dependencies",
         }
-        
+
         agent = TaskDependencyToolAgent(mock_llm)
         inp = ToolAgentPhaseInput(
             spec_content="Test spec",
             current_files={"tasks.md": "task content"},
         )
-        
+
         result = agent.review(inp)
         assert isinstance(result, ToolAgentPhaseOutput)
 
@@ -285,7 +285,7 @@ class TestTaskDependencyToolAgent:
 
 class TestPhaseToolAgentMapping:
     """Tests for phase-tool agent mapping."""
-    
+
     def test_planning_has_5_agents(self):
         """Planning phase should have 5 agents."""
         agents = PHASE_TOOL_AGENTS[Phase.PLANNING]
@@ -297,13 +297,13 @@ class TestPhaseToolAgentMapping:
             ToolAgentKind.UI_DESIGN,
         }
         assert set(agents) == expected
-    
+
     def test_implementation_has_7_agents(self):
         """Implementation phase should have 7 agents (all except Task Dependency)."""
         agents = PHASE_TOOL_AGENTS[Phase.IMPLEMENTATION]
         assert ToolAgentKind.TASK_DEPENDENCY not in agents
         assert len(agents) == 7
-    
+
     def test_review_has_task_dependency(self):
         """Review phase should have Task Dependency."""
         agents = PHASE_TOOL_AGENTS[Phase.REVIEW]
@@ -312,12 +312,12 @@ class TestPhaseToolAgentMapping:
 
 class TestPlanningV2PlanningAgent:
     """Tests for PlanningV2PlanningAgent (Layer 2)."""
-    
+
     def test_init_requires_llm(self):
         """Test that LLM client is required."""
         with pytest.raises(AssertionError):
             PlanningV2PlanningAgent(None)
-    
+
     def test_init_creates_tool_agents(self, mock_llm: MagicMock):
         """Test that init creates tool agents."""
         agent = PlanningV2PlanningAgent(mock_llm)
@@ -327,12 +327,12 @@ class TestPlanningV2PlanningAgent:
 
 class TestPlanningV2ProductLead:
     """Tests for PlanningV2ProductLead (Layer 1)."""
-    
+
     def test_init_requires_llm(self):
         """Test that LLM client is required."""
         with pytest.raises(AssertionError):
             PlanningV2ProductLead(None)
-    
+
     def test_backward_compat_alias(self, mock_llm: MagicMock):
         """Test PlanningV2TeamLead is an alias for ProductLead."""
         lead = PlanningV2TeamLead(mock_llm)
@@ -341,7 +341,7 @@ class TestPlanningV2ProductLead:
 
 class TestWorkflowExecution:
     """Integration tests for workflow execution."""
-    
+
     def test_workflow_creates_planning_dir(
         self,
         mock_llm: MagicMock,
@@ -409,7 +409,7 @@ class TestWorkflowExecution:
             "passed": True,
             "initiatives": [],
         }
-        
+
         lead = PlanningV2ProductLead(mock_llm)
         result = lead.run_workflow(
             spec_content=sample_spec,
@@ -429,11 +429,11 @@ class TestWorkflowExecution:
 
 class TestPlanningPhase:
     """Tests for planning phase."""
-    
+
     def test_invokes_tool_agents(self, mock_llm: MagicMock, temp_repo: Path):
         """Test planning invokes correct tool agents."""
         from planning_v2_team.phases.planning import run_planning
-        
+
         mock_llm.complete_json.return_value = {
             "goals_vision": "Goals",
             "constraints_limitations": "",
@@ -450,35 +450,35 @@ class TestPlanningPhase:
             "summary": "Done",
             "initiatives": [],
         }
-        
+
         tool_agents = _build_tool_agents(mock_llm)
-        
+
         result = run_planning(
             llm=mock_llm,
             spec_content="Test spec",
             repo_path=temp_repo,
             tool_agents=tool_agents,
         )
-        
+
         assert isinstance(result, PlanningPhaseResult)
 
 
 class TestImplementationPhase:
     """Tests for implementation phase."""
-    
+
     def test_creates_artifacts(self, mock_llm: MagicMock, temp_repo: Path):
         """Test implementation creates planning artifacts."""
         from planning_v2_team.phases.implementation import run_implementation
-        
+
         tool_agents = _build_tool_agents(mock_llm)
-        
+
         result = run_implementation(
             llm=mock_llm,
             spec_content="Test spec",
             repo_path=temp_repo,
             tool_agents=tool_agents,
         )
-        
+
         assert len(result.assets_created) > 0
         assert (temp_repo / "plan").exists()
 
@@ -490,7 +490,9 @@ class TestCompletenessHelper:
         """Content ending with a very short line (e.g. mid-sentence) is detected as truncated."""
         from planning_v2_team.output_templates import looks_like_truncated_file_content
 
-        content = "# UI Design\n\n## Section\n\n- Item 1\n- Item 2\nI want to create a task with a ti"
+        content = (
+            "# UI Design\n\n## Section\n\n- Item 1\n- Item 2\nI want to create a task with a ti"
+        )
         assert looks_like_truncated_file_content(content) is True
 
     def test_complete_content_not_truncated(self):
@@ -656,7 +658,9 @@ class TestClassifyIssue:
     def test_architecture_keywords(self):
         from planning_v2_team.phases.problem_solving import _classify_issue
 
-        assert _classify_issue("architecture layer boundaries unclear") == ToolAgentKind.ARCHITECTURE
+        assert (
+            _classify_issue("architecture layer boundaries unclear") == ToolAgentKind.ARCHITECTURE
+        )
         assert _classify_issue("component integration missing") == ToolAgentKind.ARCHITECTURE
         assert _classify_issue("module dependencies") == ToolAgentKind.ARCHITECTURE
 
@@ -678,7 +682,10 @@ class TestClassifyIssue:
         from planning_v2_team.phases.problem_solving import _classify_issue
 
         assert _classify_issue("task team assignment wrong") == ToolAgentKind.TASK_CLASSIFICATION
-        assert _classify_issue("classification should be frontend") == ToolAgentKind.TASK_CLASSIFICATION
+        assert (
+            _classify_issue("classification should be frontend")
+            == ToolAgentKind.TASK_CLASSIFICATION
+        )
         assert _classify_issue("assign to backend team") == ToolAgentKind.TASK_CLASSIFICATION
         assert _classify_issue("team assignment for QA") == ToolAgentKind.TASK_CLASSIFICATION
 
@@ -740,7 +747,9 @@ class TestGroupIssuesByAgent:
 class TestOrchestratorStatusText:
     """Tests that orchestrator sets status_text for each phase."""
 
-    def test_update_job_receives_planning_status_text(self, mock_llm: MagicMock, temp_repo: Path, sample_spec: str):
+    def test_update_job_receives_planning_status_text(
+        self, mock_llm: MagicMock, temp_repo: Path, sample_spec: str
+    ):
         """When workflow runs, job updater is called with planning status_text listing agents."""
         from planning_v2_team.orchestrator import Phase, PlanningV2ProductLead
 
@@ -774,7 +783,9 @@ class TestOrchestratorStatusText:
             )
         except Exception:
             pass
-        planning_updates = [u for u in job_updates if u.get("current_phase") == Phase.PLANNING.value]
+        planning_updates = [
+            u for u in job_updates if u.get("current_phase") == Phase.PLANNING.value
+        ]
         assert len(planning_updates) >= 1
         status_texts = [u.get("status_text") for u in planning_updates if u.get("status_text")]
         assert any(
@@ -782,7 +793,9 @@ class TestOrchestratorStatusText:
             for t in status_texts
         ), f"Expected planning status_text to list agents, got: {status_texts}"
 
-    def test_implementation_with_issues_status_includes_breakdown(self, mock_llm: MagicMock, temp_repo: Path, sample_spec: str):
+    def test_implementation_with_issues_status_includes_breakdown(
+        self, mock_llm: MagicMock, temp_repo: Path, sample_spec: str
+    ):
         """When implementation runs with review issues, status_text includes breakdown."""
         from planning_v2_team.orchestrator import PlanningV2PlanningAgent
 

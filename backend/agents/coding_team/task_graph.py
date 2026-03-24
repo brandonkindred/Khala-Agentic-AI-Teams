@@ -184,29 +184,31 @@ class TaskGraphService:
 
         tasks_data = []
         for t in self._tasks.values():
-            tasks_data.append({
-                "id": t.id,
-                "title": t.title,
-                "description": t.description,
-                "dependencies": t.dependencies,
-                "status": t.status.value if isinstance(t.status, TS) else str(t.status),
-                "assigned_agent_id": t.assigned_agent_id,
-                "feature_branch": t.feature_branch,
-                "merged_at": t.merged_at.isoformat() if t.merged_at else None,
-                "acceptance_criteria": t.acceptance_criteria,
-                "out_of_scope": t.out_of_scope,
-                "priority": t.priority,
-                "subtasks": [
-                    {
-                        "id": s.id,
-                        "title": s.title,
-                        "description": s.description,
-                        "dependencies": s.dependencies,
-                        "status": s.status.value if isinstance(s.status, TS) else str(s.status),
-                    }
-                    for s in t.subtasks
-                ],
-            })
+            tasks_data.append(
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "description": t.description,
+                    "dependencies": t.dependencies,
+                    "status": t.status.value if isinstance(t.status, TS) else str(t.status),
+                    "assigned_agent_id": t.assigned_agent_id,
+                    "feature_branch": t.feature_branch,
+                    "merged_at": t.merged_at.isoformat() if t.merged_at else None,
+                    "acceptance_criteria": t.acceptance_criteria,
+                    "out_of_scope": t.out_of_scope,
+                    "priority": t.priority,
+                    "subtasks": [
+                        {
+                            "id": s.id,
+                            "title": s.title,
+                            "description": s.description,
+                            "dependencies": s.dependencies,
+                            "status": s.status.value if isinstance(s.status, TS) else str(s.status),
+                        }
+                        for s in t.subtasks
+                    ],
+                }
+            )
         return {
             "job_id": self.job_id,
             "tasks": tasks_data,
@@ -238,7 +240,9 @@ class TaskGraphService:
                 status=TaskStatus(tdata.get("status", "to_do")),
                 assigned_agent_id=tdata.get("assigned_agent_id"),
                 feature_branch=tdata.get("feature_branch"),
-                merged_at=datetime.fromisoformat(tdata["merged_at"].replace("Z", "+00:00")) if tdata.get("merged_at") else None,
+                merged_at=datetime.fromisoformat(tdata["merged_at"].replace("Z", "+00:00"))
+                if tdata.get("merged_at")
+                else None,
                 acceptance_criteria=tdata.get("acceptance_criteria", []),
                 out_of_scope=tdata.get("out_of_scope", ""),
                 priority=tdata.get("priority", "medium"),

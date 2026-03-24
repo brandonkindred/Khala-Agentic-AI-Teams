@@ -26,9 +26,7 @@ class BuildCoverageMatrixInput(BaseModel):
         default_factory=lambda: ["web"],
         description="Surfaces to test: web, ios, android, pdf",
     )
-    journeys: List[str] = Field(
-        default_factory=list, description="User journeys to cover"
-    )
+    journeys: List[str] = Field(default_factory=list, description="User journeys to cover")
     wcag_version: str = Field(default="2.2", description="WCAG version")
     focus_sc: List[str] = Field(
         default_factory=list,
@@ -56,11 +54,7 @@ async def build_coverage_matrix(
     """
     # Determine which SCs to include
     if input_data.focus_sc:
-        sc_list = [
-            WCAG_22_CRITERIA[sc]
-            for sc in input_data.focus_sc
-            if sc in WCAG_22_CRITERIA
-        ]
+        sc_list = [WCAG_22_CRITERIA[sc] for sc in input_data.focus_sc if sc in WCAG_22_CRITERIA]
     else:
         sc_list = get_level_a_aa_criteria()
 

@@ -22,7 +22,9 @@ def _run_async(coro: Any) -> Any:
     loop = get_temporal_loop()
     client = get_temporal_client()
     if loop is None or client is None:
-        raise RuntimeError("Temporal client not available; is the Agent Provisioning worker running?")
+        raise RuntimeError(
+            "Temporal client not available; is the Agent Provisioning worker running?"
+        )
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=START_WORKFLOW_TIMEOUT)
 

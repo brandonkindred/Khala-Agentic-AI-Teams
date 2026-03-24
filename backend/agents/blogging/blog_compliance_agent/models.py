@@ -14,9 +14,13 @@ Status = Literal["PASS", "FAIL"]
 class Violation(BaseModel):
     """A single compliance violation."""
 
-    rule_id: str = Field(..., description="Rule identifier (e.g. formatting.min_paragraph_sentences).")
+    rule_id: str = Field(
+        ..., description="Rule identifier (e.g. formatting.min_paragraph_sentences)."
+    )
     description: str = Field(..., description="Description of the violation.")
-    evidence_quotes: List[str] = Field(default_factory=list, description="Direct quotes from the draft.")
+    evidence_quotes: List[str] = Field(
+        default_factory=list, description="Direct quotes from the draft."
+    )
     location_hint: Optional[str] = Field(None, description="Heading name or approximate section.")
 
 

@@ -33,7 +33,9 @@ class LifestyleInfo(BaseModel):
 
     max_cooking_time_minutes: Optional[int] = None  # e.g. 15, 30
     lunch_context: str = "remote"  # "office" (portable, minimal prep) or "remote" (can cook/reheat)
-    equipment_constraints: List[str] = Field(default_factory=list)  # e.g. "no oven", "limited equipment"
+    equipment_constraints: List[str] = Field(
+        default_factory=list
+    )  # e.g. "no oven", "limited equipment"
     other_constraints: str = ""
 
 
@@ -58,8 +60,12 @@ class ClientProfile(BaseModel):
 
     client_id: str = ""
     household: HouseholdInfo = Field(default_factory=HouseholdInfo)
-    dietary_needs: List[str] = Field(default_factory=list)  # vegetarian, vegan, keto, low-sodium, diabetic-friendly, etc.
-    allergies_and_intolerances: List[str] = Field(default_factory=list)  # nuts, shellfish, gluten, etc.
+    dietary_needs: List[str] = Field(
+        default_factory=list
+    )  # vegetarian, vegan, keto, low-sodium, diabetic-friendly, etc.
+    allergies_and_intolerances: List[str] = Field(
+        default_factory=list
+    )  # nuts, shellfish, gluten, etc.
     lifestyle: LifestyleInfo = Field(default_factory=LifestyleInfo)
     preferences: PreferencesInfo = Field(default_factory=PreferencesInfo)
     goals: GoalsInfo = Field(default_factory=GoalsInfo)
@@ -85,7 +91,9 @@ class NutritionPlan(BaseModel):
     """Structured nutrition plan: targets and guidelines, no recipes."""
 
     daily_targets: DailyTargets = Field(default_factory=DailyTargets)
-    balance_guidelines: List[str] = Field(default_factory=list)  # e.g. "more vegetables", "limit added sugar"
+    balance_guidelines: List[str] = Field(
+        default_factory=list
+    )  # e.g. "more vegetables", "limit added sugar"
     foods_to_emphasize: List[str] = Field(default_factory=list)
     foods_to_avoid: List[str] = Field(default_factory=list)
     notes: str = ""

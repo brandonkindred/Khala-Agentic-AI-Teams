@@ -15,9 +15,7 @@ class DomNode(BaseModel):
     selector: str = Field(..., description="CSS selector")
     html: str = Field(default="", description="HTML excerpt")
     tag_name: str = Field(default="")
-    computed_styles: Dict[str, str] = Field(
-        default_factory=dict, description="Computed CSS styles"
-    )
+    computed_styles: Dict[str, str] = Field(default_factory=dict, description="Computed CSS styles")
     a11y_node: Optional[Dict[str, Any]] = Field(
         default=None, description="Accessibility tree node info"
     )
@@ -27,9 +25,7 @@ class DomNode(BaseModel):
     states: List[str] = Field(
         default_factory=list, description="ARIA states (e.g., expanded, selected)"
     )
-    aria_attributes: Dict[str, str] = Field(
-        default_factory=dict, description="ARIA attributes"
-    )
+    aria_attributes: Dict[str, str] = Field(default_factory=dict, description="ARIA attributes")
 
 
 class CaptureDomSnapshotInput(BaseModel):
@@ -41,12 +37,8 @@ class CaptureDomSnapshotInput(BaseModel):
         default_factory=list,
         description="CSS selectors to capture (empty = capture full page)",
     )
-    include_computed_styles: bool = Field(
-        default=True, description="Include computed CSS styles"
-    )
-    include_a11y_tree: bool = Field(
-        default=True, description="Include accessibility tree info"
-    )
+    include_computed_styles: bool = Field(default=True, description="Include computed CSS styles")
+    include_a11y_tree: bool = Field(default=True, description="Include accessibility tree info")
     styles_to_capture: List[str] = Field(
         default_factory=lambda: [
             "color",
@@ -70,12 +62,8 @@ class CaptureDomSnapshotOutput(BaseModel):
     nodes: List[DomNode] = Field(default_factory=list)
     page_title: str = Field(default="")
     page_lang: str = Field(default="")
-    landmarks: List[Dict[str, str]] = Field(
-        default_factory=list, description="Page landmarks"
-    )
-    headings: List[Dict[str, str]] = Field(
-        default_factory=list, description="Heading structure"
-    )
+    landmarks: List[Dict[str, str]] = Field(default_factory=list, description="Page landmarks")
+    headings: List[Dict[str, str]] = Field(default_factory=list, description="Heading structure")
 
 
 async def capture_dom_snapshot(

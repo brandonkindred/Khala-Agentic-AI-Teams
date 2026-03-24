@@ -2,9 +2,12 @@
 
 from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
-ACCESSIBILITY_PROMPT = """You are an expert Accessibility Engineer specializing in WCAG 2.2 compliance. Your job is to review frontend code and produce a list of well-defined accessibility issues for the coding agent to fix. You do NOT write fixes yourself – the coding agent implements them.
+ACCESSIBILITY_PROMPT = (
+    """You are an expert Accessibility Engineer specializing in WCAG 2.2 compliance. Your job is to review frontend code and produce a list of well-defined accessibility issues for the coding agent to fix. You do NOT write fixes yourself – the coding agent implements them.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 **Your expertise:**
 - WCAG 2.2 (Web Content Accessibility Guidelines) – Perceivable, Operable, Understandable, Robust
@@ -39,3 +42,4 @@ Return a single JSON object with:
 If no issues are found, return empty issues list. Be thorough. Each recommendation must be actionable – the coding agent should know exactly what to implement.
 
 Respond with valid JSON only. No explanatory text outside JSON."""
+)

@@ -1,4 +1,5 @@
 """Compatibility shim: re-exports from frontend_team_deprecated."""
+
 from frontend_team_deprecated import (  # noqa: F401
     DesignSystemOutput,
     FrontendArchitectOutput,

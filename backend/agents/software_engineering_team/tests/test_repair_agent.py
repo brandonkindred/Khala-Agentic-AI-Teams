@@ -28,14 +28,16 @@ NameError: name 'compute_spec_content_chars' is not defined
         "summary": "Added missing import for compute_spec_content_chars",
     }
     agent = RepairExpertAgent(llm_client=mock_llm)
-    result = agent.run(RepairInput(
-        traceback=traceback_str,
-        exception_type="NameError",
-        exception_message="name 'compute_spec_content_chars' is not defined",
-        task_id="backend-task-1",
-        agent_type="backend",
-        agent_source_path=Path(__file__).resolve().parent.parent,
-    ))
+    result = agent.run(
+        RepairInput(
+            traceback=traceback_str,
+            exception_type="NameError",
+            exception_message="name 'compute_spec_content_chars' is not defined",
+            task_id="backend-task-1",
+            agent_type="backend",
+            agent_source_path=Path(__file__).resolve().parent.parent,
+        )
+    )
     assert result.suggested_fixes
     assert len(result.suggested_fixes) == 1
     fix = result.suggested_fixes[0]
@@ -53,14 +55,16 @@ def test_repair_agent_returns_empty_when_no_fix() -> None:
         "summary": "Unable to determine fix: ambiguous error",
     }
     agent = RepairExpertAgent(llm_client=mock_llm)
-    result = agent.run(RepairInput(
-        traceback="Traceback...",
-        exception_type="RuntimeError",
-        exception_message="Something went wrong",
-        task_id="task-1",
-        agent_type="backend",
-        agent_source_path=Path(__file__).resolve().parent.parent,
-    ))
+    result = agent.run(
+        RepairInput(
+            traceback="Traceback...",
+            exception_type="RuntimeError",
+            exception_message="Something went wrong",
+            task_id="task-1",
+            agent_type="backend",
+            agent_source_path=Path(__file__).resolve().parent.parent,
+        )
+    )
     assert not result.suggested_fixes
     assert result.summary
 
@@ -68,6 +72,7 @@ def test_repair_agent_returns_empty_when_no_fix() -> None:
 def test_parse_traceback_for_crash_extracts_location() -> None:
     """_parse_traceback_for_crash extracts file_path, line_number, function_name."""
     import orchestrator
+
     try:
         raise NameError("test")
     except NameError as e:
@@ -81,6 +86,7 @@ def test_parse_traceback_for_crash_extracts_location() -> None:
 def test_log_agent_crash_banner_does_not_raise() -> None:
     """_log_agent_crash_banner logs without raising."""
     import orchestrator
+
     try:
         raise ValueError("test crash")
     except ValueError as e:
@@ -90,6 +96,7 @@ def test_log_agent_crash_banner_does_not_raise() -> None:
 def test_log_agent_crash_banner_logs_error_with_task_and_exception() -> None:
     """_log_agent_crash_banner logs at ERROR level with task_id and exception info."""
     import orchestrator
+
     error_calls = []
     original_error = orchestrator.logger.error
 
@@ -111,6 +118,7 @@ def test_log_agent_crash_banner_logs_error_with_task_and_exception() -> None:
 def test_apply_repair_fixes_applies_valid_fix(tmp_path: Path) -> None:
     """_apply_repair_fixes applies a valid fix and returns True."""
     import orchestrator
+
     target_file = tmp_path / "test_file.py"
     target_file.write_text("line1\nline2\nline3\nline4\nline5\n")
     suggested_fixes = [
@@ -132,6 +140,7 @@ def test_apply_repair_fixes_applies_valid_fix(tmp_path: Path) -> None:
 def test_apply_repair_fixes_rejects_path_outside_tree(tmp_path: Path) -> None:
     """_apply_repair_fixes rejects paths outside agent_source_path."""
     import orchestrator
+
     agent_root = tmp_path / "software_engineering_team"
     agent_root.mkdir()
     (agent_root / "backend_agent").mkdir(parents=True)
@@ -188,7 +197,9 @@ def test_orchestrator_repair_requeue_on_backend_crash(tmp_path: Path) -> None:
 
     mock_repair = MagicMock()
     mock_repair.run.return_value = RepairOutput(
-        suggested_fixes=[{"file_path": "x.py", "line_start": 1, "line_end": 1, "replacement_content": "fix\n"}],
+        suggested_fixes=[
+            {"file_path": "x.py", "line_start": 1, "line_end": 1, "replacement_content": "fix\n"}
+        ],
         summary="Fixed",
         applied=False,
     )
@@ -208,7 +219,9 @@ def test_orchestrator_repair_requeue_on_backend_crash(tmp_path: Path) -> None:
     }
 
     with patch("orchestrator.update_job"):
-        with patch("software_engineering_team.shared.command_runner.ensure_backend_project_initialized") as mock_init:
+        with patch(
+            "software_engineering_team.shared.command_runner.ensure_backend_project_initialized"
+        ) as mock_init:
             mock_init.return_value = MagicMock(success=True)
             with patch("orchestrator._apply_repair_fixes", return_value=True):
                 orchestrator._run_backend_frontend_workers(
@@ -259,11 +272,13 @@ def test_orchestrator_requeues_when_task_contract_is_repaired(tmp_path: Path) ->
         acceptance_criteria=["Index exists and query latency improves"],
         metadata={},
     )
-    refined_task = initial_task.model_copy(update={
-        "description": "Add DB index for tenant-scoped task queries.",
-        "requirements": "Input: existing tasks table schema. Output: migration adding tasks.tenant_id index and validation.",
-        "acceptance_criteria": ["Migration adds index", "Reads remain backward compatible"],
-    })
+    refined_task = initial_task.model_copy(
+        update={
+            "description": "Add DB index for tenant-scoped task queries.",
+            "requirements": "Input: existing tasks table schema. Output: migration adding tasks.tenant_id index and validation.",
+            "acceptance_criteria": ["Migration adds index", "Reads remain backward compatible"],
+        }
+    )
 
     fail_result = MagicMock()
     fail_result.success = False
@@ -309,7 +324,9 @@ def test_orchestrator_requeues_when_task_contract_is_repaired(tmp_path: Path) ->
     completed_code_task_ids = []
 
     with patch("orchestrator.update_job"):
-        with patch("software_engineering_team.shared.command_runner.ensure_backend_project_initialized") as mock_init:
+        with patch(
+            "software_engineering_team.shared.command_runner.ensure_backend_project_initialized"
+        ) as mock_init:
             mock_init.return_value = MagicMock(success=True)
             orchestrator._run_backend_frontend_workers(
                 job_id="test-job",

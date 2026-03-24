@@ -32,10 +32,7 @@ class InfraPatchAgent:
         for fname, content in input_data.original_artifacts.items():
             artifacts_text += f"\n### {fname} ###\n{content}\n"
 
-        context = (
-            f"--- Errors ---\n{errors_text}\n\n"
-            f"--- Current Artifacts ---\n{artifacts_text}\n"
-        )
+        context = f"--- Errors ---\n{errors_text}\n\n--- Current Artifacts ---\n{artifacts_text}\n"
 
         data = self.llm.complete_json(
             INFRA_PATCH_PROMPT + "\n\n---\n\n" + context,

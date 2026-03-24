@@ -84,36 +84,36 @@ def load_manifest(
     manifests_dir: Optional[Path] = None,
 ) -> ToolManifest:
     """Load and validate a tool manifest from YAML.
-    
+
     Args:
         manifest_path: Path to manifest file (relative to manifests_dir or absolute)
         manifests_dir: Base directory for manifests (defaults to package manifests/)
-    
+
     Returns:
         Validated ToolManifest
-    
+
     Raises:
         FileNotFoundError: If manifest file doesn't exist
         ValueError: If manifest is invalid
     """
     manifests_dir = manifests_dir or DEFAULT_MANIFESTS_DIR
-    
+
     path = Path(manifest_path)
     if not path.is_absolute():
         path = manifests_dir / manifest_path
-    
+
     if not path.exists():
         raise FileNotFoundError(f"Manifest not found: {path}")
-    
+
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
     except yaml.YAMLError as e:
         raise ValueError(f"Invalid YAML in manifest: {e}") from e
-    
+
     if data is None:
         data = {}
-    
+
     try:
         return ToolManifest(**data)
     except Exception as e:
@@ -122,25 +122,25 @@ def load_manifest(
 
 def validate_manifest(manifest_path: str) -> List[str]:
     """Validate a manifest and return any errors.
-    
+
     Returns:
         List of error messages (empty if valid)
     """
     errors: List[str] = []
-    
+
     try:
         manifest = load_manifest(manifest_path)
-        
+
         if not manifest.tools:
             errors.append("Manifest has no tools defined")
-        
+
         tool_names = [t.name for t in manifest.tools]
         if len(tool_names) != len(set(tool_names)):
             errors.append("Duplicate tool names in manifest")
-        
+
     except FileNotFoundError as e:
         errors.append(str(e))
     except ValueError as e:
         errors.append(str(e))
-    
+
     return errors

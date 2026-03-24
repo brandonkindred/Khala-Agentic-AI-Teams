@@ -84,9 +84,24 @@ def _build_synthetic_architecture_data(reqs: ProductRequirements) -> Dict[str, A
         f"{'; '.join(reqs.acceptance_criteria[:3]) or reqs.description[:120]}"
     )
     components = [
-        {"name": "Backend API", "type": "backend", "description": "API layer", "technology": "fastapi"},
-        {"name": "Frontend App", "type": "frontend", "description": "UI layer", "technology": "react"},
-        {"name": "Database", "type": "database", "description": "Primary data store", "technology": "postgresql"},
+        {
+            "name": "Backend API",
+            "type": "backend",
+            "description": "API layer",
+            "technology": "fastapi",
+        },
+        {
+            "name": "Frontend App",
+            "type": "frontend",
+            "description": "UI layer",
+            "technology": "react",
+        },
+        {
+            "name": "Database",
+            "type": "database",
+            "description": "Primary data store",
+            "technology": "postgresql",
+        },
     ]
     bullets = ["- Components: Backend API, Frontend App, Database"]
     if reqs.constraints:
@@ -139,32 +154,46 @@ class ArchitectureExpertAgent:
         ]
         if input_data.project_overview:
             po = input_data.project_overview
-            context_parts.extend([
-                "",
-                "**Project Overview (use to align architecture with delivery strategy):**",
-                f"- Primary goal: {po.get('primary_goal', '')}",
-                f"- Delivery strategy: {po.get('delivery_strategy', '')}",
-                "- Milestones: " + ", ".join(m.get("name", "") for m in po.get("milestones", [])),
-            ])
-        if input_data.features_and_functionality_doc and input_data.features_and_functionality_doc.strip():
-            context_parts.extend([
-                "",
-                "**Features and Functionality (architecture must support all of these):**",
-                "---",
-                input_data.features_and_functionality_doc.strip()[:12000]
-                + ("..." if len(input_data.features_and_functionality_doc) > 12000 else ""),
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Project Overview (use to align architecture with delivery strategy):**",
+                    f"- Primary goal: {po.get('primary_goal', '')}",
+                    f"- Delivery strategy: {po.get('delivery_strategy', '')}",
+                    "- Milestones: "
+                    + ", ".join(m.get("name", "") for m in po.get("milestones", [])),
+                ]
+            )
+        if (
+            input_data.features_and_functionality_doc
+            and input_data.features_and_functionality_doc.strip()
+        ):
+            context_parts.extend(
+                [
+                    "",
+                    "**Features and Functionality (architecture must support all of these):**",
+                    "---",
+                    input_data.features_and_functionality_doc.strip()[:12000]
+                    + ("..." if len(input_data.features_and_functionality_doc) > 12000 else ""),
+                    "---",
+                ]
+            )
         if input_data.planning_feedback:
-            context_parts.extend([
-                "",
-                "**Planning review feedback – adjust architecture to address these:**",
-                *[f"- {f}" for f in input_data.planning_feedback],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Planning review feedback – adjust architecture to address these:**",
+                    *[f"- {f}" for f in input_data.planning_feedback],
+                ]
+            )
         if input_data.existing_architecture:
-            context_parts.extend(["", "**Existing Architecture to extend:**", input_data.existing_architecture])
+            context_parts.extend(
+                ["", "**Existing Architecture to extend:**", input_data.existing_architecture]
+            )
         if input_data.technology_preferences:
-            context_parts.extend(["", "**Technology Preferences:**", ", ".join(input_data.technology_preferences)])
+            context_parts.extend(
+                ["", "**Technology Preferences:**", ", ".join(input_data.technology_preferences)]
+            )
 
         prompt = ARCHITECTURE_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
 
@@ -177,10 +206,7 @@ class ArchitectureExpertAgent:
             data = {}
 
         # Detect raw wrapper from JSON parse failure (only "content" key, or no "overview")
-        is_parse_failure = (
-            not data.get("overview")
-            or (len(data) == 1 and "content" in data)
-        )
+        is_parse_failure = not data.get("overview") or (len(data) == 1 and "content" in data)
         if is_parse_failure:
             logger.debug(
                 "Architecture Expert: LLM response unparseable or missing structure, building synthetic architecture from requirements"
@@ -188,7 +214,14 @@ class ArchitectureExpertAgent:
             data = _build_synthetic_architecture_data(reqs)
 
         # Validate required top-level keys and log if any are missing (DEBUG when we have fallbacks)
-        required_keys = ["overview", "components", "architecture_document", "diagrams", "decisions", "summary"]
+        required_keys = [
+            "overview",
+            "components",
+            "architecture_document",
+            "diagrams",
+            "decisions",
+            "summary",
+        ]
         missing = [k for k in required_keys if k not in data]
         if missing:
             logger.debug("Architecture Expert: LLM response missing keys: %s", ", ".join(missing))
@@ -239,8 +272,7 @@ class ArchitectureExpertAgent:
             bullets = []
             if components:
                 bullets.append(
-                    "- Components: "
-                    + ", ".join(f"{c.name} ({c.type})" for c in components[:8])
+                    "- Components: " + ", ".join(f"{c.name} ({c.type})" for c in components[:8])
                 )
             if reqs.constraints:
                 bullets.append("- Key constraints: " + ", ".join(reqs.constraints[:5]))
@@ -261,18 +293,26 @@ class ArchitectureExpertAgent:
         if not isinstance(diagrams, dict):
             diagrams = {}
 
-        missing_diagrams = [k for k in REQUIRED_DIAGRAM_KEYS if not str(diagrams.get(k) or "").strip()]
+        missing_diagrams = [
+            k for k in REQUIRED_DIAGRAM_KEYS if not str(diagrams.get(k) or "").strip()
+        ]
         if missing_diagrams:
-            logger.info("Architecture Expert: backfilling %d missing diagram(s)", len(missing_diagrams))
+            logger.info(
+                "Architecture Expert: backfilling %d missing diagram(s)", len(missing_diagrams)
+            )
         for key in REQUIRED_DIAGRAM_KEYS:
             value = str(diagrams.get(key) or "").strip()
             if not value:
                 diagrams[key] = _default_diagram(key, reqs)
 
         # Derive lightweight planning hints from components for downstream planners
-        backend_components = [c.name for c in components if c.type in ("backend", "api", "api_gateway", "database")]
+        backend_components = [
+            c.name for c in components if c.type in ("backend", "api", "api_gateway", "database")
+        ]
         frontend_components = [c.name for c in components if c.type in ("frontend", "ui", "client")]
-        infra_components = [c.name for c in components if c.type in ("infrastructure", "queue", "cache", "cdn")]
+        infra_components = [
+            c.name for c in components if c.type in ("infrastructure", "queue", "cache", "cdn")
+        ]
 
         planning_hints = {
             "backend": {

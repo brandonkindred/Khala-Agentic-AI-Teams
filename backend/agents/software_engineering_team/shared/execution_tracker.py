@@ -60,7 +60,9 @@ class ExecutionTracker:
     def _emit(self, event_type: str, payload: dict) -> None:
         self._events.append({"type": event_type, "timestamp": _iso(_utc_now()), "payload": payload})
 
-    def upsert_task(self, task_id: str, title: str, assigned_agent: str, dependencies: List[str] | None = None) -> None:
+    def upsert_task(
+        self, task_id: str, title: str, assigned_agent: str, dependencies: List[str] | None = None
+    ) -> None:
         with self._lock:
             existing = self._tasks.get(task_id)
             if existing:
@@ -96,7 +98,9 @@ class ExecutionTracker:
             if task.percent_complete >= 100:
                 task.status = "done"
                 task.finished_at = task.finished_at or _utc_now()
-            self._emit("task_progress", {"task_id": task_id, "percent_complete": task.percent_complete})
+            self._emit(
+                "task_progress", {"task_id": task_id, "percent_complete": task.percent_complete}
+            )
 
     def observe_loop(self, task_id: str, loop_count: int) -> None:
         with self._lock:
@@ -135,4 +139,3 @@ class ExecutionTracker:
 
 
 execution_tracker = ExecutionTracker()
-

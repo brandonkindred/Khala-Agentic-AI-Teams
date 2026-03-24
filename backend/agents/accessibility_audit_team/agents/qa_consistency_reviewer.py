@@ -143,9 +143,7 @@ class QAConsistencyReviewer(BaseSpecialistAgent):
 
         # Normalize severity across patterns
         for pattern in patterns:
-            pattern_findings = [
-                f for f in approved_findings if f.id in pattern.linked_finding_ids
-            ]
+            pattern_findings = [f for f in approved_findings if f.id in pattern.linked_finding_ids]
             if pattern_findings:
                 # All findings in a pattern should have consistent severity
                 pattern_severity = pattern.severity
@@ -193,56 +191,68 @@ class QAConsistencyReviewer(BaseSpecialistAgent):
         if finding.evidence_pack_ref:
             checks.append({"check": "evidence_exists", "passed": True})
         else:
-            checks.append({
-                "check": "evidence_exists",
-                "passed": False,
-                "issue": "No evidence pack attached",
-            })
+            checks.append(
+                {
+                    "check": "evidence_exists",
+                    "passed": False,
+                    "issue": "No evidence pack attached",
+                }
+            )
 
         # Check repro steps
         if finding.repro_steps and len(finding.repro_steps) >= 2:
             checks.append({"check": "repro_steps_adequate", "passed": True})
         else:
-            checks.append({
-                "check": "repro_steps_adequate",
-                "passed": False,
-                "issue": "Repro steps missing or too brief",
-            })
+            checks.append(
+                {
+                    "check": "repro_steps_adequate",
+                    "passed": False,
+                    "issue": "Repro steps missing or too brief",
+                }
+            )
 
         # Check user impact
         if finding.user_impact and len(finding.user_impact) > 20:
             checks.append({"check": "user_impact_described", "passed": True})
         else:
-            checks.append({
-                "check": "user_impact_described",
-                "passed": False,
-                "issue": "User impact not adequately described",
-            })
+            checks.append(
+                {
+                    "check": "user_impact_described",
+                    "passed": False,
+                    "issue": "User impact not adequately described",
+                }
+            )
 
         # Check WCAG mapping
         if finding.wcag_mappings:
             high_confidence = any(m.confidence >= 0.7 for m in finding.wcag_mappings)
-            checks.append({
-                "check": "wcag_mapping_confident",
-                "passed": high_confidence,
-                "issue": None if high_confidence else "Low confidence in WCAG mapping",
-            })
+            checks.append(
+                {
+                    "check": "wcag_mapping_confident",
+                    "passed": high_confidence,
+                    "issue": None if high_confidence else "Low confidence in WCAG mapping",
+                }
+            )
         else:
-            checks.append({
-                "check": "wcag_mapping_confident",
-                "passed": False,
-                "issue": "No WCAG mapping",
-            })
+            checks.append(
+                {
+                    "check": "wcag_mapping_confident",
+                    "passed": False,
+                    "issue": "No WCAG mapping",
+                }
+            )
 
         # Check acceptance criteria
         if finding.acceptance_criteria and len(finding.acceptance_criteria) >= 1:
             checks.append({"check": "acceptance_criteria", "passed": True})
         else:
-            checks.append({
-                "check": "acceptance_criteria",
-                "passed": False,
-                "issue": "No acceptance criteria",
-            })
+            checks.append(
+                {
+                    "check": "acceptance_criteria",
+                    "passed": False,
+                    "issue": "No acceptance criteria",
+                }
+            )
 
         all_passed = all(c["passed"] for c in checks)
 

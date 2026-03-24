@@ -9,13 +9,24 @@ from git_operations_tool_agent.models import GitOperationInput
 
 def _init_repo(tmp_path: Path) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True
+    )
     (tmp_path / "README.md").write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True
+    )
 
 
 def test_create_branch_and_commit_scope_guard(tmp_path: Path) -> None:
@@ -45,7 +56,10 @@ def test_create_branch_and_commit_scope_guard(tmp_path: Path) -> None:
             requesting_agent="PythonImplementationAgent",
             branch={"naming_template": "feature/{task_id}-{slug}", "slug": "invoice"},
             scope_guard={"allowed_paths": ["src"]},
-            commit={"message_template": "feat(billing): add invoice [BE-1]", "include_generated_body": True},
+            commit={
+                "message_template": "feat(billing): add invoice [BE-1]",
+                "include_generated_body": True,
+            },
         )
     )
     assert commit_out.status == "success"
@@ -75,7 +89,10 @@ def test_merge_requires_token_and_quality_gates(tmp_path: Path) -> None:
             requesting_agent="PythonImplementationAgent",
             branch={"naming_template": "feature/{task_id}-{slug}", "slug": "auth-fix"},
             scope_guard={"allowed_paths": ["src"]},
-            commit={"message_template": "fix(auth): update service [BE-2]", "include_generated_body": False},
+            commit={
+                "message_template": "fix(auth): update service [BE-2]",
+                "include_generated_body": False,
+            },
         )
     )
 

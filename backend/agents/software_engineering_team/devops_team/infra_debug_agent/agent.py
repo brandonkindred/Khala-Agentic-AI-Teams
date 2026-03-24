@@ -38,14 +38,16 @@ class InfraDebugAgent:
 
         errors = []
         for err_data in data.get("errors") or []:
-            errors.append(IaCExecutionError(
-                error_type=err_data.get("error_type", "unknown"),
-                tool=err_data.get("tool", input_data.tool_name),
-                file_path=err_data.get("file_path"),
-                line_number=err_data.get("line_number"),
-                error_message=err_data.get("error_message", ""),
-                raw_output=input_data.execution_output[:500],
-            ))
+            errors.append(
+                IaCExecutionError(
+                    error_type=err_data.get("error_type", "unknown"),
+                    tool=err_data.get("tool", input_data.tool_name),
+                    file_path=err_data.get("file_path"),
+                    line_number=err_data.get("line_number"),
+                    error_message=err_data.get("error_message", ""),
+                    raw_output=input_data.execution_output[:500],
+                )
+            )
 
         fixable = bool(errors) and all(e.error_type in _FIXABLE_TYPES for e in errors)
 

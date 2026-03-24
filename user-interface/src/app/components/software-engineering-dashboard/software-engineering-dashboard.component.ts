@@ -433,12 +433,6 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
     this.productAnalysisJobId = res.job_id;
   }
 
-  /** When started from Run Team tab: set job id and switch to Product Analysis to show progress. */
-  onStartFromSpecSuccessFromRunTeam(res: { job_id: string }): void {
-    this.error = null;
-    this.productAnalysisJobId = res.job_id;
-    this.selectedTabIndex = SoftwareEngineeringDashboardComponent.JOB_TYPE_TAB_MAP['product_analysis'] ?? 1;
-  }
 
   onStartFromSpecError(message: string): void {
     this.error = message || 'Failed to create project and start analysis.';

@@ -11,8 +11,12 @@ class CodeEdit(BaseModel):
     """A minimal code edit: replace old_text with new_text at the given location."""
 
     file_path: str = Field(description="Path to the file to edit (e.g. app/main.py)")
-    line_start: Optional[int] = Field(default=None, description="1-based start line; omit for whole-file replacement")
-    line_end: Optional[int] = Field(default=None, description="1-based end line; omit for single-line or whole-file")
+    line_start: Optional[int] = Field(
+        default=None, description="1-based start line; omit for whole-file replacement"
+    )
+    line_end: Optional[int] = Field(
+        default=None, description="1-based end line; omit for single-line or whole-file"
+    )
     old_text: str = Field(description="Exact text to find and replace (must match exactly)")
     new_text: str = Field(description="Replacement text")
 

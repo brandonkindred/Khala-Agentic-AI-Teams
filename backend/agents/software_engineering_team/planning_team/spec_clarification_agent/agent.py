@@ -63,7 +63,8 @@ class SpecClarificationAgent:
         )
         data_next = self.llm.complete_json(prompt_next, temperature=0.2) or {}
         return SpecClarificationOutput(
-            assistant_message=data_next.get("assistant_message") or f"Next question: {remaining[0]}",
+            assistant_message=data_next.get("assistant_message")
+            or f"Next question: {remaining[0]}",
             open_questions=remaining,
             assumptions=assumptions,
             resolved_questions=new_resolved,
@@ -92,7 +93,8 @@ class SpecClarificationAgent:
         )
         data = self.llm.complete_json(prompt, temperature=0.2) or {}
         return SpecClarificationOutput(
-            assistant_message=data.get("assistant_message") or f"First question: {open_questions[0]}",
+            assistant_message=data.get("assistant_message")
+            or f"First question: {open_questions[0]}",
             open_questions=open_questions,
             assumptions=assumptions,
             resolved_questions=[],

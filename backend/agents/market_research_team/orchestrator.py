@@ -36,7 +36,9 @@ class MarketResearchOrchestrator:
         return MarketSignal(
             signal="Cross-interview theme consistency",
             confidence=0.55,
-            evidence=["Insufficient transcript volume for consistency scoring; collect 5+ interviews."],
+            evidence=[
+                "Insufficient transcript volume for consistency scoring; collect 5+ interviews."
+            ],
         )
 
     def _run_split_signals(self, mission: ResearchMission) -> tuple[list, list[MarketSignal]]:
@@ -53,7 +55,9 @@ class MarketResearchOrchestrator:
 
         repeated = [theme for theme, count in theme_counter.items() if count > 1]
         confidence = min(1.0, 0.55 + (len(repeated) * 0.1))
-        evidence = repeated[:4] or ["No repeated pains found yet; gather more interviews for consistency checks."]
+        evidence = repeated[:4] or [
+            "No repeated pains found yet; gather more interviews for consistency checks."
+        ]
 
         consistency = MarketSignal(
             signal="Cross-interview theme consistency",
@@ -90,7 +94,8 @@ class MarketResearchOrchestrator:
                 market_signals=market_signals,
                 recommendation=recommendation,
                 proposed_research_scripts=scripts,
-                human_feedback=human_review.feedback or "Please review findings and approve next experiment.",
+                human_feedback=human_review.feedback
+                or "Please review findings and approve next experiment.",
             )
 
         return TeamOutput(

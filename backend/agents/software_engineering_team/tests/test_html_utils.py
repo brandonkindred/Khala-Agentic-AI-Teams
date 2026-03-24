@@ -1,6 +1,5 @@
 """Unit tests for HTML truncation detection and recovery utilities."""
 
-
 from software_engineering_team.shared.html_utils import (
     get_truncated_files_summary,
     get_truncated_html_files,
@@ -214,7 +213,7 @@ class TestMergeHtmlContinuation:
 
     def test_preserves_content(self):
         original = '<div class="container">'
-        continuation = '<button>Click</button></div>'
+        continuation = "<button>Click</button></div>"
         result = merge_html_continuation(original, continuation)
         assert '<div class="container">' in result
         assert "<button>Click</button></div>" in result

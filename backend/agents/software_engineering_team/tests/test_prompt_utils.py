@@ -85,13 +85,19 @@ def test_log_llm_prompt_emits_info_record(caplog: pytest.LogCaptureFixture) -> N
     assert any("prompt_len=" in rec.message for rec in caplog.records)
 
 
-def test_log_llm_prompt_logs_metadata_only_for_long_prompt(caplog: pytest.LogCaptureFixture) -> None:
+def test_log_llm_prompt_logs_metadata_only_for_long_prompt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """log_llm_prompt logs metadata only (agent, mode, task, prompt_len); no prompt body."""
     caplog.set_level(logging.INFO)
     log = logging.getLogger("test_prompt_utils")
     long_prompt = "x" * 5000
     log_llm_prompt(log, "TestAgent", "problem_solving", "Fix", long_prompt)
-    record = next(r for r in caplog.records if "agent=TestAgent" in r.message and "problem_solving" in r.message)
+    record = next(
+        r
+        for r in caplog.records
+        if "agent=TestAgent" in r.message and "problem_solving" in r.message
+    )
     assert "prompt_len=5000" in record.message
     assert "x" * 100 not in record.message  # No prompt body in log
 
@@ -102,7 +108,9 @@ def test_log_llm_prompt_initial_mode_omits_body(caplog: pytest.LogCaptureFixture
     log = logging.getLogger("test_prompt_utils")
     body = "This is the secret prompt body that should not appear in logs"
     log_llm_prompt(log, "TestAgent", "initial", "Task", body)
-    record = next(r for r in caplog.records if "agent=TestAgent" in r.message and "mode=initial" in r.message)
+    record = next(
+        r for r in caplog.records if "agent=TestAgent" in r.message and "mode=initial" in r.message
+    )
     assert "secret prompt body" not in record.message
     assert "prompt_len=" in record.message
 
@@ -112,4 +120,6 @@ def test_log_llm_prompt_handles_none_gracefully(caplog: pytest.LogCaptureFixture
     caplog.set_level(logging.INFO)
     log = logging.getLogger("test_prompt_utils")
     log_llm_prompt(log, "TestAgent", "initial", "Task", None)
-    assert any("LLM call" in rec.message and "agent=TestAgent" in rec.message for rec in caplog.records)
+    assert any(
+        "LLM call" in rec.message and "agent=TestAgent" in rec.message for rec in caplog.records
+    )

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
-from llm_service import LLMClient
+from llm_service import LLMClient, compact_text
 from software_engineering_team.shared.prompt_utils import log_llm_prompt
 from software_engineering_team.shared.repo_utils import int_env as _int_env
 from software_engineering_team.shared.task_plan import TaskPlan
@@ -112,6 +112,7 @@ def _validate_devops_output(result: DevOpsOutput) -> Tuple[bool, List[str]]:
         has_output = True
         try:
             import yaml
+
             data = yaml.safe_load(result.pipeline_yaml)
             if data is None:
                 errors.append("Pipeline YAML parsed as empty")
@@ -123,6 +124,7 @@ def _validate_devops_output(result: DevOpsOutput) -> Tuple[bool, List[str]]:
         has_output = True
         try:
             import yaml
+
             data = yaml.safe_load(result.docker_compose)
             if data is not None and isinstance(data, dict) and "services" not in data:
                 errors.append("docker-compose.yml should have 'services' key")
@@ -137,13 +139,16 @@ def _validate_devops_output(result: DevOpsOutput) -> Tuple[bool, List[str]]:
                 if path.endswith((".yml", ".yaml")):
                     try:
                         import yaml
+
                         yaml.safe_load(content)
                     except Exception as e:
                         errors.append(f"Artifact {path} YAML parse error: {e}")
                 break
 
     if not has_output:
-        errors.append("No files to write: all outputs (dockerfile, pipeline_yaml, docker_compose, iac_content, artifacts) are empty")
+        errors.append(
+            "No files to write: all outputs (dockerfile, pipeline_yaml, docker_compose, iac_content, artifacts) are empty"
+        )
 
     return len(errors) == 0, errors
 
@@ -174,24 +179,28 @@ class DevOpsExpertAgent:
             f"**Requirements:** {requirements}",
         ]
         if architecture:
-            context_parts.extend([
-                "",
-                "**Architecture:**",
-                getattr(architecture, "overview", str(architecture)),
-                *[
-                    f"- {c.name} ({c.type}): {getattr(c, 'technology', None) or 'TBD'}"
-                    for c in getattr(architecture, "components", [])
-                ],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Architecture:**",
+                    getattr(architecture, "overview", str(architecture)),
+                    *[
+                        f"- {c.name} ({c.type}): {getattr(c, 'technology', None) or 'TBD'}"
+                        for c in getattr(architecture, "components", [])
+                    ],
+                ]
+            )
         if existing_pipeline:
             context_parts.extend(["", "**Existing Pipeline:**", existing_pipeline])
         if target_repo is not None:
             repo_val = target_repo.value if hasattr(target_repo, "value") else target_repo
-            context_parts.extend([
-                "",
-                "**Target repo:**",
-                f"target_repo={repo_val}",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Target repo:**",
+                    f"target_repo={repo_val}",
+                ]
+            )
         # Codebase context: dependencies, entry points, existing CI
         if repo_path:
             codebase_ctx = _gather_codebase_context(repo_path, subdir)
@@ -210,53 +219,68 @@ class DevOpsExpertAgent:
 
     def run(self, input_data: DevOpsInput) -> DevOpsOutput:
         """Create or extend CI/CD, IaC, and Docker configurations."""
-        logger.info("DevOps: starting task '%s'", input_data.task_description[:60] + ("..." if len(input_data.task_description) > 60 else ""))
+        logger.info(
+            "DevOps: starting task '%s'",
+            input_data.task_description[:60]
+            + ("..." if len(input_data.task_description) > 60 else ""),
+        )
         context_parts = [
             f"**Task:** {input_data.task_description}",
             f"**Requirements:** {input_data.requirements}",
         ]
         if input_data.architecture:
-            context_parts.extend([
-                "",
-                "**Architecture:**",
-                input_data.architecture.overview,
-                *[f"- {c.name} ({c.type}): {c.technology or 'TBD'}" for c in input_data.architecture.components],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Architecture:**",
+                    input_data.architecture.overview,
+                    *[
+                        f"- {c.name} ({c.type}): {c.technology or 'TBD'}"
+                        for c in input_data.architecture.components
+                    ],
+                ]
+            )
         if input_data.existing_pipeline:
             context_parts.extend(["", "**Existing Pipeline:**", input_data.existing_pipeline])
         if input_data.tech_stack:
             context_parts.extend(["", "**Tech Stack:**", ", ".join(input_data.tech_stack)])
         if getattr(input_data, "target_repo", None):
-            repo_val = input_data.target_repo.value if hasattr(input_data.target_repo, "value") else input_data.target_repo
-            context_parts.extend([
-                "",
-                "**Target repo:** You are producing containerization and deployment artifacts for this application repo only.",
-                f"- target_repo={repo_val}",
-            ])
+            repo_val = (
+                input_data.target_repo.value
+                if hasattr(input_data.target_repo, "value")
+                else input_data.target_repo
+            )
+            context_parts.extend(
+                [
+                    "",
+                    "**Target repo:** You are producing containerization and deployment artifacts for this application repo only.",
+                    f"- target_repo={repo_val}",
+                ]
+            )
         if getattr(input_data, "task_plan", None) and input_data.task_plan:
             context_parts.extend(["", "**Implementation plan:**", input_data.task_plan])
         if getattr(input_data, "build_errors", None) and input_data.build_errors:
-            from software_engineering_team.shared.context_sizing import compute_build_errors_chars
             from software_engineering_team.shared.error_parsing import (
                 build_agent_feedback,
                 parse_devops_failure,
             )
 
-            max_errors = compute_build_errors_chars(self.llm)
             raw_errors = input_data.build_errors
             # Pre-write validation errors are already structured; use as-is
             if raw_errors.startswith("Pre-write validation failed:"):
-                errors_text = raw_errors[:max_errors]
+                errors_text = raw_errors
             else:
                 # Use structured parsing for build/verify errors (Docker, YAML) for better feedback
                 failures = parse_devops_failure(raw_errors)
-                feedback = build_agent_feedback(failures, max_chars=max_errors - 200)
-                errors_text = feedback if feedback else raw_errors[:max_errors]
-            context_parts.extend([
-                "",
-                "**Build/validation errors to fix:** The previous output failed verification. Fix these issues:",
-                errors_text,
-            ])
+                feedback = build_agent_feedback(failures)
+                errors_text = feedback if feedback else raw_errors
+            context_parts.extend(
+                [
+                    "",
+                    "**Build/validation errors to fix:** The previous output failed verification. Fix these issues:",
+                    errors_text,
+                ]
+            )
 
         prompt = DEVOPS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         data = self.llm.complete_json(prompt, temperature=0.2)
@@ -269,7 +293,8 @@ class DevOpsExpertAgent:
 
         logger.info(
             "DevOps: done, summary=%s chars, needs_clarification=%s",
-            len(summary), needs_clarification,
+            len(summary),
+            needs_clarification,
         )
         return DevOpsOutput(
             pipeline_yaml=data.get("pipeline_yaml", ""),
@@ -330,7 +355,9 @@ class DevOpsExpertAgent:
             requirements=requirements,
             architecture=architecture,
             existing_pipeline=existing_pipeline,
-            target_repo=target_repo.value if target_repo and hasattr(target_repo, "value") else (target_repo or None),
+            target_repo=target_repo.value
+            if target_repo and hasattr(target_repo, "value")
+            else (target_repo or None),
             repo_path=path,
             subdir=subdir,
         )
@@ -355,7 +382,8 @@ class DevOpsExpertAgent:
         for iteration in range(1, max_iterations + 1):
             logger.info(
                 "DevOps WORKFLOW: iteration %d/%d. Next step -> Generating DevOps configuration",
-                iteration, max_iterations,
+                iteration,
+                max_iterations,
             )
             # Generate (with build_errors from previous iteration if any)
             result = self.run(
@@ -367,7 +395,11 @@ class DevOpsExpertAgent:
                     tech_stack=tech_stack,
                     target_repo=target_repo,
                     task_plan=plan_text if plan_text else None,
-                    build_errors=build_errors[:compute_build_errors_chars(self.llm)] if build_errors else None,
+                    build_errors=compact_text(
+                        build_errors, compute_build_errors_chars(self.llm), self.llm, "build errors"
+                    )
+                    if build_errors
+                    else None,
                 )
             )
             if result.needs_clarification and result.clarification_requests:
@@ -395,7 +427,9 @@ class DevOpsExpertAgent:
                     logger.error(
                         "DevOps WORKFLOW: Recovery summary: 1) Attempted %d iterations, "
                         "2) Same validation error repeated %d times. %s",
-                        iteration, consecutive_same_build_failures, repeated_reason,
+                        iteration,
+                        consecutive_same_build_failures,
+                        repeated_reason,
                     )
                     return DevOpsWorkflowResult(
                         success=False,
@@ -429,11 +463,17 @@ class DevOpsExpertAgent:
                     iac_content=result.iac_content,
                     task_description=task_description,
                     requirements=requirements,
-                    target_repo=target_repo.value if target_repo and hasattr(target_repo, "value") else str(target_repo) if target_repo else None,
+                    target_repo=target_repo.value
+                    if target_repo and hasattr(target_repo, "value")
+                    else str(target_repo)
+                    if target_repo
+                    else None,
                 )
                 review_output = devops_review_agent.run(review_input)
                 if not review_output.approved:
-                    critical_major = [i for i in review_output.issues if i.severity in ("critical", "major")]
+                    critical_major = [
+                        i for i in review_output.issues if i.severity in ("critical", "major")
+                    ]
                     if critical_major:
                         build_errors = "DevOps review failed:\n" + "\n".join(
                             f"- [{i.artifact}] {i.description}\n  Suggestion: {i.suggestion}"
@@ -446,9 +486,7 @@ class DevOpsExpertAgent:
                             last_build_error_sig = build_error_sig
                             consecutive_same_build_failures = 1
                         if consecutive_same_build_failures >= MAX_SAME_BUILD_FAILURES:
-                            repeated_reason = (
-                                f"DevOps review failed {MAX_SAME_BUILD_FAILURES} times with same issues; stopping."
-                            )
+                            repeated_reason = f"DevOps review failed {MAX_SAME_BUILD_FAILURES} times with same issues; stopping."
                             logger.error("DevOps WORKFLOW: %s", repeated_reason)
                             return DevOpsWorkflowResult(
                                 success=False,

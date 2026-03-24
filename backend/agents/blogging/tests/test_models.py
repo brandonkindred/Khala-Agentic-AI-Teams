@@ -21,4 +21,3 @@ def test_research_agent_output_structure() -> None:
     )
     output = ResearchAgentOutput(query_plan=[], references=[ref], notes=None)
     assert output.references[0].title == "Example"
-

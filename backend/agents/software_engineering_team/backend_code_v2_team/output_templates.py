@@ -41,14 +41,14 @@ def _section(text: str, start_marker: str, end_marker: str) -> str:
 
 def _normalize_file_path(path: str) -> str:
     """Strip redundant backend/ prefix from path.
-    
+
     The backend team operates within the backend directory, so LLM output
     paths like 'backend/src/...' should be normalized to 'src/...'.
     """
     prefixes_to_strip = ("backend/", "./backend/")
     for prefix in prefixes_to_strip:
         if path.startswith(prefix):
-            return path[len(prefix):]
+            return path[len(prefix) :]
     return path
 
 

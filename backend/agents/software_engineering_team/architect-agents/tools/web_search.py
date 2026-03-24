@@ -14,7 +14,9 @@ def _ollama_web_search_impl(query: str, max_results: int = 10) -> str:
     if not api_key:
         return "Ollama web search not available: OLLAMA_API_KEY is not set (e.g. from https://ollama.com/settings/keys)."
 
-    base_url = (os.environ.get("OLLAMA_WEB_SEARCH_BASE_URL") or "https://ollama.com/api").rstrip("/")
+    base_url = (os.environ.get("OLLAMA_WEB_SEARCH_BASE_URL") or "https://ollama.com/api").rstrip(
+        "/"
+    )
     url = f"{base_url}/web_search"
     payload = {"query": query, "max_results": min(max_results, 10)}
     headers = {"Authorization": f"Bearer {api_key}"}

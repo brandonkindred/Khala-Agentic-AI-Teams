@@ -33,39 +33,54 @@ class DevOpsReviewAgent:
             context_parts.append(f"**Target repo:** {input_data.target_repo}")
 
         if input_data.dockerfile:
-            context_parts.extend([
-                "",
-                "**Dockerfile:**",
-                "```",
-                input_data.dockerfile,
-                "```",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Dockerfile:**",
+                    "```",
+                    input_data.dockerfile,
+                    "```",
+                ]
+            )
         if input_data.pipeline_yaml:
-            context_parts.extend([
-                "",
-                "**CI/CD Pipeline:**",
-                "```yaml",
-                input_data.pipeline_yaml,
-                "```",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**CI/CD Pipeline:**",
+                    "```yaml",
+                    input_data.pipeline_yaml,
+                    "```",
+                ]
+            )
         if input_data.docker_compose:
-            context_parts.extend([
-                "",
-                "**docker-compose.yml:**",
-                "```yaml",
-                input_data.docker_compose,
-                "```",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**docker-compose.yml:**",
+                    "```yaml",
+                    input_data.docker_compose,
+                    "```",
+                ]
+            )
         if input_data.iac_content:
-            context_parts.extend([
-                "",
-                "**IaC:**",
-                "```",
-                input_data.iac_content,
-                "```",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**IaC:**",
+                    "```",
+                    input_data.iac_content,
+                    "```",
+                ]
+            )
 
-        if not any([input_data.dockerfile, input_data.pipeline_yaml, input_data.docker_compose, input_data.iac_content]):
+        if not any(
+            [
+                input_data.dockerfile,
+                input_data.pipeline_yaml,
+                input_data.docker_compose,
+                input_data.iac_content,
+            ]
+        ):
             logger.warning("DevOpsReview: no artifacts to review")
             return DevOpsReviewOutput(approved=True, issues=[], summary="No artifacts to review")
 
@@ -113,7 +128,9 @@ class DevOpsReviewAgent:
                 issues.append(synthesized)
                 critical_or_major.append(synthesized)
             else:
-                logger.warning("DevOpsReview: approved=False with no issues/summary, auto-approving")
+                logger.warning(
+                    "DevOpsReview: approved=False with no issues/summary, auto-approving"
+                )
                 approved = True
 
         logger.info(

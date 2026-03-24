@@ -1,6 +1,5 @@
 """Tests for ai_systems_team models."""
 
-
 from ai_systems_team.models import (
     KPI,
     AcceptanceTest,

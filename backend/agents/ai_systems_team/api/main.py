@@ -67,7 +67,7 @@ def _run_build_background(
     """Background thread function for running AI system generation workflow."""
     try:
         mark_job_running(job_id)
-        
+
         def job_updater(
             current_phase: Optional[str] = None,
             progress: Optional[int] = None,
@@ -75,17 +75,17 @@ def _run_build_background(
         ) -> None:
             """Callback to update job status during workflow execution."""
             updates: Dict[str, Any] = {}
-            
+
             if current_phase is not None:
                 updates["current_phase"] = current_phase
             if progress is not None:
                 updates["progress"] = progress
             if status_text is not None:
                 updates["status_text"] = status_text
-            
+
             if updates:
                 update_job(job_id, **updates)
-        
+
         blueprint = orchestrator.run_workflow(
             project_name=project_name,
             spec_path=spec_path,
@@ -93,12 +93,12 @@ def _run_build_background(
             output_dir=output_dir,
             job_updater=job_updater,
         )
-        
+
         if blueprint.success:
             mark_job_completed(job_id, blueprint=blueprint.model_dump())
         else:
             mark_job_failed(job_id, error=blueprint.error or "Build failed")
-    
+
     except Exception as e:
         mark_job_failed(job_id, error=str(e))
 
@@ -113,7 +113,7 @@ def _run_build_background(
 def start_build(request: AISystemRequest) -> AISystemJobResponse:
     """Start a new AI system build job."""
     job_id = str(uuid.uuid4())
-    
+
     create_job(
         job_id=job_id,
         project_name=request.project_name,
@@ -125,6 +125,7 @@ def start_build(request: AISystemRequest) -> AISystemJobResponse:
     try:
         from ai_systems_team.temporal.client import is_temporal_enabled
         from ai_systems_team.temporal.start_workflow import start_build_workflow
+
         if is_temporal_enabled():
             start_build_workflow(
                 job_id,
@@ -170,14 +171,14 @@ def start_build(request: AISystemRequest) -> AISystemJobResponse:
 def get_build_status(job_id: str) -> AISystemStatusResponse:
     """Get status of an AI system build job."""
     data = get_job(job_id)
-    
+
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
+
     blueprint = None
     if data.get("status") == JOB_STATUS_COMPLETED and data.get("blueprint"):
         blueprint = AgentBlueprint(**data["blueprint"])
-    
+
     return AISystemStatusResponse(
         job_id=job_id,
         status=data.get("status", JOB_STATUS_PENDING),
@@ -201,7 +202,7 @@ def list_build_jobs(
 ) -> AISystemJobsListResponse:
     """List all AI system build jobs."""
     jobs_data = list_jobs(running_only=running_only)
-    
+
     jobs = [
         AISystemJobSummary(
             job_id=j["job_id"],
@@ -213,7 +214,7 @@ def list_build_jobs(
         )
         for j in jobs_data
     ]
-    
+
     return AISystemJobsListResponse(jobs=jobs)
 
 
@@ -284,10 +285,10 @@ def list_blueprints() -> Dict[str, List[str]]:
 def get_blueprint(project_name: str) -> AgentBlueprint:
     """Get a blueprint by project name."""
     blueprint = orchestrator.get_blueprint(project_name)
-    
+
     if not blueprint:
         raise HTTPException(status_code=404, detail=f"Blueprint '{project_name}' not found")
-    
+
     return blueprint
 
 

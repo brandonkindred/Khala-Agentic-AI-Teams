@@ -58,9 +58,13 @@ class SocialMediaMarketingOrchestrator:
         self.risk_reviewer = RiskComplianceAgent()
 
     def _build_initial_proposal(self, goals: BrandGoals) -> CampaignProposal:
-        objective = "Validate repeatable content themes that improve engagement and follower growth."
+        objective = (
+            "Validate repeatable content themes that improve engagement and follower growth."
+        )
         if goals.brand_objectives:
-            objective = f"{objective} Ground strategy in brand objectives: {goals.brand_objectives[:400]}"
+            objective = (
+                f"{objective} Ground strategy in brand objectives: {goals.brand_objectives[:400]}"
+            )
 
         proposal = CampaignProposal(
             campaign_name=f"{goals.brand_name} multi-platform growth sprint",
@@ -134,14 +138,20 @@ class SocialMediaMarketingOrchestrator:
                 and all(score >= self.CONSENSUS_THRESHOLD for score in scores)
                 and all(rubric_results)
             ):
-                proposal.communication_log.append("Consensus reached: proposal is thorough enough for test-content planning.")
+                proposal.communication_log.append(
+                    "Consensus reached: proposal is thorough enough for test-content planning."
+                )
                 return proposal
 
-            proposal.communication_log.append("Consensus not reached yet: refining objective and metrics for next round.")
+            proposal.communication_log.append(
+                "Consensus not reached yet: refining objective and metrics for next round."
+            )
             proposal.success_metrics.append(f"Refined metric checkpoint round {round_number}")
 
     @staticmethod
-    def _calibrate_probabilities(ideas: List[ConceptIdea], performance: CampaignPerformanceSnapshot | None) -> List[ConceptIdea]:
+    def _calibrate_probabilities(
+        ideas: List[ConceptIdea], performance: CampaignPerformanceSnapshot | None
+    ) -> List[ConceptIdea]:
         if not performance or not performance.observations:
             return ideas
 
@@ -186,19 +196,28 @@ class SocialMediaMarketingOrchestrator:
         candidates = self._goal_traceability_filter(candidates, goals)
         candidates = self._calibrate_probabilities(candidates, performance)
 
-        risk_reviewed: List[ConceptIdea] = [self.risk_reviewer.review_concept(idea, goals) for idea in candidates]
+        risk_reviewed: List[ConceptIdea] = [
+            self.risk_reviewer.review_concept(idea, goals) for idea in candidates
+        ]
         approved = [
-            idea for idea in risk_reviewed
+            idea
+            for idea in risk_reviewed
             if idea.estimated_engagement_probability >= 0.70 and idea.risk_level != "high"
         ]
 
         idx = 1
         while len(approved) < required_posts:
-            seed = approved[(idx - 1) % len(approved)] if approved else risk_reviewed[(idx - 1) % len(risk_reviewed)]
+            seed = (
+                approved[(idx - 1) % len(approved)]
+                if approved
+                else risk_reviewed[(idx - 1) % len(risk_reviewed)]
+            )
             clone = seed.model_copy(deep=True)
             clone.title = f"{seed.title} variant {idx}"
             clone.concept = f"{seed.concept} Variant angle {idx} tuned for daypart testing."
-            clone.estimated_engagement_probability = max(0.70, seed.estimated_engagement_probability - 0.01)
+            clone.estimated_engagement_probability = max(
+                0.70, seed.estimated_engagement_probability - 0.01
+            )
             clone.risk_level = "medium" if seed.risk_level == "high" else seed.risk_level
             approved.append(clone)
             idx += 1
@@ -229,7 +248,9 @@ class SocialMediaMarketingOrchestrator:
 
         content_plan = self._plan_content(proposal, goals, performance)
         platform_plans = [
-            specialist.create_execution_plan(goals, proposal.campaign_name, len(content_plan.approved_ideas))
+            specialist.create_execution_plan(
+                goals, proposal.campaign_name, len(content_plan.approved_ideas)
+            )
             for specialist in self.platform_specialists
         ]
         experiment_plan = self.experiment_designer.build_experiment_plan(

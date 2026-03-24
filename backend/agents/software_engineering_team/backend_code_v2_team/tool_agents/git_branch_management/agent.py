@@ -100,7 +100,9 @@ class GitBranchManagementToolAgent:
         if not (path / ".git").exists():
             logger.warning("Git branch management: not a git repository at %s", path)
             return False, None
-        slug = re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
+        slug = (
+            re.sub(r"[^a-z0-9-]+", "-", (task_title or task_id).lower()).strip("-")[:40] or "task"
+        )
         ok, branch_msg = git_create_feature_branch(path, DEVELOPMENT_BRANCH, f"{task_id}-{slug}")
         if not ok:
             return False, None
@@ -122,7 +124,11 @@ class GitBranchManagementToolAgent:
 
         task_id = phase_inp.task_id or "task"
         task_title = phase_inp.task_title or ""
-        slug = re.sub(r"[^a-z0-9-]+", "-", task_title.lower()).strip("-")[:40] if task_title else "task"
+        slug = (
+            re.sub(r"[^a-z0-9-]+", "-", task_title.lower()).strip("-")[:40]
+            if task_title
+            else "task"
+        )
         branch_name: Optional[str] = phase_inp.feature_branch_name
 
         if branch_name:
@@ -143,12 +149,16 @@ class GitBranchManagementToolAgent:
             # Fallback: create branch, write files, commit, merge, delete.
             ok, created_branch = self.create_feature_branch(repo_path, task_id, task_title)
             if not ok or not created_branch:
-                return ToolAgentPhaseOutput(success=False, summary="Feature branch creation failed.")
+                return ToolAgentPhaseOutput(
+                    success=False, summary="Feature branch creation failed."
+                )
             from software_engineering_team.shared.repo_writer import write_agent_output
 
             scope = slug[:20]
             summary = (phase_inp.task_description or "")[:72]
-            commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(scope=scope, summary=summary or "deliver")
+            commit_msg = DELIVER_COMMIT_MSG_TEMPLATE.format(
+                scope=scope, summary=summary or "deliver"
+            )
             payload = _FilesPayload(phase_inp.current_files, summary, commit_msg)
             write_ok, write_msg = write_agent_output(repo_path, payload, subdir="")
             if not write_ok:

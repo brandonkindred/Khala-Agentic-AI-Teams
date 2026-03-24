@@ -35,9 +35,7 @@ def build_problem_solving_header(
     Returns:
         A markdown-formatted header string to prepend to the prompt.
     """
-    parts = [
-        f"{label}: {count}" for label, count in issue_summaries.items() if count > 0
-    ]
+    parts = [f"{label}: {count}" for label, count in issue_summaries.items() if count > 0]
     summary = ", ".join(parts) if parts else "issues"
     default_instructions = (
         "1. Identify the likely root cause using the issue details in this section.\n"

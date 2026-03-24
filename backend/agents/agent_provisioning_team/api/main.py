@@ -69,7 +69,7 @@ def _run_provisioning_background(
     """Background thread function for running provisioning workflow."""
     try:
         mark_job_running(job_id)
-        
+
         def job_updater(
             current_phase: Optional[str] = None,
             progress: Optional[int] = None,
@@ -80,7 +80,7 @@ def _run_provisioning_background(
         ) -> None:
             """Callback to update job status during workflow execution."""
             updates: Dict[str, Any] = {}
-            
+
             if current_phase is not None:
                 updates["current_phase"] = current_phase
             if progress is not None:
@@ -93,23 +93,23 @@ def _run_provisioning_background(
                 updates["tools_total"] = tools_total
             if status_text is not None:
                 updates["status_text"] = status_text
-            
+
             if updates:
                 update_job(job_id, **updates)
-        
+
         result = orchestrator.run_workflow(
             agent_id=agent_id,
             manifest_path=manifest_path,
             access_tier=access_tier,
             job_updater=job_updater,
         )
-        
+
         if result.success:
             redacted = redact_credentials_for_response(result)
             mark_job_completed(job_id, result=redacted.model_dump())
         else:
             mark_job_failed(job_id, error=result.error or "Provisioning failed")
-    
+
     except Exception as e:
         mark_job_failed(job_id, error=str(e))
 
@@ -124,7 +124,7 @@ def _run_provisioning_background(
 def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
     """Start a new provisioning job."""
     job_id = str(uuid.uuid4())
-    
+
     create_job(
         job_id=job_id,
         agent_id=request.agent_id,
@@ -135,6 +135,7 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
     try:
         from agent_provisioning_team.temporal.client import is_temporal_enabled
         from agent_provisioning_team.temporal.start_workflow import start_provisioning_workflow
+
         if is_temporal_enabled():
             start_provisioning_workflow(
                 job_id,
@@ -173,14 +174,14 @@ def start_provisioning(request: ProvisionRequest) -> ProvisionJobResponse:
 def get_provisioning_status(job_id: str) -> ProvisionStatusResponse:
     """Get status of a provisioning job."""
     data = get_job(job_id)
-    
+
     if not data:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    
+
     result = None
     if data.get("status") == JOB_STATUS_COMPLETED and data.get("result"):
         result = ProvisioningResult(**data["result"])
-    
+
     return ProvisionStatusResponse(
         job_id=job_id,
         status=data.get("status", JOB_STATUS_PENDING),
@@ -207,7 +208,7 @@ def list_provisioning_jobs(
 ) -> ProvisionJobsListResponse:
     """List all provisioning jobs."""
     jobs_data = list_jobs(running_only=running_only)
-    
+
     jobs = [
         ProvisionJobSummary(
             job_id=j["job_id"],
@@ -219,7 +220,7 @@ def list_provisioning_jobs(
         )
         for j in jobs_data
     ]
-    
+
     return ProvisionJobsListResponse(jobs=jobs)
 
 
@@ -305,10 +306,10 @@ class AgentStatusResponse(BaseModel):
 def get_agent_status(agent_id: str) -> AgentStatusResponse:
     """Get status of a provisioned agent."""
     status = orchestrator.get_agent_status(agent_id)
-    
+
     if status is None:
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
-    
+
     return AgentStatusResponse(**status)
 
 
@@ -329,7 +330,7 @@ def list_agents(
 ) -> AgentListResponse:
     """List all provisioned agents."""
     agents_data = orchestrator.list_agents(status=status)
-    
+
     agents = [
         AgentStatusResponse(
             agent_id=a["agent_id"],
@@ -340,7 +341,7 @@ def list_agents(
         )
         for a in agents_data
     ]
-    
+
     return AgentListResponse(agents=agents)
 
 

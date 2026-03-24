@@ -38,7 +38,9 @@ def get_client(agent_key: Optional[str] = None) -> Union[DummyLLMClient, OllamaL
 
     with _cache_lock:
         if cache_key not in _client_cache:
-            _client_cache[cache_key] = OllamaLLMClient(model=model, base_url=base_url, timeout=timeout)
+            _client_cache[cache_key] = OllamaLLMClient(
+                model=model, base_url=base_url, timeout=timeout
+            )
         client = _client_cache[cache_key]
 
     if agent_key is None:

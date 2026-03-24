@@ -157,9 +157,7 @@ def resolve_length_policy(
     if series_context is not None:
         guidance = guidance + _series_block(series_context)
     if length_notes and length_notes.strip():
-        guidance += (
-            "\n\n**Author notes (length / scope):**\n" + length_notes.strip()
-        )
+        guidance += "\n\n**Author notes (length / scope):**\n" + length_notes.strip()
 
     return LengthPolicy(
         content_profile=effective_profile,
@@ -213,12 +211,20 @@ def resolve_length_policy_from_request_dict(request_dict: Dict[str, Any]) -> Len
     profile: Optional[ContentProfile] = None
     raw_profile = request_dict.get("content_profile")
     if raw_profile is not None and raw_profile != "":
-        profile = raw_profile if isinstance(raw_profile, ContentProfile) else ContentProfile(str(raw_profile))
+        profile = (
+            raw_profile
+            if isinstance(raw_profile, ContentProfile)
+            else ContentProfile(str(raw_profile))
+        )
 
     series: Optional[SeriesContext] = None
     raw_series = request_dict.get("series_context")
     if raw_series:
-        series = raw_series if isinstance(raw_series, SeriesContext) else SeriesContext.model_validate(raw_series)
+        series = (
+            raw_series
+            if isinstance(raw_series, SeriesContext)
+            else SeriesContext.model_validate(raw_series)
+        )
 
     notes_raw = request_dict.get("length_notes")
     notes: Optional[str] = None

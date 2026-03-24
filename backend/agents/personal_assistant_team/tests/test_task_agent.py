@@ -57,12 +57,14 @@ class TestTaskAgent:
 
     def test_create_list(self, agent):
         """Test creating a task list."""
-        task_list = agent.create_list(CreateListRequest(
-            user_id="test_user",
-            name="Groceries",
-            description="Weekly shopping",
-        ))
-        
+        task_list = agent.create_list(
+            CreateListRequest(
+                user_id="test_user",
+                name="Groceries",
+                description="Weekly shopping",
+            )
+        )
+
         assert task_list.name == "Groceries"
         assert task_list.user_id == "test_user"
         assert len(task_list.items) == 0
@@ -71,9 +73,9 @@ class TestTaskAgent:
         """Test getting all lists for a user."""
         agent.create_list(CreateListRequest(user_id="test_user", name="Groceries"))
         agent.create_list(CreateListRequest(user_id="test_user", name="Todos"))
-        
+
         lists = agent.get_all_lists("test_user")
-        
+
         assert len(lists) == 2
         names = [lst.name for lst in lists]
         assert "Groceries" in names
@@ -81,90 +83,112 @@ class TestTaskAgent:
 
     def test_add_item(self, agent):
         """Test adding an item to a list."""
-        task_list = agent.create_list(CreateListRequest(
-            user_id="test_user",
-            name="Groceries",
-        ))
-        
-        item = agent.add_item(AddItemRequest(
-            user_id="test_user",
-            list_id=task_list.list_id,
-            description="Milk",
-            quantity="2 gallons",
-            priority=Priority.HIGH,
-        ))
-        
+        task_list = agent.create_list(
+            CreateListRequest(
+                user_id="test_user",
+                name="Groceries",
+            )
+        )
+
+        item = agent.add_item(
+            AddItemRequest(
+                user_id="test_user",
+                list_id=task_list.list_id,
+                description="Milk",
+                quantity="2 gallons",
+                priority=Priority.HIGH,
+            )
+        )
+
         assert item.description == "Milk"
         assert item.quantity == "2 gallons"
         assert item.priority == Priority.HIGH
 
     def test_add_items(self, agent):
         """Test adding multiple items."""
-        task_list = agent.create_list(CreateListRequest(
-            user_id="test_user",
-            name="Groceries",
-        ))
-        
-        items = agent.add_items("test_user", task_list.list_id, [
-            {"description": "Milk", "priority": "high"},
-            {"description": "Bread", "priority": "medium"},
-            {"description": "Eggs", "priority": "medium"},
-        ])
-        
+        task_list = agent.create_list(
+            CreateListRequest(
+                user_id="test_user",
+                name="Groceries",
+            )
+        )
+
+        items = agent.add_items(
+            "test_user",
+            task_list.list_id,
+            [
+                {"description": "Milk", "priority": "high"},
+                {"description": "Bread", "priority": "medium"},
+                {"description": "Eggs", "priority": "medium"},
+            ],
+        )
+
         assert len(items) == 3
 
     def test_add_items_from_text(self, agent):
         """Test adding items from natural language."""
-        result = agent.add_items_from_text(AddItemsFromTextRequest(
-            user_id="test_user",
-            text="I need to buy milk and bread from the grocery store",
-        ))
-        
+        result = agent.add_items_from_text(
+            AddItemsFromTextRequest(
+                user_id="test_user",
+                text="I need to buy milk and bread from the grocery store",
+            )
+        )
+
         assert result["success"] is True
         assert len(result["added_items"]) >= 1
 
     def test_complete_item(self, agent):
         """Test completing an item."""
-        task_list = agent.create_list(CreateListRequest(
-            user_id="test_user",
-            name="Tasks",
-        ))
-        
-        item = agent.add_item(AddItemRequest(
-            user_id="test_user",
-            list_id=task_list.list_id,
-            description="Test task",
-        ))
-        
-        result = agent.complete_item(CompleteItemRequest(
-            user_id="test_user",
-            list_id=task_list.list_id,
-            item_id=item.item_id,
-        ))
-        
+        task_list = agent.create_list(
+            CreateListRequest(
+                user_id="test_user",
+                name="Tasks",
+            )
+        )
+
+        item = agent.add_item(
+            AddItemRequest(
+                user_id="test_user",
+                list_id=task_list.list_id,
+                description="Test task",
+            )
+        )
+
+        result = agent.complete_item(
+            CompleteItemRequest(
+                user_id="test_user",
+                list_id=task_list.list_id,
+                item_id=item.item_id,
+            )
+        )
+
         assert result is True
-        
+
         updated_list = agent.get_list("test_user", task_list.list_id)
         completed_item = next(i for i in updated_list.items if i.item_id == item.item_id)
         assert completed_item.status == TaskStatus.COMPLETED
 
     def test_delete_item(self, agent):
         """Test deleting an item."""
-        task_list = agent.create_list(CreateListRequest(
-            user_id="test_user",
-            name="Tasks",
-        ))
-        
-        item = agent.add_item(AddItemRequest(
-            user_id="test_user",
-            list_id=task_list.list_id,
-            description="Test task",
-        ))
-        
+        task_list = agent.create_list(
+            CreateListRequest(
+                user_id="test_user",
+                name="Tasks",
+            )
+        )
+
+        item = agent.add_item(
+            AddItemRequest(
+                user_id="test_user",
+                list_id=task_list.list_id,
+                description="Test task",
+            )
+        )
+
         result = agent.delete_item("test_user", task_list.list_id, item.item_id)
-        
+
         assert result is True
-        
+
         updated_list = agent.get_list("test_user", task_list.list_id)
         assert len(updated_list.items) == 0
 
@@ -172,22 +196,28 @@ class TestTaskAgent:
         """Test getting pending items across all lists."""
         list1 = agent.create_list(CreateListRequest(user_id="test_user", name="List1"))
         list2 = agent.create_list(CreateListRequest(user_id="test_user", name="List2"))
-        
-        agent.add_item(AddItemRequest(user_id="test_user", list_id=list1.list_id, description="Task 1"))
-        agent.add_item(AddItemRequest(user_id="test_user", list_id=list2.list_id, description="Task 2"))
-        
+
+        agent.add_item(
+            AddItemRequest(user_id="test_user", list_id=list1.list_id, description="Task 1")
+        )
+        agent.add_item(
+            AddItemRequest(user_id="test_user", list_id=list2.list_id, description="Task 2")
+        )
+
         pending = agent.get_pending_items("test_user")
-        
+
         assert len(pending) == 2
 
     def test_delete_list(self, agent):
         """Test deleting a list."""
-        task_list = agent.create_list(CreateListRequest(
-            user_id="test_user",
-            name="Test List",
-        ))
-        
+        task_list = agent.create_list(
+            CreateListRequest(
+                user_id="test_user",
+                name="Test List",
+            )
+        )
+
         result = agent.delete_list("test_user", task_list.list_id)
-        
+
         assert result is True
         assert agent.get_list("test_user", task_list.list_id) is None

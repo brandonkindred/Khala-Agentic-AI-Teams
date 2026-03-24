@@ -54,7 +54,9 @@ def create_se_worker(client: Optional[object] = None) -> Optional[Worker]:
     if client is None:
         return None
     if _activity_executor is None:
-        _activity_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="se-temporal-activity")
+        _activity_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="se-temporal-activity"
+        )
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,

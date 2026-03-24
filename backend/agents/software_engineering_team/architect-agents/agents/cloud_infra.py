@@ -69,4 +69,5 @@ Design the cloud infrastructure for this system. Produce infrastructure componen
 
 def _get_sonnet_model() -> str:
     import os
+
     return os.environ.get("ARCHITECT_MODEL_SPECIALIST", "anthropic.claude-sonnet-4-20250514-v1:0")

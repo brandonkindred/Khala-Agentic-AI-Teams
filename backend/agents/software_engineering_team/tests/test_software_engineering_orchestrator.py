@@ -32,7 +32,7 @@ def test_run_build_verification_appends_fix_line_when_pytest_fails_with_test_err
         "= FAILURES =\n"
         "________________________ test_generic_exception_handler ________________________\n"
         "tests/test_error_handlers.py:108: in test_generic_exception_handler\n"
-        "    response = client.get(\"/test-generic-error\")"
+        '    response = client.get("/test-generic-error")'
     )
     mock_result = CommandResult(
         success=False,
@@ -45,10 +45,10 @@ def test_run_build_verification_appends_fix_line_when_pytest_fails_with_test_err
         "software_engineering_team.shared.command_runner.run_python_syntax_check",
         return_value=CommandResult(True, 0, "", ""),
     ):
-        with patch("software_engineering_team.shared.command_runner.run_pytest", return_value=mock_result):
-            ok, error_output = orchestrator._run_build_verification(
-                tmp_path, "backend", "task-1"
-            )
+        with patch(
+            "software_engineering_team.shared.command_runner.run_pytest", return_value=mock_result
+        ):
+            ok, error_output = orchestrator._run_build_verification(tmp_path, "backend", "task-1")
 
     assert ok is False
     assert "FIX: Preserve the /test-generic-error route" in error_output
@@ -75,8 +75,7 @@ def test_run_orchestrator_pauses_on_llm_rate_limit_in_spec_parsing(
             orchestrator.run_orchestrator(job_id, str(tmp_path))
 
     paused_calls = [
-        (jid, kw) for jid, kw in update_job_calls
-        if kw.get("status") == "paused_llm_limit"
+        (jid, kw) for jid, kw in update_job_calls if kw.get("status") == "paused_llm_limit"
     ]
     assert len(paused_calls) >= 1
     assert paused_calls[0][1]["error"] == OLLAMA_WEEKLY_LIMIT_MESSAGE
@@ -101,10 +100,13 @@ def test_run_failed_tasks_pauses_on_llm_rate_limit(tmp_path: Path) -> None:
     )
     task_data = task.model_dump() if hasattr(task, "model_dump") else task.dict()
     from software_engineering_team.shared.job_store import create_job, update_job
+
     create_job(job_id, str(tmp_path))
     update_job(
         job_id,
-        failed_tasks=[{"task_id": "backend-task-1", "reason": "previous fail", "title": "Backend task"}],
+        failed_tasks=[
+            {"task_id": "backend-task-1", "reason": "previous fail", "title": "Backend task"}
+        ],
         _all_tasks={"backend-task-1": task_data},
         _architecture_overview="API + frontend",
         _spec_content="# Test\n\nSpec.",
@@ -116,9 +118,7 @@ def test_run_failed_tasks_pauses_on_llm_rate_limit(tmp_path: Path) -> None:
         update_job_calls.append((jid, kwargs))
 
     mock_backend = MagicMock()
-    mock_backend.run_workflow.side_effect = LLMRateLimitError(
-        "429 rate limited", status_code=429
-    )
+    mock_backend.run_workflow.side_effect = LLMRateLimitError("429 rate limited", status_code=429)
     mock_git_setup = MagicMock()
     mock_git_setup.run.return_value = MagicMock(success=True)
     mock_agents = {
@@ -146,8 +146,7 @@ def test_run_failed_tasks_pauses_on_llm_rate_limit(tmp_path: Path) -> None:
                 orchestrator.run_failed_tasks(job_id)
 
     paused_calls = [
-        (jid, kw) for jid, kw in update_job_calls
-        if kw.get("status") == "paused_llm_limit"
+        (jid, kw) for jid, kw in update_job_calls if kw.get("status") == "paused_llm_limit"
     ]
     assert len(paused_calls) >= 1
     assert paused_calls[-1][1]["error"] == OLLAMA_WEEKLY_LIMIT_MESSAGE
@@ -221,9 +220,15 @@ def test_run_orchestrator_fails_job_when_planning_raises_no_fallback(tmp_path: P
                     constraints=[],
                 ),
             ):
-                with patch("product_requirements_analysis_agent.ProductRequirementsAnalysisAgent", return_value=mock_pra_agent):
+                with patch(
+                    "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
+                    return_value=mock_pra_agent,
+                ):
                     with patch("planning_v3_team.orchestrator.run_workflow") as mock_run_v3:
-                        mock_run_v3.return_value = {"success": False, "failure_reason": "Planning failed"}
+                        mock_run_v3.return_value = {
+                            "success": False,
+                            "failure_reason": "Planning failed",
+                        }
                         orchestrator.run_orchestrator(job_id, str(tmp_path))
 
     failed_calls = [(jid, kw) for jid, kw in update_job_calls if kw.get("status") == "failed"]
@@ -276,15 +281,18 @@ def test_run_orchestrator_fails_job_when_project_planning_raises(tmp_path: Path)
                     constraints=[],
                 ),
             ):
-                with patch("product_requirements_analysis_agent.ProductRequirementsAnalysisAgent", return_value=mock_pra_agent):
+                with patch(
+                    "product_requirements_analysis_agent.ProductRequirementsAnalysisAgent",
+                    return_value=mock_pra_agent,
+                ):
                     with patch("planning_v3_team.orchestrator.run_workflow") as mock_run_v3:
-                        mock_run_v3.return_value = {"success": False, "failure_reason": "Planning failed"}
+                        mock_run_v3.return_value = {
+                            "success": False,
+                            "failure_reason": "Planning failed",
+                        }
                         orchestrator.run_orchestrator(job_id, str(tmp_path))
 
-    failed_calls = [
-        (jid, kw) for jid, kw in update_job_calls
-        if kw.get("status") == "failed"
-    ]
+    failed_calls = [(jid, kw) for jid, kw in update_job_calls if kw.get("status") == "failed"]
     assert len(failed_calls) >= 1
     assert "planning" in failed_calls[0][1].get("error", "").lower()
 
@@ -392,10 +400,15 @@ def test_frontend_json_parse_failure_triggers_tech_lead_review_for_task_breakdow
     assert task_update.agent_type == "frontend"
     assert task_update.status == "failed"
     assert task_update.failure_class == "json_parse"
-    assert "parse" in (task_update.failure_reason or "").lower() or "json" in (task_update.failure_reason or "").lower()
+    assert (
+        "parse" in (task_update.failure_reason or "").lower()
+        or "json" in (task_update.failure_reason or "").lower()
+    )
 
 
-def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers(tmp_path: Path) -> None:
+def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers(
+    tmp_path: Path,
+) -> None:
     """Main path: after Planning V3 and adapter, run_coding_team_orchestrator is called; Tech Lead and v2 workers are not."""
     from planning_v3_adapter import PlanningV2AdapterResult
 
@@ -431,7 +444,9 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
     coding_team_calls = []
 
     def capture_run_coding_team(jid, repo_path, plan_input, **kwargs):
-        coding_team_calls.append({"job_id": jid, "repo_path": repo_path, "plan_input": plan_input, **kwargs})
+        coding_team_calls.append(
+            {"job_id": jid, "repo_path": repo_path, "plan_input": plan_input, **kwargs}
+        )
         if kwargs.get("update_job_fn"):
             kwargs["update_job_fn"](status="completed", phase="completed")
 
@@ -471,7 +486,9 @@ def test_run_orchestrator_invokes_coding_team_not_legacy_tech_lead_or_v2_workers
                     with patch("planning_v3_team.orchestrator.run_workflow") as mock_run_v3:
                         mock_run_v3.return_value = {
                             "success": True,
-                            "handoff_package": {"architecture_overview": "Backend FastAPI; frontend Angular."},
+                            "handoff_package": {
+                                "architecture_overview": "Backend FastAPI; frontend Angular."
+                            },
                             "failure_reason": None,
                         }
                         with patch(

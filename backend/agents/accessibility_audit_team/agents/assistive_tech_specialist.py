@@ -175,9 +175,7 @@ class AssistiveTechSpecialist(BaseSpecialistAgent):
         specific = type_specific_steps.get(issue_type, ["Verify the reported issue"])
         return base_steps + specific
 
-    def _refine_user_impact(
-        self, original_impact: str, tool: str, at_notes: str
-    ) -> str:
+    def _refine_user_impact(self, original_impact: str, tool: str, at_notes: str) -> str:
         """Refine user impact statement with AT-specific details."""
         tool_name = {
             "nvda": "NVDA",

@@ -69,7 +69,12 @@ def main() -> None:
     )
     arch_output = arch_agent.run(arch_input)
     architecture = arch_output.architecture
-    logger.info("Architecture: %s", architecture.overview[:200] + "..." if len(architecture.overview) > 200 else architecture.overview)
+    logger.info(
+        "Architecture: %s",
+        architecture.overview[:200] + "..."
+        if len(architecture.overview) > 200
+        else architecture.overview,
+    )
 
     # 2. Tech Lead plans and assigns tasks
     logger.info("=== Tech Lead ===")
@@ -81,7 +86,9 @@ def main() -> None:
     )
     tech_lead_output = tech_lead.run(tech_lead_input)
     if tech_lead_output.spec_clarification_needed:
-        logger.warning("Spec is unclear. Clarification needed: %s", tech_lead_output.clarification_questions)
+        logger.warning(
+            "Spec is unclear. Clarification needed: %s", tech_lead_output.clarification_questions
+        )
         return
     assignment = tech_lead_output.assignment
     logger.info("Tasks: %s", [t.id for t in assignment.tasks])
@@ -103,7 +110,9 @@ def main() -> None:
 
         # Git setup: skip (platform handles at API level) or log for CLI
         if task.type == TaskType.GIT_SETUP:
-            logger.info("=== Task %s (git_setup) - skipped in CLI (run via API with repo_path) ===", task.id)
+            logger.info(
+                "=== Task %s (git_setup) - skipped in CLI (run via API with repo_path) ===", task.id
+            )
             continue
 
         if task.assignee not in agent_map:
@@ -169,7 +178,11 @@ def main() -> None:
             artifacts["security_fixed_code"] = result.fixed_code or code_to_review
 
         elif task.assignee == "qa":
-            code_to_test = artifacts.get("security_fixed_code") or artifacts.get("backend_code", "") or artifacts.get("frontend_code", "")
+            code_to_test = (
+                artifacts.get("security_fixed_code")
+                or artifacts.get("backend_code", "")
+                or artifacts.get("frontend_code", "")
+            )
             if not code_to_test.strip():
                 code_to_test = "# No code to test"
             result = agent.run(
@@ -180,10 +193,19 @@ def main() -> None:
                     architecture=architecture,
                 )
             )
-            logger.info("QA: %s bugs, integration tests: %s chars", len(result.bugs_found), len(result.integration_tests))
+            logger.info(
+                "QA: %s bugs, integration tests: %s chars",
+                len(result.bugs_found),
+                len(result.integration_tests),
+            )
 
     print("\n--- Team pipeline complete ---")
-    print("Architecture:", architecture.overview[:300] + "..." if len(architecture.overview) > 300 else architecture.overview)
+    print(
+        "Architecture:",
+        architecture.overview[:300] + "..."
+        if len(architecture.overview) > 300
+        else architecture.overview,
+    )
     print("\nTasks executed:", assignment.execution_order)
 
 

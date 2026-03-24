@@ -48,13 +48,18 @@ def set_temporal_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
 
 async def connect_temporal_client() -> Optional["Client"]:
     from temporalio.client import Client
+
     address = get_temporal_address()
     if not address:
         return None
     namespace = get_temporal_namespace()
     try:
         client = await Client.connect(address, namespace=namespace)
-        logger.info("Nutrition Meal Planning Temporal client connected to %s namespace %s", address, namespace)
+        logger.info(
+            "Nutrition Meal Planning Temporal client connected to %s namespace %s",
+            address,
+            namespace,
+        )
         return client
     except Exception as e:
         logger.exception("Nutrition Meal Planning Temporal client connection failed: %s", e)

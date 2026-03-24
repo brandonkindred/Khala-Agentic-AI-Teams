@@ -38,21 +38,13 @@ class SuggestFixOutput(BaseModel):
     """Output from fix suggestion."""
 
     root_cause_hypothesis: str = Field(default="")
-    recommended_fix: List[str] = Field(
-        default_factory=list, description="Step-by-step fix recipe"
-    )
+    recommended_fix: List[str] = Field(default_factory=list, description="Step-by-step fix recipe")
     acceptance_criteria: List[str] = Field(
         default_factory=list, description="Testable acceptance criteria"
     )
-    test_plan: List[str] = Field(
-        default_factory=list, description="Verification test steps"
-    )
-    code_examples_ref: str = Field(
-        default="", description="Reference to code examples"
-    )
-    code_snippet: str = Field(
-        default="", description="Inline code example if brief"
-    )
+    test_plan: List[str] = Field(default_factory=list, description="Verification test steps")
+    code_examples_ref: str = Field(default="", description="Reference to code examples")
+    code_snippet: str = Field(default="", description="Inline code example if brief")
     regression_prevention: List[str] = Field(
         default_factory=list, description="Suggestions to prevent regression"
     )
@@ -128,7 +120,9 @@ async def suggest_fix(input_data: SuggestFixInput) -> SuggestFixOutput:
     pattern = FIX_PATTERNS.get(issue_type, {})
 
     return SuggestFixOutput(
-        root_cause_hypothesis=pattern.get("root_cause", f"Issue related to {input_data.finding.issue_type}"),
+        root_cause_hypothesis=pattern.get(
+            "root_cause", f"Issue related to {input_data.finding.issue_type}"
+        ),
         recommended_fix=pattern.get("fix_steps", []),
         acceptance_criteria=pattern.get("acceptance", []),
         test_plan=[

@@ -68,13 +68,9 @@ async def run_verification_phase(
     ree = EvidenceEngineer(llm_client)
 
     # Prioritize high-impact findings for AT verification
-    high_impact = [
-        f for f in draft_findings
-        if f.severity in [Severity.CRITICAL, Severity.HIGH]
-    ]
+    high_impact = [f for f in draft_findings if f.severity in [Severity.CRITICAL, Severity.HIGH]]
     other_findings = [
-        f for f in draft_findings
-        if f.severity not in [Severity.CRITICAL, Severity.HIGH]
+        f for f in draft_findings if f.severity not in [Severity.CRITICAL, Severity.HIGH]
     ]
 
     verified_findings: List[Finding] = []
@@ -134,10 +130,7 @@ async def run_verification_phase(
             verified_findings = ra_result.get("remediated_findings", verified_findings)
 
     # REE supplements evidence for verified findings
-    needs_more_evidence = [
-        f for f in verified_findings
-        if not f.evidence_pack_ref
-    ]
+    needs_more_evidence = [f for f in verified_findings if not f.evidence_pack_ref]
 
     if needs_more_evidence:
         ree_context = {

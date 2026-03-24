@@ -22,7 +22,8 @@ from ...prompts import FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
 
-AUTH_PROMPT = """You are an expert Authentication and Authorization specialist.
+AUTH_PROMPT = (
+    """You are an expert Authentication and Authorization specialist.
 
 Given a microtask about login, JWT, RBAC, permission gates, or secure defaults,
 produce the required files (auth modules, middleware, permission models, etc.).
@@ -30,7 +31,9 @@ produce the required files (auth modules, middleware, permission models, etc.).
 **Microtask:** {description}
 **Language:** {language}
 **Existing code context:** {existing_code}
-""" + FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
+"""
+    + FILES_OUTPUT_TEMPLATE_INSTRUCTIONS
+)
 
 
 class AuthToolAgent:
@@ -60,7 +63,9 @@ class AuthToolAgent:
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Recommend how auth/RBAC work should be reflected in the plan."""
         return ToolAgentPhaseOutput(
-            recommendations=["Include auth middleware and permission checks in the microtask plan."],
+            recommendations=[
+                "Include auth middleware and permission checks in the microtask plan."
+            ],
             summary="Auth planning input provided.",
         )
 

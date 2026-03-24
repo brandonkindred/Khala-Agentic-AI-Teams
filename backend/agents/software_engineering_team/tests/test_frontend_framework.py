@@ -33,13 +33,19 @@ def test_get_frontend_framework_from_spec_vue() -> None:
 def test_get_frontend_framework_from_spec_priority() -> None:
     """Angular is checked first, then React, then Vue."""
     # Angular takes priority
-    assert get_frontend_framework_from_spec(
-        "Use Angular for the dashboard. React is also mentioned later."
-    ) == "angular"
+    assert (
+        get_frontend_framework_from_spec(
+            "Use Angular for the dashboard. React is also mentioned later."
+        )
+        == "angular"
+    )
     # React takes priority over Vue
-    assert get_frontend_framework_from_spec(
-        "Use React for the dashboard. Vue is also mentioned later."
-    ) == "react"
+    assert (
+        get_frontend_framework_from_spec(
+            "Use React for the dashboard. Vue is also mentioned later."
+        )
+        == "react"
+    )
 
 
 def test_get_frontend_framework_from_spec_no_false_positives() -> None:
@@ -57,18 +63,27 @@ def test_get_frontend_framework_from_spec_angular() -> None:
 
 def test_resolve_frontend_framework_task_metadata_first() -> None:
     """Task metadata framework_target takes precedence over spec."""
-    assert resolve_frontend_framework(
-        {"framework_target": "react"},
-        "Use Vue for the frontend.",
-    ) == "react"
-    assert resolve_frontend_framework(
-        {"framework_target": "angular"},
-        "Use React for the frontend.",
-    ) == "angular"
-    assert resolve_frontend_framework(
-        {"framework_target": "vue"},
-        "",
-    ) == "vue"
+    assert (
+        resolve_frontend_framework(
+            {"framework_target": "react"},
+            "Use Vue for the frontend.",
+        )
+        == "react"
+    )
+    assert (
+        resolve_frontend_framework(
+            {"framework_target": "angular"},
+            "Use React for the frontend.",
+        )
+        == "angular"
+    )
+    assert (
+        resolve_frontend_framework(
+            {"framework_target": "vue"},
+            "",
+        )
+        == "vue"
+    )
 
 
 def test_resolve_frontend_framework_spec_fallback() -> None:
@@ -93,6 +108,7 @@ def test_detect_framework_from_project_angular(tmp_path: Path) -> None:
 def test_detect_framework_from_project_react(tmp_path: Path) -> None:
     """Detect React from package.json."""
     import json
+
     pkg = tmp_path / "package.json"
     pkg.write_text(json.dumps({"dependencies": {"react": "^18.0.0"}}))
     assert detect_framework_from_project(tmp_path) == "react"
@@ -101,6 +117,7 @@ def test_detect_framework_from_project_react(tmp_path: Path) -> None:
 def test_detect_framework_from_project_vue(tmp_path: Path) -> None:
     """Detect Vue from package.json."""
     import json
+
     pkg = tmp_path / "package.json"
     pkg.write_text(json.dumps({"dependencies": {"vue": "^3.0.0"}}))
     assert detect_framework_from_project(tmp_path) == "vue"

@@ -9,6 +9,8 @@ from pydantic import HttpUrl
 
 logger = logging.getLogger(__name__)
 
+from llm_service import compact_text  # noqa: E402
+
 from .agent_cache import AgentCache  # noqa: E402
 from .llm import LLMClient, LLMJsonParseError  # noqa: E402
 from .models import (  # noqa: E402
@@ -88,6 +90,7 @@ class ResearchAgent:
               length <= brief_input.max_results), notes (str or None), and
               compiled_document (formatted document of most relevant links with summaries).
         """
+
         def _report(status: str, sub: float) -> None:
             if progress_callback:
                 progress_callback(status, sub)
@@ -95,7 +98,9 @@ class ResearchAgent:
         self._progress_callback = progress_callback
         try:
             brief_preview = (
-                (brief_input.brief[:77] + "...") if len(brief_input.brief) > 80 else brief_input.brief
+                (brief_input.brief[:77] + "...")
+                if len(brief_input.brief) > 80
+                else brief_input.brief
             )
             logger.info(
                 "Starting research: brief=%s, max_results=%s",
@@ -110,7 +115,9 @@ class ResearchAgent:
             if self.cache:
                 cached_state = self.cache.load_checkpoint(brief_input)
                 if cached_state:
-                    logger.info("Resuming from checkpoint: last_step=%s", cached_state.last_completed_step)
+                    logger.info(
+                        "Resuming from checkpoint: last_step=%s", cached_state.last_completed_step
+                    )
 
             # Step 1: Parse brief
             _report("Parsing brief...", 0.05)
@@ -141,7 +148,9 @@ class ResearchAgent:
                 candidates = self._run_searches(
                     queries,
                     brief_input,
-                    on_search_progress=lambda i, n: _report(f"Running web search {i + 1}/{n}...", 0.15 + 0.20 * (i + 1) / max(1, n)),
+                    on_search_progress=lambda i, n: _report(
+                        f"Running web search {i + 1}/{n}...", 0.15 + 0.20 * (i + 1) / max(1, n)
+                    ),
                 )
             _report("Fetching and reading web pages...", 0.38)
 
@@ -162,13 +171,19 @@ class ResearchAgent:
                 for item in cached_state.scored_docs:
                     # Support old format [doc, score, type] and new [doc, relevance, authority, accuracy, type]
                     if len(item) >= 5:
-                        scored_docs.append((
-                            SourceDocument(**item[0]), item[1], item[2], item[3], item[4]
-                        ))
+                        scored_docs.append(
+                            (SourceDocument(**item[0]), item[1], item[2], item[3], item[4])
+                        )
                     else:
-                        scored_docs.append((
-                            SourceDocument(**item[0]), item[1], 0.5, 0.5, item[2] if len(item) > 2 else None
-                        ))
+                        scored_docs.append(
+                            (
+                                SourceDocument(**item[0]),
+                                item[1],
+                                0.5,
+                                0.5,
+                                item[2] if len(item) > 2 else None,
+                            )
+                        )
             else:
                 scored_docs = self._score_documents(documents, brief_input)
                 if self.cache:
@@ -256,7 +271,9 @@ class ResearchAgent:
             "constraints": parsed.get("constraints") or [],
         }
 
-    def _generate_queries(self, brief_input: ResearchBriefInput, normalized: dict) -> List[SearchQuery]:
+    def _generate_queries(
+        self, brief_input: ResearchBriefInput, normalized: dict
+    ) -> List[SearchQuery]:
         """
         Preconditions: brief_input valid; normalized has core_topics, angle, constraints.
         Postconditions: Returns non-empty list of SearchQuery (fallback to brief if needed).
@@ -354,23 +371,31 @@ class ResearchAgent:
         logger.info("Fetched %s documents", len(documents))
         return documents
 
-    # Max chars of document content to send for scoring (avoids context overflow; response truncation handled by LLM client)
-    _SCORE_DOC_CONTENT_MAX_CHARS = 6000
-
     def _score_one_document(
         self,
         doc: SourceDocument,
         brief_input: ResearchBriefInput,
     ) -> Tuple[SourceDocument, float, float, float, str]:
         """Score a single document for relevance, authority, accuracy, and type. Used by _score_documents."""
-        excerpt = doc.content[: self._SCORE_DOC_CONTENT_MAX_CHARS]
+        # Budget: leave room for the prompt template (~2K), brief, and response tokens.
+        ctx_tokens = (
+            self.llm.get_max_context_tokens()
+            if hasattr(self.llm, "get_max_context_tokens")
+            else 16384
+        )
+        max_content_chars = int(
+            (ctx_tokens - 6000) * 3.5
+        )  # reserve 6K tokens for prompt + response
+        doc_content = compact_text(
+            doc.content or "", max_content_chars, self.llm, "document for scoring"
+        )
         prompt = (
             DOC_RELEVANCE_SCORING_PROMPT
             + "\n\n"
             + (
                 f"Brief:\n{brief_input.brief}\n\n"
                 f"Document title: {doc.title or ''}\n"
-                f"Document content (excerpt):\n{excerpt}\n"
+                f"Document content:\n{doc_content}\n"
             )
         )
         data = self.llm.complete_json(prompt, temperature=0.0)
@@ -389,7 +414,11 @@ class ResearchAgent:
         type_label = data.get("type") or None
         logger.debug(
             "Scored doc: title=%s, relevance=%s, authority=%s, accuracy=%s, type=%s",
-            doc.title, relevance, authority, accuracy, type_label,
+            doc.title,
+            relevance,
+            authority,
+            accuracy,
+            type_label,
         )
         return (doc, relevance, authority, accuracy, type_label)
 
@@ -410,14 +439,15 @@ class ResearchAgent:
             logger.info("No documents to score")
             return []
 
-        logger.info("Scoring %s documents for relevance, authority, and accuracy (parallel)...", n_docs)
+        logger.info(
+            "Scoring %s documents for relevance, authority, and accuracy (parallel)...", n_docs
+        )
         self._report_llm("Scoring documents for relevance...", 0.50)
 
         max_workers = min(n_docs, 8)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(self._score_one_document, doc, brief_input)
-                for doc in documents
+                executor.submit(self._score_one_document, doc, brief_input) for doc in documents
             ]
             scored = [fut.result() for fut in futures]
 
@@ -433,10 +463,16 @@ class ResearchAgent:
     ) -> ResearchReference:
         """Summarize a single document into a ResearchReference. Used by _summarize_documents."""
         doc, relevance, authority, accuracy, type_label = item
-        excerpt = doc.content[:8000]
-        prompt = DOC_SUMMARIZATION_PROMPT + "\n\n" + (
-            f"Brief:\n{brief_input.brief}\n"
+        ctx_tokens = (
+            self.llm.get_max_context_tokens()
+            if hasattr(self.llm, "get_max_context_tokens")
+            else 16384
         )
+        max_content_chars = int((ctx_tokens - 6000) * 3.5)
+        doc_content = compact_text(
+            doc.content or "", max_content_chars, self.llm, "document for summarization"
+        )
+        prompt = DOC_SUMMARIZATION_PROMPT + "\n\n" + (f"Brief:\n{brief_input.brief}\n")
         if brief_input.audience:
             prompt += f"Audience: {brief_input.audience}\n"
         if brief_input.tone_or_purpose:
@@ -444,7 +480,7 @@ class ResearchAgent:
         prompt += (
             f"\nDocument title: {doc.title or ''}\n"
             f"Document URL: {doc.url}\n"
-            f"Document excerpt:\n{excerpt}\n"
+            f"Document content:\n{doc_content}\n"
         )
         try:
             data = self.llm.complete_json(prompt, temperature=0.2)
@@ -457,7 +493,11 @@ class ResearchAgent:
                 type(e).__name__,
             )
             raw = (doc.content or "").strip()[:1200].replace("\n", " ")
-            summary = (raw[:600] + "…") if len(raw) > 600 else (raw or f"(Source: {doc.title or doc.url})")
+            summary = (
+                (raw[:600] + "…")
+                if len(raw) > 600
+                else (raw or f"(Source: {doc.title or doc.url})")
+            )
             key_points = []
         return ResearchReference(
             title=doc.title or str(doc.url),
@@ -494,8 +534,7 @@ class ResearchAgent:
         max_workers = min(cap, 8)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(self._summarize_one_document, item, brief_input)
-                for item in items
+                executor.submit(self._summarize_one_document, item, brief_input) for item in items
             ]
             references = [fut.result() for fut in futures]
 
@@ -529,9 +568,10 @@ class ResearchAgent:
                 }
             )
 
-        prompt = FINAL_SYNTHESIS_PROMPT + "\n\n" + (
-            f"Brief:\n{brief_input.brief}\n\n"
-            f"References (JSON):\n{refs_for_prompt}\n"
+        prompt = (
+            FINAL_SYNTHESIS_PROMPT
+            + "\n\n"
+            + (f"Brief:\n{brief_input.brief}\n\nReferences (JSON):\n{refs_for_prompt}\n")
         )
         self._report_llm("Synthesizing overview...", 0.78)
         try:
@@ -607,12 +647,15 @@ class ResearchAgent:
         if not references:
             return []
         refs_preview = "\n".join(
-            f"- {ref.title}: {ref.summary[:150]}..." if len(ref.summary) > 150 else f"- {ref.title}: {ref.summary}"
+            f"- {ref.title}: {ref.summary[:150]}..."
+            if len(ref.summary) > 150
+            else f"- {ref.title}: {ref.summary}"
             for ref in references[:5]
         )
-        prompt = SIMILAR_TOPICS_PROMPT + "\n\n" + (
-            f"Brief:\n{brief_input.brief}\n\n"
-            f"References found:\n{refs_preview}\n"
+        prompt = (
+            SIMILAR_TOPICS_PROMPT
+            + "\n\n"
+            + (f"Brief:\n{brief_input.brief}\n\nReferences found:\n{refs_preview}\n")
         )
         self._report_llm("Finding similar topics...", 0.90)
         try:
@@ -670,9 +713,14 @@ class ResearchAgent:
             summary_line = notes.replace("\n", " ").strip()[:2000]
             lines.append("- " + summary_line)
         else:
-            lines.append("- Summary of sources: " + (
-                f"Found {len(references)} web source(s) and {len(academic_papers)} academic paper(s) relevant to \"{brief_input.brief[:80]}...\"." if len(brief_input.brief) > 80 else f"Found {len(references)} web source(s) and {len(academic_papers)} academic paper(s) relevant to \"{brief_input.brief}\"."
-            ))
+            lines.append(
+                "- Summary of sources: "
+                + (
+                    f'Found {len(references)} web source(s) and {len(academic_papers)} academic paper(s) relevant to "{brief_input.brief[:80]}...".'
+                    if len(brief_input.brief) > 80
+                    else f'Found {len(references)} web source(s) and {len(academic_papers)} academic paper(s) relevant to "{brief_input.brief}".'
+                )
+            )
         lines.append("")
         lines.append("## Sources")
         lines.append("")
@@ -708,4 +756,3 @@ class ResearchAgent:
             lines.append("(No similar topics with score > 70%.)")
             lines.append("")
         return "\n".join(lines).strip()
-

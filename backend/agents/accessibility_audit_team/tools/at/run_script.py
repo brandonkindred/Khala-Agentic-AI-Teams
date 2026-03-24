@@ -13,9 +13,7 @@ class ATScript(BaseModel):
     """Assistive technology test script."""
 
     name: str = Field(..., description="Script name")
-    steps: List[str] = Field(
-        default_factory=list, description="Steps to execute"
-    )
+    steps: List[str] = Field(default_factory=list, description="Steps to execute")
 
 
 class ATStepResult(BaseModel):
@@ -41,9 +39,7 @@ class RunScriptInput(BaseModel):
     """Input for running an AT script."""
 
     audit_id: str = Field(..., description="Audit identifier")
-    surface: Literal["web", "ios", "android"] = Field(
-        ..., description="Platform surface"
-    )
+    surface: Literal["web", "ios", "android"] = Field(..., description="Platform surface")
     tool: Literal["nvda", "jaws", "voiceover", "talkback"] = Field(
         ..., description="Assistive technology to use"
     )

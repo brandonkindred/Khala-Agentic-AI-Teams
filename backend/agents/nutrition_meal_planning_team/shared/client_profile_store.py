@@ -39,7 +39,9 @@ def get_profile(client_id: str, storage_dir: Optional[Path] = None) -> Optional[
         return None
 
 
-def save_profile(client_id: str, profile: ClientProfile, storage_dir: Optional[Path] = None) -> None:
+def save_profile(
+    client_id: str, profile: ClientProfile, storage_dir: Optional[Path] = None
+) -> None:
     """Save client profile. Creates directory if needed."""
     directory = storage_dir or _default_storage_dir()
     directory.mkdir(parents=True, exist_ok=True)

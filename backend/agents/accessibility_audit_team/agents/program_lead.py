@@ -189,7 +189,7 @@ class AccessibilityProgramLead(BaseSpecialistAgent):
 
 ### Patterns Identified
 - **Total Patterns:** {len(patterns)}
-- **Systemic Issues:** {sum(1 for p in patterns if p.scope.value == 'Systemic')}
+- **Systemic Issues:** {sum(1 for p in patterns if p.scope.value == "Systemic")}
 
 ### Recommended Roadmap
 1. Address systemic patterns first (design system fixes)
@@ -250,8 +250,7 @@ class AccessibilityProgramLead(BaseSpecialistAgent):
 
         # Identify ready for report
         ready_for_report = [
-            f for f in sorted_findings
-            if f.confidence >= 0.6 and f.evidence_pack_ref
+            f for f in sorted_findings if f.confidence >= 0.6 and f.evidence_pack_ref
         ]
 
         return {

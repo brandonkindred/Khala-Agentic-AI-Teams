@@ -22,7 +22,11 @@ class UXEngineerAgent:
 
     def run(self, input_data: UXEngineerInput) -> UXEngineerOutput:
         """Review code for UX polish; return issues as code_review-style for implementation pass."""
-        logger.info("UX Engineer: reviewing %s chars for task %s", len(input_data.code or ""), input_data.task_id or "unknown")
+        logger.info(
+            "UX Engineer: reviewing %s chars for task %s",
+            len(input_data.code or ""),
+            input_data.task_id or "unknown",
+        )
         context_parts = [
             f"**Task:** {input_data.task_description}",
             "**Code to review:**",
@@ -39,13 +43,15 @@ class UXEngineerAgent:
         issues: List[Dict[str, Any]] = []
         for i in data.get("issues") or []:
             if isinstance(i, dict) and i.get("description"):
-                issues.append({
-                    "severity": i.get("severity", "medium"),
-                    "category": i.get("category", "ux"),
-                    "file_path": i.get("file_path", ""),
-                    "description": i["description"],
-                    "suggestion": i.get("suggestion", ""),
-                })
+                issues.append(
+                    {
+                        "severity": i.get("severity", "medium"),
+                        "category": i.get("category", "ux"),
+                        "file_path": i.get("file_path", ""),
+                        "description": i["description"],
+                        "suggestion": i.get("suggestion", ""),
+                    }
+                )
 
         critical_major = [x for x in issues if x.get("severity") in ("critical", "major")]
         approved = data.get("approved", len(critical_major) == 0)

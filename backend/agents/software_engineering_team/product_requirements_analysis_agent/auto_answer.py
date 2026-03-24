@@ -78,9 +78,7 @@ def _get_default_option(question: OpenQuestion) -> Optional[QuestionOption]:
         return default
 
     if question.options:
-        sorted_by_confidence = sorted(
-            question.options, key=lambda o: o.confidence, reverse=True
-        )
+        sorted_by_confidence = sorted(question.options, key=lambda o: o.confidence, reverse=True)
         return sorted_by_confidence[0]
 
     return None
@@ -198,9 +196,7 @@ def get_auto_answer_for_job(
         return None
 
     pending_questions = job_data.get("pending_questions", [])
-    question_data = next(
-        (q for q in pending_questions if q.get("id") == question_id), None
-    )
+    question_data = next((q for q in pending_questions if q.get("id") == question_id), None)
 
     if not question_data:
         logger.warning("Question %s not found in job %s", question_id, job_id)

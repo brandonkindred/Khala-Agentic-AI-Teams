@@ -1,6 +1,5 @@
 """Tests for the blog publication agent."""
 
-
 import pytest
 from blog_publication_agent import (
     BlogPublicationAgent,
@@ -18,7 +17,9 @@ def temp_blog_root(tmp_path):
 @pytest.fixture
 def agent(temp_blog_root):
     llm = DummyLLMClient()
-    return BlogPublicationAgent(llm_client=llm, blog_posts_root=temp_blog_root, max_revision_loops=2)
+    return BlogPublicationAgent(
+        llm_client=llm, blog_posts_root=temp_blog_root, max_revision_loops=2
+    )
 
 
 def test_submit_draft(agent, temp_blog_root) -> None:
@@ -70,7 +71,9 @@ def test_reject_and_revision_loop(agent, temp_blog_root) -> None:
         )
     )
 
-    rejection = agent.reject(result.submission_id, "The intro is too short.", force_ready_to_revise=True)
+    rejection = agent.reject(
+        result.submission_id, "The intro is too short.", force_ready_to_revise=True
+    )
     assert rejection.ready_to_revise
 
     draft_agent = BlogDraftAgent(llm_client=DummyLLMClient())

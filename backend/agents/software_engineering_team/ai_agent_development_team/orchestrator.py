@@ -34,7 +34,9 @@ class AIAgentDevelopmentTeamLead:
     def __init__(self, llm_client: LLMClient) -> None:
         self.llm = llm_client
 
-    def _build_tool_runners(self) -> Dict[ToolAgentKind, Callable[[ToolAgentInput], ToolAgentOutput]]:
+    def _build_tool_runners(
+        self,
+    ) -> Dict[ToolAgentKind, Callable[[ToolAgentInput], ToolAgentOutput]]:
         from .tool_agents.agent_runtime import AgentRuntimeToolAgent
         from .tool_agents.evaluation_harness import EvaluationHarnessToolAgent
         from .tool_agents.mcp_server_connectivity import MCPServerConnectivityToolAgent
@@ -67,7 +69,10 @@ class AIAgentDevelopmentTeamLead:
         for file_path in sorted(repo_path.rglob("*")):
             if not file_path.is_file() or file_path.suffix not in exts:
                 continue
-            if any(skip in file_path.parts for skip in (".git", "node_modules", "__pycache__", ".venv", "venv")):
+            if any(
+                skip in file_path.parts
+                for skip in (".git", "node_modules", "__pycache__", ".venv", "venv")
+            ):
                 continue
             text = file_path.read_text(encoding="utf-8", errors="replace")
             chunk = f"--- {file_path.relative_to(repo_path)} ---\n{text}\n"
@@ -104,7 +109,9 @@ class AIAgentDevelopmentTeamLead:
 
             result.current_phase = Phase.PLANNING
             _trace(Phase.PLANNING, "Planning microtasks")
-            planning = run_planning(llm=self.llm, task=task, intake_result=intake, spec_content=spec_content)
+            planning = run_planning(
+                llm=self.llm, task=task, intake_result=intake, spec_content=spec_content
+            )
             result.planning_result = planning
 
             result.current_phase = Phase.EXECUTION
@@ -131,7 +138,9 @@ class AIAgentDevelopmentTeamLead:
 
                 result.current_phase = Phase.PROBLEM_SOLVING
                 _trace(Phase.PROBLEM_SOLVING, f"Problem-solving iteration {i}")
-                problem_solving = run_problem_solving(execution_result=execution, review_result=review)
+                problem_solving = run_problem_solving(
+                    execution_result=execution, review_result=review
+                )
                 result.problem_solving_result = problem_solving
 
                 if not problem_solving.resolved:
@@ -145,13 +154,17 @@ class AIAgentDevelopmentTeamLead:
 
             if not result.review_result or not result.review_result.passed:
                 result.failure_reason = "Review did not pass after max iterations."
-                result.summary = result.review_result.summary if result.review_result else "Review failed"
+                result.summary = (
+                    result.review_result.summary if result.review_result else "Review failed"
+                )
                 result.needs_followup = True
                 return result
 
             result.current_phase = Phase.DELIVER
             _trace(Phase.DELIVER, "Preparing handoff package")
-            deliver = run_deliver(llm=self.llm, execution_result=execution, review_result=result.review_result)
+            deliver = run_deliver(
+                llm=self.llm, execution_result=execution, review_result=result.review_result
+            )
             result.deliver_result = deliver
             result.success = True
             result.summary = deliver.summary or "AI agent system blueprint generated."

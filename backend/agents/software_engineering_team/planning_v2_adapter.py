@@ -47,7 +47,10 @@ def adapt_planning_v2_result(
         ValueError: If result.success is False or required phase results are missing.
     """
     if not getattr(result, "success", False):
-        reason = getattr(result, "failure_reason", None) or "Planning-v2 workflow did not complete successfully."
+        reason = (
+            getattr(result, "failure_reason", None)
+            or "Planning-v2 workflow did not complete successfully."
+        )
         raise ValueError(reason)
 
     spec_review = getattr(result, "spec_review_result", None)
@@ -79,7 +82,9 @@ def adapt_planning_v2_result(
         if not acceptance_criteria and planning.milestones:
             acceptance_criteria.extend(planning.milestones)
 
-    description = "\n\n".join(description_parts) if description_parts else "See planning-v2 artifacts."
+    description = (
+        "\n\n".join(description_parts) if description_parts else "See planning-v2 artifacts."
+    )
     if not acceptance_criteria:
         acceptance_criteria = ["Deliver according to spec and planning artifacts."]
 

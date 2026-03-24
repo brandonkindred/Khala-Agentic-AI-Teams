@@ -6,7 +6,7 @@ import logging
 import re
 from typing import List, Tuple
 
-from llm_service import LLMClient
+from llm_service import LLMClient, compact_text
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_chunk_chars,
@@ -72,12 +72,6 @@ def build_chunks(blocks: List[Tuple[str, str]], max_chars: int) -> List[Tuple[Li
     return chunks
 
 
-def _truncate(s: str, max_chars: int) -> str:
-    if not s or len(s) <= max_chars:
-        return s or ""
-    return s[:max_chars] + "\n\n... [truncated]"
-
-
 def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOutput:
     """
     Split code into chunks, review each chunk, and merge results deterministically.
@@ -86,11 +80,15 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
     max_spec = compute_code_review_spec_excerpt_chars(llm)
     max_arch = compute_code_review_arch_overview_chars(llm)
     max_existing = compute_code_review_existing_codebase_chars(llm)
-    spec_content = _truncate(input_data.spec_content or "", max_spec)
+    spec_content = compact_text(input_data.spec_content or "", max_spec, llm, "specification")
     arch_overview = ""
     if input_data.architecture:
-        arch_overview = _truncate(input_data.architecture.overview or "", max_arch)
-    existing_codebase = _truncate(input_data.existing_codebase or "", max_existing)
+        arch_overview = compact_text(
+            input_data.architecture.overview or "", max_arch, llm, "architecture overview"
+        )
+    existing_codebase = compact_text(
+        input_data.existing_codebase or "", max_existing, llm, "existing codebase"
+    )
 
     max_chars_per_chunk = compute_code_review_chunk_chars(llm)
     blocks = parse_code_into_file_blocks(code)
@@ -149,9 +147,7 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
 
     # Safety net: same as main agent
     if not approved and not critical_or_major and deduped:
-        logger.info(
-            "CodeReviewCoordinator: overriding to approved=True (only minor/nit issues)"
-        )
+        logger.info("CodeReviewCoordinator: overriding to approved=True (only minor/nit issues)")
         approved = True
 
     merged_summary = "\n\n".join(s for s in summaries if s.strip())

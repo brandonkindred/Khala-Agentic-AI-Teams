@@ -21,6 +21,7 @@ def run_provisioning_activity(
     """Run the provisioning workflow. Converts access_tier_str to AccessTier."""
     try:
         from agent_provisioning_team.api.main import _run_provisioning_background
+
         access_tier = AccessTier(access_tier_str)
         _run_provisioning_background(job_id, agent_id, manifest_path, access_tier)
     except Exception:

@@ -28,13 +28,13 @@ class ToolProvisionerInterface(Protocol):
         access_tier: AccessTier,
     ) -> ToolProvisionResult:
         """Provision resources for the agent in this tool.
-        
+
         Args:
             agent_id: Unique identifier for the agent
             config: Tool-specific configuration from manifest
             credentials: Pre-generated credentials to use
             access_tier: Requested access tier
-        
+
         Returns:
             ToolProvisionResult with success status and details
         """
@@ -46,11 +46,11 @@ class ToolProvisionerInterface(Protocol):
         expected_tier: AccessTier,
     ) -> AccessVerification:
         """Verify the agent's access matches expected permissions.
-        
+
         Args:
             agent_id: Agent to verify
             expected_tier: Expected access tier
-        
+
         Returns:
             AccessVerification result
         """
@@ -58,10 +58,10 @@ class ToolProvisionerInterface(Protocol):
 
     def deprovision(self, agent_id: str) -> DeprovisionResult:
         """Remove agent's access and clean up resources.
-        
+
         Args:
             agent_id: Agent to deprovision
-        
+
         Returns:
             DeprovisionResult with success status
         """

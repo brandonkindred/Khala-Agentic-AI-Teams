@@ -26,9 +26,12 @@ logger = logging.getLogger(__name__)
 MAX_ACCESSIBILITY_CODE_CHARS = 12_000
 MAX_RELEVANT_CODE_CHARS = 8_000
 
-ACCESSIBILITY_REVIEW_PROMPT = """You are an expert Accessibility Engineer specializing in WCAG 2.2 compliance. Your job is to review frontend code and produce a list of well-defined accessibility issues for the coding agent to fix. You do NOT write fixes yourself – the coding agent implements them.
+ACCESSIBILITY_REVIEW_PROMPT = (
+    """You are an expert Accessibility Engineer specializing in WCAG 2.2 compliance. Your job is to review frontend code and produce a list of well-defined accessibility issues for the coding agent to fix. You do NOT write fixes yourself – the coding agent implements them.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 **Your expertise:**
 - WCAG 2.2 (Web Content Accessibility Guidelines) – Perceivable, Operable, Understandable, Robust
@@ -71,6 +74,7 @@ Respond with valid JSON only. No explanatory text outside JSON.
 **Code to review:**
 {code}
 """
+)
 
 
 def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) -> str:

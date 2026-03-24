@@ -86,7 +86,9 @@ def check_paragraph_length(draft: str, brand_spec: BrandSpec) -> CheckResult:
             continue
         count = _count_sentences(para)
         if count > 0 and (count < min_sent or count > max_sent):
-            bad_paragraphs.append({"index": i + 1, "sentence_count": count, "preview": para[:80] + "..."})
+            bad_paragraphs.append(
+                {"index": i + 1, "sentence_count": count, "preview": para[:80] + "..."}
+            )
 
     if bad_paragraphs:
         return CheckResult(
@@ -137,7 +139,9 @@ def check_required_sections(draft: str, brand_spec: BrandSpec) -> CheckResult:
         if m:
             headings.add(m.group(1).strip())
 
-    missing = [h for h in required if not any(h.lower() in existing.lower() for existing in headings)]
+    missing = [
+        h for h in required if not any(h.lower() in existing.lower() for existing in headings)
+    ]
     if missing:
         return CheckResult(
             name="required_sections",

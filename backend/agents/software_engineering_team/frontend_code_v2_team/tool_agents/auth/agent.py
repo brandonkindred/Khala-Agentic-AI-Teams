@@ -18,7 +18,9 @@ class AuthToolAgent:
         return ToolAgentOutput(summary="Auth stub — no changes applied.")
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(recommendations=["Consider login UI and auth guards."], summary="Auth planning stub.")
+        return ToolAgentPhaseOutput(
+            recommendations=["Consider login UI and auth guards."], summary="Auth planning stub."
+        )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(summary="Auth review stub.")

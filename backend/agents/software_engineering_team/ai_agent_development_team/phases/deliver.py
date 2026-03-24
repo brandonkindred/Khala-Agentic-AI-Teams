@@ -8,7 +8,9 @@ from ..models import DeliverResult, ExecutionResult, ReviewResult
 from ..prompts import DELIVER_PROMPT
 
 
-def run_deliver(*, llm: LLMClient, execution_result: ExecutionResult, review_result: ReviewResult) -> DeliverResult:
+def run_deliver(
+    *, llm: LLMClient, execution_result: ExecutionResult, review_result: ReviewResult
+) -> DeliverResult:
     prompt = (
         f"{DELIVER_PROMPT}\n\n"
         f"Execution summary: {execution_result.summary}\n"

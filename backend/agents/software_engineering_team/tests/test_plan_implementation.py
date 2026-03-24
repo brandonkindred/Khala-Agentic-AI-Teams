@@ -97,11 +97,13 @@ def test_integration_agent_exists_and_runs() -> None:
 
     llm = DummyLLMClient()
     agent = IntegrationAgent(llm)
-    result = agent.run(IntegrationInput(
-        backend_code="from fastapi import FastAPI\napp = FastAPI()\n@app.get('/api/tasks')",
-        frontend_code="this.http.get('/api/todos')",
-        spec_content="Task manager app",
-    ))
+    result = agent.run(
+        IntegrationInput(
+            backend_code="from fastapi import FastAPI\napp = FastAPI()\n@app.get('/api/tasks')",
+            frontend_code="this.http.get('/api/todos')",
+            spec_content="Task manager app",
+        )
+    )
     assert hasattr(result, "passed")
     assert hasattr(result, "issues")
     assert hasattr(result, "summary")
@@ -113,14 +115,16 @@ def test_acceptance_verifier_agent_exists_and_flags_unsatisfied() -> None:
 
     llm = DummyLLMClient()
     agent = AcceptanceVerifierAgent(llm)
-    result = agent.run(AcceptanceVerifierInput(
-        code="def foo(): pass",
-        task_description="Implement GET /api/users",
-        acceptance_criteria=[
-            "GET /api/users returns 200 with user list",
-            "POST /api/users creates a user",
-        ],
-    ))
+    result = agent.run(
+        AcceptanceVerifierInput(
+            code="def foo(): pass",
+            task_description="Implement GET /api/users",
+            acceptance_criteria=[
+                "GET /api/users returns 200 with user list",
+                "POST /api/users creates a user",
+            ],
+        )
+    )
     assert hasattr(result, "all_satisfied")
     assert hasattr(result, "per_criterion")
 

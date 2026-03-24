@@ -48,4 +48,3 @@ def test_run_blog_full_pipeline_job_marks_cancelled_on_temporal_cancel(monkeypat
     assert any(u.get("status") == "cancelled" for u in updates)
     assert any(u.get("status_text") == "Pipeline cancelled" for u in updates)
     assert fail_calls == []
-

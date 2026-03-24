@@ -25,7 +25,8 @@ def test_frontend_orchestrator_run_workflow_signature_matches_frontend_expert() 
 
     # Return type: both return FrontendWorkflowResult (from frontend_team.feature_agent.models)
     assert FrontendOrchestratorAgent.run_workflow.__annotations__.get("return") is None or (
-        "FrontendWorkflowResult" in str(FrontendOrchestratorAgent.run_workflow.__annotations__.get("return", ""))
+        "FrontendWorkflowResult"
+        in str(FrontendOrchestratorAgent.run_workflow.__annotations__.get("return", ""))
     )
 
 

@@ -20,6 +20,7 @@ def run_assistant_activity(
     """Run the assistant job (orchestrator handle_request with job updates)."""
     try:
         from personal_assistant_team.api.main import _run_assistant_job
+
         _run_assistant_job(job_id, user_id, message, context or {})
     except Exception:
         logger.exception("PA assistant activity failed for job %s", job_id)

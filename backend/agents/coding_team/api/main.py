@@ -78,7 +78,10 @@ def post_run(request: RunRequest) -> RunResponse:
     job_id = str(uuid.uuid4())
     create_job(job_id=job_id, repo_path=request.repo_path, plan_input=request.plan_input)
     if request.plan_input:
-        plan = CodingTeamPlanInput.model_validate({**request.plan_input, "repo_path": request.repo_path})
+        plan = CodingTeamPlanInput.model_validate(
+            {**request.plan_input, "repo_path": request.repo_path}
+        )
+
         def run() -> None:
             try:
                 run_coding_team_orchestrator(
@@ -92,6 +95,7 @@ def post_run(request: RunRequest) -> RunResponse:
             except Exception as e:
                 logger.exception("Coding team orchestrator failed: %s", e)
                 update_job(job_id, status="failed", error=str(e))
+
         t = threading.Thread(target=run, daemon=True)
         t.start()
     return RunResponse(job_id=job_id, status="pending")

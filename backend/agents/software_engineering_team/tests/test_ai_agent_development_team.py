@@ -97,12 +97,23 @@ def test_ai_agent_development_workflow_problem_solving(tmp_path: Path):
                 return {"summary": "done", "handoff_notes": [], "runbook": []}
             if "AI systems planner" in prompt:
                 return {
-                    "microtasks": [{"id": "mt-1", "title": "Only one", "description": "x", "tool_agent": "general"}],
+                    "microtasks": [
+                        {
+                            "id": "mt-1",
+                            "title": "Only one",
+                            "description": "x",
+                            "tool_agent": "general",
+                        }
+                    ],
                     "summary": "planned",
                 }
             if "spec intake specialist" in prompt:
                 return super().complete_json(prompt)
-            return {"files": {"ai_system/system_blueprint.md": "# blueprint"}, "recommendations": [], "summary": "partial"}
+            return {
+                "files": {"ai_system/system_blueprint.md": "# blueprint"},
+                "recommendations": [],
+                "summary": "partial",
+            }
 
     lead = AIAgentDevelopmentTeamLead(SparseLLM())
     result = lead.run_workflow(repo_path=tmp_path, task=_build_task(), spec_content="Spec text")

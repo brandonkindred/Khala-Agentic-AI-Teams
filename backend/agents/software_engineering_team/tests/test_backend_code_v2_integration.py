@@ -70,9 +70,27 @@ class TestTaskParsingBackendCodeV2:
     def test_execution_order_preserves_backend_code_v2(self):
         data = {
             "tasks": [
-                {"id": "bv2-1", "type": "backend", "assignee": "backend-code-v2", "description": "a", "dependencies": []},
-                {"id": "be-1", "type": "backend", "assignee": "backend", "description": "b", "dependencies": []},
-                {"id": "fe-1", "type": "frontend", "assignee": "frontend", "description": "c", "dependencies": []},
+                {
+                    "id": "bv2-1",
+                    "type": "backend",
+                    "assignee": "backend-code-v2",
+                    "description": "a",
+                    "dependencies": [],
+                },
+                {
+                    "id": "be-1",
+                    "type": "backend",
+                    "assignee": "backend",
+                    "description": "b",
+                    "dependencies": [],
+                },
+                {
+                    "id": "fe-1",
+                    "type": "frontend",
+                    "assignee": "frontend",
+                    "description": "c",
+                    "dependencies": [],
+                },
             ],
             "execution_order": ["bv2-1", "be-1", "fe-1"],
             "rationale": "",
@@ -102,8 +120,8 @@ class TestNoBackendAgentImports:
                 if "from backend_agent" in stripped or "import backend_agent" in stripped:
                     violations.append(f"{py_file.relative_to(team_dir)}:{i}: {stripped}")
 
-        assert not violations, (
-            "Found backend_agent imports in backend_code_v2_team:\n" + "\n".join(violations)
+        assert not violations, "Found backend_agent imports in backend_code_v2_team:\n" + "\n".join(
+            violations
         )
 
 
@@ -116,10 +134,12 @@ class TestOrchestratorRegistration:
         agents = _get_agents()
         assert "backend" in agents
         from backend_code_v2_team import BackendCodeV2TeamLead
+
         assert isinstance(agents["backend"], BackendCodeV2TeamLead)
         # Replaced standalone backend_code_v2 key with backend
         assert "backend_code_v2" not in agents
 
     def test_backend_code_v2_worker_exists(self):
         import orchestrator
+
         assert hasattr(orchestrator, "_backend_code_v2_worker")

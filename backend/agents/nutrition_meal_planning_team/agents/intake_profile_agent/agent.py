@@ -43,6 +43,7 @@ def _merge_profile_structural(
     data["client_id"] = client_id
     return ClientProfile.model_validate(data)
 
+
 SYSTEM_PROMPT = """You are an expert intake specialist for a personal nutrition and meal planning service.
 Your job is to take partial or full client information and produce a complete, consistent client profile as JSON.
 
@@ -93,7 +94,14 @@ class IntakeProfileAgent:
                 prompt,
                 temperature=0.2,
                 system_prompt=SYSTEM_PROMPT,
-                expected_keys=["household", "dietary_needs", "allergies_and_intolerances", "lifestyle", "preferences", "goals"],
+                expected_keys=[
+                    "household",
+                    "dietary_needs",
+                    "allergies_and_intolerances",
+                    "lifestyle",
+                    "preferences",
+                    "goals",
+                ],
             )
         except LLMJsonParseError as e:
             logger.warning("Intake profile JSON extraction failed: %s", e)

@@ -18,7 +18,10 @@ class ContainerizationAdapterAgent:
         return ToolAgentOutput(summary="Containerization stub — no changes applied.")
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
-        return ToolAgentPhaseOutput(recommendations=["Consider Dockerfile for frontend app."], summary="Containerization planning stub.")
+        return ToolAgentPhaseOutput(
+            recommendations=["Consider Dockerfile for frontend app."],
+            summary="Containerization planning stub.",
+        )
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         return ToolAgentPhaseOutput(summary="Containerization review stub.")

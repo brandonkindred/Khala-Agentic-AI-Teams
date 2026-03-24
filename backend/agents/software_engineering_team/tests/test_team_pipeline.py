@@ -1,6 +1,5 @@
 """Integration tests for the full software engineering team pipeline."""
 
-
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 from backend_agent import BackendExpertAgent, BackendInput
 from devops_agent import DevOpsExpertAgent, DevOpsInput

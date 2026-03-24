@@ -192,7 +192,7 @@ def run_research_and_planning(
         status_text="Generating content plan...",
     )
 
-    research_digest = build_research_digest(research_document)
+    research_digest = build_research_digest(research_document, llm=llm_client)
     planning_input = PlanningInput(
         brief=brief.brief,
         audience=brief.audience,
@@ -385,9 +385,7 @@ def _fill_story_placeholders(
             skipped_topics.append(gap.section_title)
             logger.info("Post-draft: user has no experience for '%s'", gap.section_title)
         elif result.narrative:
-            new_narratives.append(
-                f"[Story for section: {gap.section_title}]\n{result.narrative}"
-            )
+            new_narratives.append(f"[Story for section: {gap.section_title}]\n{result.narrative}")
             # Save to story bank for reuse across future posts
             try:
                 from shared.story_bank import save_story
@@ -443,7 +441,9 @@ def _fill_story_placeholders(
             **draft_input_kwargs,
             elicited_stories=(elicited_stories_text or "") + skip_instruction or None,
         )
-        draft_output_path = (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
+        draft_output_path = (
+            (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
+        )
         redraft_result = draft_agent.run(
             draft_input,
             on_llm_request=lambda msg: job_updater(phase="draft_initial", status_text=msg),
@@ -511,7 +511,7 @@ def run_pipeline(
         ComplianceError: If compliance check fails unrecoverably.
         FactCheckError: If fact check fails unrecoverably.
     """
-    
+
     def _update(
         phase: BlogPhase,
         sub_progress: float = 0.0,
@@ -532,7 +532,7 @@ def run_pipeline(
                 raise
             except Exception as e:
                 logger.warning("Failed to update job status: %s", e)
-    
+
     if llm_client is None:
         llm_client = get_client("blog")
 
@@ -692,7 +692,8 @@ def run_pipeline(
                     progress=30,
                     status_text=(
                         f"Story gathering complete: {len(collected_narratives)} narrative(s) collected"
-                        if collected_narratives else "Story gathering complete (no stories collected)"
+                        if collected_narratives
+                        else "Story gathering complete (no stories collected)"
                     ),
                 )
             else:
@@ -765,17 +766,23 @@ def run_pipeline(
             try:
                 draft_input = DraftInput(
                     research_document=research_document,
-                    research_references=research_result.references if research_result.references else None,
+                    research_references=research_result.references
+                    if research_result.references
+                    else None,
                     content_plan=plan,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
-                    allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
+                    allowed_claims=allowed_claims_data
+                    if isinstance(allowed_claims_data, dict)
+                    else None,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=selected_title or None,
                     elicited_stories=elicited_stories_text or None,
                 )
-                draft_output_path = (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
+                draft_output_path = (
+                    (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
+                )
                 draft_result = draft_agent.run(
                     draft_input,
                     on_llm_request=lambda msg: _update(BlogPhase.DRAFT_INITIAL, status_text=msg),
@@ -786,9 +793,13 @@ def run_pipeline(
             except CancelledError:
                 raise
             except Exception as e:
-                raise DraftError(f"Initial draft generation failed: {e}", iteration=iteration, cause=e) from e
+                raise DraftError(
+                    f"Initial draft generation failed: {e}", iteration=iteration, cause=e
+                ) from e
 
-            logger.info("Draft iteration %s: initial draft, length=%s", iteration, len(draft_result.draft))
+            logger.info(
+                "Draft iteration %s: initial draft, length=%s", iteration, len(draft_result.draft)
+            )
             _update(
                 BlogPhase.DRAFT_INITIAL,
                 sub_progress=1.0,
@@ -812,11 +823,15 @@ def run_pipeline(
                     draft_agent=draft_agent,
                     draft_input_kwargs=dict(
                         research_document=research_document,
-                        research_references=research_result.references if research_result.references else None,
+                        research_references=research_result.references
+                        if research_result.references
+                        else None,
                         content_plan=plan,
                         audience=brief.audience,
                         tone_or_purpose=brief.tone_or_purpose,
-                        allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
+                        allowed_claims=allowed_claims_data
+                        if isinstance(allowed_claims_data, dict)
+                        else None,
                         target_word_count=length_policy.target_word_count,
                         length_guidance=build_draft_length_instruction(length_policy),
                         selected_title=selected_title or None,
@@ -841,7 +856,9 @@ def run_pipeline(
                     draft=draft_result.draft,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
-                    previous_feedback_items=previous_feedback_items if previous_feedback_items else None,
+                    previous_feedback_items=previous_feedback_items
+                    if previous_feedback_items
+                    else None,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=length_policy.length_guidance,
                     soft_min_words=length_policy.soft_min_words,
@@ -851,7 +868,11 @@ def run_pipeline(
                     content_profile=length_policy.content_profile.value,
                     content_plan_context=content_plan_to_outline_markdown(plan),
                 )
-                feedback_path = (Path(work_dir) / f"editor_feedback_iter_{copy_edit_num}.json") if work_dir is not None else None
+                feedback_path = (
+                    (Path(work_dir) / f"editor_feedback_iter_{copy_edit_num}.json")
+                    if work_dir is not None
+                    else None
+                )
                 copy_editor_result = copy_editor_agent.run(
                     copy_editor_input,
                     on_llm_request=lambda msg: _update(BlogPhase.COPY_EDIT_LOOP, status_text=msg),
@@ -865,7 +886,9 @@ def run_pipeline(
                 )
 
                 if copy_editor_result.approved:
-                    logger.info("Copy editor approved draft at iteration %s, stopping loop.", copy_edit_num)
+                    logger.info(
+                        "Copy editor approved draft at iteration %s, stopping loop.", copy_edit_num
+                    )
                     _update(
                         BlogPhase.COPY_EDIT_LOOP,
                         sub_progress=1.0,
@@ -878,19 +901,27 @@ def run_pipeline(
                     draft=draft_result.draft,
                     feedback_items=copy_editor_result.feedback_items,
                     feedback_summary=copy_editor_result.summary,
-                    previous_feedback_items=previous_feedback_items if previous_feedback_items else None,
+                    previous_feedback_items=previous_feedback_items
+                    if previous_feedback_items
+                    else None,
                     research_document=research_document,
                     content_plan=plan,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
-                    allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
+                    allowed_claims=allowed_claims_data
+                    if isinstance(allowed_claims_data, dict)
+                    else None,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=selected_title or None,
                     elicited_stories=elicited_stories_text or None,
                 )
-                previous_feedback_items = previous_feedback_items + list(copy_editor_result.feedback_items)
-                draft_output_path = (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
+                previous_feedback_items = previous_feedback_items + list(
+                    copy_editor_result.feedback_items
+                )
+                draft_output_path = (
+                    (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
+                )
                 draft_result = draft_agent.revise(
                     revise_input,
                     on_llm_request=lambda msg: _update(BlogPhase.COPY_EDIT_LOOP, status_text=msg),
@@ -905,7 +936,9 @@ def run_pipeline(
                     raise
                 raise DraftError(f"Draft revision failed: {e}", iteration=iteration, cause=e) from e
 
-            logger.info("Draft iteration %s: revised, length=%s", iteration, len(draft_result.draft))
+            logger.info(
+                "Draft iteration %s: revised, length=%s", iteration, len(draft_result.draft)
+            )
     else:
         _update(
             BlogPhase.COPY_EDIT_LOOP,
@@ -918,7 +951,7 @@ def run_pipeline(
     if work_dir is not None:
         write_artifact(work_dir, "final.md", draft_result.draft)
         logger.info("Persisted final.md")
-        
+
     if work_dir is not None and run_gates:
         brand_spec_prompt_text = load_brand_spec_prompt(BRAND_SPEC_PROMPT_PATH)
         compliance_agent = BlogComplianceAgent(llm_client=llm_client)
@@ -933,12 +966,14 @@ def run_pipeline(
                 status_text=f"Running fact check (iteration {rewrite_iter + 1})...",
                 rewrite_iterations=rewrite_iter,
             )
-            
+
             try:
                 validator_report = run_validators_from_work_dir(work_dir)
                 fact_report = fact_check_agent.run(
                     draft_result.draft,
-                    allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
+                    allowed_claims=allowed_claims_data
+                    if isinstance(allowed_claims_data, dict)
+                    else None,
                     require_disclaimer_for=require_disclaimer_for,
                     work_dir=work_dir,
                     on_llm_request=lambda msg: _update(BlogPhase.FACT_CHECK, status_text=msg),
@@ -951,7 +986,7 @@ def run_pipeline(
                 if _is_external_cancellation(e):
                     raise
                 raise FactCheckError(f"Fact check failed: {e}", cause=e) from e
-            
+
             # Compliance phase
             _update(
                 BlogPhase.COMPLIANCE,
@@ -959,12 +994,14 @@ def run_pipeline(
                 status_text=f"Running compliance check (iteration {rewrite_iter + 1})...",
                 rewrite_iterations=rewrite_iter,
             )
-            
+
             try:
                 compliance_report = compliance_agent.run(
                     draft_result.draft,
                     brand_spec_prompt=brand_spec_prompt_text,
-                    validator_report=validator_report.model_dump() if hasattr(validator_report, "model_dump") else None,
+                    validator_report=validator_report.model_dump()
+                    if hasattr(validator_report, "model_dump")
+                    else None,
                     work_dir=work_dir,
                     on_llm_request=lambda msg: _update(BlogPhase.COMPLIANCE, status_text=msg),
                 )
@@ -986,13 +1023,13 @@ def run_pipeline(
             if all_pass:
                 status = "PASS"
                 logger.info("All gates PASS on rewrite iteration %s", rewrite_iter + 1)
-                
+
                 _update(
                     BlogPhase.FINALIZE,
                     sub_progress=0.5,
                     status_text="All checks passed, finalizing...",
                 )
-                
+
                 pack = PublishingPack(
                     title_options=[tc.title for tc in plan.title_candidates[:5]],
                     meta_description=draft_result.draft[:155].strip() or None,
@@ -1000,7 +1037,7 @@ def run_pipeline(
                 )
                 write_artifact(work_dir, "publishing_pack.json", pack.model_dump())
                 logger.info("Wrote publishing_pack.json")
-                
+
                 _update(
                     BlogPhase.FINALIZE,
                     sub_progress=1.0,
@@ -1028,7 +1065,7 @@ def run_pipeline(
                 status_text=f"Rewriting to address issues (iteration {rewrite_iter + 1}/{max_rewrite_iterations})...",
                 rewrite_iterations=rewrite_iter + 1,
             )
-            
+
             # --- Build feedback from ALL gates ---
             feedback_items: list[FeedbackItem] = []
 
@@ -1106,9 +1143,13 @@ def run_pipeline(
                 failed_checks = [c.name for c in validator_report.checks if c.status == "FAIL"]
                 gate_failures.append(f"Validator FAIL ({', '.join(failed_checks)})")
             if fact_report.claims_status == "FAIL" or fact_report.risk_status == "FAIL":
-                gate_failures.append(f"Fact-check FAIL (claims={fact_report.claims_status}, risk={fact_report.risk_status})")
+                gate_failures.append(
+                    f"Fact-check FAIL (claims={fact_report.claims_status}, risk={fact_report.risk_status})"
+                )
             if compliance_report.status == "FAIL":
-                gate_failures.append(f"Compliance FAIL ({len(compliance_report.violations)} violations)")
+                gate_failures.append(
+                    f"Compliance FAIL ({len(compliance_report.violations)} violations)"
+                )
             feedback_summary = "; ".join(gate_failures) if gate_failures else "Gates failed"
 
             try:
@@ -1120,7 +1161,9 @@ def run_pipeline(
                     content_plan=plan,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
-                    allowed_claims=allowed_claims_data if isinstance(allowed_claims_data, dict) else None,
+                    allowed_claims=allowed_claims_data
+                    if isinstance(allowed_claims_data, dict)
+                    else None,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=selected_title or None,
@@ -1139,7 +1182,9 @@ def run_pipeline(
             except Exception as e:
                 if _is_external_cancellation(e):
                     raise
-                raise DraftError(f"Rewrite revision failed: {e}", iteration=rewrite_iter + 1, cause=e) from e
+                raise DraftError(
+                    f"Rewrite revision failed: {e}", iteration=rewrite_iter + 1, cause=e
+                ) from e
 
             write_artifact(work_dir, "final.md", draft_result.draft)
             logger.info("Rewrite iteration %s: applied fixes, re-running gates", rewrite_iter + 1)
@@ -1166,7 +1211,9 @@ def main() -> None:
     )
 
     work_dir = Path(__file__).resolve().parent / "run_dir"
-    research_result, planning_phase_result, draft_result, status = run_pipeline(brief, work_dir=work_dir)
+    research_result, planning_phase_result, draft_result, status = run_pipeline(
+        brief, work_dir=work_dir
+    )
     plan = planning_phase_result.content_plan
 
     print("\n--- Title choices ---")

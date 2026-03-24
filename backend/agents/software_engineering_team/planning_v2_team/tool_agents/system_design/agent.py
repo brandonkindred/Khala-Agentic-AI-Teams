@@ -212,7 +212,7 @@ Complete updated file content here.
 class SystemDesignToolAgent:
     """
     System Design tool agent: component layout, system boundaries, integration points.
-    
+
     Participates in all 6 phases per the matrix.
     """
 
@@ -226,7 +226,7 @@ class SystemDesignToolAgent:
                 summary="System Design planning skipped (no LLM).",
                 recommendations=["Define component boundaries", "Identify integration points"],
             )
-        
+
         prior_analysis = ""
         if inp.spec_review_result:
             prior_analysis = getattr(inp.spec_review_result, "plan_summary", "") or ""
@@ -237,13 +237,15 @@ class SystemDesignToolAgent:
             prior_analysis=prior_analysis[:2000],
         )
         raw_text = complete_text_with_continuation(
-            self.llm, prompt, agent_name="SystemDesign",
+            self.llm,
+            prompt,
+            agent_name="SystemDesign",
         )
         data = parse_planning_tool_output(raw_text)
         recommendations = data.get("recommendations") or []
         if not isinstance(recommendations, list):
             recommendations = [str(recommendations)]
-        
+
         return ToolAgentPhaseOutput(
             summary=data.get("summary", "System design planning complete."),
             recommendations=recommendations,
@@ -260,16 +262,20 @@ class SystemDesignToolAgent:
         """
         if not self.llm:
             return ToolAgentPhaseOutput(summary="System Design execute skipped (no LLM).")
-        
+
         fixes_applied: List[str] = []
         files_written: List[str] = []
         current_files: Dict[str, str] = dict(inp.current_files or {})
-        
+
         design_issues = [
-            i for i in inp.review_issues
-            if any(kw in i.lower() for kw in ["design", "system", "diagram", "flow", "interface", "component"])
+            i
+            for i in inp.review_issues
+            if any(
+                kw in i.lower()
+                for kw in ["design", "system", "diagram", "flow", "interface", "component"]
+            )
         ]
-        
+
         if design_issues:
             logger.info(
                 "SystemDesign: handling %d review issue(s) (will apply fixes in one update and write to disk).",
@@ -297,7 +303,7 @@ class SystemDesignToolAgent:
                 "SystemDesign: fixed %d review issue(s) in one update (all fixes written to planning artifacts).",
                 len(design_issues),
             )
-        
+
         existing_design = (inp.current_files or {}).get(planning_asset_path("system_design.md"))
         if existing_design and not design_issues:
             return ToolAgentPhaseOutput(
@@ -306,11 +312,11 @@ class SystemDesignToolAgent:
                 recommendations=fixes_applied if fixes_applied else [],
                 files_written=[],
             )
-        
+
         component_design = inp.metadata.get("component_design", [])
         data_flow = inp.metadata.get("data_flow", "")
         integration_strategy = inp.metadata.get("integration_strategy", "")
-        
+
         content_parts = ["# System Design\n"]
         content_parts.append("## Components\n")
         for comp in component_design:
@@ -323,16 +329,18 @@ class SystemDesignToolAgent:
                 if deps:
                     content_parts.append(f"**Dependencies:** {', '.join(deps)}\n")
                 content_parts.append("\n")
-        
+
         if data_flow:
             content_parts.append("## Data Flow\n")
             content_parts.append(f"{data_flow}\n\n")
-        
+
         if integration_strategy:
             content_parts.append("## Integration Strategy\n")
             content_parts.append(f"{integration_strategy}\n\n")
-        
-        if (component_design or data_flow) and planning_asset_path("system_design.md") not in files_written:
+
+        if (component_design or data_flow) and planning_asset_path(
+            "system_design.md"
+        ) not in files_written:
             rel_path = planning_asset_path("system_design.md")
             content = "".join(content_parts)
             repo = Path(inp.repo_path or ".")
@@ -340,11 +348,11 @@ class SystemDesignToolAgent:
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content, encoding="utf-8")
             files_written.append(rel_path)
-        
+
         summary = "System design artifacts generated."
         if fixes_applied:
             summary = f"System design artifacts generated. Fixed {len(design_issues)} review issue(s) in one update."
-        
+
         return ToolAgentPhaseOutput(
             summary=summary,
             files={},
@@ -356,31 +364,32 @@ class SystemDesignToolAgent:
         """Review phase: check system design coherence."""
         if not self.llm:
             return ToolAgentPhaseOutput(summary="System Design review skipped (no LLM).")
-        
+
         artifacts = "\n".join(
-            f"--- {path} ---\n{content}"
-            for path, content in list(inp.current_files.items())[:10]
+            f"--- {path} ---\n{content}" for path, content in list(inp.current_files.items())[:10]
         )[:8000]
-        
+
         if not artifacts.strip():
             return ToolAgentPhaseOutput(
                 summary="System Design review skipped (no artifacts).",
                 issues=[],
             )
-        
+
         prompt = SYSTEM_DESIGN_REVIEW_PROMPT.format(artifacts=artifacts)
         raw_text = complete_text_with_continuation(
-            self.llm, prompt, agent_name="SystemDesign",
+            self.llm,
+            prompt,
+            agent_name="SystemDesign",
         )
         data = parse_review_output(raw_text)
         issues = data.get("issues") or []
         if not isinstance(issues, list):
             issues = [str(issues)] if issues else []
-        
+
         recommendations = data.get("recommendations") or []
         if not isinstance(recommendations, list):
             recommendations = [str(recommendations)] if recommendations else []
-        
+
         return ToolAgentPhaseOutput(
             summary=data.get("summary", "System design review complete."),
             issues=issues,
@@ -392,13 +401,16 @@ class SystemDesignToolAgent:
         if not self.llm:
             return ToolAgentPhaseOutput(summary="System Design problem_solve skipped (no LLM).")
 
-        design_issues = [i for i in inp.review_issues if "design" in i.lower() or "system" in i.lower()]
+        design_issues = [
+            i for i in inp.review_issues if "design" in i.lower() or "system" in i.lower()
+        ]
         if not design_issues:
             return ToolAgentPhaseOutput(summary="No system design issues to resolve.")
 
         result = self.fix_all_issues(design_issues, inp)
         return ToolAgentPhaseOutput(
-            summary=result.summary or f"System design: addressed {len(design_issues)} issue(s) in one update.",
+            summary=result.summary
+            or f"System design: addressed {len(design_issues)} issue(s) in one update.",
             recommendations=[result.summary] if result.summary else [],
             files=result.files or {},
             resolved=result.resolved or bool(result.files),
@@ -429,13 +441,17 @@ class SystemDesignToolAgent:
 
         prompt = SYSTEM_DESIGN_FIX_SINGLE_ISSUE_PROMPT.format(
             issue=issue,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="SystemDesign_FixSingleIssue",
+                self.llm,
+                prompt,
+                agent_name="SystemDesign_FixSingleIssue",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -452,11 +468,18 @@ class SystemDesignToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "SystemDesign_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "SystemDesign_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(system_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(system_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("system_design.md")] = updated_content
                         logger.info("SystemDesign: fix applied after continuation (single-issue).")
@@ -469,25 +492,44 @@ class SystemDesignToolAgent:
                     logger.info("SystemDesign: fix applied (single-issue) — %s", fix_desc[:120])
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
                         logger.info("SystemDesign: fix applied (single-issue) — %s", fix_desc[:120])
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "SystemDesign_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "SystemDesign_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(system_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(system_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("system_design.md")] = uc
                         logger.info("SystemDesign: fix applied after continuation (single-issue).")
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
-                                logger.info("SystemDesign: fix applied after continuation (single-issue).")
+                                logger.info(
+                                    "SystemDesign: fix applied after continuation (single-issue)."
+                                )
                                 break
                         else:
                             logger.warning(
@@ -508,9 +550,7 @@ class SystemDesignToolAgent:
                 resolved=False,
             )
 
-    def fix_all_issues(
-        self, issues: List[str], inp: ToolAgentPhaseInput
-    ) -> ToolAgentPhaseOutput:
+    def fix_all_issues(self, issues: List[str], inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Fix all listed system design issues in one LLM call."""
         if not issues:
             return ToolAgentPhaseOutput(
@@ -533,13 +573,17 @@ class SystemDesignToolAgent:
         issues_list = "\n".join(f"{i + 1}. {issue}" for i, issue in enumerate(issues))
         prompt = SYSTEM_DESIGN_FIX_ALL_ISSUES_PROMPT.format(
             issues_list=issues_list,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="SystemDesign_FixAllIssues",
+                self.llm,
+                prompt,
+                agent_name="SystemDesign_FixAllIssues",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -556,11 +600,18 @@ class SystemDesignToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "SystemDesign_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "SystemDesign_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(system_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(system_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("system_design.md")] = updated_content
                     else:
@@ -571,21 +622,38 @@ class SystemDesignToolAgent:
                     files[planning_asset_path("system_design.md")] = updated_content
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "SystemDesign_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "SystemDesign_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(system_design_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(system_design_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("system_design.md")] = uc
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
                                 break
                         else:
@@ -623,18 +691,20 @@ class SystemDesignToolAgent:
                 summary="System Design spec review skipped (no LLM).",
                 recommendations=["Review spec for component boundaries"],
             )
-        
+
         prompt = SYSTEM_DESIGN_SPEC_REVIEW_PROMPT.format(
             spec_content=(inp.spec_content or "")[:10000],
         )
         raw_text = complete_text_with_continuation(
-            self.llm, prompt, agent_name="SystemDesign",
+            self.llm,
+            prompt,
+            agent_name="SystemDesign",
         )
         data = parse_spec_review_output(raw_text)
         gaps = data.get("gaps") or []
         if not isinstance(gaps, list):
             gaps = [str(gaps)] if gaps else []
-        
+
         return ToolAgentPhaseOutput(
             summary=data.get("summary", "System design spec review complete."),
             issues=gaps,

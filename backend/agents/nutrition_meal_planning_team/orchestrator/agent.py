@@ -49,9 +49,7 @@ class NutritionMealPlanningOrchestrator:
         """Get client profile or None if not found."""
         return self.profile_store.get_profile(client_id)
 
-    def update_profile(
-        self, client_id: str, update: ProfileUpdateRequest
-    ) -> ClientProfile:
+    def update_profile(self, client_id: str, update: ProfileUpdateRequest) -> ClientProfile:
         """Validate/complete profile with intake agent and save."""
         current = self.profile_store.get_profile(client_id)
         if current is None:
@@ -76,9 +74,7 @@ class NutritionMealPlanningOrchestrator:
         if profile is None:
             raise ValueError("Profile not found")
         nutrition_plan = self.nutritionist_agent.run(profile)
-        meal_history = self.meal_feedback_store.get_meal_history(
-            request.client_id, limit=50
-        )
+        meal_history = self.meal_feedback_store.get_meal_history(request.client_id, limit=50)
         suggestions = self.meal_planning_agent.run(
             profile,
             nutrition_plan,
@@ -91,9 +87,7 @@ class NutritionMealPlanningOrchestrator:
             rec_id = self.meal_feedback_store.record_recommendation(
                 request.client_id, s.model_dump()
             )
-            with_ids.append(
-                MealRecommendationWithId(**s.model_dump(), recommendation_id=rec_id)
-            )
+            with_ids.append(MealRecommendationWithId(**s.model_dump(), recommendation_id=rec_id))
         return MealPlanResponse(client_id=request.client_id, suggestions=with_ids)
 
     def submit_feedback(self, request: FeedbackRequest) -> FeedbackResponse:
@@ -104,9 +98,7 @@ class NutritionMealPlanningOrchestrator:
             would_make_again=request.would_make_again,
             notes=request.notes,
         )
-        return FeedbackResponse(
-            recommendation_id=request.recommendation_id, recorded=ok
-        )
+        return FeedbackResponse(recommendation_id=request.recommendation_id, recorded=ok)
 
     def get_meal_history(self, client_id: str, limit: int = 100) -> MealHistoryResponse:
         """Return past recommendations and feedback for the client."""

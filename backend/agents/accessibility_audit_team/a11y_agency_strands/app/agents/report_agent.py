@@ -9,9 +9,7 @@ from .base import ToolContext, tool
 
 
 @tool(context=True)
-def run_reporting(
-    engagement_id: str, findings: list[dict], tool_context: ToolContext
-) -> dict:
+def run_reporting(engagement_id: str, findings: list[dict], tool_context: ToolContext) -> dict:
     backlog = export_backlog_csv(findings)
     report = ReportPackage(
         executive_summary="Executive summary",

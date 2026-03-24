@@ -55,8 +55,8 @@ def test_run_team_without_temporal_starts_thread(
         # Thread should have been constructed (target=_run_orchestrator_background)
         assert mock_thread_class.call_count >= 1
         found_orchestrator_thread = any(
-            (c[1].get("target") == _api_main._run_orchestrator_background) or
-            (c[0] and len(c[0]) >= 2 and c[0][0] == _api_main._run_orchestrator_background)
+            (c[1].get("target") == _api_main._run_orchestrator_background)
+            or (c[0] and len(c[0]) >= 2 and c[0][0] == _api_main._run_orchestrator_background)
             for c in mock_thread_class.call_args_list
         )
         assert found_orchestrator_thread
@@ -82,7 +82,8 @@ def test_run_team_with_temporal_starts_workflow(
         assert args[1] == str(temp_work_path)
         # No thread for orchestrator (thread_calls with target _run_orchestrator_background)
         orchestrator_thread_calls = [
-            c for c in mock_thread_class.call_args_list
+            c
+            for c in mock_thread_class.call_args_list
             if c[1].get("target") == _api_main._run_orchestrator_background
         ]
         assert len(orchestrator_thread_calls) == 0
@@ -101,14 +102,21 @@ def test_retry_failed_with_temporal_starts_workflow(
 
     job_id = "test-retry-job"
     create_job(job_id, str(temp_work_path), job_type="run_team")
-    update_job(job_id, status="failed", failed_tasks=[{"task_id": "t1"}], _all_tasks={"t1": {"id": "t1", "title": "T1"}})
+    update_job(
+        job_id,
+        status="failed",
+        failed_tasks=[{"task_id": "t1"}],
+        _all_tasks={"t1": {"id": "t1", "title": "T1"}},
+    )
 
     r = client.post(f"/run-team/{job_id}/retry-failed")
     assert r.status_code == 200
     mock_start_retry.assert_called_once_with(job_id)
 
 
-@patch("software_engineering_team.temporal.start_workflow.cancel_run_team_workflow", return_value=True)
+@patch(
+    "software_engineering_team.temporal.start_workflow.cancel_run_team_workflow", return_value=True
+)
 @patch("software_engineering_team.temporal.client.is_temporal_enabled", return_value=True)
 def test_cancel_with_temporal_cancels_workflow(
     mock_temporal_enabled: MagicMock,

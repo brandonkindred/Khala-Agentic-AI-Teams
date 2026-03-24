@@ -16,6 +16,7 @@ def run_meal_plan_activity(job_id: str, request_dict: Dict[str, Any]) -> None:
     try:
         from nutrition_meal_planning_team.api.main import _run_meal_plan_job
         from nutrition_meal_planning_team.models import MealPlanRequest
+
         body = MealPlanRequest(**request_dict)
         _run_meal_plan_job(job_id, body)
     except Exception:

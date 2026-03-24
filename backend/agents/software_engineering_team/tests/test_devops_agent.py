@@ -15,8 +15,19 @@ def test_devops_run_workflow_calls_plan_task_without_error() -> None:
     mock_llm = MagicMock()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.side_effect = [
-        {"feature_intent": "Containerize", "what_changes": ["Dockerfile"], "algorithms_data_structures": "", "tests_needed": ""},
-        {"pipeline_yaml": "", "dockerfile": "FROM node:20\nCMD [\"node\"]", "summary": "Done", "needs_clarification": False, "clarification_requests": []},
+        {
+            "feature_intent": "Containerize",
+            "what_changes": ["Dockerfile"],
+            "algorithms_data_structures": "",
+            "tests_needed": "",
+        },
+        {
+            "pipeline_yaml": "",
+            "dockerfile": 'FROM node:20\nCMD ["node"]',
+            "summary": "Done",
+            "needs_clarification": False,
+            "clarification_requests": [],
+        },
     ]
     agent = DevOpsExpertAgent(llm_client=mock_llm)
     build_verifier = MagicMock(return_value=(True, ""))
@@ -24,9 +35,15 @@ def test_devops_run_workflow_calls_plan_task_without_error() -> None:
         path = Path(tmp)
         (path / "package.json").write_text("{}")
         subprocess.run(["git", "init"], cwd=path, capture_output=True, check=False)
-        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=path, capture_output=True, check=False)
-        subprocess.run(["git", "config", "user.name", "T"], cwd=path, capture_output=True, check=False)
-        subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=path, capture_output=True, check=False)
+        subprocess.run(
+            ["git", "config", "user.email", "t@t.com"], cwd=path, capture_output=True, check=False
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "T"], cwd=path, capture_output=True, check=False
+        )
+        subprocess.run(
+            ["git", "config", "commit.gpgsign", "false"], cwd=path, capture_output=True, check=False
+        )
         result = agent.run_workflow(
             repo_path=path,
             task_description="Containerize frontend",

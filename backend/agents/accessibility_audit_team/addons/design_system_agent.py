@@ -213,36 +213,42 @@ class AccessibleDesignSystemAgent:
         if "focus_ring" in tokens:
             focus_ring = tokens["focus_ring"]
             if focus_ring.get("width", 0) < 2:
-                results.append(TokenCheckResult(
-                    token="focus_ring.width",
-                    problem="Focus ring width too thin",
-                    recommendation="Use at least 2px focus ring width",
-                    passes=False,
-                ))
+                results.append(
+                    TokenCheckResult(
+                        token="focus_ring.width",
+                        problem="Focus ring width too thin",
+                        recommendation="Use at least 2px focus ring width",
+                        passes=False,
+                    )
+                )
 
         # Check color tokens for contrast
         if "colors" in tokens:
             colors = tokens["colors"]
             for name, value in colors.items():
                 # Would calculate actual contrast in production
-                results.append(TokenCheckResult(
-                    token=f"colors.{name}",
-                    problem="",
-                    recommendation="",
-                    passes=True,
-                ))
+                results.append(
+                    TokenCheckResult(
+                        token=f"colors.{name}",
+                        problem="",
+                        recommendation="",
+                        passes=True,
+                    )
+                )
 
         # Check spacing for touch targets
         if "spacing" in tokens:
             spacing = tokens["spacing"]
             touch_target = spacing.get("touch_target_min", 0)
             if touch_target < 44:
-                results.append(TokenCheckResult(
-                    token="spacing.touch_target_min",
-                    problem=f"Touch target minimum ({touch_target}) below 44px",
-                    recommendation="Set touch_target_min to at least 44px",
-                    passes=False,
-                ))
+                results.append(
+                    TokenCheckResult(
+                        token="spacing.touch_target_min",
+                        problem=f"Touch target minimum ({touch_target}) below 44px",
+                        recommendation="Set touch_target_min to at least 44px",
+                        passes=False,
+                    )
+                )
 
         return results
 
@@ -263,41 +269,51 @@ class AccessibleDesignSystemAgent:
         component_lower = component.lower()
 
         if "button" in component_lower:
-            requirements.update({
-                "role": "button",
-                "activatable_via_enter_space": True,
-                "disabled_state_exposed": True,
-            })
+            requirements.update(
+                {
+                    "role": "button",
+                    "activatable_via_enter_space": True,
+                    "disabled_state_exposed": True,
+                }
+            )
 
         if "input" in component_lower or "field" in component_lower:
-            requirements.update({
-                "labeled_by_or_labelled": True,
-                "error_state_exposed": True,
-                "required_state_exposed": True,
-                "autocomplete_attribute": True,
-            })
+            requirements.update(
+                {
+                    "labeled_by_or_labelled": True,
+                    "error_state_exposed": True,
+                    "required_state_exposed": True,
+                    "autocomplete_attribute": True,
+                }
+            )
 
         if "modal" in component_lower or "dialog" in component_lower:
-            requirements.update({
-                "role": "dialog",
-                "focus_trap": True,
-                "return_focus_on_close": True,
-                "escape_closes": True,
-                "background_inert": True,
-            })
+            requirements.update(
+                {
+                    "role": "dialog",
+                    "focus_trap": True,
+                    "return_focus_on_close": True,
+                    "escape_closes": True,
+                    "background_inert": True,
+                }
+            )
 
         if "menu" in component_lower or "dropdown" in component_lower:
-            requirements.update({
-                "arrow_key_navigation": True,
-                "typeahead_search": True,
-                "escape_closes": True,
-            })
+            requirements.update(
+                {
+                    "arrow_key_navigation": True,
+                    "typeahead_search": True,
+                    "escape_closes": True,
+                }
+            )
 
         if "tab" in component_lower:
-            requirements.update({
-                "arrow_key_navigation": True,
-                "tab_panel_linked": True,
-            })
+            requirements.update(
+                {
+                    "arrow_key_navigation": True,
+                    "tab_panel_linked": True,
+                }
+            )
 
         return requirements
 
@@ -316,24 +332,30 @@ class AccessibleDesignSystemAgent:
         component_lower = component.lower()
 
         if "button" in component_lower:
-            base_tests.extend([
-                "click_via_keyboard_test",
-                "disabled_state_test",
-            ])
+            base_tests.extend(
+                [
+                    "click_via_keyboard_test",
+                    "disabled_state_test",
+                ]
+            )
 
         if "input" in component_lower:
-            base_tests.extend([
-                "label_association_test",
-                "error_announcement_test",
-                "autocomplete_test",
-            ])
+            base_tests.extend(
+                [
+                    "label_association_test",
+                    "error_announcement_test",
+                    "autocomplete_test",
+                ]
+            )
 
         if "modal" in component_lower:
-            base_tests.extend([
-                "focus_trap_test",
-                "escape_close_test",
-                "return_focus_test",
-            ])
+            base_tests.extend(
+                [
+                    "focus_trap_test",
+                    "escape_close_test",
+                    "return_focus_test",
+                ]
+            )
 
         return {
             "tests": base_tests,
@@ -382,24 +404,30 @@ class AccessibleDesignSystemAgent:
         component = contract.component.lower()
 
         if "button" in component:
-            mistakes.extend([
-                "Using div/span instead of button element",
-                "Missing keyboard event handlers on custom buttons",
-                "Icon-only buttons without accessible name",
-            ])
+            mistakes.extend(
+                [
+                    "Using div/span instead of button element",
+                    "Missing keyboard event handlers on custom buttons",
+                    "Icon-only buttons without accessible name",
+                ]
+            )
 
         if "input" in component:
-            mistakes.extend([
-                "Placeholder text as only label",
-                "Error messages not associated with input",
-                "Missing autocomplete attribute",
-            ])
+            mistakes.extend(
+                [
+                    "Placeholder text as only label",
+                    "Error messages not associated with input",
+                    "Missing autocomplete attribute",
+                ]
+            )
 
         if "modal" in component:
-            mistakes.extend([
-                "Focus not trapped in modal",
-                "Background content still interactive",
-                "Focus not returned on close",
-            ])
+            mistakes.extend(
+                [
+                    "Focus not trapped in modal",
+                    "Background content still interactive",
+                    "Focus not returned on close",
+                ]
+            )
 
         return mistakes

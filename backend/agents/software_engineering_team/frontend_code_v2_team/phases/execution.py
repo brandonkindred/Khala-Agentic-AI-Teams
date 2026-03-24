@@ -115,13 +115,32 @@ def run_execution(
     for idx, mt in enumerate(microtasks):
         deps_met = all(d in completed_ids for d in mt.depends_on)
         if not deps_met:
-            logger.warning("[%s] Microtask %s has unmet deps %s — running anyway", task.id, mt.id, mt.depends_on)
+            logger.warning(
+                "[%s] Microtask %s has unmet deps %s — running anyway",
+                task.id,
+                mt.id,
+                mt.depends_on,
+            )
 
         mt.status = MicrotaskStatus.IN_PROGRESS
-        logger.info("[%s] Execution: microtask %d/%d — %s (%s)", task.id, idx + 1, total, mt.id, mt.tool_agent.value)
+        logger.info(
+            "[%s] Execution: microtask %d/%d — %s (%s)",
+            task.id,
+            idx + 1,
+            total,
+            mt.id,
+            mt.tool_agent.value,
+        )
 
         if progress_callback:
-            progress_callback(idx + 1, len(completed_ids), total, mt.title or mt.id, "coding", "Generating code...")
+            progress_callback(
+                idx + 1,
+                len(completed_ids),
+                total,
+                mt.title or mt.id,
+                "coding",
+                "Generating code...",
+            )
 
         try:
             runner = runners.get(mt.tool_agent)
@@ -155,7 +174,9 @@ def run_execution(
             mt.notes = str(exc)
 
         if progress_callback:
-            progress_callback(idx + 1, len(completed_ids), total, mt.title or mt.id, "completed", "")
+            progress_callback(
+                idx + 1, len(completed_ids), total, mt.title or mt.id, "completed", ""
+            )
 
     summary = f"Executed {len(completed_ids)}/{total} microtasks; {len(all_files)} files produced."
     return ExecutionResult(files=all_files, microtasks=microtasks, summary=summary)
@@ -220,34 +241,61 @@ def run_execution_with_review_gates(
     total = len(microtasks)
 
     task_id = task.id
-    logger.info("[%s] Starting execution with batch review flow: %d microtasks, max_retries=%d, on_failure=%s",
-                task_id, total, config.max_retries, config.on_failure)
+    logger.info(
+        "[%s] Starting execution with batch review flow: %d microtasks, max_retries=%d, on_failure=%s",
+        task_id,
+        total,
+        config.max_retries,
+        config.on_failure,
+    )
 
     for idx, mt in enumerate(microtasks):
         deps_met = all(d in completed_ids for d in mt.depends_on)
         if not deps_met:
             unmet = [d for d in mt.depends_on if d not in completed_ids]
             if any(d in review_failed_ids for d in unmet):
-                logger.warning("[%s] Microtask %s depends on review-failed microtasks %s — skipping",
-                               task_id, mt.id, unmet)
+                logger.warning(
+                    "[%s] Microtask %s depends on review-failed microtasks %s — skipping",
+                    task_id,
+                    mt.id,
+                    unmet,
+                )
                 mt.status = MicrotaskStatus.SKIPPED
                 mt.notes = f"Skipped: depends on review-failed microtasks {unmet}"
                 continue
-            logger.warning("[%s] Microtask %s has unmet deps %s — running anyway", task_id, mt.id, unmet)
+            logger.warning(
+                "[%s] Microtask %s has unmet deps %s — running anyway", task_id, mt.id, unmet
+            )
 
         mt.status = MicrotaskStatus.IN_PROGRESS
-        logger.info("[%s] Execution: microtask %d/%d — %s (%s)", task_id, idx + 1, total, mt.id, mt.tool_agent.value)
+        logger.info(
+            "[%s] Execution: microtask %d/%d — %s (%s)",
+            task_id,
+            idx + 1,
+            total,
+            mt.id,
+            mt.tool_agent.value,
+        )
 
         current_idx = idx + 1
         current_phase = "coding"
 
         if progress_callback:
-            progress_callback(current_idx, len(completed_ids), total, mt.title or mt.id, "coding", "Generating code...")
+            progress_callback(
+                current_idx,
+                len(completed_ids),
+                total,
+                mt.title or mt.id,
+                "coding",
+                "Generating code...",
+            )
 
         def _detail_cb(detail: str, _idx: int = current_idx, _phase: str = current_phase) -> None:
             """Forward phase detail to progress callback."""
             if progress_callback:
-                progress_callback(_idx, len(completed_ids), total, mt.title or mt.id, _phase, detail)
+                progress_callback(
+                    _idx, len(completed_ids), total, mt.title or mt.id, _phase, detail
+                )
 
         # ── Phase 1: Coding ───────────────────────────────────────────────────
         try:
@@ -282,7 +330,9 @@ def run_execution_with_review_gates(
             mt.status = MicrotaskStatus.FAILED
             mt.notes = str(exc)
             if progress_callback:
-                progress_callback(current_idx, len(completed_ids), total, mt.title or mt.id, "completed", "")
+                progress_callback(
+                    current_idx, len(completed_ids), total, mt.title or mt.id, "completed", ""
+                )
             continue
 
         phase_failed = False
@@ -295,14 +345,26 @@ def run_execution_with_review_gates(
 
         while not phase_failed and total_cycles < max_total_cycles:
             total_cycles += 1
-            
+
             # ── Code Review Phase ─────────────────────────────────────────────
             mt.status = MicrotaskStatus.IN_REVIEW
             current_phase = "code_review"
-            logger.info("[%s] Microtask %s: Cycle %d - Running code review phase", task_id, mt.id, total_cycles)
+            logger.info(
+                "[%s] Microtask %s: Cycle %d - Running code review phase",
+                task_id,
+                mt.id,
+                total_cycles,
+            )
 
             if progress_callback:
-                progress_callback(current_idx, len(completed_ids), total, mt.title or mt.id, "code_review", f"Code review (cycle {total_cycles})...")
+                progress_callback(
+                    current_idx,
+                    len(completed_ids),
+                    total,
+                    mt.title or mt.id,
+                    "code_review",
+                    f"Code review (cycle {total_cycles})...",
+                )
 
             review_result = run_microtask_review(
                 llm=llm,
@@ -324,12 +386,22 @@ def run_execution_with_review_gates(
                 cr_retry += 1
                 logger.info(
                     "[%s] Microtask %s: Code review failed with %d issues. Batch fixing (attempt %d/%d)",
-                    task_id, mt.id, len(review_result.issues), cr_retry, config.max_retries,
+                    task_id,
+                    mt.id,
+                    len(review_result.issues),
+                    cr_retry,
+                    config.max_retries,
                 )
 
                 if progress_callback:
-                    progress_callback(current_idx, len(completed_ids), total, mt.title or mt.id, "code_review", 
-                                    f"Batch fixing {len(review_result.issues)} issues (attempt {cr_retry})...")
+                    progress_callback(
+                        current_idx,
+                        len(completed_ids),
+                        total,
+                        mt.title or mt.id,
+                        "code_review",
+                        f"Batch fixing {len(review_result.issues)} issues (attempt {cr_retry})...",
+                    )
 
                 ps_result = run_batch_coding_fixes(
                     llm=llm,
@@ -349,7 +421,14 @@ def run_execution_with_review_gates(
                 all_files.update(microtask_files)
 
                 if progress_callback:
-                    progress_callback(current_idx, len(completed_ids), total, mt.title or mt.id, "code_review", "Re-running code review...")
+                    progress_callback(
+                        current_idx,
+                        len(completed_ids),
+                        total,
+                        mt.title or mt.id,
+                        "code_review",
+                        "Re-running code review...",
+                    )
 
                 review_result = run_microtask_review(
                     llm=llm,
@@ -373,7 +452,10 @@ def run_execution_with_review_gates(
                 mt.notes = f"Code review failed after {config.max_retries} batch fix attempts: {review_result.summary}"
                 logger.warning(
                     "[%s] Microtask %s: CODE_REVIEW_FAILED after %d batch fix attempts. Issues: %s",
-                    task_id, mt.id, config.max_retries, review_result.summary[:200],
+                    task_id,
+                    mt.id,
+                    config.max_retries,
+                    review_result.summary[:200],
                 )
                 if config.on_failure == "stop":
                     raise MicrotaskReviewFailedError(mt, review_result)
@@ -381,10 +463,22 @@ def run_execution_with_review_gates(
 
             # ── QA Testing Phase ──────────────────────────────────────────────
             current_phase = "qa_testing"
-            logger.info("[%s] Microtask %s: Cycle %d - Running QA testing phase", task_id, mt.id, total_cycles)
+            logger.info(
+                "[%s] Microtask %s: Cycle %d - Running QA testing phase",
+                task_id,
+                mt.id,
+                total_cycles,
+            )
 
             if progress_callback:
-                progress_callback(current_idx, len(completed_ids), total, mt.title or mt.id, "qa_testing", f"QA testing (cycle {total_cycles})...")
+                progress_callback(
+                    current_idx,
+                    len(completed_ids),
+                    total,
+                    mt.title or mt.id,
+                    "qa_testing",
+                    f"QA testing (cycle {total_cycles})...",
+                )
 
             qa_review = run_microtask_review(
                 llm=llm,
@@ -405,12 +499,20 @@ def run_execution_with_review_gates(
             if qa_issues:
                 logger.info(
                     "[%s] Microtask %s: QA testing found %d issues. Batch fixing and restarting from code review.",
-                    task_id, mt.id, len(qa_issues),
+                    task_id,
+                    mt.id,
+                    len(qa_issues),
                 )
 
                 if progress_callback:
-                    progress_callback(current_idx, len(completed_ids), total, mt.title or mt.id, "qa_testing",
-                                    f"Batch fixing {len(qa_issues)} QA issues...")
+                    progress_callback(
+                        current_idx,
+                        len(completed_ids),
+                        total,
+                        mt.title or mt.id,
+                        "qa_testing",
+                        f"Batch fixing {len(qa_issues)} QA issues...",
+                    )
 
                 ps_result = run_batch_coding_fixes(
                     llm=llm,
@@ -434,10 +536,22 @@ def run_execution_with_review_gates(
 
             # ── Security Testing Phase ────────────────────────────────────────
             current_phase = "security_testing"
-            logger.info("[%s] Microtask %s: Cycle %d - Running security testing phase", task_id, mt.id, total_cycles)
+            logger.info(
+                "[%s] Microtask %s: Cycle %d - Running security testing phase",
+                task_id,
+                mt.id,
+                total_cycles,
+            )
 
             if progress_callback:
-                progress_callback(current_idx, len(completed_ids), total, mt.title or mt.id, "security_testing", f"Security testing (cycle {total_cycles})...")
+                progress_callback(
+                    current_idx,
+                    len(completed_ids),
+                    total,
+                    mt.title or mt.id,
+                    "security_testing",
+                    f"Security testing (cycle {total_cycles})...",
+                )
 
             sec_review = run_microtask_review(
                 llm=llm,
@@ -458,12 +572,20 @@ def run_execution_with_review_gates(
             if sec_issues:
                 logger.info(
                     "[%s] Microtask %s: Security testing found %d issues. Batch fixing and restarting from code review.",
-                    task_id, mt.id, len(sec_issues),
+                    task_id,
+                    mt.id,
+                    len(sec_issues),
                 )
 
                 if progress_callback:
-                    progress_callback(current_idx, len(completed_ids), total, mt.title or mt.id, "security_testing",
-                                    f"Batch fixing {len(sec_issues)} security issues...")
+                    progress_callback(
+                        current_idx,
+                        len(completed_ids),
+                        total,
+                        mt.title or mt.id,
+                        "security_testing",
+                        f"Batch fixing {len(sec_issues)} security issues...",
+                    )
 
                 ps_result = run_batch_coding_fixes(
                     llm=llm,
@@ -496,22 +618,39 @@ def run_execution_with_review_gates(
             mt.notes = f"Review cycles exhausted after {total_cycles} iterations"
             logger.warning(
                 "[%s] Microtask %s: REVIEW_FAILED - exhausted %d total cycles",
-                task_id, mt.id, total_cycles,
+                task_id,
+                mt.id,
+                total_cycles,
             )
             if config.on_failure == "stop":
-                raise MicrotaskReviewFailedError(mt, ReviewResult(passed=False, issues=[], summary="Max cycles exceeded"))
+                raise MicrotaskReviewFailedError(
+                    mt, ReviewResult(passed=False, issues=[], summary="Max cycles exceeded")
+                )
 
         # ── Phase 5: Documentation (Self-Review, Never Fails) ─────────────────
         if not phase_failed:
             mt.status = MicrotaskStatus.IN_DOCUMENTATION
             current_phase = "documentation"
-            logger.info("[%s] Microtask %s: Running documentation self-review (3-5 iterations)", task_id, mt.id)
+            logger.info(
+                "[%s] Microtask %s: Running documentation self-review (3-5 iterations)",
+                task_id,
+                mt.id,
+            )
 
             if progress_callback:
-                progress_callback(current_idx, len(completed_ids), total, mt.title or mt.id, "documentation", "Starting documentation self-review...")
+                progress_callback(
+                    current_idx,
+                    len(completed_ids),
+                    total,
+                    mt.title or mt.id,
+                    "documentation",
+                    "Starting documentation self-review...",
+                )
 
             # Generate initial documentation
-            doc_agent = deps.tool_agents.get(ToolAgentKind.DOCUMENTATION) if deps.tool_agents else None
+            doc_agent = (
+                deps.tool_agents.get(ToolAgentKind.DOCUMENTATION) if deps.tool_agents else None
+            )
             doc_files: Dict[str, str] = {}
             if doc_agent and hasattr(doc_agent, "document_microtask"):
                 try:
@@ -522,10 +661,19 @@ def run_execution_with_review_gates(
                     )
                     if doc_result.files:
                         doc_files = doc_result.files
-                        logger.info("[%s] Microtask %s: initial documentation generated %d file(s)", 
-                                    task_id, mt.id, len(doc_files))
+                        logger.info(
+                            "[%s] Microtask %s: initial documentation generated %d file(s)",
+                            task_id,
+                            mt.id,
+                            len(doc_files),
+                        )
                 except Exception as e:
-                    logger.warning("[%s] Microtask %s: initial documentation generation failed: %s", task_id, mt.id, e)
+                    logger.warning(
+                        "[%s] Microtask %s: initial documentation generation failed: %s",
+                        task_id,
+                        mt.id,
+                        e,
+                    )
 
             # Run self-review iterations
             self_review_result = run_documentation_self_review(
@@ -548,15 +696,25 @@ def run_execution_with_review_gates(
 
             logger.info(
                 "[%s] Microtask %s: documentation self-review complete after %d iterations (score: %.2f)",
-                task_id, mt.id, self_review_result.iterations, self_review_result.final_quality_score,
+                task_id,
+                mt.id,
+                self_review_result.iterations,
+                self_review_result.final_quality_score,
             )
 
             mt.status = MicrotaskStatus.COMPLETED
             completed_ids.add(mt.id)
-            logger.info("[%s] Microtask %s: COMPLETED (passed all review phases in %d cycles)", task_id, mt.id, total_cycles)
+            logger.info(
+                "[%s] Microtask %s: COMPLETED (passed all review phases in %d cycles)",
+                task_id,
+                mt.id,
+                total_cycles,
+            )
 
         if progress_callback:
-            progress_callback(current_idx, len(completed_ids), total, mt.title or mt.id, "completed", "")
+            progress_callback(
+                current_idx, len(completed_ids), total, mt.title or mt.id, "completed", ""
+            )
 
     completed_count = len(completed_ids)
     failed_count = len(review_failed_ids)

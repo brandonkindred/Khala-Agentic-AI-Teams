@@ -32,10 +32,13 @@ except ImportError:
 try:
     from shared.errors import FactCheckError, LLMError
 except ImportError:
+
     class FactCheckError(Exception):
         pass
+
     class LLMError(Exception):
         pass
+
 
 _MAX_JSON_RETRIES = 2
 
@@ -75,7 +78,10 @@ class BlogFactCheckAgent:
         require_disclaimer_for = require_disclaimer_for or ["medical", "legal", "financial"]
         claims_list = (allowed_claims or {}).get("claims") or []
         allowed_text = json.dumps(
-            [{"id": c.get("id"), "text": c.get("text"), "citations": c.get("citations", [])} for c in claims_list],
+            [
+                {"id": c.get("id"), "text": c.get("text"), "citations": c.get("citations", [])}
+                for c in claims_list
+            ],
             indent=2,
         )
 
@@ -102,7 +108,9 @@ class BlogFactCheckAgent:
             except LLMServiceJsonParseError as e:
                 logger.warning(
                     "Fact-check JSON parse failed (attempt %d/%d): %s",
-                    attempt + 1, _MAX_JSON_RETRIES, e,
+                    attempt + 1,
+                    _MAX_JSON_RETRIES,
+                    e,
                 )
                 continue
             except (LLMServiceError, LLMError):
@@ -148,7 +156,9 @@ class BlogFactCheckAgent:
         if work_dir and write_artifact:
             data = report.dict() if hasattr(report, "dict") else report.model_dump()
             write_artifact(work_dir, "fact_check_report.json", data)
-            logger.info("Wrote fact_check_report.json: claims=%s risk=%s", claims_status, risk_status)
+            logger.info(
+                "Wrote fact_check_report.json: claims=%s risk=%s", claims_status, risk_status
+            )
 
         return report
 

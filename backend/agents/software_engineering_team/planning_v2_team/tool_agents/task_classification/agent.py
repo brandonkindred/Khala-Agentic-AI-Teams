@@ -29,9 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _decompose_tasks_into_batches(
-    tasks_json: str, batch_size: int = 10
-) -> List[str]:
+def _decompose_tasks_into_batches(tasks_json: str, batch_size: int = 10) -> List[str]:
     """Decompose task list into smaller batches."""
     try:
         tasks = json.loads(tasks_json)
@@ -69,8 +67,8 @@ def _merge_task_classification_results(results: List[Dict[str, Any]]) -> Dict[st
         if r.get("summary"):
             summaries.append(str(r["summary"]))
 
-    merged["summary"] = (
-        f"Classified {len(merged['classifications'])} tasks. " + " ".join(summaries[:2])
+    merged["summary"] = f"Classified {len(merged['classifications'])} tasks. " + " ".join(
+        summaries[:2]
     )
     if merged["classifications"]:
         merged["classifications"] = dedupe_by_key(
@@ -78,6 +76,7 @@ def _merge_task_classification_results(results: List[Dict[str, Any]]) -> Dict[st
             key_fn=lambda x: x.get("task_id", "") if isinstance(x, dict) else str(x),
         )
     return merged
+
 
 TASK_CLASSIFICATION_PROMPT = """You are a Task Classification expert. Classify each task into one team: frontend, backend, devops, qa.
 
@@ -161,25 +160,27 @@ def _extract_tasks_from_hierarchy(hierarchy: Optional[PlanningHierarchy]) -> Lis
     """Extract all tasks from hierarchy for classification."""
     if not hierarchy:
         return []
-    
+
     tasks = []
     for init in hierarchy.initiatives:
         for epic in init.epics:
             for story in epic.stories:
                 for task in story.tasks:
-                    tasks.append({
-                        "id": task.id,
-                        "title": task.title,
-                        "description": task.description,
-                        "current_team": task.assignee or "",
-                    })
+                    tasks.append(
+                        {
+                            "id": task.id,
+                            "title": task.title,
+                            "description": task.description,
+                            "current_team": task.assignee or "",
+                        }
+                    )
     return tasks
 
 
 class TaskClassificationToolAgent:
     """
     Task Classification tool agent: classifies tasks into execution teams.
-    
+
     Participates in Implementation phase only per the matrix.
     """
 
@@ -188,7 +189,9 @@ class TaskClassificationToolAgent:
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Planning phase: Task Classification does not participate."""
-        return ToolAgentPhaseOutput(summary="Task Classification planning not applicable (per matrix).")
+        return ToolAgentPhaseOutput(
+            summary="Task Classification planning not applicable (per matrix)."
+        )
 
     def execute(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Implementation phase: classify tasks into teams or update existing classifications.
@@ -197,12 +200,24 @@ class TaskClassificationToolAgent:
         fixes_applied: List[str] = []
         files_written: List[str] = []
         current_files: Dict[str, str] = dict(inp.current_files or {})
-        
+
         classification_issues = [
-            i for i in inp.review_issues
-            if any(kw in i.lower() for kw in ["classification", "team assignment", "task team", "frontend", "backend", "devops", "qa"])
+            i
+            for i in inp.review_issues
+            if any(
+                kw in i.lower()
+                for kw in [
+                    "classification",
+                    "team assignment",
+                    "task team",
+                    "frontend",
+                    "backend",
+                    "devops",
+                    "qa",
+                ]
+            )
         ]
-        
+
         if classification_issues and self.llm:
             logger.info(
                 "TaskClassification: handling %d review issue(s) (will apply fixes in one update and write to disk).",
@@ -230,8 +245,12 @@ class TaskClassificationToolAgent:
                 "TaskClassification: fixed %d review issue(s) in one update (all fixes written to planning artifacts).",
                 len(classification_issues),
             )
-        
-        existing_doc = inp.current_files.get(planning_asset_path("task_classification.md")) if inp.current_files else None
+
+        existing_doc = (
+            inp.current_files.get(planning_asset_path("task_classification.md"))
+            if inp.current_files
+            else None
+        )
         if existing_doc and not classification_issues:
             return ToolAgentPhaseOutput(
                 summary="Task Classification artifacts unchanged (file exists, no review issues).",
@@ -249,28 +268,29 @@ class TaskClassificationToolAgent:
                 recommendations=fixes_applied if fixes_applied else [],
                 files_written=files_written,
             )
-        
+
         if not self.llm:
             return ToolAgentPhaseOutput(
                 summary="Task Classification execute skipped (no LLM).",
                 recommendations=["Classify tasks by team: frontend, backend, devops, qa"],
                 files_written=[],
             )
-        
+
         tasks = _extract_tasks_from_hierarchy(inp.hierarchy)
         if not tasks:
             return ToolAgentPhaseOutput(
                 summary="Task Classification skipped (no tasks to classify).",
                 files_written=[],
             )
-        
+
         tasks_text = "\n".join(
-            f"- {t['id']}: {t['title']} - {t['description'][:100]}"
-            for t in tasks[:50]
+            f"- {t['id']}: {t['title']} - {t['description'][:100]}" for t in tasks[:50]
         )
         prompt = TASK_CLASSIFICATION_PROMPT.format(tasks=tasks_text)
         raw_text = complete_text_with_continuation(
-            self.llm, prompt, agent_name="TaskClassification",
+            self.llm,
+            prompt,
+            agent_name="TaskClassification",
         )
         data = parse_task_classification_output(raw_text)
         classifications = data.get("classifications") or []
@@ -286,7 +306,7 @@ class TaskClassificationToolAgent:
             for team, count in team_summary.items():
                 content_parts.append(f"- **{team}:** {count} tasks\n")
             content_parts.append("\n")
-        
+
         if classifications:
             content_parts.append("## Classifications\n")
             for c in classifications:
@@ -296,7 +316,7 @@ class TaskClassificationToolAgent:
                     reason = c.get("reason", "")
                     content_parts.append(f"- **{task_id}** → {team}: {reason}\n")
             content_parts.append("\n")
-        
+
         if classifications:
             rel_path = planning_asset_path("task_classification.md")
             content = "".join(content_parts)
@@ -305,7 +325,7 @@ class TaskClassificationToolAgent:
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_text(content, encoding="utf-8")
             files_written.append(rel_path)
-        
+
         return ToolAgentPhaseOutput(
             summary=data.get("summary", f"Classified {len(classifications)} tasks."),
             files={},
@@ -334,7 +354,9 @@ class TaskClassificationToolAgent:
 
         current_artifact = ""
         if inp.current_files:
-            current_artifact = inp.current_files.get(planning_asset_path("task_classification.md"), "")
+            current_artifact = inp.current_files.get(
+                planning_asset_path("task_classification.md"), ""
+            )
             if not current_artifact:
                 for path, content in inp.current_files.items():
                     if "task_classification" in path.lower() or "classification" in path.lower():
@@ -343,13 +365,17 @@ class TaskClassificationToolAgent:
 
         prompt = TASK_CLASSIFICATION_FIX_SINGLE_ISSUE_PROMPT.format(
             issue=issue,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="TaskClassification_FixSingleIssue",
+                self.llm,
+                prompt,
+                agent_name="TaskClassification_FixSingleIssue",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -366,42 +392,76 @@ class TaskClassificationToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "TaskClassification_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "TaskClassification_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(task_classification_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(task_classification_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("task_classification.md")] = updated_content
-                        logger.info("TaskClassification: fix applied after continuation (single-issue).")
+                        logger.info(
+                            "TaskClassification: fix applied after continuation (single-issue)."
+                        )
                     else:
                         logger.warning(
                             "TaskClassification: fix output still truncated after continuation; not writing.",
                         )
                 else:
                     files[planning_asset_path("task_classification.md")] = updated_content
-                    logger.info("TaskClassification: fix applied (single-issue) — %s", fix_desc[:120])
+                    logger.info(
+                        "TaskClassification: fix applied (single-issue) — %s", fix_desc[:120]
+                    )
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
-                        logger.info("TaskClassification: fix applied (single-issue) — %s", fix_desc[:120])
+                        logger.info(
+                            "TaskClassification: fix applied (single-issue) — %s", fix_desc[:120]
+                        )
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "TaskClassification_FixSingleIssue",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "TaskClassification_FixSingleIssue",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(task_classification_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(task_classification_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("task_classification.md")] = uc
-                        logger.info("TaskClassification: fix applied after continuation (single-issue).")
+                        logger.info(
+                            "TaskClassification: fix applied after continuation (single-issue)."
+                        )
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
-                                logger.info("TaskClassification: fix applied after continuation (single-issue).")
+                                logger.info(
+                                    "TaskClassification: fix applied after continuation (single-issue)."
+                                )
                                 break
                         else:
                             logger.warning(
@@ -422,9 +482,7 @@ class TaskClassificationToolAgent:
                 resolved=False,
             )
 
-    def fix_all_issues(
-        self, issues: List[str], inp: ToolAgentPhaseInput
-    ) -> ToolAgentPhaseOutput:
+    def fix_all_issues(self, issues: List[str], inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Fix all listed task classification issues in one LLM call."""
         if not issues:
             return ToolAgentPhaseOutput(
@@ -439,7 +497,9 @@ class TaskClassificationToolAgent:
 
         current_artifact = ""
         if inp.current_files:
-            current_artifact = inp.current_files.get(planning_asset_path("task_classification.md"), "")
+            current_artifact = inp.current_files.get(
+                planning_asset_path("task_classification.md"), ""
+            )
             if not current_artifact:
                 for path, content in inp.current_files.items():
                     if "task_classification" in path.lower() or "classification" in path.lower():
@@ -449,13 +509,17 @@ class TaskClassificationToolAgent:
         issues_list = "\n".join(f"{i + 1}. {issue}" for i, issue in enumerate(issues))
         prompt = TASK_CLASSIFICATION_FIX_ALL_ISSUES_PROMPT.format(
             issues_list=issues_list,
-            current_artifact=current_artifact[:6000] if current_artifact else "(no existing artifact)",
+            current_artifact=current_artifact[:6000]
+            if current_artifact
+            else "(no existing artifact)",
             spec_excerpt=(inp.spec_content or "")[:3000],
         )
 
         try:
             raw_text = complete_text_with_continuation(
-                self.llm, prompt, agent_name="TaskClassification_FixAllIssues",
+                self.llm,
+                prompt,
+                agent_name="TaskClassification_FixAllIssues",
             )
             raw = parse_fix_output(raw_text)
             updated_content = raw.get("updated_content", "")
@@ -472,11 +536,18 @@ class TaskClassificationToolAgent:
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "TaskClassification_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "TaskClassification_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    updated_content = fu.get(task_classification_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    updated_content = (
+                        fu.get(task_classification_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if updated_content and not looks_like_truncated_file_content(updated_content):
                         files[planning_asset_path("task_classification.md")] = updated_content
                     else:
@@ -487,21 +558,38 @@ class TaskClassificationToolAgent:
                     files[planning_asset_path("task_classification.md")] = updated_content
             elif file_updates:
                 for path, content in file_updates.items():
-                    if content and isinstance(content, str) and content.strip() and not looks_like_truncated_file_content(content):
+                    if (
+                        content
+                        and isinstance(content, str)
+                        and content.strip()
+                        and not looks_like_truncated_file_content(content)
+                    ):
                         files[path] = content
                         break
                 else:
                     continued = attempt_fix_output_continuation(
-                        self.llm, prompt, raw_text, "TaskClassification_FixAllIssues",
+                        self.llm,
+                        prompt,
+                        raw_text,
+                        "TaskClassification_FixAllIssues",
                     )
                     raw = parse_fix_output(continued)
                     fu = raw.get("file_updates") or {}
-                    uc = fu.get(task_classification_path) or raw.get("updated_content", "") or next(iter(fu.values()), "")
+                    uc = (
+                        fu.get(task_classification_path)
+                        or raw.get("updated_content", "")
+                        or next(iter(fu.values()), "")
+                    )
                     if uc and not looks_like_truncated_file_content(uc):
                         files[planning_asset_path("task_classification.md")] = uc
                     else:
                         for p, c in fu.items():
-                            if c and isinstance(c, str) and c.strip() and not looks_like_truncated_file_content(c):
+                            if (
+                                c
+                                and isinstance(c, str)
+                                and c.strip()
+                                and not looks_like_truncated_file_content(c)
+                            ):
                                 files[p] = c
                                 break
                         else:
@@ -527,12 +615,18 @@ class TaskClassificationToolAgent:
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Review phase: Task Classification does not participate."""
-        return ToolAgentPhaseOutput(summary="Task Classification review not applicable (per matrix).")
+        return ToolAgentPhaseOutput(
+            summary="Task Classification review not applicable (per matrix)."
+        )
 
     def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Problem-solving phase: Task Classification does not participate."""
-        return ToolAgentPhaseOutput(summary="Task Classification problem_solve not applicable (per matrix).")
+        return ToolAgentPhaseOutput(
+            summary="Task Classification problem_solve not applicable (per matrix)."
+        )
 
     def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Deliver phase: Task Classification does not participate."""
-        return ToolAgentPhaseOutput(summary="Task Classification deliver not applicable (per matrix).")
+        return ToolAgentPhaseOutput(
+            summary="Task Classification deliver not applicable (per matrix)."
+        )

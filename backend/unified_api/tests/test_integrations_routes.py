@@ -162,19 +162,25 @@ def test_build_medium_config_response_defaults_to_google_provider():
 
 def test_list_integrations_returns_200():
     """GET /api/integrations returns HTTP 200."""
-    with patch(f"{_STORE_MODULE}.get_integrations_list", return_value=[
-        {"id": "slack", "type": "slack", "enabled": False, "channel": None},
-        {"id": "medium", "type": "medium", "enabled": False, "channel": None},
-    ]):
+    with patch(
+        f"{_STORE_MODULE}.get_integrations_list",
+        return_value=[
+            {"id": "slack", "type": "slack", "enabled": False, "channel": None},
+            {"id": "medium", "type": "medium", "enabled": False, "channel": None},
+        ],
+    ):
         resp = client.get("/api/integrations")
     assert resp.status_code == 200
 
 
 def test_list_integrations_returns_list():
     """GET /api/integrations returns a JSON list."""
-    with patch(f"{_STORE_MODULE}.get_integrations_list", return_value=[
-        {"id": "slack", "type": "slack", "enabled": False, "channel": None},
-    ]):
+    with patch(
+        f"{_STORE_MODULE}.get_integrations_list",
+        return_value=[
+            {"id": "slack", "type": "slack", "enabled": False, "channel": None},
+        ],
+    ):
         resp = client.get("/api/integrations")
     assert isinstance(resp.json(), list)
 
@@ -211,8 +217,10 @@ def test_get_slack_response_shape():
 
 def test_put_slack_disabled_requires_no_validation():
     """PUT /api/integrations/slack with enabled=False succeeds without url/token."""
-    with patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)), \
-         patch(f"{_STORE_MODULE}.set_slack_config"):
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)),
+        patch(f"{_STORE_MODULE}.set_slack_config"),
+    ):
         resp = client.put("/api/integrations/slack", json={"enabled": False, "mode": "webhook"})
     assert resp.status_code == 200
 
@@ -227,36 +235,47 @@ def test_put_slack_webhook_mode_requires_webhook_url():
 def test_put_slack_webhook_mode_rejects_non_slack_url():
     """PUT /api/integrations/slack rejects webhook_url not starting with hooks.slack.com."""
     with patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)):
-        resp = client.put("/api/integrations/slack", json={
-            "enabled": True,
-            "mode": "webhook",
-            "webhook_url": "https://evil.com/hook",
-        })
+        resp = client.put(
+            "/api/integrations/slack",
+            json={
+                "enabled": True,
+                "mode": "webhook",
+                "webhook_url": "https://evil.com/hook",
+            },
+        )
     assert resp.status_code == 400
 
 
 def test_put_slack_bot_mode_requires_default_channel():
     """PUT /api/integrations/slack with mode=bot, missing default_channel returns 400."""
     with patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)):
-        resp = client.put("/api/integrations/slack", json={
-            "enabled": True,
-            "mode": "bot",
-            "bot_token": "xoxb-some-token",
-            "default_channel": "",
-        })
+        resp = client.put(
+            "/api/integrations/slack",
+            json={
+                "enabled": True,
+                "mode": "bot",
+                "bot_token": "xoxb-some-token",
+                "default_channel": "",
+            },
+        )
     assert resp.status_code == 400
 
 
 def test_put_slack_bot_mode_accepts_valid_token_and_channel():
     """PUT /api/integrations/slack with mode=bot, valid token and channel returns 200."""
-    with patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)), \
-         patch(f"{_STORE_MODULE}.set_slack_config"):
-        resp = client.put("/api/integrations/slack", json={
-            "enabled": True,
-            "mode": "bot",
-            "bot_token": "xoxb-valid",
-            "default_channel": "#eng",
-        })
+    with (
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)),
+        patch(f"{_STORE_MODULE}.set_slack_config"),
+    ):
+        resp = client.put(
+            "/api/integrations/slack",
+            json={
+                "enabled": True,
+                "mode": "bot",
+                "bot_token": "xoxb-valid",
+                "default_channel": "#eng",
+            },
+        )
     assert resp.status_code == 200
 
 
@@ -275,8 +294,7 @@ def test_slack_oauth_connect_returns_400_when_client_id_missing():
 
 def test_slack_oauth_connect_returns_400_when_client_secret_missing():
     """GET /slack/oauth/connect returns 400 when Client Secret is not configured."""
-    with patch(f"{_STORE_MODULE}.get_slack_config",
-               return_value=dict(_DEFAULT_SLACK_CFG, client_id="my-id")):
+    with patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG, client_id="my-id")):
         resp = client.get("/api/integrations/slack/oauth/connect")
     assert resp.status_code == 400
     assert "Client Secret" in resp.json()["detail"]
@@ -284,9 +302,13 @@ def test_slack_oauth_connect_returns_400_when_client_secret_missing():
 
 def test_slack_oauth_connect_returns_url_and_client_id():
     """GET /slack/oauth/connect returns the Slack authorization URL and client_id."""
-    with patch(f"{_STORE_MODULE}.get_slack_config",
-               return_value=dict(_DEFAULT_SLACK_CFG, client_id="cid-123", client_secret="csec")), \
-         patch(f"{_STORE_MODULE}.generate_oauth_state", return_value="test-state-xyz"):
+    with (
+        patch(
+            f"{_STORE_MODULE}.get_slack_config",
+            return_value=dict(_DEFAULT_SLACK_CFG, client_id="cid-123", client_secret="csec"),
+        ),
+        patch(f"{_STORE_MODULE}.generate_oauth_state", return_value="test-state-xyz"),
+    ):
         resp = client.get("/api/integrations/slack/oauth/connect")
     assert resp.status_code == 200
     data = resp.json()
@@ -324,8 +346,10 @@ def test_slack_oauth_callback_redirects_on_invalid_state():
 
 def test_slack_oauth_callback_redirects_on_missing_credentials():
     """GET /slack/oauth/callback redirects with missing_credentials when store has no client_id."""
-    with patch(f"{_STORE_MODULE}.verify_and_clear_oauth_state", return_value=True), \
-         patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)):
+    with (
+        patch(f"{_STORE_MODULE}.verify_and_clear_oauth_state", return_value=True),
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)),
+    ):
         resp = client.get("/api/integrations/slack/oauth/callback?code=abc&state=valid-state")
     assert resp.status_code in (302, 307)
     assert "missing_credentials" in resp.headers["location"]
@@ -339,11 +363,15 @@ def test_slack_oauth_callback_success_stores_token_and_redirects():
         "team": {"id": "T1", "name": "Acme"},
         "bot_user_id": "U1",
     }
-    with patch(f"{_STORE_MODULE}.verify_and_clear_oauth_state", return_value=True), \
-         patch(f"{_STORE_MODULE}.get_slack_config",
-               return_value=dict(_DEFAULT_SLACK_CFG, client_id="cid", client_secret="csec")), \
-         patch(f"{_STORE_MODULE}._exchange_code", return_value=mock_exchange), \
-         patch(f"{_STORE_MODULE}.set_slack_oauth_token") as mock_set_token:
+    with (
+        patch(f"{_STORE_MODULE}.verify_and_clear_oauth_state", return_value=True),
+        patch(
+            f"{_STORE_MODULE}.get_slack_config",
+            return_value=dict(_DEFAULT_SLACK_CFG, client_id="cid", client_secret="csec"),
+        ),
+        patch(f"{_STORE_MODULE}._exchange_code", return_value=mock_exchange),
+        patch(f"{_STORE_MODULE}.set_slack_oauth_token") as mock_set_token,
+    ):
         resp = client.get("/api/integrations/slack/oauth/callback?code=authcode&state=valid")
     assert resp.status_code in (302, 307)
     assert "slack_connected=1" in resp.headers["location"]
@@ -362,8 +390,10 @@ def test_slack_oauth_callback_success_stores_token_and_redirects():
 
 def test_slack_oauth_disconnect_calls_clear_and_returns_200():
     """DELETE /slack/oauth clears OAuth state and returns updated config."""
-    with patch(f"{_STORE_MODULE}.clear_slack_oauth"), \
-         patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)):
+    with (
+        patch(f"{_STORE_MODULE}.clear_slack_oauth"),
+        patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG)),
+    ):
         resp = client.delete("/api/integrations/slack/oauth")
     assert resp.status_code == 200
     assert resp.json()["enabled"] is False
@@ -376,8 +406,10 @@ def test_slack_oauth_disconnect_calls_clear_and_returns_200():
 
 def test_get_google_browser_login_status_returns_200():
     """GET /google-browser-login returns HTTP 200 with configured and storage_available."""
-    with patch(f"{_STORE_MODULE}.google_browser_login_credentials_configured", return_value=False), \
-         patch(f"{_STORE_MODULE}.google_browser_login_storage_available", return_value=False):
+    with (
+        patch(f"{_STORE_MODULE}.google_browser_login_credentials_configured", return_value=False),
+        patch(f"{_STORE_MODULE}.google_browser_login_storage_available", return_value=False),
+    ):
         resp = client.get("/api/integrations/google-browser-login")
     assert resp.status_code == 200
     data = resp.json()
@@ -387,8 +419,10 @@ def test_get_google_browser_login_status_returns_200():
 
 def test_put_google_browser_login_stores_credentials():
     """PUT /google-browser-login stores credentials and returns configured=True."""
-    with patch(f"{_STORE_MODULE}.set_google_browser_login_credentials"), \
-         patch(f"{_STORE_MODULE}.google_browser_login_storage_available", return_value=True):
+    with (
+        patch(f"{_STORE_MODULE}.set_google_browser_login_credentials"),
+        patch(f"{_STORE_MODULE}.google_browser_login_storage_available", return_value=True),
+    ):
         resp = client.put(
             "/api/integrations/google-browser-login",
             json={"email": "user@example.com", "password": "secret"},
@@ -399,8 +433,7 @@ def test_put_google_browser_login_stores_credentials():
 
 def test_put_google_browser_login_returns_400_on_validation_error():
     """PUT /google-browser-login propagates ValueError as HTTP 400."""
-    with patch(f"{_STORE_MODULE}.set_google_browser_login_credentials",
-               side_effect=ValueError("Invalid email")):
+    with patch(f"{_STORE_MODULE}.set_google_browser_login_credentials", side_effect=ValueError("Invalid email")):
         resp = client.put(
             "/api/integrations/google-browser-login",
             json={"email": "", "password": ""},
@@ -410,8 +443,9 @@ def test_put_google_browser_login_returns_400_on_validation_error():
 
 def test_put_google_browser_login_returns_503_when_storage_unavailable():
     """PUT /google-browser-login propagates RuntimeError (no Postgres) as HTTP 503."""
-    with patch(f"{_STORE_MODULE}.set_google_browser_login_credentials",
-               side_effect=RuntimeError("POSTGRES_HOST is not set")):
+    with patch(
+        f"{_STORE_MODULE}.set_google_browser_login_credentials", side_effect=RuntimeError("POSTGRES_HOST is not set")
+    ):
         resp = client.put(
             "/api/integrations/google-browser-login",
             json={"email": "user@example.com", "password": "pw"},
@@ -421,8 +455,10 @@ def test_put_google_browser_login_returns_503_when_storage_unavailable():
 
 def test_delete_google_browser_login_returns_200():
     """DELETE /google-browser-login clears credentials and returns configured=False."""
-    with patch(f"{_STORE_MODULE}.clear_google_browser_login_credentials"), \
-         patch(f"{_STORE_MODULE}.google_browser_login_storage_available", return_value=True):
+    with (
+        patch(f"{_STORE_MODULE}.clear_google_browser_login_credentials"),
+        patch(f"{_STORE_MODULE}.google_browser_login_storage_available", return_value=True),
+    ):
         resp = client.delete("/api/integrations/google-browser-login")
     assert resp.status_code == 200
     assert resp.json()["configured"] is False
@@ -453,9 +489,10 @@ def test_get_medium_response_fields():
 
 def test_put_medium_saves_config():
     """PUT /medium saves the integration config and returns updated state."""
-    with patch(f"{_STORE_MODULE}.set_medium_config") as mock_set, \
-         patch(f"{_STORE_MODULE}.get_medium_config",
-               return_value=dict(_DEFAULT_MEDIUM_CFG, enabled=True)):
+    with (
+        patch(f"{_STORE_MODULE}.set_medium_config") as mock_set,
+        patch(f"{_STORE_MODULE}.get_medium_config", return_value=dict(_DEFAULT_MEDIUM_CFG, enabled=True)),
+    ):
         resp = client.put("/api/integrations/medium", json={"enabled": True, "oauth_provider": "google"})
     assert resp.status_code == 200
     mock_set.assert_called_once()
@@ -468,28 +505,32 @@ def test_put_medium_saves_config():
 
 def test_medium_google_oauth_connect_returns_400_when_provider_not_google():
     """GET /medium/oauth/google/connect returns 400 when oauth_provider != google."""
-    with patch(f"{_STORE_MODULE}.get_medium_config",
-               return_value=dict(_DEFAULT_MEDIUM_CFG, oauth_provider="apple")):
+    with patch(f"{_STORE_MODULE}.get_medium_config", return_value=dict(_DEFAULT_MEDIUM_CFG, oauth_provider="apple")):
         resp = client.get("/api/integrations/medium/oauth/google/connect")
     assert resp.status_code == 400
 
 
 def test_medium_google_oauth_connect_returns_400_when_client_credentials_missing():
     """GET /medium/oauth/google/connect returns 400 when Google client credentials are absent."""
-    with patch(f"{_STORE_MODULE}.get_medium_config",
-               return_value=dict(_DEFAULT_MEDIUM_CFG, oauth_provider="google")):
+    with patch(f"{_STORE_MODULE}.get_medium_config", return_value=dict(_DEFAULT_MEDIUM_CFG, oauth_provider="google")):
         resp = client.get("/api/integrations/medium/oauth/google/connect")
     assert resp.status_code == 400
 
 
 def test_medium_google_oauth_connect_returns_auth_url():
     """GET /medium/oauth/google/connect returns a Google authorization URL."""
-    with patch(f"{_STORE_MODULE}.get_medium_config", return_value=dict(
-        _DEFAULT_MEDIUM_CFG,
-        oauth_provider="google",
-        google_client_id="gid",
-        google_client_secret="gsec",
-    )), patch(f"{_STORE_MODULE}.generate_medium_google_oauth_state", return_value="mg-state"):
+    with (
+        patch(
+            f"{_STORE_MODULE}.get_medium_config",
+            return_value=dict(
+                _DEFAULT_MEDIUM_CFG,
+                oauth_provider="google",
+                google_client_id="gid",
+                google_client_secret="gsec",
+            ),
+        ),
+        patch(f"{_STORE_MODULE}.generate_medium_google_oauth_state", return_value="mg-state"),
+    ):
         resp = client.get("/api/integrations/medium/oauth/google/connect")
     assert resp.status_code == 200
     assert "accounts.google.com" in resp.json()["url"]
@@ -525,17 +566,22 @@ def test_medium_google_oauth_callback_redirects_on_invalid_state():
 
 def test_medium_google_oauth_callback_success_stores_identity():
     """GET /medium/oauth/google/callback on success stores identity and redirects."""
-    with patch(f"{_STORE_MODULE}.verify_and_clear_medium_google_oauth_state", return_value=True), \
-         patch(f"{_STORE_MODULE}.get_medium_config", return_value=dict(
-             _DEFAULT_MEDIUM_CFG,
-             google_client_id="gid",
-             google_client_secret="gsec",
-         )), \
-         patch(f"{_STORE_MODULE}._exchange_google_oauth_code",
-               return_value={"access_token": "at", "refresh_token": "rt"}), \
-         patch(f"{_STORE_MODULE}._google_userinfo",
-               return_value={"email": "user@example.com", "name": "User"}), \
-         patch(f"{_STORE_MODULE}.set_medium_google_oauth_identity") as mock_set_id:
+    with (
+        patch(f"{_STORE_MODULE}.verify_and_clear_medium_google_oauth_state", return_value=True),
+        patch(
+            f"{_STORE_MODULE}.get_medium_config",
+            return_value=dict(
+                _DEFAULT_MEDIUM_CFG,
+                google_client_id="gid",
+                google_client_secret="gsec",
+            ),
+        ),
+        patch(
+            f"{_STORE_MODULE}._exchange_google_oauth_code", return_value={"access_token": "at", "refresh_token": "rt"}
+        ),
+        patch(f"{_STORE_MODULE}._google_userinfo", return_value={"email": "user@example.com", "name": "User"}),
+        patch(f"{_STORE_MODULE}.set_medium_google_oauth_identity") as mock_set_id,
+    ):
         resp = client.get("/api/integrations/medium/oauth/google/callback?code=c&state=valid")
     assert resp.status_code in (302, 307)
     assert "medium_google_connected=1" in resp.headers["location"]
@@ -553,8 +599,10 @@ def test_medium_google_oauth_callback_success_stores_identity():
 
 def test_medium_google_oauth_disconnect_returns_200():
     """DELETE /medium/oauth/google clears identity and returns updated config."""
-    with patch(f"{_STORE_MODULE}.clear_medium_google_oauth_identity"), \
-         patch(f"{_STORE_MODULE}.get_medium_config", return_value=dict(_DEFAULT_MEDIUM_CFG)):
+    with (
+        patch(f"{_STORE_MODULE}.clear_medium_google_oauth_identity"),
+        patch(f"{_STORE_MODULE}.get_medium_config", return_value=dict(_DEFAULT_MEDIUM_CFG)),
+    ):
         resp = client.delete("/api/integrations/medium/oauth/google")
     assert resp.status_code == 200
     assert resp.json()["oauth_identity_connected"] is False
@@ -567,9 +615,10 @@ def test_medium_google_oauth_disconnect_returns_200():
 
 def test_medium_import_session_stores_state():
     """POST /medium/session stores storage_state and returns updated config."""
-    with patch(f"{_STORE_MODULE}.set_medium_session_storage_state_json") as mock_set, \
-         patch(f"{_STORE_MODULE}.get_medium_config",
-               return_value=dict(_DEFAULT_MEDIUM_CFG, session_configured=True)):
+    with (
+        patch(f"{_STORE_MODULE}.set_medium_session_storage_state_json") as mock_set,
+        patch(f"{_STORE_MODULE}.get_medium_config", return_value=dict(_DEFAULT_MEDIUM_CFG, session_configured=True)),
+    ):
         resp = client.post(
             "/api/integrations/medium/session",
             json={"storage_state": {"cookies": [], "origins": []}},
@@ -587,9 +636,10 @@ def test_medium_import_session_returns_400_on_invalid_state():
 
 def test_medium_clear_session_returns_200():
     """DELETE /medium/session clears storage and returns session_configured=False."""
-    with patch(f"{_STORE_MODULE}.clear_medium_session_storage"), \
-         patch(f"{_STORE_MODULE}.get_medium_config",
-               return_value=dict(_DEFAULT_MEDIUM_CFG, session_configured=False)):
+    with (
+        patch(f"{_STORE_MODULE}.clear_medium_session_storage"),
+        patch(f"{_STORE_MODULE}.get_medium_config", return_value=dict(_DEFAULT_MEDIUM_CFG, session_configured=False)),
+    ):
         resp = client.delete("/api/integrations/medium/session")
     assert resp.status_code == 200
     assert resp.json()["session_configured"] is False

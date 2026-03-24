@@ -30,7 +30,9 @@ def test_market_research_run_endpoint_needs_human_decision() -> None:
 def test_market_research_run_endpoint_ready_for_execution_with_folder(tmp_path: Path) -> None:
     folder = tmp_path / "folder"
     folder.mkdir()
-    (folder / "one.txt").write_text("I am trying to automate onboarding.\nPain is manual steps.", encoding="utf-8")
+    (folder / "one.txt").write_text(
+        "I am trying to automate onboarding.\nPain is manual steps.", encoding="utf-8"
+    )
 
     response = client.post(
         "/market-research/run",

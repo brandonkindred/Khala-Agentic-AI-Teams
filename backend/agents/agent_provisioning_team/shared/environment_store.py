@@ -144,7 +144,7 @@ class EnvironmentStore:
     def list_all(self, status: Optional[str] = None) -> List[EnvironmentInfo]:
         """List all registered environments, optionally filtered by status."""
         environments: List[EnvironmentInfo] = []
-        
+
         with _lock:
             for env_file in self.storage_dir.glob("*.json"):
                 try:
@@ -154,7 +154,7 @@ class EnvironmentStore:
                         environments.append(env)
                 except (json.JSONDecodeError, KeyError):
                     continue
-        
+
         environments.sort(key=lambda e: e.created_at or "", reverse=True)
         return environments
 

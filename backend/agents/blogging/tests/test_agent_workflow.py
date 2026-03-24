@@ -111,4 +111,3 @@ def test_research_agent_run_end_to_end() -> None:
     assert "example.com" in result.compiled_document or "http" in result.compiled_document
     assert "-- " in result.compiled_document
     assert result.similar_topics or "Similar" in result.compiled_document
-

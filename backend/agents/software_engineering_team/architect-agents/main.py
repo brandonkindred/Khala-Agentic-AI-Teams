@@ -42,7 +42,9 @@ def main() -> int:
     else:
         spec_content = sys.stdin.read()
         if not spec_content.strip():
-            print("Error: No spec provided. Pass a file path or pipe spec to stdin.", file=sys.stderr)
+            print(
+                "Error: No spec provided. Pass a file path or pipe spec to stdin.", file=sys.stderr
+            )
             return 1
 
     output_dir = Path(

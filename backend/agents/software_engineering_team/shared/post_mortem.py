@@ -212,7 +212,9 @@ class PostMortemWriter:
         for i in range(shown):
             response = partial_responses[i]
             excerpt = self._truncate_text(response, max_per_response)
-            lines.append(f"**Response {i + 1}/{total}** ({len(response)} chars):\n```\n{excerpt}\n```\n")
+            lines.append(
+                f"**Response {i + 1}/{total}** ({len(response)} chars):\n```\n{excerpt}\n```\n"
+            )
 
         if total > shown:
             lines.append(f"*... and {total - shown} more responses not shown*\n")

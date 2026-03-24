@@ -17,9 +17,7 @@ DEFAULT_MAX_RECOMMENDATIONS = 15
 DEFAULT_MAX_ISSUES = 20
 
 
-def dedupe_strings(
-    items: List[str], similarity_threshold: float = 0.85
-) -> List[str]:
+def dedupe_strings(items: List[str], similarity_threshold: float = 0.85) -> List[str]:
     """Remove near-duplicate strings from a list based on string similarity.
 
     Uses SequenceMatcher to detect items that are variations of the same concern.

@@ -251,8 +251,7 @@ class WebAuditSpecialist(BaseSpecialistAgent):
             actual=actual,
             user_impact=user_impact,
             wcag_mappings=[
-                WCAGMapping(sc=sc, name="", confidence=0.8, rationale="")
-                for sc in wcag_scs
+                WCAGMapping(sc=sc, name="", confidence=0.8, rationale="") for sc in wcag_scs
             ],
             created_by="WAS",
         )

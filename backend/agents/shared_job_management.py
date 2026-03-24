@@ -117,9 +117,7 @@ class CentralJobManager:
                 data["last_heartbeat_at"] = now
             self._write(path, data)
 
-    def apply_to_job(
-        self, job_id: str, fn: Callable[[Dict[str, Any]], None]
-    ) -> None:
+    def apply_to_job(self, job_id: str, fn: Callable[[Dict[str, Any]], None]) -> None:
         """Atomically read job, call fn(data), write back. No-op if job does not exist."""
         with self._lock:
             path = self._job_file(job_id)
@@ -179,7 +177,11 @@ class CentralJobManager:
                     continue
                 if data.get(waiting_field):
                     continue
-                hb_raw = data.get("last_heartbeat_at") or data.get("updated_at") or data.get("created_at")
+                hb_raw = (
+                    data.get("last_heartbeat_at")
+                    or data.get("updated_at")
+                    or data.get("created_at")
+                )
                 try:
                     hb = datetime.fromisoformat(str(hb_raw))
                 except Exception:

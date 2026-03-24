@@ -43,9 +43,13 @@ def resolve_medium_stats_storage_state() -> Tuple[Optional[Dict[str, Any]], str,
         )
     except Exception as e:
         logger.warning("Medium integration modules unavailable: %s", e)
-        return None, "", (
-            "Medium integration is not available (run the Unified API from the backend repo "
-            "so unified_api is on PYTHONPATH)."
+        return (
+            None,
+            "",
+            (
+                "Medium integration is not available (run the Unified API from the backend repo "
+                "so unified_api is on PYTHONPATH)."
+            ),
         )
 
     cfg = get_medium_config()

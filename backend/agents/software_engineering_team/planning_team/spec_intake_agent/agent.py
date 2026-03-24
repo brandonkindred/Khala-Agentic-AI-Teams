@@ -67,7 +67,11 @@ def _format_assumptions_and_questions(assumptions: List[str], open_questions: Li
 
 def _format_acceptance_criteria_index(items: List[AcceptanceCriterionItem]) -> str:
     """Format acceptance criteria index as markdown."""
-    lines = ["# Acceptance Criteria Index\n", "Every requirement mapped to a stable ID and testable statement.\n", ""]
+    lines = [
+        "# Acceptance Criteria Index\n",
+        "Every requirement mapped to a stable ID and testable statement.\n",
+        "",
+    ]
     for item in items:
         lines.append(f"- **{item.id}:** {item.statement}")
     return "\n".join(lines) + "\n"
@@ -86,8 +90,13 @@ class SpecIntakeAgent:
     def run(self, input_data: SpecIntakeInput) -> SpecIntakeOutput:
         """Validate spec and produce lint report, glossary, assumptions, acceptance criteria index."""
         logger.info("Spec Intake: starting validation (%s chars)", len(input_data.spec_content))
-        prompt = SPEC_INTAKE_PROMPT + "\n\n---\n\n**Specification:**\n\n" + (
-            input_data.spec_content[:50000] + ("..." if len(input_data.spec_content) > 50000 else "")
+        prompt = (
+            SPEC_INTAKE_PROMPT
+            + "\n\n---\n\n**Specification:**\n\n"
+            + (
+                input_data.spec_content[:50000]
+                + ("..." if len(input_data.spec_content) > 50000 else "")
+            )
         )
         data: Dict[str, Any] = self.llm.complete_json(prompt, temperature=0.1) or {}
 
@@ -97,10 +106,12 @@ class SpecIntakeAgent:
             if isinstance(item, dict) and item.get("id") and item.get("statement"):
                 ac_index.append(AcceptanceCriterionItem(id=item["id"], statement=item["statement"]))
             elif isinstance(item, dict) and (item.get("id") or item.get("statement")):
-                ac_index.append(AcceptanceCriterionItem(
-                    id=item.get("id", f"REQ-{len(ac_index)+1:03d}"),
-                    statement=item.get("statement", str(item)),
-                ))
+                ac_index.append(
+                    AcceptanceCriterionItem(
+                        id=item.get("id", f"REQ-{len(ac_index) + 1:03d}"),
+                        statement=item.get("statement", str(item)),
+                    )
+                )
 
         # Build ProductRequirements for output
         constraints = data.get("constraints") or []
@@ -140,14 +151,20 @@ class SpecIntakeAgent:
         plan_dir = input_data.plan_dir
         if plan_dir is not None:
             plan_path = Path(plan_dir).resolve()
-            _write_artifact(plan_path, "spec_lint_report.md", _format_lint_report(output.spec_lint_report))
+            _write_artifact(
+                plan_path, "spec_lint_report.md", _format_lint_report(output.spec_lint_report)
+            )
             _write_artifact(plan_path, "glossary.md", _format_glossary(output.glossary))
             _write_artifact(
                 plan_path,
                 "assumptions_and_questions.md",
                 _format_assumptions_and_questions(output.assumptions, output.open_questions),
             )
-            _write_artifact(plan_path, "acceptance_criteria_index.md", _format_acceptance_criteria_index(output.acceptance_criteria_index))
+            _write_artifact(
+                plan_path,
+                "acceptance_criteria_index.md",
+                _format_acceptance_criteria_index(output.acceptance_criteria_index),
+            )
 
         logger.info(
             "Spec Intake: done, %s REQ-IDs, %s glossary terms, %s assumptions",

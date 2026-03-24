@@ -1,6 +1,5 @@
 """Unit tests for deterministic validators."""
 
-
 import pytest
 from shared.brand_spec import BrandSpec, FormattingConfig, ReadabilityConfig, VoiceConfig
 from validators.checks import (

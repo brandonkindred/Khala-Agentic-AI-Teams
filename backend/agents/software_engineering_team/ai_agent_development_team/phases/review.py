@@ -22,7 +22,9 @@ def run_review(*, execution_result: ExecutionResult) -> ReviewResult:
                 )
             )
 
-    failed_microtasks = [m for m in execution_result.microtasks if m.status == MicrotaskStatus.FAILED]
+    failed_microtasks = [
+        m for m in execution_result.microtasks if m.status == MicrotaskStatus.FAILED
+    ]
     for mt in failed_microtasks:
         issues.append(
             ReviewIssue(

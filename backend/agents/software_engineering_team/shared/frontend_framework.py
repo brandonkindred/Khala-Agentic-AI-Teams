@@ -38,22 +38,22 @@ _ANGULAR_PATTERN = re.compile(
 def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
     """
     Detect frontend framework from existing project files.
-    
+
     Checks for:
     - angular.json -> Angular
     - package.json with @angular/core -> Angular
     - package.json with react -> React
     - package.json with vue -> Vue
-    
+
     Returns "angular", "react", "vue", or None if not detected.
     """
     if not repo_path or not repo_path.is_dir():
         return None
-    
+
     # Check for Angular-specific config file
     if (repo_path / "angular.json").exists():
         return "angular"
-    
+
     # Check package.json for framework dependencies
     pkg_path = repo_path / "package.json"
     if pkg_path.exists():
@@ -64,27 +64,27 @@ def detect_framework_from_project(repo_path: Optional[Path]) -> Optional[str]:
                 **pkg_data.get("dependencies", {}),
                 **pkg_data.get("devDependencies", {}),
             }
-            
+
             # Check for Angular
             if "@angular/core" in all_deps or "@angular/common" in all_deps:
                 return "angular"
-            
+
             # Check for React
             if "react" in all_deps or "react-dom" in all_deps:
                 return "react"
-            
+
             # Check for Vue
             if "vue" in all_deps:
                 return "vue"
         except (json.JSONDecodeError, Exception):
             pass
-    
+
     # Check for framework-specific files
     if (repo_path / "vue.config.js").exists() or (repo_path / "vite.config.ts").exists():
         # Could be React or Vue with Vite, check for Vue-specific markers
         for f in repo_path.rglob("*.vue"):
             return "vue"
-    
+
     return None
 
 
@@ -99,7 +99,7 @@ def get_frontend_framework_from_spec(spec_content: str) -> Optional[str]:
     if not spec_content or not spec_content.strip():
         return None
     text = spec_content[:_SPEC_SCAN_CHARS]
-    
+
     # Check for explicit framework mentions
     if _ANGULAR_PATTERN.search(text):
         return "angular"
@@ -127,15 +127,15 @@ def resolve_frontend_framework(
         normalized = str(from_meta).lower().strip()
         if normalized in ("react", "vue", "angular"):
             return normalized
-    
+
     # Check existing project files
     from_project = detect_framework_from_project(repo_path)
     if from_project:
         return from_project
-    
+
     # Check spec content
     from_spec = get_frontend_framework_from_spec(spec_content or "")
     if from_spec:
         return from_spec
-    
+
     return None

@@ -1,6 +1,5 @@
 """Tests for agent_provisioning_team models."""
 
-
 from agent_provisioning_team.models import (
     AccessTier,
     DeprovisionRequest,

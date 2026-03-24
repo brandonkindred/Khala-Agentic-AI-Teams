@@ -42,7 +42,10 @@ class TestTerraformExecutionToolAgent:
     def test_plan_pass(self, tmp_path: Path) -> None:
         (tmp_path / "main.tf").write_text("resource {}", encoding="utf-8")
         agent = TerraformExecutionToolAgent()
-        with patch("devops_team.tool_agents.terraform_execution.run_command", return_value=_cmd_result(True, stdout="Plan: 1 to add")):
+        with patch(
+            "devops_team.tool_agents.terraform_execution.run_command",
+            return_value=_cmd_result(True, stdout="Plan: 1 to add"),
+        ):
             result = agent.run(TerraformExecutionInput(repo_path=str(tmp_path), command="plan"))
         assert result.success
         assert result.checks["terraform_plan"] == "pass"
@@ -50,7 +53,10 @@ class TestTerraformExecutionToolAgent:
     def test_validate_fail(self, tmp_path: Path) -> None:
         (tmp_path / "main.tf").write_text("bad", encoding="utf-8")
         agent = TerraformExecutionToolAgent()
-        with patch("devops_team.tool_agents.terraform_execution.run_command", return_value=_cmd_result(False, 1, stderr="Error: invalid")):
+        with patch(
+            "devops_team.tool_agents.terraform_execution.run_command",
+            return_value=_cmd_result(False, 1, stderr="Error: invalid"),
+        ):
             result = agent.run(TerraformExecutionInput(repo_path=str(tmp_path), command="validate"))
         assert not result.success
         assert result.checks["terraform_validate"] == "fail"
@@ -65,7 +71,9 @@ class TestTerraformExecutionToolAgent:
     def test_apply_blocked_without_auto_approve(self, tmp_path: Path) -> None:
         (tmp_path / "main.tf").write_text("resource {}", encoding="utf-8")
         agent = TerraformExecutionToolAgent()
-        result = agent.run(TerraformExecutionInput(repo_path=str(tmp_path), command="apply", auto_approve=False))
+        result = agent.run(
+            TerraformExecutionInput(repo_path=str(tmp_path), command="apply", auto_approve=False)
+        )
         assert not result.success
         assert result.checks["terraform_apply"] == "blocked"
         assert result.failure_class == "safety_blocked"
@@ -73,8 +81,13 @@ class TestTerraformExecutionToolAgent:
     def test_apply_allowed_with_auto_approve(self, tmp_path: Path) -> None:
         (tmp_path / "main.tf").write_text("resource {}", encoding="utf-8")
         agent = TerraformExecutionToolAgent()
-        with patch("devops_team.tool_agents.terraform_execution.run_command", return_value=_cmd_result(True)):
-            result = agent.run(TerraformExecutionInput(repo_path=str(tmp_path), command="apply", auto_approve=True))
+        with patch(
+            "devops_team.tool_agents.terraform_execution.run_command",
+            return_value=_cmd_result(True),
+        ):
+            result = agent.run(
+                TerraformExecutionInput(repo_path=str(tmp_path), command="apply", auto_approve=True)
+            )
         assert result.success
 
 
@@ -87,7 +100,9 @@ class TestCDKExecutionToolAgent:
     def test_synth_pass(self, tmp_path: Path) -> None:
         (tmp_path / "cdk.json").write_text("{}", encoding="utf-8")
         agent = CDKExecutionToolAgent()
-        with patch("devops_team.tool_agents.cdk_execution.run_command", return_value=_cmd_result(True)):
+        with patch(
+            "devops_team.tool_agents.cdk_execution.run_command", return_value=_cmd_result(True)
+        ):
             result = agent.run(CDKExecutionInput(repo_path=str(tmp_path), command="synth"))
         assert result.success
         assert result.checks["cdk_synth"] == "pass"
@@ -101,7 +116,10 @@ class TestCDKExecutionToolAgent:
     def test_synth_fail(self, tmp_path: Path) -> None:
         (tmp_path / "cdk.json").write_text("{}", encoding="utf-8")
         agent = CDKExecutionToolAgent()
-        with patch("devops_team.tool_agents.cdk_execution.run_command", return_value=_cmd_result(False, 1, stderr="Synthesis error")):
+        with patch(
+            "devops_team.tool_agents.cdk_execution.run_command",
+            return_value=_cmd_result(False, 1, stderr="Synthesis error"),
+        ):
             result = agent.run(CDKExecutionInput(repo_path=str(tmp_path), command="synth"))
         assert not result.success
         assert result.failure_class == "execution"
@@ -116,8 +134,13 @@ class TestDockerComposeExecutionToolAgent:
     def test_config_pass(self, tmp_path: Path) -> None:
         (tmp_path / "docker-compose.yml").write_text("version: '3'", encoding="utf-8")
         agent = DockerComposeExecutionToolAgent()
-        with patch("devops_team.tool_agents.docker_compose_execution.run_command", return_value=_cmd_result(True)):
-            result = agent.run(DockerComposeExecutionInput(repo_path=str(tmp_path), command="config"))
+        with patch(
+            "devops_team.tool_agents.docker_compose_execution.run_command",
+            return_value=_cmd_result(True),
+        ):
+            result = agent.run(
+                DockerComposeExecutionInput(repo_path=str(tmp_path), command="config")
+            )
         assert result.success
         assert result.checks["compose_config"] == "pass"
 
@@ -130,8 +153,13 @@ class TestDockerComposeExecutionToolAgent:
     def test_config_fail(self, tmp_path: Path) -> None:
         (tmp_path / "compose.yaml").write_text("bad", encoding="utf-8")
         agent = DockerComposeExecutionToolAgent()
-        with patch("devops_team.tool_agents.docker_compose_execution.run_command", return_value=_cmd_result(False, 1, stderr="parse error")):
-            result = agent.run(DockerComposeExecutionInput(repo_path=str(tmp_path), command="config"))
+        with patch(
+            "devops_team.tool_agents.docker_compose_execution.run_command",
+            return_value=_cmd_result(False, 1, stderr="parse error"),
+        ):
+            result = agent.run(
+                DockerComposeExecutionInput(repo_path=str(tmp_path), command="config")
+            )
         assert not result.success
 
 
@@ -144,7 +172,10 @@ class TestHelmExecutionToolAgent:
     def test_template_pass(self, tmp_path: Path) -> None:
         (tmp_path / "Chart.yaml").write_text("apiVersion: v2\nname: test", encoding="utf-8")
         agent = HelmExecutionToolAgent()
-        with patch("devops_team.tool_agents.helm_execution.run_command", return_value=_cmd_result(True, stdout="---\napiVersion: v1")):
+        with patch(
+            "devops_team.tool_agents.helm_execution.run_command",
+            return_value=_cmd_result(True, stdout="---\napiVersion: v1"),
+        ):
             result = agent.run(HelmExecutionInput(repo_path=str(tmp_path), command="template"))
         assert result.success
         assert result.checks["helm_template"] == "pass"
@@ -159,7 +190,10 @@ class TestHelmExecutionToolAgent:
     def test_lint_fail(self, tmp_path: Path) -> None:
         (tmp_path / "Chart.yaml").write_text("apiVersion: v2", encoding="utf-8")
         agent = HelmExecutionToolAgent()
-        with patch("devops_team.tool_agents.helm_execution.run_command", return_value=_cmd_result(False, 1, stderr="Error: chart metadata missing")):
+        with patch(
+            "devops_team.tool_agents.helm_execution.run_command",
+            return_value=_cmd_result(False, 1, stderr="Error: chart metadata missing"),
+        ):
             result = agent.run(HelmExecutionInput(repo_path=str(tmp_path), command="lint"))
         assert not result.success
         assert result.failure_class == "execution"

@@ -59,7 +59,9 @@ class ClaimsPolicy(BaseModel):
 class SafetyConfig(BaseModel):
     """Safety and disclaimer requirements."""
 
-    require_disclaimer_for: List[str] = Field(default_factory=lambda: ["medical", "legal", "financial"])
+    require_disclaimer_for: List[str] = Field(
+        default_factory=lambda: ["medical", "legal", "financial"]
+    )
 
 
 class ContentRules(BaseModel):
@@ -92,6 +94,7 @@ class BrandSpec(BaseModel):
         if hasattr(self, "model_dump"):
             return self.model_dump(exclude_none=True)
         return self.dict(exclude_none=True)  # Pydantic v1
+
 
 _BRAND_SPEC_PROMPT_RELATIVE = Path("docs") / "brand_spec_prompt.md"
 _DEFAULT_MIN_CONFIGURED_CHARS = 400

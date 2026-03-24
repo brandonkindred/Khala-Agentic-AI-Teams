@@ -133,6 +133,8 @@ def build_test_spec_checklist(
             parts.append("**Route/component expectations (from app.routes.ts):**")
             parts.append(frontend_expectations)
             parts.append("")
-            parts.append("Ensure every referenced component path exists and exports the expected class.")
+            parts.append(
+                "Ensure every referenced component path exists and exports the expected class."
+            )
 
     return "\n".join(parts).strip() if parts else ""

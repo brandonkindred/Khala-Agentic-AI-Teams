@@ -69,7 +69,7 @@ class CredentialStore:
     ) -> None:
         """
         Initialize the credential store.
-        
+
         Args:
             storage_dir: Directory for storing encrypted credentials.
                         Defaults to .agent_cache/credentials/
@@ -91,7 +91,7 @@ class CredentialStore:
                 "Credentials will not persist across restarts!"
             )
             key = Fernet.generate_key().decode()
-        
+
         try:
             if isinstance(key, str):
                 key = key.encode()
@@ -116,15 +116,17 @@ class CredentialStore:
             decrypted = self.fernet.decrypt(encrypted_data)
             return json.loads(decrypted.decode())
         except InvalidToken as e:
-            raise CredentialStoreError("Failed to decrypt credentials. Key may have changed.") from e
+            raise CredentialStoreError(
+                "Failed to decrypt credentials. Key may have changed."
+            ) from e
 
     def _load_credentials(self, user_id: str) -> StoredCredentials:
         """Load credentials for a user."""
         file_path = self._get_user_file(user_id)
-        
+
         if not file_path.exists():
             return StoredCredentials(user_id=user_id)
-        
+
         try:
             encrypted_data = file_path.read_bytes()
             data = self._decrypt(encrypted_data)
@@ -137,7 +139,7 @@ class CredentialStore:
         """Save credentials for a user."""
         credentials.updated_at = datetime.utcnow().isoformat()
         file_path = self._get_user_file(credentials.user_id)
-        
+
         try:
             encrypted_data = self._encrypt(credentials.model_dump())
             file_path.write_bytes(encrypted_data)
@@ -152,27 +154,27 @@ class CredentialStore:
     ) -> None:
         """
         Store email credentials for a user.
-        
+
         Args:
             user_id: The user's ID
             credentials: OAuth or IMAP credentials
         """
         stored = self._load_credentials(user_id)
-        
+
         if isinstance(credentials, (OAuthCredentials, IMAPCredentials)):
             stored.email_credentials = credentials.model_dump()
         else:
             stored.email_credentials = credentials
-        
+
         self._save_credentials(stored)
 
     def get_email_credentials(self, user_id: str) -> Optional[Dict[str, Any]]:
         """
         Retrieve email credentials for a user.
-        
+
         Args:
             user_id: The user's ID
-            
+
         Returns:
             Email credentials dict or None if not found
         """
@@ -186,12 +188,12 @@ class CredentialStore:
     ) -> None:
         """Store calendar API credentials for a user."""
         stored = self._load_credentials(user_id)
-        
+
         if isinstance(credentials, OAuthCredentials):
             stored.calendar_credentials = credentials.model_dump()
         else:
             stored.calendar_credentials = credentials
-        
+
         self._save_credentials(stored)
 
     def get_calendar_credentials(self, user_id: str) -> Optional[Dict[str, Any]]:
@@ -207,7 +209,7 @@ class CredentialStore:
     ) -> None:
         """
         Store arbitrary credentials for a service.
-        
+
         Args:
             user_id: The user's ID
             service_name: Name of the service (e.g., "openai", "twilio")
@@ -225,16 +227,16 @@ class CredentialStore:
     def delete_credentials(self, user_id: str, service_name: Optional[str] = None) -> bool:
         """
         Delete credentials.
-        
+
         Args:
             user_id: The user's ID
             service_name: Specific service to delete, or None to delete all
-            
+
         Returns:
             True if deletion was successful
         """
         stored = self._load_credentials(user_id)
-        
+
         if service_name is None:
             file_path = self._get_user_file(user_id)
             if file_path.exists():
@@ -242,7 +244,7 @@ class CredentialStore:
                 logger.info("Deleted all credentials for user %s", user_id)
                 return True
             return False
-        
+
         if service_name == "email":
             stored.email_credentials = None
         elif service_name == "calendar":
@@ -251,7 +253,7 @@ class CredentialStore:
             del stored.other_credentials[service_name]
         else:
             return False
-        
+
         self._save_credentials(stored)
         return True
 

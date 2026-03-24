@@ -24,7 +24,11 @@ def test_npm_install_called_with_packages_from_frontend_output(tmp_path: Path) -
     )
     (tmp_path / "package.json").write_text('{"name": "test"}', encoding="utf-8")
 
-    with patch.object(command_runner_module, "run_command_with_nvm", return_value=CommandResult(success=True, exit_code=0, stdout="", stderr="")) as mock_nvm:
+    with patch.object(
+        command_runner_module,
+        "run_command_with_nvm",
+        return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
+    ) as mock_nvm:
         if result.npm_packages_to_install:
             install_cmd = ["npm", "install", "--save"] + result.npm_packages_to_install
             command_runner_module.run_command_with_nvm(install_cmd, cwd=tmp_path)

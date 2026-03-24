@@ -119,6 +119,7 @@ def run_workflow(
         context.update(ctx_update)
 
         _update(Phase.DOCUMENT_PRODUCTION.value, 45, "Document production")
+
         def _pra_answer_cb(questions: list) -> list:
             if answer_callback:
                 return answer_callback(questions)
@@ -126,7 +127,9 @@ def run_workflow(
             for q in questions:
                 opts = q.get("options", [])
                 if opts:
-                    opt_id = next((o.get("id") for o in opts if o.get("is_default")), opts[0].get("id"))
+                    opt_id = next(
+                        (o.get("id") for o in opts if o.get("is_default")), opts[0].get("id")
+                    )
                     answers.append({"question_id": q.get("id", ""), "selected_option_id": opt_id})
             return answers
 

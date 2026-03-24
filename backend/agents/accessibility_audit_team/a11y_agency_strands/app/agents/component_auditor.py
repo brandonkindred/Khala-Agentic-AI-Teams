@@ -5,9 +5,7 @@ from .base import StubAgent, ToolContext, tool
 
 @tool(context=True)
 def run_component_audit(component_id: str, tool_context: ToolContext) -> dict:
-    inventory = build_component_inventory(
-        [{"component_id": component_id, "complexity": "high"}]
-    )
+    inventory = build_component_inventory([{"component_id": component_id, "complexity": "high"}])
     run_axe_scan(component_id)
     specialist = StubAgent(name="component_auditor")
     finding = specialist.invoke(

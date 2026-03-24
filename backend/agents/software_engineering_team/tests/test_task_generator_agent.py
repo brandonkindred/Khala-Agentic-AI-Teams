@@ -47,14 +47,21 @@ def mock_llm() -> MagicMock:
                 "user_story": "As an API consumer, I want task CRUD so that I can manage tasks.",
                 "assignee": "backend",
                 "requirements": "FastAPI router, Pydantic models, pagination, filtering.",
-                "acceptance_criteria": ["GET returns 200", "POST creates task", "PUT updates", "DELETE removes"],
+                "acceptance_criteria": [
+                    "GET returns 200",
+                    "POST creates task",
+                    "PUT updates",
+                    "DELETE removes",
+                ],
                 "dependencies": ["git-setup"],
             },
         ],
         "execution_order": ["git-setup", "backend-tasks-api"],
         "rationale": "Minimal plan for task manager.",
         "summary": "2 tasks.",
-        "requirement_task_mapping": [{"spec_item": "CRUD for tasks", "task_ids": ["backend-tasks-api"]}],
+        "requirement_task_mapping": [
+            {"spec_item": "CRUD for tasks", "task_ids": ["backend-tasks-api"]}
+        ],
         "clarification_questions": [],
     }
     return llm
@@ -167,7 +174,9 @@ def test_task_generator_tolerates_resolved_questions_in_output(
         "execution_order": ["git-setup", "devops-sla-monitoring"],
         "rationale": "Plan with SLA resolution.",
         "summary": "2 tasks including SLA monitoring.",
-        "requirement_task_mapping": [{"spec_item": "CRUD for tasks", "task_ids": ["devops-sla-monitoring"]}],
+        "requirement_task_mapping": [
+            {"spec_item": "CRUD for tasks", "task_ids": ["devops-sla-monitoring"]}
+        ],
         "clarification_questions": [],
         "resolved_questions": [
             {

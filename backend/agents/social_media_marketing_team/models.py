@@ -73,7 +73,6 @@ class RiskReason(BaseModel):
     message: str
 
 
-
 class ContentPlan(BaseModel):
     campaign_name: str
     cadence_posts_per_day: int

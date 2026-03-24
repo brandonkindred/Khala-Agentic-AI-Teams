@@ -18,9 +18,8 @@ DEFAULT_TIMEOUT = 120.0
 
 
 def _base_url() -> Optional[str]:
-    return (
-        os.environ.get("PLANNING_V3_MARKET_RESEARCH_URL")
-        or os.environ.get("UNIFIED_API_BASE_URL")
+    return os.environ.get("PLANNING_V3_MARKET_RESEARCH_URL") or os.environ.get(
+        "UNIFIED_API_BASE_URL"
     )
 
 
@@ -66,11 +65,17 @@ def market_research_to_evidence(data: Dict[str, Any]) -> Dict[str, Any]:
     insights = []
     rec = data.get("recommendation") or {}
     if isinstance(rec, dict) and rec.get("rationale"):
-        insights.extend(rec["rationale"] if isinstance(rec["rationale"], list) else [rec["rationale"]])
+        insights.extend(
+            rec["rationale"] if isinstance(rec["rationale"], list) else [rec["rationale"]]
+        )
     for item in data.get("insights", []):
         if isinstance(item, dict) and item.get("pain_points"):
             insights.extend(item["pain_points"])
-    signals = [s.get("signal") for s in data.get("market_signals", []) if isinstance(s, dict) and s.get("signal")]
+    signals = [
+        s.get("signal")
+        for s in data.get("market_signals", [])
+        if isinstance(s, dict) and s.get("signal")
+    ]
     return {
         "summary": summary[:2000] if summary else "",
         "insights": insights[:30],

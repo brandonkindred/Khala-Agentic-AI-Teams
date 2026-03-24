@@ -173,7 +173,9 @@ def write_architecture_plan(
     ]
 
     if architecture.architecture_document and architecture.architecture_document.strip():
-        sections.extend(["## Architecture Document", "", architecture.architecture_document.strip(), ""])
+        sections.extend(
+            ["## Architecture Document", "", architecture.architecture_document.strip(), ""]
+        )
 
     if architecture.components:
         sections.extend(["## Components", ""])
@@ -199,7 +201,10 @@ def write_architecture_plan(
     if getattr(architecture, "tenancy_model", "") and str(architecture.tenancy_model).strip():
         sections.extend(["## Tenancy Model", "", architecture.tenancy_model.strip(), ""])
 
-    if getattr(architecture, "reliability_model", "") and str(architecture.reliability_model).strip():
+    if (
+        getattr(architecture, "reliability_model", "")
+        and str(architecture.reliability_model).strip()
+    ):
         sections.extend(["## Reliability Model", "", architecture.reliability_model.strip(), ""])
 
     if architecture.decisions:
@@ -270,18 +275,20 @@ def write_tech_lead_plan(
 
     for task in assignment.tasks:
         t = task if isinstance(task, Task) else task
-        sections.extend([
-            f"### {t.id}",
-            "",
-            f"- **Title:** {t.title}",
-            f"- **Type:** {t.type.value if hasattr(t.type, 'value') else t.type}",
-            f"- **Assignee:** {t.assignee}",
-            "",
-            "#### Description",
-            "",
-            t.description.strip() or "(No description.)",
-            "",
-        ])
+        sections.extend(
+            [
+                f"### {t.id}",
+                "",
+                f"- **Title:** {t.title}",
+                f"- **Type:** {t.type.value if hasattr(t.type, 'value') else t.type}",
+                f"- **Assignee:** {t.assignee}",
+                "",
+                "#### Description",
+                "",
+                t.description.strip() or "(No description.)",
+                "",
+            ]
+        )
         # If the task is linked to a specific architecture component, surface that for readers
         component_name = None
         try:

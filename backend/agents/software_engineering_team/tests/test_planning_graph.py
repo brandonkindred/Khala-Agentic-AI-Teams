@@ -17,7 +17,9 @@ from planning_team.planning_graph import (
 def test_planning_graph_add_and_merge():
     """PlanningGraph supports add_node, add_edge, and merge."""
     g = PlanningGraph()
-    n1 = PlanningNode(id="backend-api", domain=PlanningDomain.BACKEND, kind=PlanningNodeKind.STORY, summary="API")
+    n1 = PlanningNode(
+        id="backend-api", domain=PlanningDomain.BACKEND, kind=PlanningNodeKind.STORY, summary="API"
+    )
     g.add_node(n1)
     g.add_edge(PlanningEdge(from_id="git-setup", to_id="backend-api", type=EdgeType.BLOCKS))
 
@@ -25,7 +27,9 @@ def test_planning_graph_add_and_merge():
     assert len(g.edges) == 1
 
     g2 = PlanningGraph()
-    n2 = PlanningNode(id="frontend-ui", domain=PlanningDomain.FRONTEND, kind=PlanningNodeKind.STORY, summary="UI")
+    n2 = PlanningNode(
+        id="frontend-ui", domain=PlanningDomain.FRONTEND, kind=PlanningNodeKind.STORY, summary="UI"
+    )
     g2.add_node(n2)
     g.merge(g2)
     assert "frontend-ui" in g.nodes

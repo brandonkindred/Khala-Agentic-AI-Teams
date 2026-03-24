@@ -17,7 +17,9 @@ def mock_llm() -> MagicMock:
     llm.get_max_context_tokens.return_value = 16384
     llm.complete_json.return_value = {
         "data_entities": [{"name": "User", "attributes": ["id", "email"]}],
-        "api_endpoints": [{"method": "GET", "path": "/users", "description": "List users", "auth_required": True}],
+        "api_endpoints": [
+            {"method": "GET", "path": "/users", "description": "List users", "auth_required": True}
+        ],
         "ui_screens": [],
         "user_flows": [],
         "non_functional": [],

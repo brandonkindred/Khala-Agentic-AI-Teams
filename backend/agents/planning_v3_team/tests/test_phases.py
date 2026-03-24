@@ -43,12 +43,18 @@ def test_run_synthesis_with_evidence():
 
 
 def test_run_requirements_with_mock_llm():
-    context = {"client_context": ClientContext(problem_summary="Need reports"), "initial_brief": "Brief", "spec_content": "Spec"}
+    context = {
+        "client_context": ClientContext(problem_summary="Need reports"),
+        "initial_brief": "Brief",
+        "spec_content": "Spec",
+    }
     mock_llm = type("LLM", (), {})()
-    mock_llm.complete_text = lambda prompt, temperature=0: '''{"questions": [
+    mock_llm.complete_text = lambda prompt, temperature=0: (
+        """{"questions": [
         {"id": "req_1", "question_text": "RPO/RTO?", "context": "...", "category": "business", "priority": "high",
          "options": [{"id": "opt_none", "label": "None", "is_default": true}]}
-    ]}'''
+    ]}"""
+    )
     ctx_update, artifacts = run_requirements(context, llm=mock_llm)
     assert "open_questions" in ctx_update
     assert len(ctx_update["open_questions"]) >= 1

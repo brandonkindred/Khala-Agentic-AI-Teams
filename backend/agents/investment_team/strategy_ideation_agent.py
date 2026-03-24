@@ -48,9 +48,7 @@ Return ONLY a JSON object with no markdown:
 }}
 """
 
-_ANALYSIS_SYSTEM = (
-    "You are a quantitative trading analyst. Write concise, insightful backtest analysis narratives."
-)
+_ANALYSIS_SYSTEM = "You are a quantitative trading analyst. Write concise, insightful backtest analysis narratives."
 
 _ANALYSIS_PROMPT = """\
 Analyze the following swing trading strategy backtest.
@@ -153,7 +151,9 @@ class StrategyIdeationAgent:
         """
         result = record.backtest.result
         strategy = record.strategy
-        outcome_label = "WINNING (>8% annualized)" if record.is_winning else "LOSING (<8% annualized)"
+        outcome_label = (
+            "WINNING (>8% annualized)" if record.is_winning else "LOSING (<8% annualized)"
+        )
 
         prompt = _ANALYSIS_PROMPT.format(
             asset_class=strategy.asset_class,

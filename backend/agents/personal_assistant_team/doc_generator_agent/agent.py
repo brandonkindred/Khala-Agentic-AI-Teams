@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class DocGeneratorAgent:
     """
     Agent for generating documentation.
-    
+
     Capabilities:
     - Process documentation (how-to guides)
     - Checklists for tasks
@@ -52,7 +52,7 @@ class DocGeneratorAgent:
     ) -> None:
         """
         Initialize the Document Generator Agent.
-        
+
         Args:
             llm: LLM client for generation
             profile_store: User profile storage
@@ -60,9 +60,7 @@ class DocGeneratorAgent:
         """
         self.llm = llm
         self.profile_store = profile_store or UserProfileStore()
-        self.storage_dir = Path(
-            storage_dir or os.getenv("PA_DOCS_DIR", ".agent_cache/documents")
-        )
+        self.storage_dir = Path(storage_dir or os.getenv("PA_DOCS_DIR", ".agent_cache/documents"))
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_user_dir(self, user_id: str) -> Path:
@@ -77,42 +75,47 @@ class DocGeneratorAgent:
         file_ext = "md" if doc.format == "markdown" else "txt"
         file_path = user_dir / f"{doc.doc_id}.{file_ext}"
         file_path.write_text(doc.content)
-        
+
         meta_path = user_dir / f"{doc.doc_id}.json"
-        meta_path.write_text(json.dumps({
-            "doc_id": doc.doc_id,
-            "doc_type": doc.doc_type,
-            "title": doc.title,
-            "format": doc.format,
-            "created_at": doc.created_at,
-        }, indent=2))
+        meta_path.write_text(
+            json.dumps(
+                {
+                    "doc_id": doc.doc_id,
+                    "doc_type": doc.doc_type,
+                    "title": doc.title,
+                    "format": doc.format,
+                    "created_at": doc.created_at,
+                },
+                indent=2,
+            )
+        )
 
     def generate_process_doc(self, request: GenerateDocRequest) -> GeneratedDocument:
         """
         Generate a process documentation.
-        
+
         Args:
             request: Generation request
-            
+
         Returns:
             Generated document
         """
         profile = self.profile_store.load_profile(request.user_id)
-        
+
         user_info = ""
         if profile:
             if profile.professional.job_title:
                 user_info += f"Job: {profile.professional.job_title}\n"
             if profile.professional.industry:
                 user_info += f"Industry: {profile.professional.industry}\n"
-        
+
         prompt = PROCESS_DOC_PROMPT.format(
             topic=request.topic,
             context=request.context or "No additional context",
             user_info=user_info or "No specific user information",
             format=request.format,
         )
-        
+
         try:
             data = self.llm.complete_json(
                 prompt,
@@ -139,7 +142,7 @@ class DocGeneratorAgent:
                 format=request.format,
                 created_at=datetime.utcnow().isoformat(),
             )
-        
+
         doc = GeneratedDocument(
             doc_id=str(uuid4())[:8],
             doc_type="process",
@@ -148,30 +151,30 @@ class DocGeneratorAgent:
             format=request.format,
             created_at=datetime.utcnow().isoformat(),
         )
-        
+
         self._save_document(request.user_id, doc)
         return doc
 
     def generate_checklist(self, request: GenerateChecklistRequest) -> GeneratedChecklist:
         """
         Generate a checklist for a task.
-        
+
         Args:
             request: Checklist request
-            
+
         Returns:
             Generated checklist
         """
         time_instruction = ""
         if request.include_time_estimates:
             time_instruction = "Include time estimates for each item."
-        
+
         prompt = CHECKLIST_PROMPT.format(
             task=request.task,
             context=request.context or "No additional context",
             time_estimate_instruction=time_instruction,
         )
-        
+
         try:
             data = self.llm.complete_json(
                 prompt,
@@ -183,7 +186,12 @@ class DocGeneratorAgent:
             return GeneratedChecklist(
                 checklist_id=str(uuid4())[:8],
                 title=f"Checklist: {request.task}",
-                items=[{"item": "Failed to generate items - JSON extraction error", "priority": "required"}],
+                items=[
+                    {
+                        "item": "Failed to generate items - JSON extraction error",
+                        "priority": "required",
+                    }
+                ],
                 created_at=datetime.utcnow().isoformat(),
             )
         except Exception as e:
@@ -194,7 +202,7 @@ class DocGeneratorAgent:
                 items=[{"item": "Failed to generate items", "priority": "required"}],
                 created_at=datetime.utcnow().isoformat(),
             )
-        
+
         return GeneratedChecklist(
             checklist_id=str(uuid4())[:8],
             title=data.get("title", f"Checklist: {request.task}"),
@@ -206,10 +214,10 @@ class DocGeneratorAgent:
     def generate_template(self, request: GenerateTemplateRequest) -> GeneratedTemplate:
         """
         Generate a document template.
-        
+
         Args:
             request: Template request
-            
+
         Returns:
             Generated template
         """
@@ -218,7 +226,7 @@ class DocGeneratorAgent:
             purpose=request.purpose,
             fields=", ".join(request.fields) if request.fields else "Determine appropriate fields",
         )
-        
+
         try:
             data = self.llm.complete_json(
                 prompt,
@@ -243,7 +251,7 @@ class DocGeneratorAgent:
                 content="Failed to generate template.",
                 created_at=datetime.utcnow().isoformat(),
             )
-        
+
         return GeneratedTemplate(
             template_id=str(uuid4())[:8],
             template_type=request.template_type,
@@ -256,10 +264,10 @@ class DocGeneratorAgent:
     def generate_sop(self, request: SOPRequest) -> GeneratedDocument:
         """
         Generate a Standard Operating Procedure.
-        
+
         Args:
             request: SOP request
-            
+
         Returns:
             Generated SOP document
         """
@@ -268,21 +276,21 @@ class DocGeneratorAgent:
             steps_text = "\n".join(f"- {step}" for step in request.steps)
         else:
             steps_text = "Determine appropriate steps"
-        
+
         safety_section = ""
         if request.include_safety:
             safety_section = "Include a Safety Considerations section."
-        
+
         troubleshooting_section = ""
         if request.include_troubleshooting:
             troubleshooting_section = "Include a Troubleshooting section."
-        
+
         additional_sections = ""
         if request.include_safety:
             additional_sections += "6. Safety considerations\n"
         if request.include_troubleshooting:
             additional_sections += "7. Troubleshooting guide\n"
-        
+
         prompt = SOP_PROMPT.format(
             process_name=request.process_name,
             description=request.description,
@@ -291,7 +299,7 @@ class DocGeneratorAgent:
             troubleshooting_section=troubleshooting_section,
             additional_sections=additional_sections,
         )
-        
+
         try:
             data = self.llm.complete_json(
                 prompt,
@@ -318,7 +326,7 @@ class DocGeneratorAgent:
                 format="markdown",
                 created_at=datetime.utcnow().isoformat(),
             )
-        
+
         doc = GeneratedDocument(
             doc_id=str(uuid4())[:8],
             doc_type="sop",
@@ -327,7 +335,7 @@ class DocGeneratorAgent:
             format="markdown",
             created_at=datetime.utcnow().isoformat(),
         )
-        
+
         self._save_document(request.user_id, doc)
         return doc
 
@@ -341,14 +349,14 @@ class DocGeneratorAgent:
     ) -> GeneratedDocument:
         """
         Generate a meeting agenda.
-        
+
         Args:
             user_id: The user ID
             purpose: Meeting purpose
             duration: Meeting duration in minutes
             attendees: List of attendees
             topics: Topics to cover
-            
+
         Returns:
             Generated agenda document
         """
@@ -358,7 +366,7 @@ class DocGeneratorAgent:
             attendees=", ".join(attendees) if attendees else "TBD",
             topics="\n".join(f"- {t}" for t in topics) if topics else "Determine based on purpose",
         )
-        
+
         try:
             data = self.llm.complete_json(
                 prompt,
@@ -385,7 +393,7 @@ class DocGeneratorAgent:
                 format="markdown",
                 created_at=datetime.utcnow().isoformat(),
             )
-        
+
         doc = GeneratedDocument(
             doc_id=str(uuid4())[:8],
             doc_type="agenda",
@@ -394,24 +402,24 @@ class DocGeneratorAgent:
             format="markdown",
             created_at=datetime.utcnow().isoformat(),
         )
-        
+
         self._save_document(user_id, doc)
         return doc
 
     def list_documents(self, user_id: str, doc_type: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         List user's generated documents.
-        
+
         Args:
             user_id: The user ID
             doc_type: Filter by document type
-            
+
         Returns:
             List of document metadata
         """
         user_dir = self._get_user_dir(user_id)
         documents = []
-        
+
         for meta_file in user_dir.glob("*.json"):
             try:
                 meta = json.loads(meta_file.read_text())
@@ -419,48 +427,48 @@ class DocGeneratorAgent:
                     documents.append(meta)
             except Exception as e:
                 logger.warning("Failed to load document metadata: %s", e)
-        
+
         documents.sort(key=lambda d: d.get("created_at", ""), reverse=True)
         return documents
 
     def get_document(self, user_id: str, doc_id: str) -> Optional[str]:
         """
         Get a document's content.
-        
+
         Args:
             user_id: The user ID
             doc_id: Document ID
-            
+
         Returns:
             Document content or None
         """
         user_dir = self._get_user_dir(user_id)
-        
+
         for ext in ["md", "txt"]:
             file_path = user_dir / f"{doc_id}.{ext}"
             if file_path.exists():
                 return file_path.read_text()
-        
+
         return None
 
     def delete_document(self, user_id: str, doc_id: str) -> bool:
         """
         Delete a document.
-        
+
         Args:
             user_id: The user ID
             doc_id: Document ID
-            
+
         Returns:
             True if deleted
         """
         user_dir = self._get_user_dir(user_id)
         deleted = False
-        
+
         for ext in ["md", "txt", "json"]:
             file_path = user_dir / f"{doc_id}.{ext}"
             if file_path.exists():
                 file_path.unlink()
                 deleted = True
-        
+
         return deleted

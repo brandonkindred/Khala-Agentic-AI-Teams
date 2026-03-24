@@ -12,6 +12,7 @@ if str(_agents_dir) not in sys.path:
 
 def test_product_analysis_run_returns_job_id():
     from planning_v3_team.adapters.product_analysis import run_product_analysis
+
     mock_resp = MagicMock()
     mock_resp.raise_for_status = MagicMock()
     mock_resp.json.return_value = {"job_id": "pa-123"}
@@ -27,6 +28,7 @@ def test_product_analysis_run_returns_job_id():
 
 def test_product_analysis_status():
     from planning_v3_team.adapters.product_analysis import get_product_analysis_status
+
     mock_resp = MagicMock()
     mock_resp.raise_for_status = MagicMock()
     mock_resp.json.return_value = {"job_id": "j1", "status": "running", "progress": 30}
@@ -43,6 +45,7 @@ def test_product_analysis_status():
 
 def test_planning_v2_run_returns_job_id():
     from planning_v3_team.adapters.planning_v2 import run_planning_v2
+
     mock_resp = MagicMock()
     mock_resp.raise_for_status = MagicMock()
     mock_resp.json.return_value = {"job_id": "p2-456"}
@@ -58,6 +61,7 @@ def test_planning_v2_run_returns_job_id():
 
 def test_market_research_returns_none_without_base_url():
     from planning_v3_team.adapters.market_research import request_market_research
+
     with patch.dict(os.environ, {}, clear=True):
         out = request_market_research(product_concept="X", target_users="Y", business_goal="Z")
     assert out is None
@@ -65,6 +69,7 @@ def test_market_research_returns_none_without_base_url():
 
 def test_market_research_to_evidence():
     from planning_v3_team.adapters.market_research import market_research_to_evidence
+
     data = {"mission_summary": "Summary", "insights": [], "market_signals": [{"signal": "S1"}]}
     ev = market_research_to_evidence(data)
     assert ev["summary"] == "Summary"
@@ -74,6 +79,7 @@ def test_market_research_to_evidence():
 
 def test_ai_systems_start_build_returns_job_id():
     from planning_v3_team.adapters.ai_systems import start_ai_systems_build
+
     mock_resp = MagicMock()
     mock_resp.raise_for_status = MagicMock()
     mock_resp.json.return_value = {"job_id": "build-789"}

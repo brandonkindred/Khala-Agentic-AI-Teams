@@ -46,7 +46,9 @@ def test_approved_campaign_generates_cadence_platform_plans_and_experiment_plan(
     assert result.content_plan is not None
     assert result.content_plan.total_required_posts == 28
     assert len(result.content_plan.approved_ideas) == 28
-    assert all(i.estimated_engagement_probability >= 0.70 for i in result.content_plan.approved_ideas)
+    assert all(
+        i.estimated_engagement_probability >= 0.70 for i in result.content_plan.approved_ideas
+    )
     assert all(i.risk_level != "high" for i in result.content_plan.approved_ideas)
     assert all(i.linked_goals for i in result.content_plan.approved_ideas)
 

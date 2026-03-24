@@ -167,7 +167,9 @@ class GitOperationsToolAgent:
                 return out
             if token.requested_by not in {"BackendTeamLeadAgent", "DevOpsTeamLeadAgent"}:
                 out.status = "blocked"
-                out.policy_findings.append("Only BackendTeamLeadAgent or DevOpsTeamLeadAgent may merge to development")
+                out.policy_findings.append(
+                    "Only BackendTeamLeadAgent or DevOpsTeamLeadAgent may merge to development"
+                )
                 return out
             if token.branch_name != out.branch_name:
                 out.status = "blocked"
@@ -175,7 +177,14 @@ class GitOperationsToolAgent:
                 return out
 
             if input_data.merge.require_quality_gates_passed:
-                required = ["lint", "static_analysis", "unit_tests", "integration_tests", "security_review", "code_review"]
+                required = [
+                    "lint",
+                    "static_analysis",
+                    "unit_tests",
+                    "integration_tests",
+                    "security_review",
+                    "code_review",
+                ]
                 missing = [g for g in required if token.quality_gates.get(g) != "pass"]
                 if missing:
                     out.status = "blocked"
@@ -222,7 +231,10 @@ class GitOperationsToolAgent:
                     return out
                 out.notes.append("Squash merge used per policy")
             elif input_data.merge.strategy == "no_ff":
-                rc, msg = _run_git(repo, ["git", "merge", "--no-ff", out.branch_name, "-m", f"Merge {out.branch_name}"])
+                rc, msg = _run_git(
+                    repo,
+                    ["git", "merge", "--no-ff", out.branch_name, "-m", f"Merge {out.branch_name}"],
+                )
                 if rc != 0:
                     out.status = "blocked"
                     out.policy_findings.append(f"Merge conflict: {msg[:200]}")

@@ -165,4 +165,3 @@ class ResearchAgentOutput(BaseModel):
         default_factory=list,
         description="Topics with similarity to the brief (score > 70%).",
     )
-

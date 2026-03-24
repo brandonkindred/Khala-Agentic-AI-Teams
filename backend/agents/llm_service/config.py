@@ -18,10 +18,12 @@ logger = logging.getLogger(__name__)
 # Environment variable names (prefer LLM_*, fallback to SW_LLM_*)
 # ---------------------------------------------------------------------------
 
+
 def _env(key_llm: str, key_sw: str, default: str) -> str:
     """Return env value: LLM_* if set, else SW_LLM_*, else default."""
     v = os.environ.get(key_llm) or os.environ.get(key_sw)
     return (v or default).strip()
+
 
 # Primary (LLM_*) and backward-compat (SW_LLM_*)
 ENV_LLM_PROVIDER = "LLM_PROVIDER"
@@ -110,6 +112,7 @@ DEFAULT_FALLBACK_MODEL = "qwen3.5:397b-cloud"
 # Resolvers (env + agent defaults)
 # ---------------------------------------------------------------------------
 
+
 def resolve_provider() -> str:
     """Return effective LLM provider: 'dummy' or 'ollama' (default)."""
     return _env(ENV_LLM_PROVIDER, ENV_LLM_PROVIDER_SW, "ollama").lower().strip()
@@ -120,7 +123,9 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
     Resolve model name: LLM_MODEL_<agent_key>, then LLM_MODEL, then AGENT_DEFAULT_MODELS[agent_key], then fallback.
     """
     if agent_key:
-        per_agent = os.environ.get(f"LLM_MODEL_{agent_key}") or os.environ.get(f"SW_LLM_MODEL_{agent_key}")
+        per_agent = os.environ.get(f"LLM_MODEL_{agent_key}") or os.environ.get(
+            f"SW_LLM_MODEL_{agent_key}"
+        )
         if per_agent:
             return per_agent.strip()
     global_model = _env(ENV_LLM_MODEL, ENV_LLM_MODEL_SW, "")

@@ -23,7 +23,9 @@ class CICDPipelineAgent:
             f"acceptance_criteria={spec.acceptance_criteria}\n"
             f"existing_pipeline={input_data.existing_pipeline[:4000]}\n"
         )
-        data = self.llm.complete_json(CICD_PIPELINE_PROMPT + "\n\n---\n\n" + context, temperature=0.1)
+        data = self.llm.complete_json(
+            CICD_PIPELINE_PROMPT + "\n\n---\n\n" + context, temperature=0.1
+        )
         return CICDPipelineAgentOutput(
             artifacts=data.get("artifacts") or {},
             pipeline_job_graph_summary=data.get("pipeline_job_graph_summary", ""),

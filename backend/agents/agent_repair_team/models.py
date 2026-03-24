@@ -14,7 +14,9 @@ class RepairInput(BaseModel):
     exception_message: str = Field(description="Exception message")
     task_id: str = Field(description="Task ID that was running when the crash occurred")
     agent_type: str = Field(description="Agent type: backend or frontend")
-    agent_source_path: Path = Field(description="Path to software_engineering_team/ or repo root; edits must be under this tree")
+    agent_source_path: Path = Field(
+        description="Path to software_engineering_team/ or repo root; edits must be under this tree"
+    )
 
 
 class RepairOutput(BaseModel):

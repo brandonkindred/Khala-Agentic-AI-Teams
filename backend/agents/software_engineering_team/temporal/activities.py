@@ -94,7 +94,15 @@ def _run_frontend_code_v2_impl(
     )
     arch = SystemArchitecture(overview=architecture_overview) if architecture_overview else None
     team_lead = FrontendCodeV2TeamLead(get_client("frontend"))
-    phase_order = ["setup", "planning", "execution", "review", "problem_solving", "documentation", "deliver"]
+    phase_order = [
+        "setup",
+        "planning",
+        "execution",
+        "review",
+        "problem_solving",
+        "documentation",
+        "deliver",
+    ]
 
     def _job_updater(**kwargs: Any) -> None:
         completed_phases = []
@@ -169,7 +177,15 @@ def _run_backend_code_v2_impl(
     )
     arch = SystemArchitecture(overview=architecture_overview) if architecture_overview else None
     team_lead = BackendCodeV2TeamLead(get_client("backend"))
-    phase_order = ["setup", "planning", "execution", "review", "problem_solving", "documentation", "deliver"]
+    phase_order = [
+        "setup",
+        "planning",
+        "execution",
+        "review",
+        "problem_solving",
+        "documentation",
+        "deliver",
+    ]
 
     def _job_updater(**kwargs: Any) -> None:
         completed_phases = []
@@ -246,7 +262,9 @@ def _run_planning_v2_impl(
     from software_engineering_team.shared.job_store import is_cancel_requested
 
     if is_cancel_requested(job_id):
-        logger.info("Planning-v2: cancellation detected, preserving cancelled state for job %s", job_id)
+        logger.info(
+            "Planning-v2: cancellation detected, preserving cancelled state for job %s", job_id
+        )
         return
     final_status = "completed" if result.success else "failed"
     phase_results: Dict[str, Any] = {}
@@ -330,7 +348,9 @@ def _run_product_analysis_impl(
         progress=100 if result.success else 90,
         summary=result.summary,
         error=result.failure_reason if not result.success else None,
-        current_phase=AnalysisPhase.SPEC_CLEANUP.value if result.success else (result.current_phase.value if result.current_phase else None),
+        current_phase=AnalysisPhase.SPEC_CLEANUP.value
+        if result.success
+        else (result.current_phase.value if result.current_phase else None),
         iterations=result.iterations,
         validated_spec_path=result.validated_spec_path,
     )

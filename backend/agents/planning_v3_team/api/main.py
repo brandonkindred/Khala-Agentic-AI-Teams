@@ -59,13 +59,16 @@ app.add_middleware(
 class SubmitAnswersRequest(BaseModel):
     """Submit answers to pending open questions."""
 
-    answers: list[dict] = Field(..., description="List of {question_id, selected_option_id?, other_text?}")
+    answers: list[dict] = Field(
+        ..., description="List of {question_id, selected_option_id?, other_text?}"
+    )
 
 
 def _get_llm():
     """Return LLM client from central llm_service (or None if unavailable)."""
     try:
         from llm_service import get_client
+
         return get_client("planning_v3")
     except Exception as e:
         logger.warning("LLM not available: %s", e)
@@ -82,7 +85,11 @@ def _run_workflow_background(
     use_planning_v2: bool,
     use_market_research: bool,
 ) -> None:
-    def job_updater(current_phase: str | None = None, progress: int | None = None, status_text: str | None = None) -> None:
+    def job_updater(
+        current_phase: str | None = None,
+        progress: int | None = None,
+        status_text: str | None = None,
+    ) -> None:
         updates = {}
         if current_phase is not None:
             updates["current_phase"] = current_phase
@@ -128,12 +135,15 @@ def _run_workflow_background(
 def run_planning_v3(request: PlanningV3RunRequest) -> PlanningV3RunResponse:
     repo = Path(request.repo_path)
     if not repo.is_dir():
-        raise HTTPException(status_code=400, detail=f"repo_path is not a directory: {request.repo_path}")
+        raise HTTPException(
+            status_code=400, detail=f"repo_path is not a directory: {request.repo_path}"
+        )
     job_id = str(uuid.uuid4())
     create_job(job_id, request.repo_path)
     try:
         from planning_v3_team.temporal.client import is_temporal_enabled
         from planning_v3_team.temporal.start_workflow import start_planning_v3_workflow
+
         if is_temporal_enabled():
             start_planning_v3_workflow(
                 job_id,
@@ -212,8 +222,12 @@ def get_result(job_id: str) -> PlanningV3ResultResponse:
         job_id=job_id,
         success=success,
         handoff_package=handoff,
-        client_context_document_path=handoff.get("client_context_document_path") if isinstance(handoff, dict) else None,
-        validated_spec_path=handoff.get("validated_spec_path") if isinstance(handoff, dict) else None,
+        client_context_document_path=handoff.get("client_context_document_path")
+        if isinstance(handoff, dict)
+        else None,
+        validated_spec_path=handoff.get("validated_spec_path")
+        if isinstance(handoff, dict)
+        else None,
         prd_path=handoff.get("prd_path") if isinstance(handoff, dict) else None,
         summary=data.get("summary"),
         failure_reason=data.get("error"),

@@ -17,9 +17,7 @@ class TouchTargetViolation(BaseModel):
     size_px: float = Field(default=0.0, description="Smallest dimension in px")
     required_px: float = Field(default=24.0, description="Required minimum size")
     screenshot_ref: str = Field(default="")
-    spacing_issue: bool = Field(
-        default=False, description="True if spacing is the issue vs size"
-    )
+    spacing_issue: bool = Field(default=False, description="True if spacing is the issue vs size")
     adjacent_elements: List[str] = Field(
         default_factory=list, description="Elements too close to this one"
     )
@@ -54,9 +52,7 @@ class CheckTouchTargetsOutput(BaseModel):
     total_interactive_elements: int = Field(default=0)
     passing_elements: int = Field(default=0)
     failing_elements: int = Field(default=0)
-    meets_wcag_258: bool = Field(
-        default=True, description="Meets WCAG 2.5.8 Target Size (Minimum)"
-    )
+    meets_wcag_258: bool = Field(default=True, description="Meets WCAG 2.5.8 Target Size (Minimum)")
 
 
 async def check_touch_targets(

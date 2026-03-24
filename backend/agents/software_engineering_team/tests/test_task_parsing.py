@@ -1,6 +1,5 @@
 """Tests for task parsing: flat and hierarchical formats."""
 
-
 from software_engineering_team.shared.models import TaskType
 from software_engineering_team.shared.task_parsing import (
     flatten_hierarchy_to_assignment,
@@ -190,25 +189,27 @@ def test_parse_hierarchy_from_data() -> None:
 
 def test_flatten_hierarchy_deduplicates() -> None:
     """flatten_hierarchy_to_assignment skips duplicate story IDs."""
-    hierarchy = parse_hierarchy_from_data({
-        "initiatives": [
-            {
-                "id": "init-1",
-                "title": "App",
-                "epics": [
-                    {
-                        "id": "epic-1",
-                        "title": "Feature",
-                        "stories": [
-                            {"id": "s1", "title": "Story", "assignee": "backend"},
-                            {"id": "s1", "title": "Duplicate", "assignee": "backend"},
-                        ],
-                    },
-                ],
-            },
-        ],
-        "execution_order": ["s1"],
-    })
+    hierarchy = parse_hierarchy_from_data(
+        {
+            "initiatives": [
+                {
+                    "id": "init-1",
+                    "title": "App",
+                    "epics": [
+                        {
+                            "id": "epic-1",
+                            "title": "Feature",
+                            "stories": [
+                                {"id": "s1", "title": "Story", "assignee": "backend"},
+                                {"id": "s1", "title": "Duplicate", "assignee": "backend"},
+                            ],
+                        },
+                    ],
+                },
+            ],
+            "execution_order": ["s1"],
+        }
+    )
     assignment = flatten_hierarchy_to_assignment(hierarchy)
     assert len(assignment.tasks) == 1
 
@@ -283,7 +284,10 @@ def test_initiative_epic_story_tasks_four_levels() -> None:
                                         "user_story": "As a client, I want a login endpoint",
                                         "assignee": "backend",
                                         "requirements": "FastAPI, JWT",
-                                        "acceptance_criteria": ["POST returns 200 with token", "Invalid credentials return 401"],
+                                        "acceptance_criteria": [
+                                            "POST returns 200 with token",
+                                            "Invalid credentials return 401",
+                                        ],
                                         "dependencies": [],
                                         "example": '{"email":"u@e.com","password":"p"} -> {"token":"..."}',
                                     },
@@ -294,7 +298,10 @@ def test_initiative_epic_story_tasks_four_levels() -> None:
                                         "user_story": "As a user, I want to log in",
                                         "assignee": "frontend",
                                         "requirements": "Angular form",
-                                        "acceptance_criteria": ["Form submits to API", "Token stored"],
+                                        "acceptance_criteria": [
+                                            "Form submits to API",
+                                            "Token stored",
+                                        ],
                                         "dependencies": ["backend-auth-login-api"],
                                     },
                                 ],

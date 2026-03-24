@@ -41,7 +41,9 @@ class DevOpsOutput(BaseModel):
     """Output from the DevOps Expert agent."""
 
     pipeline_yaml: str = Field(default="", description="CI/CD pipeline configuration")
-    iac_content: str = Field(default="", description="Infrastructure as Code (Terraform, CloudFormation, etc.)")
+    iac_content: str = Field(
+        default="", description="Infrastructure as Code (Terraform, CloudFormation, etc.)"
+    )
     dockerfile: str = Field(default="", description="Dockerfile content")
     docker_compose: str = Field(default="", description="Docker Compose if applicable")
     summary: str = ""

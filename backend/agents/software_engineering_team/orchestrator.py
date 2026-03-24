@@ -116,6 +116,7 @@ ANSWER_WAIT_POLL_INTERVAL = 5.0
 
 class CancellationError(Exception):
     """Raised when a job cancellation is detected."""
+
     pass
 
 
@@ -139,17 +140,20 @@ def _convert_to_structured_questions(
     - An 'other' option is implicitly available in the UI
     """
     import uuid
+
     structured = []
     for idx, question_text in enumerate(questions):
         question_id = f"{source}_{idx}_{uuid.uuid4().hex[:8]}"
-        structured.append({
-            "id": question_id,
-            "question_text": question_text,
-            "context": None,
-            "options": DEFAULT_CLARIFICATION_OPTIONS.copy(),
-            "required": True,
-            "source": source,
-        })
+        structured.append(
+            {
+                "id": question_id,
+                "question_text": question_text,
+                "context": None,
+                "options": DEFAULT_CLARIFICATION_OPTIONS.copy(),
+                "required": True,
+                "source": source,
+            }
+        )
     return structured
 
 
@@ -231,7 +235,9 @@ def _log_task_completion_banner(
     logger.info("")
 
 
-def _parse_traceback_for_crash(exception: BaseException) -> tuple[str | None, int | None, str | None]:
+def _parse_traceback_for_crash(
+    exception: BaseException,
+) -> tuple[str | None, int | None, str | None]:
     """
     Extract file_path, line_number, and function_name from the exception traceback.
     Returns the last frame (where the exception occurred) as (file_path, line_number, function_name).
@@ -273,7 +279,9 @@ def _log_agent_crash_banner(
     sep = "!" * BANNER_WIDTH
     logger.error("")
     logger.error(sep)
-    logger.error("  *** AGENT CRASH (%s) ***%s", agent_type.capitalize(), "  [RETRY]" if log_prefix else "")
+    logger.error(
+        "  *** AGENT CRASH (%s) ***%s", agent_type.capitalize(), "  [RETRY]" if log_prefix else ""
+    )
     logger.error("  Task: %s", task_id)
     logger.error("  Exception: %s: %s", exc_type, exc_msg)
     if location:
@@ -306,7 +314,9 @@ def _apply_repair_fixes(agent_source_path: Path, suggested_fixes: list) -> bool:
             replacement = fix.get("replacement_content", "")
             lines = target.read_text(encoding="utf-8").splitlines(keepends=True)
             if line_start < 1 or line_end > len(lines):
-                logger.warning("Repair: line range %d-%d out of bounds for %s", line_start, line_end, target)
+                logger.warning(
+                    "Repair: line range %d-%d out of bounds for %s", line_start, line_end, target
+                )
                 continue
             # 1-based to 0-based
             new_content = "".join(lines[: line_start - 1]) + replacement + "".join(lines[line_end:])
@@ -350,7 +360,9 @@ def _log_task_breakdown(
     logger.info("  ★★★  TASK BREAKDOWN  ★★★")
     if job_id:
         logger.info("  Job: %s", job_id)
-    logger.info("  Total: %d completed | %d failed | %d total", len(completed), failed_count, total_tasks)
+    logger.info(
+        "  Total: %d completed | %d failed | %d total", len(completed), failed_count, total_tasks
+    )
     logger.info("-" * BANNER_WIDTH)
     for key in ["backend", "frontend", "devops", "git_setup", "documentation", "security", "qa"]:
         count = breakdown.get(key, 0)
@@ -412,12 +424,14 @@ def _get_agents() -> Dict[str, Any]:
 def _lazy_init_backend_code_v2_team():
     """Instantiate the backend team lead (backend_code_v2_team; lazy import)."""
     from backend_code_v2_team import BackendCodeV2TeamLead
+
     return BackendCodeV2TeamLead(get_client("backend"))
 
 
 def _lazy_init_frontend_code_v2_team():
     """Instantiate the frontend team lead (frontend_code_v2_team; lazy import)."""
     from frontend_code_v2_team import FrontendCodeV2TeamLead
+
     return FrontendCodeV2TeamLead(get_client("frontend"))
 
 
@@ -425,10 +439,12 @@ _task_requirements = task_requirements
 
 MAX_REVIEW_ITERATIONS = 100
 MAX_CLARIFICATION_REFINEMENTS = 100  # Max times to refine a task based on specialist clarification
-MAX_CODE_REVIEW_ITERATIONS = 100    # Max rounds of code review -> fix -> re-review
+MAX_CODE_REVIEW_ITERATIONS = 100  # Max rounds of code review -> fix -> re-review
 
 
-def _issues_to_dicts(qa_bugs: Any, sec_vulns: Any) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def _issues_to_dicts(
+    qa_bugs: Any, sec_vulns: Any
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Convert QA/Security outputs to dict lists for coding agent input."""
     qa_list = [b.model_dump() if hasattr(b, "model_dump") else b.dict() for b in (qa_bugs or [])]
     sec_list = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in (sec_vulns or [])]
@@ -448,6 +464,7 @@ def _build_coding_team_plan_input(
 ) -> Any:
     """Build CodingTeamPlanInput from PlanningV2AdapterResult for coding_team orchestrator."""
     from coding_team.models import CodingTeamPlanInput
+
     req = adapter_result.requirements
     open_q = getattr(adapter_result, "open_questions", None) or []
     open_questions = [
@@ -469,7 +486,9 @@ def _build_coding_team_plan_input(
     )
 
 
-def _build_task_update(task_id: str, agent_type: str, result: Any, status: str = "completed") -> TaskUpdate:
+def _build_task_update(
+    task_id: str, agent_type: str, result: Any, status: str = "completed"
+) -> TaskUpdate:
     """Construct a TaskUpdate from a specialist agent's output."""
     summary = getattr(result, "summary", "") or ""
     files_changed = list((getattr(result, "files", None) or {}).keys())
@@ -518,12 +537,14 @@ def _run_dbc_comments_review(
             logger.info("[%s] DbC: no code files to review, skipping", task_id)
             return
 
-        dbc_result = agents["dbc_comments"].run(DbcCommentsInput(
-            code=dbc_code,
-            language=language,
-            task_description=task_description,
-            architecture=architecture,
-        ))
+        dbc_result = agents["dbc_comments"].run(
+            DbcCommentsInput(
+                code=dbc_code,
+                language=language,
+                task_description=task_description,
+                architecture=architecture,
+            )
+        )
 
         if not dbc_result.already_compliant and dbc_result.files:
             ok, msg = write_files_and_commit(
@@ -646,10 +667,7 @@ def _run_code_review(
 
 def _code_review_issues_to_dicts(issues: Any) -> List[Dict[str, Any]]:
     """Convert CodeReviewIssue objects to dicts for coding agent input."""
-    return [
-        i.model_dump() if hasattr(i, "model_dump") else i.dict()
-        for i in (issues or [])
-    ]
+    return [i.model_dump() if hasattr(i, "model_dump") else i.dict() for i in (issues or [])]
 
 
 def _log_code_review_result(review_result: Any, task_id: str) -> None:
@@ -668,17 +686,25 @@ def _log_code_review_result(review_result: Any, task_id: str) -> None:
     for i, issue in enumerate(review_result.issues, 1):
         logger.warning(
             "[%s]   Issue %s: [%s] %s: %s (file: %s)",
-            task_id, i, issue.severity, issue.category,
-            issue.description, issue.file_path or "n/a",
+            task_id,
+            i,
+            issue.severity,
+            issue.category,
+            issue.description,
+            issue.file_path or "n/a",
         )
         if issue.suggestion:
             logger.warning(
-                "[%s]     Suggestion: %s", task_id, issue.suggestion[:300],
+                "[%s]     Suggestion: %s",
+                task_id,
+                issue.suggestion[:300],
             )
     if review_result.summary:
         logger.info("[%s]   Review summary: %s", task_id, review_result.summary[:300])
     if review_result.spec_compliance_notes:
-        logger.info("[%s]   Spec compliance: %s", task_id, review_result.spec_compliance_notes[:300])
+        logger.info(
+            "[%s]   Spec compliance: %s", task_id, review_result.spec_compliance_notes[:300]
+        )
     if not review_result.issues:
         logger.warning(
             "[%s]   WARNING: Review rejected but returned 0 issues -- coding agent has nothing to fix!",
@@ -706,11 +732,14 @@ def _run_build_verification(
 
     if agent_type == "frontend":
         # repo_path may be frontend repo root (package.json here) or work path (frontend/ subdir)
-        frontend_dir = repo_path if (repo_path / "package.json").exists() else (repo_path / "frontend")
+        frontend_dir = (
+            repo_path if (repo_path / "package.json").exists() else (repo_path / "frontend")
+        )
         if not (frontend_dir / "package.json").exists():
             logger.info("Build verification: no frontend project found, skipping frontend build")
             return True, ""
         from software_engineering_team.shared.command_runner import is_ng_build_environment_failure
+
         result = run_ng_build_with_nvm_fallback(frontend_dir)
         if not result.success:
             if is_ng_build_environment_failure(result):
@@ -719,7 +748,9 @@ def _run_build_verification(
             # Try tool-agent build fix (review all issues, fix one at a time)
             fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, agent_type, task_id)
             if fixed:
-                logger.info("Build verification passed for frontend task %s after tool-agent fix", task_id)
+                logger.info(
+                    "Build verification passed for frontend task %s after tool-agent fix", task_id
+                )
                 return True, ""
             failures = result.parsed_failures("ng_build")
             if failures:
@@ -727,6 +758,7 @@ def _run_build_verification(
                     build_agent_feedback,
                     get_failure_class_tag,
                 )
+
                 feedback = build_agent_feedback(failures)
                 logger.warning(
                     "Build verification failed for task %s: %s",
@@ -734,7 +766,9 @@ def _run_build_verification(
                     get_failure_class_tag(failures[0].failure_class),
                 )
                 return False, feedback
-            logger.warning("Build verification failed for task %s: %s", task_id, result.error_summary[:200])
+            logger.warning(
+                "Build verification failed for task %s: %s", task_id, result.error_summary[:200]
+            )
             return False, result.error_summary
         logger.info("Build verification passed for frontend task %s", task_id)
         return True, ""
@@ -747,10 +781,14 @@ def _run_build_verification(
             return True, ""
         result = run_python_syntax_check(backend_dir)
         if not result.success:
-            logger.warning("Syntax check failed for task %s: %s", task_id, result.error_summary[:200])
+            logger.warning(
+                "Syntax check failed for task %s: %s", task_id, result.error_summary[:200]
+            )
             fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, agent_type, task_id)
             if fixed:
-                logger.info("Build verification passed for backend task %s after tool-agent fix", task_id)
+                logger.info(
+                    "Build verification passed for backend task %s after tool-agent fix", task_id
+                )
                 return True, ""
             return False, result.error_summary
         # Also try pytest if tests directory exists
@@ -780,6 +818,7 @@ def _run_build_verification(
                         build_agent_feedback,
                         get_failure_class_tag,
                     )
+
                     summary = build_agent_feedback(failures)
                     logger.warning(
                         "Tests failed for task %s: %s",
@@ -790,6 +829,7 @@ def _run_build_verification(
                     summary = test_result.pytest_error_summary()
                 # When failure matches exception-handler test patterns, append canonical FIX line
                 from backend_agent.agent import EXCEPTION_HANDLER_TEST_PATTERNS
+
                 if any(p in summary for p in EXCEPTION_HANDLER_TEST_PATTERNS):
                     summary += (
                         "\n\nFIX: Preserve the /test-generic-error route in app/main.py and "
@@ -797,7 +837,10 @@ def _run_build_verification(
                     )
                 fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, agent_type, task_id)
                 if fixed:
-                    logger.info("Build verification passed for backend task %s after tool-agent fix", task_id)
+                    logger.info(
+                        "Build verification passed for backend task %s after tool-agent fix",
+                        task_id,
+                    )
                     return True, ""
                 return False, summary
         logger.info("Build verification passed for backend task %s", task_id)
@@ -854,7 +897,9 @@ def _run_build_verification(
                     timeout=120,
                 )
                 if not result.success:
-                    logger.warning("Docker build failed for task %s: %s", task_id, result.error_summary[:200])
+                    logger.warning(
+                        "Docker build failed for task %s: %s", task_id, result.error_summary[:200]
+                    )
                     return False, result.error_summary
 
         logger.info("Build verification passed for devops task %s", task_id)
@@ -887,6 +932,7 @@ def _try_build_fix_one_at_a_time(
             from software_engineering_team.shared.command_runner import (
                 is_ng_build_environment_failure,
             )
+
             result = run_ng_build_with_nvm_fallback(project_dir)
         except Exception as e:
             logger.warning("Build fix: ng build failed to run: %s", e)
@@ -898,17 +944,23 @@ def _try_build_fix_one_at_a_time(
         failures = result.parsed_failures("ng_build")
         issues = []
         for f in failures:
-            issues.append({
-                "description": (f.message or f.raw_excerpt or "")[:500],
-                "file_path": (f.file_path or "")[:300],
-                "recommendation": (f.suggestion or f.playbook_hint or "Fix the build error.")[:500],
-            })
+            issues.append(
+                {
+                    "description": (f.message or f.raw_excerpt or "")[:500],
+                    "file_path": (f.file_path or "")[:300],
+                    "recommendation": (f.suggestion or f.playbook_hint or "Fix the build error.")[
+                        :500
+                    ],
+                }
+            )
         if not issues:
-            issues.append({
-                "description": result.error_summary[:500],
-                "file_path": "",
-                "recommendation": "Fix the build error.",
-            })
+            issues.append(
+                {
+                    "description": result.error_summary[:500],
+                    "file_path": "",
+                    "recommendation": "Fix the build error.",
+                }
+            )
         language = "typescript"
         prompt_module = "frontend_code_v2_team.prompts"
     elif agent_type == "backend":
@@ -928,17 +980,21 @@ def _try_build_fix_one_at_a_time(
                     path, _, msg = line.partition(":")
                     path, msg = path.strip(), msg.strip()
                     if path and msg:
-                        issues.append({
-                            "description": msg[:500],
-                            "file_path": path[:300],
-                            "recommendation": "Fix the syntax error in this file.",
-                        })
+                        issues.append(
+                            {
+                                "description": msg[:500],
+                                "file_path": path[:300],
+                                "recommendation": "Fix the syntax error in this file.",
+                            }
+                        )
             if not issues:
-                issues.append({
-                    "description": result.error_summary[:500],
-                    "file_path": "",
-                    "recommendation": "Fix the syntax errors.",
-                })
+                issues.append(
+                    {
+                        "description": result.error_summary[:500],
+                        "file_path": "",
+                        "recommendation": "Fix the syntax errors.",
+                    }
+                )
         else:
             tests_dir = project_dir / "tests"
             if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
@@ -955,17 +1011,25 @@ def _try_build_fix_one_at_a_time(
                 test_result = run_pytest(project_dir, python_exe=sys.executable)
                 if not test_result.success:
                     for f in test_result.parsed_failures("pytest"):
-                        issues.append({
-                            "description": (f.message or f.raw_excerpt or "")[:500],
-                            "file_path": (f.file_path or "")[:300],
-                            "recommendation": (f.suggestion or f.playbook_hint or "Fix the test or implementation.")[:500],
-                        })
+                        issues.append(
+                            {
+                                "description": (f.message or f.raw_excerpt or "")[:500],
+                                "file_path": (f.file_path or "")[:300],
+                                "recommendation": (
+                                    f.suggestion
+                                    or f.playbook_hint
+                                    or "Fix the test or implementation."
+                                )[:500],
+                            }
+                        )
                     if not issues:
-                        issues.append({
-                            "description": test_result.pytest_error_summary()[:500],
-                            "file_path": "",
-                            "recommendation": "Fix the failing tests.",
-                        })
+                        issues.append(
+                            {
+                                "description": test_result.pytest_error_summary()[:500],
+                                "file_path": "",
+                                "recommendation": "Fix the failing tests.",
+                            }
+                        )
         if not issues:
             return True, ""
         if test_result is not None:
@@ -977,13 +1041,19 @@ def _try_build_fix_one_at_a_time(
 
     # Read current files from project_dir (relative paths)
     current_files: Dict[str, str] = {}
-    ext_map = {"frontend": (".ts", ".tsx", ".html", ".scss", ".css", ".js", ".jsx"), "backend": (".py",)}
+    ext_map = {
+        "frontend": (".ts", ".tsx", ".html", ".scss", ".css", ".js", ".jsx"),
+        "backend": (".py",),
+    }
     exts = ext_map.get(agent_type, (".py",))
     max_chars = 30_000
     total = 0
     for ext in exts:
         for f in project_dir.rglob(f"*{ext}"):
-            if not f.is_file() or any(p in f.parts for p in ("node_modules", ".git", "dist", "build", "__pycache__", ".angular")):
+            if not f.is_file() or any(
+                p in f.parts
+                for p in ("node_modules", ".git", "dist", "build", "__pycache__", ".angular")
+            ):
                 continue
             try:
                 rel = str(f.relative_to(project_dir))
@@ -1001,11 +1071,15 @@ def _try_build_fix_one_at_a_time(
         llm = get_client("build_fix_specialist")
     except Exception as e:
         logger.warning("Build fix: could not get LLM: %s", e)
-        return False, result.error_summary if agent_type == "frontend" else (result.error_summary if "result" in dir() else "Build failed")
+        return False, result.error_summary if agent_type == "frontend" else (
+            result.error_summary if "result" in dir() else "Build failed"
+        )
 
     from backend_code_v2_team.output_templates import parse_problem_solving_single_issue_template
+
     if prompt_module == "frontend_code_v2_team.prompts":
         from frontend_code_v2_team.prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT
+
         language_conventions = ""
     else:
         from backend_code_v2_team.prompts import (
@@ -1015,6 +1089,7 @@ def _try_build_fix_one_at_a_time(
         from backend_code_v2_team.prompts import (
             PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT as FIX_PROMPT,
         )
+
         language_conventions = JAVA_CONVENTIONS if language == "java" else PYTHON_CONVENTIONS
 
     max_fix_attempts = 15
@@ -1025,7 +1100,10 @@ def _try_build_fix_one_at_a_time(
         desc = issue["description"]
         logger.info(
             "[%s] Build fix attempt %d/%d: Next step -> Fixing issue: %s",
-            task_id, attempt + 1, max_fix_attempts, desc[:80],
+            task_id,
+            attempt + 1,
+            max_fix_attempts,
+            desc[:80],
         )
         file_path = issue.get("file_path") or ""
         rec = issue.get("recommendation") or "Fix the issue."
@@ -1061,7 +1139,10 @@ def _try_build_fix_one_at_a_time(
         except Exception as e:
             logger.warning(
                 "[%s] Build fix attempt %d/%d failed: LLM call error: %s. Next step -> Skipping to next issue",
-                task_id, attempt + 1, max_fix_attempts, e,
+                task_id,
+                attempt + 1,
+                max_fix_attempts,
+                e,
             )
             continue
         parsed = parse_problem_solving_single_issue_template(raw)
@@ -1094,9 +1175,22 @@ def _try_build_fix_one_at_a_time(
         # Collect remaining issues for next iteration
         if agent_type == "frontend":
             failures = result.parsed_failures("ng_build")
-            issues = [{"description": (f.message or f.raw_excerpt or "")[:500], "file_path": (f.file_path or "")[:300], "recommendation": (f.suggestion or f.playbook_hint or "Fix.")[:500]} for f in failures]
+            issues = [
+                {
+                    "description": (f.message or f.raw_excerpt or "")[:500],
+                    "file_path": (f.file_path or "")[:300],
+                    "recommendation": (f.suggestion or f.playbook_hint or "Fix.")[:500],
+                }
+                for f in failures
+            ]
             if not issues:
-                issues.append({"description": result.error_summary[:500], "file_path": "", "recommendation": "Fix."})
+                issues.append(
+                    {
+                        "description": result.error_summary[:500],
+                        "file_path": "",
+                        "recommendation": "Fix.",
+                    }
+                )
         else:
             if not result.success:
                 stderr = (result.stderr or "").strip()
@@ -1108,22 +1202,53 @@ def _try_build_fix_one_at_a_time(
                             path, _, msg = line.partition(":")
                             path, msg = path.strip(), msg.strip()
                             if path and msg:
-                                issues.append({"description": msg[:500], "file_path": path[:300], "recommendation": "Fix syntax."})
+                                issues.append(
+                                    {
+                                        "description": msg[:500],
+                                        "file_path": path[:300],
+                                        "recommendation": "Fix syntax.",
+                                    }
+                                )
                 if not issues:
-                    issues.append({"description": result.error_summary[:500], "file_path": "", "recommendation": "Fix."})
+                    issues.append(
+                        {
+                            "description": result.error_summary[:500],
+                            "file_path": "",
+                            "recommendation": "Fix.",
+                        }
+                    )
             else:
                 test_result = run_pytest(project_dir, python_exe=sys.executable)
                 result = test_result
                 if not result.success:
-                    issues = [{"description": (f.message or f.raw_excerpt or "")[:500], "file_path": (f.file_path or "")[:300], "recommendation": (f.suggestion or f.playbook_hint or "Fix.")[:500]} for f in result.parsed_failures("pytest")]
+                    issues = [
+                        {
+                            "description": (f.message or f.raw_excerpt or "")[:500],
+                            "file_path": (f.file_path or "")[:300],
+                            "recommendation": (f.suggestion or f.playbook_hint or "Fix.")[:500],
+                        }
+                        for f in result.parsed_failures("pytest")
+                    ]
                     if not issues:
-                        issues.append({"description": result.pytest_error_summary()[:500], "file_path": "", "recommendation": "Fix."})
+                        issues.append(
+                            {
+                                "description": result.pytest_error_summary()[:500],
+                                "file_path": "",
+                                "recommendation": "Fix.",
+                            }
+                        )
 
-    error_summary = result.error_summary if hasattr(result, "error_summary") else "Build still failing after fix attempts"
+    error_summary = (
+        result.error_summary
+        if hasattr(result, "error_summary")
+        else "Build still failing after fix attempts"
+    )
     logger.error(
         "[%s] Build fix exhausted. Recovery summary: attempted %d fix iterations, "
         "each applying LLM-generated patches then re-running build. Final error: %s",
-        task_id, max_fix_attempts, error_summary[:200],
+        task_id,
+        max_fix_attempts,
+        error_summary[:200],
     )
     return False, error_summary
 
@@ -1167,6 +1292,7 @@ def _backend_code_v2_worker(
     Designed to run in its own thread, parallel with frontend worker.
     """
     from software_engineering_team.shared.models import SystemArchitecture
+
     team_lead = agents.get("backend")
     if team_lead is None:
         for tid in backend_code_v2_queue:
@@ -1178,7 +1304,7 @@ def _backend_code_v2_worker(
         if is_cancel_requested(job_id):
             logger.info("Backend worker: cancellation detected, stopping")
             return
-            
+
         task_id = backend_code_v2_queue.pop(0)
         task = all_tasks.get(task_id)
         if not task:
@@ -1194,8 +1320,10 @@ def _backend_code_v2_worker(
             update_job_team_progress(job_id, "backend-code-v2", **kwargs)
 
         try:
-            arch = architecture if isinstance(architecture, SystemArchitecture) else (
-                SystemArchitecture(overview=str(architecture)) if architecture else None
+            arch = (
+                architecture
+                if isinstance(architecture, SystemArchitecture)
+                else (SystemArchitecture(overview=str(architecture)) if architecture else None)
             )
             result = team_lead.run_workflow(
                 repo_path=repo_path,
@@ -1226,15 +1354,25 @@ def _backend_code_v2_worker(
             else:
                 reason = result.failure_reason or "backend workflow did not succeed"
                 failed[task_id] = reason
-                update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=reason)
+                update_task_state(
+                    job_id, task_id, status="failed", finished_at=_iso_now(), error=reason
+                )
                 logger.warning("[%s] backend task failed: %s", task_id, reason)
         except LLMRateLimitError as exc:
             failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
-            update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
+            update_task_state(
+                job_id,
+                task_id,
+                status="failed",
+                finished_at=_iso_now(),
+                error=OLLAMA_WEEKLY_LIMIT_MESSAGE,
+            )
             logger.warning("[%s] LLM rate limit exceeded in backend worker: %s", task_id, exc)
         except Exception as exc:
             failed[task_id] = f"backend exception: {exc}"
-            update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc))
+            update_task_state(
+                job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc)
+            )
             logger.exception("[%s] backend worker exception", task_id)
 
 
@@ -1252,6 +1390,7 @@ def _frontend_code_v2_worker(
 ) -> None:
     """Worker that drains frontend_code_v2_queue by calling frontend_code_v2_team run_workflow."""
     from software_engineering_team.shared.models import SystemArchitecture
+
     team_lead = agents.get("frontend_code_v2")
     if team_lead is None:
         for tid in frontend_code_v2_queue:
@@ -1263,7 +1402,7 @@ def _frontend_code_v2_worker(
         if is_cancel_requested(job_id):
             logger.info("Frontend worker: cancellation detected, stopping")
             return
-            
+
         task_id = frontend_code_v2_queue.pop(0)
         task = all_tasks.get(task_id)
         if not task:
@@ -1279,8 +1418,10 @@ def _frontend_code_v2_worker(
             update_job_team_progress(job_id, "frontend-code-v2", **kwargs)
 
         try:
-            arch = architecture if isinstance(architecture, SystemArchitecture) else (
-                SystemArchitecture(overview=str(architecture)) if architecture else None
+            arch = (
+                architecture
+                if isinstance(architecture, SystemArchitecture)
+                else (SystemArchitecture(overview=str(architecture)) if architecture else None)
             )
             result = team_lead.run_workflow(
                 repo_path=repo_path,
@@ -1309,11 +1450,15 @@ def _frontend_code_v2_worker(
             else:
                 reason = result.failure_reason or "frontend_code_v2 workflow did not succeed"
                 failed[task_id] = reason
-                update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=reason)
+                update_task_state(
+                    job_id, task_id, status="failed", finished_at=_iso_now(), error=reason
+                )
                 logger.warning("[%s] frontend_code_v2 task failed: %s", task_id, reason)
         except Exception as exc:
             failed[task_id] = f"frontend_code_v2 exception: {exc}"
-            update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc))
+            update_task_state(
+                job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc)
+            )
             logger.exception("[%s] frontend_code_v2 worker exception", task_id)
 
 
@@ -1382,16 +1527,29 @@ def _run_backend_frontend_workers(
                 from software_engineering_team.shared.command_runner import (
                     ensure_backend_project_initialized,
                 )
+
                 init_result = ensure_backend_project_initialized(backend_dir)
                 if not init_result.success:
-                    update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=init_result.error_summary)
+                    update_task_state(
+                        job_id,
+                        task_id,
+                        status="failed",
+                        finished_at=_iso_now(),
+                        error=init_result.error_summary,
+                    )
                     with state_lock:
                         failed[task_id] = f"Backend init failed: {init_result.error_summary}"
                     continue
                 if not (backend_dir / ".git").exists():
                     gs_result = agents["git_setup"].run(backend_dir)
                     if not gs_result.success:
-                        update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=gs_result.message)
+                        update_task_state(
+                            job_id,
+                            task_id,
+                            status="failed",
+                            finished_at=_iso_now(),
+                            error=gs_result.message,
+                        )
                         with state_lock:
                             failed[task_id] = f"Git setup failed: {gs_result.message}"
                         continue
@@ -1451,61 +1609,106 @@ def _run_backend_frontend_workers(
                         )
                         if _contract_refineable:
                             _refine_contract = True
-                            logger.info("%s[%s] Task contract incomplete – attempting refinement", log_prefix, task_id)
+                            logger.info(
+                                "%s[%s] Task contract incomplete – attempting refinement",
+                                log_prefix,
+                                task_id,
+                            )
                         else:
                             failed[task_id] = failure_reason
-                            update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=failure_reason)
+                            update_task_state(
+                                job_id,
+                                task_id,
+                                status="failed",
+                                finished_at=_iso_now(),
+                                error=failure_reason,
+                            )
                             execution_tracker.observe_loop(task_id, 1)
                             execution_tracker.finish_task(task_id, blocked=True)
-                            logger.warning("%s[%s] Backend FAILED after %.1fs: %s", log_prefix, task_id, elapsed, failed[task_id])
+                            logger.warning(
+                                "%s[%s] Backend FAILED after %.1fs: %s",
+                                log_prefix,
+                                task_id,
+                                elapsed,
+                                failed[task_id],
+                            )
                 if _refine_contract:
                     try:
                         project_planning_agent = agents.get("project_planning")
                         planning_output = project_planning_agent.run(spec_content=spec_content)
                         nf_reqs = []
-                        if hasattr(planning_output, "overview") and hasattr(planning_output.overview, "non_functional_requirements"):
+                        if hasattr(planning_output, "overview") and hasattr(
+                            planning_output.overview, "non_functional_requirements"
+                        ):
                             nf_reqs = planning_output.overview.non_functional_requirements or []
-                        refined = tech_lead.refine_task(task=task, clarification_requests=[], spec_content=spec_content)
+                        refined = tech_lead.refine_task(
+                            task=task, clarification_requests=[], spec_content=spec_content
+                        )
                         contract_metadata = {
-                            "goal": getattr(refined, "description", None) or getattr(task, "description", ""),
-                            "scope": getattr(refined, "description", None) or getattr(task, "description", ""),
+                            "goal": getattr(refined, "description", None)
+                            or getattr(task, "description", ""),
+                            "scope": getattr(refined, "description", None)
+                            or getattr(task, "description", ""),
                             "constraints": nf_reqs,
                             "non_functional_requirements": nf_reqs,
-                            "inputs_outputs": getattr(refined, "requirements", None) or getattr(task, "requirements", "") or "",
+                            "inputs_outputs": getattr(refined, "requirements", None)
+                            or getattr(task, "requirements", "")
+                            or "",
                         }
                         existing_metadata = getattr(refined, "metadata", None) or {}
-                        updated_task = refined.model_copy(update={"metadata": {**existing_metadata, **contract_metadata}})
+                        updated_task = refined.model_copy(
+                            update={"metadata": {**existing_metadata, **contract_metadata}}
+                        )
                         with state_lock:
                             all_tasks[task_id] = updated_task
                             repaired_tasks.add(task_id)
                             backend_queue.append(task_id)
                         update_job(job_id, status=JOB_STATUS_RUNNING, error=None)
-                        logger.info("%s[%s] Task contract refined. Re-queuing task.", log_prefix, task_id)
+                        logger.info(
+                            "%s[%s] Task contract refined. Re-queuing task.", log_prefix, task_id
+                        )
                     except Exception as refine_err:
-                        logger.warning("%s[%s] Contract refinement failed: %s", log_prefix, task_id, refine_err)
-                        update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=failure_reason)
+                        logger.warning(
+                            "%s[%s] Contract refinement failed: %s", log_prefix, task_id, refine_err
+                        )
+                        update_task_state(
+                            job_id,
+                            task_id,
+                            status="failed",
+                            finished_at=_iso_now(),
+                            error=failure_reason,
+                        )
                         with state_lock:
                             failed[task_id] = failure_reason
             except (LLMError, httpx.HTTPError) as e:
                 err_msg = (
-                    OLLAMA_WEEKLY_LIMIT_MESSAGE if isinstance(e, LLMRateLimitError)
-                    else "LLM rate limited or temporarily unavailable – please retry later" if isinstance(e, LLMTemporaryError)
-                    else str(e) if isinstance(e, LLMPermanentError)
+                    OLLAMA_WEEKLY_LIMIT_MESSAGE
+                    if isinstance(e, LLMRateLimitError)
+                    else "LLM rate limited or temporarily unavailable – please retry later"
+                    if isinstance(e, LLMTemporaryError)
+                    else str(e)
+                    if isinstance(e, LLMPermanentError)
                     else f"LLM error: {e}"
                 )
-                update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=err_msg)
+                update_task_state(
+                    job_id, task_id, status="failed", finished_at=_iso_now(), error=err_msg
+                )
                 with state_lock:
                     if isinstance(e, LLMRateLimitError):
                         llm_limit_exceeded[0] = True
                         failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
                     elif isinstance(e, LLMTemporaryError):
-                        failed[task_id] = "LLM rate limited or temporarily unavailable – please retry later"
+                        failed[task_id] = (
+                            "LLM rate limited or temporarily unavailable – please retry later"
+                        )
                     elif isinstance(e, LLMPermanentError):
                         failed[task_id] = str(e)
                     else:
                         failed[task_id] = f"LLM error: {e}"
                 if isinstance(e, LLMRateLimitError):
-                    logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
+                    logger.warning(
+                        "Ollama LLM usage limit exceeded for week. Job %s paused.", job_id
+                    )
                 else:
                     logger.warning("%s[%s] Backend task LLM/HTTP error: %s", log_prefix, task_id, e)
             except Exception as e:
@@ -1521,43 +1724,71 @@ def _run_backend_frontend_workers(
                     "line_number": line_number,
                     "function_name": func_name,
                 }
-                update_job(job_id, status=JOB_STATUS_AGENT_CRASH, error=str(e), agent_crash_details=agent_crash_details)
+                update_job(
+                    job_id,
+                    status=JOB_STATUS_AGENT_CRASH,
+                    error=str(e),
+                    agent_crash_details=agent_crash_details,
+                )
                 repair_applied = False
                 if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
                     logger.info(
                         "%s[%s] Exception is repairable (%s). Next step -> Attempting automatic repair",
-                        log_prefix, task_id, type(e).__name__,
+                        log_prefix,
+                        task_id,
+                        type(e).__name__,
                     )
                     repair_agent = agents.get("repair")
                     if repair_agent:
                         try:
                             from agent_repair_team.models import RepairInput
-                            result = repair_agent.run(RepairInput(
-                                traceback=traceback.format_exc(),
-                                exception_type=type(e).__name__,
-                                exception_message=str(e),
-                                task_id=task_id,
-                                agent_type="backend",
-                                agent_source_path=agent_source_path,
-                            ))
-                            if result.suggested_fixes and _apply_repair_fixes(agent_source_path, result.suggested_fixes):
+
+                            result = repair_agent.run(
+                                RepairInput(
+                                    traceback=traceback.format_exc(),
+                                    exception_type=type(e).__name__,
+                                    exception_message=str(e),
+                                    task_id=task_id,
+                                    agent_type="backend",
+                                    agent_source_path=agent_source_path,
+                                )
+                            )
+                            if result.suggested_fixes and _apply_repair_fixes(
+                                agent_source_path, result.suggested_fixes
+                            ):
                                 repair_applied = True
                                 with state_lock:
                                     repaired_tasks.add(task_id)
                                     backend_queue.append(task_id)
-                                update_job(job_id, status=JOB_STATUS_RUNNING, error=None, agent_crash_details=None)
-                                logger.info("%s[%s] Repair applied. Next step -> Re-queuing task for retry", log_prefix, task_id)
+                                update_job(
+                                    job_id,
+                                    status=JOB_STATUS_RUNNING,
+                                    error=None,
+                                    agent_crash_details=None,
+                                )
+                                logger.info(
+                                    "%s[%s] Repair applied. Next step -> Re-queuing task for retry",
+                                    log_prefix,
+                                    task_id,
+                                )
                         except Exception as repair_err:
-                            logger.warning("%s[%s] Repair agent failed: %s", log_prefix, task_id, repair_err)
+                            logger.warning(
+                                "%s[%s] Repair agent failed: %s", log_prefix, task_id, repair_err
+                            )
                 if not repair_applied:
-                    update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=str(e))
+                    update_task_state(
+                        job_id, task_id, status="failed", finished_at=_iso_now(), error=str(e)
+                    )
                     with state_lock:
                         failed[task_id] = f"Unhandled exception: {e}"
                     logger.error(
                         "%s[%s] Backend task failed. Recovery summary: 1) Workflow execution failed, "
                         "2) Repair %s. Final error: %s",
-                        log_prefix, task_id,
-                        "attempted but unsuccessful" if type(e) in REPAIRABLE_EXCEPTIONS else "not applicable (non-repairable exception)",
+                        log_prefix,
+                        task_id,
+                        "attempted but unsuccessful"
+                        if type(e) in REPAIRABLE_EXCEPTIONS
+                        else "not applicable (non-repairable exception)",
                         e,
                     )
                 logger.exception("%s[%s] Backend task exception", log_prefix, task_id)
@@ -1568,8 +1799,13 @@ def _run_backend_frontend_workers(
         if devops_agent and backend_dir.is_dir() and (backend_dir / ".git").exists():
             existing_pipeline = _read_repo_code(backend_dir, [".yml", ".yaml"])
             tech_lead.trigger_devops_for_backend(
-                devops_agent, backend_dir, architecture, spec_content,
-                existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+                devops_agent,
+                backend_dir,
+                architecture,
+                spec_content,
+                existing_pipeline=existing_pipeline
+                if existing_pipeline != "# No code files found"
+                else None,
                 build_verifier=_run_build_verification,
             )
 
@@ -1606,19 +1842,36 @@ def _run_backend_frontend_workers(
                 from software_engineering_team.shared.frontend_framework import (
                     resolve_frontend_framework,
                 )
+
                 # Detect framework from task metadata, project files, or spec
                 task_meta = getattr(task, "metadata", None) or {}
-                detected_framework = resolve_frontend_framework(task_meta, spec_content, frontend_dir)
-                init_result = ensure_frontend_project_initialized(frontend_dir, framework=detected_framework)
+                detected_framework = resolve_frontend_framework(
+                    task_meta, spec_content, frontend_dir
+                )
+                init_result = ensure_frontend_project_initialized(
+                    frontend_dir, framework=detected_framework
+                )
                 if not init_result.success:
-                    update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=init_result.error_summary)
+                    update_task_state(
+                        job_id,
+                        task_id,
+                        status="failed",
+                        finished_at=_iso_now(),
+                        error=init_result.error_summary,
+                    )
                     with state_lock:
                         failed[task_id] = f"Frontend init failed: {init_result.error_summary}"
                     continue
                 if not (frontend_dir / ".git").exists():
                     gs_result = agents["git_setup"].run(frontend_dir)
                     if not gs_result.success:
-                        update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=gs_result.message)
+                        update_task_state(
+                            job_id,
+                            task_id,
+                            status="failed",
+                            finished_at=_iso_now(),
+                            error=gs_result.message,
+                        )
                         with state_lock:
                             failed[task_id] = f"Git setup failed: {gs_result.message}"
                         continue
@@ -1680,13 +1933,36 @@ def _run_backend_frontend_workers(
                         )
                     else:
                         failed[task_id] = failure_reason
-                        update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=failure_reason)
+                        update_task_state(
+                            job_id,
+                            task_id,
+                            status="failed",
+                            finished_at=_iso_now(),
+                            error=failure_reason,
+                        )
                         execution_tracker.observe_loop(task_id, 1)
                         execution_tracker.finish_task(task_id, blocked=True)
-                        logger.warning("%s[%s] Frontend FAILED after %.1fs: %s", log_prefix, task_id, elapsed, failed[task_id])
-                logger.info("%s[%s] <<< Frontend worker done (completed=%s)", log_prefix, task_id, workflow_result.success)
+                        logger.warning(
+                            "%s[%s] Frontend FAILED after %.1fs: %s",
+                            log_prefix,
+                            task_id,
+                            elapsed,
+                            failed[task_id],
+                        )
+                logger.info(
+                    "%s[%s] <<< Frontend worker done (completed=%s)",
+                    log_prefix,
+                    task_id,
+                    workflow_result.success,
+                )
                 if getattr(workflow_result, "llm_unreachable", False):
-                    update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=LLM_UNREACHABLE_AFTER_RETRIES)
+                    update_task_state(
+                        job_id,
+                        task_id,
+                        status="failed",
+                        finished_at=_iso_now(),
+                        error=LLM_UNREACHABLE_AFTER_RETRIES,
+                    )
                     with state_lock:
                         llm_connectivity_failed[0] = True
                         failed[task_id] = LLM_UNREACHABLE_AFTER_RETRIES
@@ -1694,28 +1970,44 @@ def _run_backend_frontend_workers(
                     break
             except (LLMError, httpx.HTTPError) as e:
                 err_msg = (
-                    OLLAMA_WEEKLY_LIMIT_MESSAGE if isinstance(e, LLMRateLimitError)
-                    else "LLM rate limited or temporarily unavailable – please retry later" if isinstance(e, LLMTemporaryError)
-                    else str(e) if isinstance(e, LLMPermanentError)
+                    OLLAMA_WEEKLY_LIMIT_MESSAGE
+                    if isinstance(e, LLMRateLimitError)
+                    else "LLM rate limited or temporarily unavailable – please retry later"
+                    if isinstance(e, LLMTemporaryError)
+                    else str(e)
+                    if isinstance(e, LLMPermanentError)
                     else f"LLM error: {e}"
                 )
-                update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=err_msg)
+                update_task_state(
+                    job_id, task_id, status="failed", finished_at=_iso_now(), error=err_msg
+                )
                 with state_lock:
                     if isinstance(e, LLMRateLimitError):
                         llm_limit_exceeded[0] = True
                         failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
                     elif isinstance(e, LLMTemporaryError):
-                        failed[task_id] = "LLM rate limited or temporarily unavailable – please retry later"
+                        failed[task_id] = (
+                            "LLM rate limited or temporarily unavailable – please retry later"
+                        )
                     elif isinstance(e, LLMPermanentError):
                         failed[task_id] = str(e)
                     else:
                         failed[task_id] = f"LLM error: {e}"
                 if isinstance(e, LLMRateLimitError):
-                    logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
+                    logger.warning(
+                        "Ollama LLM usage limit exceeded for week. Job %s paused.", job_id
+                    )
                 elif isinstance(e, LLMPermanentError):
-                    logger.warning("%s[%s] Frontend task generation failed validation: %s", log_prefix, task_id, e)
+                    logger.warning(
+                        "%s[%s] Frontend task generation failed validation: %s",
+                        log_prefix,
+                        task_id,
+                        e,
+                    )
                 else:
-                    logger.warning("%s[%s] Frontend task LLM/HTTP error: %s", log_prefix, task_id, e)
+                    logger.warning(
+                        "%s[%s] Frontend task LLM/HTTP error: %s", log_prefix, task_id, e
+                    )
                 # On JSON parse failure, ask Tech Lead to break task into smaller subtasks (plan update).
                 _is_json_parse_failure = isinstance(e, LLMJsonParseError) or (
                     isinstance(e, LLMPermanentError)
@@ -1734,6 +2026,7 @@ def _run_backend_frontend_workers(
                         failure_class=failure_class,
                     )
                     remaining_ids = _remaining_queue_ids()
+
                     def _append_task_by_assignee(tid: str) -> None:
                         with state_lock:
                             t = all_tasks.get(tid)
@@ -1742,6 +2035,7 @@ def _run_backend_frontend_workers(
                                 frontend_queue.append(tid)
                             else:
                                 backend_queue.append(tid)
+
                     try:
                         _run_tech_lead_review(
                             tech_lead=tech_lead,
@@ -1776,43 +2070,71 @@ def _run_backend_frontend_workers(
                     "line_number": line_number,
                     "function_name": func_name,
                 }
-                update_job(job_id, status=JOB_STATUS_AGENT_CRASH, error=str(e), agent_crash_details=agent_crash_details)
+                update_job(
+                    job_id,
+                    status=JOB_STATUS_AGENT_CRASH,
+                    error=str(e),
+                    agent_crash_details=agent_crash_details,
+                )
                 repair_applied = False
                 if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
                     logger.info(
                         "%s[%s] Exception is repairable (%s). Next step -> Attempting automatic repair",
-                        log_prefix, task_id, type(e).__name__,
+                        log_prefix,
+                        task_id,
+                        type(e).__name__,
                     )
                     repair_agent = agents.get("repair")
                     if repair_agent:
                         try:
                             from agent_repair_team.models import RepairInput
-                            result = repair_agent.run(RepairInput(
-                                traceback=traceback.format_exc(),
-                                exception_type=type(e).__name__,
-                                exception_message=str(e),
-                                task_id=task_id,
-                                agent_type="frontend",
-                                agent_source_path=agent_source_path,
-                            ))
-                            if result.suggested_fixes and _apply_repair_fixes(agent_source_path, result.suggested_fixes):
+
+                            result = repair_agent.run(
+                                RepairInput(
+                                    traceback=traceback.format_exc(),
+                                    exception_type=type(e).__name__,
+                                    exception_message=str(e),
+                                    task_id=task_id,
+                                    agent_type="frontend",
+                                    agent_source_path=agent_source_path,
+                                )
+                            )
+                            if result.suggested_fixes and _apply_repair_fixes(
+                                agent_source_path, result.suggested_fixes
+                            ):
                                 repair_applied = True
                                 with state_lock:
                                     repaired_tasks.add(task_id)
                                     frontend_queue.append(task_id)
-                                update_job(job_id, status=JOB_STATUS_RUNNING, error=None, agent_crash_details=None)
-                                logger.info("%s[%s] Repair applied. Next step -> Re-queuing task for retry", log_prefix, task_id)
+                                update_job(
+                                    job_id,
+                                    status=JOB_STATUS_RUNNING,
+                                    error=None,
+                                    agent_crash_details=None,
+                                )
+                                logger.info(
+                                    "%s[%s] Repair applied. Next step -> Re-queuing task for retry",
+                                    log_prefix,
+                                    task_id,
+                                )
                         except Exception as repair_err:
-                            logger.warning("%s[%s] Repair agent failed: %s", log_prefix, task_id, repair_err)
+                            logger.warning(
+                                "%s[%s] Repair agent failed: %s", log_prefix, task_id, repair_err
+                            )
                 if not repair_applied:
-                    update_task_state(job_id, task_id, status="failed", finished_at=_iso_now(), error=str(e))
+                    update_task_state(
+                        job_id, task_id, status="failed", finished_at=_iso_now(), error=str(e)
+                    )
                     with state_lock:
                         failed[task_id] = f"Unhandled exception: {e}"
                     logger.error(
                         "%s[%s] Frontend task failed. Recovery summary: 1) Workflow execution failed, "
                         "2) Repair %s. Final error: %s",
-                        log_prefix, task_id,
-                        "attempted but unsuccessful" if type(e) in REPAIRABLE_EXCEPTIONS else "not applicable (non-repairable exception)",
+                        log_prefix,
+                        task_id,
+                        "attempted but unsuccessful"
+                        if type(e) in REPAIRABLE_EXCEPTIONS
+                        else "not applicable (non-repairable exception)",
                         e,
                     )
                 logger.exception("%s[%s] Frontend task exception", log_prefix, task_id)
@@ -1823,8 +2145,13 @@ def _run_backend_frontend_workers(
             if devops_agent and frontend_dir.is_dir() and (frontend_dir / ".git").exists():
                 existing_pipeline = _read_repo_code(frontend_dir, [".yml", ".yaml"])
                 tech_lead.trigger_devops_for_frontend(
-                    devops_agent, frontend_dir, architecture, spec_content,
-                    existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+                    devops_agent,
+                    frontend_dir,
+                    architecture,
+                    spec_content,
+                    existing_pipeline=existing_pipeline
+                    if existing_pipeline != "# No code files found"
+                    else None,
                     build_verifier=_run_build_verification,
                 )
 
@@ -1863,8 +2190,13 @@ def run_orchestrator(
     try:
         # Check for cancellation at start
         _check_cancellation(job_id)
-        
-        update_job(job_id, status=JOB_STATUS_RUNNING, phase="product_analysis", status_text="Starting pipeline")
+
+        update_job(
+            job_id,
+            status=JOB_STATUS_RUNNING,
+            phase="product_analysis",
+            status_text="Starting pipeline",
+        )
 
         agents = _get_agents()
 
@@ -1875,13 +2207,14 @@ def run_orchestrator(
             get_newest_spec_path,
             parse_spec_with_llm,
         )
+
         initial_spec_path = None
         if spec_content_override is not None:
             spec_content = spec_content_override
         else:
             initial_spec_path = get_newest_spec_path(path)
             spec_content = get_newest_spec_content(path)
-        
+
         # Gather all context files from the repo for PRA agent
         context_files = gather_context_files(path)
         if context_files:
@@ -1894,10 +2227,19 @@ def run_orchestrator(
             return
         except Exception as e:
             logger.error("Spec parsing failed (LLM unavailable or returned invalid output): %s", e)
-            update_job(job_id, status=JOB_STATUS_FAILED, error=f"Spec parsing failed: {e}", phase="completed")
+            update_job(
+                job_id,
+                status=JOB_STATUS_FAILED,
+                error=f"Spec parsing failed: {e}",
+                phase="completed",
+            )
             return
-        update_job(job_id, requirements_title=requirements.title, status_text="Specification parsed successfully")
-        
+        update_job(
+            job_id,
+            requirements_title=requirements.title,
+            status_text="Specification parsed successfully",
+        )
+
         # Check for cancellation after spec parsing
         _check_cancellation(job_id)
 
@@ -1926,8 +2268,15 @@ def run_orchestrator(
             except Exception:
                 pass
 
-        update_job(job_id, phase="product_analysis", message="Starting product requirements analysis...", status_text="Starting product requirements analysis")
-        logger.info("Next step -> Running Product Requirements Analysis agent to validate spec and gather clarifications")
+        update_job(
+            job_id,
+            phase="product_analysis",
+            message="Starting product requirements analysis...",
+            status_text="Starting product requirements analysis",
+        )
+        logger.info(
+            "Next step -> Running Product Requirements Analysis agent to validate spec and gather clarifications"
+        )
         pra_agent = ProductRequirementsAnalysisAgent(get_client("product_analysis"))
         pra_result = pra_agent.run_workflow(
             spec_content=spec_content,
@@ -1938,7 +2287,10 @@ def run_orchestrator(
             initial_spec_path=initial_spec_path,
         )
         if not pra_result.success:
-            err = pra_result.failure_reason or "Product Requirements Analysis did not complete successfully."
+            err = (
+                pra_result.failure_reason
+                or "Product Requirements Analysis did not complete successfully."
+            )
             logger.error("Product Requirements Analysis failed: %s", err)
             update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
             return
@@ -1949,13 +2301,18 @@ def run_orchestrator(
             "Product Requirements Analysis complete: %d iterations, validated spec ready",
             pra_result.iterations,
         )
-        
+
         # Check for cancellation after PRA
         _check_cancellation(job_id)
 
         # ── Step 2: Planning V3 Team ──────────────────────────────────────────
         # Receives validated spec, performs planning (intake → discovery → requirements → synthesis → document production)
-        update_job(job_id, phase="planning", message="Starting planning workflow...", status_text="Starting planning workflow")
+        update_job(
+            job_id,
+            phase="planning",
+            message="Starting planning workflow...",
+            status_text="Starting planning workflow",
+        )
         logger.info("Next step -> Running Planning V3 team to generate handoff and context")
 
         from planning_v3_adapter import PlanningV2AdapterResult, adapt_planning_v3_result
@@ -1963,7 +2320,12 @@ def run_orchestrator(
         from planning_v3_team.orchestrator import run_workflow as run_planning_v3_workflow
 
         PLANNING_V3_PHASE_ORDER = [
-            "intake", "discovery", "requirements", "synthesis", "document_production", "sub_agent_provisioning"
+            "intake",
+            "discovery",
+            "requirements",
+            "synthesis",
+            "document_production",
+            "sub_agent_provisioning",
         ]
 
         def _planning_v3_job_updater(**kwargs: Any) -> None:
@@ -1991,6 +2353,7 @@ def run_orchestrator(
             from architecture_expert.models import ArchitectureInput
 
             from software_engineering_team.shared.models import ProductRequirements
+
             req_desc = (spec_content or "").strip()
             if (prd_content or "").strip():
                 req_desc = (req_desc + "\n\n" + prd_content.strip()).strip()
@@ -2012,14 +2375,27 @@ def run_orchestrator(
                 features_parts.append(prd_content)
             if client_context:
                 if client_context.get("problem_summary"):
-                    features_parts.append("## Problem summary\n" + (client_context["problem_summary"] or ""))
+                    features_parts.append(
+                        "## Problem summary\n" + (client_context["problem_summary"] or "")
+                    )
                 if client_context.get("opportunity_statement"):
-                    features_parts.append("## Opportunity\n" + (client_context["opportunity_statement"] or ""))
+                    features_parts.append(
+                        "## Opportunity\n" + (client_context["opportunity_statement"] or "")
+                    )
             features_doc = "\n\n".join(features_parts) if features_parts else ""
             goals = ""
-            if client_context and (client_context.get("problem_summary") or client_context.get("opportunity_statement")):
-                goals = (client_context.get("problem_summary") or "") + "\n" + (client_context.get("opportunity_statement") or "")
-            project_overview = {"features_and_functionality_doc": features_doc, "goals": goals.strip()}
+            if client_context and (
+                client_context.get("problem_summary") or client_context.get("opportunity_statement")
+            ):
+                goals = (
+                    (client_context.get("problem_summary") or "")
+                    + "\n"
+                    + (client_context.get("opportunity_statement") or "")
+                )
+            project_overview = {
+                "features_and_functionality_doc": features_doc,
+                "goals": goals.strip(),
+            }
             arch_agent = agents["architecture"]
             arch_input = ArchitectureInput(
                 requirements=requirements,
@@ -2029,7 +2405,11 @@ def run_orchestrator(
             )
             try:
                 arch_output = arch_agent.run(arch_input)
-                return (arch_output.architecture.overview or "") if arch_output and arch_output.architecture else None
+                return (
+                    (arch_output.architecture.overview or "")
+                    if arch_output and arch_output.architecture
+                    else None
+                )
             except Exception:
                 return None
 
@@ -2043,7 +2423,10 @@ def run_orchestrator(
             run_architecture_fn=_run_architecture_for_planning_v3,
         )
         if not p3_result.get("success"):
-            err = p3_result.get("failure_reason") or "Planning V3 workflow did not complete successfully."
+            err = (
+                p3_result.get("failure_reason")
+                or "Planning V3 workflow did not complete successfully."
+            )
             logger.error("Planning V3 failed: %s", err)
             update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
             return
@@ -2079,6 +2462,7 @@ def run_orchestrator(
                 adapter_result, str(path), existing_code_summary, resolved_questions_override
             )
             from coding_team.orchestrator import run_coding_team_orchestrator
+
             run_coding_team_orchestrator(
                 job_id,
                 str(path),
@@ -2094,14 +2478,21 @@ def run_orchestrator(
         # and standalone Architecture Expert are retained for legacy/alternate flows only.
         # Planning process: (1) features doc from planning-v3 adapter; (2) tasks from Tech Lead; (3) architecture from Architecture Expert;
         # (4) consolidation; (5) execution.
-        features_and_functionality_doc = (project_overview.get("features_and_functionality_doc") or "").strip()
+        features_and_functionality_doc = (
+            project_overview.get("features_and_functionality_doc") or ""
+        ).strip()
 
         # Optional: Run Enterprise Architect for richer architecture context (SW_USE_ENTERPRISE_ARCHITECT=true)
         enterprise_arch_context: Optional[str] = None
-        if (os.environ.get("SW_USE_ENTERPRISE_ARCHITECT") or "").strip().lower() in ("1", "true", "yes"):
+        if (os.environ.get("SW_USE_ENTERPRISE_ARCHITECT") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
             try:
                 if _arch_dir.exists():
                     from integration import run_enterprise_architect
+
                     ea_result = run_enterprise_architect(
                         spec_content=spec_content_for_planning,
                         work_path=str(path),
@@ -2133,17 +2524,26 @@ def run_orchestrator(
         tech_lead_output = None
         assignment = None
         try:
-            tech_lead_output = tech_lead.run(TechLeadInput(
-                requirements=requirements,
-                repo_path=str(path),
-                spec_content=spec_content_for_planning,
-                existing_codebase=existing_code if existing_code != "# No code files found" else None,
-                project_overview=project_overview,
-                open_questions=[q.question_text if hasattr(q, 'question_text') else str(q) for q in spec_intake_open_questions] if spec_intake_open_questions else None,
-                assumptions=spec_intake_assumptions if spec_intake_assumptions else None,
-                resolved_questions=resolved_questions_override,
-                planning_hierarchy=planning_v2_hierarchy,
-            ))
+            tech_lead_output = tech_lead.run(
+                TechLeadInput(
+                    requirements=requirements,
+                    repo_path=str(path),
+                    spec_content=spec_content_for_planning,
+                    existing_codebase=existing_code
+                    if existing_code != "# No code files found"
+                    else None,
+                    project_overview=project_overview,
+                    open_questions=[
+                        q.question_text if hasattr(q, "question_text") else str(q)
+                        for q in spec_intake_open_questions
+                    ]
+                    if spec_intake_open_questions
+                    else None,
+                    assumptions=spec_intake_assumptions if spec_intake_assumptions else None,
+                    resolved_questions=resolved_questions_override,
+                    planning_hierarchy=planning_v2_hierarchy,
+                )
+            )
         except LLMRateLimitError:
             logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
             update_job(job_id, status="paused_llm_limit", error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
@@ -2158,9 +2558,7 @@ def run_orchestrator(
                 )
                 add_pending_questions(job_id, structured_questions)
                 if slack_notify_open_questions:
-                    slack_notify_open_questions(
-                        job_id, structured_questions, source="run-team"
-                    )
+                    slack_notify_open_questions(job_id, structured_questions, source="run-team")
                 logger.info(
                     "Job %s waiting for %d clarification answers from user",
                     job_id,
@@ -2179,7 +2577,12 @@ def run_orchestrator(
         assignment = tech_lead_output.assignment
         if not assignment or not assignment.tasks:
             logger.error("Tech Lead produced no tasks; failing job")
-            update_job(job_id, status=JOB_STATUS_FAILED, error="Tech Lead produced no tasks", phase="completed")
+            update_job(
+                job_id,
+                status=JOB_STATUS_FAILED,
+                error="Tech Lead produced no tasks",
+                phase="completed",
+            )
             return
 
         # Architecture (single pass, no iteration)
@@ -2207,6 +2610,7 @@ def run_orchestrator(
         # Planning consolidation: master plan, risk register, ship checklist
         try:
             from planning_team.planning_consolidation import run_planning_consolidation
+
             run_planning_consolidation(plan_dir, assignment, architecture, project_overview)
         except Exception as e:
             logger.warning("Planning consolidation skipped: %s", e)
@@ -2217,7 +2621,8 @@ def run_orchestrator(
                 path,
                 assignment,
                 summary=getattr(tech_lead_output, "summary", "") or "",
-                requirement_task_mapping=getattr(tech_lead_output, "requirement_task_mapping", None) or [],
+                requirement_task_mapping=getattr(tech_lead_output, "requirement_task_mapping", None)
+                or [],
                 validation_report=getattr(tech_lead_output, "validation_report", None),
                 plan_dir=plan_dir,
             )
@@ -2251,26 +2656,32 @@ def run_orchestrator(
             epics = []
             stories = []
             for init in hierarchy.initiatives:
-                initiatives.append({
-                    "id": init.id,
-                    "title": init.title,
-                    "description": getattr(init, "description", "") or "",
-                })
+                initiatives.append(
+                    {
+                        "id": init.id,
+                        "title": init.title,
+                        "description": getattr(init, "description", "") or "",
+                    }
+                )
                 for epic in init.epics:
-                    epics.append({
-                        "id": epic.id,
-                        "title": epic.title,
-                        "description": getattr(epic, "description", "") or "",
-                        "initiative_id": init.id,
-                    })
-                    for story in epic.stories:
-                        stories.append({
-                            "id": story.id,
-                            "title": story.title,
-                            "description": getattr(story, "description", "") or "",
-                            "epic_id": epic.id,
+                    epics.append(
+                        {
+                            "id": epic.id,
+                            "title": epic.title,
+                            "description": getattr(epic, "description", "") or "",
                             "initiative_id": init.id,
-                        })
+                        }
+                    )
+                    for story in epic.stories:
+                        stories.append(
+                            {
+                                "id": story.id,
+                                "title": story.title,
+                                "description": getattr(story, "description", "") or "",
+                                "epic_id": epic.id,
+                                "initiative_id": init.id,
+                            }
+                        )
             hierarchy_summary = {
                 "initiatives": initiatives,
                 "epics": epics,
@@ -2285,12 +2696,14 @@ def run_orchestrator(
             phase="execution",
             status_text="Starting task execution",
         )
-        
+
         # Check for cancellation before execution
         _check_cancellation(job_id)
-        
+
         if planning_only:
-            logger.info("Planning-only run: stopping before execution (re-plan-with-clarifications)")
+            logger.info(
+                "Planning-only run: stopping before execution (re-plan-with-clarifications)"
+            )
             update_job(job_id, status="completed", phase="completed")
             return
 
@@ -2308,24 +2721,42 @@ def run_orchestrator(
         completed_code_task_ids: List[str] = []
         all_tasks = {t.id: t for t in assignment.tasks}
         full_order = list(assignment.execution_order)
-        prefix_queue = [tid for tid in full_order if all_tasks.get(tid) and (
-            all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops"
-        )]
-        backend_queue: List[str] = []  # All backend work routed to backend_code_v2_team via backend_code_v2_queue
+        prefix_queue = [
+            tid
+            for tid in full_order
+            if all_tasks.get(tid)
+            and (all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops")
+        ]
+        backend_queue: List[
+            str
+        ] = []  # All backend work routed to backend_code_v2_team via backend_code_v2_queue
         backend_code_v2_queue: List[str] = [
-            tid for tid in full_order
+            tid
+            for tid in full_order
             if all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
         ]
-        frontend_queue: List[str] = []  # All frontend work routed to frontend_code_v2_team via frontend_code_v2_queue
+        frontend_queue: List[
+            str
+        ] = []  # All frontend work routed to frontend_code_v2_team via frontend_code_v2_queue
         frontend_code_v2_queue: List[str] = [
-            tid for tid in full_order
+            tid
+            for tid in full_order
             if all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
         ]
-        total_tasks = len(prefix_queue) + len(backend_queue) + len(backend_code_v2_queue) + len(frontend_queue) + len(frontend_code_v2_queue)
+        total_tasks = (
+            len(prefix_queue)
+            + len(backend_queue)
+            + len(backend_code_v2_queue)
+            + len(frontend_queue)
+            + len(frontend_code_v2_queue)
+        )
 
         logger.info(
             "=== Starting task execution: prefix=%s, backend=%s, frontend=%s, frontend_code_v2=%s ===",
-            len(prefix_queue), len(backend_code_v2_queue), len(frontend_queue), len(frontend_code_v2_queue),
+            len(prefix_queue),
+            len(backend_code_v2_queue),
+            len(frontend_queue),
+            len(frontend_code_v2_queue),
         )
 
         # Run prefix tasks sequentially (work path; devops writes to path/devops, no git)
@@ -2431,11 +2862,16 @@ def run_orchestrator(
 
         llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed.values())
         llm_connectivity_failed = any(v == LLM_UNREACHABLE_AFTER_RETRIES for v in failed.values())
-        remaining_in_queues = len(backend_code_v2_queue) + len(frontend_queue) + len(frontend_code_v2_queue)
+        remaining_in_queues = (
+            len(backend_code_v2_queue) + len(frontend_queue) + len(frontend_code_v2_queue)
+        )
         # Log final execution summary with task breakdown
         logger.info(
             "=== Task execution finished: %s completed, %s failed, %s remaining (of %s total) ===",
-            len(completed), len(failed), remaining_in_queues, total_tasks,
+            len(completed),
+            len(failed),
+            remaining_in_queues,
+            total_tasks,
         )
         _log_task_breakdown(
             completed=completed,
@@ -2453,7 +2889,9 @@ def run_orchestrator(
         if remaining_in_queues:
             logger.warning(
                 "Unprocessed tasks still in queues: backend=%s, frontend=%s, frontend_code_v2=%s",
-                len(backend_code_v2_queue), len(frontend_queue), len(frontend_code_v2_queue),
+                len(backend_code_v2_queue),
+                len(frontend_queue),
+                len(frontend_code_v2_queue),
             )
 
         # Integration phase: validate backend-frontend API contract alignment
@@ -2463,29 +2901,42 @@ def run_orchestrator(
         if integration_agent and has_backend and has_frontend and completed_code_task_ids:
             try:
                 from integration_team import IntegrationInput
+
                 code_backend = _read_repo_code(backend_dir, [".py"])
                 code_frontend = _read_repo_code(frontend_dir, [".ts", ".tsx", ".html", ".scss"])
-                if code_backend != "# No code files found" and code_frontend != "# No code files found":
-                    int_result = integration_agent.run(IntegrationInput(
-                        backend_code=code_backend,
-                        frontend_code=code_frontend,
-                        spec_content=spec_content,
-                        architecture=architecture,
-                    ))
+                if (
+                    code_backend != "# No code files found"
+                    and code_frontend != "# No code files found"
+                ):
+                    int_result = integration_agent.run(
+                        IntegrationInput(
+                            backend_code=code_backend,
+                            frontend_code=code_frontend,
+                            spec_content=spec_content,
+                            architecture=architecture,
+                        )
+                    )
                     if not int_result.passed:
                         logger.warning(
                             "Integration agent found %s issues (%s critical/high)",
                             len(int_result.issues),
-                            len([i for i in int_result.issues if i.severity in ("critical", "high")]),
+                            len(
+                                [i for i in int_result.issues if i.severity in ("critical", "high")]
+                            ),
                         )
                         for i, issue in enumerate(int_result.issues[:10], 1):
                             logger.warning(
                                 "  [%s] %s: %s (backend: %s, frontend: %s)",
-                                i, issue.severity, issue.description[:100],
-                                issue.backend_location or "n/a", issue.frontend_location or "n/a",
+                                i,
+                                issue.severity,
+                                issue.description[:100],
+                                issue.backend_location or "n/a",
+                                issue.frontend_location or "n/a",
                             )
                     else:
-                        logger.info("Integration agent: passed (no critical/high contract mismatches)")
+                        logger.info(
+                            "Integration agent: passed (no critical/high contract mismatches)"
+                        )
             except Exception as int_err:
                 logger.warning("Integration phase failed (non-blocking): %s", int_err)
 
@@ -2495,22 +2946,36 @@ def run_orchestrator(
             logger.info("Next step -> Running DevOps agent to containerize backend repo")
             existing_pipeline = _read_repo_code(backend_dir, [".yml", ".yaml"])
             tech_lead.trigger_devops_for_backend(
-                devops_agent, backend_dir, architecture, spec_content,
-                existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+                devops_agent,
+                backend_dir,
+                architecture,
+                spec_content,
+                existing_pipeline=existing_pipeline
+                if existing_pipeline != "# No code files found"
+                else None,
                 build_verifier=_run_build_verification,
             )
         if devops_agent and frontend_dir.is_dir() and (frontend_dir / ".git").exists():
             logger.info("Next step -> Running DevOps agent to containerize frontend repo")
             existing_pipeline = _read_repo_code(frontend_dir, [".yml", ".yaml"])
             tech_lead.trigger_devops_for_frontend(
-                devops_agent, frontend_dir, architecture, spec_content,
-                existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+                devops_agent,
+                frontend_dir,
+                architecture,
+                spec_content,
+                existing_pipeline=existing_pipeline
+                if existing_pipeline != "# No code files found"
+                else None,
                 build_verifier=_run_build_verification,
             )
 
         # Persist failed task details and retryable state in job store
         failed_details = [
-            {"task_id": tid, "reason": reason, "title": (all_tasks.get(tid).title if all_tasks.get(tid) else tid)}
+            {
+                "task_id": tid,
+                "reason": reason,
+                "title": (all_tasks.get(tid).title if all_tasks.get(tid) else tid),
+            }
             for tid, reason in failed.items()
         ]
         # Store serializable task data for retry capability
@@ -2531,35 +2996,53 @@ def run_orchestrator(
             completed_code_task_ids, spec_content, tech_lead_output.requirement_task_mapping
         ):
             from security_agent.models import SecurityInput
+
             has_backend = any(
                 all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
                 for tid in completed_code_task_ids
             )
-            has_frontend = any(all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2") for tid in completed_code_task_ids)
+            has_frontend = any(
+                all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
+                for tid in completed_code_task_ids
+            )
             if has_backend:
-                logger.info("Tech Lead requested security review - running Security agent on backend repo")
+                logger.info(
+                    "Tech Lead requested security review - running Security agent on backend repo"
+                )
                 code_backend = _read_repo_code(backend_dir)
                 if code_backend and code_backend != "# No code files found":
-                    sec_result = agents["security"].run(SecurityInput(
-                        code=code_backend,
-                        language="python",
-                        task_description="Full codebase security review",
-                        architecture=architecture,
-                    ))
+                    sec_result = agents["security"].run(
+                        SecurityInput(
+                            code=code_backend,
+                            language="python",
+                            task_description="Full codebase security review",
+                            architecture=architecture,
+                        )
+                    )
                     if sec_result.vulnerabilities:
-                        logger.warning("Security (backend) found %s vulnerabilities", len(sec_result.vulnerabilities))
+                        logger.warning(
+                            "Security (backend) found %s vulnerabilities",
+                            len(sec_result.vulnerabilities),
+                        )
             if has_frontend:
-                logger.info("Tech Lead requested security review - running Security agent on frontend repo")
+                logger.info(
+                    "Tech Lead requested security review - running Security agent on frontend repo"
+                )
                 code_frontend = _read_repo_code(frontend_dir, [".ts", ".tsx", ".html", ".scss"])
                 if code_frontend and code_frontend != "# No code files found":
-                    sec_result = agents["security"].run(SecurityInput(
-                        code=code_frontend,
-                        language="typescript",
-                        task_description="Full codebase security review",
-                        architecture=architecture,
-                    ))
+                    sec_result = agents["security"].run(
+                        SecurityInput(
+                            code=code_frontend,
+                            language="typescript",
+                            task_description="Full codebase security review",
+                            architecture=architecture,
+                        )
+                    )
                     if sec_result.vulnerabilities:
-                        logger.warning("Security (frontend) found %s vulnerabilities", len(sec_result.vulnerabilities))
+                        logger.warning(
+                            "Security (frontend) found %s vulnerabilities",
+                            len(sec_result.vulnerabilities),
+                        )
 
         # Final documentation pass: always run comprehensive documentation review for each repo
         doc_agent = agents.get("documentation")
@@ -2588,11 +3071,14 @@ def run_orchestrator(
                         from software_engineering_team.shared.context_sizing import (
                             compute_existing_code_chars,
                         )
+
                         max_code_chars = compute_existing_code_chars(doc_agent.llm)
                         codebase_content = _truncate_for_context(
                             _read_repo_code(
                                 repo_dir,
-                                [".py"] if repo_name == "backend" else [".ts", ".tsx", ".html", ".scss"],
+                                [".py"]
+                                if repo_name == "backend"
+                                else [".ts", ".tsx", ".html", ".scss"],
                             ),
                             max_code_chars,
                         )
@@ -2641,11 +3127,23 @@ def run_orchestrator(
                 failed_count=len(failed),
                 job_id=job_id,
             )
-            update_job(job_id, status=JOB_STATUS_COMPLETED, progress=100, current_task=None, phase="completed", status_text="All tasks completed successfully")
+            update_job(
+                job_id,
+                status=JOB_STATUS_COMPLETED,
+                progress=100,
+                current_task=None,
+                phase="completed",
+                status_text="All tasks completed successfully",
+            )
 
     except CancellationError:
         logger.info("Orchestrator stopped due to job cancellation: %s", job_id)
-        update_job(job_id, status=JOB_STATUS_CANCELLED, status_text="Job cancelled by user", phase="completed")
+        update_job(
+            job_id,
+            status=JOB_STATUS_CANCELLED,
+            status_text="Job cancelled by user",
+            phase="completed",
+        )
     except Exception as e:
         logger.exception("Orchestrator failed")
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
@@ -2676,7 +3174,9 @@ def run_failed_tasks(job_id: str) -> None:
         raise ValueError(f"Job {job_id} has no stored task data for retry")
 
     failed_ids = [ft["task_id"] for ft in failed_tasks]
-    logger.info("=== Retrying %s failed tasks for job %s: %s ===", len(failed_ids), job_id, failed_ids)
+    logger.info(
+        "=== Retrying %s failed tasks for job %s: %s ===", len(failed_ids), job_id, failed_ids
+    )
 
     path = Path(repo_path).resolve()
     backend_dir = path / "backend"
@@ -2696,11 +3196,15 @@ def run_failed_tasks(job_id: str) -> None:
 
         # Re-read spec for agents that need it
         from spec_parser import get_latest_spec_content
+
         spec_content = get_latest_spec_content(path)
 
         # Reconstruct minimal architecture from stored overview
         from software_engineering_team.shared.models import SystemArchitecture
-        arch_overview = job_data.get("_architecture_overview") or job_data.get("architecture_overview") or ""
+
+        arch_overview = (
+            job_data.get("_architecture_overview") or job_data.get("architecture_overview") or ""
+        )
         architecture = SystemArchitecture(overview=arch_overview)
 
         tech_lead = agents["tech_lead"]
@@ -2711,22 +3215,32 @@ def run_failed_tasks(job_id: str) -> None:
         completed_code_task_ids: List[str] = []
 
         retry_prefix = [
-            tid for tid in failed_ids
-            if all_tasks.get(tid) and (
-                all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops"
-            )
+            tid
+            for tid in failed_ids
+            if all_tasks.get(tid)
+            and (all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops")
         ]
         retry_backend_queue: List[str] = []  # All backend retries go through backend_code_v2_team
         retry_backend_code_v2_queue = [
-            tid for tid in failed_ids
+            tid
+            for tid in failed_ids
             if all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
         ]
-        retry_frontend_queue: List[str] = []  # All frontend retries go through frontend_code_v2_team
+        retry_frontend_queue: List[
+            str
+        ] = []  # All frontend retries go through frontend_code_v2_team
         retry_frontend_code_v2_queue = [
-            tid for tid in failed_ids
+            tid
+            for tid in failed_ids
             if all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
         ]
-        total_tasks = len(retry_prefix) + len(retry_backend_queue) + len(retry_backend_code_v2_queue) + len(retry_frontend_queue) + len(retry_frontend_code_v2_queue)
+        total_tasks = (
+            len(retry_prefix)
+            + len(retry_backend_queue)
+            + len(retry_backend_code_v2_queue)
+            + len(retry_frontend_queue)
+            + len(retry_frontend_code_v2_queue)
+        )
 
         # Run prefix (devops, git_setup) sequentially
         for task_id in retry_prefix:
@@ -2753,7 +3267,9 @@ def run_failed_tasks(job_id: str) -> None:
                         task_description=task.description,
                         requirements=_task_requirements(task),
                         architecture=architecture,
-                        existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+                        existing_pipeline=existing_pipeline
+                        if existing_pipeline != "# No code files found"
+                        else None,
                         tech_stack=["Python", "FastAPI", "PostgreSQL", "Docker"],
                         build_verifier=_run_build_verification,
                         task_id=task_id,
@@ -2770,7 +3286,9 @@ def run_failed_tasks(job_id: str) -> None:
                             description=getattr(task, "description", "") or "",
                         )
                     else:
-                        failed_retry[task_id] = workflow_result.failure_reason or "DevOps workflow failed"
+                        failed_retry[task_id] = (
+                            workflow_result.failure_reason or "DevOps workflow failed"
+                        )
                 except Exception as e:
                     failed_retry[task_id] = f"DevOps failed: {e}"
 
@@ -2818,7 +3336,8 @@ def run_failed_tasks(job_id: str) -> None:
         if retry_backend_queue or retry_frontend_queue:
             logger.info(
                 "=== Retry: running with parallel workers (backend=%s, frontend=%s) ===",
-                len(retry_backend_queue), len(retry_frontend_queue),
+                len(retry_backend_queue),
+                len(retry_frontend_queue),
             )
             _run_backend_frontend_workers(
                 job_id=job_id,
@@ -2845,12 +3364,16 @@ def run_failed_tasks(job_id: str) -> None:
             retry_fv2_thread.join()
 
         llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed_retry.values())
-        llm_connectivity_failed = any(v == LLM_UNREACHABLE_AFTER_RETRIES for v in failed_retry.values())
+        llm_connectivity_failed = any(
+            v == LLM_UNREACHABLE_AFTER_RETRIES for v in failed_retry.values()
+        )
 
         # Final summary with task breakdown
         logger.info(
             "=== Retry finished: %s completed, %s still failed (of %s retried) ===",
-            len(completed), len(failed_retry), total_tasks,
+            len(completed),
+            len(failed_retry),
+            total_tasks,
         )
         _log_task_breakdown(
             completed=completed,
@@ -2863,7 +3386,9 @@ def run_failed_tasks(job_id: str) -> None:
             logger.warning(
                 "=== Still-failed task report. Recovery summary: re-attempted %d tasks, "
                 "%d completed successfully, %d remain failed ===",
-                total_tasks, len(completed), len(failed_retry),
+                total_tasks,
+                len(completed),
+                len(failed_retry),
             )
             for tid, reason in sorted(failed_retry.items()):
                 task_obj = all_tasks.get(tid)
@@ -2875,20 +3400,34 @@ def run_failed_tasks(job_id: str) -> None:
         if devops_agent and backend_dir.is_dir() and (backend_dir / ".git").exists():
             existing_pipeline = _read_repo_code(backend_dir, [".yml", ".yaml"])
             tech_lead.trigger_devops_for_backend(
-                devops_agent, backend_dir, architecture, spec_content,
-                existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+                devops_agent,
+                backend_dir,
+                architecture,
+                spec_content,
+                existing_pipeline=existing_pipeline
+                if existing_pipeline != "# No code files found"
+                else None,
                 build_verifier=_run_build_verification,
             )
         if devops_agent and frontend_dir.is_dir() and (frontend_dir / ".git").exists():
             existing_pipeline = _read_repo_code(frontend_dir, [".yml", ".yaml"])
             tech_lead.trigger_devops_for_frontend(
-                devops_agent, frontend_dir, architecture, spec_content,
-                existing_pipeline=existing_pipeline if existing_pipeline != "# No code files found" else None,
+                devops_agent,
+                frontend_dir,
+                architecture,
+                spec_content,
+                existing_pipeline=existing_pipeline
+                if existing_pipeline != "# No code files found"
+                else None,
                 build_verifier=_run_build_verification,
             )
 
         failed_details = [
-            {"task_id": tid, "reason": reason, "title": (all_tasks.get(tid).title if all_tasks.get(tid) else tid)}
+            {
+                "task_id": tid,
+                "reason": reason,
+                "title": (all_tasks.get(tid).title if all_tasks.get(tid) else tid),
+            }
             for tid, reason in failed_retry.items()
         ]
         if llm_connectivity_failed:
@@ -2919,7 +3458,13 @@ def run_failed_tasks(job_id: str) -> None:
                 failed_count=len(failed_retry),
                 job_id=job_id,
             )
-            update_job(job_id, failed_tasks=failed_details, status=JOB_STATUS_COMPLETED, current_task=None, status_text="Retry completed")
+            update_job(
+                job_id,
+                failed_tasks=failed_details,
+                status=JOB_STATUS_COMPLETED,
+                current_task=None,
+                status_text="Retry completed",
+            )
 
     except CancellationError:
         logger.info("Retry orchestrator stopped due to job cancellation: %s", job_id)

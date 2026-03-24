@@ -24,7 +24,9 @@ def test_ollama_get_max_context_tokens_env_override(monkeypatch: pytest.MonkeyPa
     assert client.get_max_context_tokens() == 50000
 
 
-def _make_streaming_mock(status_code: int, sse_lines: list[str] | None = None, body_text: str = "") -> tuple:
+def _make_streaming_mock(
+    status_code: int, sse_lines: list[str] | None = None, body_text: str = ""
+) -> tuple:
     """Return (mock_client_cls_instance, mock_stream_response) configured for client.stream() usage."""
     mock_response = MagicMock()
     mock_response.status_code = status_code
@@ -136,13 +138,17 @@ def test_thinking_enabled_for_all_models() -> None:
     client = OllamaLLMClient(model="llama3", base_url="http://localhost:9999", timeout=5)
     assert client._should_enable_thinking() is True
 
-    client_qwen = OllamaLLMClient(model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5)
+    client_qwen = OllamaLLMClient(
+        model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5
+    )
     assert client_qwen._should_enable_thinking() is True
 
 
 def test_thinking_disabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
-    client = OllamaLLMClient(model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5)
+    client = OllamaLLMClient(
+        model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5
+    )
     assert client._should_enable_thinking() is False
 
 
@@ -156,7 +162,16 @@ def test_ollama_tool_call_response(monkeypatch: pytest.MonkeyPatch) -> None:
         'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
         "data: [DONE]",
     ]
-    tools = [{"type": "function", "function": {"name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+        }
+    ]
     mock_client, _ = _make_streaming_mock(200, sse_lines)
     with patch("httpx.Client") as mock_client_cls:
         mock_client_cls.return_value = mock_client

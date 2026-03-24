@@ -2,9 +2,12 @@
 
 from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
-CODE_REVIEW_PROMPT = """You are a Senior Code Reviewer. You review code produced by other engineers to ensure it meets production quality standards, follows the project specification, and integrates properly with the existing codebase.
+CODE_REVIEW_PROMPT = (
+    """You are a Senior Code Reviewer. You review code produced by other engineers to ensure it meets production quality standards, follows the project specification, and integrates properly with the existing codebase.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 **Your role:**
 You review code that has been written by a coding agent (Frontend or Backend) for a specific task. Your job is to catch issues BEFORE the code is merged. You are the last line of defense against bad code.
@@ -109,3 +112,4 @@ Return a single JSON object with:
 Be thorough but fair. Focus on issues that actually matter for production code quality.
 
 Respond with valid JSON only. No explanatory text outside JSON."""
+)

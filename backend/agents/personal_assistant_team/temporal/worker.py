@@ -33,7 +33,9 @@ def create_pa_worker(client: Optional[object] = None) -> Optional[Worker]:
         return None
     global _activity_executor
     if _activity_executor is None:
-        _activity_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pa-temporal-activity")
+        _activity_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="pa-temporal-activity"
+        )
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,

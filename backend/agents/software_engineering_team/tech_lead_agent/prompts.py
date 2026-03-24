@@ -5,7 +5,8 @@ from software_engineering_team.shared.coding_standards import (
     GIT_BRANCHING_RULES,
 )
 
-TECH_LEAD_PROMPT = """You are an expert Staff-level Tech Lead software engineer and orchestrator. Your PRIMARY GOAL is to produce a structured build plan using an Initiative → Epic → Story → Task hierarchy that fully covers the provided spec. You bridge product management and engineering.
+TECH_LEAD_PROMPT = (
+    """You are an expert Staff-level Tech Lead software engineer and orchestrator. Your PRIMARY GOAL is to produce a structured build plan using an Initiative → Epic → Story → Task hierarchy that fully covers the provided spec. You bridge product management and engineering.
 
 Prefer **planning with explicit, well-justified assumptions** derived from enterprise best practices over blocking for clarification. Only return spec_clarification_needed=true when the spec is fundamentally contradictory or the choice would materially affect compliance, legal, or safety in ways that cannot be responsibly assumed.
 
@@ -97,9 +98,13 @@ DEPENDENCIES AND ORDER
 - Backend and frontend tasks can run in parallel; order execution_order so dependencies are respected.
 - Minimize cross-domain dependencies: frontend app shell and backend data models can run in parallel from the start.
 
-""" + GIT_BRANCHING_RULES + """
+"""
+    + GIT_BRANCHING_RULES
+    + """
 
-""" + COMMIT_MESSAGE_STANDARDS + """
+"""
+    + COMMIT_MESSAGE_STANDARDS
+    + """
 
 ============================================================
 OUTPUT FORMAT
@@ -150,6 +155,7 @@ Return a single JSON object. Choose ONE of two modes:
 - "resolved_questions": list of resolved open questions (if any were provided)
 
 Respond with valid JSON only. No explanatory text, markdown, or code fences."""
+)
 
 
 TECH_LEAD_ANALYZE_CODEBASE_PROMPT = """You are an expert Staff-level Tech Lead performing a thorough codebase audit before planning new work. Your goal is to deeply understand the EXISTING code so that your build plan leverages what already exists and avoids duplication.

@@ -136,9 +136,7 @@ class MealFeedbackStore:
         would_make_again: Optional[bool] = None,
         notes: Optional[str] = None,
     ) -> bool:
-        return record_feedback(
-            recommendation_id, rating, would_make_again, notes, self.storage_dir
-        )
+        return record_feedback(recommendation_id, rating, would_make_again, notes, self.storage_dir)
 
     def get_meal_history(
         self,

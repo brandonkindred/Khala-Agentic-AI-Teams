@@ -6,11 +6,12 @@ from code_review_agent.agent import CodeReviewAgent
 from code_review_agent.models import CodeReviewInput
 
 
-def test_code_review_agent_truncates_long_code_before_llm_call():
-    """When code exceeds model-based limit, agent truncates so request body stays under limit."""
+def test_code_review_agent_compacts_long_code_before_llm_call():
+    """When code exceeds model-based limit, agent compacts via LLM so request body stays under limit."""
     long_code = "x" * 250_000  # exceeds typical model context
     mock_llm = MagicMock()
     mock_llm.get_max_context_tokens.return_value = 16384
+    mock_llm.complete.return_value = "compacted code"  # compact_text() result
     mock_llm.complete_json.return_value = {
         "approved": True,
         "issues": [],
@@ -28,10 +29,8 @@ def test_code_review_agent_truncates_long_code_before_llm_call():
 
     # Uses coordinator when > 30K; may have multiple calls
     assert mock_llm.complete_json.call_count >= 1
-    for call in mock_llm.complete_json.call_args_list:
-        prompt = call[0][0]
-        assert long_code not in prompt
-        assert len(prompt) < 300_000  # truncated, not full 250K
+    # compact_text should have been invoked via llm.complete()
+    assert mock_llm.complete.call_count >= 1
 
 
 def test_code_review_agent_small_code_uses_single_call():

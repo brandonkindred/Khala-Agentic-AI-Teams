@@ -66,99 +66,126 @@ class TaskGeneratorAgent:
 
         resolved = input_data.resolved_questions or []
         resolved_question_texts = {r.get("question", "") for r in resolved if isinstance(r, dict)}
-        remaining_open = [q for q in (input_data.open_questions or []) if q not in resolved_question_texts]
+        remaining_open = [
+            q for q in (input_data.open_questions or []) if q not in resolved_question_texts
+        ]
 
         if resolved:
-            context_parts.extend([
-                "",
-                "**USER-PROVIDED RESOLUTIONS (use these exactly):**",
-                *[f"- **{r.get('question', '')}** -> {r.get('answer', '')}" for r in resolved if isinstance(r, dict)],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**USER-PROVIDED RESOLUTIONS (use these exactly):**",
+                    *[
+                        f"- **{r.get('question', '')}** -> {r.get('answer', '')}"
+                        for r in resolved
+                        if isinstance(r, dict)
+                    ],
+                ]
+            )
         if remaining_open:
-            context_parts.extend([
-                "",
-                "**OPEN QUESTIONS (resolve with best-practice defaults):**",
-                *[f"- {q}" for q in remaining_open],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**OPEN QUESTIONS (resolve with best-practice defaults):**",
+                    *[f"- {q}" for q in remaining_open],
+                ]
+            )
         if input_data.assumptions:
-            context_parts.extend([
-                "",
-                "**Assumptions from Spec Intake:**",
-                *[f"- {a}" for a in input_data.assumptions],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Assumptions from Spec Intake:**",
+                    *[f"- {a}" for a in input_data.assumptions],
+                ]
+            )
 
         if input_data.project_overview:
             po = input_data.project_overview
-            context_parts.extend([
-                "",
-                "**Project Overview:**",
-                f"- Primary goal: {po.get('primary_goal', '')}",
-                f"- Delivery strategy: {po.get('delivery_strategy', '')}",
-                "- Milestones: " + ", ".join(m.get("name", "") for m in po.get("milestones", [])),
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Project Overview:**",
+                    f"- Primary goal: {po.get('primary_goal', '')}",
+                    f"- Delivery strategy: {po.get('delivery_strategy', '')}",
+                    "- Milestones: "
+                    + ", ".join(m.get("name", "") for m in po.get("milestones", [])),
+                ]
+            )
 
         if features:
-            context_parts.extend([
-                "",
-                "**Features and Functionality:**",
-                "---",
-                features,
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Features and Functionality:**",
+                    "---",
+                    features,
+                    "---",
+                ]
+            )
 
         if input_data.repo_path:
             context_parts.extend(["", f"**Repo path:** {input_data.repo_path}"])
 
         if merged:
-            context_parts.extend([
-                "",
-                "**DEEP SPEC ANALYSIS:**",
-                "---",
-                merged,
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**DEEP SPEC ANALYSIS:**",
+                    "---",
+                    merged,
+                    "---",
+                ]
+            )
 
         if spec_trunc:
-            context_parts.extend([
-                "",
-                "**Truncated initial_spec.md (reference only):**",
-                "---",
-                spec_trunc,
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Truncated initial_spec.md (reference only):**",
+                    "---",
+                    spec_trunc,
+                    "---",
+                ]
+            )
 
         if codebase:
-            context_parts.extend([
-                "",
-                "**CODEBASE ANALYSIS:**",
-                "---",
-                codebase,
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**CODEBASE ANALYSIS:**",
+                    "---",
+                    codebase,
+                    "---",
+                ]
+            )
 
         if existing:
-            context_parts.extend([
-                "",
-                "**EXISTING CODE (sample):**",
-                "---",
-                existing,
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**EXISTING CODE (sample):**",
+                    "---",
+                    existing,
+                    "---",
+                ]
+            )
 
         if input_data.architecture:
             arch = input_data.architecture
             max_arch = compute_task_generator_arch_chars(self.llm)
             arch_doc = (arch.architecture_document or "")[:max_arch]
-            context_parts.extend([
-                "",
-                "**System Architecture:**",
-                arch.overview,
-                "",
-                "**Components:**",
-                *[f"- {c.name} ({c.type}): {c.description}" for c in arch.components],
-                "",
-                "**Architecture Document (excerpt):**",
-                arch_doc,
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**System Architecture:**",
+                    arch.overview,
+                    "",
+                    "**Components:**",
+                    *[f"- {c.name} ({c.type}): {c.description}" for c in arch.components],
+                    "",
+                    "**Architecture Document (excerpt):**",
+                    arch_doc,
+                ]
+            )
 
         return tech_lead_prompt + "\n\n---\n\n" + "\n".join(context_parts)

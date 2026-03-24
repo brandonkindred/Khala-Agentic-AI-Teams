@@ -11,8 +11,13 @@ class IaCExecutionError(BaseModel):
     """A classified IaC execution error."""
 
     error_type: Literal[
-        "syntax", "state", "permissions", "resource_conflict",
-        "validation", "runtime", "unknown",
+        "syntax",
+        "state",
+        "permissions",
+        "resource_conflict",
+        "validation",
+        "runtime",
+        "unknown",
     ] = "unknown"
     tool: str = ""
     file_path: Optional[str] = None

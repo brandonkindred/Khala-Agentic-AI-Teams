@@ -117,7 +117,9 @@ class BuildSpecialistAdapterAgent:
             return ToolAgentPhaseOutput(summary="Build Specialist review skipped (no repo_path).")
         path = Path(inp.repo_path).resolve()
         if not path.exists():
-            return ToolAgentPhaseOutput(summary="Build Specialist review skipped (repo path missing).")
+            return ToolAgentPhaseOutput(
+                summary="Build Specialist review skipped (repo path missing)."
+            )
         issues = _run_frontend_build_and_parse(path)
         return ToolAgentPhaseOutput(
             issues=issues,

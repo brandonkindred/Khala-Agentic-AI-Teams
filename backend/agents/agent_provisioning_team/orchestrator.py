@@ -44,7 +44,7 @@ def _build_tool_agents() -> Dict[str, Any]:
 class ProvisioningOrchestrator:
     """
     Orchestrator for the agent provisioning workflow.
-    
+
     Coordinates 6 phases:
     1. SETUP - Create Docker container
     2. CREDENTIAL_GENERATION - Generate passwords/tokens
@@ -73,7 +73,7 @@ class ProvisioningOrchestrator:
     ) -> ProvisioningResult:
         """
         Execute the full provisioning workflow through all phases.
-        
+
         Args:
             agent_id: Unique identifier for the agent being provisioned
             manifest_path: Path to the tool manifest YAML
@@ -87,10 +87,11 @@ class ProvisioningOrchestrator:
                             tools_total: Optional[int] = None,
                             status_text: Optional[str] = None,
                         )
-        
+
         Returns:
             ProvisioningResult with complete provisioning information
         """
+
         def _update(
             current_phase: Optional[str] = None,
             progress: Optional[int] = None,
@@ -124,7 +125,7 @@ class ProvisioningOrchestrator:
             progress=5,
             status_text="Creating Docker environment...",
         )
-        
+
         setup_result = run_setup(
             agent_id=agent_id,
             manifest=manifest,
@@ -133,7 +134,7 @@ class ProvisioningOrchestrator:
             docker_provisioner=self.tool_agents.get("docker_provisioner"),
             progress_callback=lambda msg: _update(status_text=msg),
         )
-        
+
         if not setup_result.success:
             return ProvisioningResult(
                 agent_id=agent_id,
@@ -148,7 +149,7 @@ class ProvisioningOrchestrator:
             progress=20,
             status_text="Generating credentials...",
         )
-        
+
         cred_result = run_credential_generation(
             agent_id=agent_id,
             manifest=manifest,
@@ -160,7 +161,7 @@ class ProvisioningOrchestrator:
                 status_text=f"Generating credentials for {tool}...",
             ),
         )
-        
+
         if not cred_result.success:
             cleanup_setup(agent_id, self.environment_store)
             return ProvisioningResult(
@@ -178,7 +179,7 @@ class ProvisioningOrchestrator:
             tools_total=len(manifest.tools),
             status_text="Provisioning tool accounts...",
         )
-        
+
         account_result = run_account_provisioning(
             agent_id=agent_id,
             manifest=manifest,
@@ -200,7 +201,7 @@ class ProvisioningOrchestrator:
             progress=70,
             status_text="Auditing access permissions...",
         )
-        
+
         audit_result = run_access_audit(
             agent_id=agent_id,
             tool_results=account_result.tool_results,
@@ -215,13 +216,11 @@ class ProvisioningOrchestrator:
             progress=85,
             status_text="Generating onboarding documentation...",
         )
-        
+
         workspace_path = (
-            setup_result.environment.workspace_path
-            if setup_result.environment
-            else "/workspace"
+            setup_result.environment.workspace_path if setup_result.environment else "/workspace"
         )
-        
+
         doc_result = run_documentation(
             agent_id=agent_id,
             manifest=manifest,
@@ -237,7 +236,7 @@ class ProvisioningOrchestrator:
             progress=95,
             status_text="Finalizing provisioning...",
         )
-        
+
         deliver_result = run_deliver(
             agent_id=agent_id,
             environment=setup_result.environment,
@@ -258,13 +257,13 @@ class ProvisioningOrchestrator:
             onboarding=doc_result.onboarding,
             deliver_result=deliver_result,
         )
-        
+
         _update(
             current_phase=Phase.DELIVER.value,
             progress=100,
             status_text="Provisioning complete",
         )
-        
+
         return final_result
 
     def deprovision(
@@ -274,42 +273,42 @@ class ProvisioningOrchestrator:
     ) -> DeprovisionResponse:
         """
         Deprovision an agent: remove all resources and access.
-        
+
         Args:
             agent_id: Agent to deprovision
             force: Force removal even if errors occur
-        
+
         Returns:
             DeprovisionResponse with results
         """
         results: Dict[str, Any] = {}
         errors: List[str] = []
-        
+
         tool_results = deprovision_tools(
             agent_id=agent_id,
             provisioners=self.tool_agents,
         )
         results["tools"] = tool_results
-        
+
         for tool, success in tool_results.items():
             if not success:
                 errors.append(f"Failed to deprovision {tool}")
-        
+
         docker = self.tool_agents.get("docker_provisioner")
         if docker:
             docker_result = docker.deprovision(agent_id)
             results["docker"] = docker_result.success
             if not docker_result.success and docker_result.error:
                 errors.append(f"Docker: {docker_result.error}")
-        
+
         cred_removed = self.credential_store.delete_credentials(agent_id)
         results["credentials_removed"] = cred_removed
-        
+
         env_removed = self.environment_store.remove(agent_id)
         results["environment_removed"] = env_removed
-        
+
         success = len(errors) == 0 or force
-        
+
         return DeprovisionResponse(
             agent_id=agent_id,
             success=success,
@@ -320,17 +319,17 @@ class ProvisioningOrchestrator:
     def get_agent_status(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """
         Get the current status of a provisioned agent.
-        
+
         Args:
             agent_id: Agent to check
-        
+
         Returns:
             Status dict or None if not found
         """
         env = self.environment_store.get(agent_id)
         if env is None:
             return None
-        
+
         return {
             "agent_id": agent_id,
             "status": env.status,
@@ -343,10 +342,10 @@ class ProvisioningOrchestrator:
     def list_agents(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         List all provisioned agents.
-        
+
         Args:
             status: Optional status filter ('running', 'ready', etc.)
-        
+
         Returns:
             List of agent status dicts
         """

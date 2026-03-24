@@ -43,9 +43,7 @@ class MapWcagOutput(BaseModel):
     """Output from WCAG mapping."""
 
     candidates: List[WCAGCandidate] = Field(default_factory=list)
-    recommended: List[str] = Field(
-        default_factory=list, description="Recommended SC numbers"
-    )
+    recommended: List[str] = Field(default_factory=list, description="Recommended SC numbers")
     needs_verification: bool = Field(
         default=False,
         description="True if confidence < 0.6 for all candidates",

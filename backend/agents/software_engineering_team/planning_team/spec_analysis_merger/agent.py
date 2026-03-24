@@ -45,7 +45,7 @@ class SpecAnalysisMerger:
             )
 
         chunks_text = "\n\n---\n\n".join(
-            f"**Chunk {i+1}:**\n```json\n{json.dumps(c, indent=2)}\n```"
+            f"**Chunk {i + 1}:**\n```json\n{json.dumps(c, indent=2)}\n```"
             for i, c in enumerate(chunk_results)
         )
 
@@ -53,8 +53,11 @@ class SpecAnalysisMerger:
         prompt += "\n\n---\n\n**Chunk analyses to merge:**\n\n" + chunks_text
         if spec_outline:
             from software_engineering_team.shared.context_sizing import compute_spec_outline_chars
+
             max_outline = compute_spec_outline_chars(self.llm)
-            prompt += "\n\n---\n\n**Spec outline (section structure):**\n" + spec_outline[:max_outline]
+            prompt += (
+                "\n\n---\n\n**Spec outline (section structure):**\n" + spec_outline[:max_outline]
+            )
 
         logger.info(
             "SpecAnalysisMerger: merging %d chunk analyses",

@@ -45,18 +45,42 @@ logger = logging.getLogger(__name__)
 MAX_PATH_SEGMENT_LENGTH = 30
 # Test files (test_*.py) may have longer descriptive names; allow up to 60 chars
 MAX_TEST_FILE_SEGMENT_LENGTH = 60
-BAD_NAME_PATTERN = re.compile(r"^[a-z]+-[a-z]+-[a-z]+-[a-z]+")  # 4+ hyphenated words = likely sentence
-BAD_NAME_SNAKE_PATTERN = re.compile(r"^[a-z]+_[a-z]+_[a-z]+_[a-z]+_[a-z]+")  # 5+ underscored words = likely sentence
+BAD_NAME_PATTERN = re.compile(
+    r"^[a-z]+-[a-z]+-[a-z]+-[a-z]+"
+)  # 4+ hyphenated words = likely sentence
+BAD_NAME_SNAKE_PATTERN = re.compile(
+    r"^[a-z]+_[a-z]+_[a-z]+_[a-z]+_[a-z]+"
+)  # 5+ underscored words = likely sentence
 VERB_PREFIX_PATTERN = re.compile(
     r"^(implement|create|build|setup|configure|add|make|define|develop|write|design|establish)[_-]"
 )
 FILLER_WORD_PATTERN = re.compile(r"[_-](the|that|with|using|which|for|and|a|an)[_-]")
 # Well-known directory names that are always allowed
-_ALLOWED_DIRS = frozenset({
-    "app", "src", "lib", "tests", "test", "routers", "models", "schemas",
-    "services", "controllers", "repository", "middleware", "config", "utils",
-    "helpers", "main", "infrastructure", "dist", "build",
-})
+_ALLOWED_DIRS = frozenset(
+    {
+        "app",
+        "src",
+        "lib",
+        "tests",
+        "test",
+        "routers",
+        "models",
+        "schemas",
+        "services",
+        "controllers",
+        "repository",
+        "middleware",
+        "config",
+        "utils",
+        "helpers",
+        "main",
+        "infrastructure",
+        "dist",
+        "build",
+    }
+)
+
+
 def _validate_file_paths(files: Dict[str, str]) -> tuple[Dict[str, str], list[str]]:
     """
     Validate and sanitize file paths from LLM output.
@@ -81,29 +105,39 @@ def _validate_file_paths(files: Dict[str, str]) -> tuple[Dict[str, str], list[st
             if name_part.lower() in _ALLOWED_DIRS:
                 continue
             # Test files (test_*.py) may have longer descriptive names
-            max_len = MAX_TEST_FILE_SEGMENT_LENGTH if (
-                name_part.startswith("test_") and seg.endswith(".py")
-            ) else MAX_PATH_SEGMENT_LENGTH
+            max_len = (
+                MAX_TEST_FILE_SEGMENT_LENGTH
+                if (name_part.startswith("test_") and seg.endswith(".py"))
+                else MAX_PATH_SEGMENT_LENGTH
+            )
             if len(name_part) > max_len:
                 warnings.append(f"Path segment too long: '{seg}' in '{path}'")
                 bad_segment = True
                 break
             if BAD_NAME_PATTERN.match(name_part):
-                warnings.append(f"Path segment looks like a sentence (4+ hyphenated words): '{seg}' in '{path}'")
+                warnings.append(
+                    f"Path segment looks like a sentence (4+ hyphenated words): '{seg}' in '{path}'"
+                )
                 bad_segment = True
                 break
             # Exempt test files from sentence-like snake pattern (e.g. test_task_crud_qa.py)
             if not (name_part.startswith("test_") and seg.endswith(".py")):
                 if BAD_NAME_SNAKE_PATTERN.match(name_part):
-                    warnings.append(f"Path segment looks like a sentence (5+ underscored words): '{seg}' in '{path}'")
+                    warnings.append(
+                        f"Path segment looks like a sentence (5+ underscored words): '{seg}' in '{path}'"
+                    )
                     bad_segment = True
                     break
             if VERB_PREFIX_PATTERN.match(name_part):
-                warnings.append(f"Path segment starts with a verb (task description as name): '{seg}' in '{path}'")
+                warnings.append(
+                    f"Path segment starts with a verb (task description as name): '{seg}' in '{path}'"
+                )
                 bad_segment = True
                 break
             if FILLER_WORD_PATTERN.search(name_part):
-                warnings.append(f"Path segment contains filler words (task description as name): '{seg}' in '{path}'")
+                warnings.append(
+                    f"Path segment contains filler words (task description as name): '{seg}' in '{path}'"
+                )
                 bad_segment = True
                 break
         if bad_segment:
@@ -117,10 +151,16 @@ def _validate_file_paths(files: Dict[str, str]) -> tuple[Dict[str, str], list[st
         else:
             validated[path] = content
     return validated, warnings
+
+
 # ── Workflow constants ──────────────────────────────────────────────────────
 MAX_REVIEW_ITERATIONS = _int_env("SW_MAX_REVIEW_ITERATIONS", 100)
-MAX_SAME_BUILD_FAILURES = _int_env("SW_MAX_SAME_BUILD_FAILURES", 6)  # Stop if build fails identically this many times
-MAX_PREWRITE_REGENERATIONS = _int_env("SW_MAX_PREWRITE_REGENERATIONS", 2)  # Max regenerations for pre-write test-route checks
+MAX_SAME_BUILD_FAILURES = _int_env(
+    "SW_MAX_SAME_BUILD_FAILURES", 6
+)  # Stop if build fails identically this many times
+MAX_PREWRITE_REGENERATIONS = _int_env(
+    "SW_MAX_PREWRITE_REGENERATIONS", 2
+)  # Max regenerations for pre-write test-route checks
 MAX_CLARIFICATION_ROUNDS = _int_env("SW_MAX_CLARIFICATION_ROUNDS", 100)
 MAX_PROBLEM_SOLVER_CYCLES = _int_env("SW_MAX_PROBLEM_SOLVER_CYCLES", 20)
 _REQUIRED_TASK_CONTRACT_FIELDS = (
@@ -143,9 +183,9 @@ EXCEPTION_HANDLER_TEST_PATTERNS = (
 # Scanned from tests/ via client.get("/...") or similar.
 _TEST_ROUTE_PATTERNS = ("/test-generic-error",)
 # Regex to extract HTTP paths from TestClient calls: client.get("/path"), client.post("/tasks", ...)
-_CLIENT_ROUTE_RE = re.compile(
-    r'client\.(?:get|post|patch|put|delete)\s*\(\s*["\']([^"\']+)["\']'
-)
+_CLIENT_ROUTE_RE = re.compile(r'client\.(?:get|post|patch|put|delete)\s*\(\s*["\']([^"\']+)["\']')
+
+
 def _extract_routes_from_tests(repo_path: Path) -> List[str]:
     """Extract all HTTP paths referenced in test files (client.get/post/etc)."""
     tests_dir = repo_path / "tests"
@@ -164,6 +204,8 @@ def _extract_routes_from_tests(repo_path: Path) -> List[str]:
         except Exception:
             pass
     return found
+
+
 def _extract_routes_from_main(content: str) -> List[str]:
     """Extract HTTP paths from FastAPI app (e.g. @app.get('/path'), include_router(prefix='...'))."""
     paths: List[str] = []
@@ -180,6 +222,8 @@ def _extract_routes_from_main(content: str) -> List[str]:
     ):
         paths.append(match.group(1))
     return paths
+
+
 def _check_test_endpoint_compatibility(
     repo_path: Path, main_content: str | None = None
 ) -> List[str]:
@@ -207,6 +251,8 @@ def _check_test_endpoint_compatibility(
         if ref not in main_content and ref_base not in main_content:
             missing.append(ref)
     return missing
+
+
 def _test_routes_referenced_in_tests(repo_path: Path) -> List[str]:
     """Scan tests/ for routes that tests call (e.g. client.get(\"/test-generic-error\"))."""
     tests_dir = repo_path / "tests"
@@ -224,6 +270,8 @@ def _test_routes_referenced_in_tests(repo_path: Path) -> List[str]:
         except Exception:
             pass
     return found
+
+
 def _test_routes_missing_from_main_py(repo_path: Path, files: Dict[str, str]) -> List[str]:
     """Return routes that tests reference but are missing from main.py in files."""
     required = _test_routes_referenced_in_tests(repo_path)
@@ -238,6 +286,8 @@ def _test_routes_missing_from_main_py(repo_path: Path, files: Dict[str, str]) ->
         return []  # No main.py in output, nothing to check
     missing = [r for r in required if r not in main_content]
     return missing
+
+
 def _build_code_review_issues_for_missing_test_routes(
     missing_routes: List[str] | None = None,
 ) -> List[Dict[str, Any]]:
@@ -266,10 +316,14 @@ def _build_code_review_issues_for_missing_test_routes(
             "suggestion": suggestion,
         }
     ]
+
+
 def _extract_failing_test_file_from_build_errors(build_errors: str) -> Optional[str]:
     """Extract failing test file path from build_errors (e.g. tests/test_auth_middleware.py)."""
     match = re.search(r"tests/test_[a-zA-Z0-9_]+\.py", build_errors)
     return match.group(0) if match else None
+
+
 def _extract_affected_file_paths_from_build_errors(build_errors: str, repo_path: Path) -> List[str]:
     """Extract file paths mentioned in build_errors that exist in repo (for BuildFixSpecialist context)."""
     seen: set = set()
@@ -293,6 +347,8 @@ def _extract_affected_file_paths_from_build_errors(build_errors: str, repo_path:
     if "app/main.py" not in seen and (repo_path / "app" / "main.py").exists():
         paths.insert(0, "app/main.py")
     return paths[:10]  # Cap to avoid huge context
+
+
 def _read_affected_files_code(repo_path: Path, file_paths: List[str]) -> str:
     """Read content of affected files for BuildFixSpecialist context."""
     parts: List[str] = []
@@ -304,11 +360,14 @@ def _read_affected_files_code(repo_path: Path, file_paths: List[str]) -> str:
             except Exception:
                 pass
     return "\n\n".join(parts) if parts else "# No affected files found"
+
+
 def _apply_build_fix_edits(
     repo_path: Path, edits: List[Any], max_code_chars: int
 ) -> Tuple[bool, str, Dict[str, str]]:
     """Apply BuildFixSpecialist edits. Returns (success, message, files_dict for commit)."""
     from build_fix_specialist.models import CodeEdit
+
     # Group edits by file, apply in order
     file_edits: Dict[str, List[CodeEdit]] = {}
     for edit in edits:
@@ -341,9 +400,13 @@ def _apply_build_fix_edits(
     if not files_to_write:
         return False, "No edits could be applied", {}
     return True, f"Applied {len(files_to_write)} edit(s)", files_to_write
+
+
 def _is_pytest_assertion_failure(build_errors: str) -> bool:
     """Return True if build_errors indicates a pytest assertion failure."""
     return "[pytest_assertion]" in build_errors or "failure_class=pytest_assertion" in build_errors
+
+
 def _build_error_signature(build_errors: str) -> str:
     """Compute a signature for same-error detection.
     For pytest assertion failures, use the last 1200 chars (where assertion details
@@ -352,6 +415,8 @@ def _build_error_signature(build_errors: str) -> str:
     if _is_pytest_assertion_failure(build_errors):
         return (build_errors[-1200:] if len(build_errors) > 1200 else build_errors).strip()
     return (build_errors[:800] or build_errors).strip()
+
+
 def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[str, Any]]:
     """Build code_review_issues from build/test failure output.
     When failure matches exception-handler test patterns, returns a targeted
@@ -360,9 +425,7 @@ def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[
     Otherwise, extracts the failing test file from the feedback (e.g. "Fix tests/...")
     when present, so the code review issue points at the correct file.
     """
-    is_exception_handler_failure = any(
-        p in build_errors for p in EXCEPTION_HANDLER_TEST_PATTERNS
-    )
+    is_exception_handler_failure = any(p in build_errors for p in EXCEPTION_HANDLER_TEST_PATTERNS)
     if is_exception_handler_failure:
         suggestion = (
             "Tests expect the route `/test-generic-error` and a generic "
@@ -396,14 +459,18 @@ def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[
                 # Try to extract file:line from traceback (e.g. "app/main.py:42:" or 'File "app/main.py", line 42')
                 file_line_match = re.search(
                     r'(?:File\s+["\']([^"\']+\.py)["\'].*?line\s+(\d+)|'
-                    r'([a-zA-Z0-9_/]+\.py):(\d+):)',
+                    r"([a-zA-Z0-9_/]+\.py):(\d+):)",
                     build_errors,
                 )
                 if file_line_match:
                     file_path = file_line_match.group(1) or file_line_match.group(3) or ""
                     line_num = file_line_match.group(2) or file_line_match.group(4) or ""
                     if file_path:
-                        suggestion = f"Fix the error at {file_path}" + (f" line {line_num}" if line_num else "") + ". Apply the minimal change indicated by the traceback."
+                        suggestion = (
+                            f"Fix the error at {file_path}"
+                            + (f" line {line_num}" if line_num else "")
+                            + ". Apply the minimal change indicated by the traceback."
+                        )
     return [
         {
             "severity": "critical",
@@ -413,11 +480,15 @@ def _build_code_review_issues_for_build_failure(build_errors: str) -> List[Dict[
             "suggestion": suggestion,
         }
     ]
+
+
 def _read_repo_code(repo_path: Path, extensions: List[str] | None = None) -> str:
     """Read code files from repo, concatenated. Delegates to shared.repo_utils."""
     if extensions is None:
         extensions = BACKEND_EXTENSIONS
     return read_repo_code(repo_path, extensions)
+
+
 def _read_repo_meta_files(repo_path: Path) -> str:
     """Read .gitignore, README.md, CONTRIBUTORS.md for code review when task is repo-setup."""
     parts: List[str] = []
@@ -429,14 +500,19 @@ def _read_repo_meta_files(repo_path: Path) -> str:
             except (OSError, UnicodeDecodeError) as e:
                 logger.debug("Could not read %s: %s", f, e)
     return "\n\n".join(parts) if parts else ""
+
+
 def _is_repo_setup_task(task: Any) -> bool:
     """True if task description suggests repo setup / initial commit / branching."""
     desc = (getattr(task, "description", None) or "").lower()
     return (
-        "git" in desc and ("setup" in desc or "initial" in desc or "branch" in desc)
+        "git" in desc
+        and ("setup" in desc or "initial" in desc or "branch" in desc)
         or "initial commit" in desc
         or "branching strategy" in desc
     )
+
+
 def _is_openapi_spec_task(task: Any) -> bool:
     """True if task description is about creating an OpenAPI specification file.
     Detects tasks that explicitly ask for a static OpenAPI spec file, as opposed to
@@ -446,13 +522,25 @@ def _is_openapi_spec_task(task: Any) -> bool:
     title = (getattr(task, "title", None) or "").lower()
     combined = f"{desc} {title}"
     return (
-        ("openapi" in combined and ("spec" in combined or "specification" in combined or "yaml" in combined or "file" in combined))
+        (
+            "openapi" in combined
+            and (
+                "spec" in combined
+                or "specification" in combined
+                or "yaml" in combined
+                or "file" in combined
+            )
+        )
         or "api specification" in combined
         or "api contract" in combined
         or ("swagger" in combined and ("spec" in combined or "file" in combined))
     )
+
+
 _truncate_for_context = truncate_for_context
 MAX_OPENAPI_SPEC_CHARS = 100_000  # 100KB limit for OpenAPI spec context
+
+
 def _read_openapi_spec_from_repo(repo_path: Path) -> Optional[str]:
     """Read existing OpenAPI spec from repo (app/openapi.yaml, openapi.yaml, docs/openapi.yaml).
     Returns truncated content or None if not found. Used to pass existing spec as api_spec
@@ -474,12 +562,16 @@ def _read_openapi_spec_from_repo(repo_path: Path) -> Optional[str]:
             except (OSError, UnicodeDecodeError) as e:
                 logger.debug("Could not read OpenAPI spec %s: %s", p, e)
     return None
+
+
 _task_requirements = task_requirements
 
 
 def _task_requirements_with_test_expectations(task: Task, repo_path: Path) -> str:
     """Build requirements string including test/spec expectations from repo."""
     return task_requirements_with_expectations(task, repo_path, "backend")
+
+
 class BackendExpertAgent:
     """
     Backend expert that implements solutions in Python or Java.
@@ -492,9 +584,11 @@ class BackendExpertAgent:
         - ``self.llm`` is always a valid LLMClient.
         - ``run()`` never modifies the repository; ``run_workflow()`` does.
     """
+
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
+
     def _plan_task(
         self,
         *,
@@ -513,24 +607,34 @@ class BackendExpertAgent:
         if getattr(task, "user_story", None):
             context_parts.append(f"**User Story:** {task.user_story}")
         if spec_content:
-            context_parts.extend([
-                "",
-                "**Project Specification:**",
-                _truncate_for_context(spec_content, compute_spec_content_chars(self.llm)),
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Project Specification:**",
+                    _truncate_for_context(spec_content, compute_spec_content_chars(self.llm)),
+                ]
+            )
         if architecture:
-            context_parts.extend([
-                "",
-                "**Architecture:**",
-                architecture.overview,
-                *[f"- {c.name} ({c.type}): {c.technology}" for c in architecture.components if c.technology],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Architecture:**",
+                    architecture.overview,
+                    *[
+                        f"- {c.name} ({c.type}): {c.technology}"
+                        for c in architecture.components
+                        if c.technology
+                    ],
+                ]
+            )
         if existing_code and existing_code != "# No code files found":
-            context_parts.extend([
-                "",
-                "**Existing codebase:**",
-                _truncate_for_context(existing_code, compute_existing_code_chars(self.llm)),
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Existing codebase:**",
+                    _truncate_for_context(existing_code, compute_existing_code_chars(self.llm)),
+                ]
+            )
         prompt = BACKEND_PLANNING_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         log_llm_prompt(logger, "Backend", "planning", (task.description or "")[:80], prompt)
         try:
@@ -540,6 +644,7 @@ class BackendExpertAgent:
         except Exception as e:
             logger.warning("[%s] Planning step failed, proceeding without plan: %s", task.id, e)
             return ("", False)
+
     # ── Autonomous workflow ─────────────────────────────────────────────────
     def run_workflow(
         self,
@@ -623,22 +728,21 @@ class BackendExpertAgent:
             NO_FILES_TO_WRITE_MSG,
             write_agent_output,
         )
+
         task_id = task.id
         workflow_start = time.monotonic()
         review_history: List[ReviewIterationRecord] = []
         git_ops_metadata: Dict[str, Any] = {"branch_created": "", "commits": [], "merge": {}}
         logger.info(
-            "[%s] WORKFLOW START: Backend agent beginning autonomous workflow "
-            "for task '%s'",
+            "[%s] WORKFLOW START: Backend agent beginning autonomous workflow for task '%s'",
             task_id,
             task.title or task.description[:80],
         )
         # Contract-first guardrail: reject ambiguous task payloads early.
         task_contract_valid, missing_contract_fields = _validate_task_contract(task)
         if not task_contract_valid:
-            failure_reason = (
-                "Task contract is incomplete. Missing required fields: "
-                + ", ".join(missing_contract_fields)
+            failure_reason = "Task contract is incomplete. Missing required fields: " + ", ".join(
+                missing_contract_fields
             )
             logger.error("[%s] WORKFLOW BLOCKED: %s", task_id, failure_reason)
             if tech_lead is not None:
@@ -659,7 +763,9 @@ class BackendExpertAgent:
                         codebase_summary="",
                     )
                 except Exception as tl_err:
-                    logger.warning("[%s] Tech Lead notify on contract block failed: %s", task_id, tl_err)
+                    logger.warning(
+                        "[%s] Tech Lead notify on contract block failed: %s", task_id, tl_err
+                    )
             return BackendWorkflowResult(
                 task_id=task_id,
                 success=False,
@@ -677,7 +783,12 @@ class BackendExpertAgent:
             try:
                 from git_operations_tool_agent.models import GitOperationInput
 
-                slug = re.sub(r"[^a-z0-9-]+", "-", (task.title or task.description or "task").lower()).strip("-")[:40] or "task"
+                slug = (
+                    re.sub(
+                        r"[^a-z0-9-]+", "-", (task.title or task.description or "task").lower()
+                    ).strip("-")[:40]
+                    or "task"
+                )
                 create_out = git_operations_tool_agent.run(
                     GitOperationInput(
                         task_id=task_id,
@@ -694,10 +805,17 @@ class BackendExpertAgent:
                 if ok:
                     git_ops_metadata["branch_created"] = branch_msg
                 else:
-                    branch_msg = "; ".join(create_out.policy_findings + create_out.notes) or "create_branch failed"
+                    branch_msg = (
+                        "; ".join(create_out.policy_findings + create_out.notes)
+                        or "create_branch failed"
+                    )
             except Exception as git_tool_err:
                 ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, task_id)
-                logger.warning("[%s] GitOperationsToolAgent create_branch failed, fallback to git_utils: %s", task_id, git_tool_err)
+                logger.warning(
+                    "[%s] GitOperationsToolAgent create_branch failed, fallback to git_utils: %s",
+                    task_id,
+                    git_tool_err,
+                )
         else:
             ok, branch_msg = create_feature_branch(repo_path, DEVELOPMENT_BRANCH, task_id)
         if not ok:
@@ -712,7 +830,9 @@ class BackendExpertAgent:
                 success=False,
                 failure_reason=f"Feature branch creation failed: {branch_msg}",
             )
-        branch_name = branch_msg or (f"feature/{task_id}" if not task_id.startswith("feature/") else task_id)
+        branch_name = branch_msg or (
+            f"feature/{task_id}" if not task_id.startswith("feature/") else task_id
+        )
         logger.info("[%s] WORKFLOW   Branch created: %s", task_id, branch_name)
         # ── Step 1b: Sync with development (accumulative updates) ───────────
         # Merge development into feature branch so we see any work from parallel
@@ -739,11 +859,10 @@ class BackendExpertAgent:
         plan_text_for_fix_loop: str = ""  # Persists for review loop; passed to _regenerate_with_issues for first 2-3 fix attempts
         # Handle clarification sub-loop (separate from the review loop)
         from software_engineering_team.shared.context_sizing import compute_existing_code_chars
+
         for clar_round in range(MAX_CLARIFICATION_ROUNDS + 1):
             max_code_chars = compute_existing_code_chars(self.llm)
-            existing_code = _truncate_for_context(
-                _read_repo_code(repo_path), max_code_chars
-            )
+            existing_code = _truncate_for_context(_read_repo_code(repo_path), max_code_chars)
             # Per-task planning: produce implementation plan before first code gen
             plan_text, _ = self._plan_task(
                 task=current_task,
@@ -753,7 +872,11 @@ class BackendExpertAgent:
             )
             if plan_text:
                 plan_text_for_fix_loop = plan_text
-                logger.info("[%s] WORKFLOW   Planning complete, plan length=%d chars", task_id, len(plan_text))
+                logger.info(
+                    "[%s] WORKFLOW   Planning complete, plan length=%d chars",
+                    task_id,
+                    len(plan_text),
+                )
                 plan_dir = repo_path.parent / "plan"
                 if not plan_dir.exists():
                     plan_dir = repo_path / "plan"
@@ -772,9 +895,7 @@ class BackendExpertAgent:
                     task_description=current_task.description,
                     requirements=_task_requirements_with_test_expectations(current_task, repo_path),
                     user_story=getattr(current_task, "user_story", "") or "",
-                    spec_content=_truncate_for_context(
-                        spec_content, max_code_chars
-                    ),
+                    spec_content=_truncate_for_context(spec_content, max_code_chars),
                     architecture=architecture,
                     language="python",
                     existing_code=(
@@ -804,8 +925,7 @@ class BackendExpertAgent:
                     continue
                 else:
                     logger.warning(
-                        "[%s] WORKFLOW FAILED at Step 2: Still needs clarification "
-                        "after %d rounds",
+                        "[%s] WORKFLOW FAILED at Step 2: Still needs clarification after %d rounds",
                         task_id,
                         MAX_CLARIFICATION_ROUNDS,
                     )
@@ -898,8 +1018,7 @@ class BackendExpertAgent:
         logger.info("[%s] WORKFLOW   Initial commit successful", task_id)
         # ── Steps 4-6: Review feedback loop ─────────────────────────────────
         logger.info(
-            "[%s] WORKFLOW Steps 4-6: Entering review feedback loop "
-            "(max %d iterations)",
+            "[%s] WORKFLOW Steps 4-6: Entering review feedback loop (max %d iterations)",
             task_id,
             MAX_REVIEW_ITERATIONS,
         )
@@ -938,10 +1057,11 @@ class BackendExpertAgent:
                     task_plan=task_plan_arg,
                 )
                 fix_attempt_count += 1
-                for _ in range(MAX_PREWRITE_REGENERATIONS - 1):  # -1 since we already regenerated once above
-                    main_from_files = (
-                        result.files.get("app/main.py", "")
-                        or result.files.get("main.py", "")
+                for _ in range(
+                    MAX_PREWRITE_REGENERATIONS - 1
+                ):  # -1 since we already regenerated once above
+                    main_from_files = result.files.get("app/main.py", "") or result.files.get(
+                        "main.py", ""
                     )
                     still_missing = _check_test_endpoint_compatibility(
                         repo_path, main_content=main_from_files
@@ -994,28 +1114,37 @@ class BackendExpertAgent:
             if linting_tool_agent is not None:
                 try:
                     from linting_tool_agent.models import LintToolInput as _LintInput
-                    lint_result = linting_tool_agent.run(_LintInput(
-                        repo_path=str(repo_path),
-                        agent_type="backend",
-                        task_id=task_id,
-                        task_description=current_task.description,
-                    ))
+
+                    lint_result = linting_tool_agent.run(
+                        _LintInput(
+                            repo_path=str(repo_path),
+                            agent_type="backend",
+                            task_id=task_id,
+                            task_description=current_task.description,
+                        )
+                    )
                     if not lint_result.execution_result.success:
                         logger.info(
                             "[%s] WORKFLOW   [%d] Lint found %d issue(s), %d edit(s)",
-                            task_id, iteration,
+                            task_id,
+                            iteration,
                             lint_result.execution_result.issue_count,
                             len(lint_result.edits),
                         )
                         if lint_result.edits:
                             ok_lint, msg_lint, lint_files = _apply_build_fix_edits(
-                                repo_path, lint_result.edits,
+                                repo_path,
+                                lint_result.edits,
                                 compute_existing_code_chars(self.llm),
                             )
                             if ok_lint and lint_files:
                                 write_agent_output(
                                     repo_path,
-                                    type("_LR", (), {"files": lint_files, "summary": lint_result.summary})(),
+                                    type(
+                                        "_LR",
+                                        (),
+                                        {"files": lint_files, "summary": lint_result.summary},
+                                    )(),
                                     subdir="",
                                 )
                         elif lint_result.linter_issues:
@@ -1034,7 +1163,8 @@ class BackendExpertAgent:
                 except Exception as lint_err:
                     logger.warning(
                         "[%s] WORKFLOW   Lint step failed (non-blocking): %s",
-                        task_id, lint_err,
+                        task_id,
+                        lint_err,
                     )
             # ─── 4b. Build verification ─────────────────────────────────
             logger.info(
@@ -1079,7 +1209,10 @@ class BackendExpertAgent:
                 if consecutive_same_build_failures >= 2 and build_fix_specialist is not None:
                     try:
                         from build_fix_specialist.models import BuildFixInput
-                        affected_paths = _extract_affected_file_paths_from_build_errors(build_errors, repo_path)
+
+                        affected_paths = _extract_affected_file_paths_from_build_errors(
+                            build_errors, repo_path
+                        )
                         affected_code = _read_affected_files_code(repo_path, affected_paths)
                         failing_test_file = (
                             _extract_failing_test_file_from_build_errors(build_errors)
@@ -1091,22 +1224,32 @@ class BackendExpertAgent:
                             test_path = repo_path / failing_test_file
                             if test_path.exists():
                                 try:
-                                    failing_test_content = test_path.read_text(encoding="utf-8", errors="replace")[:3000]
+                                    failing_test_content = test_path.read_text(
+                                        encoding="utf-8", errors="replace"
+                                    )[:3000]
                                 except Exception:
                                     pass
-                        bf_result = build_fix_specialist.run(BuildFixInput(
-                            build_errors=build_errors[:4000],
-                            failing_test_content=failing_test_content,
-                            affected_files_code=affected_code,
-                            task_description=current_task.description,
-                        ))
+                        bf_result = build_fix_specialist.run(
+                            BuildFixInput(
+                                build_errors=build_errors[:4000],
+                                failing_test_content=failing_test_content,
+                                affected_files_code=affected_code,
+                                task_description=current_task.description,
+                            )
+                        )
                         if bf_result.edits:
                             max_chars = compute_existing_code_chars(self.llm)
                             ok_apply, msg_apply, files_dict = _apply_build_fix_edits(
                                 repo_path, bf_result.edits, max_chars
                             )
                             if ok_apply and files_dict:
-                                ok_write, write_msg = write_agent_output(repo_path, type("R", (), {"files": files_dict, "summary": bf_result.summary})(), subdir="")
+                                ok_write, write_msg = write_agent_output(
+                                    repo_path,
+                                    type(
+                                        "R", (), {"files": files_dict, "summary": bf_result.summary}
+                                    )(),
+                                    subdir="",
+                                )
                                 if ok_write:
                                     logger.info(
                                         "[%s] WORKFLOW   [%d] BuildFixSpecialist applied %d edit(s), re-running build",
@@ -1116,11 +1259,22 @@ class BackendExpertAgent:
                                     )
                                     continue  # Re-run build verification
                                 else:
-                                    logger.warning("[%s] WORKFLOW   BuildFixSpecialist write failed: %s", task_id, write_msg)
+                                    logger.warning(
+                                        "[%s] WORKFLOW   BuildFixSpecialist write failed: %s",
+                                        task_id,
+                                        write_msg,
+                                    )
                             else:
-                                logger.warning("[%s] WORKFLOW   BuildFixSpecialist apply failed: %s", task_id, msg_apply)
+                                logger.warning(
+                                    "[%s] WORKFLOW   BuildFixSpecialist apply failed: %s",
+                                    task_id,
+                                    msg_apply,
+                                )
                         else:
-                            logger.info("[%s] WORKFLOW   BuildFixSpecialist returned no edits, falling back to full regeneration", task_id)
+                            logger.info(
+                                "[%s] WORKFLOW   BuildFixSpecialist returned no edits, falling back to full regeneration",
+                                task_id,
+                            )
                     except Exception as spec_err:
                         logger.warning(
                             "[%s] WORKFLOW   BuildFixSpecialist failed (non-blocking): %s",
@@ -1132,7 +1286,8 @@ class BackendExpertAgent:
                     bug_issue = {
                         "severity": "critical",
                         "description": f"Build/test failure: {build_errors[:1000]}",
-                        "location": _extract_failing_test_file_from_build_errors(build_errors) or "",
+                        "location": _extract_failing_test_file_from_build_errors(build_errors)
+                        or "",
                         "recommendation": "Use specialist-guided root-cause analysis and patch the bug.",
                     }
                     solved, solver_result, solver_error = self._run_problem_solver_bug_loop(
@@ -1157,14 +1312,17 @@ class BackendExpertAgent:
                 # Invoke testing sub-agent to analyze build errors and produce fix recommendations
                 code_on_branch = _read_repo_code(repo_path)
                 from qa_agent.models import QAInput as QAI
-                qa_fix_result = qa_agent.run(QAI(
-                    code=code_on_branch,
-                    language="python",
-                    task_description=current_task.description,
-                    architecture=architecture,
-                    build_errors=build_errors[:4000],
-                    request_mode="fix_build",
-                ))
+
+                qa_fix_result = qa_agent.run(
+                    QAI(
+                        code=code_on_branch,
+                        language="python",
+                        task_description=current_task.description,
+                        architecture=architecture,
+                        build_errors=build_errors[:4000],
+                        request_mode="fix_build",
+                    )
+                )
                 qa_issues = [
                     b.model_dump() if hasattr(b, "model_dump") else b.dict()
                     for b in (qa_fix_result.bugs_found or [])
@@ -1202,7 +1360,9 @@ class BackendExpertAgent:
                         test_path = repo_path / failing_test_file
                         if test_path.exists():
                             try:
-                                test_content = test_path.read_text(encoding="utf-8", errors="replace")
+                                test_content = test_path.read_text(
+                                    encoding="utf-8", errors="replace"
+                                )
                                 escalation_desc += (
                                     f"\n\nFailing test expectations (from {failing_test_file}):\n```\n"
                                     f"{test_content[:3000]}{'... [truncated]' if len(test_content) > 3000 else ''}\n```"
@@ -1215,28 +1375,34 @@ class BackendExpertAgent:
                                 pass
                         else:
                             escalation_desc += f"\n\nFailing test file: {failing_test_file} (file not found in repo)."
-                    qa_issues.insert(0, {
-                        "severity": "critical",
-                        "description": escalation_desc,
-                        "location": failing_test_file or "",
-                        "recommendation": escalation_suggestion,
-                    })
+                    qa_issues.insert(
+                        0,
+                        {
+                            "severity": "critical",
+                            "description": escalation_desc,
+                            "location": failing_test_file or "",
+                            "recommendation": escalation_suggestion,
+                        },
+                    )
                     if consecutive_same_build_failures == 4:
                         # Suggest that test expectations might be wrong
-                        qa_issues.insert(0, {
-                            "severity": "critical",
-                            "description": (
-                                "ESCALATION (4th same failure): Consider whether the failing test expectations are wrong. "
-                                "If the test asserts behavior that conflicts with the spec, you may need to update the test "
-                                "rather than the implementation. Explain your reasoning. Either fix the implementation to "
-                                "satisfy the test, or update the test if it incorrectly asserts behavior."
-                            ),
-                            "location": "",
-                            "recommendation": (
-                                "Re-read the failing test and the spec. If the test is wrong, Change the test to match the spec. "
-                                "If the implementation is wrong, Fix the implementation to satisfy the test."
-                            ),
-                        })
+                        qa_issues.insert(
+                            0,
+                            {
+                                "severity": "critical",
+                                "description": (
+                                    "ESCALATION (4th same failure): Consider whether the failing test expectations are wrong. "
+                                    "If the test asserts behavior that conflicts with the spec, you may need to update the test "
+                                    "rather than the implementation. Explain your reasoning. Either fix the implementation to "
+                                    "satisfy the test, or update the test if it incorrectly asserts behavior."
+                                ),
+                                "location": "",
+                                "recommendation": (
+                                    "Re-read the failing test and the spec. If the test is wrong, Change the test to match the spec. "
+                                    "If the implementation is wrong, Fix the implementation to satisfy the test."
+                                ),
+                            },
+                        )
                 task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                 result = self._regenerate_with_issues(
                     repo_path=repo_path,
@@ -1306,13 +1472,16 @@ class BackendExpertAgent:
                 write_tests_requested = True
                 code_on_branch = _read_repo_code(repo_path)
                 from qa_agent.models import QAInput as QAI
-                qa_tests_result = qa_agent.run(QAI(
-                    code=code_on_branch,
-                    language="python",
-                    task_description=current_task.description,
-                    architecture=architecture,
-                    request_mode="write_tests",
-                ))
+
+                qa_tests_result = qa_agent.run(
+                    QAI(
+                        code=code_on_branch,
+                        language="python",
+                        task_description=current_task.description,
+                        architecture=architecture,
+                        request_mode="write_tests",
+                    )
+                )
                 tests_dict = {}
                 if getattr(qa_tests_result, "unit_tests", "").strip():
                     tests_dict["unit_tests"] = qa_tests_result.unit_tests.strip()
@@ -1448,14 +1617,17 @@ class BackendExpertAgent:
                 code_for_verify = _read_repo_code(repo_path)
                 if code_for_verify and code_for_verify != "# No code files found":
                     from acceptance_verifier_agent.models import AcceptanceVerifierInput
-                    av_result = acceptance_verifier_agent.run(AcceptanceVerifierInput(
-                        code=code_for_verify,
-                        task_description=current_task.description,
-                        acceptance_criteria=current_task.acceptance_criteria,
-                        spec_content=spec_content,
-                        architecture=architecture,
-                        language="python",
-                    ))
+
+                    av_result = acceptance_verifier_agent.run(
+                        AcceptanceVerifierInput(
+                            code=code_for_verify,
+                            task_description=current_task.description,
+                            acceptance_criteria=current_task.acceptance_criteria,
+                            spec_content=spec_content,
+                            architecture=architecture,
+                            language="python",
+                        )
+                    )
                     if not av_result.all_satisfied:
                         unsatisfied = [c for c in av_result.per_criterion if not c.satisfied]
                         logger.warning(
@@ -1489,7 +1661,9 @@ class BackendExpertAgent:
                             missing = _test_routes_missing_from_main_py(repo_path, result.files)
                             if not missing:
                                 break
-                            task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
+                            task_plan_arg = (
+                                plan_text_for_fix_loop if fix_attempt_count < 3 else None
+                            )
                             result = self._regenerate_with_issues(
                                 repo_path=repo_path,
                                 current_task=current_task,
@@ -1499,13 +1673,17 @@ class BackendExpertAgent:
                                 task_plan=task_plan_arg,
                             )
                             fix_attempt_count += 1
-                        missing_after_av = _test_routes_missing_from_main_py(repo_path, result.files)
+                        missing_after_av = _test_routes_missing_from_main_py(
+                            repo_path, result.files
+                        )
                         if missing_after_av:
                             failure_reason = (
                                 f"Could not generate main.py with required test routes after {MAX_PREWRITE_REGENERATIONS} attempts. "
                                 f"Tests reference {missing_after_av} but main.py does not include them."
                             )
-                            logger.error("[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason)
+                            logger.error(
+                                "[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason
+                            )
                             checkout_branch(repo_path, DEVELOPMENT_BRANCH)
                             return BackendWorkflowResult(
                                 task_id=task_id,
@@ -1654,13 +1832,11 @@ class BackendExpertAgent:
                 task_id,
                 iteration,
             )
-            dbc_issues_count, dbc_updated_count, dbc_compliant = (
-                self._run_dbc_review(
-                    dbc_agent=dbc_agent,
-                    repo_path=repo_path,
-                    task=current_task,
-                    architecture=architecture,
-                )
+            dbc_issues_count, dbc_updated_count, dbc_compliant = self._run_dbc_review(
+                dbc_agent=dbc_agent,
+                repo_path=repo_path,
+                task=current_task,
+                architecture=architecture,
             )
             record.dbc_already_compliant = dbc_compliant
             record.dbc_comments_added = dbc_issues_count
@@ -1699,14 +1875,17 @@ class BackendExpertAgent:
                         )
                         code_on_branch = _read_repo_code(repo_path)
                         from qa_agent.models import QAInput as QAI
-                        qa_fix_result = qa_agent.run(QAI(
-                            code=code_on_branch,
-                            language="python",
-                            task_description=current_task.description,
-                            architecture=architecture,
-                            build_errors=build_errors[:4000],
-                            request_mode="fix_build",
-                        ))
+
+                        qa_fix_result = qa_agent.run(
+                            QAI(
+                                code=code_on_branch,
+                                language="python",
+                                task_description=current_task.description,
+                                architecture=architecture,
+                                build_errors=build_errors[:4000],
+                                request_mode="fix_build",
+                            )
+                        )
                         qa_issues_artifact = [
                             b.model_dump() if hasattr(b, "model_dump") else b.dict()
                             for b in (qa_fix_result.bugs_found or [])
@@ -1718,7 +1897,9 @@ class BackendExpertAgent:
                                     "severity": i.get("severity", "critical"),
                                     "description": i.get("description", ""),
                                     "location": i.get("file_path", ""),
-                                    "recommendation": i.get("suggestion", "Fix the build/test errors"),
+                                    "recommendation": i.get(
+                                        "suggestion", "Fix the build/test errors"
+                                    ),
                                 }
                                 for i in cr_issues
                             ]
@@ -1840,9 +2021,7 @@ class BackendExpertAgent:
                     "[%s] WORKFLOW   Attempting emergency merge of partial work despite build failures",
                     task_id,
                 )
-                merge_ok, merge_msg = merge_branch(
-                    repo_path, branch_name, DEVELOPMENT_BRANCH
-                )
+                merge_ok, merge_msg = merge_branch(repo_path, branch_name, DEVELOPMENT_BRANCH)
                 if merge_ok:
                     logger.info(
                         "[%s] WORKFLOW   Emergency merge successful; partial work preserved on %s",
@@ -1850,8 +2029,7 @@ class BackendExpertAgent:
                         DEVELOPMENT_BRANCH,
                     )
                     failure_reason = (
-                        f"{repeated_build_failure_reason} "
-                        "(Partial work merged to development.)"
+                        f"{repeated_build_failure_reason} (Partial work merged to development.)"
                     )
                 else:
                     logger.warning(
@@ -1936,7 +2114,10 @@ class BackendExpertAgent:
                         base_branch=DEVELOPMENT_BRANCH,
                         requested_operation="merge_to_development",
                         requesting_agent="BackendTeamLeadAgent",
-                        branch={"naming_template": branch_name.replace(task_id, "{task_id}"), "slug": "task"},
+                        branch={
+                            "naming_template": branch_name.replace(task_id, "{task_id}"),
+                            "slug": "task",
+                        },
                         merge={
                             "strategy": "squash",
                             "require_clean_worktree": True,
@@ -1975,7 +2156,11 @@ class BackendExpertAgent:
                     merge_msg = merge_msg or "merge_to_development failed"
             except Exception as merge_tool_err:
                 merge_ok, merge_msg = merge_branch(repo_path, branch_name, DEVELOPMENT_BRANCH)
-                logger.warning("[%s] GitOperationsToolAgent merge failed, fallback to git_utils: %s", task_id, merge_tool_err)
+                logger.warning(
+                    "[%s] GitOperationsToolAgent merge failed, fallback to git_utils: %s",
+                    task_id,
+                    merge_tool_err,
+                )
         else:
             merge_ok, merge_msg = merge_branch(repo_path, branch_name, DEVELOPMENT_BRANCH)
 
@@ -2030,7 +2215,9 @@ class BackendExpertAgent:
             task_id=task_id,
             agent_type="backend",
             status="completed",
-            summary=(result.summary if result else "") + "\n\ncompletion_package=" + json.dumps(completion_package, separators=(",", ":")),
+            summary=(result.summary if result else "")
+            + "\n\ncompletion_package="
+            + json.dumps(completion_package, separators=(",", ":")),
             files_changed=list(final_files.keys()),
             needs_followup=used_stub,
             failure_reason=(
@@ -2090,8 +2277,7 @@ class BackendExpertAgent:
             )
         workflow_elapsed = time.monotonic() - workflow_start
         logger.info(
-            "[%s] WORKFLOW COMPLETE: merged to development in %d iterations, "
-            "%.1fs total, %d files",
+            "[%s] WORKFLOW COMPLETE: merged to development in %d iterations, %.1fs total, %d files",
             task_id,
             len(review_history),
             workflow_elapsed,
@@ -2104,8 +2290,11 @@ class BackendExpertAgent:
             iterations_used=len(review_history),
             final_files=final_files,
             review_history=review_history,
-            summary=(result.summary if result else "") + "\n\ncompletion_package=" + json.dumps(completion_package, separators=(",", ":")),
+            summary=(result.summary if result else "")
+            + "\n\ncompletion_package="
+            + json.dumps(completion_package, separators=(",", ":")),
         )
+
     # ── Private helpers for run_workflow ─────────────────────────────────────
     def _regenerate_with_issues(
         self,
@@ -2128,9 +2317,7 @@ class BackendExpertAgent:
         Postconditions:
             - Returns a new ``BackendOutput`` with fixes applied.
         """
-        existing_code = _truncate_for_context(
-            _read_repo_code(repo_path), MAX_EXISTING_CODE_CHARS
-        )
+        existing_code = _truncate_for_context(_read_repo_code(repo_path), MAX_EXISTING_CODE_CHARS)
         return self.run(
             BackendInput(
                 task_description=current_task.description,
@@ -2154,6 +2341,7 @@ class BackendExpertAgent:
                 task_plan=task_plan,
             )
         )
+
     def _run_problem_solver_cycle(
         self,
         *,
@@ -2172,6 +2360,7 @@ class BackendExpertAgent:
         )
         try:
             from problem_solver_agent.models import ProblemSolverInput
+
             ps_result = problem_solver_agent.run(
                 ProblemSolverInput(
                     task_description=current_task.description,
@@ -2192,6 +2381,7 @@ class BackendExpertAgent:
         except Exception as err:
             logger.warning("ProblemSolver cycle failed (non-blocking): %s", err)
             return ""
+
     def _run_problem_solver_bug_loop(
         self,
         *,
@@ -2206,6 +2396,7 @@ class BackendExpertAgent:
     ) -> tuple[bool, Optional[BackendOutput], str]:
         """Run up to MAX_PROBLEM_SOLVER_CYCLES to patch a bug before moving on."""
         from software_engineering_team.shared.repo_writer import write_agent_output
+
         last_error = base_issue.get("description", "")
         last_result: Optional[BackendOutput] = None
         for cycle in range(1, MAX_PROBLEM_SOLVER_CYCLES + 1):
@@ -2220,8 +2411,8 @@ class BackendExpertAgent:
             qa_issue = dict(base_issue)
             if recommendation:
                 qa_issue["recommendation"] = (
-                    (qa_issue.get("recommendation", "") + "\n\n" + recommendation).strip()
-                )
+                    qa_issue.get("recommendation", "") + "\n\n" + recommendation
+                ).strip()
             last_result = self._regenerate_with_issues(
                 repo_path=repo_path,
                 current_task=current_task,
@@ -2243,6 +2434,7 @@ class BackendExpertAgent:
                 return True, last_result, ""
             last_error = build_errors or last_error
         return False, last_result, last_error
+
     @staticmethod
     def _run_code_review(
         *,
@@ -2264,6 +2456,7 @@ class BackendExpertAgent:
         from code_review_agent.models import CodeReviewInput
 
         from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
+
         max_chars = compute_code_review_total_chars(code_review_agent.llm)
         code_capped = _truncate_for_context(code, max_chars)
         return code_review_agent.run(
@@ -2278,6 +2471,7 @@ class BackendExpertAgent:
                 existing_codebase=existing_code,
             )
         )
+
     @staticmethod
     def _run_security_review(
         *,
@@ -2296,6 +2490,7 @@ class BackendExpertAgent:
             - Each dict has keys: severity, category, description, location, recommendation.
         """
         from security_agent.models import SecurityInput
+
         code_to_review = _read_repo_code(repo_path)
         if not code_to_review or code_to_review == "# No code files found":
             return []
@@ -2313,6 +2508,7 @@ class BackendExpertAgent:
             v.model_dump() if hasattr(v, "model_dump") else v.dict()
             for v in (sec_result.vulnerabilities or [])
         ]
+
     @staticmethod
     def _run_qa_review(
         *,
@@ -2332,6 +2528,7 @@ class BackendExpertAgent:
             - QAOutput contains integration_tests, unit_tests, readme_content for persistence.
         """
         from qa_agent.models import QAInput
+
         code_to_review = _read_repo_code(repo_path)
         qa_result = qa_agent.run(
             QAInput(
@@ -2348,6 +2545,7 @@ class BackendExpertAgent:
                 for b in (qa_result.bugs_found or [])
             ]
         return issues, qa_result
+
     @staticmethod
     def _persist_qa_artifacts(
         *,
@@ -2362,6 +2560,7 @@ class BackendExpertAgent:
         Returns True if any test files were written (so caller can re-run build verification).
         """
         from software_engineering_team.shared.git_utils import write_files_and_commit
+
         files_to_write: Dict[str, str] = {}
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in task_id)[:50]
         if getattr(qa_output, "integration_tests", "").strip():
@@ -2381,7 +2580,10 @@ class BackendExpertAgent:
         try:
             tests_dir = repo_path / "tests"
             tests_dir.mkdir(parents=True, exist_ok=True)
-            msg = getattr(qa_output, "suggested_commit_message", "") or "test(qa): add QA-generated tests and docs"
+            msg = (
+                getattr(qa_output, "suggested_commit_message", "")
+                or "test(qa): add QA-generated tests and docs"
+            )
             if not msg or len(msg) < 10:
                 msg = "test(qa): add QA-generated tests and docs"
             ok, err = write_files_and_commit(repo_path, files_to_write, msg)
@@ -2392,16 +2594,14 @@ class BackendExpertAgent:
                     list(files_to_write.keys()),
                 )
                 # Return True if we wrote any test files (integration or unit)
-                return any(
-                    p.startswith("tests/") and p.endswith(".py")
-                    for p in files_to_write
-                )
+                return any(p.startswith("tests/") and p.endswith(".py") for p in files_to_write)
             else:
                 logger.warning("[%s] Failed to persist QA artifacts: %s", task_id, err)
                 return False
         except Exception as e:
             logger.warning("[%s] Persist QA artifacts failed (non-blocking): %s", task_id, e)
             return False
+
     @staticmethod
     def _run_dbc_review(
         *,
@@ -2424,6 +2624,7 @@ class BackendExpertAgent:
         from technical_writers.dbc_comments_agent.models import DbcCommentsInput
 
         from software_engineering_team.shared.git_utils import write_files_and_commit
+
         try:
             dbc_code = _read_repo_code(repo_path)
             if not dbc_code or dbc_code == "# No code files found":
@@ -2452,6 +2653,7 @@ class BackendExpertAgent:
         except Exception as e:
             logger.warning("DBC review failed (non-blocking): %s", e)
             return 0, 0, True
+
     # ── Stateless code generation (original interface) ──────────────────────
     def run(self, input_data: BackendInput) -> BackendOutput:
         """Implement backend functionality."""
@@ -2473,7 +2675,9 @@ class BackendExpertAgent:
         )
         qa_count = len(input_data.qa_issues) if input_data.qa_issues else 0
         security_count = len(input_data.security_issues) if input_data.security_issues else 0
-        code_review_count = len(input_data.code_review_issues) if input_data.code_review_issues else 0
+        code_review_count = (
+            len(input_data.code_review_issues) if input_data.code_review_issues else 0
+        )
         has_issues = qa_count > 0 or security_count > 0 or code_review_count > 0
         context_parts: List[str] = []
         if has_issues:
@@ -2486,11 +2690,17 @@ class BackendExpertAgent:
                 issue_summaries["code review issues"] = code_review_count
             desc_lines: List[str] = []
             for i in input_data.qa_issues or []:
-                desc_lines.append(f"  - QA: {i.get('description', '')} (location: {i.get('location', '')})")
+                desc_lines.append(
+                    f"  - QA: {i.get('description', '')} (location: {i.get('location', '')})"
+                )
             for i in input_data.security_issues or []:
-                desc_lines.append(f"  - Security [{i.get('category', '')}]: {i.get('description', '')} (location: {i.get('location', '')})")
+                desc_lines.append(
+                    f"  - Security [{i.get('category', '')}]: {i.get('description', '')} (location: {i.get('location', '')})"
+                )
             for i in input_data.code_review_issues or []:
-                desc_lines.append(f"  - Code review [{i.get('category', 'general')}]: {i.get('description', '')} (file: {i.get('file_path', 'unknown')})")
+                desc_lines.append(
+                    f"  - Code review [{i.get('category', 'general')}]: {i.get('description', '')} (file: {i.get('file_path', 'unknown')})"
+                )
             issue_descriptions = "\n".join(desc_lines) if desc_lines else None
             header = build_problem_solving_header(
                 issue_summaries, "Backend", issue_descriptions=issue_descriptions
@@ -2511,7 +2721,9 @@ class BackendExpertAgent:
                     f"- [{i.get('severity')}] {i.get('category')}: {i.get('description')} (location: {i.get('location')})\n  Recommendation: {i.get('recommendation')}"
                     for i in input_data.security_issues
                 )
-                problem_block_parts.extend(["", "**Security issues to fix (implement these):**", sec_text])
+                problem_block_parts.extend(
+                    ["", "**Security issues to fix (implement these):**", sec_text]
+                )
             if input_data.code_review_issues:
                 cr_text = "\n".join(
                     f"- [{i.get('severity')}] {i.get('category', 'general')}: {i.get('description')} "
@@ -2520,11 +2732,13 @@ class BackendExpertAgent:
                 )
                 problem_block_parts.extend(["", "**Code review issues to resolve:**", cr_text])
             if input_data.task_plan:
-                problem_block_parts.extend([
-                    "",
-                    "**CRITICAL - Implementation plan:** When fixing issues, you must still satisfy the Implementation plan below. "
-                    "Do not remove or change code that fulfills the plan unless the issue explicitly requires it.",
-                ])
+                problem_block_parts.extend(
+                    [
+                        "",
+                        "**CRITICAL - Implementation plan:** When fixing issues, you must still satisfy the Implementation plan below. "
+                        "Do not remove or change code that fulfills the plan unless the issue explicitly requires it.",
+                    ]
+                )
             problem_block_parts.extend(["", "---"])
             context_parts.append("\n".join(problem_block_parts))
             logger.info(
@@ -2568,56 +2782,94 @@ class BackendExpertAgent:
                 "```"
             )
             context_parts.append(specialist_findings_instruction)
-        context_parts.extend([
-            f"**Task:** {input_data.task_description}",
-            f"**Requirements:** {input_data.requirements}",
-            f"**Language:** {input_data.language}",
-        ])
+        context_parts.extend(
+            [
+                f"**Task:** {input_data.task_description}",
+                f"**Requirements:** {input_data.requirements}",
+                f"**Language:** {input_data.language}",
+            ]
+        )
         if input_data.user_story:
             context_parts.extend(["", f"**User Story:** {input_data.user_story}"])
         if input_data.spec_content:
-            context_parts.extend([
-                "",
-                "**Project Specification (full spec for the application being built):**",
-                "---",
-                input_data.spec_content,
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Project Specification (full spec for the application being built):**",
+                    "---",
+                    input_data.spec_content,
+                    "---",
+                ]
+            )
         if input_data.architecture:
-            context_parts.extend([
-                "",
-                "**Architecture:**",
-                input_data.architecture.overview,
-                *[f"- {c.name} ({c.type}): {c.technology}" for c in input_data.architecture.components if c.technology],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Architecture:**",
+                    input_data.architecture.overview,
+                    *[
+                        f"- {c.name} ({c.type}): {c.technology}"
+                        for c in input_data.architecture.components
+                        if c.technology
+                    ],
+                ]
+            )
         if input_data.existing_code:
             context_parts.extend(["", "**Existing code:**", input_data.existing_code])
         if input_data.api_spec:
             context_parts.extend(["", "**API spec:**", input_data.api_spec])
         if input_data.suggested_tests_from_qa:
-            tests_block = ["", "**Suggested tests from QA/testing sub-agent – integrate these into your tests/test_*.py files:**"]
+            tests_block = [
+                "",
+                "**Suggested tests from QA/testing sub-agent – integrate these into your tests/test_*.py files:**",
+            ]
             if input_data.suggested_tests_from_qa.get("unit_tests"):
-                tests_block.extend(["", "**Unit tests:**", "```", input_data.suggested_tests_from_qa["unit_tests"], "```"])
+                tests_block.extend(
+                    [
+                        "",
+                        "**Unit tests:**",
+                        "```",
+                        input_data.suggested_tests_from_qa["unit_tests"],
+                        "```",
+                    ]
+                )
             if input_data.suggested_tests_from_qa.get("integration_tests"):
-                tests_block.extend(["", "**Integration tests:**", "```", input_data.suggested_tests_from_qa["integration_tests"], "```"])
+                tests_block.extend(
+                    [
+                        "",
+                        "**Integration tests:**",
+                        "```",
+                        input_data.suggested_tests_from_qa["integration_tests"],
+                        "```",
+                    ]
+                )
             context_parts.extend(tests_block)
         # Explicit guidance for OpenAPI spec tasks
         task_desc_lower = (input_data.task_description or "").lower()
         if (
-            ("openapi" in task_desc_lower and ("spec" in task_desc_lower or "specification" in task_desc_lower or "yaml" in task_desc_lower))
+            (
+                "openapi" in task_desc_lower
+                and (
+                    "spec" in task_desc_lower
+                    or "specification" in task_desc_lower
+                    or "yaml" in task_desc_lower
+                )
+            )
             or "api specification" in task_desc_lower
             or "api contract" in task_desc_lower
         ):
-            context_parts.extend([
-                "",
-                "**CRITICAL - OpenAPI Spec Task:**",
-                "This task requires creating a **static OpenAPI spec file**. You MUST:",
-                "1. Create `app/openapi.yaml` with the complete OpenAPI 3.0 specification",
-                "2. Include all paths, request/response schemas, security definitions, and error responses",
-                "3. Do NOT rely solely on FastAPI's auto-generated /openapi.json",
-                "4. The `app/openapi.yaml` file MUST be included in your 'files' output",
-                "5. Also update any referenced schema files (e.g., app/schemas/error.py) to match the spec",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**CRITICAL - OpenAPI Spec Task:**",
+                    "This task requires creating a **static OpenAPI spec file**. You MUST:",
+                    "1. Create `app/openapi.yaml` with the complete OpenAPI 3.0 specification",
+                    "2. Include all paths, request/response schemas, security definitions, and error responses",
+                    "3. Do NOT rely solely on FastAPI's auto-generated /openapi.json",
+                    "4. The `app/openapi.yaml` file MUST be included in your 'files' output",
+                    "5. Also update any referenced schema files (e.g., app/schemas/error.py) to match the spec",
+                ]
+            )
         prompt = BACKEND_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         mode = "problem_solving" if has_issues else "initial"
         task_hint = (input_data.task_description or "")[:80]
@@ -2654,7 +2906,9 @@ class BackendExpertAgent:
             for warn in validation_warnings:
                 logger.warning("Backend output validation: %s", warn)
             # Guard: 0 files and 0 code -> retry up to 3 times with explicit rejection message
-            total_chars = sum(len(c or "") for c in (validated_files or {}).values()) + len(code or "")
+            total_chars = sum(len(c or "") for c in (validated_files or {}).values()) + len(
+                code or ""
+            )
             if not data.get("needs_clarification", False) and total_chars == 0 and attempt < 3:
                 response_preview = ""
                 if data.get("content"):
@@ -2684,6 +2938,7 @@ class BackendExpertAgent:
             # Fail fast when LLM produces no valid output
             if not validated_files and not data.get("needs_clarification", False):
                 from llm_service import LLMPermanentError
+
                 if raw_files:
                     raise LLMPermanentError(
                         f"Backend: LLM returned {len(raw_files)} files but all were rejected by validation. "
@@ -2707,8 +2962,12 @@ class BackendExpertAgent:
         logger.info(
             "Backend: done, code=%s chars, files=%s (validated from %s), tests=%s chars, "
             "summary=%s chars, needs_clarification=%s",
-            len(code), len(validated_files), len(raw_files), len(tests),
-            len(summary), needs_clarification,
+            len(code),
+            len(validated_files),
+            len(raw_files),
+            len(tests),
+            len(summary),
+            needs_clarification,
         )
         return BackendOutput(
             code=code,
@@ -2719,8 +2978,12 @@ class BackendExpertAgent:
             suggested_commit_message=data.get("suggested_commit_message", ""),
             needs_clarification=needs_clarification,
             clarification_requests=clarification_requests,
-            gitignore_entries=[str(e).strip() for e in (data.get("gitignore_entries") or []) if str(e).strip()],
+            gitignore_entries=[
+                str(e).strip() for e in (data.get("gitignore_entries") or []) if str(e).strip()
+            ],
         )
+
+
 def _validate_task_contract(task: Task) -> tuple[bool, list[str]]:
     """Validate contract-first task requirements before implementation begins."""
     missing: List[str] = []
@@ -2736,6 +2999,8 @@ def _validate_task_contract(task: Task) -> tuple[bool, list[str]]:
     if io_contract in (None, "", [], {}) and "input" not in (task.requirements or "").lower():
         missing.append("inputs_outputs")
     return (len(missing) == 0, missing)
+
+
 def _build_acceptance_trace(task: Task, files_changed: List[str]) -> List[Dict[str, Any]]:
     """Build criterion-to-implementation/test trace for completion package."""
     tests = [f for f in files_changed if "/test" in f or f.startswith("tests/")]
@@ -2750,6 +3015,8 @@ def _build_acceptance_trace(task: Task, files_changed: List[str]) -> List[Dict[s
             }
         )
     return trace
+
+
 def _build_completion_package(
     *,
     task: Task,

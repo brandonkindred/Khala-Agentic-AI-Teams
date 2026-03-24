@@ -22,7 +22,9 @@ class DevOpsTestValidationAgent:
             f"acceptance_criteria={input_data.acceptance_criteria}\n"
             f"tool_results={input_data.tool_results}\n"
         )
-        data = self.llm.complete_json(DEVOPS_TEST_VALIDATION_PROMPT + "\n\n---\n\n" + context, temperature=0.0)
+        data = self.llm.complete_json(
+            DEVOPS_TEST_VALIDATION_PROMPT + "\n\n---\n\n" + context, temperature=0.0
+        )
         gates = data.get("quality_gates") or {}
         approved = bool(data.get("approved", False))
         if any(v == "fail" for v in gates.values()):
@@ -31,6 +33,8 @@ class DevOpsTestValidationAgent:
             approved=approved,
             quality_gates=gates,
             acceptance_trace=data.get("acceptance_trace") or [],
-            evidence=[ValidationEvidence(**e) for e in (data.get("evidence") or []) if isinstance(e, dict)],
+            evidence=[
+                ValidationEvidence(**e) for e in (data.get("evidence") or []) if isinstance(e, dict)
+            ],
             summary=data.get("summary", ""),
         )

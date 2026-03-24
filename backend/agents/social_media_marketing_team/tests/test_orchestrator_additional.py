@@ -73,7 +73,9 @@ def test_plan_content_handles_no_initially_approved_ideas() -> None:
 
     assert content_plan.total_required_posts == 3
     assert len(content_plan.approved_ideas) == 3
-    assert all(idea.estimated_engagement_probability >= 0.70 for idea in content_plan.approved_ideas)
+    assert all(
+        idea.estimated_engagement_probability >= 0.70 for idea in content_plan.approved_ideas
+    )
 
 
 def test_goal_traceability_filter_excludes_invalid_goal_links() -> None:

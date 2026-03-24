@@ -26,6 +26,7 @@ sys.path.insert(0, str(_team_dir))
 def pytest_configure(config):
     """Configure logging so test runs show agent activity when -v or --log-cli-level is used."""
     import logging
+
     # Default: show INFO logs during tests when -v is passed
     if config.getoption("verbose", 0) > 0:
         logging.basicConfig(

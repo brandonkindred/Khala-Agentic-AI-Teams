@@ -390,9 +390,15 @@ class ProspectorAgent:
     def __post_init__(self) -> None:
         self._agent = _build_strands_agent(_PROSPECTOR_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
-    def prospect(self, icp_json: str, product_name: str, value_proposition: str,
-                 max_prospects: int, company_context: str,
-                 insights_context: Optional[str] = None) -> str:
+    def prospect(
+        self,
+        icp_json: str,
+        product_name: str,
+        value_proposition: str,
+        max_prospects: int,
+        company_context: str,
+        insights_context: Optional[str] = None,
+    ) -> str:
         prompt = _with_insights(
             f"You are prospecting for: {product_name}\n"
             f"Value proposition: {value_proposition}\n"
@@ -405,21 +411,23 @@ class ProspectorAgent:
             "Return a JSON array of prospect objects.",
             insights_context,
         )
-        stub = json.dumps([
-            {
-                "company_name": "Acme Corp",
-                "website": "https://acme.example.com",
-                "contact_name": "Jane Smith",
-                "contact_title": "VP of Sales",
-                "contact_email": None,
-                "linkedin_url": "https://linkedin.com/in/jane-smith-example",
-                "company_size_estimate": "200–500",
-                "industry": "SaaS",
-                "icp_match_score": 0.85,
-                "research_notes": "Recently raised Series B; hiring 10 AEs; uses Salesforce.",
-                "trigger_events": ["Series B funding announced", "Headcount growing 40% YoY"],
-            }
-        ])
+        stub = json.dumps(
+            [
+                {
+                    "company_name": "Acme Corp",
+                    "website": "https://acme.example.com",
+                    "contact_name": "Jane Smith",
+                    "contact_title": "VP of Sales",
+                    "contact_email": None,
+                    "linkedin_url": "https://linkedin.com/in/jane-smith-example",
+                    "company_size_estimate": "200–500",
+                    "industry": "SaaS",
+                    "icp_match_score": 0.85,
+                    "research_notes": "Recently raised Series B; hiring 10 AEs; uses Salesforce.",
+                    "trigger_events": ["Series B funding announced", "Headcount growing 40% YoY"],
+                }
+            ]
+        )
         return _call_agent(self._agent, prompt, stub)
 
 
@@ -436,9 +444,15 @@ class OutreachAgent:
     def __post_init__(self) -> None:
         self._agent = _build_strands_agent(_OUTREACH_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
-    def generate_sequence(self, prospect_json: str, product_name: str,
-                          value_proposition: str, case_studies: str, company_context: str,
-                          insights_context: Optional[str] = None) -> str:
+    def generate_sequence(
+        self,
+        prospect_json: str,
+        product_name: str,
+        value_proposition: str,
+        case_studies: str,
+        company_context: str,
+        insights_context: Optional[str] = None,
+    ) -> str:
         prompt = _with_insights(
             f"Create a complete 6-touch outreach sequence for this prospect:\n{prospect_json}\n\n"
             f"Product: {product_name}\n"
@@ -451,31 +465,37 @@ class OutreachAgent:
             "Return a JSON object with email_sequence, call_script, linkedin_message, sequence_rationale.",
             insights_context,
         )
-        stub = json.dumps({
-            "email_sequence": [
-                {
-                    "day": 1,
-                    "subject_line": "{{company_name}} + [Product] — quick thought",
-                    "body": (
-                        "Hi {{contact_name}},\n\nSaw {{trigger_event}} — congrats on the momentum.\n\n"
-                        "We help [titles] at companies like yours [core outcome] without [key friction].\n\n"
-                        "Worth a 15-min call this week?"
-                    ),
-                    "personalization_tokens": ["{{company_name}}", "{{contact_name}}", "{{trigger_event}}"],
-                    "call_to_action": "15-minute call this week",
-                },
-            ],
-            "call_script": (
-                "Hi {{contact_name}}, this is [SDR] from [Company]. "
-                "I know I'm calling out of the blue — do you have 27 seconds? "
-                "[Pause] We help [titles] solve [pain]. Is that on your radar?"
-            ),
-            "linkedin_message": (
-                "Hi {{contact_name}}, noticed {{trigger_event}} — impressive growth. "
-                "I work with similar [titles] on [outcome]. Would love to connect."
-            ),
-            "sequence_rationale": "Trigger-event hook chosen to maximize relevance and open rates.",
-        })
+        stub = json.dumps(
+            {
+                "email_sequence": [
+                    {
+                        "day": 1,
+                        "subject_line": "{{company_name}} + [Product] — quick thought",
+                        "body": (
+                            "Hi {{contact_name}},\n\nSaw {{trigger_event}} — congrats on the momentum.\n\n"
+                            "We help [titles] at companies like yours [core outcome] without [key friction].\n\n"
+                            "Worth a 15-min call this week?"
+                        ),
+                        "personalization_tokens": [
+                            "{{company_name}}",
+                            "{{contact_name}}",
+                            "{{trigger_event}}",
+                        ],
+                        "call_to_action": "15-minute call this week",
+                    },
+                ],
+                "call_script": (
+                    "Hi {{contact_name}}, this is [SDR] from [Company]. "
+                    "I know I'm calling out of the blue — do you have 27 seconds? "
+                    "[Pause] We help [titles] solve [pain]. Is that on your radar?"
+                ),
+                "linkedin_message": (
+                    "Hi {{contact_name}}, noticed {{trigger_event}} — impressive growth. "
+                    "I work with similar [titles] on [outcome]. Would love to connect."
+                ),
+                "sequence_rationale": "Trigger-event hook chosen to maximize relevance and open rates.",
+            }
+        )
         return _call_agent(self._agent, prompt, stub)
 
 
@@ -492,9 +512,14 @@ class LeadQualifierAgent:
     def __post_init__(self) -> None:
         self._agent = _build_strands_agent(_QUALIFIER_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
-    def qualify(self, prospect_json: str, product_name: str,
-                value_proposition: str, call_notes: str,
-                insights_context: Optional[str] = None) -> str:
+    def qualify(
+        self,
+        prospect_json: str,
+        product_name: str,
+        value_proposition: str,
+        call_notes: str,
+        insights_context: Optional[str] = None,
+    ) -> str:
         prompt = _with_insights(
             f"Qualify this prospect for {product_name}:\n{prospect_json}\n\n"
             f"Value proposition: {value_proposition}\n"
@@ -507,25 +532,27 @@ class LeadQualifierAgent:
             "recommended_action, disqualification_reason, qualification_notes.",
             insights_context,
         )
-        stub = json.dumps({
-            "bant": {"budget": 7, "authority": 6, "need": 9, "timeline": 6},
-            "meddic": {
-                "metrics_identified": True,
-                "economic_buyer_known": False,
-                "decision_criteria_understood": True,
-                "decision_process_mapped": False,
-                "identify_pain": True,
-                "champion_found": True,
-            },
-            "overall_score": 0.72,
-            "value_creation_level": 3,
-            "recommended_action": "Advance to Discovery — schedule 30-min discovery call",
-            "disqualification_reason": None,
-            "qualification_notes": (
-                "Strong need and champion present. EB not yet identified — must multi-thread "
-                "before proposal stage. Budget likely available but not confirmed."
-            ),
-        })
+        stub = json.dumps(
+            {
+                "bant": {"budget": 7, "authority": 6, "need": 9, "timeline": 6},
+                "meddic": {
+                    "metrics_identified": True,
+                    "economic_buyer_known": False,
+                    "decision_criteria_understood": True,
+                    "decision_process_mapped": False,
+                    "identify_pain": True,
+                    "champion_found": True,
+                },
+                "overall_score": 0.72,
+                "value_creation_level": 3,
+                "recommended_action": "Advance to Discovery — schedule 30-min discovery call",
+                "disqualification_reason": None,
+                "qualification_notes": (
+                    "Strong need and champion present. EB not yet identified — must multi-thread "
+                    "before proposal stage. Budget likely available but not confirmed."
+                ),
+            }
+        )
         return _call_agent(self._agent, prompt, stub)
 
 
@@ -542,9 +569,14 @@ class NurtureAgent:
     def __post_init__(self) -> None:
         self._agent = _build_strands_agent(_NURTURE_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
-    def build_sequence(self, prospect_json: str, product_name: str,
-                       value_proposition: str, duration_days: int,
-                       insights_context: Optional[str] = None) -> str:
+    def build_sequence(
+        self,
+        prospect_json: str,
+        product_name: str,
+        value_proposition: str,
+        duration_days: int,
+        insights_context: Optional[str] = None,
+    ) -> str:
         prompt = _with_insights(
             f"Build a {duration_days}-day nurture sequence for:\n{prospect_json}\n\n"
             f"Product: {product_name}\n"
@@ -557,51 +589,53 @@ class NurtureAgent:
             "re_engagement_triggers (array), content_recommendations (array).",
             insights_context,
         )
-        stub = json.dumps({
-            "duration_days": duration_days,
-            "touchpoints": [
-                {
-                    "day": 1,
-                    "channel": "email",
-                    "content_type": "educational article",
-                    "message": "Sharing a benchmark report on [pain area] that peers in your space found useful.",
-                    "goal": "Establish thought leadership and keep top of mind",
-                },
-                {
-                    "day": 14,
-                    "channel": "linkedin",
-                    "content_type": "case study snippet",
-                    "message": "Quick win: [Customer] reduced [metric] by 40% in 60 days with [Product].",
-                    "goal": "Introduce social proof at consideration stage",
-                },
-                {
-                    "day": 30,
-                    "channel": "email",
-                    "content_type": "ROI calculator",
-                    "message": "I built a quick calculator showing the cost of [pain] for a company your size.",
-                    "goal": "Move prospect from consideration to decision stage",
-                },
-                {
-                    "day": 60,
-                    "channel": "phone",
-                    "content_type": "check-in call",
-                    "message": "Following up to see if [trigger event or industry change] has shifted priorities.",
-                    "goal": "Re-qualify and determine readiness to advance",
-                },
-            ],
-            "re_engagement_triggers": [
-                "New funding round announced",
-                "Leadership change in buying committee",
-                "End-of-quarter budget release",
-                "Competitor product incident",
-            ],
-            "content_recommendations": [
-                "Industry benchmark report: [Pain area] in 2026",
-                "Customer case study: How [Similar Company] solved [Pain]",
-                "Blog post: 5 signs your [current solution] is costing you more than you think",
-                "ROI calculator: Cost of [problem] for [company size] teams",
-            ],
-        })
+        stub = json.dumps(
+            {
+                "duration_days": duration_days,
+                "touchpoints": [
+                    {
+                        "day": 1,
+                        "channel": "email",
+                        "content_type": "educational article",
+                        "message": "Sharing a benchmark report on [pain area] that peers in your space found useful.",
+                        "goal": "Establish thought leadership and keep top of mind",
+                    },
+                    {
+                        "day": 14,
+                        "channel": "linkedin",
+                        "content_type": "case study snippet",
+                        "message": "Quick win: [Customer] reduced [metric] by 40% in 60 days with [Product].",
+                        "goal": "Introduce social proof at consideration stage",
+                    },
+                    {
+                        "day": 30,
+                        "channel": "email",
+                        "content_type": "ROI calculator",
+                        "message": "I built a quick calculator showing the cost of [pain] for a company your size.",
+                        "goal": "Move prospect from consideration to decision stage",
+                    },
+                    {
+                        "day": 60,
+                        "channel": "phone",
+                        "content_type": "check-in call",
+                        "message": "Following up to see if [trigger event or industry change] has shifted priorities.",
+                        "goal": "Re-qualify and determine readiness to advance",
+                    },
+                ],
+                "re_engagement_triggers": [
+                    "New funding round announced",
+                    "Leadership change in buying committee",
+                    "End-of-quarter budget release",
+                    "Competitor product incident",
+                ],
+                "content_recommendations": [
+                    "Industry benchmark report: [Pain area] in 2026",
+                    "Customer case study: How [Similar Company] solved [Pain]",
+                    "Blog post: 5 signs your [current solution] is costing you more than you think",
+                    "ROI calculator: Cost of [problem] for [company size] teams",
+                ],
+            }
+        )
         return _call_agent(self._agent, prompt, stub)
 
 
@@ -618,9 +652,14 @@ class DiscoveryAgent:
     def __post_init__(self) -> None:
         self._agent = _build_strands_agent(_DISCOVERY_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
-    def prepare(self, prospect_json: str, qualification_json: str,
-                product_name: str, value_proposition: str,
-                insights_context: Optional[str] = None) -> str:
+    def prepare(
+        self,
+        prospect_json: str,
+        qualification_json: str,
+        product_name: str,
+        value_proposition: str,
+        insights_context: Optional[str] = None,
+    ) -> str:
         prompt = _with_insights(
             f"Prepare a complete discovery call guide for:\nProspect: {prospect_json}\n"
             f"Qualification context: {qualification_json}\n\n"
@@ -635,49 +674,51 @@ class DiscoveryAgent:
             "challenger_insight, demo_agenda, expected_objections, success_criteria_for_call.",
             insights_context,
         )
-        stub = json.dumps({
-            "spin_questions": {
-                "situation": [
-                    "Walk me through how your team currently handles [process].",
-                    "How many people are involved in [process], and what tools do they use?",
+        stub = json.dumps(
+            {
+                "spin_questions": {
+                    "situation": [
+                        "Walk me through how your team currently handles [process].",
+                        "How many people are involved in [process], and what tools do they use?",
+                    ],
+                    "problem": [
+                        "What's the biggest frustration your team has with [current approach]?",
+                        "Where do deals most commonly fall through in your current process?",
+                    ],
+                    "implication": [
+                        "What happens to your [key metric] when [pain] occurs?",
+                        "If this isn't resolved by Q3, what's the downstream impact on your team's targets?",
+                    ],
+                    "need_payoff": [
+                        "If you could eliminate [pain] entirely, what would that free your team to focus on?",
+                        "What would a 20% improvement in [metric] mean for your business this year?",
+                    ],
+                },
+                "challenger_insight": (
+                    "Most [titles] we talk to assume [common belief]. "
+                    "What our data across 200+ customers shows is that [counterintuitive truth] — "
+                    "which means the real leverage point is [reframe]."
+                ),
+                "demo_agenda": [
+                    "Set agenda & confirm success criteria (2 min)",
+                    "Challenger insight: reframe the problem (2 min)",
+                    "Validate key pains from discovery (5 min)",
+                    "Show [Feature A] — ties to confirmed pain #1 (5 min)",
+                    "Show [Feature B] — ties to confirmed pain #2 (5 min)",
+                    "Objection checkpoint — invite concerns (5 min)",
+                    "Propose next steps (3 min)",
                 ],
-                "problem": [
-                    "What's the biggest frustration your team has with [current approach]?",
-                    "Where do deals most commonly fall through in your current process?",
+                "expected_objections": [
+                    "We already have [competitor] — why switch?",
+                    "This isn't in the budget right now.",
+                    "I need to loop in [other stakeholder] before we can move forward.",
                 ],
-                "implication": [
-                    "What happens to your [key metric] when [pain] occurs?",
-                    "If this isn't resolved by Q3, what's the downstream impact on your team's targets?",
-                ],
-                "need_payoff": [
-                    "If you could eliminate [pain] entirely, what would that free your team to focus on?",
-                    "What would a 20% improvement in [metric] mean for your business this year?",
-                ],
-            },
-            "challenger_insight": (
-                "Most [titles] we talk to assume [common belief]. "
-                "What our data across 200+ customers shows is that [counterintuitive truth] — "
-                "which means the real leverage point is [reframe]."
-            ),
-            "demo_agenda": [
-                "Set agenda & confirm success criteria (2 min)",
-                "Challenger insight: reframe the problem (2 min)",
-                "Validate key pains from discovery (5 min)",
-                "Show [Feature A] — ties to confirmed pain #1 (5 min)",
-                "Show [Feature B] — ties to confirmed pain #2 (5 min)",
-                "Objection checkpoint — invite concerns (5 min)",
-                "Propose next steps (3 min)",
-            ],
-            "expected_objections": [
-                "We already have [competitor] — why switch?",
-                "This isn't in the budget right now.",
-                "I need to loop in [other stakeholder] before we can move forward.",
-            ],
-            "success_criteria_for_call": (
-                "Confirmed 2 quantified pain points, identified the Economic Buyer, "
-                "and booked a follow-up with the full buying committee within 5 business days."
-            ),
-        })
+                "success_criteria_for_call": (
+                    "Confirmed 2 quantified pain points, identified the Economic Buyer, "
+                    "and booked a follow-up with the full buying committee within 5 business days."
+                ),
+            }
+        )
         return _call_agent(self._agent, prompt, stub)
 
 
@@ -694,10 +735,17 @@ class ProposalAgent:
     def __post_init__(self) -> None:
         self._agent = _build_strands_agent(_PROPOSAL_SYSTEM_PROMPT, [*_DEFAULT_TOOLS])
 
-    def write(self, prospect_json: str, product_name: str, value_proposition: str,
-              annual_cost_usd: float, discovery_notes: str,
-              case_studies: str, company_context: str,
-              insights_context: Optional[str] = None) -> str:
+    def write(
+        self,
+        prospect_json: str,
+        product_name: str,
+        value_proposition: str,
+        annual_cost_usd: float,
+        discovery_notes: str,
+        case_studies: str,
+        company_context: str,
+        insights_context: Optional[str] = None,
+    ) -> str:
         prompt = _with_insights(
             f"Write a complete sales proposal for:\nProspect: {prospect_json}\n\n"
             f"Product: {product_name}\n"
@@ -717,54 +765,60 @@ class ProposalAgent:
             insights_context,
         )
         benefit = annual_cost_usd * 2.8
-        stub = json.dumps({
-            "executive_summary": (
-                f"This proposal outlines how {product_name} will help {{company_name}} achieve "
-                "[strategic outcome] by [specific date], delivering measurable ROI within [N] months."
-            ),
-            "situation_analysis": (
-                "Based on our discovery conversations, {{company_name}} is facing [confirmed pain #1] "
-                "and [confirmed pain #2], costing an estimated $[X] per year in [metric]."
-            ),
-            "proposed_solution": (
-                f"You will have a fully operational {product_name} environment within [N] weeks, "
-                "enabling [outcome #1] and [outcome #2] without [key friction]."
-            ),
-            "roi_model": {
-                "annual_cost_usd": annual_cost_usd,
-                "estimated_annual_benefit_usd": round(benefit, 2),
-                "payback_months": round(12 / ((benefit - annual_cost_usd) / annual_cost_usd), 1),
-                "roi_percentage": round(((benefit - annual_cost_usd) / annual_cost_usd) * 100, 1),
-                "assumptions": [
-                    "10% productivity gain across [N] team members",
-                    "20% reduction in [metric] based on comparable customer data",
-                    "Conservative 80% adoption rate in first 90 days",
+        stub = json.dumps(
+            {
+                "executive_summary": (
+                    f"This proposal outlines how {product_name} will help {{company_name}} achieve "
+                    "[strategic outcome] by [specific date], delivering measurable ROI within [N] months."
+                ),
+                "situation_analysis": (
+                    "Based on our discovery conversations, {{company_name}} is facing [confirmed pain #1] "
+                    "and [confirmed pain #2], costing an estimated $[X] per year in [metric]."
+                ),
+                "proposed_solution": (
+                    f"You will have a fully operational {product_name} environment within [N] weeks, "
+                    "enabling [outcome #1] and [outcome #2] without [key friction]."
+                ),
+                "roi_model": {
+                    "annual_cost_usd": annual_cost_usd,
+                    "estimated_annual_benefit_usd": round(benefit, 2),
+                    "payback_months": round(
+                        12 / ((benefit - annual_cost_usd) / annual_cost_usd), 1
+                    ),
+                    "roi_percentage": round(
+                        ((benefit - annual_cost_usd) / annual_cost_usd) * 100, 1
+                    ),
+                    "assumptions": [
+                        "10% productivity gain across [N] team members",
+                        "20% reduction in [metric] based on comparable customer data",
+                        "Conservative 80% adoption rate in first 90 days",
+                    ],
+                },
+                "investment_table": (
+                    f"Annual subscription: ${annual_cost_usd:,.0f}\n"
+                    "Implementation & onboarding: Included\n"
+                    "Dedicated customer success: Included\n"
+                    f"Total Year 1: ${annual_cost_usd:,.0f}"
+                ),
+                "implementation_timeline": (
+                    "Week 1–2: Technical setup and data migration\n"
+                    "Week 3: Admin training and workflow configuration\n"
+                    "Week 4: Team onboarding and go-live\n"
+                    "Day 90: Business review and optimization session"
+                ),
+                "risk_mitigation": (
+                    "1. Change management: Dedicated CSM for 90-day onboarding.\n"
+                    "2. Data security: SOC2 Type II certified; your data never leaves [region].\n"
+                    "3. ROI risk: 30-day money-back guarantee if [specific outcome] not achieved."
+                ),
+                "next_steps": [
+                    "Review this proposal with your team by [date]",
+                    "Schedule a 30-min Q&A call with our technical team",
+                    "Sign and return by [date] to secure [implementation slot]",
                 ],
-            },
-            "investment_table": (
-                f"Annual subscription: ${annual_cost_usd:,.0f}\n"
-                "Implementation & onboarding: Included\n"
-                "Dedicated customer success: Included\n"
-                f"Total Year 1: ${annual_cost_usd:,.0f}"
-            ),
-            "implementation_timeline": (
-                "Week 1–2: Technical setup and data migration\n"
-                "Week 3: Admin training and workflow configuration\n"
-                "Week 4: Team onboarding and go-live\n"
-                "Day 90: Business review and optimization session"
-            ),
-            "risk_mitigation": (
-                "1. Change management: Dedicated CSM for 90-day onboarding.\n"
-                "2. Data security: SOC2 Type II certified; your data never leaves [region].\n"
-                "3. ROI risk: 30-day money-back guarantee if [specific outcome] not achieved."
-            ),
-            "next_steps": [
-                "Review this proposal with your team by [date]",
-                "Schedule a 30-min Q&A call with our technical team",
-                "Sign and return by [date] to secure [implementation slot]",
-            ],
-            "custom_sections": [],
-        })
+                "custom_sections": [],
+            }
+        )
         return _call_agent(self._agent, prompt, stub)
 
 
@@ -781,9 +835,14 @@ class CloserAgent:
     def __post_init__(self) -> None:
         self._agent = _build_strands_agent(_CLOSER_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
-    def develop_strategy(self, prospect_json: str, proposal_json: str,
-                         product_name: str, value_proposition: str,
-                         insights_context: Optional[str] = None) -> str:
+    def develop_strategy(
+        self,
+        prospect_json: str,
+        proposal_json: str,
+        product_name: str,
+        value_proposition: str,
+        insights_context: Optional[str] = None,
+    ) -> str:
         prompt = _with_insights(
             f"Develop a closing strategy for:\nProspect: {prospect_json}\n"
             f"Proposal context: {proposal_json}\n\n"
@@ -800,53 +859,55 @@ class CloserAgent:
             "urgency_framing, walk_away_criteria, emotional_intelligence_notes.",
             insights_context,
         )
-        stub = json.dumps({
-            "recommended_close_technique": "summary",
-            "close_script": (
-                "So we've agreed that [pain #1] is costing you [metric], "
-                "and [pain #2] is blocking [outcome]. "
-                f"{product_name} solves both, and you'll see ROI within [N] months. "
-                "Shall we get the paperwork started so you can hit [Q goal]?"
-            ),
-            "objection_handlers": [
-                {
-                    "objection": "The price is too high.",
-                    "response": (
-                        "I understand — and I want to make sure this makes sense for you financially. "
-                        "The ROI model shows a [N]-month payback. "
-                        "Is the concern the absolute cost, or the timing of the spend?"
-                    ),
-                    "feel_felt_found": (
-                        "I understand how you feel — many of our customers felt the same way. "
-                        "What they found was that after 90 days the ROI more than justified the investment."
-                    ),
-                },
-                {
-                    "objection": "We need to think about it.",
-                    "response": (
-                        "Of course — what specifically would you like to think through? "
-                        "I want to make sure you have everything you need to make a confident decision."
-                    ),
-                    "feel_felt_found": None,
-                },
-            ],
-            "urgency_framing": (
-                "Implementation slots are currently booking [N] weeks out. "
-                "To hit your [Q] deadline, we'd need to sign by [date]. "
-                "I can hold your slot until [date + 3 days] — no pressure, but I wanted you to know."
-            ),
-            "walk_away_criteria": (
-                "If budget is genuinely unavailable for 6+ months OR the prospect repeatedly "
-                "avoids scheduling next steps after 3 follow-up attempts, "
-                "politely disengage and flag for nurture re-entry in 90 days."
-            ),
-            "emotional_intelligence_notes": (
-                "This buyer appears analytical — lead with data before emotion. "
-                "Validate their thoroughness: 'It makes sense that you want to be thorough — "
-                "this is a significant decision.' Mirror their deliberate pace; "
-                "rushing this buyer will lose the deal."
-            ),
-        })
+        stub = json.dumps(
+            {
+                "recommended_close_technique": "summary",
+                "close_script": (
+                    "So we've agreed that [pain #1] is costing you [metric], "
+                    "and [pain #2] is blocking [outcome]. "
+                    f"{product_name} solves both, and you'll see ROI within [N] months. "
+                    "Shall we get the paperwork started so you can hit [Q goal]?"
+                ),
+                "objection_handlers": [
+                    {
+                        "objection": "The price is too high.",
+                        "response": (
+                            "I understand — and I want to make sure this makes sense for you financially. "
+                            "The ROI model shows a [N]-month payback. "
+                            "Is the concern the absolute cost, or the timing of the spend?"
+                        ),
+                        "feel_felt_found": (
+                            "I understand how you feel — many of our customers felt the same way. "
+                            "What they found was that after 90 days the ROI more than justified the investment."
+                        ),
+                    },
+                    {
+                        "objection": "We need to think about it.",
+                        "response": (
+                            "Of course — what specifically would you like to think through? "
+                            "I want to make sure you have everything you need to make a confident decision."
+                        ),
+                        "feel_felt_found": None,
+                    },
+                ],
+                "urgency_framing": (
+                    "Implementation slots are currently booking [N] weeks out. "
+                    "To hit your [Q] deadline, we'd need to sign by [date]. "
+                    "I can hold your slot until [date + 3 days] — no pressure, but I wanted you to know."
+                ),
+                "walk_away_criteria": (
+                    "If budget is genuinely unavailable for 6+ months OR the prospect repeatedly "
+                    "avoids scheduling next steps after 3 follow-up attempts, "
+                    "politely disengage and flag for nurture re-entry in 90 days."
+                ),
+                "emotional_intelligence_notes": (
+                    "This buyer appears analytical — lead with data before emotion. "
+                    "Validate their thoroughness: 'It makes sense that you want to be thorough — "
+                    "this is a significant decision.' Mirror their deliberate pace; "
+                    "rushing this buyer will lose the deal."
+                ),
+            }
+        )
         return _call_agent(self._agent, prompt, stub)
 
 
@@ -863,8 +924,13 @@ class SalesCoachAgent:
     def __post_init__(self) -> None:
         self._agent = _build_strands_agent(_COACH_SYSTEM_PROMPT, _DEFAULT_TOOLS)
 
-    def review(self, prospects_json: str, product_name: str, pipeline_context: str,
-               insights_context: Optional[str] = None) -> str:
+    def review(
+        self,
+        prospects_json: str,
+        product_name: str,
+        pipeline_context: str,
+        insights_context: Optional[str] = None,
+    ) -> str:
         prompt = _with_insights(
             f"Review this sales pipeline for {product_name}:\n{prospects_json}\n\n"
             f"Additional pipeline context: {pipeline_context or 'None provided'}\n\n"
@@ -877,45 +943,47 @@ class SalesCoachAgent:
             "top_priority_deals (array), recommended_next_actions (array), coaching_summary.",
             insights_context,
         )
-        stub = json.dumps({
-            "prospects_reviewed": 1,
-            "deal_risk_signals": [
-                {
-                    "signal": "Single-threaded — only one contact engaged",
-                    "severity": "high",
-                    "recommended_action": (
-                        "Request an intro to the Economic Buyer within the next call. "
-                        "Use: 'Who else on your team would need to be involved in a decision like this?'"
-                    ),
-                },
-                {
-                    "signal": "No confirmed next step on calendar",
-                    "severity": "medium",
-                    "recommended_action": (
-                        "Do not end any call without a specific next-step booked. "
-                        "Use calendar link in outreach footer."
-                    ),
-                },
-            ],
-            "talk_listen_ratio_advice": (
-                "On discovery calls, aim for 43% talk / 57% listen. "
-                "Ask SPIN questions in clusters of 2, then pause and let silence work for you."
-            ),
-            "velocity_insights": (
-                "Average stage duration in this pipeline appears longer than benchmark (14 days in qualification). "
-                "Recommend qualifying or disqualifying within 7 days by applying hard BANT questions in call #2."
-            ),
-            "forecast_category": "pipeline",
-            "top_priority_deals": ["Acme Corp"],
-            "recommended_next_actions": [
-                "Multi-thread Acme Corp — request intro to VP Finance by EOW",
-                "Send Acme Corp ROI model from proposal before next call",
-                "Set a 5-day follow-up reminder for any prospect with no activity",
-            ],
-            "coaching_summary": (
-                "Pipeline is early-stage and needs multi-threading. "
-                "Primary risk is single-threaded deals with no Economic Buyer identified. "
-                "Focus this week on advancing qualification conversations and securing EB meetings."
-            ),
-        })
+        stub = json.dumps(
+            {
+                "prospects_reviewed": 1,
+                "deal_risk_signals": [
+                    {
+                        "signal": "Single-threaded — only one contact engaged",
+                        "severity": "high",
+                        "recommended_action": (
+                            "Request an intro to the Economic Buyer within the next call. "
+                            "Use: 'Who else on your team would need to be involved in a decision like this?'"
+                        ),
+                    },
+                    {
+                        "signal": "No confirmed next step on calendar",
+                        "severity": "medium",
+                        "recommended_action": (
+                            "Do not end any call without a specific next-step booked. "
+                            "Use calendar link in outreach footer."
+                        ),
+                    },
+                ],
+                "talk_listen_ratio_advice": (
+                    "On discovery calls, aim for 43% talk / 57% listen. "
+                    "Ask SPIN questions in clusters of 2, then pause and let silence work for you."
+                ),
+                "velocity_insights": (
+                    "Average stage duration in this pipeline appears longer than benchmark (14 days in qualification). "
+                    "Recommend qualifying or disqualifying within 7 days by applying hard BANT questions in call #2."
+                ),
+                "forecast_category": "pipeline",
+                "top_priority_deals": ["Acme Corp"],
+                "recommended_next_actions": [
+                    "Multi-thread Acme Corp — request intro to VP Finance by EOW",
+                    "Send Acme Corp ROI model from proposal before next call",
+                    "Set a 5-day follow-up reminder for any prospect with no activity",
+                ],
+                "coaching_summary": (
+                    "Pipeline is early-stage and needs multi-threading. "
+                    "Primary risk is single-threaded deals with no Economic Buyer identified. "
+                    "Focus this week on advancing qualification conversations and securing EB meetings."
+                ),
+            }
+        )
         return _call_agent(self._agent, prompt, stub)

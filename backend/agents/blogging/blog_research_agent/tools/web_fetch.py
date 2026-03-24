@@ -39,7 +39,9 @@ class SimpleWebFetcher:
         }
 
         try:
-            with httpx.Client(timeout=self.timeout, headers=headers, follow_redirects=True) as client:
+            with httpx.Client(
+                timeout=self.timeout, headers=headers, follow_redirects=True
+            ) as client:
                 resp = client.get(str(url))
         except httpx.HTTPError as exc:
             raise WebFetchError(f"HTTP error while fetching {url}: {exc}") from exc
@@ -76,4 +78,3 @@ class SimpleWebFetcher:
             language=None,
             metadata={"content_type": content_type},
         )
-

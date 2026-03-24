@@ -150,7 +150,9 @@ class BlogPublicationAgent:
 
         meta = PublicationMetadata.load(meta_path)
         if meta.state != "awaiting_approval":
-            raise ValueError(f"Submission {submission_id} is not awaiting approval (state={meta.state})")
+            raise ValueError(
+                f"Submission {submission_id} is not awaiting approval (state={meta.state})"
+            )
 
         post_dir = self.blog_posts_root / meta.slug
         post_dir.mkdir(parents=True, exist_ok=True)
@@ -311,8 +313,12 @@ class BlogPublicationAgent:
                 tone_or_purpose=tone,
                 human_feedback=human_feedback_text if iteration == 0 else None,
             )
-            feedback_path = self.pending_dir / f"{submission_id}_editor_feedback_iter_{iteration + 1}.json"
-            copy_editor_result = copy_editor_agent.run(copy_editor_input, feedback_output_path=feedback_path)
+            feedback_path = (
+                self.pending_dir / f"{submission_id}_editor_feedback_iter_{iteration + 1}.json"
+            )
+            copy_editor_result = copy_editor_agent.run(
+                copy_editor_input, feedback_output_path=feedback_path
+            )
 
             all_feedback = (
                 human_feedback_items + copy_editor_result.feedback_items

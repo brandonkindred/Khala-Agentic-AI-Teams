@@ -120,7 +120,9 @@ def run_planning(
     result = _parse_planning_output(raw_parsed, language)
     logger.info(
         "[%s] Planning phase: produced %d microtasks — %s",
-        task.id, len(result.microtasks), result.summary[:120] if result.summary else "",
+        task.id,
+        len(result.microtasks),
+        result.summary[:120] if result.summary else "",
     )
 
     if tool_agents:
@@ -137,7 +139,9 @@ def run_planning(
             try:
                 out = agent.plan(phase_inp)
                 if out.recommendations:
-                    result.summary = (result.summary or "").rstrip() + "\n" + " ".join(out.recommendations)
+                    result.summary = (
+                        (result.summary or "").rstrip() + "\n" + " ".join(out.recommendations)
+                    )
             except Exception as e:
                 logger.warning("[%s] Tool agent %s plan() failed: %s", task.id, kind.value, e)
 
@@ -176,15 +180,15 @@ def plan_fixes_for_unresolved_issues(
         f"- [{i.severity}] {i.description} (file: {i.file_path or 'N/A'}) → {i.recommendation}"
         for i in unresolved_issues
     )
-    code_text = "\n\n".join(
-        f"--- {p} ---\n{c}" for p, c in list(current_files.items())[:15]
-    )[:8000]
+    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(current_files.items())[:15])[:8000]
     prompt = PLANNING_FIXES_FOR_ISSUES_PROMPT.format(
         issues_text=issues_text,
         existing_code=code_text or "(no code)",
         language=language,
     )
-    logger.info("[%s] Planning fix microtasks for %d unresolved issues", task_id, len(unresolved_issues))
+    logger.info(
+        "[%s] Planning fix microtasks for %d unresolved issues", task_id, len(unresolved_issues)
+    )
     raw = llm.complete_text(prompt)
     raw_parsed = parse_planning_template(raw)
     result = _parse_planning_output(raw_parsed, language)

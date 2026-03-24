@@ -34,7 +34,11 @@ class RepoNavigatorToolAgent:
             low = rel.lower()
             if low.endswith(".tf") or "/terraform/" in low or "/infra/" in low:
                 iac_paths.append(rel)
-            if ".github/workflows/" in low or low.endswith(".gitlab-ci.yml") or "jenkinsfile" in low:
+            if (
+                ".github/workflows/" in low
+                or low.endswith(".gitlab-ci.yml")
+                or "jenkinsfile" in low
+            ):
                 pipeline_paths.append(rel)
             if "/helm/" in low or "/k8s/" in low or "docker-compose" in low:
                 deploy_paths.append(rel)

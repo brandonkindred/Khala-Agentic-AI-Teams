@@ -129,7 +129,9 @@ class AudienceDetails(BaseModel):
 class ResearchAndReviewRequest(BaseModel):
     """Request body for the research-and-review endpoint."""
 
-    brief: str = Field(..., max_length=50_000, description="Short description of the content topic.")
+    brief: str = Field(
+        ..., max_length=50_000, description="Short description of the content topic."
+    )
     title_concept: Optional[str] = Field(
         None,
         description="Optional idea or angle for the title.",
@@ -432,13 +434,19 @@ def _run_research_review_with_tracking(job_id: str, request: ResearchAndReviewRe
 class FullPipelineRequest(BaseModel):
     """Request body for the full pipeline endpoint."""
 
-    brief: str = Field(..., max_length=50_000, description="Short description of the content topic.")
+    brief: str = Field(
+        ..., max_length=50_000, description="Short description of the content topic."
+    )
     title_concept: Optional[str] = Field(None, description="Optional idea or angle for the title.")
     audience: Optional[Union[AudienceDetails, str]] = Field(None, description="Audience details.")
-    tone_or_purpose: Optional[str] = Field(None, description="e.g. 'educational', 'technical deep-dive'.")
+    tone_or_purpose: Optional[str] = Field(
+        None, description="e.g. 'educational', 'technical deep-dive'."
+    )
     max_results: int = Field(20, ge=1, le=50, description="Maximum references.")
     run_gates: bool = Field(True, description="Run validators, fact-check, and compliance gates.")
-    max_rewrite_iterations: int = Field(3, ge=1, le=10, description="Max rewrite iterations on FAIL.")
+    max_rewrite_iterations: int = Field(
+        3, ge=1, le=10, description="Max rewrite iterations on FAIL."
+    )
     content_profile: Optional[ContentProfile] = Field(
         None,
         description=(
@@ -490,6 +498,7 @@ def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
     """Run the full brand-aligned pipeline with artifact persistence and gates."""
     import sys
     from pathlib import Path
+
     _blogging_root = Path(__file__).resolve().parent.parent
     if str(_blogging_root) not in sys.path:
         sys.path.insert(0, str(_blogging_root))
@@ -572,7 +581,9 @@ class BlogJobStatusResponse(BaseModel):
     """Response for job status polling."""
 
     job_id: str
-    status: str = Field(..., description="pending, running, completed, failed, or needs_human_review")
+    status: str = Field(
+        ..., description="pending, running, completed, failed, or needs_human_review"
+    )
     phase: Optional[str] = Field(None, description="Current phase of the pipeline")
     progress: int = Field(0, ge=0, le=100, description="Overall progress 0-100")
     status_text: Optional[str] = Field(None, description="Human-readable status message")
@@ -588,35 +599,68 @@ class BlogJobStatusResponse(BaseModel):
     created_at: Optional[str] = Field(None, description="Job creation timestamp")
     started_at: Optional[str] = Field(None, description="Job start timestamp")
     completed_at: Optional[str] = Field(None, description="Job completion timestamp")
-    approved_at: Optional[str] = Field(None, description="When the job was approved (ISO timestamp)")
+    approved_at: Optional[str] = Field(
+        None, description="When the job was approved (ISO timestamp)"
+    )
     approved_by: Optional[str] = Field(None, description="Who approved the job (optional)")
     job_type: Optional[str] = Field(None, description="Job category, e.g. medium_stats")
     content_plan_summary: Optional[str] = Field(
         None,
         description="Short summary from ContentPlan when pipeline completed planning",
     )
-    planning_iterations_used: Optional[int] = Field(None, description="Planning refine iterations completed")
-    parse_retry_count: Optional[int] = Field(None, description="JSON parse/repair attempts during planning")
-    planning_wall_ms_total: Optional[float] = Field(None, description="Wall-clock ms spent in planning phase")
+    planning_iterations_used: Optional[int] = Field(
+        None, description="Planning refine iterations completed"
+    )
+    parse_retry_count: Optional[int] = Field(
+        None, description="JSON parse/repair attempts during planning"
+    )
+    planning_wall_ms_total: Optional[float] = Field(
+        None, description="Wall-clock ms spent in planning phase"
+    )
     planning_failure_reason: Optional[str] = Field(
         None,
         description="When status is failed and failed_phase is planning, machine-readable reason",
     )
     # Title selection collaboration fields
-    waiting_for_title_selection: bool = Field(False, description="True when the pipeline is paused waiting for the author to select a title")
-    selected_title: Optional[str] = Field(None, description="Title chosen by the author from the planning candidates")
+    waiting_for_title_selection: bool = Field(
+        False,
+        description="True when the pipeline is paused waiting for the author to select a title",
+    )
+    selected_title: Optional[str] = Field(
+        None, description="Title chosen by the author from the planning candidates"
+    )
     # Story elicitation collaboration fields
-    waiting_for_story_input: bool = Field(False, description="True when the ghost writer agent is waiting for the author's story response")
-    story_gaps: List[Dict[str, Any]] = Field(default_factory=list, description="Story gap opportunities identified by the ghost writer agent")
-    current_story_gap_index: int = Field(0, description="Index of the story gap currently being elicited")
-    story_chat_history: List[Dict[str, Any]] = Field(default_factory=list, description="Multi-turn conversation between ghost writer and author")
-    elicited_stories: List[str] = Field(default_factory=list, description="Compiled first-person story narratives from the interview")
+    waiting_for_story_input: bool = Field(
+        False,
+        description="True when the ghost writer agent is waiting for the author's story response",
+    )
+    story_gaps: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Story gap opportunities identified by the ghost writer agent",
+    )
+    current_story_gap_index: int = Field(
+        0, description="Index of the story gap currently being elicited"
+    )
+    story_chat_history: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Multi-turn conversation between ghost writer and author"
+    )
+    elicited_stories: List[str] = Field(
+        default_factory=list,
+        description="Compiled first-person story narratives from the interview",
+    )
     # General Q&A collaboration fields
-    pending_questions: List[Dict[str, Any]] = Field(default_factory=list, description="Questions from pipeline agents waiting for author answers")
-    waiting_for_answers: bool = Field(False, description="True when the pipeline is paused waiting for Q&A answers")
+    pending_questions: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Questions from pipeline agents waiting for author answers",
+    )
+    waiting_for_answers: bool = Field(
+        False, description="True when the pipeline is paused waiting for Q&A answers"
+    )
 
 
-def _blog_job_dict_to_status_response(job: Dict[str, Any], job_id_fallback: str) -> BlogJobStatusResponse:
+def _blog_job_dict_to_status_response(
+    job: Dict[str, Any], job_id_fallback: str
+) -> BlogJobStatusResponse:
     """Map persisted job dict to API response (single place for optional planning fields)."""
     title_choices: List[TitleChoiceResponse] = []
     for tc in job.get("title_choices", []):
@@ -681,14 +725,20 @@ class ArtifactMeta(BaseModel):
     """Metadata for a single artifact (name and optional producer phase/agent)."""
 
     name: str = Field(..., description="Artifact filename")
-    producer_phase: Optional[str] = Field(None, description="Pipeline phase that produced this artifact")
-    producer_agent: Optional[str] = Field(None, description="Agent or component that produced this artifact")
+    producer_phase: Optional[str] = Field(
+        None, description="Pipeline phase that produced this artifact"
+    )
+    producer_agent: Optional[str] = Field(
+        None, description="Agent or component that produced this artifact"
+    )
 
 
 class ArtifactListResponse(BaseModel):
     """Response listing artifact names that exist for a job, with optional producer metadata."""
 
-    artifacts: List[ArtifactMeta] = Field(..., description="Existing artifacts with name and producer metadata")
+    artifacts: List[ArtifactMeta] = Field(
+        ..., description="Existing artifacts with name and producer metadata"
+    )
 
 
 class ArtifactContentResponse(BaseModel):
@@ -764,6 +814,7 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
     try:
         import sys
         from pathlib import Path
+
         _blogging_root = Path(__file__).resolve().parent.parent
         if str(_blogging_root) not in sys.path:
             sys.path.insert(0, str(_blogging_root))
@@ -820,7 +871,9 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
                 {"title": tc.title, "probability_of_success": tc.probability_of_success}
                 for tc in plan.title_candidates
             ]
-            draft_preview = draft_result.draft[:2000] + ("..." if len(draft_result.draft) > 2000 else "")
+            draft_preview = draft_result.draft[:2000] + (
+                "..." if len(draft_result.draft) > 2000 else ""
+            )
 
             final_status = JOB_STATUS_COMPLETED if status == "PASS" else JOB_STATUS_NEEDS_REVIEW
             if complete_blog_job is not None:
@@ -888,6 +941,7 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
     try:
         from blogging.temporal.client import is_temporal_enabled
         from blogging.temporal.start_workflow import start_full_pipeline_workflow
+
         if is_temporal_enabled():
             request_dict = request.model_dump(mode="json")
             request_dict["audience"] = audience_str or request_dict.get("audience")
@@ -1160,7 +1214,9 @@ def select_title(job_id: str, request: SelectTitleRequest) -> BlogJobStatusRespo
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     if not job.get("waiting_for_title_selection"):
-        raise HTTPException(status_code=400, detail="Job is not currently waiting for title selection")
+        raise HTTPException(
+            status_code=400, detail="Job is not currently waiting for title selection"
+        )
     if not request.title.strip():
         raise HTTPException(status_code=422, detail="title must not be empty")
     submit_title_selection(job_id, request.title.strip())
@@ -1193,7 +1249,9 @@ def story_response(job_id: str, request: StoryResponseRequest) -> BlogJobStatusR
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     if not job.get("waiting_for_story_input"):
-        raise HTTPException(status_code=400, detail="Job is not currently waiting for a story response")
+        raise HTTPException(
+            status_code=400, detail="Job is not currently waiting for a story response"
+        )
     if not request.message.strip():
         raise HTTPException(status_code=422, detail="message must not be empty")
     submit_story_user_message(job_id, request.message.strip())
@@ -1303,7 +1361,9 @@ def list_job_artifacts(job_id: str) -> ArtifactListResponse:
 def get_job_artifact_content(
     job_id: str,
     artifact_name: str,
-    download: bool = Query(False, description="If true, return content as attachment with Content-Disposition"),
+    download: bool = Query(
+        False, description="If true, return content as attachment with Content-Disposition"
+    ),
 ) -> ArtifactContentResponse | Response:
     """Return content of one artifact for a job, or as download attachment."""
     if get_blog_job is None or read_artifact is None:

@@ -42,13 +42,15 @@ class IntegrationAgent:
             "```",
         ]
         if input_data.spec_content:
-            context_parts.extend([
-                "",
-                "**Project specification:**",
-                "---",
-                input_data.spec_content[:8000],
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Project specification:**",
+                    "---",
+                    input_data.spec_content[:8000],
+                    "---",
+                ]
+            )
         if input_data.architecture:
             context_parts.append(f"**Architecture:** {input_data.architecture.overview}")
 

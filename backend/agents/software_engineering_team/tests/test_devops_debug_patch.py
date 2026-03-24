@@ -34,12 +34,14 @@ class TestInfraDebugAgent:
             "fixable": True,
         }
         agent = InfraDebugAgent(llm_client=mock_llm)
-        result = agent.run(IaCDebugInput(
-            execution_output="Error: Missing closing brace at main.tf:10",
-            tool_name="terraform",
-            command="validate",
-            artifacts={"main.tf": "resource {\n"},
-        ))
+        result = agent.run(
+            IaCDebugInput(
+                execution_output="Error: Missing closing brace at main.tf:10",
+                tool_name="terraform",
+                command="validate",
+                artifacts={"main.tf": "resource {\n"},
+            )
+        )
         assert len(result.errors) == 1
         assert result.errors[0].error_type == "syntax"
         assert result.fixable
@@ -52,12 +54,14 @@ class TestInfraDebugAgent:
             "fixable": False,
         }
         agent = InfraDebugAgent(llm_client=mock_llm)
-        result = agent.run(IaCDebugInput(
-            execution_output="Something went wrong",
-            tool_name="terraform",
-            command="plan",
-            artifacts={},
-        ))
+        result = agent.run(
+            IaCDebugInput(
+                execution_output="Something went wrong",
+                tool_name="terraform",
+                command="plan",
+                artifacts={},
+            )
+        )
         assert result.errors[0].error_type == "unknown"
         assert not result.fixable
 
@@ -71,12 +75,14 @@ class TestInfraDebugAgent:
             "summary": "Two fixable errors",
         }
         agent = InfraDebugAgent(llm_client=mock_llm)
-        result = agent.run(IaCDebugInput(
-            execution_output="errors",
-            tool_name="cdk",
-            command="synth",
-            artifacts={},
-        ))
+        result = agent.run(
+            IaCDebugInput(
+                execution_output="errors",
+                tool_name="cdk",
+                command="synth",
+                artifacts={},
+            )
+        )
         assert result.fixable
 
     def test_sets_fixable_false_when_runtime_present(self) -> None:
@@ -90,12 +96,14 @@ class TestInfraDebugAgent:
             "fixable": False,
         }
         agent = InfraDebugAgent(llm_client=mock_llm)
-        result = agent.run(IaCDebugInput(
-            execution_output="errors",
-            tool_name="terraform",
-            command="apply",
-            artifacts={},
-        ))
+        result = agent.run(
+            IaCDebugInput(
+                execution_output="errors",
+                tool_name="terraform",
+                command="apply",
+                artifacts={},
+            )
+        )
         assert not result.fixable
 
 
@@ -120,10 +128,14 @@ class TestInfraPatchAgent:
             fixable=True,
         )
         agent = InfraPatchAgent(llm_client=mock_llm)
-        result = agent.run(IaCPatchInput(
-            debug_output=debug_out,
-            original_artifacts={"main.tf": 'resource "aws_s3_bucket" "b" {\n  bucket = "my-bucket"\n'},
-        ))
+        result = agent.run(
+            IaCPatchInput(
+                debug_output=debug_out,
+                original_artifacts={
+                    "main.tf": 'resource "aws_s3_bucket" "b" {\n  bucket = "my-bucket"\n'
+                },
+            )
+        )
         assert "main.tf" in result.patched_artifacts
         assert result.edits_applied == 1
 
@@ -135,10 +147,12 @@ class TestInfraPatchAgent:
         )
         mock_llm = MagicMock()
         agent = InfraPatchAgent(llm_client=mock_llm)
-        result = agent.run(IaCPatchInput(
-            debug_output=debug_out,
-            original_artifacts={"main.tf": "content"},
-        ))
+        result = agent.run(
+            IaCPatchInput(
+                debug_output=debug_out,
+                original_artifacts={"main.tf": "content"},
+            )
+        )
         assert not result.patched_artifacts
         mock_llm.complete_json.assert_not_called()
 
@@ -164,12 +178,36 @@ class TestDevOpsPipelineDebugPatchLoop:
             # Deployment
             {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ""},
             # Debug agent (will be called up to 3 times)
-            {"errors": [{"error_type": "syntax", "error_message": "bad"}], "summary": "err", "fixable": True},
-            {"patched_artifacts": {"main.tf": "resource { }"}, "summary": "fix", "edits_applied": 1},
-            {"errors": [{"error_type": "syntax", "error_message": "bad"}], "summary": "err", "fixable": True},
-            {"patched_artifacts": {"main.tf": "resource { }"}, "summary": "fix", "edits_applied": 1},
-            {"errors": [{"error_type": "syntax", "error_message": "bad"}], "summary": "err", "fixable": True},
-            {"patched_artifacts": {"main.tf": "resource { }"}, "summary": "fix", "edits_applied": 1},
+            {
+                "errors": [{"error_type": "syntax", "error_message": "bad"}],
+                "summary": "err",
+                "fixable": True,
+            },
+            {
+                "patched_artifacts": {"main.tf": "resource { }"},
+                "summary": "fix",
+                "edits_applied": 1,
+            },
+            {
+                "errors": [{"error_type": "syntax", "error_message": "bad"}],
+                "summary": "err",
+                "fixable": True,
+            },
+            {
+                "patched_artifacts": {"main.tf": "resource { }"},
+                "summary": "fix",
+                "edits_applied": 1,
+            },
+            {
+                "errors": [{"error_type": "syntax", "error_message": "bad"}],
+                "summary": "err",
+                "fixable": True,
+            },
+            {
+                "patched_artifacts": {"main.tf": "resource { }"},
+                "summary": "fix",
+                "edits_applied": 1,
+            },
             # DevSecOps review
             {"approved": True, "summary": "ok", "findings": []},
             # Change review
@@ -177,21 +215,40 @@ class TestDevOpsPipelineDebugPatchLoop:
             # Test validation
             {"quality_gates": {}, "summary": "ok"},
             # Doc runbook
-            {"files": {}, "completion_package": {"task_id": "t1", "status": "completed", "files_changed": [], "quality_gates": {}, "notes": []}},
+            {
+                "files": {},
+                "completion_package": {
+                    "task_id": "t1",
+                    "status": "completed",
+                    "files_changed": [],
+                    "quality_gates": {},
+                    "notes": [],
+                },
+            },
         ]
 
         agent = DevOpsTeamLeadAgent(llm_client=mock_llm)
 
         def always_fail_exec(repo_str, artifacts):
-            return [{"tool": "terraform", "command": "validate", "success": False,
-                     "checks": {"terraform_validate": "fail"}, "findings": ["Error"],
-                     "failure_class": "execution"}]
+            return [
+                {
+                    "tool": "terraform",
+                    "command": "validate",
+                    "success": False,
+                    "checks": {"terraform_validate": "fail"},
+                    "findings": ["Error"],
+                    "failure_class": "execution",
+                }
+            ]
 
         agent._run_execution_tools = always_fail_exec  # type: ignore[assignment]
 
         from devops_team.models import DevOpsTaskSpec
+
         spec = DevOpsTaskSpec(
-            task_id="t1", title="Test", goal={"summary": "test"},
+            task_id="t1",
+            title="Test",
+            goal={"summary": "test"},
             platform_scope={"cloud": "on-premises", "environments": ["dev"]},
             acceptance_criteria=["IaC validates"],
             constraints={"secrets": {"source": "env"}},
@@ -199,6 +256,7 @@ class TestDevOpsPipelineDebugPatchLoop:
 
         import tempfile
         from pathlib import Path
+
         with tempfile.TemporaryDirectory() as td:
             result = agent._run_pipeline(
                 repo_path=Path(td),
@@ -220,9 +278,17 @@ class TestDevOpsPipelineDebugPatchLoop:
             {"artifacts": {}, "summary": "cicd", "pipeline_yaml": ""},
             {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ""},
             # Debug
-            {"errors": [{"error_type": "syntax", "error_message": "missing brace"}], "summary": "err", "fixable": True},
+            {
+                "errors": [{"error_type": "syntax", "error_message": "missing brace"}],
+                "summary": "err",
+                "fixable": True,
+            },
             # Patch
-            {"patched_artifacts": {"main.tf": "resource {}"}, "summary": "fixed", "edits_applied": 1},
+            {
+                "patched_artifacts": {"main.tf": "resource {}"},
+                "summary": "fixed",
+                "edits_applied": 1,
+            },
             # DevSecOps review
             {"approved": True, "summary": "ok", "findings": []},
             # Change review
@@ -230,27 +296,54 @@ class TestDevOpsPipelineDebugPatchLoop:
             # Test validation
             {"quality_gates": {}, "summary": "ok"},
             # Doc runbook
-            {"files": {}, "completion_package": {"task_id": "t1", "status": "completed", "files_changed": [], "quality_gates": {}, "notes": []}},
+            {
+                "files": {},
+                "completion_package": {
+                    "task_id": "t1",
+                    "status": "completed",
+                    "files_changed": [],
+                    "quality_gates": {},
+                    "notes": [],
+                },
+            },
         ]
 
         agent = DevOpsTeamLeadAgent(llm_client=mock_llm)
 
         call_count = [0]
+
         def exec_tools(repo_str, artifacts):
             call_count[0] += 1
             if call_count[0] == 1:
-                return [{"tool": "terraform", "command": "validate", "success": False,
-                         "checks": {"terraform_validate": "fail"}, "findings": ["Error: missing brace"],
-                         "failure_class": "execution"}]
-            return [{"tool": "terraform", "command": "validate", "success": True,
-                     "checks": {"terraform_validate": "pass"}, "findings": [],
-                     "failure_class": ""}]
+                return [
+                    {
+                        "tool": "terraform",
+                        "command": "validate",
+                        "success": False,
+                        "checks": {"terraform_validate": "fail"},
+                        "findings": ["Error: missing brace"],
+                        "failure_class": "execution",
+                    }
+                ]
+            return [
+                {
+                    "tool": "terraform",
+                    "command": "validate",
+                    "success": True,
+                    "checks": {"terraform_validate": "pass"},
+                    "findings": [],
+                    "failure_class": "",
+                }
+            ]
 
         agent._run_execution_tools = exec_tools  # type: ignore[assignment]
 
         from devops_team.models import DevOpsTaskSpec
+
         spec = DevOpsTaskSpec(
-            task_id="t1", title="Test", goal={"summary": "test"},
+            task_id="t1",
+            title="Test",
+            goal={"summary": "test"},
             platform_scope={"cloud": "on-premises", "environments": ["dev"]},
             acceptance_criteria=["IaC validates"],
             constraints={"secrets": {"source": "env"}},
@@ -258,6 +351,7 @@ class TestDevOpsPipelineDebugPatchLoop:
 
         import tempfile
         from pathlib import Path
+
         with tempfile.TemporaryDirectory() as td:
             result = agent._run_pipeline(
                 repo_path=Path(td),

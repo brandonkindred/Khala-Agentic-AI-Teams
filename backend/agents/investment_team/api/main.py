@@ -174,8 +174,6 @@ class ValidateStrategyResponse(BaseModel):
     failures: List[str] = Field(default_factory=list)
 
 
-
-
 class RunBacktestRequest(BaseModel):
     strategy_id: str = Field(..., description="Strategy ID to back test")
     submitted_by: str = Field(..., description="Agent or user ID submitting the back test")
@@ -284,10 +282,18 @@ def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
         max_drawdown_tolerance_pct=request.max_drawdown_tolerance_pct,
         time_horizon_years=request.time_horizon_years,
         liquidity_needs=LiquidityNeeds(emergency_fund_months=request.emergency_fund_months),
-        income=IncomeProfile(annual_gross=request.annual_gross_income, stability=request.income_stability),
-        net_worth=NetWorth(total=request.total_net_worth, investable_assets=request.investable_assets),
+        income=IncomeProfile(
+            annual_gross=request.annual_gross_income, stability=request.income_stability
+        ),
+        net_worth=NetWorth(
+            total=request.total_net_worth, investable_assets=request.investable_assets
+        ),
         savings_rate=SavingsRate(monthly=request.monthly_savings, annual=request.annual_savings),
-        tax_profile=TaxProfile(country=request.tax_country, state=request.tax_state, account_types=request.account_types),
+        tax_profile=TaxProfile(
+            country=request.tax_country,
+            state=request.tax_state,
+            account_types=request.account_types,
+        ),
         preferences=UserPreferences(
             excluded_asset_classes=request.excluded_asset_classes,
             excluded_industries=request.excluded_industries,
@@ -380,7 +386,9 @@ def get_proposal(proposal_id: str) -> GetProposalResponse:
 
 
 @app.post("/proposals/{proposal_id}/validate", response_model=ValidateProposalResponse)
-def validate_proposal(proposal_id: str, request: ValidateProposalRequest) -> ValidateProposalResponse:
+def validate_proposal(
+    proposal_id: str, request: ValidateProposalRequest
+) -> ValidateProposalResponse:
     """Validate a portfolio proposal against the user's IPS."""
     with _lock:
         proposal = _proposals.get(proposal_id)
@@ -426,7 +434,9 @@ def create_strategy(request: CreateStrategyRequest) -> CreateStrategyResponse:
 
 
 @app.post("/strategies/{strategy_id}/validate", response_model=ValidateStrategyResponse)
-def validate_strategy(strategy_id: str, request: ValidateStrategyRequest) -> ValidateStrategyResponse:
+def validate_strategy(
+    strategy_id: str, request: ValidateStrategyRequest
+) -> ValidateStrategyResponse:
     """Run validation checks on a strategy."""
     with _lock:
         strategy = _strategies.get(strategy_id)
@@ -450,11 +460,27 @@ def validate_strategy(strategy_id: str, request: ValidateStrategyRequest) -> Val
             )
     else:
         checks = [
-            ValidationCheck(name="backtest_quality", status=ValidationStatus.PASS, details="Sharpe > 1.0"),
-            ValidationCheck(name="walk_forward", status=ValidationStatus.PASS, details="Out-of-sample Sharpe > 0.8"),
-            ValidationCheck(name="stress_test", status=ValidationStatus.PASS, details="Max DD within limits"),
-            ValidationCheck(name="transaction_cost_model", status=ValidationStatus.PASS, details="Net return positive"),
-            ValidationCheck(name="liquidity_impact", status=ValidationStatus.PASS, details="Minimal market impact"),
+            ValidationCheck(
+                name="backtest_quality", status=ValidationStatus.PASS, details="Sharpe > 1.0"
+            ),
+            ValidationCheck(
+                name="walk_forward",
+                status=ValidationStatus.PASS,
+                details="Out-of-sample Sharpe > 0.8",
+            ),
+            ValidationCheck(
+                name="stress_test", status=ValidationStatus.PASS, details="Max DD within limits"
+            ),
+            ValidationCheck(
+                name="transaction_cost_model",
+                status=ValidationStatus.PASS,
+                details="Net return positive",
+            ),
+            ValidationCheck(
+                name="liquidity_impact",
+                status=ValidationStatus.PASS,
+                details="Minimal market impact",
+            ),
         ]
 
     validation = ValidationReport(
@@ -480,8 +506,6 @@ def validate_strategy(strategy_id: str, request: ValidateStrategyRequest) -> Val
     )
 
 
-
-
 @app.post("/backtests", response_model=RunBacktestResponse)
 def run_backtest(request: RunBacktestRequest) -> RunBacktestResponse:
     """Run a deterministic backtest simulation and store the result."""
@@ -503,13 +527,19 @@ def run_backtest(request: RunBacktestRequest) -> RunBacktestResponse:
     )
     period_span = max(len(request.start_date) + len(request.end_date), 1)
 
-    total_return = _calc(6.0, (strategy_signal_score % 11) * 0.9 - request.transaction_cost_bps * 0.03, -95.0)
+    total_return = _calc(
+        6.0, (strategy_signal_score % 11) * 0.9 - request.transaction_cost_bps * 0.03, -95.0
+    )
     annualized_return = _calc(4.0, total_return * 0.35 - request.slippage_bps * 0.02, -95.0)
     volatility = _calc(10.0, (strategy_signal_score % 7) * 1.4 + (period_span % 5) * 0.7, 0.1)
     sharpe = round(annualized_return / volatility if volatility else 0.0, 2)
     max_drawdown = _calc(8.0, (strategy_signal_score % 5) * 1.8 + request.slippage_bps * 0.1, 0.0)
-    win_rate = _calc(45.0, (strategy_signal_score % 9) * 2.2 - request.transaction_cost_bps * 0.1, 1.0)
-    profit_factor = round(max(1.01, 1.05 + (strategy_signal_score % 6) * 0.08 - request.slippage_bps * 0.01), 2)
+    win_rate = _calc(
+        45.0, (strategy_signal_score % 9) * 2.2 - request.transaction_cost_bps * 0.1, 1.0
+    )
+    profit_factor = round(
+        max(1.01, 1.05 + (strategy_signal_score % 6) * 0.08 - request.slippage_bps * 0.01), 2
+    )
 
     backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
     config = BacktestConfig(
@@ -573,7 +603,9 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
     if not strategy:
         raise HTTPException(status_code=404, detail=f"Strategy {request.strategy_id} not found")
     if not validation:
-        raise HTTPException(status_code=400, detail=f"Strategy {request.strategy_id} has no validation report")
+        raise HTTPException(
+            status_code=400, detail=f"Strategy {request.strategy_id} has no validation report"
+        )
     if not ips:
         raise HTTPException(status_code=404, detail=f"No IPS found for user {request.user_id}")
 
@@ -616,7 +648,9 @@ def workflow_queues() -> QueuesResponse:
         queues = {}
         for q_name, items in _workflow_state.queues.items():
             queues[q_name] = [
-                QueueItemResponse(queue=item.queue, payload_id=item.payload_id, priority=item.priority)
+                QueueItemResponse(
+                    queue=item.queue, payload_id=item.payload_id, priority=item.priority
+                )
                 for item in items
             ]
 
@@ -647,12 +681,36 @@ _CRYPTO_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "XRP", "MATIC", "AVAX", "LINK", "
 _OTHER_SYMBOLS = ["GLD", "USO", "TLT", "VIX", "QQQ", "IWM", "EEM", "GDX", "XLE", "XLF"]
 
 _SYMBOL_BASE_PRICES = {
-    "AAPL": 170, "MSFT": 380, "NVDA": 490, "TSLA": 240, "AMZN": 180,
-    "META": 490, "GOOGL": 170, "JPM": 190, "AMD": 170, "SPY": 480,
-    "BTC": 42000, "ETH": 2500, "SOL": 105, "BNB": 380, "XRP": 0.60,
-    "MATIC": 0.90, "AVAX": 38, "LINK": 18, "ADA": 0.55, "DOT": 8,
-    "GLD": 190, "USO": 75, "TLT": 95, "VIX": 18, "QQQ": 425,
-    "IWM": 200, "EEM": 40, "GDX": 29, "XLE": 92, "XLF": 40,
+    "AAPL": 170,
+    "MSFT": 380,
+    "NVDA": 490,
+    "TSLA": 240,
+    "AMZN": 180,
+    "META": 490,
+    "GOOGL": 170,
+    "JPM": 190,
+    "AMD": 170,
+    "SPY": 480,
+    "BTC": 42000,
+    "ETH": 2500,
+    "SOL": 105,
+    "BNB": 380,
+    "XRP": 0.60,
+    "MATIC": 0.90,
+    "AVAX": 38,
+    "LINK": 18,
+    "ADA": 0.55,
+    "DOT": 8,
+    "GLD": 190,
+    "USO": 75,
+    "TLT": 95,
+    "VIX": 18,
+    "QQQ": 425,
+    "IWM": 200,
+    "EEM": 40,
+    "GDX": 29,
+    "XLE": 92,
+    "XLF": 40,
 }
 
 
@@ -756,7 +814,9 @@ def _generate_trade_ledger(
         else:
             trade_return_pct = round(-avg_loss_pct * mag_var, 3)
 
-        exit_price = round(entry_price * (1.0 + trade_return_pct / 100.0), 2 if base_price >= 1 else 6)
+        exit_price = round(
+            entry_price * (1.0 + trade_return_pct / 100.0), 2 if base_price >= 1 else 6
+        )
         shares = round(position_value_base / entry_price, 4 if base_price < 10 else 2)
         position_value = round(entry_price * shares, 2)
         gross_pnl = round(shares * (exit_price - entry_price), 2)

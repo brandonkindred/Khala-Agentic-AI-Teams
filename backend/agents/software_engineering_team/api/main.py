@@ -89,6 +89,7 @@ def _start_stale_job_monitor_once() -> None:
         thread.start()
         _stale_monitor_started = True
 
+
 def _get_workspace_base_dir() -> Path:
     """Base dir for auto-created project workspaces.
     Fallback: SE_WORKSPACE_DIR -> ENV_WORKSPACE_ROOT -> ./se_workspaces
@@ -189,9 +190,9 @@ class RunningJobSummary(BaseModel):
 class RunningJobsResponse(BaseModel):
     """Response from GET /run-team/jobs (list of running/pending jobs)."""
 
-    jobs: List[RunningJobSummary] = Field(default_factory=list, description="Running or pending jobs.")
-
-
+    jobs: List[RunningJobSummary] = Field(
+        default_factory=list, description="Running or pending jobs."
+    )
 
 
 class FailedTaskDetail(BaseModel):
@@ -206,13 +207,19 @@ class TaskStateEntry(BaseModel):
     """Per-task execution state for tracking panel / graph."""
 
     status: str = Field(..., description="pending, in_progress, done, failed")
-    assignee: str = Field(..., description="Team: backend-code-v2, backend, frontend, git_setup, devops")
+    assignee: str = Field(
+        ..., description="Team: backend-code-v2, backend, frontend, git_setup, devops"
+    )
     title: Optional[str] = Field(None, description="Task title.")
-    dependencies: List[str] = Field(default_factory=list, description="Task IDs this task depends on.")
+    dependencies: List[str] = Field(
+        default_factory=list, description="Task IDs this task depends on."
+    )
     started_at: Optional[str] = Field(None, description="ISO timestamp when task started.")
     finished_at: Optional[str] = Field(None, description="ISO timestamp when task finished.")
     error: Optional[str] = Field(None, description="Error message if failed.")
-    initiative_id: Optional[str] = Field(None, description="Parent initiative ID from planning hierarchy.")
+    initiative_id: Optional[str] = Field(
+        None, description="Parent initiative ID from planning hierarchy."
+    )
     epic_id: Optional[str] = Field(None, description="Parent epic ID from planning hierarchy.")
     story_id: Optional[str] = Field(None, description="Parent story ID from planning hierarchy.")
 
@@ -220,10 +227,16 @@ class TaskStateEntry(BaseModel):
 class TeamProgressEntry(BaseModel):
     """Per-team progress when multiple teams run in parallel."""
 
-    current_phase: Optional[str] = Field(None, description="e.g. planning, execution, review (backend-code-v2).")
+    current_phase: Optional[str] = Field(
+        None, description="e.g. planning, execution, review (backend-code-v2)."
+    )
     progress: Optional[int] = Field(None, description="0-100 completion for this team.")
-    current_task_id: Optional[str] = Field(None, description="Task ID currently being executed by this team.")
-    current_microtask: Optional[str] = Field(None, description="Title of the currently executing microtask.")
+    current_task_id: Optional[str] = Field(
+        None, description="Task ID currently being executed by this team."
+    )
+    current_microtask: Optional[str] = Field(
+        None, description="Title of the currently executing microtask."
+    )
     current_microtask_phase: Optional[str] = Field(
         None,
         description="Current phase of the microtask: coding, code_review, qa_testing, security_testing, documentation, or completed.",
@@ -232,7 +245,9 @@ class TeamProgressEntry(BaseModel):
         None,
         description="Human-readable detail about what's happening within the current phase.",
     )
-    current_microtask_index: Optional[int] = Field(None, description="1-based index of the currently executing microtask.")
+    current_microtask_index: Optional[int] = Field(
+        None, description="1-based index of the currently executing microtask."
+    )
     microtasks_completed: Optional[int] = Field(None, description="Number of microtasks completed.")
     microtasks_total: Optional[int] = Field(None, description="Total number of microtasks.")
 
@@ -242,7 +257,9 @@ class QuestionOption(BaseModel):
 
     id: str = Field(..., description="Unique identifier for this option.")
     label: str = Field(..., description="Display text for this option.")
-    is_default: bool = Field(default=False, description="Whether this option is the recommended default.")
+    is_default: bool = Field(
+        default=False, description="Whether this option is the recommended default."
+    )
     rationale: Optional[str] = Field(None, description="Why this option is suggested.")
     confidence: Optional[float] = Field(None, description="Agent confidence in this option (0–1).")
 
@@ -280,7 +297,9 @@ class JobStatusResponse(BaseModel):
     requirements_title: Optional[str] = Field(None, description="Parsed project title.")
     architecture_overview: Optional[str] = Field(None, description="Architecture overview.")
     current_task: Optional[str] = Field(None, description="Current task being executed.")
-    status_text: Optional[str] = Field(None, description="Human-readable status message describing current activity.")
+    status_text: Optional[str] = Field(
+        None, description="Human-readable status message describing current activity."
+    )
     task_results: list = Field(default_factory=list, description="Completed task results.")
     task_ids: list = Field(default_factory=list, description="Task IDs in execution order.")
     progress: Optional[int] = Field(None, description="Progress percentage.")
@@ -377,7 +396,9 @@ class ArchitectDesignResponse(BaseModel):
     """Response from POST /architect/design."""
 
     overview: str = Field(..., description="High-level architecture overview")
-    architecture_document: str = Field(default="", description="Full markdown architecture document")
+    architecture_document: str = Field(
+        default="", description="Full markdown architecture document"
+    )
     components: List[Dict[str, Any]] = Field(
         default_factory=list,
         description="Architecture components (name, type, description, technology, etc.)",
@@ -406,6 +427,7 @@ def _run_orchestrator_background(
     """Run orchestrator in background thread."""
     try:
         from orchestrator import run_orchestrator
+
         run_orchestrator(
             job_id,
             repo_path,
@@ -422,6 +444,7 @@ def _run_retry_background(job_id: str) -> None:
     """Run retry in background thread."""
     try:
         from orchestrator import run_failed_tasks
+
         run_failed_tasks(job_id)
     except Exception as e:
         logger.exception("Retry orchestrator failed")
@@ -668,14 +691,20 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         "architecture_overview": data.get("architecture_overview"),
         "current_task": data.get("current_task"),
         "status_text": data.get("status_text"),
-        "task_results": data.get("task_results") if isinstance(data.get("task_results"), list) else [],
+        "task_results": data.get("task_results")
+        if isinstance(data.get("task_results"), list)
+        else [],
         "task_ids": task_ids,
         "progress": _coerce_progress(data.get("progress")),
         "error": data.get("error"),
         "failed_tasks": [ft.model_dump() for ft in failed_tasks],
         "phase": data.get("phase"),
-        "task_states": {k: v.model_dump() for k, v in task_states_parsed.items()} if task_states_parsed else None,
-        "team_progress": {k: v.model_dump() for k, v in team_progress_parsed.items()} if team_progress_parsed else None,
+        "task_states": {k: v.model_dump() for k, v in task_states_parsed.items()}
+        if task_states_parsed
+        else None,
+        "team_progress": {k: v.model_dump() for k, v in team_progress_parsed.items()}
+        if team_progress_parsed
+        else None,
         "pending_questions": [pq.model_dump() for pq in pending_questions_parsed],
         "waiting_for_answers": bool(data.get("waiting_for_answers", False)),
         "planning_subprocess": data.get("planning_subprocess"),
@@ -815,7 +844,12 @@ def delete_run_team_job(job_id: str) -> DeleteJobResponse:
 
 
 # Include JOB_STATUS_FAILED so users can resume after server down or stale heartbeat
-RESUMABLE_STATUSES = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING, JOB_STATUS_AGENT_CRASH, JOB_STATUS_FAILED)
+RESUMABLE_STATUSES = (
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_AGENT_CRASH,
+    JOB_STATUS_FAILED,
+)
 RESTARTABLE_STATUSES = (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -1086,23 +1120,19 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
         task_ids=updated_data.get("execution_order", []),
         progress=updated_data.get("progress"),
         error=updated_data.get("error"),
-        failed_tasks=[
-            FailedTaskDetail(**ft)
-            for ft in updated_data.get("failed_tasks", [])
-        ],
+        failed_tasks=[FailedTaskDetail(**ft) for ft in updated_data.get("failed_tasks", [])],
         phase=updated_data.get("phase"),
         task_states={
-            k: TaskStateEntry(**v)
-            for k, v in (updated_data.get("task_states") or {}).items()
-        } if updated_data.get("task_states") else None,
+            k: TaskStateEntry(**v) for k, v in (updated_data.get("task_states") or {}).items()
+        }
+        if updated_data.get("task_states")
+        else None,
         team_progress={
-            k: TeamProgressEntry(**v)
-            for k, v in (updated_data.get("team_progress") or {}).items()
-        } if updated_data.get("team_progress") else None,
-        pending_questions=[
-            PendingQuestion(**q)
-            for q in updated_data.get("pending_questions", [])
-        ],
+            k: TeamProgressEntry(**v) for k, v in (updated_data.get("team_progress") or {}).items()
+        }
+        if updated_data.get("team_progress")
+        else None,
+        pending_questions=[PendingQuestion(**q) for q in updated_data.get("pending_questions", [])],
         waiting_for_answers=updated_data.get("waiting_for_answers", False),
         planning_subprocess=updated_data.get("planning_subprocess"),
         planning_completed_phases=updated_data.get("planning_completed_phases") or [],
@@ -1192,6 +1222,7 @@ def architect_design(request: ArchitectDesignRequest) -> ArchitectDesignResponse
 # Backend-Code-V2 endpoints
 # ---------------------------------------------------------------------------
 
+
 class BackendCodeV2TaskInput(BaseModel):
     """Task input for backend-code-v2."""
 
@@ -1199,7 +1230,9 @@ class BackendCodeV2TaskInput(BaseModel):
     title: str = Field(default="", description="Short task title")
     description: str = Field(default="", description="Detailed description")
     requirements: str = Field(default="", description="Technical requirements")
-    acceptance_criteria: List[str] = Field(default_factory=list, description="Acceptance criteria list")
+    acceptance_criteria: List[str] = Field(
+        default_factory=list, description="Acceptance criteria list"
+    )
 
 
 class BackendCodeV2RunRequest(BaseModel):
@@ -1250,6 +1283,7 @@ class BackendCodeV2StatusResponse(BaseModel):
 # Frontend-Code-V2 endpoints
 # ---------------------------------------------------------------------------
 
+
 class FrontendCodeV2TaskInput(BaseModel):
     """Task input for frontend-code-v2."""
 
@@ -1257,7 +1291,9 @@ class FrontendCodeV2TaskInput(BaseModel):
     title: str = Field(default="", description="Short task title")
     description: str = Field(default="", description="Detailed description")
     requirements: str = Field(default="", description="Technical requirements")
-    acceptance_criteria: List[str] = Field(default_factory=list, description="Acceptance criteria list")
+    acceptance_criteria: List[str] = Field(
+        default_factory=list, description="Acceptance criteria list"
+    )
 
 
 class FrontendCodeV2RunRequest(BaseModel):
@@ -1296,7 +1332,9 @@ class FrontendCodeV2StatusResponse(BaseModel):
     )
 
 
-def _run_frontend_code_v2_background(job_id: str, repo_path: str, task_dict: dict, architecture_overview: str) -> None:
+def _run_frontend_code_v2_background(
+    job_id: str, repo_path: str, task_dict: dict, architecture_overview: str
+) -> None:
     """Run frontend-code-v2 workflow in a background thread."""
     try:
         import uuid as _uuid
@@ -1330,7 +1368,15 @@ def _run_frontend_code_v2_background(job_id: str, repo_path: str, task_dict: dic
 
         team_lead = FrontendCodeV2TeamLead(get_client("frontend"))
 
-        phase_order = ["setup", "planning", "execution", "review", "problem_solving", "documentation", "deliver"]
+        phase_order = [
+            "setup",
+            "planning",
+            "execution",
+            "review",
+            "problem_solving",
+            "documentation",
+            "deliver",
+        ]
 
         def _job_updater(**kwargs):
             completed_phases = []
@@ -1373,7 +1419,10 @@ def run_frontend_code_v2(request: FrontendCodeV2RunRequest) -> FrontendCodeV2Run
     """Start the frontend-code-v2 team on a task."""
     repo = Path(request.repo_path)
     if not repo.is_dir():
-        raise HTTPException(status_code=400, detail=f"repo_path does not exist or is not a directory: {request.repo_path}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"repo_path does not exist or is not a directory: {request.repo_path}",
+        )
 
     job_id = str(uuid.uuid4())
     create_job(job_id, request.repo_path, job_type="frontend_code_v2")
@@ -1449,12 +1498,15 @@ def get_frontend_code_v2_status(job_id: str) -> FrontendCodeV2StatusResponse:
 # Planning-V2
 # ---------------------------------------------------------------------------
 
+
 class PlanningV2RunRequest(BaseModel):
     """Request body for POST /planning-v2/run."""
 
     spec_content: str = Field(..., description="Product/specification content")
     repo_path: str = Field(..., description="Local path where planning artifacts will be written")
-    inspiration_content: Optional[str] = Field(None, description="Optional inspiration/moodboard content")
+    inspiration_content: Optional[str] = Field(
+        None, description="Optional inspiration/moodboard content"
+    )
 
 
 class PlanningV2RunResponse(BaseModel):
@@ -1474,7 +1526,9 @@ class PlanningV2StatusResponse(BaseModel):
     current_phase: Optional[str] = None
     progress: int = Field(default=0, description="0-100 completion percentage")
     completed_phases: List[str] = Field(default_factory=list)
-    active_roles: List[str] = Field(default_factory=list, description="Roles active in current phase")
+    active_roles: List[str] = Field(
+        default_factory=list, description="Roles active in current phase"
+    )
     error: Optional[str] = None
     summary: Optional[str] = None
     pending_questions: List[PendingQuestion] = Field(
@@ -1507,7 +1561,9 @@ class PlanningV2ResultResponse(BaseModel):
     error: Optional[str] = None
 
 
-def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict, architecture_overview: str) -> None:
+def _run_backend_code_v2_background(
+    job_id: str, repo_path: str, task_dict: dict, architecture_overview: str
+) -> None:
     """Run backend-code-v2 workflow in a background thread."""
     try:
         import uuid as _uuid
@@ -1541,7 +1597,15 @@ def _run_backend_code_v2_background(job_id: str, repo_path: str, task_dict: dict
 
         team_lead = BackendCodeV2TeamLead(get_client("backend"))
 
-        phase_order = ["setup", "planning", "execution", "review", "problem_solving", "documentation", "deliver"]
+        phase_order = [
+            "setup",
+            "planning",
+            "execution",
+            "review",
+            "problem_solving",
+            "documentation",
+            "deliver",
+        ]
 
         def _job_updater(**kwargs):
             completed_phases = []
@@ -1612,7 +1676,10 @@ def _run_planning_v2_background(
 
         # Honor cancellation: if job was cancelled during execution, don't overwrite status
         if is_cancel_requested(job_id):
-            logger.info("Planning-v2 workflow: cancellation detected, preserving cancelled state for job %s", job_id)
+            logger.info(
+                "Planning-v2 workflow: cancellation detected, preserving cancelled state for job %s",
+                job_id,
+            )
             return
 
         final_status = "completed" if result.success else "failed"
@@ -1645,7 +1712,10 @@ def _run_planning_v2_background(
         if not is_cancel_requested(job_id):
             update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         else:
-            logger.info("Planning-v2 workflow: exception during cancelled job %s, preserving cancelled state", job_id)
+            logger.info(
+                "Planning-v2 workflow: exception during cancelled job %s, preserving cancelled state",
+                job_id,
+            )
 
 
 @app.post(
@@ -1659,7 +1729,10 @@ def run_backend_code_v2(request: BackendCodeV2RunRequest) -> BackendCodeV2RunRes
     """Start the backend-code-v2 team on a task."""
     repo = Path(request.repo_path)
     if not repo.is_dir():
-        raise HTTPException(status_code=400, detail=f"repo_path does not exist or is not a directory: {request.repo_path}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"repo_path does not exist or is not a directory: {request.repo_path}",
+        )
 
     job_id = str(uuid.uuid4())
     create_job(job_id, request.repo_path, job_type="backend_code_v2")
@@ -1840,7 +1913,9 @@ def get_planning_v2_status(job_id: str) -> PlanningV2StatusResponse:
     "The workflow will resume once all required questions are answered. "
     "Each answer can select a predefined option or provide custom 'other' text.",
 )
-def submit_planning_v2_answers(job_id: str, request: SubmitAnswersRequest) -> PlanningV2StatusResponse:
+def submit_planning_v2_answers(
+    job_id: str, request: SubmitAnswersRequest
+) -> PlanningV2StatusResponse:
     """Submit answers to open questions and resume planning-v2 workflow."""
     data = get_job(job_id)
     if not data:
@@ -1942,7 +2017,9 @@ def get_planning_v2_result(job_id: str) -> PlanningV2ResultResponse:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     status = data.get("status", JOB_STATUS_PENDING)
     if status in ("pending", "running"):
-        raise HTTPException(status_code=404, detail="Result not yet available; job still in progress")
+        raise HTTPException(
+            status_code=404, detail="Result not yet available; job still in progress"
+        )
     phase_results = data.get("phase_results")
     if phase_results is None:
         phase_results = {}
@@ -2029,9 +2106,7 @@ def auto_answer_run_team_question(
         )
 
     pending_questions = data.get("pending_questions", [])
-    question_data = next(
-        (q for q in pending_questions if q.get("id") == question_id), None
-    )
+    question_data = next((q for q in pending_questions if q.get("id") == question_id), None)
     if not question_data:
         raise HTTPException(
             status_code=404,
@@ -2107,9 +2182,7 @@ def auto_answer_planning_v2_question(
         )
 
     pending_questions = data.get("pending_questions", [])
-    question_data = next(
-        (q for q in pending_questions if q.get("id") == question_id), None
-    )
+    question_data = next((q for q in pending_questions if q.get("id") == question_id), None)
     if not question_data:
         raise HTTPException(
             status_code=404,
@@ -2222,7 +2295,9 @@ class ProductAnalysisRunResponse(BaseModel):
 
     job_id: str = Field(..., description="Job ID for polling status.")
     status: str = Field(default="running", description="Initial status.")
-    message: str = Field(default="Product analysis started. Poll GET /product-analysis/status/{job_id} for progress.")
+    message: str = Field(
+        default="Product analysis started. Poll GET /product-analysis/status/{job_id} for progress."
+    )
 
 
 class ProductAnalysisStatusResponse(BaseModel):
@@ -2231,8 +2306,12 @@ class ProductAnalysisStatusResponse(BaseModel):
     job_id: str = Field(..., description="Job ID.")
     status: str = Field(..., description="pending, running, completed, or failed.")
     repo_path: Optional[str] = Field(None, description="Path to the repo.")
-    current_phase: Optional[str] = Field(None, description="spec_review, communicate, spec_update, or spec_cleanup.")
-    status_text: Optional[str] = Field(None, description="Human-readable status message describing current activity.")
+    current_phase: Optional[str] = Field(
+        None, description="spec_review, communicate, spec_update, or spec_cleanup."
+    )
+    status_text: Optional[str] = Field(
+        None, description="Human-readable status message describing current activity."
+    )
     progress: int = Field(default=0, description="Progress percentage 0-100.")
     iterations: int = Field(default=0, description="Number of spec review iterations completed.")
     pending_questions: List[PendingQuestion] = Field(
@@ -2245,7 +2324,9 @@ class ProductAnalysisStatusResponse(BaseModel):
     )
     error: Optional[str] = Field(None, description="Error message if failed.")
     summary: Optional[str] = Field(None, description="Summary of analysis results.")
-    validated_spec_path: Optional[str] = Field(None, description="Path to validated spec file when complete.")
+    validated_spec_path: Optional[str] = Field(
+        None, description="Path to validated spec file when complete."
+    )
 
 
 def _run_product_analysis_background(
@@ -2293,7 +2374,11 @@ def _run_product_analysis_background(
             progress=100 if result.success else 90,
             summary=result.summary,
             error=result.failure_reason if not result.success else None,
-            current_phase=AnalysisPhase.SPEC_CLEANUP.value if result.success else result.current_phase.value if result.current_phase else None,
+            current_phase=AnalysisPhase.SPEC_CLEANUP.value
+            if result.success
+            else result.current_phase.value
+            if result.current_phase
+            else None,
             iterations=result.iterations,
             validated_spec_path=result.validated_spec_path,
         )
@@ -2511,7 +2596,9 @@ def get_product_analysis_status(job_id: str) -> ProductAnalysisStatusResponse:
     summary="Submit answers to Product Analysis open questions",
     description="Submit user answers to open questions identified during spec review.",
 )
-def submit_product_analysis_answers(job_id: str, request: SubmitAnswersRequest) -> ProductAnalysisStatusResponse:
+def submit_product_analysis_answers(
+    job_id: str, request: SubmitAnswersRequest
+) -> ProductAnalysisStatusResponse:
     """Submit answers to open questions and resume Product Analysis workflow."""
     data = get_job(job_id)
     if not data:
@@ -2587,9 +2674,7 @@ def auto_answer_product_analysis_question(
         )
 
     pending_questions = data.get("pending_questions", [])
-    question_data = next(
-        (q for q in pending_questions if q.get("id") == question_id), None
-    )
+    question_data = next((q for q in pending_questions if q.get("id") == question_id), None)
     if not question_data:
         raise HTTPException(
             status_code=404,
@@ -2663,11 +2748,20 @@ def get_product_analysis_jobs() -> RunningJobsResponse:
 
 
 SUPERVISOR_LOG_DIR = Path("/var/log/supervisor")
-ALLOWED_SERVICES = frozenset({
-    "sw_api", "blogging_api", "market_research_api", "soc2_compliance_api",
-    "social_marketing_api", "blog_research_api", "agent_provisioning_api",
-    "postgresql", "nginx", "dockerd",
-})
+ALLOWED_SERVICES = frozenset(
+    {
+        "sw_api",
+        "blogging_api",
+        "market_research_api",
+        "soc2_compliance_api",
+        "social_marketing_api",
+        "blog_research_api",
+        "agent_provisioning_api",
+        "postgresql",
+        "nginx",
+        "dockerd",
+    }
+)
 
 
 @app.get("/logs", response_class=PlainTextResponse)
@@ -2685,7 +2779,9 @@ def get_logs(
     if not SUPERVISOR_LOG_DIR.exists():
         raise HTTPException(status_code=503, detail="Log directory not available")
     if service != "all" and service not in ALLOWED_SERVICES:
-        raise HTTPException(status_code=400, detail=f"Unknown service. Allowed: {sorted(ALLOWED_SERVICES)} or 'all'")
+        raise HTTPException(
+            status_code=400, detail=f"Unknown service. Allowed: {sorted(ALLOWED_SERVICES)} or 'all'"
+        )
     lines = max(1, min(lines, 10000))
     parts: List[str] = []
     if service == "all":

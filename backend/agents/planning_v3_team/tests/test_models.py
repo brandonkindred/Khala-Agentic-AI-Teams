@@ -1,6 +1,5 @@
 """Tests for Planning V3 models."""
 
-
 import sys
 from pathlib import Path
 
@@ -28,7 +27,9 @@ def test_phase_enum():
 
 
 def test_planning_v3_run_request():
-    r = PlanningV3RunRequest(repo_path="/tmp/repo", client_name="Acme", initial_brief="Build a dashboard")
+    r = PlanningV3RunRequest(
+        repo_path="/tmp/repo", client_name="Acme", initial_brief="Build a dashboard"
+    )
     assert r.repo_path == "/tmp/repo"
     assert r.client_name == "Acme"
     assert r.use_product_analysis is True
@@ -55,7 +56,9 @@ def test_planning_v3_result_response():
 
 
 def test_client_context():
-    c = ClientContext(client_name="Acme", problem_summary="Need faster reports", target_users=["analysts"])
+    c = ClientContext(
+        client_name="Acme", problem_summary="Need faster reports", target_users=["analysts"]
+    )
     assert c.client_name == "Acme"
     assert "analysts" in c.target_users
     d = c.model_dump()

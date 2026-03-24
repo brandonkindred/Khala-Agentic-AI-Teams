@@ -65,9 +65,7 @@ async def run_retest_phase(
 
     for finding in findings_to_retest:
         # Re-verify based on acceptance criteria
-        passed = await _verify_acceptance_criteria(
-            finding, was, mas, ats
-        )
+        passed = await _verify_acceptance_criteria(finding, was, mas, ats)
 
         if passed:
             # Finding is fixed - close it
@@ -186,8 +184,5 @@ async def retest_pattern(
         "findings_closed": result.findings_closed,
         "findings_still_open": result.findings_still_open,
         "all_fixed": result.findings_still_open == 0,
-        "updated_findings": [
-            {"id": f.id, "state": f.state.value}
-            for f in result.updated_findings
-        ],
+        "updated_findings": [{"id": f.id, "state": f.state.value} for f in result.updated_findings],
     }

@@ -63,7 +63,11 @@ SECTION_508_REQUIREMENTS: Dict[str, Section508Requirement] = {
         category=Section508Category.GENERAL,
         description="Electronic content shall conform to Level A and Level AA Success Criteria and Conformance Requirements in WCAG 2.0.",
         wcag_mappings=["all_level_a", "all_level_aa"],
-        platforms=[ApplicablePlatform.WEB, ApplicablePlatform.SOFTWARE, ApplicablePlatform.DOCUMENT],
+        platforms=[
+            ApplicablePlatform.WEB,
+            ApplicablePlatform.SOFTWARE,
+            ApplicablePlatform.DOCUMENT,
+        ],
     ),
     # Chapter 3: Functional Performance Criteria
     "302.1": Section508Requirement(
@@ -72,7 +76,11 @@ SECTION_508_REQUIREMENTS: Dict[str, Section508Requirement] = {
         category=Section508Category.GENERAL,
         description="ICT shall provide at least one mode of operation that does not require user vision.",
         wcag_mappings=["1.1.1", "1.3.1", "1.3.2", "1.4.1", "4.1.2"],
-        platforms=[ApplicablePlatform.WEB, ApplicablePlatform.SOFTWARE, ApplicablePlatform.MOBILE_APP],
+        platforms=[
+            ApplicablePlatform.WEB,
+            ApplicablePlatform.SOFTWARE,
+            ApplicablePlatform.MOBILE_APP,
+        ],
         notes="Screen reader compatibility is primary method of compliance.",
     ),
     "302.2": Section508Requirement(
@@ -81,7 +89,11 @@ SECTION_508_REQUIREMENTS: Dict[str, Section508Requirement] = {
         category=Section508Category.GENERAL,
         description="ICT shall provide at least one mode of operation that enables users with limited vision to make use of ICT.",
         wcag_mappings=["1.4.3", "1.4.4", "1.4.10", "1.4.11", "1.4.12"],
-        platforms=[ApplicablePlatform.WEB, ApplicablePlatform.SOFTWARE, ApplicablePlatform.MOBILE_APP],
+        platforms=[
+            ApplicablePlatform.WEB,
+            ApplicablePlatform.SOFTWARE,
+            ApplicablePlatform.MOBILE_APP,
+        ],
         notes="Includes contrast, resize, zoom, and reflow requirements.",
     ),
     "302.3": Section508Requirement(
@@ -90,7 +102,11 @@ SECTION_508_REQUIREMENTS: Dict[str, Section508Requirement] = {
         category=Section508Category.GENERAL,
         description="ICT shall provide at least one mode of operation that does not require user perception of color.",
         wcag_mappings=["1.4.1"],
-        platforms=[ApplicablePlatform.WEB, ApplicablePlatform.SOFTWARE, ApplicablePlatform.MOBILE_APP],
+        platforms=[
+            ApplicablePlatform.WEB,
+            ApplicablePlatform.SOFTWARE,
+            ApplicablePlatform.MOBILE_APP,
+        ],
     ),
     "302.4": Section508Requirement(
         section="302.4",
@@ -98,7 +114,11 @@ SECTION_508_REQUIREMENTS: Dict[str, Section508Requirement] = {
         category=Section508Category.GENERAL,
         description="ICT shall provide at least one mode of operation that does not require user hearing.",
         wcag_mappings=["1.2.1", "1.2.2", "1.2.3", "1.2.4", "1.2.5"],
-        platforms=[ApplicablePlatform.WEB, ApplicablePlatform.SOFTWARE, ApplicablePlatform.MOBILE_APP],
+        platforms=[
+            ApplicablePlatform.WEB,
+            ApplicablePlatform.SOFTWARE,
+            ApplicablePlatform.MOBILE_APP,
+        ],
         notes="Captions and transcripts required for audio content.",
     ),
     "302.5": Section508Requirement(
@@ -107,7 +127,11 @@ SECTION_508_REQUIREMENTS: Dict[str, Section508Requirement] = {
         category=Section508Category.GENERAL,
         description="ICT shall provide at least one mode of operation that enables users with limited hearing to make use of ICT.",
         wcag_mappings=["1.2.2", "1.2.4", "1.4.2"],
-        platforms=[ApplicablePlatform.WEB, ApplicablePlatform.SOFTWARE, ApplicablePlatform.MOBILE_APP],
+        platforms=[
+            ApplicablePlatform.WEB,
+            ApplicablePlatform.SOFTWARE,
+            ApplicablePlatform.MOBILE_APP,
+        ],
     ),
     "302.6": Section508Requirement(
         section="302.6",
@@ -115,7 +139,11 @@ SECTION_508_REQUIREMENTS: Dict[str, Section508Requirement] = {
         category=Section508Category.GENERAL,
         description="ICT shall provide at least one mode of operation that does not require user speech.",
         wcag_mappings=[],
-        platforms=[ApplicablePlatform.WEB, ApplicablePlatform.SOFTWARE, ApplicablePlatform.MOBILE_APP],
+        platforms=[
+            ApplicablePlatform.WEB,
+            ApplicablePlatform.SOFTWARE,
+            ApplicablePlatform.MOBILE_APP,
+        ],
         notes="Alternative input methods must be available.",
     ),
     "302.7": Section508Requirement(
@@ -124,7 +152,11 @@ SECTION_508_REQUIREMENTS: Dict[str, Section508Requirement] = {
         category=Section508Category.GENERAL,
         description="ICT shall provide at least one mode of operation that does not require fine motor control or simultaneous manual operations.",
         wcag_mappings=["2.1.1", "2.1.2", "2.5.1", "2.5.2", "2.5.4"],
-        platforms=[ApplicablePlatform.WEB, ApplicablePlatform.SOFTWARE, ApplicablePlatform.MOBILE_APP],
+        platforms=[
+            ApplicablePlatform.WEB,
+            ApplicablePlatform.SOFTWARE,
+            ApplicablePlatform.MOBILE_APP,
+        ],
     ),
     "302.8": Section508Requirement(
         section="302.8",
@@ -132,15 +164,37 @@ SECTION_508_REQUIREMENTS: Dict[str, Section508Requirement] = {
         category=Section508Category.GENERAL,
         description="ICT shall provide at least one mode of operation that is operable with limited reach and limited strength.",
         wcag_mappings=["2.5.8"],
-        platforms=[ApplicablePlatform.WEB, ApplicablePlatform.SOFTWARE, ApplicablePlatform.MOBILE_APP, ApplicablePlatform.HARDWARE],
+        platforms=[
+            ApplicablePlatform.WEB,
+            ApplicablePlatform.SOFTWARE,
+            ApplicablePlatform.MOBILE_APP,
+            ApplicablePlatform.HARDWARE,
+        ],
     ),
     "302.9": Section508Requirement(
         section="302.9",
         name="With Limited Language, Cognitive, and Learning Abilities",
         category=Section508Category.GENERAL,
         description="ICT shall provide features making content usable by individuals with limited cognitive, language, and learning abilities.",
-        wcag_mappings=["3.1.1", "3.1.2", "3.2.1", "3.2.2", "3.2.3", "3.2.4", "3.3.1", "3.3.2", "3.3.3", "3.3.4", "3.3.7", "3.3.8"],
-        platforms=[ApplicablePlatform.WEB, ApplicablePlatform.SOFTWARE, ApplicablePlatform.MOBILE_APP],
+        wcag_mappings=[
+            "3.1.1",
+            "3.1.2",
+            "3.2.1",
+            "3.2.2",
+            "3.2.3",
+            "3.2.4",
+            "3.3.1",
+            "3.3.2",
+            "3.3.3",
+            "3.3.4",
+            "3.3.7",
+            "3.3.8",
+        ],
+        platforms=[
+            ApplicablePlatform.WEB,
+            ApplicablePlatform.SOFTWARE,
+            ApplicablePlatform.MOBILE_APP,
+        ],
     ),
     # Chapter 4: Hardware
     "402.1": Section508Requirement(
@@ -206,7 +260,11 @@ SECTION_508_REQUIREMENTS: Dict[str, Section508Requirement] = {
         category=Section508Category.SOFTWARE,
         description="Data tables shall expose row and column headers programmatically.",
         wcag_mappings=["1.3.1"],
-        platforms=[ApplicablePlatform.SOFTWARE, ApplicablePlatform.MOBILE_APP, ApplicablePlatform.WEB],
+        platforms=[
+            ApplicablePlatform.SOFTWARE,
+            ApplicablePlatform.MOBILE_APP,
+            ApplicablePlatform.WEB,
+        ],
     ),
     "502.3.4": Section508Requirement(
         section="502.3.4",
@@ -403,17 +461,13 @@ SECTION_508_REQUIREMENTS: Dict[str, Section508Requirement] = {
 
 def get_508_requirements_for_wcag(wcag_sc: str) -> List[Section508Requirement]:
     """Get all Section 508 requirements that map to a given WCAG SC."""
-    return [
-        req
-        for req in SECTION_508_REQUIREMENTS.values()
-        if wcag_sc in req.wcag_mappings
-    ]
+    return [req for req in SECTION_508_REQUIREMENTS.values() if wcag_sc in req.wcag_mappings]
 
 
 def get_508_tags_for_wcag_list(wcag_scs: List[str]) -> List[str]:
     """
     Get Section 508 tags for a list of WCAG success criteria.
-    
+
     Returns a deduplicated list of 508 section numbers.
     """
     tags = set()
@@ -433,20 +487,14 @@ def get_requirements_by_category(
     category: Section508Category,
 ) -> List[Section508Requirement]:
     """Get all requirements for a given category."""
-    return [
-        req for req in SECTION_508_REQUIREMENTS.values() if req.category == category
-    ]
+    return [req for req in SECTION_508_REQUIREMENTS.values() if req.category == category]
 
 
 def get_requirements_by_platform(
     platform: ApplicablePlatform,
 ) -> List[Section508Requirement]:
     """Get all requirements applicable to a given platform."""
-    return [
-        req
-        for req in SECTION_508_REQUIREMENTS.values()
-        if platform in req.platforms
-    ]
+    return [req for req in SECTION_508_REQUIREMENTS.values() if platform in req.platforms]
 
 
 def get_web_requirements() -> List[Section508Requirement]:

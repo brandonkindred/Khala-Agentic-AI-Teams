@@ -43,13 +43,16 @@ class BuildFixSpecialistAgent:
             "```",
         ]
         if input_data.failing_test_content:
-            context_parts.extend([
-                "",
-                "**Failing test file content:**",
-                "```",
-                input_data.failing_test_content[:4000] + ("..." if len(input_data.failing_test_content or "") > 4000 else ""),
-                "```",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Failing test file content:**",
+                    "```",
+                    input_data.failing_test_content[:4000]
+                    + ("..." if len(input_data.failing_test_content or "") > 4000 else ""),
+                    "```",
+                ]
+            )
         if input_data.task_description:
             context_parts.insert(0, f"**Task context:** {input_data.task_description}\n")
 
@@ -70,5 +73,9 @@ class BuildFixSpecialistAgent:
                 )
 
         summary = data.get("summary", "")
-        logger.info("BuildFixSpecialist: produced %d edits, summary=%s", len(edits), summary[:80] if summary else "")
+        logger.info(
+            "BuildFixSpecialist: produced %d edits, summary=%s",
+            len(edits),
+            summary[:80] if summary else "",
+        )
         return BuildFixOutput(edits=edits, summary=summary)

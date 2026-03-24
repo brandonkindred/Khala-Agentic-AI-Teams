@@ -14,7 +14,13 @@ from typing import Any, Callable, Optional, Union
 
 from blog_research_agent.models import ResearchReference
 
-from llm_service import LLMClient, LLMJsonParseError, LLMTemporaryError, LLMTruncatedError
+from llm_service import (
+    LLMClient,
+    LLMJsonParseError,
+    LLMTemporaryError,
+    LLMTruncatedError,
+    compact_text,
+)
 
 from .models import DraftInput, DraftOutput, ReviseDraftInput
 from .prompts import (
@@ -27,13 +33,14 @@ from .prompts import (
 
 logger = logging.getLogger(__name__)
 
-# Caps for prompt inputs so the combined prompt fits within model context (e.g. 262K tokens for qwen3.5:397b-cloud).
-# Exceeding these can cause "prompt too long; exceeded max context length" (400).
-MAX_RESEARCH_CHARS_FOR_DRAFT = 100_000
-MAX_OUTLINE_CHARS_FOR_DRAFT = 20_000
-MAX_CLAIMS_CHARS_FOR_DRAFT = 15_000
-# Per-source cap for extraction calls (each document sent to one LLM call).
-MAX_CHARS_PER_SOURCE = 12_000
+# Context budget for compaction — content exceeding these thresholds is compacted
+# (LLM-summarised) rather than naively truncated, preserving technical detail.
+# The model context (e.g. 262K tokens ≈ 917K chars) is large enough that
+# compaction should rarely be needed.
+COMPACT_RESEARCH_CHARS = 800_000
+COMPACT_OUTLINE_CHARS = 200_000
+COMPACT_CLAIMS_CHARS = 150_000
+COMPACT_PER_SOURCE_CHARS = 100_000
 
 
 def _extract_draft_after_marker(raw_response: str) -> str:
@@ -112,15 +119,9 @@ class BlogDraftAgent:
         doc_text = (ref.content or ref.summary or "").strip()
         if ref.key_points:
             doc_text = doc_text + "\n\nKey points:\n" + "\n".join(f"- {p}" for p in ref.key_points)
-        if len(doc_text) > MAX_CHARS_PER_SOURCE:
-            doc_text = doc_text[:MAX_CHARS_PER_SOURCE] + "\n\n[... truncated for context ...]"
+        doc_text = compact_text(doc_text, COMPACT_PER_SOURCE_CHARS, self.llm, "source document")
         source_ref_str = f"{ref.title} ({ref.url})"
-        prompt = (
-            EXTRACT_NOTES_PROMPT
-            + "\n\n---\nOUTLINE:\n"
-            + outline[:4000]
-            + "\n\n---\n"
-        )
+        prompt = EXTRACT_NOTES_PROMPT + "\n\n---\nOUTLINE:\n" + outline + "\n\n---\n"
         if audience:
             prompt += f"Audience: {audience}\n"
         if tone:
@@ -157,13 +158,7 @@ class BlogDraftAgent:
         When draft_output_path is set, writes the draft to that path and logs the path.
         """
         outline = draft_input.outline_for_prompt().strip()
-        if len(outline) > MAX_OUTLINE_CHARS_FOR_DRAFT:
-            logger.warning(
-                "Truncating content plan text from %s to %s chars to fit context",
-                len(outline),
-                MAX_OUTLINE_CHARS_FOR_DRAFT,
-            )
-            outline = outline[:MAX_OUTLINE_CHARS_FOR_DRAFT] + "\n\n[... content plan truncated for context ...]"
+        outline = compact_text(outline, COMPACT_OUTLINE_CHARS, self.llm, "content plan")
         if not outline:
             logger.warning("Empty content plan; returning minimal draft.")
             return DraftOutput(draft="# Draft\n\nAdd a content plan to generate a draft.")
@@ -203,16 +198,12 @@ class BlogDraftAgent:
             )
         else:
             research = (draft_input.research_document or "").strip()
-            if len(research) > MAX_RESEARCH_CHARS_FOR_DRAFT:
-                logger.warning(
-                    "Truncating research_document from %s to %s chars to fit context",
-                    len(research),
-                    MAX_RESEARCH_CHARS_FOR_DRAFT,
-                )
-                research = research[:MAX_RESEARCH_CHARS_FOR_DRAFT] + "\n\n[... research truncated for context ...]"
+            research = compact_text(research, COMPACT_RESEARCH_CHARS, self.llm, "research document")
             if not research:
                 logger.warning("Empty research_document; returning minimal draft.")
-                return DraftOutput(draft="# Draft\n\nAdd research document and outline to generate a draft.")
+                return DraftOutput(
+                    draft="# Draft\n\nAdd research document and outline to generate a draft."
+                )
 
         style_guide_text = self._style_prompt
 
@@ -245,29 +236,27 @@ class BlogDraftAgent:
         if draft_input.allowed_claims and draft_input.allowed_claims.get("claims"):
             claims_list = draft_input.allowed_claims["claims"]
             claims_text = "\n".join(
-                f"- [CLAIM:{c.get('id','')}] {c.get('text','')} (sources: {', '.join(c.get('citations',[]))})"
+                f"- [CLAIM:{c.get('id', '')}] {c.get('text', '')} (sources: {', '.join(c.get('citations', []))})"
                 for c in claims_list
             )
-            if len(claims_text) > MAX_CLAIMS_CHARS_FOR_DRAFT:
-                logger.warning(
-                    "Truncating allowed_claims from %s to %s chars to fit context",
-                    len(claims_text),
-                    MAX_CLAIMS_CHARS_FOR_DRAFT,
-                )
-                claims_text = claims_text[:MAX_CLAIMS_CHARS_FOR_DRAFT] + "\n... [claims truncated for context]"
+            claims_text = compact_text(
+                claims_text, COMPACT_CLAIMS_CHARS, self.llm, "allowed claims"
+            )
             prompt_parts.append(ALLOWED_CLAIMS_INSTRUCTION.format(claims_text=claims_text))
             prompt_parts.append("")
-        prompt_parts.extend([
-            "---",
-            "RESEARCH DOCUMENT (use this for facts, examples, and substance):",
-            "---",
-            research,
-            "",
-            "---",
-            "CONTENT PLAN (follow narrative flow and section coverage):",
-            "---",
-            outline,
-        ])
+        prompt_parts.extend(
+            [
+                "---",
+                "RESEARCH DOCUMENT (use this for facts, examples, and substance):",
+                "---",
+                research,
+                "",
+                "---",
+                "CONTENT PLAN (follow narrative flow and section coverage):",
+                "---",
+                outline,
+            ]
+        )
         if draft_input.selected_title:
             prompt_parts.append("")
             prompt_parts.append("---")
@@ -302,7 +291,9 @@ class BlogDraftAgent:
                 "and do not cut substance to stay under it. Aim for the target, not perfection."
             )
         prompt_parts.append("")
-        prompt_parts.append('Use this format: first line {"draft": 0}, then ---DRAFT---, then the full blog post in Markdown.')
+        prompt_parts.append(
+            'Use this format: first line {"draft": 0}, then ---DRAFT---, then the full blog post in Markdown.'
+        )
         prompt = "\n".join(prompt_parts)
 
         if on_llm_request:
@@ -358,9 +349,9 @@ class BlogDraftAgent:
             if self._brand_spec_prompt
             else "No brand specification was provided. Follow the style guide below."
         )
-        cp = revise_input.outline_for_prompt()
-        if len(cp) > MAX_OUTLINE_CHARS_FOR_DRAFT:
-            cp = cp[:MAX_OUTLINE_CHARS_FOR_DRAFT] + "\n\n[... content plan truncated ...]"
+        cp = compact_text(
+            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self.llm, "content plan"
+        )
         prompt_parts = [
             REVISE_SINGLE_ITEM_PROMPT,
             "",
@@ -396,38 +387,46 @@ class BlogDraftAgent:
         if revise_input.allowed_claims and revise_input.allowed_claims.get("claims"):
             claims_list = revise_input.allowed_claims["claims"]
             claims_text = "\n".join(
-                f"- [CLAIM:{c.get('id','')}] {c.get('text','')}"
-                for c in claims_list
+                f"- [CLAIM:{c.get('id', '')}] {c.get('text', '')}" for c in claims_list
             )
-            block = "\n".join([
-                "",
-                "---",
-                "ALLOWED CLAIMS (preserve [CLAIM:id] tags; do not add new factual claims):",
-                "---",
-                claims_text,
-            ])
+            block = "\n".join(
+                [
+                    "",
+                    "---",
+                    "ALLOWED CLAIMS (preserve [CLAIM:id] tags; do not add new factual claims):",
+                    "---",
+                    claims_text,
+                ]
+            )
             prompt_parts.insert(len(prompt_parts) - 5, block)
         if revise_input.selected_title:
-            prompt_parts.extend([
-                "",
-                "---",
-                f"AUTHOR-CHOSEN TITLE (preserve this exact H1): {revise_input.selected_title}",
-            ])
+            prompt_parts.extend(
+                [
+                    "",
+                    "---",
+                    f"AUTHOR-CHOSEN TITLE (preserve this exact H1): {revise_input.selected_title}",
+                ]
+            )
         if revise_input.elicited_stories:
-            prompt_parts.extend([
-                "",
-                "---",
-                "AUTHOR'S PERSONAL STORIES (preserve these in the revision):\n" + revise_input.elicited_stories,
-            ])
+            prompt_parts.extend(
+                [
+                    "",
+                    "---",
+                    "AUTHOR'S PERSONAL STORIES (preserve these in the revision):\n"
+                    + revise_input.elicited_stories,
+                ]
+            )
         if revise_input.research_document:
             research = revise_input.research_document.strip()
-            prompt_parts.extend([
-                "",
-                "---",
-                "RESEARCH (for context; preserve facts):",
-                "---",
-                research,
-            ])
+            prompt_parts.extend(
+                [
+                    "",
+                    "---",
+                    "RESEARCH (for context; preserve facts):",
+                    "---",
+                    research,
+                ]
+            )
         length_block = (
             revise_input.length_guidance.strip()
             if (revise_input.length_guidance or "").strip()
@@ -436,14 +435,16 @@ class BlogDraftAgent:
                 "Apply the feedback item above without significantly expanding the post beyond this target."
             )
         )
-        prompt_parts.extend([
-            "",
-            "---",
-            length_block,
-            "",
-            "---",
-            'Use this format: first line {"draft": 0}, then ---DRAFT---, then the full revised blog post in Markdown.',
-        ])
+        prompt_parts.extend(
+            [
+                "",
+                "---",
+                length_block,
+                "",
+                "---",
+                'Use this format: first line {"draft": 0}, then ---DRAFT---, then the full revised blog post in Markdown.',
+            ]
+        )
         return "\n".join(prompt_parts)
 
     def _format_feedback_item_line(self, item: Any, index: int) -> str:
@@ -468,13 +469,14 @@ class BlogDraftAgent:
             else "No brand specification was provided. Follow the style guide below."
         )
         feedback_lines = [
-            self._format_feedback_item_line(item, i) for i, item in enumerate(feedback_items, start=1)
+            self._format_feedback_item_line(item, i)
+            for i, item in enumerate(feedback_items, start=1)
         ]
         feedback_block = "\n\n".join(feedback_lines)
 
-        cp = revise_input.outline_for_prompt()
-        if len(cp) > MAX_OUTLINE_CHARS_FOR_DRAFT:
-            cp = cp[:MAX_OUTLINE_CHARS_FOR_DRAFT] + "\n\n[... content plan truncated ...]"
+        cp = compact_text(
+            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self.llm, "content plan"
+        )
         prompt_parts = [
             REVISE_DRAFT_PROMPT,
             "",
@@ -504,19 +506,23 @@ class BlogDraftAgent:
             for i, item in enumerate(revise_input.previous_feedback_items, 1):
                 loc = f" [{item.location}]" if item.location else ""
                 prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
-            prompt_parts.extend([
+            prompt_parts.extend(
+                [
+                    "---",
+                    "PREVIOUSLY ADDRESSED FEEDBACK (do NOT regress on these fixes — the editor already flagged them):",
+                    "---",
+                    "\n".join(prev_lines),
+                    "",
+                ]
+            )
+        prompt_parts.extend(
+            [
                 "---",
-                "PREVIOUSLY ADDRESSED FEEDBACK (do NOT regress on these fixes — the editor already flagged them):",
+                "CURRENT DRAFT:",
                 "---",
-                "\n".join(prev_lines),
-                "",
-            ])
-        prompt_parts.extend([
-            "---",
-            "CURRENT DRAFT:",
-            "---",
-            draft,
-        ])
+                draft,
+            ]
+        )
         if revise_input.audience:
             prompt_parts.insert(0, f"Audience: {revise_input.audience}\n")
         if revise_input.tone_or_purpose:
@@ -524,38 +530,46 @@ class BlogDraftAgent:
         if revise_input.allowed_claims and revise_input.allowed_claims.get("claims"):
             claims_list = revise_input.allowed_claims["claims"]
             claims_text = "\n".join(
-                f"- [CLAIM:{c.get('id','')}] {c.get('text','')}"
-                for c in claims_list
+                f"- [CLAIM:{c.get('id', '')}] {c.get('text', '')}" for c in claims_list
             )
-            block = "\n".join([
-                "",
-                "---",
-                "ALLOWED CLAIMS (preserve [CLAIM:id] tags; do not add new factual claims):",
-                "---",
-                claims_text,
-            ])
+            block = "\n".join(
+                [
+                    "",
+                    "---",
+                    "ALLOWED CLAIMS (preserve [CLAIM:id] tags; do not add new factual claims):",
+                    "---",
+                    claims_text,
+                ]
+            )
             prompt_parts.insert(len(prompt_parts) - 5, block)
         if revise_input.selected_title:
-            prompt_parts.extend([
-                "",
-                "---",
-                f"AUTHOR-CHOSEN TITLE (preserve this exact H1): {revise_input.selected_title}",
-            ])
+            prompt_parts.extend(
+                [
+                    "",
+                    "---",
+                    f"AUTHOR-CHOSEN TITLE (preserve this exact H1): {revise_input.selected_title}",
+                ]
+            )
         if revise_input.elicited_stories:
-            prompt_parts.extend([
-                "",
-                "---",
-                "AUTHOR'S PERSONAL STORIES (preserve these in the revision):\n" + revise_input.elicited_stories,
-            ])
+            prompt_parts.extend(
+                [
+                    "",
+                    "---",
+                    "AUTHOR'S PERSONAL STORIES (preserve these in the revision):\n"
+                    + revise_input.elicited_stories,
+                ]
+            )
         if revise_input.research_document:
             research = revise_input.research_document.strip()
-            prompt_parts.extend([
-                "",
-                "---",
-                "RESEARCH (for context; preserve facts):",
-                "---",
-                research,
-            ])
+            prompt_parts.extend(
+                [
+                    "",
+                    "---",
+                    "RESEARCH (for context; preserve facts):",
+                    "---",
+                    research,
+                ]
+            )
         length_block = (
             revise_input.length_guidance.strip()
             if (revise_input.length_guidance or "").strip()
@@ -564,14 +578,16 @@ class BlogDraftAgent:
                 "Apply all feedback above without significantly expanding the post beyond this target."
             )
         )
-        prompt_parts.extend([
-            "",
-            "---",
-            length_block,
-            "",
-            "---",
-            'Use this format: first line {"draft": 0}, then ---DRAFT---, then the full revised blog post in Markdown.',
-        ])
+        prompt_parts.extend(
+            [
+                "",
+                "---",
+                length_block,
+                "",
+                "---",
+                'Use this format: first line {"draft": 0}, then ---DRAFT---, then the full revised blog post in Markdown.',
+            ]
+        )
         return "\n".join(prompt_parts)
 
     def revise(
@@ -643,7 +659,9 @@ class BlogDraftAgent:
                 if attempt == 0:
                     logger.warning("Revise (batch) complete() failed: %s; retrying.", e)
                 else:
-                    logger.warning("Revise (batch) failed after retry; trying complete_json fallback.")
+                    logger.warning(
+                        "Revise (batch) failed after retry; trying complete_json fallback."
+                    )
                     break
 
         if not revised or not revised.strip():
@@ -662,7 +680,11 @@ class BlogDraftAgent:
         else:
             logger.warning("Revise (batch) produced no content; keeping original draft.")
 
-        logger.info("Final revised draft: length=%s (%s feedback items in prompt)", len(current_draft), num_items)
+        logger.info(
+            "Final revised draft: length=%s (%s feedback items in prompt)",
+            len(current_draft),
+            num_items,
+        )
         if draft_output_path:
             _write_draft_to_path(current_draft, draft_output_path)
         return DraftOutput(draft=current_draft)

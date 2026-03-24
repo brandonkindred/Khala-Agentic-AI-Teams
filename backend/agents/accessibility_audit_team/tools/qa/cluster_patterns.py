@@ -17,16 +17,12 @@ class ClusterPatternsInput(BaseModel):
     """Input for clustering findings into patterns."""
 
     audit_id: str = Field(..., description="Audit identifier")
-    findings: List[Finding] = Field(
-        default_factory=list, description="Findings to cluster"
-    )
+    findings: List[Finding] = Field(default_factory=list, description="Findings to cluster")
     cluster_by: List[Literal["component", "issue_type", "wcag_sc"]] = Field(
         default_factory=lambda: ["component", "issue_type"],
         description="Dimensions to cluster by",
     )
-    min_cluster_size: int = Field(
-        default=2, description="Minimum findings for a cluster"
-    )
+    min_cluster_size: int = Field(default=2, description="Minimum findings for a cluster")
 
 
 class ClusterPatternsOutput(BaseModel):
@@ -34,9 +30,7 @@ class ClusterPatternsOutput(BaseModel):
 
     patterns: List[PatternCluster] = Field(default_factory=list)
     total_patterns: int = Field(default=0)
-    systemic_patterns: int = Field(
-        default=0, description="Patterns affecting 3+ areas"
-    )
+    systemic_patterns: int = Field(default=0, description="Patterns affecting 3+ areas")
     findings_clustered: int = Field(default=0)
     unclustered_findings: List[str] = Field(
         default_factory=list, description="Finding IDs not in any cluster"
@@ -86,10 +80,15 @@ async def cluster_patterns(
 
                             # Determine severity (highest in cluster)
                             severities = [f.severity for f in comp_findings]
-                            max_severity = max(severities, key=lambda s: [
-                                Severity.CRITICAL, Severity.HIGH,
-                                Severity.MEDIUM, Severity.LOW
-                            ].index(s))
+                            max_severity = max(
+                                severities,
+                                key=lambda s: [
+                                    Severity.CRITICAL,
+                                    Severity.HIGH,
+                                    Severity.MEDIUM,
+                                    Severity.LOW,
+                                ].index(s),
+                            )
 
                             # Determine scope
                             if len(comp_findings) >= 5:
@@ -108,11 +107,13 @@ async def cluster_patterns(
                                     severity=max_severity,
                                     scope=scope,
                                     issue_types=[issue_type],
-                                    wcag_scs=list(set(
-                                        m.sc for f in comp_findings for m in f.wcag_mappings
-                                    )),
+                                    wcag_scs=list(
+                                        set(m.sc for f in comp_findings for m in f.wcag_mappings)
+                                    ),
                                     component_ids=[comp] if comp != "unknown" else [],
-                                    fix_priority=len(comp_findings),  # More findings = higher priority
+                                    fix_priority=len(
+                                        comp_findings
+                                    ),  # More findings = higher priority
                                 )
                             )
                 else:
@@ -122,10 +123,15 @@ async def cluster_patterns(
                     clustered_ids.update(linked_ids)
 
                     severities = [f.severity for f in type_findings]
-                    max_severity = max(severities, key=lambda s: [
-                        Severity.CRITICAL, Severity.HIGH,
-                        Severity.MEDIUM, Severity.LOW
-                    ].index(s))
+                    max_severity = max(
+                        severities,
+                        key=lambda s: [
+                            Severity.CRITICAL,
+                            Severity.HIGH,
+                            Severity.MEDIUM,
+                            Severity.LOW,
+                        ].index(s),
+                    )
 
                     if len(type_findings) >= 5:
                         scope = Scope.SYSTEMIC
@@ -143,9 +149,9 @@ async def cluster_patterns(
                             severity=max_severity,
                             scope=scope,
                             issue_types=[issue_type],
-                            wcag_scs=list(set(
-                                m.sc for f in type_findings for m in f.wcag_mappings
-                            )),
+                            wcag_scs=list(
+                                set(m.sc for f in type_findings for m in f.wcag_mappings)
+                            ),
                             component_ids=[],
                             fix_priority=len(type_findings),
                         )

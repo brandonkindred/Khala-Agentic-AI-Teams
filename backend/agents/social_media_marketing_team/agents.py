@@ -95,13 +95,9 @@ class PlatformSpecialistAgent:
                     "mapped to priority messaging pillars."
                 )
             elif self.platform == Platform.FACEBOOK:
-                detail = (
-                    f"{base} (story-led post plus at least one discussion prompt) that invites comments and shares."
-                )
+                detail = f"{base} (story-led post plus at least one discussion prompt) that invites comments and shares."
             else:
-                detail = (
-                    f"{base} (short posts or threads) that test at least one strong hook and one follow-up insight."
-                )
+                detail = f"{base} (short posts or threads) that test at least one strong hook and one follow-up insight."
             schedule.append(detail)
 
         schedule.append(
@@ -123,19 +119,29 @@ class CampaignCollaborationAgent:
 
     role: str
 
-    def evaluate_proposal(self, proposal: CampaignProposal, round_number: int) -> tuple[float, str, Dict[str, float]]:
+    def evaluate_proposal(
+        self, proposal: CampaignProposal, round_number: int
+    ) -> tuple[float, str, Dict[str, float]]:
         """Provide a richer, more actionable rubric for proposal quality."""
         objective_lower = proposal.objective.lower()
         audience_lower = proposal.audience_hypothesis.lower()
 
         measurability = min(1.0, 0.35 + (len(proposal.success_metrics) * 0.08))
-        if any(term in " ".join(proposal.success_metrics).lower() for term in ("rate", "uplift", "conversion")):
+        if any(
+            term in " ".join(proposal.success_metrics).lower()
+            for term in ("rate", "uplift", "conversion")
+        ):
             measurability += 0.1
 
         audience_specificity = 0.55
-        if any(term in audience_lower for term in ("for", "who", "that")) and len(audience_lower.split()) > 8:
+        if (
+            any(term in audience_lower for term in ("for", "who", "that"))
+            and len(audience_lower.split()) > 8
+        ):
             audience_specificity += 0.2
-        if any(term in audience_lower for term in ("job", "role", "founder", "marketer", "developer")):
+        if any(
+            term in audience_lower for term in ("job", "role", "founder", "marketer", "developer")
+        ):
             audience_specificity += 0.1
 
         platform_differentiation = min(1.0, 0.4 + (len(proposal.channel_mix_strategy) * 0.12))
@@ -143,7 +149,10 @@ class CampaignCollaborationAgent:
             platform_differentiation += 0.1
 
         traceability = min(1.0, 0.35 + (len(proposal.messaging_pillars) * 0.10))
-        if any(goal.lower() in objective_lower for goal in ("engagement", "follower", "leads", "pipeline")):
+        if any(
+            goal.lower() in objective_lower
+            for goal in ("engagement", "follower", "leads", "pipeline")
+        ):
             traceability += 0.05
 
         feasibility = 0.6
@@ -185,7 +194,9 @@ class CampaignCollaborationAgent:
             )
 
         if not suggestions:
-            suggestions.append("Proposal is strong across rubric dimensions; focus next rounds on sharper test hypotheses.")
+            suggestions.append(
+                "Proposal is strong across rubric dimensions; focus next rounds on sharper test hypotheses."
+            )
 
         note = (
             f"{self.role} review round {round_number}: score={score:.2f}. "
@@ -200,11 +211,17 @@ class ContentConceptAgent:
 
     role: str
 
-    def generate_candidates(self, proposal: CampaignProposal, goals: BrandGoals) -> List[ConceptIdea]:
+    def generate_candidates(
+        self, proposal: CampaignProposal, goals: BrandGoals
+    ) -> List[ConceptIdea]:
         """
         Generate a diverse, platform-aware set of candidate concepts.
         """
-        base_topics = proposal.messaging_pillars or ["Educational insight", "Proof point", "Actionable tip"]
+        base_topics = proposal.messaging_pillars or [
+            "Educational insight",
+            "Proof point",
+            "Actionable tip",
+        ]
         linked_goals = goals.goals or ["engagement"]
 
         archetypes = [
@@ -232,9 +249,13 @@ class ContentConceptAgent:
                 goal = linked_goals[(idx - 1) % len(linked_goals)]
                 primary_hook = f"{archetype_name}: {topic}"
                 suggested_visual = (
-                    "Carousel of key steps" if content_format == "carousel" else "Short reel with overlay text"
+                    "Carousel of key steps"
+                    if content_format == "carousel"
+                    else "Short reel with overlay text"
                 )
-                cta_variant = f"Invite {goals.target_audience} to take one concrete step tied to {goal}."
+                cta_variant = (
+                    f"Invite {goals.target_audience} to take one concrete step tied to {goal}."
+                )
 
                 brand_fit_score = 0.7
                 if goals.voice_and_tone:
@@ -243,7 +264,10 @@ class ContentConceptAgent:
                     brand_fit_score += 0.03
 
                 audience_resonance_score = 0.7
-                if any(word in proposal.audience_hypothesis.lower() for word in ("pain", "challenge", "struggle")):
+                if any(
+                    word in proposal.audience_hypothesis.lower()
+                    for word in ("pain", "challenge", "struggle")
+                ):
                     audience_resonance_score += 0.05
                 if "story" in archetype_name.lower():
                     audience_resonance_score += 0.03
@@ -292,7 +316,10 @@ class ExperimentDesignAgent:
         # Choose control as a strong, on-brand baseline
         control = max(
             ideas,
-            key=lambda i: (i.brand_fit_score + i.goal_alignment_score, i.estimated_engagement_probability),
+            key=lambda i: (
+                i.brand_fit_score + i.goal_alignment_score,
+                i.estimated_engagement_probability,
+            ),
         )
         arms = [
             ExperimentArm(
@@ -359,7 +386,9 @@ class RiskComplianceAgent:
         if goals.brand_guidelines:
             guidelines_lower = goals.brand_guidelines.lower()
             if "do not mention competitors" in guidelines_lower and "competitor" in lowered:
-                risk_reasons.append("Mentions competitors despite guidelines (brand_guideline_violation)")
+                risk_reasons.append(
+                    "Mentions competitors despite guidelines (brand_guideline_violation)"
+                )
             if "avoid absolute claims" in guidelines_lower and any(
                 t in lowered for t in ("never", "always", "100%")
             ):
@@ -371,6 +400,8 @@ class RiskComplianceAgent:
             risk_level = "medium"
 
         if risk_level == "low" and not risk_reasons:
-            risk_reasons.append("No high-risk claims detected; concept aligns with cautious, compliant positioning.")
+            risk_reasons.append(
+                "No high-risk claims detected; concept aligns with cautious, compliant positioning."
+            )
 
         return idea.model_copy(update={"risk_level": risk_level, "risk_reasons": risk_reasons})

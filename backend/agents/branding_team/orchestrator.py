@@ -116,6 +116,7 @@ def _build_phase_gates(up_to_phase: BrandPhase, approved: bool) -> List[PhaseGat
 
 class BrandingTeamOrchestrator:
     """Coordinates the 5-phase branding pipeline with gate validation."""
+
     """Coordinates the 5-phase branding pipeline with gate validation."""
 
     def __init__(self) -> None:
@@ -274,7 +275,6 @@ class BrandingTeamOrchestrator:
             try:
                 from .adapters.market_research import request_market_research
 
-
                 competitive_snapshot = request_market_research(mission)
             except Exception:
                 competitive_snapshot = None
@@ -282,7 +282,6 @@ class BrandingTeamOrchestrator:
         design_asset_result = None
         if include_design_assets:
             from .adapters.design_assets import request_design_assets
-
 
             design_asset_result = request_design_assets(codification, mission.company_name)
 

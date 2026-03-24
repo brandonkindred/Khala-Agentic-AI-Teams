@@ -12,9 +12,7 @@ from pydantic import BaseModel, Field
 class ReflowMode(BaseModel):
     """A reflow/zoom test mode."""
 
-    type: Literal["viewport", "zoom"] = Field(
-        ..., description="Test type: viewport or zoom"
-    )
+    type: Literal["viewport", "zoom"] = Field(..., description="Test type: viewport or zoom")
     width: Optional[int] = Field(default=None, description="Viewport width for type=viewport")
     height: Optional[int] = Field(default=None, description="Viewport height")
     percent: Optional[int] = Field(default=None, description="Zoom percentage for type=zoom")
@@ -52,9 +50,7 @@ class CheckReflowZoomInput(BaseModel):
         ],
         description="Test modes to run",
     )
-    capture: Dict[str, bool] = Field(
-        default_factory=lambda: {"screenshots": True}
-    )
+    capture: Dict[str, bool] = Field(default_factory=lambda: {"screenshots": True})
     check_horizontal_scroll: bool = Field(
         default=True, description="Check for horizontal scrolling at 320px"
     )
@@ -66,15 +62,11 @@ class CheckReflowZoomOutput(BaseModel):
     url: str
     issues: List[ReflowIssue] = Field(default_factory=list)
     modes_tested: List[str] = Field(default_factory=list)
-    passes_reflow: bool = Field(
-        default=True, description="Whether page passes WCAG 1.4.10 Reflow"
-    )
+    passes_reflow: bool = Field(default=True, description="Whether page passes WCAG 1.4.10 Reflow")
     passes_zoom: bool = Field(
         default=True, description="Whether page passes WCAG 1.4.4 Resize Text"
     )
-    screenshots: Dict[str, str] = Field(
-        default_factory=dict, description="Mode -> screenshot ref"
-    )
+    screenshots: Dict[str, str] = Field(default_factory=dict, description="Mode -> screenshot ref")
 
 
 async def check_reflow_zoom(

@@ -82,7 +82,9 @@ def parse_metrics_from_text(text: str) -> Dict[str, Any]:
     return stats
 
 
-def extract_posts_from_html(html: str, base_url: str = "https://medium.com") -> List[Dict[str, Any]]:
+def extract_posts_from_html(
+    html: str, base_url: str = "https://medium.com"
+) -> List[Dict[str, Any]]:
     """
     Parse post rows from static HTML (for tests / fixtures).
     Mirrors the browser script loosely using BeautifulSoup.
@@ -148,7 +150,9 @@ def collect_medium_stats(config: MediumStatsRunConfig) -> MediumStatsReport:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as e:
-        raise RuntimeError("playwright is not installed. pip install playwright && playwright install chromium") from e
+        raise RuntimeError(
+            "playwright is not installed. pip install playwright && playwright install chromium"
+        ) from e
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=config.headless)

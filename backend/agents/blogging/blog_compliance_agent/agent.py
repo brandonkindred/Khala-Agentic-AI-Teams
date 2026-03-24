@@ -36,8 +36,10 @@ except ImportError:
 try:
     from shared.errors import ComplianceError
 except ImportError:
+
     class ComplianceError(Exception):
         pass
+
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +145,9 @@ class BlogComplianceAgent:
                         report = _fallback_compliance_report(e)
                         if work_dir and write_artifact:
                             write_artifact(work_dir, "compliance_report.json", report.to_dict())
-                            logger.info("Wrote compliance_report.json (fallback): status=%s", report.status)
+                            logger.info(
+                                "Wrote compliance_report.json (fallback): status=%s", report.status
+                            )
                         return report
                 except (LLMTemporaryError, LLMRateLimitError) as e:
                     if llm_round >= _MAX_COMPLIANCE_LLM_ROUNDS - 1:
@@ -154,7 +158,9 @@ class BlogComplianceAgent:
                         report = _fallback_compliance_report(e)
                         if work_dir and write_artifact:
                             write_artifact(work_dir, "compliance_report.json", report.to_dict())
-                            logger.info("Wrote compliance_report.json (fallback): status=%s", report.status)
+                            logger.info(
+                                "Wrote compliance_report.json (fallback): status=%s", report.status
+                            )
                         return report
                     wait = min(60.0, 15.0 * (llm_round + 1))
                     logger.warning(
@@ -170,11 +176,15 @@ class BlogComplianceAgent:
                     working_prompt = base_prompt
                     break
                 except (LLMPermanentError, LLMTruncatedError) as e:
-                    logger.warning("Compliance LLM permanent/truncation error; using fallback report: %s", e)
+                    logger.warning(
+                        "Compliance LLM permanent/truncation error; using fallback report: %s", e
+                    )
                     report = _fallback_compliance_report(e)
                     if work_dir and write_artifact:
                         write_artifact(work_dir, "compliance_report.json", report.to_dict())
-                        logger.info("Wrote compliance_report.json (fallback): status=%s", report.status)
+                        logger.info(
+                            "Wrote compliance_report.json (fallback): status=%s", report.status
+                        )
                     return report
             if data is not None:
                 break

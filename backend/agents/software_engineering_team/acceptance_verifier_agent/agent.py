@@ -26,7 +26,9 @@ class AcceptanceVerifierAgent:
     def run(self, input_data: AcceptanceVerifierInput) -> AcceptanceVerifierOutput:
         """Verify each acceptance criterion against the code."""
         if not input_data.acceptance_criteria:
-            return AcceptanceVerifierOutput(all_satisfied=True, per_criterion=[], summary="No criteria to verify")
+            return AcceptanceVerifierOutput(
+                all_satisfied=True, per_criterion=[], summary="No criteria to verify"
+            )
 
         logger.info(
             "AcceptanceVerifier: checking %s criteria against %s chars of code",

@@ -83,16 +83,18 @@ def run_planning_consolidation(
                 sections.append(f"  - Mitigation: {mit}")
         sections.append("")
 
-    sections.extend([
-        "## Ship Checklist",
-        "",
-        "- [ ] All REQ-* covered by tests",
-        "- [ ] Security review complete",
-        "- [ ] SLOs defined and monitored",
-        "- [ ] Documentation updated",
-        "- [ ] Runbooks available",
-        "",
-    ])
+    sections.extend(
+        [
+            "## Ship Checklist",
+            "",
+            "- [ ] All REQ-* covered by tests",
+            "- [ ] Security review complete",
+            "- [ ] SLOs defined and monitored",
+            "- [ ] Documentation updated",
+            "- [ ] Runbooks available",
+            "",
+        ]
+    )
 
     content = "\n".join(sections)
     out_file.write_text(content, encoding="utf-8")

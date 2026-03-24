@@ -19,7 +19,9 @@ def test_heartbeat_updates_last_heartbeat_at(tmp_path: Path) -> None:
 
     data0 = get_job(job_id, cache_dir=cache_dir)
     assert data0 is not None
-    initial_hb = data0.get("last_heartbeat_at") or data0.get("updated_at") or data0.get("created_at")
+    initial_hb = (
+        data0.get("last_heartbeat_at") or data0.get("updated_at") or data0.get("created_at")
+    )
 
     start_job_heartbeat_thread(job_id, interval_seconds=0.15, cache_dir=cache_dir)
     time.sleep(0.4)
@@ -121,7 +123,9 @@ def test_waiting_for_answers_excluded_from_stale(tmp_path: Path) -> None:
     create_job(job_id, "/repo", cache_dir=cache_dir)
     manager = CentralJobManager(team="software_engineering_team", cache_dir=cache_dir)
     stale_ts = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
-    manager.update_job(job_id, last_heartbeat_at=stale_ts, heartbeat=False, waiting_for_answers=True)
+    manager.update_job(
+        job_id, last_heartbeat_at=stale_ts, heartbeat=False, waiting_for_answers=True
+    )
 
     failed = mark_stale_jobs_failed(stale_after_seconds=60.0, reason="stale", cache_dir=cache_dir)
     assert job_id not in failed

@@ -55,7 +55,10 @@ class QAExpertAgent:
         try:
             data = self.llm.complete_json(prompt, temperature=0.1)
         except LLMJsonParseError as e:
-            logger.warning("QA: LLM returned non-JSON output, returning fallback: %s", e.response_preview[:200] if getattr(e, "response_preview", None) else str(e))
+            logger.warning(
+                "QA: LLM returned non-JSON output, returning fallback: %s",
+                e.response_preview[:200] if getattr(e, "response_preview", None) else str(e),
+            )
             return QAOutput(
                 bugs_found=[],
                 approved=False,

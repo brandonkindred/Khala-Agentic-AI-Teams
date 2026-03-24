@@ -130,7 +130,9 @@ def _outreach_from_json(raw: str, prospect: Prospect) -> Optional[OutreachSequen
         return None
 
 
-def _nurture_from_json(raw: str, prospect: Prospect, duration_days: int) -> Optional[NurtureSequence]:
+def _nurture_from_json(
+    raw: str, prospect: Prospect, duration_days: int
+) -> Optional[NurtureSequence]:
     from .models import NurtureTouchpoint, OutreachChannel
 
     data = _parse_json(raw, {})
@@ -183,7 +185,9 @@ def _discovery_from_json(raw: str, prospect: Prospect) -> Optional[DiscoveryPlan
         return None
 
 
-def _proposal_from_json(raw: str, prospect: Prospect, annual_cost: float) -> Optional[SalesProposal]:
+def _proposal_from_json(
+    raw: str, prospect: Prospect, annual_cost: float
+) -> Optional[SalesProposal]:
     data = _parse_json(raw, {})
     if not isinstance(data, dict):
         return None
@@ -191,7 +195,9 @@ def _proposal_from_json(raw: str, prospect: Prospect, annual_cost: float) -> Opt
         roi_data = data.get("roi_model", {})
         roi = ROIModel(
             annual_cost_usd=float(roi_data.get("annual_cost_usd", annual_cost)),
-            estimated_annual_benefit_usd=float(roi_data.get("estimated_annual_benefit_usd", annual_cost * 2.5)),
+            estimated_annual_benefit_usd=float(
+                roi_data.get("estimated_annual_benefit_usd", annual_cost * 2.5)
+            ),
             payback_months=float(roi_data.get("payback_months", 8.0)),
             roi_percentage=float(roi_data.get("roi_percentage", 150.0)),
             assumptions=roi_data.get("assumptions", []),
@@ -339,8 +345,7 @@ class SalesPodOrchestrator:
         insights_ctx: Optional[str] = format_insights_for_prompt(current_insights)
         if current_insights and current_insights.total_outcomes_analyzed > 0:
             logger.info(
-                "Sales pod [%s]: injecting learning insights v%d "
-                "(%d outcomes, win_rate=%.0f%%)",
+                "Sales pod [%s]: injecting learning insights v%d (%d outcomes, win_rate=%.0f%%)",
                 job_id,
                 current_insights.insights_version,
                 current_insights.total_outcomes_analyzed,
@@ -358,7 +363,9 @@ class SalesPodOrchestrator:
             if request.existing_prospects:
                 prospects = request.existing_prospects
             else:
-                raw = self.prospector.prospect(icp_json, product, vp, request.max_prospects, ctx, insights_ctx)
+                raw = self.prospector.prospect(
+                    icp_json, product, vp, request.max_prospects, ctx, insights_ctx
+                )
                 prospects = _prospects_from_json(raw)
             result.prospects = prospects
             update("prospecting", 15)
@@ -396,7 +403,9 @@ class SalesPodOrchestrator:
             update("qualification", 40)
             logger.info("Sales pod [%s]: qualification stage", job_id)
             for p in prospects:
-                raw = self.qualifier.qualify(p.model_dump_json(indent=2), product, vp, "", insights_ctx)
+                raw = self.qualifier.qualify(
+                    p.model_dump_json(indent=2), product, vp, "", insights_ctx
+                )
                 score = _qual_from_json(raw, p)
                 if score:
                     qualified.append(score)
@@ -409,7 +418,8 @@ class SalesPodOrchestrator:
             # Disqualified and stalled leads are intentionally excluded.
             advance = [q for q in qualified if q.recommended_action.lower().startswith("advance")]
             nurture_prospects = [
-                q.prospect for q in qualified
+                q.prospect
+                for q in qualified
                 if not q.recommended_action.lower().startswith("advance")
                 and not q.recommended_action.lower().startswith("disqualify")
             ]
@@ -428,7 +438,9 @@ class SalesPodOrchestrator:
             logger.info("Sales pod [%s]: nurturing %d prospects", job_id, len(nurture_prospects))
             nurture_seqs: List[NurtureSequence] = []
             for p in nurture_prospects:
-                raw = self.nurture.build_sequence(p.model_dump_json(indent=2), product, vp, 90, insights_ctx)
+                raw = self.nurture.build_sequence(
+                    p.model_dump_json(indent=2), product, vp, 90, insights_ctx
+                )
                 seq = _nurture_from_json(raw, p, 90)
                 if seq:
                     nurture_seqs.append(seq)
@@ -440,7 +452,9 @@ class SalesPodOrchestrator:
         # ------------------------------------------------------------------
         if self._should_run(PipelineStage.DISCOVERY, entry) and qualified_prospects:
             update("discovery", 65)
-            logger.info("Sales pod [%s]: discovery stage for %d prospects", job_id, len(qualified_prospects))
+            logger.info(
+                "Sales pod [%s]: discovery stage for %d prospects", job_id, len(qualified_prospects)
+            )
             plans: List[DiscoveryPlan] = []
             for p in qualified_prospects:
                 qual_json = "{}"
@@ -448,7 +462,9 @@ class SalesPodOrchestrator:
                     if q.prospect.company_name == p.company_name:
                         qual_json = q.model_dump_json(indent=2)
                         break
-                raw = self.discovery.prepare(p.model_dump_json(indent=2), qual_json, product, vp, insights_ctx)
+                raw = self.discovery.prepare(
+                    p.model_dump_json(indent=2), qual_json, product, vp, insights_ctx
+                )
                 plan = _discovery_from_json(raw, p)
                 if plan:
                     plans.append(plan)
@@ -460,12 +476,21 @@ class SalesPodOrchestrator:
         # ------------------------------------------------------------------
         if self._should_run(PipelineStage.PROPOSAL, entry) and qualified_prospects:
             update("proposal", 78)
-            logger.info("Sales pod [%s]: proposal stage for %d prospects", job_id, len(qualified_prospects))
+            logger.info(
+                "Sales pod [%s]: proposal stage for %d prospects", job_id, len(qualified_prospects)
+            )
             proposals: List[SalesProposal] = []
             annual_cost = 25000.0  # Default; real requests should supply per-prospect pricing
             for p in qualified_prospects:
                 raw = self.proposal.write(
-                    p.model_dump_json(indent=2), product, vp, annual_cost, "", cases, ctx, insights_ctx
+                    p.model_dump_json(indent=2),
+                    product,
+                    vp,
+                    annual_cost,
+                    "",
+                    cases,
+                    ctx,
+                    insights_ctx,
                 )
                 prop = _proposal_from_json(raw, p, annual_cost)
                 if prop:
@@ -537,14 +562,16 @@ class SalesPodOrchestrator:
         """
         for p in prospects:
             try:
-                record_stage_outcome(StageOutcome(
-                    pipeline_job_id=job_id,
-                    company_name=p.company_name,
-                    industry=p.industry,
-                    stage=PipelineStage.PROSPECTING,
-                    outcome=OutcomeResult.CONVERTED,
-                    icp_match_score=p.icp_match_score,
-                ))
+                record_stage_outcome(
+                    StageOutcome(
+                        pipeline_job_id=job_id,
+                        company_name=p.company_name,
+                        industry=p.industry,
+                        stage=PipelineStage.PROSPECTING,
+                        outcome=OutcomeResult.CONVERTED,
+                        icp_match_score=p.icp_match_score,
+                    )
+                )
             except Exception as exc:
                 logger.debug("Could not auto-record prospecting outcome: %s", exc)
 
@@ -566,7 +593,12 @@ class SalesPodOrchestrator:
     ) -> List[Prospect]:
         ctx = self._load_insights_ctx()
         raw = self.prospector.prospect(
-            icp.model_dump_json(indent=2), product_name, value_proposition, max_prospects, company_context, ctx
+            icp.model_dump_json(indent=2),
+            product_name,
+            value_proposition,
+            max_prospects,
+            company_context,
+            ctx,
         )
         return _prospects_from_json(raw)
 
@@ -583,7 +615,12 @@ class SalesPodOrchestrator:
         sequences = []
         for p in prospects:
             raw = self.outreach.generate_sequence(
-                p.model_dump_json(indent=2), product_name, value_proposition, cases, company_context, ctx
+                p.model_dump_json(indent=2),
+                product_name,
+                value_proposition,
+                cases,
+                company_context,
+                ctx,
             )
             seq = _outreach_from_json(raw, p)
             if seq:

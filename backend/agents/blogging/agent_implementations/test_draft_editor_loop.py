@@ -44,8 +44,12 @@ CONTENT_PLAN = ContentPlan(
     narrative_flow="Problem, practices, wrap-up.",
     sections=[
         ContentPlanSection(title="Introduction", coverage_description="Hook and stakes.", order=0),
-        ContentPlanSection(title="The Problem", coverage_description="Why classic monitoring fails.", order=1),
-        ContentPlanSection(title="What to Look For", coverage_description="Tracing, cost, evals.", order=2),
+        ContentPlanSection(
+            title="The Problem", coverage_description="Why classic monitoring fails.", order=1
+        ),
+        ContentPlanSection(
+            title="What to Look For", coverage_description="Tracing, cost, evals.", order=2
+        ),
         ContentPlanSection(title="Wrap up", coverage_description="One next step.", order=3),
     ],
     title_candidates=[TitleCandidate(title="Observability essentials", probability_of_success=0.7)],
@@ -56,7 +60,9 @@ CONTENT_PLAN = ContentPlan(
     ),
 )
 
-RESEARCH_DOC = "## Sources\n- LLM Observability Guide: Best practices for monitoring LLMs in production."
+RESEARCH_DOC = (
+    "## Sources\n- LLM Observability Guide: Best practices for monitoring LLMs in production."
+)
 
 
 def main() -> None:
@@ -85,7 +91,9 @@ def main() -> None:
                 tone_or_purpose="technical deep-dive",
             )
             draft_result = draft_agent.run(draft_input)
-            print(f"\n--- Iteration {iteration}: Initial draft ({len(draft_result.draft)} chars) ---")
+            print(
+                f"\n--- Iteration {iteration}: Initial draft ({len(draft_result.draft)} chars) ---"
+            )
         else:
             copy_editor_input = CopyEditorInput(
                 draft=draft_result.draft,
@@ -93,7 +101,9 @@ def main() -> None:
                 tone_or_purpose="technical deep-dive",
             )
             copy_editor_result = copy_editor_agent.run(copy_editor_input)
-            print(f"\n--- Iteration {iteration}: Copy editor found {len(copy_editor_result.feedback_items)} feedback items ---")
+            print(
+                f"\n--- Iteration {iteration}: Copy editor found {len(copy_editor_result.feedback_items)} feedback items ---"
+            )
 
             revise_input = ReviseDraftInput(
                 draft=draft_result.draft,

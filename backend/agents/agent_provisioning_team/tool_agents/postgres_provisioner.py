@@ -20,6 +20,7 @@ from .base import BaseToolProvisioner
 try:
     import psycopg2
     from psycopg2 import sql
+
     HAS_PSYCOPG2 = True
 except ImportError:
     HAS_PSYCOPG2 = False
@@ -47,7 +48,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
         """Get a connection with admin privileges."""
         if not HAS_PSYCOPG2:
             raise RuntimeError("psycopg2 is not installed")
-        
+
         return psycopg2.connect(
             host=self.host,
             port=self.port,
@@ -66,35 +67,31 @@ class PostgresProvisionerTool(BaseToolProvisioner):
         """Create a PostgreSQL database and user for the agent."""
         if not HAS_PSYCOPG2:
             return self._make_error_result("psycopg2 is not installed")
-        
+
         try:
             db_prefix = config.get("database_prefix", "agent_")
             db_name = f"{db_prefix}{agent_id}".replace("-", "_")[:63]
             username = credentials.username or f"agent_{agent_id}".replace("-", "_")[:63]
             password = credentials.password
-            
+
             if not password:
                 return self._make_error_result("No password provided in credentials")
-            
+
             conn = self._get_admin_connection()
             conn.autocommit = True
             cursor = conn.cursor()
-            
+
             try:
                 cursor.execute(
-                    sql.SQL("CREATE USER {} WITH PASSWORD %s").format(
-                        sql.Identifier(username)
-                    ),
+                    sql.SQL("CREATE USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
                     [password],
                 )
             except psycopg2.errors.DuplicateObject:
                 cursor.execute(
-                    sql.SQL("ALTER USER {} WITH PASSWORD %s").format(
-                        sql.Identifier(username)
-                    ),
+                    sql.SQL("ALTER USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
                     [password],
                 )
-            
+
             try:
                 cursor.execute(
                     sql.SQL("CREATE DATABASE {} OWNER {}").format(
@@ -104,28 +101,28 @@ class PostgresProvisionerTool(BaseToolProvisioner):
                 )
             except psycopg2.errors.DuplicateDatabase:
                 pass
-            
+
             permissions = get_permissions("postgresql", access_tier)
             self._apply_permissions(cursor, db_name, username, permissions)
-            
+
             cursor.close()
             conn.close()
-            
+
             connection_string = (
                 f"postgresql://{username}:{password}@{self.host}:{self.port}/{db_name}"
             )
-            
+
             credentials.connection_string = connection_string
             credentials.extra["database"] = db_name
             credentials.extra["host"] = self.host
             credentials.extra["port"] = self.port
-            
+
             self._provisioned[agent_id] = {
                 "database": db_name,
                 "username": username,
                 "permissions": permissions,
             }
-            
+
             return self._make_success_result(
                 credentials=credentials,
                 permissions=permissions,
@@ -179,7 +176,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
     ) -> AccessVerification:
         """Verify PostgreSQL access for the agent."""
         prov_info = self._provisioned.get(agent_id)
-        
+
         if not prov_info:
             return self._make_verification(
                 passed=False,
@@ -187,14 +184,14 @@ class PostgresProvisionerTool(BaseToolProvisioner):
                 actual_permissions=[],
                 errors=[f"No PostgreSQL provisioning found for agent {agent_id}"],
             )
-        
+
         actual_permissions = prov_info.get("permissions", [])
         passed, warnings = validate_permissions(
             "postgresql",
             expected_tier,
             actual_permissions,
         )
-        
+
         return self._make_verification(
             passed=passed,
             expected_tier=expected_tier,
@@ -210,7 +207,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
                 success=False,
                 error="psycopg2 is not installed",
             )
-        
+
         prov_info = self._provisioned.get(agent_id)
         if not prov_info:
             return DeprovisionResult(
@@ -218,15 +215,15 @@ class PostgresProvisionerTool(BaseToolProvisioner):
                 success=True,
                 details={"message": "No database to remove"},
             )
-        
+
         try:
             conn = self._get_admin_connection()
             conn.autocommit = True
             cursor = conn.cursor()
-            
+
             db_name = prov_info["database"]
             username = prov_info["username"]
-            
+
             cursor.execute(
                 sql.SQL("""
                     SELECT pg_terminate_backend(pg_stat_activity.pid)
@@ -236,24 +233,16 @@ class PostgresProvisionerTool(BaseToolProvisioner):
                 """),
                 [db_name],
             )
-            
-            cursor.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {}").format(
-                    sql.Identifier(db_name)
-                )
-            )
-            
-            cursor.execute(
-                sql.SQL("DROP USER IF EXISTS {}").format(
-                    sql.Identifier(username)
-                )
-            )
-            
+
+            cursor.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(db_name)))
+
+            cursor.execute(sql.SQL("DROP USER IF EXISTS {}").format(sql.Identifier(username)))
+
             cursor.close()
             conn.close()
-            
+
             del self._provisioned[agent_id]
-            
+
             return DeprovisionResult(
                 tool_name=self.tool_name,
                 success=True,

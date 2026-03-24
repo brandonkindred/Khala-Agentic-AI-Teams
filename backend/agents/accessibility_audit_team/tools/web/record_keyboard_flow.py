@@ -26,9 +26,7 @@ class FocusTraceStep(BaseModel):
     selector: str = Field(default="", description="CSS selector of focused element")
     role: str = Field(default="", description="ARIA role")
     name: str = Field(default="", description="Accessible name")
-    visible_focus: bool = Field(
-        default=True, description="Whether focus indicator is visible"
-    )
+    visible_focus: bool = Field(default=True, description="Whether focus indicator is visible")
     focus_ring_color: Optional[str] = Field(default=None)
     focus_ring_width: Optional[str] = Field(default=None)
     tab_index: Optional[int] = Field(default=None)
@@ -47,9 +45,7 @@ class RecordKeyboardFlowInput(BaseModel):
         default_factory=lambda: {"video": False, "screenshots": True},
         description="What to capture: video, screenshots",
     )
-    max_steps: int = Field(
-        default=100, description="Maximum steps before stopping"
-    )
+    max_steps: int = Field(default=100, description="Maximum steps before stopping")
 
 
 class RecordKeyboardFlowOutput(BaseModel):
@@ -57,9 +53,7 @@ class RecordKeyboardFlowOutput(BaseModel):
 
     video_ref: str = Field(default="", description="Reference to video recording")
     focus_trace: List[FocusTraceStep] = Field(default_factory=list)
-    screenshots: List[str] = Field(
-        default_factory=list, description="Screenshot references"
-    )
+    screenshots: List[str] = Field(default_factory=list, description="Screenshot references")
     issues_detected: List[Dict[str, Any]] = Field(
         default_factory=list, description="Keyboard issues detected during flow"
     )

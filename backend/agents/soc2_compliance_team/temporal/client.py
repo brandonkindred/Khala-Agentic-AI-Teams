@@ -48,6 +48,7 @@ def set_temporal_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
 
 async def connect_temporal_client() -> Optional["Client"]:
     from temporalio.client import Client
+
     address = get_temporal_address()
     if not address:
         return None

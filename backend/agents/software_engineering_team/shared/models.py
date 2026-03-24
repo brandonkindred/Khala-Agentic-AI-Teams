@@ -134,7 +134,7 @@ class ToolRecommendation(BaseModel):
     @classmethod
     def coerce_cost_to_string(cls, v):
         """Coerce numeric values to strings for estimated_monthly_cost.
-        
+
         LLMs sometimes return float/int values instead of strings.
         """
         if v is None:
@@ -262,7 +262,9 @@ class TaskUpdate(BaseModel):
     """Completion report from a specialist agent after finishing a task."""
 
     task_id: str = Field(..., description="ID of the completed task")
-    agent_type: str = Field(..., description="Type of agent that completed the task: backend, frontend, devops")
+    agent_type: str = Field(
+        ..., description="Type of agent that completed the task: backend, frontend, devops"
+    )
     status: str = Field(
         default="completed",
         description="Completion status: completed, failed, partial",

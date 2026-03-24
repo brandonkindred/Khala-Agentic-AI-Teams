@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List
 
-from llm_service import LLMClient
+from llm_service import LLMClient, compact_text
 from software_engineering_team.shared.models import (
     Task,
     TaskStatus,
@@ -52,20 +52,24 @@ class TechLeadAgent:
     def _analyze_codebase(self, existing_codebase: str) -> str:
         """Analyze the existing codebase to understand what already exists."""
         logger.info("Tech Lead: Analyzing existing codebase (%s chars)", len(existing_codebase))
-        prompt = TECH_LEAD_ANALYZE_CODEBASE_PROMPT + "\n\n---\n\n**EXISTING CODEBASE:**\n" + existing_codebase
+        prompt = (
+            TECH_LEAD_ANALYZE_CODEBASE_PROMPT
+            + "\n\n---\n\n**EXISTING CODEBASE:**\n"
+            + existing_codebase
+        )
         data = self.llm.complete_json(prompt, temperature=0.1)
         return json.dumps(data, indent=2)
 
     def _read_plan_artifacts(self, repo_path: str) -> str:
         """
         Read all markdown planning artifacts from /plan folder.
-        
+
         Returns concatenated content with file headers for context.
         """
         plan_dir = Path(repo_path) / "plan"
         if not plan_dir.exists():
             return ""
-        
+
         artifacts: List[str] = []
         for md_file in sorted(plan_dir.glob("*.md")):
             try:
@@ -75,12 +79,13 @@ class TechLeadAgent:
             except Exception as e:
                 logger.warning(
                     "Tech Lead: failed to read %s: %s. Next step -> Continuing with remaining artifacts",
-                    md_file, e,
+                    md_file,
+                    e,
                 )
-        
+
         if artifacts:
             logger.info("Tech Lead: read %d plan artifacts from %s", len(artifacts), plan_dir)
-        
+
         return "\n\n".join(artifacts)
 
     def _generate_detailed_summary(
@@ -98,26 +103,28 @@ class TechLeadAgent:
         Generate a detailed development plan summary from the Planning V2 hierarchy
         and plan artifacts.
         """
-        
+
         parts: List[str] = []
-        
+
         # Header with project info
         parts.append(f"# Development Plan: {requirements.title}\n")
         parts.append("\n## Overview\n")
-        parts.append(f"This development plan covers {requirements.description[:200]}{'...' if len(requirements.description) > 200 else ''}\n")
-        
+        parts.append(
+            f"This development plan covers {requirements.description[:200]}{'...' if len(requirements.description) > 200 else ''}\n"
+        )
+
         # Hierarchy summary
         parts.append("\n## Planning Hierarchy Summary\n")
         parts.append(f"- **Initiatives:** {init_count}\n")
         parts.append(f"- **Epics:** {epic_count}\n")
         parts.append(f"- **Stories:** {story_count}\n")
         parts.append(f"- **Tasks:** {task_count}\n")
-        
+
         # Team breakdown
         parts.append("\n## Task Distribution by Team\n")
         for team, count in sorted(team_counts.items()):
             parts.append(f"- **{team.title()}:** {count} tasks\n")
-        
+
         # Initiative details
         parts.append("\n## Initiatives\n")
         for init in hierarchy.initiatives:
@@ -126,31 +133,35 @@ class TechLeadAgent:
             parts.append(f"\n**Epics ({len(init.epics)}):**\n")
             for epic in init.epics:
                 story_tasks = sum(len(s.tasks) for s in epic.stories)
-                parts.append(f"- **{epic.title}**: {len(epic.stories)} stories, {story_tasks} tasks\n")
+                parts.append(
+                    f"- **{epic.title}**: {len(epic.stories)} stories, {story_tasks} tasks\n"
+                )
                 if epic.description:
-                    parts.append(f"  {epic.description[:150]}{'...' if len(epic.description) > 150 else ''}\n")
-        
+                    parts.append(
+                        f"  {epic.description[:150]}{'...' if len(epic.description) > 150 else ''}\n"
+                    )
+
         # Key acceptance criteria from requirements
         if requirements.acceptance_criteria:
             parts.append("\n## Key Acceptance Criteria\n")
             for i, criterion in enumerate(requirements.acceptance_criteria[:10], 1):
                 parts.append(f"{i}. {criterion}\n")
-        
+
         # Architecture and design context from artifacts
         if plan_artifacts:
             # Extract key sections from artifacts
             parts.append("\n## Planning Context\n")
             parts.append("Planning artifacts include: ")
-            
+
             artifact_names = []
             for line in plan_artifacts.split("\n"):
                 if line.startswith("--- ") and line.endswith(" ---"):
                     artifact_names.append(line.strip("- ").strip())
-            
+
             if artifact_names:
                 parts.append(", ".join(artifact_names))
             parts.append("\n")
-        
+
         # Execution order hint
         if hierarchy.execution_order:
             parts.append("\n## Execution Order\n")
@@ -159,7 +170,7 @@ class TechLeadAgent:
             if len(hierarchy.execution_order) > 5:
                 parts.append(f" (and {len(hierarchy.execution_order) - 5} more)")
             parts.append("\n")
-        
+
         summary = "".join(parts)
         logger.info("Tech Lead: generated detailed summary (%d chars)", len(summary))
         return summary
@@ -185,24 +196,26 @@ class TechLeadAgent:
             epic_count = sum(len(i.epics) for i in hierarchy.initiatives)
             story_count = sum(len(e.stories) for i in hierarchy.initiatives for e in i.epics)
             init_count = len(hierarchy.initiatives)
-            
+
             # Count tasks by team
             team_counts: Dict[str, int] = {}
             for task in assignment.tasks:
                 team = task.assignee or "unassigned"
                 team_counts[team] = team_counts.get(team, 0) + 1
-            
+
             logger.info(
                 "Tech Lead: using Planning V2 hierarchy (%s tasks across %s stories)",
                 task_count,
                 story_count,
             )
-            
+
             # Read plan artifacts for additional context
             plan_artifacts = ""
             if input_data.repo_path:
-                plan_artifacts = input_data.plan_artifacts_content or self._read_plan_artifacts(input_data.repo_path)
-            
+                plan_artifacts = input_data.plan_artifacts_content or self._read_plan_artifacts(
+                    input_data.repo_path
+                )
+
             # Generate a detailed development plan summary
             summary = self._generate_detailed_summary(
                 hierarchy=hierarchy,
@@ -214,7 +227,7 @@ class TechLeadAgent:
                 plan_artifacts=plan_artifacts,
                 requirements=input_data.requirements,
             )
-            
+
             return TechLeadOutput(
                 assignment=assignment,
                 planning_hierarchy=hierarchy,
@@ -236,8 +249,13 @@ class TechLeadAgent:
         if data.get("spec_clarification_needed"):
             clarification_questions = data.get("clarification_questions") or []
             if not isinstance(clarification_questions, list):
-                clarification_questions = [str(clarification_questions)] if clarification_questions else []
-            logger.warning("Tech Lead: spec is unclear, requesting clarification: %s", clarification_questions[:3])
+                clarification_questions = (
+                    [str(clarification_questions)] if clarification_questions else []
+                )
+            logger.warning(
+                "Tech Lead: spec is unclear, requesting clarification: %s",
+                clarification_questions[:3],
+            )
             return TechLeadOutput(
                 assignment=None,
                 planning_hierarchy=None,
@@ -261,7 +279,9 @@ class TechLeadAgent:
             "Tech Lead: produced %s tasks across %s stories (execution order: %s)",
             len(assignment.tasks),
             sum(len(e.stories) for i in hierarchy.initiatives for e in i.epics),
-            assignment.execution_order[:10] if len(assignment.execution_order) > 10 else assignment.execution_order,
+            assignment.execution_order[:10]
+            if len(assignment.execution_order) > 10
+            else assignment.execution_order,
         )
         return TechLeadOutput(
             assignment=assignment,
@@ -289,65 +309,87 @@ class TechLeadAgent:
 
         resolved = input_data.resolved_questions or []
         resolved_question_texts = {r.get("question", "") for r in resolved if isinstance(r, dict)}
-        remaining_open = [q for q in (input_data.open_questions or []) if q not in resolved_question_texts]
+        remaining_open = [
+            q for q in (input_data.open_questions or []) if q not in resolved_question_texts
+        ]
 
         if resolved:
-            context_parts.extend([
-                "",
-                "**USER-PROVIDED RESOLUTIONS (use these exactly):**",
-                *[f"- **{r.get('question', '')}** -> {r.get('answer', '')}" for r in resolved if isinstance(r, dict)],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**USER-PROVIDED RESOLUTIONS (use these exactly):**",
+                    *[
+                        f"- **{r.get('question', '')}** -> {r.get('answer', '')}"
+                        for r in resolved
+                        if isinstance(r, dict)
+                    ],
+                ]
+            )
         if remaining_open:
-            context_parts.extend([
-                "",
-                "**OPEN QUESTIONS (resolve with best-practice defaults):**",
-                *[f"- {q}" for q in remaining_open],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**OPEN QUESTIONS (resolve with best-practice defaults):**",
+                    *[f"- {q}" for q in remaining_open],
+                ]
+            )
         if input_data.assumptions:
-            context_parts.extend([
-                "",
-                "**Assumptions from Spec Intake:**",
-                *[f"- {a}" for a in input_data.assumptions],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Assumptions from Spec Intake:**",
+                    *[f"- {a}" for a in input_data.assumptions],
+                ]
+            )
 
         if po:
-            context_parts.extend([
-                "",
-                "**Project Overview:**",
-                f"- Primary goal: {po.get('primary_goal', '')}",
-                f"- Delivery strategy: {po.get('delivery_strategy', '')}",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Project Overview:**",
+                    f"- Primary goal: {po.get('primary_goal', '')}",
+                    f"- Delivery strategy: {po.get('delivery_strategy', '')}",
+                ]
+            )
             milestones = po.get("milestones", [])
             if milestones:
-                context_parts.append("- Milestones: " + ", ".join(m.get("name", "") for m in milestones))
+                context_parts.append(
+                    "- Milestones: " + ", ".join(m.get("name", "") for m in milestones)
+                )
 
         features_doc = po.get("features_and_functionality_doc", "") if po else ""
         if features_doc:
-            context_parts.extend([
-                "",
-                "**Features and Functionality:**",
-                "---",
-                features_doc[:20000],
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Features and Functionality:**",
+                    "---",
+                    features_doc,
+                    "---",
+                ]
+            )
 
         if input_data.spec_content:
-            context_parts.extend([
-                "",
-                "**Full Specification:**",
-                "---",
-                input_data.spec_content[:30000],
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Full Specification:**",
+                    "---",
+                    input_data.spec_content,
+                    "---",
+                ]
+            )
 
         if codebase_analysis:
-            context_parts.extend([
-                "",
-                "**Codebase Analysis:**",
-                "---",
-                codebase_analysis[:10000],
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Codebase Analysis:**",
+                    "---",
+                    codebase_analysis,
+                    "---",
+                ]
+            )
 
         if input_data.existing_tasks:
             task_lines = [
@@ -356,12 +398,20 @@ class TechLeadAgent:
                 "---",
             ]
             for t in input_data.existing_tasks:
-                task_lines.append(f"- **id:** {t.id} | **type:** {t.type} | **title:** {t.title} | **status:** {t.status} | **assignee:** {t.assignee}")
-                task_lines.append(f"  **description:** {t.description[:500]}{'...' if len(t.description) > 500 else ''}")
+                task_lines.append(
+                    f"- **id:** {t.id} | **type:** {t.type} | **title:** {t.title} | **status:** {t.status} | **assignee:** {t.assignee}"
+                )
+                task_lines.append(
+                    f"  **description:** {t.description[:500]}{'...' if len(t.description) > 500 else ''}"
+                )
                 if t.requirements:
-                    task_lines.append(f"  **requirements:** {t.requirements[:300]}{'...' if len(t.requirements) > 300 else ''}")
+                    task_lines.append(
+                        f"  **requirements:** {t.requirements[:300]}{'...' if len(t.requirements) > 300 else ''}"
+                    )
                 if t.acceptance_criteria:
-                    task_lines.append("  **acceptance_criteria:** " + "; ".join(t.acceptance_criteria[:5]))
+                    task_lines.append(
+                        "  **acceptance_criteria:** " + "; ".join(t.acceptance_criteria[:5])
+                    )
                 if t.dependencies:
                     task_lines.append(f"  **dependencies:** {t.dependencies}")
                 task_lines.append("")
@@ -370,31 +420,35 @@ class TechLeadAgent:
 
         if input_data.architecture:
             arch = input_data.architecture
-            context_parts.extend([
-                "",
-                "**System Architecture:**",
-                arch.overview,
-                "",
-                "**Components:**",
-                *[f"- {c.name} ({c.type}): {c.description}" for c in arch.components],
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**System Architecture:**",
+                    arch.overview,
+                    "",
+                    "**Components:**",
+                    *[f"- {c.name} ({c.type}): {c.description}" for c in arch.components],
+                ]
+            )
 
         if input_data.repo_path:
             context_parts.extend(["", f"**Repo path:** {input_data.repo_path}"])
-        
+
         # Include plan artifacts if available (from Planning V2 or explicit input)
         plan_artifacts = input_data.plan_artifacts_content or ""
         if not plan_artifacts and input_data.repo_path:
             plan_artifacts = self._read_plan_artifacts(input_data.repo_path)
-        
+
         if plan_artifacts:
-            context_parts.extend([
-                "",
-                "**Planning Artifacts (from /plan folder - use these for context):**",
-                "---",
-                plan_artifacts[:15000],
-                "---",
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Planning Artifacts (from /plan folder - use these for context):**",
+                    "---",
+                    plan_artifacts,
+                    "---",
+                ]
+            )
 
         return TECH_LEAD_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
 
@@ -411,9 +465,13 @@ class TechLeadAgent:
         """
         from software_engineering_team.shared.context_sizing import compute_spec_excerpt_chars
 
-        logger.info("Tech Lead: refining task %s with %s clarification requests", task.id, len(clarification_requests))
+        logger.info(
+            "Tech Lead: refining task %s with %s clarification requests",
+            task.id,
+            len(clarification_requests),
+        )
         max_spec = compute_spec_excerpt_chars(self.llm)
-        spec_excerpt = (spec_content or "")[:max_spec] + ("..." if len(spec_content or "") > max_spec else "")
+        spec_excerpt = compact_text(spec_content or "", max_spec, self.llm, "specification excerpt")
         context_parts = [
             f"**Task ID:** {task.id}",
             f"**Current description:** {task.description}",
@@ -427,11 +485,13 @@ class TechLeadAgent:
             spec_excerpt,
         ]
         if architecture:
-            context_parts.extend([
-                "",
-                "**Architecture overview:**",
-                architecture.overview,
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Architecture overview:**",
+                    architecture.overview,
+                ]
+            )
 
         prompt = TECH_LEAD_REFINE_TASK_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         data = self.llm.complete_json(prompt, temperature=0.2)
@@ -471,7 +531,7 @@ class TechLeadAgent:
             for b in qa_bugs
         )
         max_spec = compute_spec_excerpt_chars(self.llm)
-        spec_excerpt = (spec_content or "")[:max_spec] + ("..." if len(spec_content or "") > max_spec else "")
+        spec_excerpt = compact_text(spec_content or "", max_spec, self.llm, "specification excerpt")
         context_parts = [
             f"**Completed task:** id={task.id}, assignee={task.assignee}, description={task.description}",
             f"**QA approved:** {getattr(qa_result, 'approved', True)}",
@@ -531,7 +591,10 @@ class TechLeadAgent:
             compute_spec_excerpt_chars,
         )
 
-        logger.info("Tech Lead: evaluating if security review should run (%s completed code tasks)", len(completed_code_task_ids))
+        logger.info(
+            "Tech Lead: evaluating if security review should run (%s completed code tasks)",
+            len(completed_code_task_ids),
+        )
         max_spec = compute_spec_excerpt_chars(self.llm)
         max_mapping = compute_requirement_mapping_chars(self.llm)
         context_parts = [
@@ -539,10 +602,12 @@ class TechLeadAgent:
             ", ".join(completed_code_task_ids),
             "",
             "**Spec:**",
-            (spec_content or "")[:max_spec] + ("..." if len(spec_content or "") > max_spec else ""),
+            compact_text(spec_content or "", max_spec, self.llm, "specification"),
             "",
             "**Requirement-task mapping:**",
-            str(requirement_task_mapping)[:max_mapping],
+            compact_text(
+                str(requirement_task_mapping), max_mapping, self.llm, "requirement-task mapping"
+            ),
         ]
         prompt = TECH_LEAD_SHOULD_RUN_SECURITY_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         data = self.llm.complete_json(prompt, temperature=0.1)
@@ -579,15 +644,25 @@ class TechLeadAgent:
             len(remaining_tasks),
         )
 
-        completed_summary = "\n".join(
-            f"- [{t.id}] {t.title}: {t.description[:120]}..." if len(t.description) > 120 else f"- [{t.id}] {t.title}: {t.description}"
-            for t in completed_tasks
-        ) or "None yet"
+        completed_summary = (
+            "\n".join(
+                f"- [{t.id}] {t.title}: {t.description[:120]}..."
+                if len(t.description) > 120
+                else f"- [{t.id}] {t.title}: {t.description}"
+                for t in completed_tasks
+            )
+            or "None yet"
+        )
 
-        remaining_summary = "\n".join(
-            f"- [{t.id}] {t.title}: {t.description[:120]}..." if len(t.description) > 120 else f"- [{t.id}] {t.title}: {t.description}"
-            for t in remaining_tasks
-        ) or "None remaining"
+        remaining_summary = (
+            "\n".join(
+                f"- [{t.id}] {t.title}: {t.description[:120]}..."
+                if len(t.description) > 120
+                else f"- [{t.id}] {t.title}: {t.description}"
+                for t in remaining_tasks
+            )
+            or "None remaining"
+        )
 
         context_parts = [
             "**TASK UPDATE (just completed):**",
@@ -611,28 +686,34 @@ class TechLeadAgent:
 
         failure_reason = getattr(task_update, "failure_reason", None)
         if failure_reason:
-            context_parts.extend([
-                "",
-                "**FAILURE REASON (create tasks to fix these specific errors):**",
-                failure_reason[:4000] + ("..." if len(failure_reason) > 4000 else ""),
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**FAILURE REASON (create tasks to fix these specific errors):**",
+                    failure_reason,
+                ]
+            )
 
         if architecture:
-            context_parts.extend([
-                "",
-                "**Architecture overview:**",
-                architecture.overview,
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Architecture overview:**",
+                    architecture.overview,
+                ]
+            )
 
         if codebase_summary:
             from software_engineering_team.shared.context_sizing import compute_existing_code_chars
+
             max_code = compute_existing_code_chars(self.llm)
-            code_excerpt = codebase_summary[:max_code] + ("..." if len(codebase_summary) > max_code else "")
-            context_parts.extend([
-                "",
-                "**Current codebase state:**",
-                code_excerpt,
-            ])
+            context_parts.extend(
+                [
+                    "",
+                    "**Current codebase state:**",
+                    compact_text(codebase_summary, max_code, self.llm, "codebase summary"),
+                ]
+            )
 
         prompt = TECH_LEAD_REVIEW_PROGRESS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         data = self.llm.complete_json(prompt, temperature=0.2)
@@ -713,8 +794,7 @@ class TechLeadAgent:
                 not readme_file.exists() or not readme_content or len(readme_content) < 100
             )
             force_docs_because_readme_empty = (
-                readme_missing_or_empty
-                and task_update.agent_type in ("backend", "frontend")
+                readme_missing_or_empty and task_update.agent_type in ("backend", "frontend")
             )
 
             should_update = force_docs_because_readme_empty
@@ -723,8 +803,11 @@ class TechLeadAgent:
                 from software_engineering_team.shared.context_sizing import (
                     compute_spec_excerpt_chars,
                 )
+
                 max_code = compute_spec_excerpt_chars(self.llm)
-                code_excerpt = (codebase_summary or "")[:max_code] + ("..." if len(codebase_summary or "") > max_code else "")
+                code_excerpt = compact_text(
+                    codebase_summary or "", max_code, self.llm, "codebase summary"
+                )
                 context_parts = [
                     f"**Task ID:** {task_update.task_id}",
                     f"**Agent type:** {task_update.agent_type}",
@@ -736,7 +819,10 @@ class TechLeadAgent:
                     code_excerpt,
                 ]
                 if readme_missing_or_empty:
-                    context_parts.insert(0, "**Repository README.md:** missing or empty (you MUST set should_update_docs to true).")
+                    context_parts.insert(
+                        0,
+                        "**Repository README.md:** missing or empty (you MUST set should_update_docs to true).",
+                    )
 
                 prompt = TECH_LEAD_TRIGGER_DOCS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
                 data = self.llm.complete_json(prompt, temperature=0.1)
@@ -748,13 +834,17 @@ class TechLeadAgent:
                 should_update,
                 task_update.task_id,
                 rationale[:100] if rationale else "N/A",
-                " (forced: README missing, empty, or minimal)" if force_docs_because_readme_empty else "",
+                " (forced: README missing, empty, or minimal)"
+                if force_docs_because_readme_empty
+                else "",
             )
 
             if not should_update:
                 return
 
-            logger.info("Tech Lead: triggering Documentation Agent for task %s", task_update.task_id)
+            logger.info(
+                "Tech Lead: triggering Documentation Agent for task %s", task_update.task_id
+            )
             doc_result = doc_agent.run_full_workflow(
                 repo_path=repo_path,
                 task_id=task_update.task_id,
@@ -803,7 +893,9 @@ class TechLeadAgent:
                 task_description="Add containerization and deployment for the backend application. Produce a Dockerfile and CI/CD so this repo can be built and deployed. Backend is Python/FastAPI.",
                 requirements="Dockerfile for Python/FastAPI (pip install, uvicorn). CI/CD: install deps, run tests (pytest), build image. Make repo self-contained for build and deploy.",
                 architecture=architecture,
-                existing_pipeline=existing_pipeline if existing_pipeline and existing_pipeline != "# No code files found" else None,
+                existing_pipeline=existing_pipeline
+                if existing_pipeline and existing_pipeline != "# No code files found"
+                else None,
                 tech_stack=["Python", "FastAPI", "PostgreSQL", "Docker"],
                 target_repo="backend",
                 build_verifier=build_verifier,
@@ -813,7 +905,10 @@ class TechLeadAgent:
             if workflow_result.success:
                 logger.info("Tech Lead: DevOps for backend completed (workflow)")
             else:
-                logger.warning("Tech Lead: DevOps for backend workflow failed: %s", workflow_result.failure_reason)
+                logger.warning(
+                    "Tech Lead: DevOps for backend workflow failed: %s",
+                    workflow_result.failure_reason,
+                )
             return workflow_result.success
         except Exception as e:
             logger.warning("Tech Lead: DevOps for backend failed (non-blocking): %s", e)
@@ -845,7 +940,9 @@ class TechLeadAgent:
                 task_description="Add containerization and deployment for the frontend application. Produce a Dockerfile and CI/CD so this repo can be built and deployed. Frontend is a JavaScript/TypeScript application (React, Angular, or Vue).",
                 requirements="Dockerfile: multi-stage build (npm ci, npm run build; serve with nginx or Node). CI/CD: install deps, run tests, build image. Make repo self-contained for build and deploy.",
                 architecture=architecture,
-                existing_pipeline=existing_pipeline if existing_pipeline and existing_pipeline != "# No code files found" else None,
+                existing_pipeline=existing_pipeline
+                if existing_pipeline and existing_pipeline != "# No code files found"
+                else None,
                 tech_stack=["JavaScript", "TypeScript", "Node", "Docker"],
                 target_repo="frontend",
                 build_verifier=build_verifier,
@@ -855,7 +952,10 @@ class TechLeadAgent:
             if workflow_result.success:
                 logger.info("Tech Lead: DevOps for frontend completed (workflow)")
             else:
-                logger.warning("Tech Lead: DevOps for frontend workflow failed: %s", workflow_result.failure_reason)
+                logger.warning(
+                    "Tech Lead: DevOps for frontend workflow failed: %s",
+                    workflow_result.failure_reason,
+                )
             return workflow_result.success
         except Exception as e:
             logger.warning("Tech Lead: DevOps for frontend failed (non-blocking): %s", e)

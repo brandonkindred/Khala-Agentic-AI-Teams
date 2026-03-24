@@ -299,7 +299,15 @@ def test_frontend_agent_with_security_issues() -> None:
         FrontendInput(
             task_description="Fix vulnerability",
             requirements="",
-            security_issues=[{"severity": "high", "category": "xss", "description": "Vuln", "recommendation": "Fix", "location": "x"}],
+            security_issues=[
+                {
+                    "severity": "high",
+                    "category": "xss",
+                    "description": "Vuln",
+                    "recommendation": "Fix",
+                    "location": "x",
+                }
+            ],
         )
     )
     call_args = mock_llm.complete_json.call_args[0][0]
@@ -321,7 +329,15 @@ def test_frontend_agent_with_accessibility_issues() -> None:
         FrontendInput(
             task_description="Fix a11y",
             requirements="",
-            accessibility_issues=[{"severity": "medium", "wcag_criterion": "1.1.1", "description": "Missing alt", "recommendation": "Add alt", "location": "x"}],
+            accessibility_issues=[
+                {
+                    "severity": "medium",
+                    "wcag_criterion": "1.1.1",
+                    "description": "Missing alt",
+                    "recommendation": "Add alt",
+                    "location": "x",
+                }
+            ],
         )
     )
     call_args = mock_llm.complete_json.call_args[0][0]
@@ -343,7 +359,14 @@ def test_frontend_agent_with_code_review_issues() -> None:
         FrontendInput(
             task_description="Address review",
             requirements="",
-            code_review_issues=[{"severity": "medium", "description": "Refactor", "suggestion": "Simplify", "file_path": "x.ts"}],
+            code_review_issues=[
+                {
+                    "severity": "medium",
+                    "description": "Refactor",
+                    "suggestion": "Simplify",
+                    "file_path": "x.ts",
+                }
+            ],
         )
     )
     call_args = mock_llm.complete_json.call_args[0][0]
@@ -367,7 +390,13 @@ def test_frontend_agent_includes_problem_solving_header_when_issues_present() ->
             requirements="",
             framework_target="angular",
             code_review_issues=[
-                {"severity": "critical", "category": "build", "description": "NG8002 formGroup", "suggestion": "Add ReactiveFormsModule", "file_path": "x.component.ts"},
+                {
+                    "severity": "critical",
+                    "category": "build",
+                    "description": "NG8002 formGroup",
+                    "suggestion": "Add ReactiveFormsModule",
+                    "file_path": "x.component.ts",
+                },
             ],
         )
     )
@@ -411,7 +440,9 @@ def test_frontend_agent_logs_llm_prompt(caplog: pytest.LogCaptureFixture) -> Non
     }
     agent = FrontendExpertAgent(llm_client=mock_llm)
     agent.run(FrontendInput(task_description="Add component", requirements=""))
-    assert any("LLM call" in rec.message and "agent=Frontend" in rec.message for rec in caplog.records)
+    assert any(
+        "LLM call" in rec.message and "agent=Frontend" in rec.message for rec in caplog.records
+    )
     assert any("mode=initial" in rec.message for rec in caplog.records)
 
 
@@ -451,7 +482,9 @@ def test_frontend_agent_logs_problem_solving_context_and_header_when_issues_pres
     assert any("mode=problem_solving" in rec.message for rec in caplog.records)
 
 
-def test_frontend_agent_no_problem_solving_logs_when_no_issues(caplog: pytest.LogCaptureFixture) -> None:
+def test_frontend_agent_no_problem_solving_logs_when_no_issues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Frontend agent does not log problem-solving context/header when no issues."""
     import logging
 
@@ -467,7 +500,9 @@ def test_frontend_agent_no_problem_solving_logs_when_no_issues(caplog: pytest.Lo
     agent = FrontendExpertAgent(llm_client=mock_llm)
     agent.run(FrontendInput(task_description="Add component", requirements=""))
     assert not any("Frontend problem-solving context" in rec.message for rec in caplog.records)
-    assert not any("Frontend problem-solving header for LLM" in rec.message for rec in caplog.records)
+    assert not any(
+        "Frontend problem-solving header for LLM" in rec.message for rec in caplog.records
+    )
 
 
 def test_frontend_agent_with_qa_issues() -> None:
@@ -485,7 +520,14 @@ def test_frontend_agent_with_qa_issues() -> None:
         FrontendInput(
             task_description="Fix bugs",
             requirements="",
-            qa_issues=[{"severity": "high", "description": "Bug", "recommendation": "Fix it", "location": "x.ts"}],
+            qa_issues=[
+                {
+                    "severity": "high",
+                    "description": "Bug",
+                    "recommendation": "Fix it",
+                    "location": "x.ts",
+                }
+            ],
         )
     )
     call_args = mock_llm.complete_json.call_args[0][0]
@@ -573,7 +615,9 @@ def test_read_repo_code_excludes_node_modules_and_dist(tmp_path):
     (tmp_path / ".angular").mkdir(parents=True)
 
     (tmp_path / "src" / "app" / "app.ts").write_text("// app source", encoding="utf-8")
-    (tmp_path / "node_modules" / "foo" / "bar.ts").write_text("// node_modules content", encoding="utf-8")
+    (tmp_path / "node_modules" / "foo" / "bar.ts").write_text(
+        "// node_modules content", encoding="utf-8"
+    )
     (tmp_path / "dist" / "main.js").write_text("// dist is not .ts", encoding="utf-8")
     (tmp_path / ".angular" / "cache").write_text("cache", encoding="utf-8")
 
@@ -599,7 +643,13 @@ def test_frontend_plan_task_returns_plan_markdown() -> None:
         "tests_needed": "task-list.component.spec.ts",
     }
     agent = FrontendExpertAgent(llm_client=mock_llm)
-    task = Task(id="f1", type=TaskType.FRONTEND, assignee="frontend", title="Add task list", description="Implement task list component")
+    task = Task(
+        id="f1",
+        type=TaskType.FRONTEND,
+        assignee="frontend",
+        title="Add task list",
+        description="Implement task list component",
+    )
     plan_text = agent._plan_task(
         task=task,
         existing_code="# No code",

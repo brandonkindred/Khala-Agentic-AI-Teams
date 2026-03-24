@@ -17,7 +17,9 @@ class Traveler(BaseModel):
     name: str = ""
     age_group: str = "adult"  # child, teen, adult, senior
     interests: List[str] = Field(default_factory=list)  # hiking, museums, food, beaches, etc.
-    needs: List[str] = Field(default_factory=list)  # wheelchair accessible, vegetarian, pet owner, etc.
+    needs: List[str] = Field(
+        default_factory=list
+    )  # wheelchair accessible, vegetarian, pet owner, etc.
     notes: str = ""
 
 

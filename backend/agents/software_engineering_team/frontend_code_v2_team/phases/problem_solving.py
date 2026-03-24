@@ -28,24 +28,13 @@ from ..prompts import BATCH_FIX_PROMPT, PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT, TYP
 logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS_PER_ISSUE = 100
-MAX_RELEVANT_CODE_CHARS = 8000
-MAX_BATCH_CODE_CHARS = 24000
 
 
-def _format_all_code(current_files: Dict[str, str], max_chars: int = MAX_BATCH_CODE_CHARS) -> str:
-    """Format all current files for batch fix prompt, respecting character limits."""
+def _format_all_code(current_files: Dict[str, str]) -> str:
+    """Format all current files for batch fix prompt."""
     parts: List[str] = []
-    total = 0
     for path, content in current_files.items():
-        chunk = f"--- {path} ---\n{content}\n"
-        if total + len(chunk) > max_chars:
-            remaining = max_chars - total
-            if remaining > 200:
-                chunk = f"--- {path} ---\n{content[:remaining]}\n... [truncated]"
-                parts.append(chunk)
-            break
-        parts.append(chunk)
-        total += len(chunk)
+        parts.append(f"--- {path} ---\n{content}\n")
     return "\n".join(parts) if parts else "(no code)"
 
 
@@ -98,7 +87,7 @@ def run_batch_coding_fixes(
     """
     microtask_id = microtask.id
     actionable = [i for i in issues if i.severity in ("critical", "high", "medium")]
-    
+
     if not actionable:
         logger.info("[%s] Batch fix for %s: no actionable issues.", task_id, phase_name)
         return ProblemSolvingResult(
@@ -108,10 +97,13 @@ def run_batch_coding_fixes(
         )
 
     lang_conv = TYPESCRIPT_CONVENTIONS
-    
+
     logger.info(
         "[%s] Microtask %s: batch fixing %d %s issues. Sending all issues to coding agent.",
-        task_id, microtask_id, len(actionable), phase_name,
+        task_id,
+        microtask_id,
+        len(actionable),
+        phase_name,
     )
 
     if detail_callback:
@@ -133,7 +125,9 @@ def run_batch_coding_fixes(
     except Exception as exc:
         logger.error(
             "[%s] Microtask %s: batch fix LLM call failed: %s",
-            task_id, microtask_id, exc,
+            task_id,
+            microtask_id,
+            exc,
         )
         return ProblemSolvingResult(
             resolved=False,
@@ -151,7 +145,7 @@ def run_batch_coding_fixes(
     merged.update(fixed_files)
 
     addressed_count = len(issues_addressed)
-    
+
     unresolved_issues: List[ReviewIssue] = []
     if addressed_count < len(actionable):
         addressed_indices = set()
@@ -170,7 +164,11 @@ def run_batch_coding_fixes(
 
     logger.info(
         "[%s] Microtask %s: batch fix complete. %d files updated, %d/%d issues addressed.",
-        task_id, microtask_id, len(fixed_files), addressed_count, len(actionable),
+        task_id,
+        microtask_id,
+        len(fixed_files),
+        addressed_count,
+        len(actionable),
     )
 
     if detail_callback:
@@ -198,21 +196,10 @@ def _relevant_code_for_issue(
 ) -> str:
     if issue.file_path and issue.file_path in current_files:
         content = current_files[issue.file_path]
-        if len(content) <= MAX_RELEVANT_CODE_CHARS:
-            return f"--- {issue.file_path} ---\n{content}"
-        return f"--- {issue.file_path} ---\n{content[:MAX_RELEVANT_CODE_CHARS]}\n... [truncated]"
+        return f"--- {issue.file_path} ---\n{content}"
     parts: List[str] = []
-    total = 0
     for path, content in list(current_files.items())[:10]:
-        chunk = f"--- {path} ---\n{content}\n"
-        if total + len(chunk) > MAX_RELEVANT_CODE_CHARS:
-            remaining = MAX_RELEVANT_CODE_CHARS - total
-            if remaining > 200:
-                chunk = f"--- {path} ---\n{content[:remaining]}\n... [truncated]"
-                parts.append(chunk)
-            break
-        parts.append(chunk)
-        total += len(chunk)
+        parts.append(f"--- {path} ---\n{content}\n")
     return "\n".join(parts) if parts else "(no code)"
 
 
@@ -230,7 +217,9 @@ def run_problem_solving(
     task_id = task.id
     actionable = [i for i in review_result.issues if i.severity in ("critical", "high", "medium")]
     if not actionable:
-        return ProblemSolvingResult(resolved=True, files=current_files, summary="No actionable issues.")
+        return ProblemSolvingResult(
+            resolved=True, files=current_files, summary="No actionable issues."
+        )
 
     merged = dict(current_files)
     fixes_applied: List[Dict[str, Any]] = []
@@ -239,7 +228,13 @@ def run_problem_solving(
 
     for issue_idx, issue in enumerate(actionable):
         desc_short = (issue.description or "")[:80]
-        logger.info("[%s] Problem-solving: issue %d/%d — %s", task_id, issue_idx + 1, len(actionable), desc_short)
+        logger.info(
+            "[%s] Problem-solving: issue %d/%d — %s",
+            task_id,
+            issue_idx + 1,
+            len(actionable),
+            desc_short,
+        )
         working = dict(merged)
         resolved_this = False
         for attempt in range(1, MAX_ITERATIONS_PER_ISSUE + 1):
@@ -255,7 +250,13 @@ def run_problem_solving(
             try:
                 raw = llm.complete_text(prompt)
             except Exception as exc:
-                logger.warning("[%s] Problem-solving LLM call failed (issue %d, attempt %d): %s", task_id, issue_idx + 1, attempt, exc)
+                logger.warning(
+                    "[%s] Problem-solving LLM call failed (issue %d, attempt %d): %s",
+                    task_id,
+                    issue_idx + 1,
+                    attempt,
+                    exc,
+                )
                 break
             parsed = parse_problem_solving_single_issue_template(raw)
             fixed_files = parsed.get("files") or {}
@@ -266,11 +267,13 @@ def run_problem_solving(
 
             working.update(fixed_files)
             merged.update(fixed_files)
-            fixes_applied.append({
-                "issue": desc_short,
-                "fix": parsed.get("summary", "updated file(s)"),
-                "root_cause": parsed.get("root_cause", ""),
-            })
+            fixes_applied.append(
+                {
+                    "issue": desc_short,
+                    "fix": parsed.get("summary", "updated file(s)"),
+                    "root_cause": parsed.get("root_cause", ""),
+                }
+            )
             if parsed.get("resolved"):
                 resolved_this = True
                 break
@@ -296,13 +299,23 @@ def run_problem_solving(
                 if out.files:
                     merged.update(out.files)
                 if out.recommendations:
-                    fixes_applied.extend([{"source": kind.value, "recommendation": r} for r in out.recommendations])
-                    summary_parts.append(f"Tool {kind.value}: {out.summary or 'suggestions applied.'}")
+                    fixes_applied.extend(
+                        [{"source": kind.value, "recommendation": r} for r in out.recommendations]
+                    )
+                    summary_parts.append(
+                        f"Tool {kind.value}: {out.summary or 'suggestions applied.'}"
+                    )
             except Exception as exc:
-                logger.warning("[%s] Tool agent %s problem_solve() failed: %s", task_id, kind.value, exc)
+                logger.warning(
+                    "[%s] Tool agent %s problem_solve() failed: %s", task_id, kind.value, exc
+                )
 
     resolved = len(unresolved_issues) == 0
-    summary = " ".join(summary_parts) if summary_parts else f"Applied {len(fixes_applied)} fix(s); {len(unresolved_issues)} unresolved."
+    summary = (
+        " ".join(summary_parts)
+        if summary_parts
+        else f"Applied {len(fixes_applied)} fix(s); {len(unresolved_issues)} unresolved."
+    )
     return ProblemSolvingResult(
         fixes_applied=fixes_applied,
         files=merged,
@@ -337,20 +350,34 @@ def run_problem_solving_for_microtask(
     microtask_id = microtask.id
     actionable = [i for i in review_result.issues if i.severity in ("critical", "high", "medium")]
     if not actionable:
-        return ProblemSolvingResult(resolved=True, files=current_files, summary="No actionable issues.")
+        return ProblemSolvingResult(
+            resolved=True, files=current_files, summary="No actionable issues."
+        )
 
     merged = dict(current_files)
     fixes_applied: List[Dict[str, Any]] = []
     summary_parts: List[str] = []
     unresolved_issues: List[ReviewIssue] = []
 
-    logger.info("[%s] Problem-solving for microtask %s: %d actionable issues", task_id, microtask_id, len(actionable))
+    logger.info(
+        "[%s] Problem-solving for microtask %s: %d actionable issues",
+        task_id,
+        microtask_id,
+        len(actionable),
+    )
 
     for issue_idx, issue in enumerate(actionable):
         desc_short = (issue.description or "")[:80]
         if detail_callback:
             detail_callback(f"Fixing issue {issue_idx + 1}/{len(actionable)}: {desc_short[:50]}...")
-        logger.info("[%s] Microtask %s: fixing issue %d/%d — %s", task_id, microtask_id, issue_idx + 1, len(actionable), desc_short)
+        logger.info(
+            "[%s] Microtask %s: fixing issue %d/%d — %s",
+            task_id,
+            microtask_id,
+            issue_idx + 1,
+            len(actionable),
+            desc_short,
+        )
         working = dict(merged)
         resolved_this = False
 
@@ -367,8 +394,14 @@ def run_problem_solving_for_microtask(
             try:
                 raw = llm.complete_text(prompt)
             except Exception as exc:
-                logger.warning("[%s] Microtask %s: problem-solving LLM call failed (issue %d, attempt %d): %s",
-                               task_id, microtask_id, issue_idx + 1, attempt, exc)
+                logger.warning(
+                    "[%s] Microtask %s: problem-solving LLM call failed (issue %d, attempt %d): %s",
+                    task_id,
+                    microtask_id,
+                    issue_idx + 1,
+                    attempt,
+                    exc,
+                )
                 break
 
             parsed = parse_problem_solving_single_issue_template(raw)
@@ -380,12 +413,14 @@ def run_problem_solving_for_microtask(
 
             working.update(fixed_files)
             merged.update(fixed_files)
-            fixes_applied.append({
-                "microtask": microtask_id,
-                "issue": desc_short,
-                "fix": parsed.get("summary", "updated file(s)"),
-                "root_cause": parsed.get("root_cause", ""),
-            })
+            fixes_applied.append(
+                {
+                    "microtask": microtask_id,
+                    "issue": desc_short,
+                    "fix": parsed.get("summary", "updated file(s)"),
+                    "root_cause": parsed.get("root_cause", ""),
+                }
+            )
             if parsed.get("resolved"):
                 resolved_this = True
                 break
@@ -414,13 +449,30 @@ def run_problem_solving_for_microtask(
                 if out.files:
                     merged.update(out.files)
                 if out.recommendations:
-                    fixes_applied.extend([{"source": kind.value, "microtask": microtask_id, "recommendation": r} for r in out.recommendations])
-                    summary_parts.append(f"Tool {kind.value}: {out.summary or 'suggestions applied.'}")
+                    fixes_applied.extend(
+                        [
+                            {"source": kind.value, "microtask": microtask_id, "recommendation": r}
+                            for r in out.recommendations
+                        ]
+                    )
+                    summary_parts.append(
+                        f"Tool {kind.value}: {out.summary or 'suggestions applied.'}"
+                    )
             except Exception as exc:
-                logger.warning("[%s] Microtask %s: tool agent %s problem_solve() failed: %s", task_id, microtask_id, kind.value, exc)
+                logger.warning(
+                    "[%s] Microtask %s: tool agent %s problem_solve() failed: %s",
+                    task_id,
+                    microtask_id,
+                    kind.value,
+                    exc,
+                )
 
     resolved = len(unresolved_issues) == 0
-    summary = " ".join(summary_parts) if summary_parts else f"Microtask {microtask_id}: applied {len(fixes_applied)} fix(s); {len(unresolved_issues)} unresolved."
+    summary = (
+        " ".join(summary_parts)
+        if summary_parts
+        else f"Microtask {microtask_id}: applied {len(fixes_applied)} fix(s); {len(unresolved_issues)} unresolved."
+    )
     logger.info("[%s] %s", task_id, summary)
 
     return ProblemSolvingResult(

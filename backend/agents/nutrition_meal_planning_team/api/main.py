@@ -107,9 +107,7 @@ async def post_plan_meals_route(body: MealPlanRequest):
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     nutrition_plan = nutritionist_agent.run(profile)
-    meal_history = meal_feedback_store.get_meal_history(
-        body.client_id, limit=50
-    )
+    meal_history = meal_feedback_store.get_meal_history(body.client_id, limit=50)
     suggestions = meal_planning_agent.run(
         profile,
         nutrition_plan,
@@ -119,9 +117,7 @@ async def post_plan_meals_route(body: MealPlanRequest):
     )
     with_ids: list[MealRecommendationWithId] = []
     for s in suggestions:
-        rec_id = meal_feedback_store.record_recommendation(
-            body.client_id, s.model_dump()
-        )
+        rec_id = meal_feedback_store.record_recommendation(body.client_id, s.model_dump())
         with_ids.append(
             MealRecommendationWithId(
                 **s.model_dump(),
@@ -142,8 +138,11 @@ def _run_meal_plan_job(job_id: str, body: MealPlanRequest) -> None:
         nutrition_plan = nutritionist_agent.run(profile)
         meal_history = meal_feedback_store.get_meal_history(body.client_id, limit=50)
         suggestions = meal_planning_agent.run(
-            profile, nutrition_plan, meal_history,
-            period_days=body.period_days, meal_types=body.meal_types,
+            profile,
+            nutrition_plan,
+            meal_history,
+            period_days=body.period_days,
+            meal_types=body.meal_types,
         )
         with_ids = []
         for s in suggestions:
@@ -164,6 +163,7 @@ async def post_plan_meals_async_route(body: MealPlanRequest):
     try:
         from nutrition_meal_planning_team.temporal.client import is_temporal_enabled
         from nutrition_meal_planning_team.temporal.start_workflow import start_meal_plan_workflow
+
         if is_temporal_enabled():
             start_meal_plan_workflow(job_id, body.model_dump())
             return {"job_id": job_id}

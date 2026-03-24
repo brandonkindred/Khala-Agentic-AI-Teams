@@ -41,7 +41,9 @@ def test_adapt_planning_v3_result_success_with_handoff() -> None:
 def test_adapt_planning_v3_result_raises_when_success_false() -> None:
     """adapt_planning_v3_result raises ValueError when result.success is False or missing."""
     with pytest.raises(ValueError, match="Workflow failed"):
-        adapt_planning_v3_result({"success": False, "failure_reason": "Workflow failed."}, spec_title="X")
+        adapt_planning_v3_result(
+            {"success": False, "failure_reason": "Workflow failed."}, spec_title="X"
+        )
     with pytest.raises(ValueError):
         adapt_planning_v3_result({"failure_reason": "No success key."}, spec_title="X")
 

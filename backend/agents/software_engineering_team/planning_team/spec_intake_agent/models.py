@@ -105,8 +105,7 @@ def validated_spec_to_requirements(output: SpecIntakeOutput) -> ProductRequireme
     metadata = dict(reqs.metadata or {})
     metadata["requirement_ids"] = req_ids
     metadata["acceptance_criteria_index"] = [
-        {"id": item.id, "statement": item.statement}
-        for item in output.acceptance_criteria_index
+        {"id": item.id, "statement": item.statement} for item in output.acceptance_criteria_index
     ]
     return ProductRequirements(
         title=reqs.title,

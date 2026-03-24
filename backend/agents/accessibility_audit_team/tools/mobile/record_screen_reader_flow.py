@@ -49,9 +49,7 @@ class RecordScreenReaderFlowInput(BaseModel):
         default_factory=list,
         description="High-level flow steps to perform",
     )
-    capture: Dict[str, bool] = Field(
-        default_factory=lambda: {"screen_recording": True}
-    )
+    capture: Dict[str, bool] = Field(default_factory=lambda: {"screen_recording": True})
     screen_reader: Literal["voiceover", "talkback"] = Field(
         default="voiceover", description="Screen reader to use"
     )

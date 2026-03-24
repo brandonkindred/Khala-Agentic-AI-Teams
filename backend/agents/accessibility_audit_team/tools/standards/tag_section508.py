@@ -15,9 +15,7 @@ class TagSection508Input(BaseModel):
     """Input for applying Section 508 tags."""
 
     audit_id: str = Field(..., description="Audit identifier")
-    wcag_scs: List[str] = Field(
-        ..., description="WCAG success criteria numbers"
-    )
+    wcag_scs: List[str] = Field(..., description="WCAG success criteria numbers")
     surface: Literal["web", "ios", "android", "pdf"] = Field(
         default="web", description="Platform surface"
     )
@@ -26,9 +24,7 @@ class TagSection508Input(BaseModel):
 class TagSection508Output(BaseModel):
     """Output from Section 508 tagging."""
 
-    tags: List[str] = Field(
-        default_factory=list, description="Section 508 section numbers"
-    )
+    tags: List[str] = Field(default_factory=list, description="Section 508 section numbers")
     notes: str = Field(default="")
     functional_performance_criteria: List[str] = Field(
         default_factory=list, description="Applicable 302.x FPC"

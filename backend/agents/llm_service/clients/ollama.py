@@ -554,7 +554,9 @@ class OllamaLLMClient(LLMClient):
                     )
                     t0 = time.monotonic()
                     with httpx.Client(timeout=self.timeout) as client:
-                        with client.stream("POST", url, json=stream_payload, headers=headers) as response:
+                        with client.stream(
+                            "POST", url, json=stream_payload, headers=headers
+                        ) as response:
                             status = response.status_code
                             if status != 200:
                                 response.read()
@@ -616,13 +618,15 @@ class OllamaLLMClient(LLMClient):
                                             pass
                                         tool_calls.append(buf)
                                 synthetic = {
-                                    "choices": [{
-                                        "message": {
-                                            "content": "".join(content_parts),
-                                            "tool_calls": tool_calls,
-                                        },
-                                        "finish_reason": finish_reason or "stop",
-                                    }]
+                                    "choices": [
+                                        {
+                                            "message": {
+                                                "content": "".join(content_parts),
+                                                "tool_calls": tool_calls,
+                                            },
+                                            "finish_reason": finish_reason or "stop",
+                                        }
+                                    ]
                                 }
                                 return self._parse_response_content(synthetic)
                             if status == 429:
@@ -631,7 +635,9 @@ class OllamaLLMClient(LLMClient):
                                     status_code=429,
                                 )
                                 if attempt < max_retries:
-                                    wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
+                                    wait = _exponential_retry_delay(
+                                        attempt, initial_backoff, backoff_max
+                                    )
                                     logger.warning(
                                         "LLM 429 (attempt %d/%d). Retrying in %.1fs",
                                         attempt + 1,
@@ -650,14 +656,19 @@ class OllamaLLMClient(LLMClient):
                                 raise last_error
                             if 500 <= status < 600:
                                 hint = ""
-                                if "ollama.com" in self.base_url and "qwen3.5" in self.model.lower():
+                                if (
+                                    "ollama.com" in self.base_url
+                                    and "qwen3.5" in self.model.lower()
+                                ):
                                     hint = " If using Ollama Cloud with qwen3.5, try LLM_ENABLE_THINKING=false."
                                 last_error = LLMTemporaryError(
                                     f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}.{hint}",
                                     status_code=status,
                                 )
                                 if attempt < max_retries:
-                                    wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
+                                    wait = _exponential_retry_delay(
+                                        attempt, initial_backoff, backoff_max
+                                    )
                                     time.sleep(wait)
                                     continue
                                 self._log_llm_server_error(

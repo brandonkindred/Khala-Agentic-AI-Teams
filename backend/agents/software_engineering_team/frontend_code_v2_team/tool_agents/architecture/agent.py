@@ -107,6 +107,7 @@ class ArchitectureToolAgent:
             data = json.loads(raw)
         except json.JSONDecodeError:
             import re
+
             match = re.search(r"\{[\s\S]*\}", raw)
             if match:
                 try:
@@ -128,7 +129,9 @@ class ArchitectureToolAgent:
             recommendations.append(f"API patterns: {data['api_client_patterns'][:500]}")
         summary = data.get("summary", "Architecture artifacts generated.")
         return ToolAgentPhaseOutput(
-            recommendations=recommendations if recommendations else ["Architecture artifacts generated."],
+            recommendations=recommendations
+            if recommendations
+            else ["Architecture artifacts generated."],
             summary=summary[:500] if summary else "Architecture planning complete.",
         )
 

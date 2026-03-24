@@ -36,7 +36,9 @@ class QuantConnectWebAgent(WebBrokerInterface):
     def run_action(self, action: str, payload: Dict[str, Any] | None = None) -> WebActionResult:
         entry = {"provider": self.provider_name, "action": action, "payload": payload or {}}
         self._artifacts.append(entry)
-        return WebActionResult(provider=self.provider_name, action=action, status="ok", details=entry)
+        return WebActionResult(
+            provider=self.provider_name, action=action, status="ok", details=entry
+        )
 
     def collect_artifacts(self) -> List[Dict[str, Any]]:
         return list(self._artifacts)

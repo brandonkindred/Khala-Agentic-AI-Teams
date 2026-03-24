@@ -51,12 +51,16 @@ class QAOutput(BaseModel):
         default=True,
         description="True when code passes review (no critical/high bugs). Merge when approved.",
     )
-    integration_tests: str = Field(default="", description="Integration test code (for QA-only tasks)")
+    integration_tests: str = Field(
+        default="", description="Integration test code (for QA-only tasks)"
+    )
     unit_tests: str = Field(default="", description="Unit tests for 85%+ coverage")
     test_plan: str = ""
     summary: str = ""
     live_test_notes: str = Field(default="", description="Notes from running the application")
-    readme_content: str = Field(default="", description="README.md content for build, run, test, deploy")
+    readme_content: str = Field(
+        default="", description="README.md content for build, run, test, deploy"
+    )
     suggested_commit_message: str = Field(
         default="",
         description="Conventional Commits format, e.g. test: add integration tests for auth",

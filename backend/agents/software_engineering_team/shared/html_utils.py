@@ -10,16 +10,59 @@ from __future__ import annotations
 HTML_EXTENSIONS = (".html", ".htm", ".component.html")
 
 COMMON_PAIRED_TAGS = [
-    "div", "span", "button", "form", "table", "thead", "tbody", "tfoot",
-    "tr", "td", "th", "ul", "ol", "li", "nav", "header", "footer", "main",
-    "section", "article", "aside", "p", "a", "label", "select", "option",
-    "textarea", "fieldset", "legend", "details", "summary", "dialog",
-    "template", "slot", "ng-container", "ng-template",
+    "div",
+    "span",
+    "button",
+    "form",
+    "table",
+    "thead",
+    "tbody",
+    "tfoot",
+    "tr",
+    "td",
+    "th",
+    "ul",
+    "ol",
+    "li",
+    "nav",
+    "header",
+    "footer",
+    "main",
+    "section",
+    "article",
+    "aside",
+    "p",
+    "a",
+    "label",
+    "select",
+    "option",
+    "textarea",
+    "fieldset",
+    "legend",
+    "details",
+    "summary",
+    "dialog",
+    "template",
+    "slot",
+    "ng-container",
+    "ng-template",
 ]
 
 SELF_CLOSING_TAGS = {
-    "br", "hr", "img", "input", "meta", "link", "area", "base", "col",
-    "embed", "param", "source", "track", "wbr",
+    "br",
+    "hr",
+    "img",
+    "input",
+    "meta",
+    "link",
+    "area",
+    "base",
+    "col",
+    "embed",
+    "param",
+    "source",
+    "track",
+    "wbr",
 }
 
 
@@ -46,6 +89,7 @@ def is_html_truncated(content: str) -> bool:
 
     # Check for unclosed attribute quotes
     import re
+
     last_tag_match = list(re.finditer(r"<[^>]*$", content))
     if last_tag_match:
         fragment = last_tag_match[-1].group()
@@ -77,6 +121,7 @@ def is_html_truncated(content: str) -> bool:
 
     # Check for unbalanced paired tags
     import re
+
     open_tags: list[str] = []
     for match in re.finditer(r"<(/?)(\w[\w-]*)[^>]*?>", content):
         closing = match.group(1) == "/"
@@ -153,7 +198,9 @@ def validate_html_completeness(content: str) -> tuple[bool, str]:
 
 def get_truncated_html_files(files: dict[str, str]) -> list[str]:
     """Return list of filenames (from a {filename: content} dict) with truncated HTML."""
-    return [path for path, content in files.items() if is_html_file(path) and is_html_truncated(content)]
+    return [
+        path for path, content in files.items() if is_html_file(path) and is_html_truncated(content)
+    ]
 
 
 def get_truncated_files_summary(files: dict[str, str]) -> str:
@@ -178,6 +225,7 @@ def merge_html_continuation(original: str, continuation: str) -> str:
     if not continuation:
         return original
     import re
+
     stripped = original.rstrip()
     # Remove any trailing incomplete tag (< ... without closing >)
     stripped = re.sub(r"<[^>]*$", "", stripped)

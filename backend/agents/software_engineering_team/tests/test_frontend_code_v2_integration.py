@@ -82,13 +82,18 @@ class TestNoFrontendTeamImports:
                 if stripped.startswith('"""') or stripped.startswith("'''"):
                     continue
                 # Only flag actual import statements, not docstrings that mention the names
-                if (stripped.startswith("from ") and ("frontend_team" in stripped or "feature_agent" in stripped)):
+                if stripped.startswith("from ") and (
+                    "frontend_team" in stripped or "feature_agent" in stripped
+                ):
                     violations.append(f"{py_file.relative_to(team_dir)}:{i}: {stripped}")
-                if (stripped.startswith("import ") and ("frontend_team" in stripped or "feature_agent" in stripped)):
+                if stripped.startswith("import ") and (
+                    "frontend_team" in stripped or "feature_agent" in stripped
+                ):
                     violations.append(f"{py_file.relative_to(team_dir)}:{i}: {stripped}")
 
         assert not violations, (
-            "Found frontend_team/feature_agent imports in frontend_code_v2_team:\n" + "\n".join(violations)
+            "Found frontend_team/feature_agent imports in frontend_code_v2_team:\n"
+            + "\n".join(violations)
         )
 
 
@@ -103,4 +108,5 @@ class TestOrchestratorRegistration:
 
     def test_frontend_code_v2_worker_exists(self):
         import orchestrator
+
         assert hasattr(orchestrator, "_frontend_code_v2_worker")

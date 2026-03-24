@@ -53,7 +53,9 @@ class WebSearchTool:
             timeout: Request timeout in seconds
         """
         self.api_key = api_key or os.environ.get("OLLAMA_API_KEY")
-        self.base_url = (base_url or os.environ.get("OLLAMA_WEB_SEARCH_BASE_URL") or "https://ollama.com/api").rstrip("/")
+        self.base_url = (
+            base_url or os.environ.get("OLLAMA_WEB_SEARCH_BASE_URL") or "https://ollama.com/api"
+        ).rstrip("/")
         self.timeout = timeout
         if not self.api_key:
             logger.warning("OLLAMA_API_KEY not set. Web search will fail.")
@@ -105,13 +107,15 @@ class WebSearchTool:
             url_str = item.get("url")
             if not url_str:
                 continue
-            results.append(SearchResult(
-                title=item.get("title") or url_str or "Untitled",
-                url=HttpUrl(url_str),
-                snippet=item.get("content", ""),
-                source="ollama",
-                rank=idx,
-            ))
+            results.append(
+                SearchResult(
+                    title=item.get("title") or url_str or "Untitled",
+                    url=HttpUrl(url_str),
+                    snippet=item.get("content", ""),
+                    source="ollama",
+                    rank=idx,
+                )
+            )
         return results
 
     def search_deals(

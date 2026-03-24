@@ -40,9 +40,15 @@ def temp_repo(tmp_path: Path) -> Path:
     repo.mkdir()
     (repo / "package.json").write_text('{"name": "test-app"}')
     subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, capture_output=True, check=True)
-    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"], cwd=repo, capture_output=True, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=repo, capture_output=True, check=True
+    )
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"], cwd=repo, capture_output=True, check=True
+    )
     subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True, check=True)
     return repo
@@ -50,13 +56,16 @@ def temp_repo(tmp_path: Path) -> Path:
 
 class TestFrontendCodeV2RunEndpoint:
     def test_run_returns_job_id(self, client: TestClient, temp_repo: Path):
-        response = client.post("/frontend-code-v2/run", json={
-            "task": {
-                "title": "Test task",
-                "description": "Implement login component",
+        response = client.post(
+            "/frontend-code-v2/run",
+            json={
+                "task": {
+                    "title": "Test task",
+                    "description": "Implement login component",
+                },
+                "repo_path": str(temp_repo),
             },
-            "repo_path": str(temp_repo),
-        })
+        )
         assert response.status_code == 200
         data = response.json()
         assert "job_id" in data
@@ -64,25 +73,31 @@ class TestFrontendCodeV2RunEndpoint:
         assert data["message"]
 
     def test_run_rejects_invalid_repo_path(self, client: TestClient):
-        response = client.post("/frontend-code-v2/run", json={
-            "task": {"title": "Test", "description": "test"},
-            "repo_path": "/nonexistent/path/does/not/exist",
-        })
+        response = client.post(
+            "/frontend-code-v2/run",
+            json={
+                "task": {"title": "Test", "description": "test"},
+                "repo_path": "/nonexistent/path/does/not/exist",
+            },
+        )
         assert response.status_code == 400
         assert "does not exist" in response.json()["detail"]
 
     def test_run_accepts_optional_fields(self, client: TestClient, temp_repo: Path):
-        response = client.post("/frontend-code-v2/run", json={
-            "task": {
-                "title": "Full task",
-                "description": "Add dashboard",
-                "requirements": "Angular, Material",
-                "acceptance_criteria": ["Responsive layout", "Dark mode"],
+        response = client.post(
+            "/frontend-code-v2/run",
+            json={
+                "task": {
+                    "title": "Full task",
+                    "description": "Add dashboard",
+                    "requirements": "Angular, Material",
+                    "acceptance_criteria": ["Responsive layout", "Dark mode"],
+                },
+                "repo_path": str(temp_repo),
+                "spec_content": "Dashboard spec",
+                "architecture": "SPA with Angular",
             },
-            "repo_path": str(temp_repo),
-            "spec_content": "Dashboard spec",
-            "architecture": "SPA with Angular",
-        })
+        )
         assert response.status_code == 200
         data = response.json()
         assert data["job_id"]
@@ -98,10 +113,13 @@ class TestFrontendCodeV2StatusEndpoint:
         assert response.status_code == 404
 
     def test_status_returns_pending_after_create(self, client: TestClient, temp_repo: Path):
-        run_resp = client.post("/frontend-code-v2/run", json={
-            "task": {"title": "Test", "description": "test"},
-            "repo_path": str(temp_repo),
-        })
+        run_resp = client.post(
+            "/frontend-code-v2/run",
+            json={
+                "task": {"title": "Test", "description": "test"},
+                "repo_path": str(temp_repo),
+            },
+        )
         job_id = run_resp.json()["job_id"]
 
         time.sleep(0.2)
@@ -117,17 +135,30 @@ class TestFrontendCodeV2StatusEndpoint:
         assert isinstance(data["microtasks_total"], int)
 
     def test_status_response_shape(self, client: TestClient, temp_repo: Path):
-        run_resp = client.post("/frontend-code-v2/run", json={
-            "task": {"title": "Shape test", "description": "test"},
-            "repo_path": str(temp_repo),
-        })
+        run_resp = client.post(
+            "/frontend-code-v2/run",
+            json={
+                "task": {"title": "Shape test", "description": "test"},
+                "repo_path": str(temp_repo),
+            },
+        )
         job_id = run_resp.json()["job_id"]
 
         time.sleep(0.1)
 
         status_resp = client.get(f"/frontend-code-v2/status/{job_id}")
         data = status_resp.json()
-        expected_keys = {"job_id", "status", "repo_path", "current_phase", "current_microtask",
-                         "progress", "microtasks_completed", "microtasks_total",
-                         "completed_phases", "error", "summary"}
+        expected_keys = {
+            "job_id",
+            "status",
+            "repo_path",
+            "current_phase",
+            "current_microtask",
+            "progress",
+            "microtasks_completed",
+            "microtasks_total",
+            "completed_phases",
+            "error",
+            "summary",
+        }
         assert expected_keys.issubset(set(data.keys()))

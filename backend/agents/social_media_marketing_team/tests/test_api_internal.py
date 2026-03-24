@@ -28,7 +28,9 @@ def _seed_job(job_id: str, request: api_main.RunMarketingTeamRequest) -> None:
 
 @pytest.fixture
 def temp_job_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    manager = CentralJobManager(team="social_media_marketing_team_test", cache_dir=tmp_path / "cache")
+    manager = CentralJobManager(
+        team="social_media_marketing_team_test", cache_dir=tmp_path / "cache"
+    )
     monkeypatch.setattr(api_main, "_job_manager", manager)
     return manager
 
@@ -57,7 +59,9 @@ def test_read_text_file_and_update_job(tmp_path: Path, temp_job_manager: Central
     assert job["last_heartbeat_at"] >= old_ts
 
 
-def test_run_team_job_success_and_failure(tmp_path: Path, temp_job_manager: CentralJobManager) -> None:
+def test_run_team_job_success_and_failure(
+    tmp_path: Path, temp_job_manager: CentralJobManager
+) -> None:
     guidelines = tmp_path / "guidelines.md"
     objectives = tmp_path / "objectives.md"
     guidelines.write_text("Keep tone direct")
@@ -124,7 +128,9 @@ def test_run_and_status_functions_with_inline_thread(
     assert status.status == "completed"
     assert status.result is not None
 
-    perf = api_main.ingest_performance(response.job_id, api_main.PerformanceIngestRequest(observations=[]))
+    perf = api_main.ingest_performance(
+        response.job_id, api_main.PerformanceIngestRequest(observations=[])
+    )
     assert perf.observations_ingested == 0
 
     revise = api_main.revise_marketing_team(

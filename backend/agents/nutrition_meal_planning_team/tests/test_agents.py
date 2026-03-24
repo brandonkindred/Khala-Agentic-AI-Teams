@@ -1,6 +1,5 @@
 """Unit/integration tests for intake, nutritionist, and meal planning agents (mocked LLM or full)."""
 
-
 import pytest
 
 from nutrition_meal_planning_team.agents.intake_profile_agent import IntakeProfileAgent
@@ -53,11 +52,16 @@ class TestIntakeProfileAgentWithDummyLLM:
     @pytest.fixture
     def dummy_llm(self):
         """LLM that returns a fixed profile JSON."""
+
         class DummyLLM:
             def complete_json(self, prompt, **kwargs):
                 return {
                     "client_id": "test",
-                    "household": {"number_of_people": 1, "description": "solo", "ages_if_relevant": []},
+                    "household": {
+                        "number_of_people": 1,
+                        "description": "solo",
+                        "ages_if_relevant": [],
+                    },
                     "dietary_needs": [],
                     "allergies_and_intolerances": [],
                     "lifestyle": {
@@ -74,6 +78,7 @@ class TestIntakeProfileAgentWithDummyLLM:
                     },
                     "goals": {"goal_type": "maintain", "notes": ""},
                 }
+
         return DummyLLM()
 
     def test_run_returns_profile(self, dummy_llm):
@@ -98,6 +103,7 @@ class TestNutritionistAgentWithDummyLLM:
                     "foods_to_avoid": [],
                     "notes": "",
                 }
+
         return DummyLLM()
 
     def test_run_returns_plan(self, dummy_llm):
@@ -132,6 +138,7 @@ class TestMealPlanningAgentWithDummyLLM:
                         }
                     ]
                 }
+
         return DummyLLM()
 
     def test_run_returns_suggestions(self, dummy_llm):

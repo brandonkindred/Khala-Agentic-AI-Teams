@@ -224,9 +224,7 @@ def default_merge_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
                         merged[key][k] = v
                     elif isinstance(v, list) and isinstance(merged[key][k], list):
                         merged[key][k].extend(v)
-                        if merged[key][k] and all(
-                            isinstance(x, str) for x in merged[key][k]
-                        ):
+                        if merged[key][k] and all(isinstance(x, str) for x in merged[key][k]):
                             merged[key][k] = dedupe_strings(merged[key][k])
             # For scalars, keep the first non-empty value
             elif not merged[key] and value:

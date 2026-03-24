@@ -122,7 +122,7 @@ def chunk_spec_by_sections(
         if len(content) > max_chars:
             sub_chunks = chunk_spec_by_size(content, max_chars=max_chars, overlap=0)
             for i, sub in enumerate(sub_chunks):
-                chunks.append((f"{title} (part {i+1})" if title else "", sub))
+                chunks.append((f"{title} (part {i + 1})" if title else "", sub))
             continue
 
         current_content.append(content)

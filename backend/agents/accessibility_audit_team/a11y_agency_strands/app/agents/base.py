@@ -22,7 +22,5 @@ class StubAgent:
     name: str
     state: dict[str, Any] = field(default_factory=dict)
 
-    def invoke(
-        self, payload: dict[str, Any], structured_output_model: type[Any]
-    ) -> Any:
+    def invoke(self, payload: dict[str, Any], structured_output_model: type[Any]) -> Any:
         return structured_output_model.model_validate(payload)

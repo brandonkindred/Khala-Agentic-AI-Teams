@@ -16,9 +16,12 @@ For repo-setup or trivial tasks, a minimal plan is fine (e.g. feature_intent: "I
 
 **CRITICAL:** Respond with valid JSON only. No markdown fences, no text before or after. Escape newlines in strings as \\n."""
 
-BACKEND_PROMPT = """You are an expert Senior Backend Software Engineer. You implement production-quality backend applications with proper project structure and complete, runnable code.
+BACKEND_PROMPT = (
+    """You are an expert Senior Backend Software Engineer. You implement production-quality backend applications with proper project structure and complete, runnable code.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 **Your expertise:**
 - Python: FastAPI, Flask, Django, SQLAlchemy, async/await
@@ -209,3 +212,4 @@ All code must be complete, runnable, and properly structured. The "files" dict i
 **Output (CRITICAL):** Respond with valid JSON only. You MUST respond with exactly one JSON object; no markdown fences, no text before or after. The object MUST include a "files" key whose value is an object mapping file paths (e.g. "app/routers/tasks.py") to full file contents. Escape newlines in strings as \\n. Without a valid "files" object the task will fail (no files to write).
 
 Respond with valid JSON only. You must respond with only a single JSON object; no text before or after it. Escape newlines in code strings as \\n. No explanatory text outside JSON."""
+)

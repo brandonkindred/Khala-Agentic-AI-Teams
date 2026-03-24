@@ -41,7 +41,9 @@ class OllamaWebSearch:
         timeout: float = 15.0,
     ) -> None:
         self.api_key = api_key or os.environ.get("OLLAMA_API_KEY")
-        self.base_url = (base_url or os.environ.get("OLLAMA_WEB_SEARCH_BASE_URL") or "https://ollama.com/api").rstrip("/")
+        self.base_url = (
+            base_url or os.environ.get("OLLAMA_WEB_SEARCH_BASE_URL") or "https://ollama.com/api"
+        ).rstrip("/")
         self.timeout = timeout
 
     def search(
@@ -89,7 +91,7 @@ class OllamaWebSearch:
                 break
             except (httpx.ConnectError, httpx.ReadTimeout) as exc:
                 if attempt < WEB_SEARCH_MAX_RETRIES:
-                    wait = WEB_SEARCH_BACKOFF_BASE ** attempt
+                    wait = WEB_SEARCH_BACKOFF_BASE**attempt
                     logger.warning(
                         "Web search connection error (attempt %d/%d): %s. Retrying in %.1fs",
                         attempt + 1,

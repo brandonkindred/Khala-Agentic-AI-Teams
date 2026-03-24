@@ -19,6 +19,7 @@ _ARTIFACT_BODY_CAP = 32_000
 # Helpers: section extraction
 # ---------------------------------------------------------------------------
 
+
 def _section(text: str, start_marker: str, end_marker: str) -> str:
     """Extract section between start_marker and end_marker (or end of text)."""
     start = text.find(start_marker)
@@ -43,7 +44,7 @@ def _parse_bullet_list(section: str) -> List[str]:
         # Strip leading "- ", "* ", "• ", or "N. " (e.g. "1. ")
         for prefix in ("- ", "* ", "• "):
             if line.startswith(prefix):
-                line = line[len(prefix):].strip()
+                line = line[len(prefix) :].strip()
                 break
         if re.match(r"^\d+[.)]\s*", line):
             line = re.sub(r"^\d+[.)]\s*", "", line).strip()
@@ -127,10 +128,10 @@ def parse_review_output(text: str) -> Dict[str, Any]:
 
     summary_section = _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY)
     if summary_section:
-        summary = summary_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP]
+        summary = summary_section.strip().split("\n")[0].strip()[:_ARTIFACT_BODY_CAP]
     elif MARKER_SUMMARY in text:
         idx = text.find(MARKER_SUMMARY) + len(MARKER_SUMMARY)
-        summary = text[idx:].strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP]
+        summary = text[idx:].strip().split("\n")[0].strip()[:_ARTIFACT_BODY_CAP]
 
     return {
         "passed": passed,
@@ -143,6 +144,7 @@ def parse_review_output(text: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Planning output: goals_vision, key_features, milestones, etc.
 # ---------------------------------------------------------------------------
+
 
 def _section_to_str(section: str, max_len: int = 5000) -> str:
     """Take first paragraph or first line, cap length."""
@@ -164,6 +166,7 @@ def parse_planning_output(text: str) -> Dict[str, Any]:
 
     Returns dict compatible with PlanningPhaseResult fields.
     """
+
     def get_section(name: str, max_len: int = _ARTIFACT_BODY_CAP) -> str:
         start = f"## {name} ##"
         end = f"## END {name} ##"
@@ -266,7 +269,7 @@ def _collect_all_file_updates_sections(text: str) -> List[str]:
         # Advance past the end marker we actually found (so we don't skip into next block)
         end_marker_len = 0
         for m in markers_end:
-            if text[end_idx:end_idx + len(m)] == m:
+            if text[end_idx : end_idx + len(m)] == m:
                 end_marker_len = len(m)
                 break
         if not end_marker_len:
@@ -309,7 +312,9 @@ def parse_fix_output(text: str) -> Dict[str, Any]:
     root_cause = root_cause.strip().split("\n")[0].strip()[:1000] if root_cause else ""
 
     fix_description = _section(text, MARKER_FIX_DESCRIPTION, MARKER_END_FIX_DESCRIPTION)
-    fix_description = fix_description.strip().split("\n")[0].strip()[:1000] if fix_description else ""
+    fix_description = (
+        fix_description.strip().split("\n")[0].strip()[:1000] if fix_description else ""
+    )
 
     resolved = True
     resolved_section = _section(text, MARKER_RESOLVED, MARKER_END_RESOLVED)
@@ -375,7 +380,13 @@ def looks_like_truncated_file_content(content: str) -> bool:
     # Ends mid-word: last character is alphanumeric (no space/newline/punctuation after last word)
     if last_line and last_line[-1].isalnum():
         # Could be end of a word at end of sentence; check if line ends with sentence punctuation
-        if len(last_line) > 1 and last_line[-2].isalnum() and "." not in last_line and "!" not in last_line and "?" not in last_line:
+        if (
+            len(last_line) > 1
+            and last_line[-2].isalnum()
+            and "." not in last_line
+            and "!" not in last_line
+            and "?" not in last_line
+        ):
             return True
     return False
 
@@ -383,6 +394,7 @@ def looks_like_truncated_file_content(content: str) -> bool:
 # ---------------------------------------------------------------------------
 # Spec review / component analysis: components, integration_points, gaps, etc.
 # ---------------------------------------------------------------------------
+
 
 def parse_spec_review_output(text: str) -> Dict[str, Any]:
     """
@@ -421,10 +433,18 @@ def parse_spec_review_output(text: str) -> Dict[str, Any]:
         gaps = _parse_bullet_list(rest)
 
     scalability_section = _section(text, "## SCALABILITY_NOTES ##", "## END SCALABILITY_NOTES ##")
-    scalability_notes = scalability_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if scalability_section else ""
+    scalability_notes = (
+        scalability_section.strip().split("\n")[0].strip()[:_ARTIFACT_BODY_CAP]
+        if scalability_section
+        else ""
+    )
 
     summary_section = _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY)
-    summary = summary_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if summary_section else ""
+    summary = (
+        summary_section.strip().split("\n")[0].strip()[:_ARTIFACT_BODY_CAP]
+        if summary_section
+        else ""
+    )
 
     return {
         "components": components,
@@ -438,6 +458,7 @@ def parse_spec_review_output(text: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Planning tool output: recommendations, component_design, data_flow, etc.
 # ---------------------------------------------------------------------------
+
 
 def parse_planning_tool_output(text: str) -> Dict[str, Any]:
     """
@@ -456,13 +477,21 @@ def parse_planning_tool_output(text: str) -> Dict[str, Any]:
         recommendations = _parse_bullet_list(rest)
 
     data_flow_section = _section(text, "## DATA_FLOW ##", "## END DATA_FLOW ##")
-    data_flow = data_flow_section.strip()[: _ARTIFACT_BODY_CAP] if data_flow_section else ""
+    data_flow = data_flow_section.strip()[:_ARTIFACT_BODY_CAP] if data_flow_section else ""
 
-    integration_section = _section(text, "## INTEGRATION_STRATEGY ##", "## END INTEGRATION_STRATEGY ##")
-    integration_strategy = integration_section.strip()[: _ARTIFACT_BODY_CAP] if integration_section else ""
+    integration_section = _section(
+        text, "## INTEGRATION_STRATEGY ##", "## END INTEGRATION_STRATEGY ##"
+    )
+    integration_strategy = (
+        integration_section.strip()[:_ARTIFACT_BODY_CAP] if integration_section else ""
+    )
 
     summary_section = _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY)
-    summary = summary_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if summary_section else ""
+    summary = (
+        summary_section.strip().split("\n")[0].strip()[:_ARTIFACT_BODY_CAP]
+        if summary_section
+        else ""
+    )
 
     component_design: List[Dict[str, Any]] = []
     comp_section = _section(text, "## COMPONENT_DESIGN ##", "## END COMPONENT_DESIGN ##")
@@ -476,11 +505,13 @@ def parse_planning_tool_output(text: str) -> Dict[str, Any]:
                 name, _, rest = line.partition(" - ")
             name = name.strip()
             if name:
-                component_design.append({
-                    "name": name,
-                    "responsibility": rest.strip()[: _ARTIFACT_BODY_CAP] if rest else "",
-                    "dependencies": [],
-                })
+                component_design.append(
+                    {
+                        "name": name,
+                        "responsibility": rest.strip()[:_ARTIFACT_BODY_CAP] if rest else "",
+                        "dependencies": [],
+                    }
+                )
 
     return {
         "component_design": component_design,
@@ -504,13 +535,21 @@ def parse_architecture_planning_output(text: str) -> Dict[str, Any]:
     cross_cutting (list of str), deployment_model, recommendations, summary.
     """
     architecture_style = _section(text, "## ARCHITECTURE_STYLE ##", "## END ARCHITECTURE_STYLE ##")
-    architecture_style = architecture_style.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if architecture_style else ""
+    architecture_style = (
+        architecture_style.strip().split("\n")[0].strip()[:_ARTIFACT_BODY_CAP]
+        if architecture_style
+        else ""
+    )
 
     deployment_section = _section(text, "## DEPLOYMENT_MODEL ##", "## END DEPLOYMENT_MODEL ##")
-    deployment_model = deployment_section.strip()[: _ARTIFACT_BODY_CAP] if deployment_section else ""
+    deployment_model = deployment_section.strip()[:_ARTIFACT_BODY_CAP] if deployment_section else ""
 
     summary_section = _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY)
-    summary = summary_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if summary_section else ""
+    summary = (
+        summary_section.strip().split("\n")[0].strip()[:_ARTIFACT_BODY_CAP]
+        if summary_section
+        else ""
+    )
 
     rec_section = _section(text, MARKER_RECOMMENDATIONS, MARKER_END_RECOMMENDATIONS)
     recommendations = _parse_bullet_list(rec_section) if rec_section else []
@@ -543,7 +582,13 @@ def parse_architecture_planning_output(text: str) -> Dict[str, Any]:
                     technologies = [rest.strip()] if rest.strip() else []
                     responsibilities = ""
                 if name:
-                    layers.append({"name": name, "technologies": technologies, "responsibilities": responsibilities})
+                    layers.append(
+                        {
+                            "name": name,
+                            "technologies": technologies,
+                            "responsibilities": responsibilities,
+                        }
+                    )
 
     return {
         "architecture_style": architecture_style,
@@ -562,10 +607,16 @@ def parse_architecture_planning_output(text: str) -> Dict[str, Any]:
 
 def parse_devops_planning_output(text: str) -> Dict[str, Any]:
     """Parse DevOps planning output."""
-    recommendations = _parse_bullet_list(_section(text, MARKER_RECOMMENDATIONS, MARKER_END_RECOMMENDATIONS))
-    summary = _section_to_str(_section(text, MARKER_SUMMARY, MARKER_END_SUMMARY), _ARTIFACT_BODY_CAP)
+    recommendations = _parse_bullet_list(
+        _section(text, MARKER_RECOMMENDATIONS, MARKER_END_RECOMMENDATIONS)
+    )
+    summary = _section_to_str(
+        _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY), _ARTIFACT_BODY_CAP
+    )
     needs_section = _section(text, "## NEEDS_CLARIFICATION ##", "## END NEEDS_CLARIFICATION ##")
-    needs_clarification = needs_section.strip().lower().startswith("true") or needs_section.strip().lower().startswith("yes")
+    needs_clarification = needs_section.strip().lower().startswith(
+        "true"
+    ) or needs_section.strip().lower().startswith("yes")
     q_section = _section(text, "## CLARIFICATION_QUESTIONS ##", "## END CLARIFICATION_QUESTIONS ##")
     clarification_questions = _parse_bullet_list(q_section) if q_section else []
     return {
@@ -592,13 +643,20 @@ def parse_task_classification_output(text: str) -> Dict[str, Any]:
                 continue
             parts = [p.strip() for p in line.split("|")]
             if len(parts) >= 2:
-                classifications.append({
-                    "task_id": parts[0],
-                    "team": parts[1],
-                    "reason": parts[2] if len(parts) > 2 else "",
-                })
-    summary = _section_to_str(_section(text, MARKER_SUMMARY, MARKER_END_SUMMARY), _ARTIFACT_BODY_CAP)
-    return {"classifications": classifications, "summary": summary or "Task classification complete."}
+                classifications.append(
+                    {
+                        "task_id": parts[0],
+                        "team": parts[1],
+                        "reason": parts[2] if len(parts) > 2 else "",
+                    }
+                )
+    summary = _section_to_str(
+        _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY), _ARTIFACT_BODY_CAP
+    )
+    return {
+        "classifications": classifications,
+        "summary": summary or "Task classification complete.",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +687,11 @@ def parse_problem_solving_output(text: str) -> Dict[str, Any]:
         resolved = first in ("true", "yes", "1")
 
     summary_section = _section(text, MARKER_SUMMARY, MARKER_END_SUMMARY)
-    summary = summary_section.strip().split("\n")[0].strip()[: _ARTIFACT_BODY_CAP] if summary_section else ""
+    summary = (
+        summary_section.strip().split("\n")[0].strip()[:_ARTIFACT_BODY_CAP]
+        if summary_section
+        else ""
+    )
 
     return {
         "fixes_applied": fixes_applied,

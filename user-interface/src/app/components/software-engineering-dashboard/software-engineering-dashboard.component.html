@@ -19,10 +19,6 @@
   <mat-tab label="Run Team">
     <div class="tab-content">
       @if (!jobId) {
-        <app-start-from-spec-form
-          (submitSuccess)="onStartFromSpecSuccessFromRunTeam($event)"
-          (submitError)="onStartFromSpecError($event)"
-        />
         <app-run-team-form (submitRequest)="onRunTeamSubmit($event)" />
       } @else {
         <div class="active-job-header">

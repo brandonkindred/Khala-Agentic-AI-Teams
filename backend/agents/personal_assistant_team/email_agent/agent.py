@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 class EmailAgent:
     """
     Agent for managing email operations.
-    
+
     Capabilities:
     - Read and summarize emails
     - Draft emails matching user's voice
@@ -48,7 +48,7 @@ class EmailAgent:
     ) -> None:
         """
         Initialize the Email Agent.
-        
+
         Args:
             llm: LLM client for text generation
             credential_store: Credential storage
@@ -62,15 +62,15 @@ class EmailAgent:
     def connect_email(self, request: ConnectEmailRequest) -> bool:
         """
         Connect an email account.
-        
+
         Args:
             request: Connection request with credentials
-            
+
         Returns:
             True if connection successful
         """
         provider = request.provider.lower()
-        
+
         if provider in ("gmail", "outlook"):
             creds = OAuthCredentials(
                 provider=provider,
@@ -89,7 +89,7 @@ class EmailAgent:
                 smtp_port=request.credentials.get("smtp_port", 587),
             )
             self.credential_store.store_email_credentials(request.user_id, creds)
-        
+
         return self.email_tool.connect_imap(request.user_id)
 
     def has_credentials(self, user_id: str) -> bool:
@@ -99,10 +99,10 @@ class EmailAgent:
     def read_emails(self, request: EmailReadRequest) -> List[EmailMessage]:
         """
         Read emails from inbox.
-        
+
         Args:
             request: Read request parameters
-            
+
         Returns:
             List of email messages
         """
@@ -116,10 +116,10 @@ class EmailAgent:
     def summarize_email(self, email: EmailMessage) -> EmailSummary:
         """
         Generate a summary of an email.
-        
+
         Args:
             email: The email to summarize
-            
+
         Returns:
             EmailSummary with key information
         """
@@ -129,12 +129,18 @@ class EmailAgent:
             date=email.timestamp,
             body=email.body[:8000],
         )
-        
+
         try:
             data = self.llm.complete_json(
                 prompt,
                 temperature=0.2,
-                expected_keys=["summary", "key_points", "extracted_events", "action_items", "sentiment"],
+                expected_keys=[
+                    "summary",
+                    "key_points",
+                    "extracted_events",
+                    "action_items",
+                    "sentiment",
+                ],
             )
         except JSONExtractionFailure as e:
             logger.error("Failed to summarize email (JSON extraction failed):\n%s", e)
@@ -152,7 +158,7 @@ class EmailAgent:
                 sender=email.sender,
                 summary="Failed to generate summary",
             )
-        
+
         return EmailSummary(
             message_id=email.message_id,
             subject=email.subject,
@@ -171,34 +177,36 @@ class EmailAgent:
     ) -> List[EmailSummary]:
         """
         Summarize recent emails in inbox.
-        
+
         Args:
             user_id: The user ID
             limit: Number of emails to summarize
-            
+
         Returns:
             List of email summaries
         """
-        emails = self.read_emails(EmailReadRequest(
-            user_id=user_id,
-            limit=limit,
-            unread_only=False,
-        ))
-        
+        emails = self.read_emails(
+            EmailReadRequest(
+                user_id=user_id,
+                limit=limit,
+                unread_only=False,
+            )
+        )
+
         summaries = []
         for email in emails:
             summary = self.summarize_email(email)
             summaries.append(summary)
-        
+
         return summaries
 
     def extract_events(self, email: EmailMessage) -> List[Dict[str, Any]]:
         """
         Extract calendar events from an email.
-        
+
         Args:
             email: The email to analyze
-            
+
         Returns:
             List of extracted events
         """
@@ -208,7 +216,7 @@ class EmailAgent:
             date=email.timestamp,
             body=email.body[:8000],
         )
-        
+
         try:
             data = self.llm.complete_json(prompt, temperature=0.1)
             return data.get("events", [])
@@ -223,19 +231,21 @@ class EmailAgent:
     ) -> List[Dict[str, Any]]:
         """
         Extract events from recent emails.
-        
+
         Args:
             user_id: The user ID
             limit: Number of emails to process
-            
+
         Returns:
             List of all extracted events
         """
-        emails = self.read_emails(EmailReadRequest(
-            user_id=user_id,
-            limit=limit,
-        ))
-        
+        emails = self.read_emails(
+            EmailReadRequest(
+                user_id=user_id,
+                limit=limit,
+            )
+        )
+
         all_events = []
         for email in emails:
             events = self.extract_events(email)
@@ -246,27 +256,27 @@ class EmailAgent:
                     "sender": email.sender,
                 }
                 all_events.append(event)
-        
+
         return all_events
 
     def draft_email(self, request: EmailDraftRequest) -> DraftResult:
         """
         Draft an email based on user intent.
-        
+
         Args:
             request: Draft request with intent and context
-            
+
         Returns:
             DraftResult with generated email
         """
         profile_summary = self.profile_store.get_profile_summary(request.user_id)
-        
+
         writing_style = "Professional and friendly"
-        
+
         reply_context = ""
         if request.reply_to_message_id:
             reply_context = f"This is a reply to message ID: {request.reply_to_message_id}"
-        
+
         prompt = EMAIL_DRAFT_PROMPT.format(
             profile_summary=profile_summary or "No profile available",
             writing_style=writing_style,
@@ -274,7 +284,7 @@ class EmailAgent:
             context=request.context,
             reply_context=reply_context,
         )
-        
+
         try:
             data = self.llm.complete_json(prompt, temperature=0.4)
         except Exception as e:
@@ -283,7 +293,7 @@ class EmailAgent:
                 subject="",
                 body="Failed to generate draft",
             )
-        
+
         return DraftResult(
             subject=data.get("subject", ""),
             body=data.get("body", ""),
@@ -294,10 +304,10 @@ class EmailAgent:
     def generate_quick_replies(self, email: EmailMessage) -> List[Dict[str, str]]:
         """
         Generate quick reply options for an email.
-        
+
         Args:
             email: The email to reply to
-            
+
         Returns:
             List of reply options
         """
@@ -306,7 +316,7 @@ class EmailAgent:
             subject=email.subject,
             body=email.body[:4000],
         )
-        
+
         try:
             data = self.llm.complete_json(prompt, temperature=0.5)
             return data.get("replies", [])
@@ -317,10 +327,10 @@ class EmailAgent:
     def send_email(self, request: EmailSendRequest) -> bool:
         """
         Send an email.
-        
+
         Args:
             request: Send request with email details
-            
+
         Returns:
             True if sent successfully
         """
@@ -331,7 +341,7 @@ class EmailAgent:
             subject=request.subject,
             body=request.body,
         )
-        
+
         return self.email_tool.send_email(request.user_id, draft)
 
     def create_draft(
@@ -342,12 +352,12 @@ class EmailAgent:
     ) -> str:
         """
         Create a draft in the user's email (Gmail only).
-        
+
         Args:
             user_id: The user ID
             draft_result: The drafted email
             recipients: Email recipients
-            
+
         Returns:
             Draft ID
         """
@@ -356,16 +366,16 @@ class EmailAgent:
             subject=draft_result.subject,
             body=draft_result.body,
         )
-        
+
         return self.email_tool.create_draft(user_id, draft)
 
     def search_emails(self, request: EmailSearchRequest) -> List[EmailMessage]:
         """
         Search emails.
-        
+
         Args:
             request: Search request
-            
+
         Returns:
             List of matching emails
         """

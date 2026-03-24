@@ -52,13 +52,17 @@ class _PromptCapturingLLM(DummyLLMClient):
 def test_draft_input_requires_research_source() -> None:
     """DraftInput raises when both research_document and research_references are empty."""
     p = _minimal_plan()
-    with pytest.raises(ValueError, match="either research_document or non-empty research_references"):
+    with pytest.raises(
+        ValueError, match="either research_document or non-empty research_references"
+    ):
         DraftInput(
             research_document=None,
             research_references=None,
             content_plan=p,
         )
-    with pytest.raises(ValueError, match="either research_document or non-empty research_references"):
+    with pytest.raises(
+        ValueError, match="either research_document or non-empty research_references"
+    ):
         DraftInput(
             research_document="",
             research_references=[],
@@ -100,7 +104,11 @@ def test_blog_draft_agent_run() -> None:
 
     assert isinstance(result, DraftOutput)
     assert result.draft
-    assert "draft" in result.draft.lower() or "introduction" in result.draft.lower() or "placeholder" in result.draft.lower()
+    assert (
+        "draft" in result.draft.lower()
+        or "introduction" in result.draft.lower()
+        or "placeholder" in result.draft.lower()
+    )
 
 
 def test_blog_draft_agent_with_style_guide() -> None:
@@ -149,7 +157,11 @@ def test_blog_draft_agent_run_with_research_references() -> None:
 
     assert isinstance(result, DraftOutput)
     assert result.draft
-    assert "draft" in result.draft.lower() or "placeholder" in result.draft.lower() or "introduction" in result.draft.lower()
+    assert (
+        "draft" in result.draft.lower()
+        or "placeholder" in result.draft.lower()
+        or "introduction" in result.draft.lower()
+    )
 
 
 def test_draft_prompt_includes_provided_brand_spec() -> None:

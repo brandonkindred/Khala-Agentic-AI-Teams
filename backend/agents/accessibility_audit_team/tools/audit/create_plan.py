@@ -43,12 +43,8 @@ class CreatePlanOutput(BaseModel):
     """Output from creating an audit plan."""
 
     audit_plan: AuditPlan
-    coverage_matrix_ref: str = Field(
-        default="", description="Reference to created coverage matrix"
-    )
-    test_run_config_ref: str = Field(
-        default="", description="Reference to test run config"
-    )
+    coverage_matrix_ref: str = Field(default="", description="Reference to created coverage matrix")
+    test_run_config_ref: str = Field(default="", description="Reference to test run config")
     inventory_ref: str = Field(default="", description="Reference to target inventory")
 
 

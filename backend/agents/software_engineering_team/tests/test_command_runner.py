@@ -41,12 +41,11 @@ def test_command_result_error_summary_timed_out() -> None:
     assert r.error_summary == "Command timed out"
 
 
-def test_command_result_error_summary_truncates_long_output() -> None:
-    """CommandResult.error_summary truncates long stderr."""
+def test_command_result_error_summary_returns_full_output() -> None:
+    """CommandResult.error_summary returns full stderr without truncation."""
     long_err = "x" * 5000
     r = CommandResult(success=False, exit_code=1, stdout="", stderr=long_err)
-    assert "[truncated]" in r.error_summary
-    assert len(r.error_summary) < 4100
+    assert len(r.error_summary) == 5000
 
 
 def test_command_result_pytest_error_summary_extracts_errors_section() -> None:
@@ -67,14 +66,13 @@ def test_command_result_pytest_error_summary_extracts_errors_section() -> None:
     assert "sqlalchemy" in summary
 
 
-def test_command_result_pytest_error_summary_preserves_up_to_max_chars() -> None:
-    """pytest_error_summary preserves up to max_chars (default 2500) for agent feedback."""
+def test_command_result_pytest_error_summary_returns_full_output() -> None:
+    """pytest_error_summary returns the full failure section without truncation."""
     long_failure = "= FAILURES =\n" + "x" * 3000
     r = CommandResult(success=False, exit_code=1, stdout=long_failure, stderr="")
     summary = r.pytest_error_summary()
-    assert len(summary) <= 2500 + 50  # 2500 + "... [truncated]" and newline
     assert "= FAILURES =" in summary
-    assert "[truncated]" in summary
+    assert len(summary) == len(long_failure.strip())
 
 
 def test_is_ng_build_environment_failure_success_returns_false() -> None:
@@ -97,7 +95,9 @@ def test_is_ng_build_environment_failure_requires_minimum_node() -> None:
 
 def test_is_ng_build_environment_failure_code_error_returns_false() -> None:
     """is_ng_build_environment_failure returns False for code compilation errors."""
-    r = CommandResult(success=False, exit_code=1, stdout="", stderr="TS2304: Cannot find name 'foo'")
+    r = CommandResult(
+        success=False, exit_code=1, stdout="", stderr="TS2304: Cannot find name 'foo'"
+    )
     assert is_ng_build_environment_failure(r) is False
 
 
@@ -164,6 +164,7 @@ def test_run_command_env_override(mock_run: object, tmp_path: Path) -> None:
 def test_run_ng_serve_smoke_test_success_when_timeout(mock_popen: object, tmp_path: Path) -> None:
     """run_ng_serve_smoke_test returns success when process runs past timeout (server started)."""
     import subprocess
+
     mock_proc = MagicMock()
     mock_proc.pid = 12345
     mock_proc.communicate.side_effect = subprocess.TimeoutExpired("ng serve", 30)
@@ -355,7 +356,9 @@ def test_ensure_provide_animations_in_config_no_config_file(tmp_path: Path) -> N
     assert not (tmp_path / "src" / "app" / "app.config.ts").exists()
 
 
-def test_ensure_app_config_di_token_imports_adds_http_interceptors_when_missing(tmp_path: Path) -> None:
+def test_ensure_app_config_di_token_imports_adds_http_interceptors_when_missing(
+    tmp_path: Path,
+) -> None:
     """When app.config.ts uses HTTP_INTERCEPTORS but does not import it, the import is added."""
     app = tmp_path / "src" / "app"
     app.mkdir(parents=True)
@@ -407,7 +410,10 @@ def test_ensure_frontend_dependencies_installed_noop_when_no_package_json(tmp_pa
     assert not (tmp_path / "package.json").exists()
 
 
-@patch("software_engineering_team.shared.command_runner.run_command", return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""))
+@patch(
+    "software_engineering_team.shared.command_runner.run_command",
+    return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
+)
 @patch("software_engineering_team.shared.command_runner._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_dependencies_uses_run_command_when_no_nvm(
     _mock_nvm: object, mock_run: object, tmp_path: Path
@@ -427,8 +433,14 @@ def test_ensure_frontend_dependencies_uses_run_command_when_no_nvm(
     mock_run.assert_called()
 
 
-@patch("software_engineering_team.shared.command_runner.run_command_with_nvm", return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""))
-@patch("software_engineering_team.shared.command_runner._get_nvm_script_prefix", return_value="source ~/.nvm/nvm.sh")
+@patch(
+    "software_engineering_team.shared.command_runner.run_command_with_nvm",
+    return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
+)
+@patch(
+    "software_engineering_team.shared.command_runner._get_nvm_script_prefix",
+    return_value="source ~/.nvm/nvm.sh",
+)
 def test_ensure_frontend_dependencies_calls_repairs(
     _mock_nvm: object, _mock_run: object, tmp_path: Path
 ) -> None:
@@ -477,7 +489,10 @@ def test_ensure_frontend_project_initialized_noop_when_package_json_exists(tmp_p
     assert "Already" in result.stdout
 
 
-@patch("software_engineering_team.shared.command_runner.run_command", return_value=CommandResult(success=False, exit_code=1, stdout="", stderr="npm init failed"))
+@patch(
+    "software_engineering_team.shared.command_runner.run_command",
+    return_value=CommandResult(success=False, exit_code=1, stdout="", stderr="npm init failed"),
+)
 @patch("software_engineering_team.shared.command_runner._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_project_initialized_returns_on_npm_init_failure(
     _mock_nvm: object, _mock_run: object, tmp_path: Path
@@ -488,8 +503,14 @@ def test_ensure_frontend_project_initialized_returns_on_npm_init_failure(
     assert "npm init failed" in result.stderr
 
 
-@patch("software_engineering_team.shared.command_runner.run_command", return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""))
-@patch("software_engineering_team.shared.command_runner.run_command_with_nvm", return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""))
+@patch(
+    "software_engineering_team.shared.command_runner.run_command",
+    return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
+)
+@patch(
+    "software_engineering_team.shared.command_runner.run_command_with_nvm",
+    return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
+)
 @patch("software_engineering_team.shared.command_runner._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_project_initialized_creates_environment_files(
     _mock_nvm: object, _mock_nvm_run: object, mock_run: object, tmp_path: Path
@@ -507,8 +528,14 @@ def test_ensure_frontend_project_initialized_creates_environment_files(
     assert "production: true" in env_prod.read_text(encoding="utf-8")
 
 
-@patch("software_engineering_team.shared.command_runner.run_command", return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""))
-@patch("software_engineering_team.shared.command_runner.run_command_with_nvm", return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""))
+@patch(
+    "software_engineering_team.shared.command_runner.run_command",
+    return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
+)
+@patch(
+    "software_engineering_team.shared.command_runner.run_command_with_nvm",
+    return_value=CommandResult(success=True, exit_code=0, stdout="", stderr=""),
+)
 @patch("software_engineering_team.shared.command_runner._get_nvm_script_prefix", return_value=None)
 def test_ensure_frontend_project_initialized_produces_material_theme_fonts_provide_animations(
     _mock_nvm: object, _mock_nvm_run: object, mock_run: object, tmp_path: Path

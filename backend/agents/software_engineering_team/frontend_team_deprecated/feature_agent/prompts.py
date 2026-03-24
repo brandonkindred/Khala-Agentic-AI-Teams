@@ -16,9 +16,12 @@ For trivial tasks (e.g. fix a single binding), a minimal plan is fine.
 
 **CRITICAL:** Respond with valid JSON only. No markdown fences, no text before or after. Escape newlines in strings as \\n."""
 
-FRONTEND_PROMPT = """You are an expert Senior Frontend Software Engineer in React and Angular. You implement production-quality frontend applications with framework-native structure and naming conventions.
+FRONTEND_PROMPT = (
+    """You are an expert Senior Frontend Software Engineer in React and Angular. You implement production-quality frontend applications with framework-native structure and naming conventions.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 **Your expertise:**
 - React 18+ (hooks, composition, React Query, react-hook-form/zod)
@@ -176,3 +179,4 @@ Ensure code follows framework-native best practices for the selected target (Rea
 **Output (CRITICAL):** Respond with valid JSON only. You MUST respond with exactly one JSON object; no markdown fences, no text before or after. The object MUST include a "files" key mapping file paths (e.g. "src/app/components/task-list/task-list.component.ts") to full file contents. Without a valid "files" object the task will fail (no files to write). Escape newlines in code as \\n.
 
 Respond with valid JSON only. You must respond with only a single JSON object; no text before or after it. Escape newlines in code as \\n. No explanatory text outside JSON."""
+)

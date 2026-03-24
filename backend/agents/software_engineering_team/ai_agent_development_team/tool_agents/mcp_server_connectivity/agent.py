@@ -33,7 +33,10 @@ class MCPServerConnectivityToolAgent:
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         raw = self.llm.complete_json(
-            PROMPT.format(microtask=inp.microtask.description or inp.microtask.title, spec=inp.spec_context[:5000])
+            PROMPT.format(
+                microtask=inp.microtask.description or inp.microtask.title,
+                spec=inp.spec_context[:5000],
+            )
         )
         return ToolAgentOutput(
             files=raw.get("files") or {},

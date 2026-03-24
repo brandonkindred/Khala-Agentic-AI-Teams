@@ -51,7 +51,9 @@ class TestExtractAffectedFilePaths:
 
     def test_parses_could_not_resolve(self, tmp_path: Path) -> None:
         (tmp_path / "src" / "app" / "components").mkdir(parents=True)
-        (tmp_path / "src" / "app" / "components" / "foo.component.ts").write_text("// foo", encoding="utf-8")
+        (tmp_path / "src" / "app" / "components" / "foo.component.ts").write_text(
+            "// foo", encoding="utf-8"
+        )
         errors = 'Could not resolve "./app/components/foo.component"'
         paths = _extract_affected_file_paths_from_frontend_build_errors(errors, tmp_path)
         assert "src/app/components/foo.component.ts" in paths
@@ -76,6 +78,7 @@ class TestApplyFrontendBuildFixEdits:
         (tmp_path / "src" / "a.ts").write_text("const x = 1;", encoding="utf-8")
 
         from build_fix_specialist.models import CodeEdit
+
         edits = [
             CodeEdit(file_path="src/a.ts", old_text="const x = 1;", new_text="const x = 2;"),
         ]
@@ -89,6 +92,7 @@ class TestApplyFrontendBuildFixEdits:
         (tmp_path / "src" / "a.ts").write_text("const x = 1;", encoding="utf-8")
 
         from build_fix_specialist.models import CodeEdit
+
         edits = [
             CodeEdit(file_path="src/a.ts", old_text="NOMATCH", new_text="replaced"),
         ]
@@ -101,6 +105,7 @@ class TestApplyFrontendBuildFixEdits:
         (tmp_path / "src" / "a.ts").write_text("aaa bbb ccc", encoding="utf-8")
 
         from build_fix_specialist.models import CodeEdit
+
         edits = [
             CodeEdit(file_path="src/a.ts", old_text="aaa", new_text="AAA"),
             CodeEdit(file_path="src/a.ts", old_text="bbb", new_text="BBB"),
@@ -122,10 +127,23 @@ class TestFrontendWorkflowBuildFixSpecialist:
     def _setup_repo(self, tmp_path: Path):
         """Create a minimal git repo with Angular-like files."""
         import subprocess
+
         subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True, capture_output=True)
-        subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "t@t.com"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "T"], cwd=tmp_path, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "config", "commit.gpgsign", "false"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
 
         (tmp_path / "src" / "app").mkdir(parents=True)
         (tmp_path / "src" / "app" / "app.component.ts").write_text(
@@ -135,44 +153,75 @@ class TestFrontendWorkflowBuildFixSpecialist:
         (tmp_path / "angular.json").write_text("{}", encoding="utf-8")
         (tmp_path / "package.json").write_text('{"name": "test"}', encoding="utf-8")
 
-        subprocess.run(["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True
+        )
         subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True
+        )
         return tmp_path
 
-    @patch("software_engineering_team.shared.command_runner.ensure_frontend_dependencies_installed", return_value=_INSTALL_OK)
-    def test_specialist_invoked_on_repeated_failure(self, _mock_install: MagicMock, _setup_repo: Path) -> None:
+    @patch(
+        "software_engineering_team.shared.command_runner.ensure_frontend_dependencies_installed",
+        return_value=_INSTALL_OK,
+    )
+    def test_specialist_invoked_on_repeated_failure(
+        self, _mock_install: MagicMock, _setup_repo: Path
+    ) -> None:
         from build_fix_specialist.models import CodeEdit
 
         from software_engineering_team.shared.models import Task, TaskType
 
         task = Task(
-            id="fe-1", type=TaskType.FRONTEND, assignee="frontend",
-            title="Fix component", description="Fix the broken component",
+            id="fe-1",
+            type=TaskType.FRONTEND,
+            assignee="frontend",
+            title="Fix component",
+            description="Fix the broken component",
             acceptance_criteria=["Compiles"],
-            metadata={"goal": {"summary": "fix"}, "scope": {"included": ["src"]},
-                       "constraints": {}, "non_functional_requirements": {},
-                       "inputs_outputs": {"input": "x", "output": "y"}},
+            metadata={
+                "goal": {"summary": "fix"},
+                "scope": {"included": ["src"]},
+                "constraints": {},
+                "non_functional_requirements": {},
+                "inputs_outputs": {"input": "x", "output": "y"},
+            },
         )
 
         mock_llm = MagicMock()
         mock_llm.get_max_context_tokens.return_value = 16384
         mock_llm.complete_json.side_effect = [
-            {"feature_intent": "Fix", "what_changes": ["src/app/app.component.ts"],
-             "algorithms_data_structures": "", "tests_needed": ""},
-            {"code": "", "language": "typescript", "summary": "Done",
-             "files": {"src/app/app.component.ts": "export class AppComponent {}"},
-             "tests": "", "suggested_commit_message": "fix: comp",
-             "npm_packages_to_install": []},
+            {
+                "feature_intent": "Fix",
+                "what_changes": ["src/app/app.component.ts"],
+                "algorithms_data_structures": "",
+                "tests_needed": "",
+            },
+            {
+                "code": "",
+                "language": "typescript",
+                "summary": "Done",
+                "files": {"src/app/app.component.ts": "export class AppComponent {}"},
+                "tests": "",
+                "suggested_commit_message": "fix: comp",
+                "npm_packages_to_install": [],
+            },
         ] + [
-            {"code": "", "language": "typescript", "summary": "Fixed",
-             "files": {"src/app/app.component.ts": "export class AppComponent {}"},
-             "tests": "", "suggested_commit_message": "fix: build",
-             "npm_packages_to_install": []}
+            {
+                "code": "",
+                "language": "typescript",
+                "summary": "Fixed",
+                "files": {"src/app/app.component.ts": "export class AppComponent {}"},
+                "tests": "",
+                "suggested_commit_message": "fix: build",
+                "npm_packages_to_install": [],
+            }
             for _ in range(10)
         ]
 
         from frontend_team.feature_agent import FrontendExpertAgent
+
         agent = FrontendExpertAgent(llm_client=mock_llm)
 
         same_error = "ERROR: src/app/app.component.ts:3:1 - error TS2304: Cannot find name 'x'."
@@ -194,9 +243,17 @@ class TestFrontendWorkflowBuildFixSpecialist:
 
         mock_qa = MagicMock()
         from qa_agent.models import BugReport
-        mock_qa.run.return_value = MagicMock(bugs_found=[
-            BugReport(severity="critical", description="Fix", location="src/app/app.component.ts", recommendation="Fix"),
-        ])
+
+        mock_qa.run.return_value = MagicMock(
+            bugs_found=[
+                BugReport(
+                    severity="critical",
+                    description="Fix",
+                    location="src/app/app.component.ts",
+                    recommendation="Fix",
+                ),
+            ]
+        )
         mock_tech_lead = MagicMock()
         mock_tech_lead.review_progress.return_value = []
 
@@ -217,37 +274,64 @@ class TestFrontendWorkflowBuildFixSpecialist:
 
         mock_specialist.run.assert_called()
 
-    @patch("software_engineering_team.shared.command_runner.ensure_frontend_dependencies_installed", return_value=_INSTALL_OK)
-    def test_falls_back_to_qa_when_no_edits(self, _mock_install: MagicMock, _setup_repo: Path) -> None:
+    @patch(
+        "software_engineering_team.shared.command_runner.ensure_frontend_dependencies_installed",
+        return_value=_INSTALL_OK,
+    )
+    def test_falls_back_to_qa_when_no_edits(
+        self, _mock_install: MagicMock, _setup_repo: Path
+    ) -> None:
         from software_engineering_team.shared.models import Task, TaskType
 
         task = Task(
-            id="fe-2", type=TaskType.FRONTEND, assignee="frontend",
-            title="Fix", description="Fix",
+            id="fe-2",
+            type=TaskType.FRONTEND,
+            assignee="frontend",
+            title="Fix",
+            description="Fix",
             acceptance_criteria=["Compiles"],
-            metadata={"goal": {"summary": "fix"}, "scope": {"included": ["src"]},
-                       "constraints": {}, "non_functional_requirements": {},
-                       "inputs_outputs": {"input": "x", "output": "y"}},
+            metadata={
+                "goal": {"summary": "fix"},
+                "scope": {"included": ["src"]},
+                "constraints": {},
+                "non_functional_requirements": {},
+                "inputs_outputs": {"input": "x", "output": "y"},
+            },
         )
 
         mock_llm = MagicMock()
         mock_llm.get_max_context_tokens.return_value = 16384
         mock_llm.complete_json.side_effect = [
-            {"feature_intent": "Fix", "what_changes": ["src/app/app.component.ts"],
-             "algorithms_data_structures": "", "tests_needed": ""},
-            {"code": "", "language": "typescript", "summary": "Done",
-             "files": {"src/app/app.component.ts": "export class AppComponent {}"},
-             "tests": "", "suggested_commit_message": "fix: comp",
-             "npm_packages_to_install": []},
+            {
+                "feature_intent": "Fix",
+                "what_changes": ["src/app/app.component.ts"],
+                "algorithms_data_structures": "",
+                "tests_needed": "",
+            },
+            {
+                "code": "",
+                "language": "typescript",
+                "summary": "Done",
+                "files": {"src/app/app.component.ts": "export class AppComponent {}"},
+                "tests": "",
+                "suggested_commit_message": "fix: comp",
+                "npm_packages_to_install": [],
+            },
         ] + [
-            {"code": "", "language": "typescript", "summary": "Fixed",
-             "files": {"src/app/app.component.ts": "export class AppComponent {}"},
-             "tests": "", "suggested_commit_message": "fix: build",
-             "npm_packages_to_install": []}
+            {
+                "code": "",
+                "language": "typescript",
+                "summary": "Fixed",
+                "files": {"src/app/app.component.ts": "export class AppComponent {}"},
+                "tests": "",
+                "suggested_commit_message": "fix: build",
+                "npm_packages_to_install": [],
+            }
             for _ in range(10)
         ]
 
         from frontend_team.feature_agent import FrontendExpertAgent
+
         agent = FrontendExpertAgent(llm_client=mock_llm)
 
         mock_specialist = MagicMock()
@@ -257,9 +341,17 @@ class TestFrontendWorkflowBuildFixSpecialist:
 
         mock_qa = MagicMock()
         from qa_agent.models import BugReport
-        mock_qa.run.return_value = MagicMock(bugs_found=[
-            BugReport(severity="critical", description="Fix", location="src/app/app.component.ts", recommendation="Fix"),
-        ])
+
+        mock_qa.run.return_value = MagicMock(
+            bugs_found=[
+                BugReport(
+                    severity="critical",
+                    description="Fix",
+                    location="src/app/app.component.ts",
+                    recommendation="Fix",
+                ),
+            ]
+        )
         mock_tech_lead = MagicMock()
         mock_tech_lead.review_progress.return_value = []
 
@@ -280,37 +372,64 @@ class TestFrontendWorkflowBuildFixSpecialist:
 
         mock_qa.run.assert_called()
 
-    @patch("software_engineering_team.shared.command_runner.ensure_frontend_dependencies_installed", return_value=_INSTALL_OK)
-    def test_specialist_failure_is_nonblocking(self, _mock_install: MagicMock, _setup_repo: Path) -> None:
+    @patch(
+        "software_engineering_team.shared.command_runner.ensure_frontend_dependencies_installed",
+        return_value=_INSTALL_OK,
+    )
+    def test_specialist_failure_is_nonblocking(
+        self, _mock_install: MagicMock, _setup_repo: Path
+    ) -> None:
         from software_engineering_team.shared.models import Task, TaskType
 
         task = Task(
-            id="fe-3", type=TaskType.FRONTEND, assignee="frontend",
-            title="Fix", description="Fix",
+            id="fe-3",
+            type=TaskType.FRONTEND,
+            assignee="frontend",
+            title="Fix",
+            description="Fix",
             acceptance_criteria=["Compiles"],
-            metadata={"goal": {"summary": "fix"}, "scope": {"included": ["src"]},
-                       "constraints": {}, "non_functional_requirements": {},
-                       "inputs_outputs": {"input": "x", "output": "y"}},
+            metadata={
+                "goal": {"summary": "fix"},
+                "scope": {"included": ["src"]},
+                "constraints": {},
+                "non_functional_requirements": {},
+                "inputs_outputs": {"input": "x", "output": "y"},
+            },
         )
 
         mock_llm = MagicMock()
         mock_llm.get_max_context_tokens.return_value = 16384
         mock_llm.complete_json.side_effect = [
-            {"feature_intent": "Fix", "what_changes": ["src/app/app.component.ts"],
-             "algorithms_data_structures": "", "tests_needed": ""},
-            {"code": "", "language": "typescript", "summary": "Done",
-             "files": {"src/app/app.component.ts": "export class AppComponent {}"},
-             "tests": "", "suggested_commit_message": "fix: comp",
-             "npm_packages_to_install": []},
+            {
+                "feature_intent": "Fix",
+                "what_changes": ["src/app/app.component.ts"],
+                "algorithms_data_structures": "",
+                "tests_needed": "",
+            },
+            {
+                "code": "",
+                "language": "typescript",
+                "summary": "Done",
+                "files": {"src/app/app.component.ts": "export class AppComponent {}"},
+                "tests": "",
+                "suggested_commit_message": "fix: comp",
+                "npm_packages_to_install": [],
+            },
         ] + [
-            {"code": "", "language": "typescript", "summary": "Fixed",
-             "files": {"src/app/app.component.ts": "export class AppComponent {}"},
-             "tests": "", "suggested_commit_message": "fix: build",
-             "npm_packages_to_install": []}
+            {
+                "code": "",
+                "language": "typescript",
+                "summary": "Fixed",
+                "files": {"src/app/app.component.ts": "export class AppComponent {}"},
+                "tests": "",
+                "suggested_commit_message": "fix: build",
+                "npm_packages_to_install": [],
+            }
             for _ in range(10)
         ]
 
         from frontend_team.feature_agent import FrontendExpertAgent
+
         agent = FrontendExpertAgent(llm_client=mock_llm)
 
         mock_specialist = MagicMock()
@@ -318,9 +437,17 @@ class TestFrontendWorkflowBuildFixSpecialist:
 
         mock_qa = MagicMock()
         from qa_agent.models import BugReport
-        mock_qa.run.return_value = MagicMock(bugs_found=[
-            BugReport(severity="critical", description="Fix", location="src/app/app.component.ts", recommendation="Fix"),
-        ])
+
+        mock_qa.run.return_value = MagicMock(
+            bugs_found=[
+                BugReport(
+                    severity="critical",
+                    description="Fix",
+                    location="src/app/app.component.ts",
+                    recommendation="Fix",
+                ),
+            ]
+        )
         mock_tech_lead = MagicMock()
         mock_tech_lead.review_progress.return_value = []
 

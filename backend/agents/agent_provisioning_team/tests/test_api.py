@@ -54,6 +54,7 @@ def test_start_provision_returns_job_id():
 
 def test_deprovision_runs_via_orchestrator():
     from agent_provisioning_team.models import DeprovisionResponse
+
     mock_resp = DeprovisionResponse(agent_id="nonexistent-agent", success=False, error="not found")
     with patch("agent_provisioning_team.api.main.orchestrator") as mock_orch:
         mock_orch.deprovision.return_value = mock_resp

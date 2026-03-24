@@ -26,7 +26,7 @@ class TestUserProfile:
     def test_create_empty_profile(self):
         """Test creating an empty profile."""
         profile = UserProfile(user_id="test_user")
-        
+
         assert profile.user_id == "test_user"
         assert profile.schema_version == "1.0"
         assert profile.identity.full_name == ""
@@ -43,7 +43,7 @@ class TestUserProfile:
                 timezone="America/New_York",
             ),
         )
-        
+
         assert profile.identity.full_name == "John Doe"
         assert profile.identity.preferred_name == "John"
         assert profile.identity.timezone == "America/New_York"
@@ -61,7 +61,7 @@ class TestUserProfile:
                 favorite_colors=["blue", "green"],
             ),
         )
-        
+
         assert "pizza" in profile.preferences.food_likes
         assert "olives" in profile.preferences.food_dislikes
         assert profile.preferences.cuisines_ranked[0] == "Italian"
@@ -74,7 +74,7 @@ class TestUserProfile:
             description="Become conversational in Spanish",
             category="education",
         )
-        
+
         profile = UserProfile(
             user_id="test_user",
             goals=GoalsProfile(
@@ -83,7 +83,7 @@ class TestUserProfile:
                 bucket_list=["Visit Japan", "Learn to surf"],
             ),
         )
-        
+
         assert len(profile.goals.short_term_goals) == 1
         assert profile.goals.short_term_goals[0].title == "Learn Spanish"
         assert "Travel the world" in profile.goals.dreams
@@ -97,14 +97,14 @@ class TestUserProfile:
             preferred_styles=["casual", "business casual"],
             colors_preferred=["navy", "gray"],
         )
-        
+
         profile = UserProfile(
             user_id="test_user",
             preferences=PreferencesProfile(
                 clothing_preferences=clothing,
             ),
         )
-        
+
         assert "athletic" in profile.preferences.clothing_preferences.sock_styles
         assert "M" in profile.preferences.clothing_preferences.shirt_sizes
 
@@ -120,7 +120,7 @@ class TestTaskModels:
             quantity="2 gallons",
             priority=Priority.HIGH,
         )
-        
+
         assert item.item_id == "t1"
         assert item.description == "Buy milk"
         assert item.quantity == "2 gallons"
@@ -134,14 +134,14 @@ class TestTaskModels:
             TaskItem(item_id="t2", description="Bread"),
             TaskItem(item_id="t3", description="Eggs"),
         ]
-        
+
         task_list = TaskList(
             list_id="l1",
             user_id="test_user",
             name="Groceries",
             items=items,
         )
-        
+
         assert task_list.name == "Groceries"
         assert len(task_list.items) == 3
         assert task_list.items[0].description == "Milk"
@@ -154,7 +154,7 @@ class TestTaskModels:
             status=TaskStatus.COMPLETED,
             completed_at=datetime.utcnow().isoformat(),
         )
-        
+
         assert item.status == TaskStatus.COMPLETED
         assert item.completed_at is not None
 
@@ -172,7 +172,7 @@ class TestCalendarEvent:
             location="Conference Room A",
             attendees=["alice@example.com", "bob@example.com"],
         )
-        
+
         assert event.title == "Team Meeting"
         assert event.location == "Conference Room A"
         assert len(event.attendees) == 2
@@ -186,7 +186,7 @@ class TestCalendarEvent:
             end_time=datetime(2026, 12, 25, 23, 59),
             is_all_day=True,
         )
-        
+
         assert event.is_all_day is True
 
 
@@ -207,7 +207,7 @@ class TestDealAndReservation:
             relevance_score=0.85,
             matching_preferences=["running", "Nike"],
         )
-        
+
         assert deal.discount_percent == 50.0
         assert deal.relevance_score == 0.85
         assert "Nike" in deal.matching_preferences
@@ -223,7 +223,7 @@ class TestDealAndReservation:
             notes="Anniversary dinner",
             status="confirmed",
         )
-        
+
         assert reservation.venue_name == "Italian Bistro"
         assert reservation.party_size == 4
         assert reservation.status == "confirmed"

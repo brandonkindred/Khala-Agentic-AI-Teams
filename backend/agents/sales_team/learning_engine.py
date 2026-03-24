@@ -115,7 +115,9 @@ Recommendations must reference specific numbers from the data when available.
 """
 
 
-def _parse_insights_json(raw: str, current_version: int, n_analyzed: int) -> Optional[LearningInsights]:
+def _parse_insights_json(
+    raw: str, current_version: int, n_analyzed: int
+) -> Optional[LearningInsights]:
     """Parse LLM output into a LearningInsights model."""
     if not raw or not raw.strip():
         return None
@@ -200,16 +202,18 @@ class LearningEngine:
                     "No outcomes recorded yet. Use POST /sales/outcomes/stage or "
                     "POST /sales/outcomes/deal to log results as you work deals."
                 ],
-                generated_at=__import__("datetime").datetime.now(
-                    __import__("datetime").timezone.utc
-                ).isoformat(),
+                generated_at=__import__("datetime")
+                .datetime.now(__import__("datetime").timezone.utc)
+                .isoformat(),
                 insights_version=current_version + 1,
             )
             save_insights(empty)
             return empty
 
         if self._agent is not None:
-            insights = self._run_with_strands(stage_outcomes, deal_outcomes, current_version, n_analyzed)
+            insights = self._run_with_strands(
+                stage_outcomes, deal_outcomes, current_version, n_analyzed
+            )
         else:
             logger.info("LearningEngine: Strands SDK not available — using heuristic analysis")
             insights = compute_heuristic_insights(stage_outcomes, deal_outcomes, current_version)
@@ -287,7 +291,9 @@ def format_insights_for_prompt(insights: Optional[LearningInsights]) -> str:
             lines.append(f"- {o}")
 
     if insights.best_close_techniques:
-        lines.append(f"\n**Best close techniques (by win rate):** {', '.join(insights.best_close_techniques)}")
+        lines.append(
+            f"\n**Best close techniques (by win rate):** {', '.join(insights.best_close_techniques)}"
+        )
 
     if insights.best_outreach_angles:
         lines.append("\n**High-reply outreach angles:**")
@@ -303,7 +309,9 @@ def format_insights_for_prompt(insights: Optional[LearningInsights]) -> str:
         lines.append(f"\n**Avg sales cycle (won):** {insights.avg_sales_cycle_days:.0f} days")
 
     if insights.stage_conversion_rates:
-        worst = min(insights.stage_conversion_rates, key=lambda k: insights.stage_conversion_rates[k])
+        worst = min(
+            insights.stage_conversion_rates, key=lambda k: insights.stage_conversion_rates[k]
+        )
         lines.append(
             f"**Biggest funnel leak:** {worst} stage "
             f"({insights.stage_conversion_rates[worst]:.0%} conversion)"

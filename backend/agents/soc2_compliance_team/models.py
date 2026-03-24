@@ -35,9 +35,13 @@ class TSCFinding(BaseModel):
     category: TSCCategory = Field(..., description="Which TSC this relates to")
     title: str = Field(..., description="Short title of the finding")
     description: str = Field(..., description="Detailed description")
-    location: str = Field(default="", description="File, component, or area (e.g. file path or 'auth module')")
+    location: str = Field(
+        default="", description="File, component, or area (e.g. file path or 'auth module')"
+    )
     recommendation: str = Field(default="", description="Recommended remediation or next step")
-    evidence_observed: str = Field(default="", description="What was observed in the repo (code/config/docs)")
+    evidence_observed: str = Field(
+        default="", description="What was observed in the repo (code/config/docs)"
+    )
 
 
 class TSCAuditResult(BaseModel):
@@ -45,7 +49,9 @@ class TSCAuditResult(BaseModel):
 
     category: TSCCategory = Field(..., description="TSC category audited")
     summary: str = Field(default="", description="Brief summary of the audit for this category")
-    findings: List[TSCFinding] = Field(default_factory=list, description="List of compliance findings")
+    findings: List[TSCFinding] = Field(
+        default_factory=list, description="List of compliance findings"
+    )
     compliant: bool = Field(
         default=True,
         description="True if no critical/high findings; false if material gaps exist.",
@@ -58,15 +64,23 @@ class RepoContext(BaseModel):
     repo_path: str = Field(default="", description="Path to the repository")
     code_summary: str = Field(default="", description="Relevant code and config content for audit")
     readme_content: str = Field(default="", description="README or top-level docs if present")
-    file_list: List[str] = Field(default_factory=list, description="List of relevant file paths scanned")
-    tech_stack_hint: str = Field(default="", description="Inferred or stated tech stack (e.g. Python/FastAPI, Node)")
+    file_list: List[str] = Field(
+        default_factory=list, description="List of relevant file paths scanned"
+    )
+    tech_stack_hint: str = Field(
+        default="", description="Inferred or stated tech stack (e.g. Python/FastAPI, Node)"
+    )
 
 
 class SOC2ComplianceReport(BaseModel):
     """Full SOC2 compliance audit report when issues are found."""
 
-    executive_summary: str = Field(..., description="Executive summary of the audit and overall compliance posture")
-    scope: str = Field(default="", description="Scope of the audit (repo path, date, criteria in scope)")
+    executive_summary: str = Field(
+        ..., description="Executive summary of the audit and overall compliance posture"
+    )
+    scope: str = Field(
+        default="", description="Scope of the audit (repo path, date, criteria in scope)"
+    )
     findings_by_tsc: Dict[str, List[TSCFinding]] = Field(
         default_factory=dict,
         description="Findings grouped by TSC category (security, availability, etc.)",
@@ -75,7 +89,9 @@ class SOC2ComplianceReport(BaseModel):
         default_factory=list,
         description="Prioritized list of remediation recommendations",
     )
-    report_type: str = Field(default="compliance_audit", description="Always 'compliance_audit' for this report")
+    report_type: str = Field(
+        default="compliance_audit", description="Always 'compliance_audit' for this report"
+    )
     raw_markdown: str = Field(default="", description="Full report as markdown for storage/display")
 
 
@@ -101,7 +117,9 @@ class SOC2AuditResult(BaseModel):
 
     status: str = Field(..., description="completed | failed")
     repo_path: str = Field(default="", description="Repository path audited")
-    tsc_results: List[TSCAuditResult] = Field(default_factory=list, description="Per-TSC audit results")
+    tsc_results: List[TSCAuditResult] = Field(
+        default_factory=list, description="Per-TSC audit results"
+    )
     has_findings: bool = Field(
         default=False,
         description="True if any critical/high findings exist; drives report vs next-steps output",

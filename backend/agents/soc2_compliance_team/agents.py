@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from llm_service import LLMClient
+from llm_service import LLMClient, compact_text
 
 from .models import (
     FindingSeverity,
@@ -65,6 +65,11 @@ def _run_tsc_agent(
     context: RepoContext,
 ) -> TSCAuditResult:
     """Generic TSC audit: one criterion, one LLM call, return TSCAuditResult."""
+    # Compute budgets from model context: reserve 8K tokens for prompt template + response
+    ctx_tokens = llm.get_max_context_tokens() if hasattr(llm, "get_max_context_tokens") else 16384
+    total_chars = int((ctx_tokens - 8000) * 3.5)
+    readme_budget = min(total_chars // 4, 200_000)
+    code_budget = total_chars - readme_budget
     prompt = f"""You are a SOC2 auditor specializing in the **{criterion_name}** Trust Service Criterion.
 Your task is to review the following repository content and identify compliance gaps or risks.
 
@@ -73,16 +78,16 @@ Your task is to review the following repository content and identify compliance 
 **Repository context:**
 - Repo path: {context.repo_path}
 - Tech stack (inferred): {context.tech_stack_hint}
-- Files scanned (sample): {context.file_list[:80]}
+- Files scanned: {context.file_list}
 
 **README / docs (if any):**
 ```
-{context.readme_content[:8000]}
+{compact_text(context.readme_content, readme_budget, llm, "README content")}
 ```
 
-**Code and configuration (excerpts):**
+**Code and configuration:**
 ```
-{context.code_summary[:70000]}
+{compact_text(context.code_summary, code_budget, llm, "code and configuration")}
 ```
 
 Identify any gaps, missing controls, or risks relative to this criterion. If the codebase does not address this criterion (e.g. no backup/monitoring for Availability), report that as a finding.
@@ -95,7 +100,11 @@ Identify any gaps, missing controls, or risks relative to this criterion. If the
     for f in findings_raw:
         if isinstance(f, dict) and (f.get("title") or f.get("description")):
             findings.append(_parse_finding(f, category))
-    compliant = data.get("compliant", len([f for f in findings if f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH)]) == 0)
+    compliant = data.get(
+        "compliant",
+        len([f for f in findings if f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH)])
+        == 0,
+    )
     return TSCAuditResult(
         category=category,
         summary=summary,
@@ -118,7 +127,9 @@ class SecurityTSCAgent:
             "encryption of data at rest and in transit; change management; risk assessment; "
             "monitoring and incident response; secure disposal of data."
         )
-        return _run_tsc_agent(llm, TSCCategory.SECURITY, "Security (Common Criteria)", focus, context)
+        return _run_tsc_agent(
+            llm, TSCCategory.SECURITY, "Security (Common Criteria)", focus, context
+        )
 
 
 class AvailabilityTSCAgent:
@@ -140,7 +151,9 @@ class ProcessingIntegrityTSCAgent:
             "Processing completeness, validity, accuracy, timeliness, and authorization; "
             "data validation; error handling; reconciliation and quality assurance of processing."
         )
-        return _run_tsc_agent(llm, TSCCategory.PROCESSING_INTEGRITY, "Processing Integrity", focus, context)
+        return _run_tsc_agent(
+            llm, TSCCategory.PROCESSING_INTEGRITY, "Processing Integrity", focus, context
+        )
 
 
 class ConfidentialityTSCAgent:
@@ -188,7 +201,8 @@ class ReportWriterAgent:
         Exactly one will be non-None: compliance_report if has_findings else next_steps_document.
         """
         has_findings = any(
-            not r.compliant or any(
+            not r.compliant
+            or any(
                 f.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH) for f in r.findings
             )
             for r in tsc_results
@@ -276,7 +290,9 @@ Respond with valid JSON only. No text outside JSON."""
         return NextStepsDocument(
             title=data.get("title") or "Next Steps for SOC2 Certification",
             introduction=data.get("introduction") or "",
-            steps=[s if isinstance(s, dict) else {"title": str(s), "description": ""} for s in steps],
+            steps=[
+                s if isinstance(s, dict) else {"title": str(s), "description": ""} for s in steps
+            ],
             recommended_timeline=data.get("recommended_timeline") or "",
             raw_markdown=data.get("raw_markdown") or "",
         )

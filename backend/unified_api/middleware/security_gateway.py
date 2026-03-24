@@ -113,14 +113,16 @@ class SecurityGatewayMiddleware:
             {"detail": SECURITY_ERROR_DETAIL, "security_findings": security_findings},
             ensure_ascii=False,
         ).encode("utf-8")
-        await send({
-            "type": "http.response.start",
-            "status": 403,
-            "headers": [
-                (b"content-type", b"application/json; charset=utf-8"),
-                (b"content-length", str(len(body)).encode()),
-            ],
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 403,
+                "headers": [
+                    (b"content-type", b"application/json; charset=utf-8"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
         await send({"type": "http.response.body", "body": body, "more_body": False})
 
     async def _forward_with_replay(

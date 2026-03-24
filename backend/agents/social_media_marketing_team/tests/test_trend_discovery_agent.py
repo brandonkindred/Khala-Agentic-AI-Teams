@@ -58,7 +58,9 @@ def mock_llm():
 def mock_search():
     searcher = MagicMock()
     searcher.search.return_value = [
-        _make_candidate("Trending Now", "https://example.com/news", "Social media is buzzing today."),
+        _make_candidate(
+            "Trending Now", "https://example.com/news", "Social media is buzzing today."
+        ),
     ]
     return searcher
 
@@ -146,11 +148,31 @@ def test_run_caps_topics_at_three(mock_llm, mock_search):
 
 def test_run_relevance_score_clamped(mock_llm, mock_search):
     """Relevance scores outside 0-1 should be clamped."""
-    mock_llm.complete_json.return_value = {"topics": [
-        {"title": "T1", "summary": "S1", "platforms": [], "sources": [], "relevance_score": 1.5},
-        {"title": "T2", "summary": "S2", "platforms": [], "sources": [], "relevance_score": -0.2},
-        {"title": "T3", "summary": "S3", "platforms": [], "sources": [], "relevance_score": 0.7},
-    ]}
+    mock_llm.complete_json.return_value = {
+        "topics": [
+            {
+                "title": "T1",
+                "summary": "S1",
+                "platforms": [],
+                "sources": [],
+                "relevance_score": 1.5,
+            },
+            {
+                "title": "T2",
+                "summary": "S2",
+                "platforms": [],
+                "sources": [],
+                "relevance_score": -0.2,
+            },
+            {
+                "title": "T3",
+                "summary": "S3",
+                "platforms": [],
+                "sources": [],
+                "relevance_score": 0.7,
+            },
+        ]
+    }
 
     agent = TrendDiscoveryAgent(llm_client=mock_llm, web_search=mock_search)
     digest = agent.run(date="2026-03-16")

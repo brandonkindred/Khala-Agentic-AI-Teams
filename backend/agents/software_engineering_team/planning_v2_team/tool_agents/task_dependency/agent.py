@@ -75,13 +75,17 @@ def _merge_task_dependency_results(results: List[Dict[str, Any]]) -> Dict[str, A
         if r.get("summary"):
             summaries.append(str(r["summary"]))
 
-    merged["summary"] = (
-        f"Analyzed {len(merged['dependencies'])} dependencies. " + " ".join(summaries[:2])
+    merged["summary"] = f"Analyzed {len(merged['dependencies'])} dependencies. " + " ".join(
+        summaries[:2]
     )
     if merged["dependencies"]:
         merged["dependencies"] = dedupe_by_key(
             merged["dependencies"],
-            key_fn=lambda x: f"{x.get('from_task','')}|{x.get('to_task','')}" if isinstance(x, dict) else str(x),
+            key_fn=lambda x: (
+                f"{x.get('from_task', '')}|{x.get('to_task', '')}"
+                if isinstance(x, dict)
+                else str(x)
+            ),
         )
     if all(isinstance(x, str) for x in merged["circular_risks"]):
         merged["circular_risks"] = dedupe_strings(merged["circular_risks"])
@@ -93,6 +97,7 @@ def _merge_task_dependency_results(results: List[Dict[str, Any]]) -> Dict[str, A
     if all(isinstance(x, str) for x in merged["issues"]):
         merged["issues"] = dedupe_strings(merged["issues"])[:DEFAULT_MAX_ISSUES]
     return merged
+
 
 TASK_DEPENDENCY_REVIEW_PROMPT = """You are an expert Task Dependency Analyzer. Review these tasks and identify dependency issues, circular risks, and a brief summary.
 
@@ -126,25 +131,27 @@ def _extract_tasks_from_hierarchy(hierarchy: Optional[PlanningHierarchy]) -> Lis
     """Extract all tasks from hierarchy for dependency analysis."""
     if not hierarchy:
         return []
-    
+
     tasks = []
     for init in hierarchy.initiatives:
         for epic in init.epics:
             for story in epic.stories:
                 for task in story.tasks:
-                    tasks.append({
-                        "id": task.id,
-                        "title": task.title,
-                        "description": task.description,
-                        "team": task.assignee or "",
-                    })
+                    tasks.append(
+                        {
+                            "id": task.id,
+                            "title": task.title,
+                            "description": task.description,
+                            "team": task.assignee or "",
+                        }
+                    )
     return tasks
 
 
 class TaskDependencyToolAgent:
     """
     Task Dependency tool agent: analyzes dependencies between tasks.
-    
+
     Participates in Review phase only per the matrix.
     """
 
@@ -166,9 +173,9 @@ class TaskDependencyToolAgent:
                 summary="Task Dependency review skipped (no LLM).",
                 recommendations=["Analyze task dependencies manually"],
             )
-        
+
         tasks = _extract_tasks_from_hierarchy(inp.hierarchy)
-        
+
         if not tasks:
             task_artifacts = "\n".join(
                 f"--- {path} ---\n{content[:500]}"
@@ -186,11 +193,23 @@ class TaskDependencyToolAgent:
                 f"- {t['id']}: [{t['team']}] {t['title']} - {t['description'][:80]}"
                 for t in tasks[:50]
             )
-            json.dumps([{"id": t["id"], "team": t["team"], "title": t["title"], "description": t["description"][:80]} for t in tasks[:50]])
-        
+            json.dumps(
+                [
+                    {
+                        "id": t["id"],
+                        "team": t["team"],
+                        "title": t["title"],
+                        "description": t["description"][:80],
+                    }
+                    for t in tasks[:50]
+                ]
+            )
+
         prompt = TASK_DEPENDENCY_REVIEW_PROMPT.format(tasks=tasks_text)
         raw_text = complete_text_with_continuation(
-            self.llm, prompt, agent_name="TaskDependency",
+            self.llm,
+            prompt,
+            agent_name="TaskDependency",
         )
         data = parse_review_output(raw_text)
         issues = data.get("issues") or []
@@ -232,7 +251,9 @@ class TaskDependencyToolAgent:
 
     def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Problem-solving phase: Task Dependency does not participate."""
-        return ToolAgentPhaseOutput(summary="Task Dependency problem_solve not applicable (per matrix).")
+        return ToolAgentPhaseOutput(
+            summary="Task Dependency problem_solve not applicable (per matrix)."
+        )
 
     def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Deliver phase: Task Dependency does not participate."""

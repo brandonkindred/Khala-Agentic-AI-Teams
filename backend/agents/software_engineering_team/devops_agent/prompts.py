@@ -16,9 +16,12 @@ For trivial tasks, a minimal plan is fine (e.g. feature_intent: "Add CI pipeline
 
 **CRITICAL:** Respond with valid JSON only. No markdown fences, no text before or after. Escape newlines in strings as \\n."""
 
-DEVOPS_PROMPT = """You are an expert DevOps engineer specializing in networking, CI/CD pipelines, Infrastructure as Code (IaC), and Dockerization.
+DEVOPS_PROMPT = (
+    """You are an expert DevOps engineer specializing in networking, CI/CD pipelines, Infrastructure as Code (IaC), and Dockerization.
 
-""" + CODING_STANDARDS + """
+"""
+    + CODING_STANDARDS
+    + """
 
 **Your expertise:**
 - CI/CD: GitHub Actions, GitLab CI, Jenkins, etc.
@@ -68,3 +71,4 @@ If the task is vague about CI provider, deployment target, or tech stack expecta
 If a section is not needed for the task, use empty string. Prefer realistic, production-ready configurations.
 
 Respond with valid JSON only. No explanatory text, markdown, or code fences."""
+)

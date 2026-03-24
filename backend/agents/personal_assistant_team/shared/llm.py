@@ -51,12 +51,14 @@ class JSONExtractionFailure(LLMJsonParseError):
         self.recovery_suggestions = recovery_suggestions or []
 
     def __str__(self) -> str:
-        suggestions = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(self.recovery_suggestions))
-        last_response = self.raw_responses[-1][:500] if self.raw_responses else "No responses captured"
+        suggestions = "\n".join(f"  {i + 1}. {s}" for i, s in enumerate(self.recovery_suggestions))
+        last_response = (
+            self.raw_responses[-1][:500] if self.raw_responses else "No responses captured"
+        )
         return (
-            f"\n{'='*80}\n"
+            f"\n{'=' * 80}\n"
             f"CRITICAL: JSON EXTRACTION FAILED\n"
-            f"{'='*80}\n\n"
+            f"{'=' * 80}\n\n"
             f"Error: {self.args[0]}\n\n"
             f"Recovery Attempts Made:\n"
             f"  - Total attempts: {self.attempts_made}\n"
@@ -67,7 +69,7 @@ class JSONExtractionFailure(LLMJsonParseError):
             f"  {self.original_prompt[:500]}{'...' if len(self.original_prompt) > 500 else ''}\n\n"
             f"Last raw response (first 500 chars):\n"
             f"  {last_response}\n"
-            f"{'='*80}\n"
+            f"{'=' * 80}\n"
         )
 
 
@@ -116,7 +118,9 @@ class LLMClient(_BaseLLMClient):
         decomposition_attempts = 0
 
         # --- direct attempt ---
-        response = self._ollama_complete(prompt, temperature=temperature, system_prompt=system_prompt, json_mode=True)
+        response = self._ollama_complete(
+            prompt, temperature=temperature, system_prompt=system_prompt, json_mode=True
+        )
         raw_responses.append(response)
         attempts_made += 1
 
@@ -149,7 +153,9 @@ class LLMClient(_BaseLLMClient):
         for subtask_prompt, subtask_key in subtasks:
             if decomposition_attempts >= self.MAX_DECOMPOSITION_ATTEMPTS:
                 break
-            resp = self._ollama_complete(subtask_prompt, temperature=temperature, system_prompt=system_prompt, json_mode=True)
+            resp = self._ollama_complete(
+                subtask_prompt, temperature=temperature, system_prompt=system_prompt, json_mode=True
+            )
             raw_responses.append(resp)
             attempts_made += 1
             decomposition_attempts += 1
@@ -273,7 +279,9 @@ class LLMClient(_BaseLLMClient):
         ]
 
     def _recovery_suggestions(self, prompt: str, raw_responses: List[str]) -> List[str]:
-        suggestions = ["Simplify the request: Break your request into smaller, more specific parts."]
+        suggestions = [
+            "Simplify the request: Break your request into smaller, more specific parts."
+        ]
         if len(prompt) > 2000:
             suggestions.append(
                 f"Reduce prompt size: Your prompt is {len(prompt)} characters. "
@@ -281,7 +289,9 @@ class LLMClient(_BaseLLMClient):
             )
         suggestions.append("Use a larger model with higher token limits.")
         suggestions.append("Check LLM configuration: SW_LLM_MODEL and SW_LLM_BASE_URL.")
-        if raw_responses and ("error" in raw_responses[-1].lower() or "cannot" in raw_responses[-1].lower()):
+        if raw_responses and (
+            "error" in raw_responses[-1].lower() or "cannot" in raw_responses[-1].lower()
+        ):
             suggestions.append("Review LLM response: The model may be refusing the request.")
         suggestions.append("Increase timeout: Set SW_LLM_TIMEOUT to a higher value.")
         return suggestions

@@ -1,6 +1,5 @@
 """Unit tests for ClientProfileStore and MealFeedbackStore."""
 
-
 import pytest
 
 from nutrition_meal_planning_team.models import (
@@ -57,7 +56,9 @@ class TestClientProfileStore:
     def test_module_level_create_get_save(self, storage_dir):
         p = create_profile("c3", storage_dir=storage_dir)
         assert p.client_id == "c3"
-        save_profile("c3", ClientProfile(client_id="c3", dietary_needs=["vegan"]), storage_dir=storage_dir)
+        save_profile(
+            "c3", ClientProfile(client_id="c3", dietary_needs=["vegan"]), storage_dir=storage_dir
+        )
         loaded = get_profile("c3", storage_dir=storage_dir)
         assert loaded is not None
         assert "vegan" in loaded.dietary_needs
@@ -75,7 +76,9 @@ class TestMealFeedbackStore:
         return MealFeedbackStore(storage_dir=storage_dir)
 
     def test_record_recommendation_returns_id(self, store):
-        rec_id = store.record_recommendation("client1", {"name": "Salad", "ingredients": ["lettuce"]})
+        rec_id = store.record_recommendation(
+            "client1", {"name": "Salad", "ingredients": ["lettuce"]}
+        )
         assert rec_id
         assert len(rec_id) == 36  # uuid4 hex + hyphens
 

@@ -30,11 +30,11 @@ def _collect_clarification_questions(
     metadata: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     """Extract clarification questions from tool agent metadata.
-    
+
     Args:
         agent_name: Name of the agent (e.g., "devops", "architecture")
         metadata: The metadata dict from ToolAgentPhaseOutput
-        
+
     Returns:
         List of question dicts with source and question_text
     """
@@ -42,10 +42,12 @@ def _collect_clarification_questions(
     if metadata.get("needs_clarification"):
         for q_text in metadata.get("clarification_questions", []):
             if isinstance(q_text, str) and q_text.strip():
-                questions.append({
-                    "source": agent_name,
-                    "question_text": q_text.strip(),
-                })
+                questions.append(
+                    {
+                        "source": agent_name,
+                        "question_text": q_text.strip(),
+                    }
+                )
     return questions
 
 
@@ -85,9 +87,9 @@ def run_planning(
 ) -> PlanningPhaseResult:
     """
     Run Planning phase.
-    
+
     Tool agents participating: System Design, Architecture, User Story, DevOps, UI Design.
-    
+
     Collects clarification questions from tool agents and returns them in the result
     for the orchestrator to surface to the user via the Open Questions UI.
     """
@@ -95,7 +97,7 @@ def run_planning(
     hierarchy: Optional[PlanningHierarchy] = None
     metadata: Dict[str, Any] = {}
     clarification_questions: List[Dict[str, Any]] = []
-    
+
     tool_agent_input = ToolAgentPhaseInput(
         spec_content=spec_content,
         inspiration_content=inspiration_content or "",
@@ -123,10 +125,7 @@ def run_planning(
 
     if tool_agents:
         with ThreadPoolExecutor(max_workers=len(participating_agents)) as executor:
-            futures = {
-                executor.submit(_run_one_plan, kind): kind
-                for kind in participating_agents
-            }
+            futures = {executor.submit(_run_one_plan, kind): kind for kind in participating_agents}
             for future in as_completed(futures):
                 agent_kind, result, exc = future.result()
                 if exc:
@@ -174,13 +173,9 @@ def run_planning(
         result = _parse_planning_response(raw)
 
         init_count = len(hierarchy.initiatives) if hierarchy else 0
-        epic_count = (
-            sum(len(i.epics) for i in hierarchy.initiatives) if hierarchy else 0
-        )
+        epic_count = sum(len(i.epics) for i in hierarchy.initiatives) if hierarchy else 0
         story_count = (
-            sum(len(e.stories) for i in hierarchy.initiatives for e in i.epics)
-            if hierarchy
-            else 0
+            sum(len(e.stories) for i in hierarchy.initiatives for e in i.epics) if hierarchy else 0
         )
 
         logger.info(

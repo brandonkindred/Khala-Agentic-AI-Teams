@@ -94,22 +94,24 @@ Given the conversation so far and the section context, respond in JSON:
 """
 
 
-_NO_EXPERIENCE_PHRASES = frozenset({
-    "skip",
-    "no experience",
-    "no relevant experience",
-    "n/a",
-    "none",
-    "pass",
-    "i don't have",
-    "i haven't",
-    "i have no",
-    "i can't think of",
-    "nothing comes to mind",
-    "not applicable",
-    "i don't have a story",
-    "no story",
-})
+_NO_EXPERIENCE_PHRASES = frozenset(
+    {
+        "skip",
+        "no experience",
+        "no relevant experience",
+        "n/a",
+        "none",
+        "pass",
+        "i don't have",
+        "i haven't",
+        "i have no",
+        "i can't think of",
+        "nothing comes to mind",
+        "not applicable",
+        "i don't have a story",
+        "no story",
+    }
+)
 
 
 def _is_no_experience(message: str) -> bool:
@@ -197,37 +199,46 @@ class GhostWriterElicitationAgent:
             is_waiting_for_story_input,
         )
 
-        conversation: List[Dict[str, str]] = [
-            {"role": "agent", "content": gap.seed_question}
-        ]
+        conversation: List[Dict[str, str]] = [{"role": "agent", "content": gap.seed_question}]
 
         for round_num in range(max_rounds):
             # ── Wait indefinitely for the user to respond ────────────────
             while is_waiting_for_story_input(job_id):
                 job_data = get_blog_job(job_id)
                 if job_data and job_data.get("status") in ("failed", "cancelled"):
-                    return StoryElicitationResult(gap=gap, narrative=None, skipped=True, rounds_used=round_num)
+                    return StoryElicitationResult(
+                        gap=gap, narrative=None, skipped=True, rounds_used=round_num
+                    )
                 if job_data and job_data.get("current_story_gap_index", 0) > gap_index:
-                    return StoryElicitationResult(gap=gap, narrative=None, skipped=True, rounds_used=round_num)
+                    return StoryElicitationResult(
+                        gap=gap, narrative=None, skipped=True, rounds_used=round_num
+                    )
                 time.sleep(POLL_INTERVAL)
 
             # Check if user skipped via UI
             job_data = get_blog_job(job_id)
             if job_data and job_data.get("current_story_gap_index", 0) > gap_index:
-                return StoryElicitationResult(gap=gap, narrative=None, skipped=True, rounds_used=round_num + 1)
+                return StoryElicitationResult(
+                    gap=gap, narrative=None, skipped=True, rounds_used=round_num + 1
+                )
 
             # Get user's last message
             history = (job_data or {}).get("story_chat_history", [])
             user_messages = [
-                m for m in history
+                m
+                for m in history
                 if m.get("role") == "user" and m.get("gap_index", gap_index) == gap_index
             ]
             last_user_msg = user_messages[-1]["content"] if user_messages else ""
 
             # ── Quick check: did user say "skip" / "no experience"? ──────
             if _is_no_experience(last_user_msg):
-                logger.info("Ghost writer: user indicated no experience for '%s'", gap.section_title)
-                return StoryElicitationResult(gap=gap, narrative=None, skipped=True, rounds_used=round_num + 1)
+                logger.info(
+                    "Ghost writer: user indicated no experience for '%s'", gap.section_title
+                )
+                return StoryElicitationResult(
+                    gap=gap, narrative=None, skipped=True, rounds_used=round_num + 1
+                )
 
             conversation.append({"role": "user", "content": last_user_msg})
 
@@ -237,7 +248,9 @@ class GhostWriterElicitationAgent:
             # Outcome 1: no_experience flagged by LLM
             if evaluation.get("no_experience"):
                 logger.info("Ghost writer: LLM detected no-experience for '%s'", gap.section_title)
-                return StoryElicitationResult(gap=gap, narrative=None, skipped=True, rounds_used=round_num + 1)
+                return StoryElicitationResult(
+                    gap=gap, narrative=None, skipped=True, rounds_used=round_num + 1
+                )
 
             # Outcome 2: sufficient STAR material
             if evaluation.get("sufficient"):
@@ -247,7 +260,9 @@ class GhostWriterElicitationAgent:
                     gap.section_title,
                     round_num + 1,
                 )
-                return StoryElicitationResult(gap=gap, narrative=narrative, skipped=False, rounds_used=round_num + 1)
+                return StoryElicitationResult(
+                    gap=gap, narrative=narrative, skipped=False, rounds_used=round_num + 1
+                )
 
             # Outcome 3: insufficient — ask follow-up (loop continues)
             follow_up = evaluation.get("follow_up")
@@ -255,16 +270,22 @@ class GhostWriterElicitationAgent:
                 # LLM couldn't generate a follow-up — compile from what we have
                 narrative = self._compile_from_history(gap, conversation)
                 if narrative:
-                    return StoryElicitationResult(gap=gap, narrative=narrative, skipped=False, rounds_used=round_num + 1)
+                    return StoryElicitationResult(
+                        gap=gap, narrative=narrative, skipped=False, rounds_used=round_num + 1
+                    )
                 break
 
             conversation.append({"role": "agent", "content": follow_up})
             add_story_agent_message(job_id, follow_up, gap_index)
 
         # Safety cap reached — compile whatever we have
-        logger.info("Ghost writer: round cap reached for '%s', compiling from history", gap.section_title)
+        logger.info(
+            "Ghost writer: round cap reached for '%s', compiling from history", gap.section_title
+        )
         narrative = self._compile_from_history(gap, conversation)
-        return StoryElicitationResult(gap=gap, narrative=narrative, skipped=False, rounds_used=max_rounds)
+        return StoryElicitationResult(
+            gap=gap, narrative=narrative, skipped=False, rounds_used=max_rounds
+        )
 
     def _evaluate_response(
         self,

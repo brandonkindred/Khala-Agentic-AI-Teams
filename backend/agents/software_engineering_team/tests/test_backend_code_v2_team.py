@@ -33,6 +33,7 @@ from backend_code_v2_team.models import (  # noqa: E402
 # Model tests
 # ---------------------------------------------------------------------------
 
+
 class TestModels:
     def test_microtask_defaults(self):
         mt = Microtask(id="mt-1")
@@ -89,6 +90,7 @@ class TestModels:
 # Setup phase tests
 # ---------------------------------------------------------------------------
 
+
 class TestSetupPhase:
     def test_run_setup_on_existing_repo(self, tmp_path):
         from backend_code_v2_team.phases.setup import run_setup
@@ -111,6 +113,7 @@ class TestSetupPhase:
 # Planning phase tests
 # ---------------------------------------------------------------------------
 
+
 class TestPlanningPhase:
     def test_language_detection_python(self, tmp_path):
         from backend_code_v2_team.phases.planning import _detect_language
@@ -118,7 +121,13 @@ class TestPlanningPhase:
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         (tmp_path / "requirements.txt").write_text("flask")
-        task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build api")
+        task = Task(
+            id="t1",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build api",
+        )
         assert _detect_language(tmp_path, task) == "python"
 
     def test_language_detection_java(self, tmp_path):
@@ -127,7 +136,13 @@ class TestPlanningPhase:
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         (tmp_path / "pom.xml").write_text("<project/>")
-        task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build api")
+        task = Task(
+            id="t1",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build api",
+        )
         assert _detect_language(tmp_path, task) == "java"
 
     def test_language_detection_from_description(self, tmp_path):
@@ -135,7 +150,13 @@ class TestPlanningPhase:
 
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
-        task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="Use Spring Boot and Java")
+        task = Task(
+            id="t1",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            description="Use Spring Boot and Java",
+        )
         assert _detect_language(tmp_path, task) == "java"
 
     def test_parse_planning_output(self):
@@ -143,8 +164,19 @@ class TestPlanningPhase:
 
         raw = {
             "microtasks": [
-                {"id": "mt-1", "title": "Create models", "tool_agent": "data_engineering", "description": "define models"},
-                {"id": "mt-2", "title": "Create API", "tool_agent": "api_openapi", "description": "routes", "depends_on": ["mt-1"]},
+                {
+                    "id": "mt-1",
+                    "title": "Create models",
+                    "tool_agent": "data_engineering",
+                    "description": "define models",
+                },
+                {
+                    "id": "mt-2",
+                    "title": "Create API",
+                    "tool_agent": "api_openapi",
+                    "description": "routes",
+                    "depends_on": ["mt-1"],
+                },
             ],
             "language": "python",
             "summary": "Plan created",
@@ -165,7 +197,13 @@ class TestPlanningPhase:
             "## LANGUAGE ##\npython\n## END LANGUAGE ##\n"
             "## SUMMARY ##\nempty\n## END SUMMARY ##"
         )
-        task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build something")
+        task = Task(
+            id="t1",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build something",
+        )
         result = run_planning(llm=mock_llm, task=task, repo_path=tmp_path)
         assert len(result.microtasks) == 1
         assert result.microtasks[0].id == "mt-implement-task"
@@ -175,6 +213,7 @@ class TestPlanningPhase:
 # Execution phase tests
 # ---------------------------------------------------------------------------
 
+
 class TestExecutionPhase:
     def test_run_execution_with_tool_runners(self, tmp_path):
         from backend_code_v2_team.phases.execution import run_execution
@@ -182,13 +221,23 @@ class TestExecutionPhase:
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
-        task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build")
+        task = Task(
+            id="t1",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build",
+        )
 
         def fake_runner(inp):
             return ToolAgentOutput(files={"models.py": "class User: pass"}, summary="done")
 
         planning = PlanningResult(
-            microtasks=[Microtask(id="mt-1", tool_agent=ToolAgentKind.DATA_ENGINEERING, description="models")],
+            microtasks=[
+                Microtask(
+                    id="mt-1", tool_agent=ToolAgentKind.DATA_ENGINEERING, description="models"
+                )
+            ],
             language="python",
         )
         result = run_execution(
@@ -210,18 +259,29 @@ class TestExecutionPhase:
         mock_llm.complete_text.return_value = (
             "## FILE app.py ##\nprint('hello')\n## SUMMARY ##\ndone\n## END SUMMARY ##"
         )
-        task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build")
+        task = Task(
+            id="t1",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build",
+        )
         planning = PlanningResult(
-            microtasks=[Microtask(id="mt-gen", tool_agent=ToolAgentKind.GENERAL, description="general task")],
+            microtasks=[
+                Microtask(id="mt-gen", tool_agent=ToolAgentKind.GENERAL, description="general task")
+            ],
             language="python",
         )
-        result = run_execution(llm=mock_llm, task=task, planning_result=planning, repo_path=tmp_path)
+        result = run_execution(
+            llm=mock_llm, task=task, planning_result=planning, repo_path=tmp_path
+        )
         assert "app.py" in result.files
 
 
 # ---------------------------------------------------------------------------
 # Review phase tests
 # ---------------------------------------------------------------------------
+
 
 class TestReviewPhase:
     def test_review_passes_no_issues(self, tmp_path):
@@ -235,9 +295,17 @@ class TestReviewPhase:
             "## ISSUES ##\n## END ISSUES ##\n"
             "## SUMMARY ##\nall good\n## END SUMMARY ##"
         )
-        task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build")
+        task = Task(
+            id="t1",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build",
+        )
         exec_result = ExecutionResult(files={"app.py": "print()"}, microtasks=[])
-        result = run_review(llm=mock_llm, task=task, execution_result=exec_result, repo_path=tmp_path)
+        result = run_review(
+            llm=mock_llm, task=task, execution_result=exec_result, repo_path=tmp_path
+        )
         assert result.passed
         assert result.build_ok
 
@@ -252,15 +320,24 @@ class TestReviewPhase:
             "## ISSUES ##\n---\nsource: code_review\nseverity: critical\ndescription: SQL injection\nfile_path: \nrecommendation: \n---\n## END ISSUES ##\n"
             "## SUMMARY ##\ncritical issue\n## END SUMMARY ##"
         )
-        task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build")
+        task = Task(
+            id="t1",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build",
+        )
         exec_result = ExecutionResult(files={"app.py": "query(input)"}, microtasks=[])
-        result = run_review(llm=mock_llm, task=task, execution_result=exec_result, repo_path=tmp_path)
+        result = run_review(
+            llm=mock_llm, task=task, execution_result=exec_result, repo_path=tmp_path
+        )
         assert not result.passed
 
 
 # ---------------------------------------------------------------------------
 # Problem-solving phase tests
 # ---------------------------------------------------------------------------
+
 
 class TestProblemSolvingPhase:
     def test_no_actionable_issues(self):
@@ -269,11 +346,22 @@ class TestProblemSolvingPhase:
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
-        task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build")
-        review = ReviewResult(passed=False, issues=[
-            ReviewIssue(source="code_review", severity="info", description="minor style"),
-        ])
-        result = run_problem_solving(llm=mock_llm, task=task, review_result=review, current_files={"a.py": "pass"})
+        task = Task(
+            id="t1",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build",
+        )
+        review = ReviewResult(
+            passed=False,
+            issues=[
+                ReviewIssue(source="code_review", severity="info", description="minor style"),
+            ],
+        )
+        result = run_problem_solving(
+            llm=mock_llm, task=task, review_result=review, current_files={"a.py": "pass"}
+        )
         assert result.resolved
 
     def test_applies_fixes(self):
@@ -288,11 +376,22 @@ class TestProblemSolvingPhase:
             "## RESOLVED ##\ntrue\n## END RESOLVED ##\n"
             "## SUMMARY ##\nFixed bug\n## END SUMMARY ##"
         )
-        task = Task(id="t1", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="build")
-        review = ReviewResult(passed=False, issues=[
-            ReviewIssue(source="code_review", severity="high", description="null pointer"),
-        ])
-        result = run_problem_solving(llm=mock_llm, task=task, review_result=review, current_files={"a.py": "bad_code()"})
+        task = Task(
+            id="t1",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            description="build",
+        )
+        review = ReviewResult(
+            passed=False,
+            issues=[
+                ReviewIssue(source="code_review", severity="high", description="null pointer"),
+            ],
+        )
+        result = run_problem_solving(
+            llm=mock_llm, task=task, review_result=review, current_files={"a.py": "bad_code()"}
+        )
         assert result.resolved
         assert result.files["a.py"] == "fixed_code()"
 
@@ -300,6 +399,7 @@ class TestProblemSolvingPhase:
 # ---------------------------------------------------------------------------
 # Tool agents tests
 # ---------------------------------------------------------------------------
+
 
 class TestToolAgents:
     def test_data_engineering_agent(self):
@@ -310,7 +410,9 @@ class TestToolAgents:
             "## FILE models.py ##\nclass User: pass\n## SUMMARY ##\nschema done\n## END SUMMARY ##"
         )
         agent = DataEngineeringToolAgent(mock_llm)
-        inp = ToolAgentInput(microtask=Microtask(id="mt-1", description="create schema"), language="python")
+        inp = ToolAgentInput(
+            microtask=Microtask(id="mt-1", description="create schema"), language="python"
+        )
         out = agent.run(inp)
         assert "models.py" in out.files
 
@@ -322,7 +424,9 @@ class TestToolAgents:
             "## FILE routes.py ##\nroute()\n## SUMMARY ##\napi done\n## END SUMMARY ##"
         )
         agent = ApiOpenApiToolAgent(mock_llm)
-        inp = ToolAgentInput(microtask=Microtask(id="mt-1", description="create endpoint"), language="python")
+        inp = ToolAgentInput(
+            microtask=Microtask(id="mt-1", description="create endpoint"), language="python"
+        )
         out = agent.run(inp)
         assert "routes.py" in out.files
 
@@ -334,7 +438,9 @@ class TestToolAgents:
             "## FILE auth.py ##\ndef login(): pass\n## SUMMARY ##\nauth done\n## END SUMMARY ##"
         )
         agent = AuthToolAgent(mock_llm)
-        inp = ToolAgentInput(microtask=Microtask(id="mt-1", description="add login"), language="python")
+        inp = ToolAgentInput(
+            microtask=Microtask(id="mt-1", description="add login"), language="python"
+        )
         out = agent.run(inp)
         assert "auth.py" in out.files
 
@@ -351,7 +457,9 @@ class TestToolAgents:
         from backend_code_v2_team.tool_agents.containerization import ContainerizationAdapterAgent
 
         agent = ContainerizationAdapterAgent()
-        inp = ToolAgentInput(microtask=Microtask(id="mt-1", description="docker"), language="python")
+        inp = ToolAgentInput(
+            microtask=Microtask(id="mt-1", description="docker"), language="python"
+        )
         out = agent.run(inp)
         assert not out.files
         assert out.summary
@@ -383,6 +491,7 @@ class TestToolAgents:
         assert not create_ok and branch is None
 
         from software_engineering_team.shared.git_utils import initialize_new_repo
+
         ok, _ = initialize_new_repo(tmp_path)
         assert ok
         create_ok, branch = agent.create_feature_branch(tmp_path, "t1", "API")
@@ -448,7 +557,9 @@ class TestToolAgents:
 
         mock_llm = MagicMock()
         data_eng = DataEngineeringToolAgent(mock_llm)
-        inp = ToolAgentPhaseInput(phase=Phase.PLANNING, task_title="API", task_description="Build API")
+        inp = ToolAgentPhaseInput(
+            phase=Phase.PLANNING, task_title="API", task_description="Build API"
+        )
         out = data_eng.plan(inp)
         assert out.recommendations
         assert out.success
@@ -466,9 +577,13 @@ class TestToolAgents:
         from backend_code_v2_team.tool_agents.data_engineering import DataEngineeringToolAgent
 
         mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = "## FILE x.py ##\ncode\n## SUMMARY ##\ndone\n## END SUMMARY ##"
+        mock_llm.complete_text.return_value = (
+            "## FILE x.py ##\ncode\n## SUMMARY ##\ndone\n## END SUMMARY ##"
+        )
         agent = DataEngineeringToolAgent(mock_llm)
-        inp = ToolAgentInput(microtask=Microtask(id="mt-1", description="schema"), language="python")
+        inp = ToolAgentInput(
+            microtask=Microtask(id="mt-1", description="schema"), language="python"
+        )
         out = agent.run(inp)
         assert out.files
         out2 = agent.execute(inp)
@@ -478,6 +593,7 @@ class TestToolAgents:
 # ---------------------------------------------------------------------------
 # BackendDevelopmentAgent tests (5-phase cycle)
 # ---------------------------------------------------------------------------
+
 
 class TestBackendDevelopmentAgent:
     def test_read_repo_code(self, tmp_path):
@@ -511,6 +627,7 @@ class TestBackendDevelopmentAgent:
 # BackendCodeV2TeamLead (Tech Lead: Setup + delegate) tests
 # ---------------------------------------------------------------------------
 
+
 class TestBackendCodeV2TeamLead:
     def test_team_lead_runs_setup_then_delegates(self, tmp_path):
         """BackendCodeV2TeamLead runs Setup then delegates to BackendDevelopmentAgent."""
@@ -527,7 +644,13 @@ class TestBackendCodeV2TeamLead:
         mock_llm.complete_text.side_effect = [planning_response, execution_response]
 
         lead = BackendCodeV2TeamLead(mock_llm)
-        task = Task(id="t-test", type=TaskType.BACKEND, assignee="backend-code-v2", status=TaskStatus.PENDING, description="Do something")
+        task = Task(
+            id="t-test",
+            type=TaskType.BACKEND,
+            assignee="backend-code-v2",
+            status=TaskStatus.PENDING,
+            description="Do something",
+        )
 
         (tmp_path / ".git").mkdir()
 

@@ -38,18 +38,10 @@ class SuccessCriterion(BaseModel):
     guideline: str = Field(..., description="Guideline number, e.g., 1.1")
     guideline_name: str
     description: str = Field(default="", description="Brief description of requirement")
-    techniques: List[str] = Field(
-        default_factory=list, description="Common sufficient techniques"
-    )
-    failures: List[str] = Field(
-        default_factory=list, description="Common failure patterns"
-    )
-    new_in_22: bool = Field(
-        default=False, description="True if new in WCAG 2.2"
-    )
-    new_in_21: bool = Field(
-        default=False, description="True if new in WCAG 2.1"
-    )
+    techniques: List[str] = Field(default_factory=list, description="Common sufficient techniques")
+    failures: List[str] = Field(default_factory=list, description="Common failure patterns")
+    new_in_22: bool = Field(default=False, description="True if new in WCAG 2.2")
+    new_in_21: bool = Field(default=False, description="True if new in WCAG 2.1")
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +721,19 @@ WCAG_22_CRITERIA: Dict[str, SuccessCriterion] = {
         guideline="4.1",
         guideline_name="Compatible",
         description="For all UI components, name and role can be programmatically determined.",
-        techniques=["G10", "G108", "G135", "H64", "H65", "H88", "H91", "ARIA4", "ARIA5", "ARIA14", "ARIA16"],
+        techniques=[
+            "G10",
+            "G108",
+            "G135",
+            "H64",
+            "H65",
+            "H88",
+            "H91",
+            "ARIA4",
+            "ARIA5",
+            "ARIA14",
+            "ARIA16",
+        ],
         failures=["F15", "F20", "F59", "F68", "F79", "F86", "F89"],
     ),
     "4.1.3": SuccessCriterion(
@@ -769,11 +773,7 @@ def get_criteria_by_principle(principle: WCAGPrinciple) -> List[SuccessCriterion
 
 def get_level_a_aa_criteria() -> List[SuccessCriterion]:
     """Get all Level A and AA success criteria (typical conformance target)."""
-    return [
-        sc
-        for sc in WCAG_22_CRITERIA.values()
-        if sc.level in (WCAGLevel.A, WCAGLevel.AA)
-    ]
+    return [sc for sc in WCAG_22_CRITERIA.values() if sc.level in (WCAGLevel.A, WCAGLevel.AA)]
 
 
 def get_new_in_22_criteria() -> List[SuccessCriterion]:

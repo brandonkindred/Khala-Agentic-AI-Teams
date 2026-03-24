@@ -31,13 +31,15 @@ class ProblemSolverAgent:
             "```",
         ]
         if input_data.current_code_snapshot:
-            context.extend([
-                "",
-                "**Current code snapshot (truncated):**",
-                "```",
-                input_data.current_code_snapshot[:6000],
-                "```",
-            ])
+            context.extend(
+                [
+                    "",
+                    "**Current code snapshot (truncated):**",
+                    "```",
+                    input_data.current_code_snapshot[:6000],
+                    "```",
+                ]
+            )
 
         prompt = PROBLEM_SOLVER_PROMPT + "\n\n---\n\n" + "\n".join(context)
         data = self.llm.complete_json(prompt, temperature=0.1)

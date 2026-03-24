@@ -58,7 +58,9 @@ class AllowedClaims(BaseModel):
     """Schema for allowed_claims.json."""
 
     topic: str = Field(default="", description="Topic or brief this claims set applies to.")
-    claims: List[ClaimEntry] = Field(default_factory=list, description="List of allowed factual claims.")
+    claims: List[ClaimEntry] = Field(
+        default_factory=list, description="List of allowed factual claims."
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         """Export for JSON serialization."""
@@ -102,13 +104,19 @@ def extract_allowed_claims(
         return AllowedClaims(topic=topic, claims=[])
 
     if not isinstance(data, dict):
-        logger.warning("Claims extraction: LLM returned non-dict (type=%s); returning empty claims", type(data).__name__)
+        logger.warning(
+            "Claims extraction: LLM returned non-dict (type=%s); returning empty claims",
+            type(data).__name__,
+        )
         return AllowedClaims(topic=topic, claims=[])
 
     try:
         raw_claims = data.get("claims") if isinstance(data.get("claims"), list) else []
     except (KeyError, AttributeError, TypeError) as e:
-        logger.warning("Claims extraction: could not read 'claims' from response: %s; returning empty claims", e)
+        logger.warning(
+            "Claims extraction: could not read 'claims' from response: %s; returning empty claims",
+            e,
+        )
         return AllowedClaims(topic=topic, claims=[])
 
     claims = []
@@ -126,9 +134,7 @@ def extract_allowed_claims(
             risk = (c.get("risk_level") or "low").lower()
             if risk not in ("low", "medium", "high"):
                 risk = "low"
-            claims.append(
-                ClaimEntry(id=cid, text=text, citations=list(citations), risk_level=risk)
-            )
+            claims.append(ClaimEntry(id=cid, text=text, citations=list(citations), risk_level=risk))
         except (KeyError, TypeError, ValueError, Exception) as _e:
             logger.debug("Skipping invalid claim entry: %s", _e)
             continue

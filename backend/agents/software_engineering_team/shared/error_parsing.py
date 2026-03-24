@@ -168,7 +168,9 @@ def parse_pytest_failure(stdout: str, stderr: str) -> List[ParsedFailure]:
         raw_excerpt = text[-2500:] if len(text) > 2500 else text
         assertion_line: Optional[str] = None
         expected_got: Optional[str] = None
-        got_status: Optional[int] = None  # detected response code (e.g. 401) when assertion is status_code
+        got_status: Optional[int] = (
+            None  # detected response code (e.g. 401) when assertion is status_code
+        )
 
         # Collect ALL FAILED path::test_name (dedupe by (file, test_name))
         failed_matches = re.findall(
@@ -188,9 +190,7 @@ def parse_pytest_failure(stdout: str, stderr: str) -> List[ParsedFailure]:
             if key not in seen:
                 seen.add(key)
                 failing_list.append((file_path_part, test_name_part))
-        failing_tests_display: List[str] = [
-            f"{f}::{t}" if t else f for (f, t) in failing_list
-        ]
+        failing_tests_display: List[str] = [f"{f}::{t}" if t else f for (f, t) in failing_list]
         first_file = failing_list[0][0] if failing_list else None
         first_test = failing_list[0][1] if failing_list and failing_list[0][1] else None
 
@@ -238,7 +238,11 @@ def parse_pytest_failure(stdout: str, stderr: str) -> List[ParsedFailure]:
             playbook_hint = playbook_hint + " " + PLAYBOOK_403_FORBIDDEN
         elif got_status == 404:
             playbook_hint = playbook_hint + " " + PLAYBOOK_404_NOT_FOUND
-        elif assertion_line and "401" in assertion_line and ("status_code" in assertion_line or expected_got):
+        elif (
+            assertion_line
+            and "401" in assertion_line
+            and ("status_code" in assertion_line or expected_got)
+        ):
             playbook_hint = playbook_hint + " " + PLAYBOOK_401_UNAUTHORIZED
         elif assertion_line and "403" in assertion_line:
             playbook_hint = playbook_hint + " " + PLAYBOOK_403_FORBIDDEN
@@ -247,7 +251,9 @@ def parse_pytest_failure(stdout: str, stderr: str) -> List[ParsedFailure]:
 
         # Message: single vs multiple failures
         if len(failing_list) > 1:
-            msg_parts = [f"{len(failing_list)} tests failed: {', '.join(failing_tests_display[:10])}"]
+            msg_parts = [
+                f"{len(failing_list)} tests failed: {', '.join(failing_tests_display[:10])}"
+            ]
             if len(failing_tests_display) > 10:
                 msg_parts[0] += f" (+{len(failing_tests_display) - 10} more)"
             if assertion_line:
@@ -305,7 +311,9 @@ def parse_pytest_failure(stdout: str, stderr: str) -> List[ParsedFailure]:
         )
 
     # Collection error (not ImportError)
-    if "ERROR collecting" in text and FailureClass.IMPORT_ERROR not in [f.failure_class for f in failures]:
+    if "ERROR collecting" in text and FailureClass.IMPORT_ERROR not in [
+        f.failure_class for f in failures
+    ]:
         failures.append(
             ParsedFailure(
                 failure_class=FailureClass.PYTEST_COLLECTION,
@@ -406,7 +414,11 @@ def parse_devops_failure(build_errors: str) -> List[ParsedFailure]:
     yamlerror_in_text = "YAMLError" in text or "yaml.YAMLError" in text
     if yaml_match or ("yaml" in text.lower() and "parse" in text.lower()) or yamlerror_in_text:
         file_path = yaml_match.group(1).strip() if yaml_match and yaml_match.group(1) else None
-        msg = yaml_match.group(2).strip()[:300] if yaml_match and yaml_match.group(2) else "YAML parse error"
+        msg = (
+            yaml_match.group(2).strip()[:300]
+            if yaml_match and yaml_match.group(2)
+            else "YAML parse error"
+        )
         failures.append(
             ParsedFailure(
                 failure_class=FailureClass.YAML_PARSE_ERROR,
@@ -525,11 +537,11 @@ def parse_command_failure(
     ]
 
 
-def build_agent_feedback(failures: List[ParsedFailure], max_chars: int = 2500) -> str:
+def build_agent_feedback(failures: List[ParsedFailure], max_chars: int = 0) -> str:
     """
-    Build a concise feedback string for agents from parsed failures.
+    Build a feedback string for agents from parsed failures.
 
-    Includes the primary failure's suggestion and playbook hint, plus truncated raw excerpt.
+    Includes the primary failure's suggestion and playbook hint, plus raw excerpt.
     For PYTEST_ASSERTION with failing_tests list, adds "Failing tests:" section.
     When 401 playbook is present, adds "Interpretation:" before Playbook.
     """
@@ -543,10 +555,7 @@ def build_agent_feedback(failures: List[ParsedFailure], max_chars: int = 2500) -
         primary.suggestion or "Fix the error.",
     ]
     # Failing tests: list each file::test_name when we have the list (assertion failures)
-    if (
-        primary.failure_class == FailureClass.PYTEST_ASSERTION
-        and primary.failing_tests
-    ):
+    if primary.failure_class == FailureClass.PYTEST_ASSERTION and primary.failing_tests:
         parts.extend(["", "Failing tests:"])
         for ft in primary.failing_tests[:20]:
             parts.append(f"  - {ft}")
@@ -561,19 +570,18 @@ def build_agent_feedback(failures: List[ParsedFailure], max_chars: int = 2500) -
         parts.extend(["", "Interpretation:", PLAYBOOK_404_NOT_FOUND])
     # Unresolved import: add verb-prefix path fix hint
     if primary.failure_class == FailureClass.FRONTEND_UNRESOLVED_IMPORT:
-        parts.extend([
-            "",
-            "Path fix: If the missing path contains a folder name like create-task or add-task, "
-            "create the component under an allowed name (e.g. task-form) and update the import "
-            "in the route or module to that path.",
-        ])
+        parts.extend(
+            [
+                "",
+                "Path fix: If the missing path contains a folder name like create-task or add-task, "
+                "create the component under an allowed name (e.g. task-form) and update the import "
+                "in the route or module to that path.",
+            ]
+        )
     if primary.playbook_hint:
         parts.extend(["", "Playbook:", primary.playbook_hint])
     if primary.raw_excerpt:
-        excerpt = primary.raw_excerpt
-        if len(excerpt) > max_chars:
-            excerpt = excerpt[:max_chars] + "\n... [truncated]"
-        parts.extend(["", "Raw output:", excerpt])
+        parts.extend(["", "Raw output:", primary.raw_excerpt])
     return "\n".join(parts)
 
 

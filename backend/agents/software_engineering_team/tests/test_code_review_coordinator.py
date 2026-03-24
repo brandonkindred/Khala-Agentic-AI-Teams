@@ -68,6 +68,7 @@ def test_run_coordinator_with_large_code_uses_chunk_reviewer():
 
     mock_llm = MagicMock()
     mock_llm.get_max_context_tokens.return_value = 16384
+    mock_llm.complete.return_value = "compacted content"  # for compact_text()
     mock_llm.complete_json.side_effect = [
         {"approved": True, "issues": [], "summary": "Chunk 1 OK"},
         {"approved": True, "issues": [], "summary": "Chunk 2 OK"},
@@ -95,6 +96,7 @@ def test_run_coordinator_merges_issues_and_rejects_if_critical():
 
     mock_llm = MagicMock()
     mock_llm.get_max_context_tokens.return_value = 16384
+    mock_llm.complete.return_value = "compacted content"  # for compact_text()
     mock_llm.complete_json.return_value = {
         "approved": False,
         "issues": [
@@ -129,6 +131,7 @@ def test_code_review_agent_uses_coordinator_when_code_exceeds_single_call_limit(
 
     mock_llm = MagicMock()
     mock_llm.get_max_context_tokens.return_value = 16384
+    mock_llm.complete.return_value = "compacted content"  # for compact_text()
     mock_llm.complete_json.return_value = {
         "approved": True,
         "issues": [],

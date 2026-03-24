@@ -69,7 +69,9 @@ class DecompositionContext:
             _decomposition_history=self._decomposition_history.copy(),
             _partial_responses=self._partial_responses,
         )
-        child._decomposition_history.append(f"depth_{self.depth}_chunk_{chunk_index + 1}_of_{total_chunks}")
+        child._decomposition_history.append(
+            f"depth_{self.depth}_chunk_{chunk_index + 1}_of_{total_chunks}"
+        )
         return child
 
     def add_partial_response(self, content: str) -> None:
@@ -353,8 +355,7 @@ class RecursiveProcessor(Generic[T]):
 
             if not context.can_decompose():
                 logger.error(
-                    "%s: Max decomposition depth (%d) reached. Cannot decompose further. "
-                    "Path: %s",
+                    "%s: Max decomposition depth (%d) reached. Cannot decompose further. Path: %s",
                     agent_name,
                     self.max_depth,
                     context.get_decomposition_path(),
@@ -412,9 +413,7 @@ class RecursiveProcessor(Generic[T]):
                 len(chunk),
             )
 
-            chunk_prompt = self.strategy.create_chunk_prompt(
-                original_prompt, chunk, i, len(chunks)
-            )
+            chunk_prompt = self.strategy.create_chunk_prompt(original_prompt, chunk, i, len(chunks))
 
             try:
                 chunk_result = self.process(

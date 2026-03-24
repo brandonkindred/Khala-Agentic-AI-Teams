@@ -107,9 +107,7 @@ def test_delete_credential_removes_only_target_key(tmp_path: Path, monkeypatch: 
     assert mod.get_credential("svc", "b") == "bbb"
 
 
-def test_delete_service_credentials_removes_all_keys_for_service(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_delete_service_credentials_removes_all_keys_for_service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """delete_service_credentials removes all keys for the target service."""
     mod = _reload(tmp_path, monkeypatch)
     mod.set_credential("svc", "key1", "v1")

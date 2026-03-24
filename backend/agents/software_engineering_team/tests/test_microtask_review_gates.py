@@ -45,6 +45,7 @@ def _create_test_task(task_type: str = "frontend") -> "Task":
 # Frontend tests
 # ---------------------------------------------------------------------------
 
+
 class TestFrontendMicrotaskReviewConfig:
     def test_config_defaults(self):
         from frontend_code_v2_team.models import MicrotaskReviewConfig
@@ -317,6 +318,7 @@ Security issue found.
 # ---------------------------------------------------------------------------
 # Backend tests
 # ---------------------------------------------------------------------------
+
 
 class TestBackendMicrotaskReviewConfig:
     def test_config_defaults(self):

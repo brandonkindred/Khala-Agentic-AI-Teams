@@ -149,6 +149,7 @@ class CicdAdapterAgent:
             return json.loads(raw)
         except json.JSONDecodeError:
             import re
+
             match = re.search(r"\{[\s\S]*\}", raw)
             if match:
                 try:

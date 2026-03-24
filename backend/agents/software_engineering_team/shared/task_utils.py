@@ -55,6 +55,7 @@ def task_requirements_with_expectations(
         from software_engineering_team.shared.test_spec_expectations import (
             build_test_spec_checklist,
         )
+
         checklist = build_test_spec_checklist(repo_path, domain)
         if checklist:
             base += "\n\n" + checklist

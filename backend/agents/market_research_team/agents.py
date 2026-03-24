@@ -39,9 +39,19 @@ class UXResearchAgent:
 
     def analyze(self, source: str, transcript: str) -> InterviewInsight:
         lines = [line.strip(" -•\t") for line in transcript.splitlines() if line.strip()]
-        user_jobs = [line for line in lines if "job" in line.lower() or "trying to" in line.lower()][:4]
-        pain_points = [line for line in lines if any(k in line.lower() for k in ("pain", "friction", "issue", "problem"))][:4]
-        desired_outcomes = [line for line in lines if any(k in line.lower() for k in ("want", "need", "goal", "outcome"))][:4]
+        user_jobs = [
+            line for line in lines if "job" in line.lower() or "trying to" in line.lower()
+        ][:4]
+        pain_points = [
+            line
+            for line in lines
+            if any(k in line.lower() for k in ("pain", "friction", "issue", "problem"))
+        ][:4]
+        desired_outcomes = [
+            line
+            for line in lines
+            if any(k in line.lower() for k in ("want", "need", "goal", "outcome"))
+        ][:4]
         direct_quotes = [line for line in lines if '"' in line][:3]
 
         if not user_jobs:
@@ -77,7 +87,8 @@ class UserPsychologyAgent:
             MarketSignal(
                 signal="User pain urgency",
                 confidence=min(1.0, urgency),
-                evidence=all_pains[:4] or ["No direct pain statements yet; run discovery interviews."],
+                evidence=all_pains[:4]
+                or ["No direct pain statements yet; run discovery interviews."],
             ),
             MarketSignal(
                 signal="Adoption motivation clarity",
@@ -93,8 +104,12 @@ class MarketViabilityAgent:
 
     role: str = "Business Viability Strategist"
 
-    def recommend(self, mission: ResearchMission, signals: List[MarketSignal], insight_count: int) -> ViabilityRecommendation:
-        avg_confidence = sum(signal.confidence for signal in signals) / len(signals) if signals else 0.45
+    def recommend(
+        self, mission: ResearchMission, signals: List[MarketSignal], insight_count: int
+    ) -> ViabilityRecommendation:
+        avg_confidence = (
+            sum(signal.confidence for signal in signals) / len(signals) if signals else 0.45
+        )
 
         if insight_count == 0:
             return ViabilityRecommendation(

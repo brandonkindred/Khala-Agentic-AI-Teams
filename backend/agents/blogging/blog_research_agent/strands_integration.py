@@ -54,4 +54,3 @@ def get_agent_spec() -> Dict[str, Any]:
         "output_model": ResearchAgentOutput,
         "handler_factory": handler_factory,
     }
-

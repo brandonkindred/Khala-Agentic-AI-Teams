@@ -35,7 +35,9 @@ def _run_git(repo_path: Path, cmd: list[str], timeout: int = 30) -> Tuple[int, s
         return -1, str(e)
 
 
-def create_feature_branch(repo_path: str | Path, base_branch: str, feature_name: str) -> Tuple[bool, str]:
+def create_feature_branch(
+    repo_path: str | Path, base_branch: str, feature_name: str
+) -> Tuple[bool, str]:
     """
     Create and checkout a feature branch from base_branch.
     feature_name: e.g. "t3-backend-auth" (will become feature/t3-backend-auth).
@@ -50,7 +52,9 @@ def create_feature_branch(repo_path: str | Path, base_branch: str, feature_name:
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return False, "Not a git repository"
-    branch_name = f"feature/{feature_name}" if not feature_name.startswith("feature/") else feature_name
+    branch_name = (
+        f"feature/{feature_name}" if not feature_name.startswith("feature/") else feature_name
+    )
 
     # Ensure working tree is clean so checkout does not fail with "would be overwritten"
     status_code, status_out = _run_git(path, ["git", "status", "--porcelain"])
@@ -71,24 +75,33 @@ def create_feature_branch(repo_path: str | Path, base_branch: str, feature_name:
             if _clear_disposable_files_if_blocking(path, out):
                 code, out = _run_git(path, ["git", "checkout", "-b", branch_name, base_branch])
                 if code == 0:
-                    logger.info("Created branch '%s' from '%s' (disposable files cleared)", branch_name, base_branch)
+                    logger.info(
+                        "Created branch '%s' from '%s' (disposable files cleared)",
+                        branch_name,
+                        base_branch,
+                    )
                     return True, branch_name
             # Working tree still dirty — try stash
             logger.info(
                 "Checkout failed due to local changes. Next step -> Trying stash to preserve changes"
             )
-            stash_code, stash_out = _run_git(path, ["git", "stash", "push", "-u", "-m", "pre-feature-branch"])
+            stash_code, stash_out = _run_git(
+                path, ["git", "stash", "push", "-u", "-m", "pre-feature-branch"]
+            )
             if stash_code == 0:
                 code, out = _run_git(path, ["git", "checkout", "-b", branch_name, base_branch])
                 if code == 0:
-                    logger.info("Created branch '%s' from '%s' (changes stashed)", branch_name, base_branch)
+                    logger.info(
+                        "Created branch '%s' from '%s' (changes stashed)", branch_name, base_branch
+                    )
                     return True, branch_name
             return False, f"Failed to create branch {branch_name}: {out}"
         if "already exists" in out:
             # Stale branch from a previous run — delete and recreate
             logger.warning(
                 "Branch '%s' already exists, deleting and recreating from '%s'",
-                branch_name, base_branch,
+                branch_name,
+                base_branch,
             )
             _run_git(path, ["git", "checkout", base_branch])
             del_code, del_out = _run_git(path, ["git", "branch", "-D", branch_name])
@@ -176,9 +189,7 @@ def commit_working_tree(repo_path: str | Path, message: str) -> Tuple[bool, str]
     return True, "Committed"
 
 
-def branch_has_commits_ahead_of(
-    repo_path: str | Path, branch: str, base: str
-) -> bool:
+def branch_has_commits_ahead_of(repo_path: str | Path, branch: str, base: str) -> bool:
     """
     Return True if branch has commits not in base.
     Used to check if there is work to merge before attempting emergency merge.
@@ -201,7 +212,9 @@ def merge_branch(repo_path: str | Path, source_branch: str, target_branch: str) 
     code, out = _run_git(path, ["git", "checkout", target_branch])
     if code != 0:
         return False, f"Failed to checkout {target_branch}: {out}"
-    code, out = _run_git(path, ["git", "merge", source_branch, "-m", f"Merge {source_branch} into {target_branch}"])
+    code, out = _run_git(
+        path, ["git", "merge", source_branch, "-m", f"Merge {source_branch} into {target_branch}"]
+    )
     if code != 0:
         return False, f"Merge failed: {out}"
     return True, f"Merged {source_branch} into {target_branch}"

@@ -1,6 +1,5 @@
 """Tests for Tech Lead agent."""
 
-
 import pytest
 from tech_lead_agent import TechLeadAgent, TechLeadInput
 
@@ -27,20 +26,21 @@ def architecture() -> SystemArchitecture:
     )
 
 
-def test_tech_lead_assigns_tasks(requirements: ProductRequirements, architecture: SystemArchitecture) -> None:
+def test_tech_lead_assigns_tasks(
+    requirements: ProductRequirements, architecture: SystemArchitecture
+) -> None:
     """Tech Lead returns TaskAssignment with tasks and execution order."""
     llm = DummyLLMClient()
     agent = TechLeadAgent(llm_client=llm)
     result = agent.run(TechLeadInput(requirements=requirements, architecture=architecture))
     assert len(result.assignment.tasks) >= 1
     assert result.assignment.execution_order
-    assert all(
-        t.id in result.assignment.execution_order
-        for t in result.assignment.tasks
-    )
+    assert all(t.id in result.assignment.execution_order for t in result.assignment.tasks)
 
 
-def test_tech_lead_tasks_have_assignees(requirements: ProductRequirements, architecture: SystemArchitecture) -> None:
+def test_tech_lead_tasks_have_assignees(
+    requirements: ProductRequirements, architecture: SystemArchitecture
+) -> None:
     """Each task has an assignee."""
     llm = DummyLLMClient()
     agent = TechLeadAgent(llm_client=llm)

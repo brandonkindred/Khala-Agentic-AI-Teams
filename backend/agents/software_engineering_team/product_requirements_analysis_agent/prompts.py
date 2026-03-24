@@ -171,7 +171,8 @@ When analyzing the spec, look for these patterns to determine resolution:
 - "user login" (vague) → Nothing resolved, ask Layer 1
 """
 
-SPEC_REVIEW_PROMPT = """You are a Product Requirements Analysis expert. Review the following product specification to identify gaps, inconsistencies, and areas that need clarification.
+SPEC_REVIEW_PROMPT = (
+    """You are a Product Requirements Analysis expert. Review the following product specification to identify gaps, inconsistencies, and areas that need clarification.
 
 Your goal is to ensure the specification is complete and unambiguous before it moves to the planning phase.
 
@@ -181,9 +182,13 @@ NOTE: The specification may include additional context files (documentation, con
 
 **Do not ask organizational/process questions:** Do NOT ask about organizational structure, approval workflows, decision-making process, who has final say, consensus, product manager vs team, or stakeholder sign-off. The client/user is the source of truth: their feedback and direction define what should be done. Implementation is handled by AI agents; there are no human roles or hierarchies to clarify. Focus open questions on product and technical decisions (what to build, how it should behave, technology choices), not on how a company would run or who approves what.
 
-""" + CONSTRAINT_DOMAINS + """
+"""
+    + CONSTRAINT_DOMAINS
+    + """
 
-""" + CONSTRAINT_DRILLING_INSTRUCTIONS + """
+"""
+    + CONSTRAINT_DRILLING_INSTRUCTIONS
+    + """
 
 ## GENERAL REVIEW GUIDELINES
 
@@ -330,6 +335,7 @@ Specification:
 {spec_content}
 ---
 """
+)
 
 AUTO_ANSWER_PROMPT = """You are a Product Analyst expert. Given the following question about a product specification, select the best answer option based on industry best practices and product success patterns.
 

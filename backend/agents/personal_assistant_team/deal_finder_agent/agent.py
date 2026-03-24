@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class DealFinderAgent:
     """
     Agent for finding deals that match user preferences.
-    
+
     Capabilities:
     - Search for deals across the web
     - Score deals based on user preferences
@@ -45,7 +45,7 @@ class DealFinderAgent:
     ) -> None:
         """
         Initialize the Deal Finder Agent.
-        
+
         Args:
             llm: LLM client for relevance scoring
             profile_store: User profile storage
@@ -53,11 +53,9 @@ class DealFinderAgent:
         """
         self.llm = llm
         self.profile_store = profile_store or UserProfileStore()
-        self.storage_dir = Path(
-            storage_dir or os.getenv("PA_DEALS_DIR", ".agent_cache/deals")
-        )
+        self.storage_dir = Path(storage_dir or os.getenv("PA_DEALS_DIR", ".agent_cache/deals"))
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        
+
         self.web_search = WebSearchTool()
         self.web_fetch = WebFetchTool()
 
@@ -70,7 +68,7 @@ class DealFinderAgent:
         file_path = self._get_wishlist_file(user_id)
         if not file_path.exists():
             return []
-        
+
         try:
             data = json.loads(file_path.read_text())
             return [WishlistItem(**item) for item in data]
@@ -87,15 +85,15 @@ class DealFinderAgent:
     def add_to_wishlist(self, request: AddWishlistRequest) -> WishlistItem:
         """
         Add an item to the user's wishlist.
-        
+
         Args:
             request: Add wishlist request
-            
+
         Returns:
             Created WishlistItem
         """
         wishlist = self._load_wishlist(request.user_id)
-        
+
         item = WishlistItem(
             item_id=str(uuid4())[:8],
             user_id=request.user_id,
@@ -105,10 +103,10 @@ class DealFinderAgent:
             keywords=request.keywords or [request.description],
             created_at=datetime.utcnow().isoformat(),
         )
-        
+
         wishlist.append(item)
         self._save_wishlist(request.user_id, wishlist)
-        
+
         return item
 
     def remove_from_wishlist(self, user_id: str, item_id: str) -> bool:
@@ -116,7 +114,7 @@ class DealFinderAgent:
         wishlist = self._load_wishlist(user_id)
         original_len = len(wishlist)
         wishlist = [i for i in wishlist if i.item_id != item_id]
-        
+
         if len(wishlist) < original_len:
             self._save_wishlist(user_id, wishlist)
             return True
@@ -129,28 +127,28 @@ class DealFinderAgent:
     def search_deals(self, request: SearchDealsRequest) -> DealSearchResult:
         """
         Search for deals.
-        
+
         Args:
             request: Search request
-            
+
         Returns:
             DealSearchResult with matched deals
         """
         query = request.query
-        
+
         if not query:
             query = self._generate_search_query(request.user_id, request.category)
-        
+
         search_query = f"{query} deals discounts sale"
-        
+
         try:
             results = self.web_search.search_deals(query, max_results=request.max_results)
         except Exception as e:
             logger.error("Web search failed: %s", e)
             return DealSearchResult(deals=[], total_found=0, query_used=search_query)
-        
+
         deals = self._process_search_results(request.user_id, results)
-        
+
         return DealSearchResult(
             deals=deals,
             total_found=len(deals),
@@ -161,19 +159,19 @@ class DealFinderAgent:
         """Generate a search query based on user preferences."""
         profile = self.profile_store.load_profile(user_id)
         wishlist = self._load_wishlist(user_id)
-        
+
         if wishlist:
             return wishlist[0].description
-        
+
         if category:
             return category
-        
+
         if profile:
             if profile.preferences.brands_liked:
                 return profile.preferences.brands_liked[0]
             if profile.preferences.hobbies:
                 return profile.preferences.hobbies[0]
-        
+
         return "best deals today"
 
     def _process_search_results(
@@ -183,7 +181,7 @@ class DealFinderAgent:
     ) -> List[DealMatch]:
         """Process search results and score deals."""
         deals = []
-        
+
         for result in results:
             deal = DealMatch(
                 deal_id=str(uuid4())[:8],
@@ -192,16 +190,17 @@ class DealFinderAgent:
                 url=result.url,
                 store=self._extract_store_name(str(result.url)),
             )
-            
+
             scored = self._score_deal(user_id, deal)
             deals.append(scored)
-        
+
         deals.sort(key=lambda d: d.relevance_score, reverse=True)
         return deals
 
     def _extract_store_name(self, url: str) -> str:
         """Extract store name from URL."""
         from urllib.parse import urlparse
+
         domain = urlparse(url).netloc
         domain = domain.replace("www.", "")
         parts = domain.split(".")
@@ -213,10 +212,10 @@ class DealFinderAgent:
         """Score a deal's relevance to the user."""
         profile = self.profile_store.load_profile(user_id)
         wishlist = self._load_wishlist(user_id)
-        
+
         preferences = ""
         discount_threshold = 20.0
-        
+
         if profile:
             if profile.preferences.brands_liked:
                 preferences += f"Liked brands: {', '.join(profile.preferences.brands_liked)}\n"
@@ -227,13 +226,17 @@ class DealFinderAgent:
             if profile.shopping.wishlist_items:
                 preferences += f"Wishlist: {', '.join(profile.shopping.wishlist_items[:5])}\n"
             discount_threshold = profile.financial.deal_alert_threshold_pct
-        
-        wishlist_text = "\n".join(
-            f"- {item.description} (target: ${item.target_price})" if item.target_price
-            else f"- {item.description}"
-            for item in wishlist[:5]
-        ) or "No wishlist items"
-        
+
+        wishlist_text = (
+            "\n".join(
+                f"- {item.description} (target: ${item.target_price})"
+                if item.target_price
+                else f"- {item.description}"
+                for item in wishlist[:5]
+            )
+            or "No wishlist items"
+        )
+
         prompt = DEAL_RELEVANCE_PROMPT.format(
             preferences=preferences or "No preferences available",
             wishlist=wishlist_text,
@@ -245,7 +248,7 @@ class DealFinderAgent:
             discount_percent=deal.discount_percent or "Unknown",
             discount_threshold=discount_threshold,
         )
-        
+
         try:
             data = self.llm.complete_json(
                 prompt,
@@ -260,32 +263,32 @@ class DealFinderAgent:
         except Exception as e:
             logger.warning("Failed to score deal: %s", e)
             deal.relevance_score = 0.5
-        
+
         return deal
 
     def find_deals_for_wishlist(self, user_id: str) -> List[DealMatch]:
         """
         Find deals matching wishlist items.
-        
+
         Args:
             user_id: The user ID
-            
+
         Returns:
             List of matching deals
         """
         wishlist = self._load_wishlist(user_id)
         if not wishlist:
             return []
-        
+
         all_deals = []
-        
+
         for item in wishlist[:5]:
             try:
                 results = self.web_search.search_deals(
                     item.description,
                     max_results=5,
                 )
-                
+
                 for result in results:
                     deal = DealMatch(
                         deal_id=str(uuid4())[:8],
@@ -294,7 +297,7 @@ class DealFinderAgent:
                         url=result.url,
                         store=self._extract_store_name(str(result.url)),
                     )
-                    
+
                     if item.target_price and deal.sale_price:
                         if deal.sale_price <= item.target_price:
                             deal.relevance_score = 1.0
@@ -303,45 +306,43 @@ class DealFinderAgent:
                             )
                     else:
                         deal.relevance_score = 0.8
-                        deal.matching_preferences.append(
-                            f"Related to wishlist: {item.description}"
-                        )
-                    
+                        deal.matching_preferences.append(f"Related to wishlist: {item.description}")
+
                     all_deals.append(deal)
             except Exception as e:
                 logger.warning("Failed to search for wishlist item %s: %s", item.description, e)
-        
+
         all_deals.sort(key=lambda d: d.relevance_score, reverse=True)
         return all_deals[:10]
 
     def get_personalized_deals(self, user_id: str) -> List[DealMatch]:
         """
         Get personalized deal recommendations.
-        
+
         Args:
             user_id: The user ID
-            
+
         Returns:
             List of recommended deals
         """
         profile = self.profile_store.load_profile(user_id)
         wishlist = self._load_wishlist(user_id)
-        
+
         preferences = ""
         if profile:
             if profile.preferences.brands_liked:
                 preferences += f"Brands: {', '.join(profile.preferences.brands_liked[:5])}\n"
             if profile.preferences.hobbies:
                 preferences += f"Hobbies: {', '.join(profile.preferences.hobbies[:5])}\n"
-        
+
         wishlist_text = ", ".join(i.description for i in wishlist[:5])
-        
+
         prompt = GENERATE_SEARCH_QUERIES_PROMPT.format(
             preferences=preferences or "General interests",
             wishlist=wishlist_text or "None",
             recent_interests="Not tracked",
         )
-        
+
         try:
             data = self.llm.complete_json(
                 prompt,
@@ -355,9 +356,9 @@ class DealFinderAgent:
         except Exception as e:
             logger.error("Failed to generate queries: %s", e)
             queries = [{"query": "best deals today", "priority": "medium"}]
-        
+
         all_deals = []
-        
+
         for query_data in queries[:3]:
             try:
                 query = query_data.get("query", "")
@@ -366,13 +367,13 @@ class DealFinderAgent:
                 all_deals.extend(deals)
             except Exception as e:
                 logger.warning("Search failed for query: %s", e)
-        
+
         seen_titles = set()
         unique_deals = []
         for deal in all_deals:
             if deal.title not in seen_titles:
                 seen_titles.add(deal.title)
                 unique_deals.append(deal)
-        
+
         unique_deals.sort(key=lambda d: d.relevance_score, reverse=True)
         return unique_deals[:10]

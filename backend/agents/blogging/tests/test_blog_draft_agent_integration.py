@@ -65,7 +65,9 @@ def _has_basic_blog_structure(draft: str) -> tuple[bool, str]:
     if not re.search(r"^#+\s+\S", text, re.MULTILINE):
         return False, "draft has no markdown heading (# or ##)"
     # Multiple sentences (rough: period, exclamation, or question)
-    sentence_ends = len(re.findall(r"[.!?]\s+", text)) + (1 if text.rstrip().endswith((".", "!", "?")) else 0)
+    sentence_ends = len(re.findall(r"[.!?]\s+", text)) + (
+        1 if text.rstrip().endswith((".", "!", "?")) else 0
+    )
     if sentence_ends < 2:
         return False, f"draft has too few sentences (counted {sentence_ends})"
     # Reasonable word count
@@ -79,7 +81,8 @@ _skip_reason = "Integration test requires real LLM (set LLM_PROVIDER=ollama and 
 
 
 @pytest.mark.skipif(
-    os.environ.get("LLM_PROVIDER", "").lower() == "dummy" or os.environ.get("SW_LLM_PROVIDER", "").lower() == "dummy",
+    os.environ.get("LLM_PROVIDER", "").lower() == "dummy"
+    or os.environ.get("SW_LLM_PROVIDER", "").lower() == "dummy",
     reason=_skip_reason,
 )
 def test_draft_agent_with_ollama_produces_real_content() -> None:
@@ -124,7 +127,9 @@ def test_draft_agent_with_ollama_produces_real_content() -> None:
                 order=3,
             ),
         ],
-        title_candidates=[TitleCandidate(title="Observability essentials", probability_of_success=0.7)],
+        title_candidates=[
+            TitleCandidate(title="Observability essentials", probability_of_success=0.7)
+        ],
         requirements_analysis=RequirementsAnalysis(
             plan_acceptable=True,
             scope_feasible=True,
@@ -156,14 +161,16 @@ def test_draft_agent_with_ollama_produces_real_content() -> None:
 
     # Write full draft to file and log preview for review
     _INTEGRATION_DRAFT_OUTPUT.write_text(result.draft, encoding="utf-8")
-    preview = result.draft[: _PREVIEW_CHARS] + ("..." if len(result.draft) > _PREVIEW_CHARS else "")
+    preview = result.draft[:_PREVIEW_CHARS] + ("..." if len(result.draft) > _PREVIEW_CHARS else "")
     logger.info(
         "Integration test draft (%d chars) written to %s. Preview:\n---\n%s\n---",
         len(result.draft),
         _INTEGRATION_DRAFT_OUTPUT,
         preview,
     )
-    print(f"\nDraft written to {_INTEGRATION_DRAFT_OUTPUT} ({len(result.draft)} chars) for review.\n")
+    print(
+        f"\nDraft written to {_INTEGRATION_DRAFT_OUTPUT} ({len(result.draft)} chars) for review.\n"
+    )
 
     passed, reason = _has_basic_blog_structure(result.draft)
     assert passed, f"draft did not meet basic content rules: {reason}"
