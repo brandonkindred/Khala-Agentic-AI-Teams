@@ -14,7 +14,7 @@ from llm_service import LLMClient
 class StubLLM(LLMClient):
     """Deterministic LLM stub for tests."""
 
-    def complete_json(self, prompt: str, *, temperature: float = 0.0):
+    def complete_json(self, prompt: str, *, temperature: float = 0.0, think=None, **kwargs):
         lowered = prompt.lower()
         if "core_topics" in lowered and "angle" in lowered and "constraints" in lowered:
             return {
