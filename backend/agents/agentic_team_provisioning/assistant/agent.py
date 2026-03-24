@@ -8,18 +8,17 @@ import re
 import uuid
 from typing import Optional
 
-from llm_service import get_client
-
 from agentic_team_provisioning.models import (
     ProcessDefinition,
     ProcessOutput,
+    ProcessStatus,
     ProcessStep,
     ProcessStepAgent,
-    ProcessStatus,
     ProcessTrigger,
     StepType,
     TriggerType,
 )
+from llm_service import get_client
 
 logger = logging.getLogger(__name__)
 
