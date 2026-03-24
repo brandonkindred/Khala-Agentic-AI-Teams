@@ -20,12 +20,13 @@ Route Prefixes:
 import atexit
 import importlib
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -126,6 +127,9 @@ def _run_shutdown_hooks(reason: str) -> None:
     for team_key, team_name in SHUTDOWN_HOOKS.items():
         if not _mounted_teams.get(team_key):
             continue
+        # Proxied teams handle their own shutdown in their container.
+        if _is_proxied(team_key):
+            continue
         try:
             client = JobServiceClient(team=team_name)
             client.mark_all_active_jobs_failed(reason)
@@ -133,131 +137,156 @@ def _run_shutdown_hooks(reason: str) -> None:
             logger.warning("Shutdown hook for team %s failed: %s", team_key, e)
 
 
-def _try_mount_blogging(app: FastAPI) -> bool:
-    """Mount blogging team API."""
-    try:
-        from blogging.api.main import app as blogging_app
+# Maps team_key -> env var name for teams that can be proxied to an external container.
+# When the env var is set, requests are forwarded via HTTP instead of mounting the team in-process.
+TEAM_SERVICE_URL_ENVS: dict[str, str] = {
+    "blogging": "BLOGGING_SERVICE_URL",
+    "software_engineering": "SOFTWARE_ENGINEERING_SERVICE_URL",
+    "personal_assistant": "PERSONAL_ASSISTANT_SERVICE_URL",
+    "market_research": "MARKET_RESEARCH_SERVICE_URL",
+    "soc2_compliance": "SOC2_COMPLIANCE_SERVICE_URL",
+    "social_marketing": "SOCIAL_MARKETING_SERVICE_URL",
+    "branding": "BRANDING_SERVICE_URL",
+    "agent_provisioning": "AGENT_PROVISIONING_SERVICE_URL",
+    "accessibility_audit": "ACCESSIBILITY_AUDIT_SERVICE_URL",
+    "ai_systems": "AI_SYSTEMS_SERVICE_URL",
+    "investment": "INVESTMENT_SERVICE_URL",
+    "nutrition_meal_planning": "NUTRITION_MEAL_PLANNING_SERVICE_URL",
+    "planning_v3": "PLANNING_V3_SERVICE_URL",
+    "coding_team": "CODING_TEAM_SERVICE_URL",
+    "studio_grid": "STUDIO_GRID_SERVICE_URL",
+    "sales_team": "SALES_TEAM_SERVICE_URL",
+    "road_trip_planning": "ROAD_TRIP_PLANNING_SERVICE_URL",
+}
 
-        config = TEAM_CONFIGS["blogging"]
-        app.mount(config.prefix, blogging_app)
+
+def _is_proxied(team_key: str) -> bool:
+    """Return True if *team_key* is configured to proxy to an external service."""
+    env_var = TEAM_SERVICE_URL_ENVS.get(team_key)
+    return bool(env_var and os.environ.get(env_var, "").strip())
+
+
+def try_mount_or_proxy(
+    app: FastAPI,
+    team_key: str,
+    import_path: str,
+    app_attr: str = "app",
+    service_url_env: str | None = None,
+) -> bool:
+    """Mount a team API directly or proxy to its external microservice.
+
+    When *service_url_env* is provided and the env var is set, a catch-all
+    route is registered that forwards all requests to the team's container.
+    Otherwise the team's FastAPI app is imported and mounted in-process.
+    """
+    config = TEAM_CONFIGS[team_key]
+
+    # Proxy mode: forward to external container.
+    if service_url_env:
+        url = os.environ.get(service_url_env, "").strip()
+        if url:
+            from unified_api.team_proxy import proxy_request
+
+            @app.api_route(
+                config.prefix + "/{path:path}",
+                methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                name=f"{team_key}_proxy",
+                tags=config.tags,
+            )
+            async def _proxy(request: Request, path: str, _url: str = url) -> Any:
+                return await proxy_request(request, _url, path)
+
+            logger.info("Proxying %s -> %s", config.prefix, url)
+            return True
+
+    # Direct mount: import team's FastAPI app in-process.
+    try:
+        mod = importlib.import_module(import_path)
+        team_app = getattr(mod, app_attr)
+        app.mount(config.prefix, team_app)
         logger.info("Mounted %s at %s", config.name, config.prefix)
         return True
     except ImportError as e:
-        logger.warning("Could not mount Blogging API: %s", e)
+        logger.warning("Could not mount %s API: %s", config.name, e)
         return False
+
+
+def _try_mount_blogging(app: FastAPI) -> bool:
+    """Mount blogging team API — proxy to container or direct mount."""
+    return try_mount_or_proxy(app, "blogging", "blogging.api.main", service_url_env="BLOGGING_SERVICE_URL")
 
 
 def _try_mount_software_engineering(app: FastAPI) -> bool:
-    """Mount software engineering team API.
-
-    The team uses 'software_engineering_team.shared' (not 'shared') so it
-    does not conflict with blogging's shared package when both are loaded.
-    """
-    try:
-        from software_engineering_team.api.main import app as se_app
-
-        config = TEAM_CONFIGS["software_engineering"]
-        app.mount(config.prefix, se_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Software Engineering API: %s", e)
-        return False
+    """Mount software engineering team API."""
+    return try_mount_or_proxy(
+        app, "software_engineering", "software_engineering_team.api.main",
+        service_url_env="SOFTWARE_ENGINEERING_SERVICE_URL",
+    )
 
 
 def _try_mount_personal_assistant(app: FastAPI) -> bool:
     """Mount personal assistant team API."""
-    try:
-        from personal_assistant_team.api.main import app as pa_app
-
-        config = TEAM_CONFIGS["personal_assistant"]
-        app.mount(config.prefix, pa_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Personal Assistant API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "personal_assistant", "personal_assistant_team.api.main",
+        service_url_env="PERSONAL_ASSISTANT_SERVICE_URL",
+    )
 
 
 def _try_mount_market_research(app: FastAPI) -> bool:
     """Mount market research team API."""
-    try:
-        from market_research_team.api.main import app as mr_app
-
-        config = TEAM_CONFIGS["market_research"]
-        app.mount(config.prefix, mr_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Market Research API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "market_research", "market_research_team.api.main",
+        service_url_env="MARKET_RESEARCH_SERVICE_URL",
+    )
 
 
 def _try_mount_soc2_compliance(app: FastAPI) -> bool:
     """Mount SOC2 compliance team API."""
-    try:
-        from soc2_compliance_team.api.main import app as soc2_app
-
-        config = TEAM_CONFIGS["soc2_compliance"]
-        app.mount(config.prefix, soc2_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount SOC2 Compliance API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "soc2_compliance", "soc2_compliance_team.api.main",
+        service_url_env="SOC2_COMPLIANCE_SERVICE_URL",
+    )
 
 
 def _try_mount_social_marketing(app: FastAPI) -> bool:
     """Mount social media marketing team API."""
-    try:
-        from social_media_marketing_team.api.main import app as smm_app
-
-        config = TEAM_CONFIGS["social_marketing"]
-        app.mount(config.prefix, smm_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Social Marketing API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "social_marketing", "social_media_marketing_team.api.main",
+        service_url_env="SOCIAL_MARKETING_SERVICE_URL",
+    )
 
 
 def _try_mount_branding(app: FastAPI) -> bool:
     """Mount branding team API."""
-    try:
-        from branding_team.api.main import app as branding_app
-
-        config = TEAM_CONFIGS["branding"]
-        app.mount(config.prefix, branding_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Branding API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "branding", "branding_team.api.main",
+        service_url_env="BRANDING_SERVICE_URL",
+    )
 
 
 def _try_mount_agent_provisioning(app: FastAPI) -> bool:
     """Mount agent provisioning team API."""
-    try:
-        from agent_provisioning_team.api.main import app as ap_app
-
-        config = TEAM_CONFIGS["agent_provisioning"]
-        app.mount(config.prefix, ap_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Agent Provisioning API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "agent_provisioning", "agent_provisioning_team.api.main",
+        service_url_env="AGENT_PROVISIONING_SERVICE_URL",
+    )
 
 
 def _try_mount_accessibility_audit(app: FastAPI) -> bool:
-    """Mount accessibility audit team API."""
-    try:
-        from fastapi import FastAPI as SubApp
+    """Mount accessibility audit team API.
 
+    This team exports a router (not an app), so the local-mount path wraps it
+    in a sub-app.  When proxied, the proxy handles everything transparently.
+    """
+    if _is_proxied("accessibility_audit"):
+        return try_mount_or_proxy(
+            app, "accessibility_audit", "",
+            service_url_env="ACCESSIBILITY_AUDIT_SERVICE_URL",
+        )
+    try:
         from accessibility_audit_team.api.main import router as a11y_router
 
-        # Create sub-app for accessibility audit
-        a11y_app = SubApp(
+        a11y_app = FastAPI(
             title="Accessibility Audit API",
             description="WCAG 2.2 and Section 508 accessibility auditing for web and mobile",
         )
@@ -274,114 +303,66 @@ def _try_mount_accessibility_audit(app: FastAPI) -> bool:
 
 def _try_mount_ai_systems(app: FastAPI) -> bool:
     """Mount AI systems team API."""
-    try:
-        from ai_systems_team.api.main import app as ai_systems_app
-
-        config = TEAM_CONFIGS["ai_systems"]
-        app.mount(config.prefix, ai_systems_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount AI Systems API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "ai_systems", "ai_systems_team.api.main",
+        service_url_env="AI_SYSTEMS_SERVICE_URL",
+    )
 
 
 def _try_mount_investment(app: FastAPI) -> bool:
     """Mount investment team API."""
-    try:
-        from investment_team.api.main import app as investment_app
-
-        config = TEAM_CONFIGS["investment"]
-        app.mount(config.prefix, investment_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Investment API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "investment", "investment_team.api.main",
+        service_url_env="INVESTMENT_SERVICE_URL",
+    )
 
 
 def _try_mount_nutrition_meal_planning(app: FastAPI) -> bool:
     """Mount nutrition & meal planning team API."""
-    try:
-        from nutrition_meal_planning_team.api.main import app as nmp_app
-
-        config = TEAM_CONFIGS["nutrition_meal_planning"]
-        app.mount(config.prefix, nmp_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Nutrition & Meal Planning API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "nutrition_meal_planning", "nutrition_meal_planning_team.api.main",
+        service_url_env="NUTRITION_MEAL_PLANNING_SERVICE_URL",
+    )
 
 
 def _try_mount_planning_v3(app: FastAPI) -> bool:
     """Mount Planning V3 team API."""
-    try:
-        from planning_v3_team.api.main import app as planning_v3_app
-
-        config = TEAM_CONFIGS["planning_v3"]
-        app.mount(config.prefix, planning_v3_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Planning V3 API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "planning_v3", "planning_v3_team.api.main",
+        service_url_env="PLANNING_V3_SERVICE_URL",
+    )
 
 
 def _try_mount_coding_team(app: FastAPI) -> bool:
     """Mount Coding Team API."""
-    try:
-        from coding_team.api.main import app as coding_team_app
-
-        config = TEAM_CONFIGS["coding_team"]
-        app.mount(config.prefix, coding_team_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Coding Team API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "coding_team", "coding_team.api.main",
+        service_url_env="CODING_TEAM_SERVICE_URL",
+    )
 
 
 def _try_mount_studio_grid(app: FastAPI) -> bool:
     """Mount StudioGrid design-system workflow API."""
-    try:
-        from studiogrid.api.main import app as studio_grid_app
-
-        config = TEAM_CONFIGS["studio_grid"]
-        app.mount(config.prefix, studio_grid_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount StudioGrid API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "studio_grid", "studiogrid.api.main",
+        service_url_env="STUDIO_GRID_SERVICE_URL",
+    )
 
 
 def _try_mount_sales_team(app: FastAPI) -> bool:
     """Mount AI Sales Team API."""
-    try:
-        from sales_team.api.main import app as sales_app
-
-        config = TEAM_CONFIGS["sales_team"]
-        app.mount(config.prefix, sales_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Sales Team API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "sales_team", "sales_team.api.main",
+        service_url_env="SALES_TEAM_SERVICE_URL",
+    )
 
 
 def _try_mount_road_trip_planning(app: FastAPI) -> bool:
     """Mount Road Trip Planning team API."""
-    try:
-        from road_trip_planning_team.api.main import app as road_trip_app
-
-        config = TEAM_CONFIGS["road_trip_planning"]
-        app.mount(config.prefix, road_trip_app)
-        logger.info("Mounted %s at %s", config.name, config.prefix)
-        return True
-    except ImportError as e:
-        logger.warning("Could not mount Road Trip Planning API: %s", e)
-        return False
+    return try_mount_or_proxy(
+        app, "road_trip_planning", "road_trip_planning_team.api.main",
+        service_url_env="ROAD_TRIP_PLANNING_SERVICE_URL",
+    )
 
 
 def mount_all_teams(app: FastAPI) -> dict[str, bool]:
@@ -454,6 +435,10 @@ async def lifespan(app: FastAPI):
     }
     for team_key, (mod_path, func_name) in _temporal_worker_starters.items():
         if not _mounted_teams.get(team_key):
+            continue
+        # Proxied teams run their own Temporal worker in their container.
+        if _is_proxied(team_key):
+            logger.info("Temporal worker for %s runs in its own container; skipping", team_key)
             continue
         try:
             mod = importlib.import_module(mod_path)

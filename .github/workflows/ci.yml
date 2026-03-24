@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check agents/ unified_api/
+      - run: ruff check agents/ unified_api/ blogging_service/ team_service/ studiogrid_service/
 
   lint-frontend:
     name: Lint Angular (ng lint)
@@ -223,6 +223,58 @@ jobs:
         with:
           context: backend
           file: backend/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-team-services:
+    name: "Build ${{ matrix.service }} Docker image"
+    runs-on: ubuntu-latest
+    needs:
+      - all-checks
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: strands-blogging-service
+            dockerfile: backend/blogging_service/Dockerfile
+          - service: strands-team-service
+            dockerfile: backend/team_service/Dockerfile
+          - service: strands-studiogrid-service
+            dockerfile: backend/studiogrid_service/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}
+          tags: |
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=pr
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

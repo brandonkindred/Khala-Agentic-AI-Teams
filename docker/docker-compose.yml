@@ -98,6 +98,521 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── Team Microservices ──────────────────────────────────────────────────────
+  # Each agent team runs in its own container using the generic team_service/Dockerfile.
+  # Blogging uses its own Dockerfile (needs Playwright/Chromium).
+  # StudioGrid uses studiogrid_service/Dockerfile (code lives outside agents/).
+
+  blogging-service:
+    build:
+      context: ../backend
+      dockerfile: blogging_service/Dockerfile
+    image: strands-blogging-service
+    container_name: strands-blogging-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
+      job-service: { condition: service_healthy }
+    environment:
+      SW_LLM_PROVIDER: ${SW_LLM_PROVIDER:-ollama}
+      SW_LLM_BASE_URL: ${SW_LLM_BASE_URL:-https://ollama.com}
+      SW_LLM_MODEL: ${SW_LLM_MODEL:-qwen3.5:397b-cloud}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      PYTHONUNBUFFERED: "1"
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      TEMPORAL_ADDRESS: temporal:7233
+      JOB_SERVICE_URL: http://job-service:8085
+      BLOG_PLANNING_MAX_ITERATIONS: ${BLOG_PLANNING_MAX_ITERATIONS:-5}
+      BLOG_PLANNING_MAX_PARSE_RETRIES: ${BLOG_PLANNING_MAX_PARSE_RETRIES:-3}
+      BLOG_PLANNING_MODEL: ${BLOG_PLANNING_MODEL:-}
+      BLOGGING_MEDIUM_STATS_ROOT: ${BLOGGING_MEDIUM_STATS_ROOT:-}
+      INTEGRATIONS_BROWSER_SESSION_ROOT: ${INTEGRATIONS_BROWSER_SESSION_ROOT:-}
+    extra_hosts: &team-extra-hosts
+      - "postgres:172.28.0.2"
+      - "temporal:172.28.0.3"
+      - "job-service:172.28.0.5"
+    ports: ["8090:8090"]
+    networks:
+      stack: { ipv4_address: 172.28.0.8, aliases: [blogging-service] }
+    restart: unless-stopped
+    healthcheck: &team-healthcheck-8090
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  se-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8091" }
+    image: strands-se-service
+    container_name: strands-se-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
+      job-service: { condition: service_healthy }
+    environment: &team-env-base
+      SW_LLM_PROVIDER: ${SW_LLM_PROVIDER:-ollama}
+      SW_LLM_BASE_URL: ${SW_LLM_BASE_URL:-https://ollama.com}
+      SW_LLM_MODEL: ${SW_LLM_MODEL:-qwen3.5:397b-cloud}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      PYTHONUNBUFFERED: "1"
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      TEMPORAL_ADDRESS: temporal:7233
+      JOB_SERVICE_URL: http://job-service:8085
+      TEAM_MODULE: software_engineering_team.api.main
+      TEAM_NAME: software_engineering_team
+      TEAM_PORT: "8091"
+      TEAM_TEMPORAL_WORKER_MODULE: software_engineering_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_se_temporal_worker_thread
+    extra_hosts: *team-extra-hosts
+    ports: ["8091:8091"]
+    networks:
+      stack: { ipv4_address: 172.28.0.9, aliases: [se-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  pa-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8092" }
+    image: strands-pa-service
+    container_name: strands-pa-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: personal_assistant_team.api.main
+      TEAM_NAME: personal_assistant_team
+      TEAM_PORT: "8092"
+      TEAM_TEMPORAL_WORKER_MODULE: personal_assistant_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_pa_temporal_worker_thread
+    extra_hosts: *team-extra-hosts
+    ports: ["8092:8092"]
+    networks:
+      stack: { ipv4_address: 172.28.0.10, aliases: [pa-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  market-research-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8093" }
+    image: strands-market-research-service
+    container_name: strands-market-research-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: market_research_team.api.main
+      TEAM_NAME: market_research_team
+      TEAM_PORT: "8093"
+      TEAM_TEMPORAL_WORKER_MODULE: ""
+      TEAM_TEMPORAL_WORKER_FUNC: ""
+    extra_hosts: *team-extra-hosts
+    ports: ["8093:8093"]
+    networks:
+      stack: { ipv4_address: 172.28.0.11, aliases: [market-research-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8093/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  soc2-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8094" }
+    image: strands-soc2-service
+    container_name: strands-soc2-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: soc2_compliance_team.api.main
+      TEAM_NAME: soc2_compliance_team
+      TEAM_PORT: "8094"
+      TEAM_TEMPORAL_WORKER_MODULE: soc2_compliance_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_soc2_temporal_worker_thread
+    extra_hosts: *team-extra-hosts
+    ports: ["8094:8094"]
+    networks:
+      stack: { ipv4_address: 172.28.0.12, aliases: [soc2-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8094/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  social-marketing-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8095" }
+    image: strands-social-marketing-service
+    container_name: strands-social-marketing-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: social_media_marketing_team.api.main
+      TEAM_NAME: social_media_marketing_team
+      TEAM_PORT: "8095"
+      TEAM_TEMPORAL_WORKER_MODULE: social_media_marketing_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_social_marketing_temporal_worker_thread
+    extra_hosts: *team-extra-hosts
+    ports: ["8095:8095"]
+    networks:
+      stack: { ipv4_address: 172.28.0.13, aliases: [social-marketing-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8095/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  branding-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8096" }
+    image: strands-branding-service
+    container_name: strands-branding-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: branding_team.api.main
+      TEAM_NAME: branding_team
+      TEAM_PORT: "8096"
+      TEAM_TEMPORAL_WORKER_MODULE: ""
+      TEAM_TEMPORAL_WORKER_FUNC: ""
+    extra_hosts: *team-extra-hosts
+    ports: ["8096:8096"]
+    networks:
+      stack: { ipv4_address: 172.28.0.14, aliases: [branding-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8096/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  agent-provisioning-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8097" }
+    image: strands-agent-provisioning-service
+    container_name: strands-agent-provisioning-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: agent_provisioning_team.api.main
+      TEAM_NAME: agent_provisioning_team
+      TEAM_PORT: "8097"
+      TEAM_TEMPORAL_WORKER_MODULE: agent_provisioning_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_agent_provisioning_temporal_worker_thread
+    extra_hosts: *team-extra-hosts
+    ports: ["8097:8097"]
+    networks:
+      stack: { ipv4_address: 172.28.0.15, aliases: [agent-provisioning-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8097/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  a11y-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8098" }
+    image: strands-a11y-service
+    container_name: strands-a11y-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: accessibility_audit_team.api.main
+      TEAM_APP_ATTR: router
+      TEAM_NAME: accessibility_audit_team
+      TEAM_PORT: "8098"
+      TEAM_TEMPORAL_WORKER_MODULE: ""
+      TEAM_TEMPORAL_WORKER_FUNC: ""
+    extra_hosts: *team-extra-hosts
+    ports: ["8098:8098"]
+    networks:
+      stack: { ipv4_address: 172.28.0.16, aliases: [a11y-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8098/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  ai-systems-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8099" }
+    image: strands-ai-systems-service
+    container_name: strands-ai-systems-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: ai_systems_team.api.main
+      TEAM_NAME: ai_systems_team
+      TEAM_PORT: "8099"
+      TEAM_TEMPORAL_WORKER_MODULE: ai_systems_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_ai_systems_temporal_worker_thread
+    extra_hosts: *team-extra-hosts
+    ports: ["8099:8099"]
+    networks:
+      stack: { ipv4_address: 172.28.0.17, aliases: [ai-systems-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8099/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  investment-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8100" }
+    image: strands-investment-service
+    container_name: strands-investment-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: investment_team.api.main
+      TEAM_NAME: investment_team
+      TEAM_PORT: "8100"
+      TEAM_TEMPORAL_WORKER_MODULE: ""
+      TEAM_TEMPORAL_WORKER_FUNC: ""
+    extra_hosts: *team-extra-hosts
+    ports: ["8100:8100"]
+    networks:
+      stack: { ipv4_address: 172.28.0.18, aliases: [investment-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  nutrition-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8101" }
+    image: strands-nutrition-service
+    container_name: strands-nutrition-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: nutrition_meal_planning_team.api.main
+      TEAM_NAME: nutrition_meal_planning_team
+      TEAM_PORT: "8101"
+      TEAM_TEMPORAL_WORKER_MODULE: nutrition_meal_planning_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_nutrition_temporal_worker_thread
+    extra_hosts: *team-extra-hosts
+    ports: ["8101:8101"]
+    networks:
+      stack: { ipv4_address: 172.28.0.19, aliases: [nutrition-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8101/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  planning-v3-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8102" }
+    image: strands-planning-v3-service
+    container_name: strands-planning-v3-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: planning_v3_team.api.main
+      TEAM_NAME: planning_v3_team
+      TEAM_PORT: "8102"
+      TEAM_TEMPORAL_WORKER_MODULE: planning_v3_team.temporal.worker
+      TEAM_TEMPORAL_WORKER_FUNC: start_planning_v3_temporal_worker_thread
+    extra_hosts: *team-extra-hosts
+    ports: ["8102:8102"]
+    networks:
+      stack: { ipv4_address: 172.28.0.20, aliases: [planning-v3-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8102/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  coding-team-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8103" }
+    image: strands-coding-team-service
+    container_name: strands-coding-team-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: coding_team.api.main
+      TEAM_NAME: coding_team
+      TEAM_PORT: "8103"
+      TEAM_TEMPORAL_WORKER_MODULE: ""
+      TEAM_TEMPORAL_WORKER_FUNC: ""
+    extra_hosts: *team-extra-hosts
+    ports: ["8103:8103"]
+    networks:
+      stack: { ipv4_address: 172.28.0.21, aliases: [coding-team-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  studio-grid-service:
+    build:
+      context: ../backend
+      dockerfile: studiogrid_service/Dockerfile
+      args: { TEAM_PORT: "8104" }
+    image: strands-studio-grid-service
+    container_name: strands-studio-grid-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: studiogrid.api.main
+      TEAM_NAME: studio_grid
+      TEAM_PORT: "8104"
+      TEAM_TEMPORAL_WORKER_MODULE: ""
+      TEAM_TEMPORAL_WORKER_FUNC: ""
+    extra_hosts: *team-extra-hosts
+    ports: ["8104:8104"]
+    networks:
+      stack: { ipv4_address: 172.28.0.22, aliases: [studio-grid-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8104/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  sales-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8105" }
+    image: strands-sales-service
+    container_name: strands-sales-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: sales_team.api.main
+      TEAM_NAME: sales_team
+      TEAM_PORT: "8105"
+      TEAM_TEMPORAL_WORKER_MODULE: ""
+      TEAM_TEMPORAL_WORKER_FUNC: ""
+    extra_hosts: *team-extra-hosts
+    ports: ["8105:8105"]
+    networks:
+      stack: { ipv4_address: 172.28.0.23, aliases: [sales-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8105/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  road-trip-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8106" }
+    image: strands-road-trip-service
+    container_name: strands-road-trip-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: road_trip_planning_team.api.main
+      TEAM_NAME: road_trip_planning_team
+      TEAM_PORT: "8106"
+      TEAM_TEMPORAL_WORKER_MODULE: ""
+      TEAM_TEMPORAL_WORKER_FUNC: ""
+    extra_hosts: *team-extra-hosts
+    ports: ["8106:8106"]
+    networks:
+      stack: { ipv4_address: 172.28.0.24, aliases: [road-trip-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8106/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Unified API (router/proxy) ──────────────────────────────────────────────
+
   strands-agents:
     build:
       context: ../backend
@@ -105,27 +620,36 @@ services:
     image: strands-unified-api
     container_name: strands-agents
     depends_on:
-      postgres:
-        condition: service_healthy
-      temporal:
-        condition: service_started
-      job-service:
-        condition: service_healthy
+      postgres: { condition: service_healthy }
+      temporal: { condition: service_started }
+      job-service: { condition: service_healthy }
+      blogging-service: { condition: service_healthy }
+      se-service: { condition: service_healthy }
+      pa-service: { condition: service_healthy }
+      market-research-service: { condition: service_healthy }
+      soc2-service: { condition: service_healthy }
+      social-marketing-service: { condition: service_healthy }
+      branding-service: { condition: service_healthy }
+      agent-provisioning-service: { condition: service_healthy }
+      a11y-service: { condition: service_healthy }
+      ai-systems-service: { condition: service_healthy }
+      investment-service: { condition: service_healthy }
+      nutrition-service: { condition: service_healthy }
+      planning-v3-service: { condition: service_healthy }
+      coding-team-service: { condition: service_healthy }
+      studio-grid-service: { condition: service_healthy }
+      sales-service: { condition: service_healthy }
+      road-trip-service: { condition: service_healthy }
     volumes:
       - agents_workspace:/workspace
     ports:
       - "8888:8080"
-    # Resource limits (used by Podman Compose via deploy; Docker may use cpus/mem_limit)
     deploy:
       resources:
-        limits:
-          cpus: "8"
-          memory: 2G
-        reservations:
-          memory: 2G
+        limits: { cpus: "8", memory: 2G }
+        reservations: { memory: 2G }
     cpus: "8"
     mem_limit: 2g
-    # All agents use central LLM; default Ollama Cloud. Set OLLAMA_API_KEY in docker/.env (https://ollama.com/settings/keys).
     environment:
       SW_LLM_PROVIDER: ${SW_LLM_PROVIDER:-ollama}
       SW_LLM_BASE_URL: ${SW_LLM_BASE_URL:-https://ollama.com}
@@ -139,10 +663,45 @@ services:
       ENABLE_LOG_API: ${ENABLE_LOG_API:-0}
       TEMPORAL_ADDRESS: temporal:7233
       JOB_SERVICE_URL: http://job-service:8085
+      # Team service URLs — proxy requests to team containers
+      BLOGGING_SERVICE_URL: http://blogging-service:8090
+      SOFTWARE_ENGINEERING_SERVICE_URL: http://se-service:8091
+      PERSONAL_ASSISTANT_SERVICE_URL: http://pa-service:8092
+      MARKET_RESEARCH_SERVICE_URL: http://market-research-service:8093
+      SOC2_COMPLIANCE_SERVICE_URL: http://soc2-service:8094
+      SOCIAL_MARKETING_SERVICE_URL: http://social-marketing-service:8095
+      BRANDING_SERVICE_URL: http://branding-service:8096
+      AGENT_PROVISIONING_SERVICE_URL: http://agent-provisioning-service:8097
+      ACCESSIBILITY_AUDIT_SERVICE_URL: http://a11y-service:8098
+      AI_SYSTEMS_SERVICE_URL: http://ai-systems-service:8099
+      INVESTMENT_SERVICE_URL: http://investment-service:8100
+      NUTRITION_MEAL_PLANNING_SERVICE_URL: http://nutrition-service:8101
+      PLANNING_V3_SERVICE_URL: http://planning-v3-service:8102
+      CODING_TEAM_SERVICE_URL: http://coding-team-service:8103
+      STUDIO_GRID_SERVICE_URL: http://studio-grid-service:8104
+      SALES_TEAM_SERVICE_URL: http://sales-service:8105
+      ROAD_TRIP_PLANNING_SERVICE_URL: http://road-trip-service:8106
     extra_hosts:
       - "postgres:172.28.0.2"
       - "temporal:172.28.0.3"
       - "job-service:172.28.0.5"
+      - "blogging-service:172.28.0.8"
+      - "se-service:172.28.0.9"
+      - "pa-service:172.28.0.10"
+      - "market-research-service:172.28.0.11"
+      - "soc2-service:172.28.0.12"
+      - "social-marketing-service:172.28.0.13"
+      - "branding-service:172.28.0.14"
+      - "agent-provisioning-service:172.28.0.15"
+      - "a11y-service:172.28.0.16"
+      - "ai-systems-service:172.28.0.17"
+      - "investment-service:172.28.0.18"
+      - "nutrition-service:172.28.0.19"
+      - "planning-v3-service:172.28.0.20"
+      - "coding-team-service:172.28.0.21"
+      - "studio-grid-service:172.28.0.22"
+      - "sales-service:172.28.0.23"
+      - "road-trip-service:172.28.0.24"
     networks:
       stack:
         ipv4_address: 172.28.0.6
