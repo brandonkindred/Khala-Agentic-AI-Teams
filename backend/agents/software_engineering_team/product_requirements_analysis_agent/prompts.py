@@ -4,6 +4,10 @@ Prompts for the Product Requirements Analysis Agent.
 Prompts for spec review, auto-answer generation, spec update, and spec cleanup phases.
 """
 
+from __future__ import annotations
+
+from typing import Dict
+
 # ---------------------------------------------------------------------------
 # Context and Constraints Discovery (pre-review)
 # ---------------------------------------------------------------------------
@@ -831,6 +835,176 @@ Respond with a JSON object only, no markdown:
 If no questions are answered by the spec, return:
 {{
   "extracted_decisions": []
+}}
+"""
+
+# ---------------------------------------------------------------------------
+# SOP Phase 1: Generate spec-aware answer options for questions with few/no hardcoded options
+# ---------------------------------------------------------------------------
+
+SOP_GENERATE_OPTIONS_PROMPT = """You are an expert Product Analyst. Generate 3-6 relevant answer options for the following SOP question. \
+The options must be specific, actionable, and informed by the project specification and any prior decisions already made.
+
+Question: {question_text}
+Question ID: {sop_id}
+
+Prior decisions already made:
+---
+{prior_decisions}
+---
+
+Product Specification excerpt:
+---
+{spec_excerpt}
+---
+
+RULES:
+1. Generate 3-6 options that are RELEVANT to this specific project based on the spec and prior decisions.
+2. If prior decisions indicate a specific technology (e.g., Python was chosen as language), tailor options accordingly (e.g., suggest Python-specific frameworks like FastAPI, Django, Flask).
+3. Mark exactly ONE option as is_default (the one most aligned with the spec).
+4. Always include an "Other" option as the last option.
+5. Each option must have a brief rationale explaining why it is relevant.
+
+Respond with a JSON object only, no markdown:
+{{
+  "options": [
+    {{"id": "opt_1", "label": "Option label", "is_default": true, "rationale": "Why this fits the project.", "confidence": 0.7}},
+    {{"id": "opt_2", "label": "Another option", "is_default": false, "rationale": "Why this is relevant.", "confidence": 0.5}},
+    {{"id": "opt_3", "label": "Third option", "is_default": false, "rationale": "Why this could work.", "confidence": 0.4}},
+    {{"id": "opt_other", "label": "Other", "is_default": false, "rationale": "Specify your preference.", "confidence": 0.3}}
+  ]
+}}
+"""
+
+# ---------------------------------------------------------------------------
+# SOP Phase 1: Sub-phase gap analysis — assess completeness and generate follow-up questions
+# ---------------------------------------------------------------------------
+
+# Maps each sub-phase to a description of the information the PRA agent should collect.
+# Used by the gap-analysis prompt to help the LLM understand what "complete" means.
+SOP_SUB_PHASE_OBJECTIVES: Dict[str, str] = {
+    "deployment": (
+        "Determine WHERE and HOW the application will be hosted/deployed. "
+        "This includes: deployment model (cloud / on-prem / PaaS / hybrid), specific cloud provider(s), "
+        "compute model (serverless / containers / VMs), target environments (dev / staging / prod), "
+        "region/availability-zone requirements, and any infrastructure constraints."
+    ),
+    "regulations": (
+        "Identify ALL regulatory, compliance, and certification requirements. "
+        "This includes: data protection laws (GDPR, CCPA, HIPAA, PCI-DSS, etc.), "
+        "enterprise certifications (SOC2, ISO 27001, FedRAMP, etc.), data residency/sovereignty rules, "
+        "and any industry-specific regulations."
+    ),
+    "tool_preferences": (
+        "Understand the team's preference for open-source vs proprietary tools, "
+        "existing tool licenses and subscriptions, and familiarity with specific tools/platforms. "
+        "This helps avoid recommending tools that conflict with existing investments."
+    ),
+    "coding_preferences": (
+        "Determine the team's coding environment preferences: source control host, "
+        "programming language(s), framework(s), package managers, CI/CD pipeline, "
+        "code quality tools, and any coding standards or conventions."
+    ),
+    "data": (
+        "Understand ALL data storage and processing needs: types of data (structured, files, time-series, "
+        "events, graph), preferred databases/storage services, data volume estimates, "
+        "event/message streaming requirements, event sourcing, caching needs, and data migration concerns."
+    ),
+    "security": (
+        "Identify authentication/authorization approach, security scanning tools, "
+        "secrets/key management strategy, encryption requirements (at rest and in transit), "
+        "network security needs, and any security review/audit processes."
+    ),
+    "observability": (
+        "Determine monitoring, logging, tracing, and alerting strategy: "
+        "preferred tools (Prometheus, Grafana, Datadog, CloudWatch, etc.), "
+        "log aggregation approach, distributed tracing needs, SLO/SLI tracking, "
+        "and dashboard/alerting requirements."
+    ),
+    "sla": (
+        "Define service-level requirements: response time/latency targets, "
+        "uptime requirements (99.9%, 99.99%, etc.), RPO/RTO for disaster recovery, "
+        "throughput/concurrency expectations, and any contractual SLAs."
+    ),
+    "budget": (
+        "Understand budget constraints: whether a budget cap exists, "
+        "whether it is flexible or rigid, approximate monthly/annual budget range, "
+        "and any cost-optimization priorities (e.g., reserved instances, spot instances)."
+    ),
+    "priorities": (
+        "Determine project priorities and their relative ranking: "
+        "resiliency, performance, frugality, simplicity, security, scalability, "
+        "time-to-market, developer experience, and any other key priorities. "
+        "The ranking informs trade-off decisions throughout the project."
+    ),
+}
+
+SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT = """You are an expert Product Analyst performing a gap analysis on the "{sub_phase_name}" sub-phase \
+of a software project's environment constraints and requirements gathering.
+
+## Objective for this sub-phase
+{sub_phase_objective}
+
+## Product Specification
+---
+{spec_excerpt}
+---
+
+## Decisions already collected for this sub-phase
+---
+{sub_phase_decisions}
+---
+
+## All decisions collected so far (across all sub-phases)
+---
+{all_decisions}
+---
+
+## Already-used question IDs (do NOT regenerate these)
+{existing_question_ids}
+
+## Your task
+1. Review the specification and the decisions already collected for the "{sub_phase_name}" sub-phase.
+2. Determine if we have ENOUGH information to consider this sub-phase COMPLETE. A sub-phase is complete when all the key aspects described in the objective have either been answered or can be clearly inferred from the spec.
+3. If the sub-phase is NOT complete, generate 1-5 follow-up questions that target the specific gaps. Each question MUST have 3-6 answer options.
+
+RULES:
+- Only generate questions for GENUINE GAPS — do not re-ask things already answered.
+- Questions must be specific to THIS project based on the spec and prior decisions.
+- If prior decisions indicate a specific technology, tailor follow-up questions accordingly.
+- Each question must have 3-6 options with id, label, is_default (exactly one true), rationale, and confidence.
+- Always include an "Other" option as the last option for each question.
+- Set allow_multiple: true when the user might reasonably select more than one option.
+- Question IDs should follow the pattern "P1.{{sub_phase_short}}.gen_{{n}}" (e.g., "P1.deploy.gen_1").
+
+Respond with a JSON object only, no markdown:
+{{
+  "is_complete": true/false,
+  "completeness_rationale": "Brief explanation of why the sub-phase is or isn't complete.",
+  "follow_up_questions": [
+    {{
+      "id": "P1.deploy.gen_1",
+      "question_text": "Which AWS regions should the application be deployed in?",
+      "context": "Region selection affects latency, compliance, and cost.",
+      "category": "infrastructure",
+      "priority": "high",
+      "allow_multiple": true,
+      "sop_sub_phase": "deployment",
+      "options": [
+        {{"id": "opt_1", "label": "us-east-1 (Virginia)", "is_default": true, "rationale": "Most common, lowest cost.", "confidence": 0.7}},
+        {{"id": "opt_2", "label": "us-west-2 (Oregon)", "is_default": false, "rationale": "West coast proximity.", "confidence": 0.5}},
+        {{"id": "opt_3", "label": "eu-west-1 (Ireland)", "is_default": false, "rationale": "EU data residency.", "confidence": 0.4}},
+        {{"id": "opt_other", "label": "Other", "is_default": false, "rationale": "Specify your region(s).", "confidence": 0.3}}
+      ]
+    }}
+  ]
+}}
+
+If the sub-phase IS complete, return:
+{{
+  "is_complete": true,
+  "completeness_rationale": "All key aspects of {sub_phase_name} have been addressed: ...",
+  "follow_up_questions": []
 }}
 """
 

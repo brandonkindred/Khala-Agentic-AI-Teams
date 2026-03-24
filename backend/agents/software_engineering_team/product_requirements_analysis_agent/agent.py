@@ -49,7 +49,10 @@ from .prompts import (
     PRD_PROMPT,
     REVIEW_QUESTIONS_ALIGNMENT_PROMPT,
     SOP_ARCHITECTURE_ANALYSIS_PROMPT,
+    SOP_GENERATE_OPTIONS_PROMPT,
     SOP_SPEC_EXTRACTION_PROMPT,
+    SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT,
+    SOP_SUB_PHASE_OBJECTIVES,
     SPEC_CLEANUP_CHUNK_PROMPT,
     SPEC_CLEANUP_PROMPT,
     SPEC_CONSISTENCY_CLARIFICATION_PROMPT,
@@ -296,7 +299,8 @@ def _context_discovery_fallback_questions() -> List[OpenQuestion]:
 # ``depends_on`` are conditional — they are only asked when the parent
 # question's answer matches one of the listed values.
 
-MAX_SOP_ROUNDS = 5  # Safety limit for multi-round SOP Phase 1
+MAX_SOP_ROUNDS = 5  # Safety limit for multi-round SOP Phase 1 (hardcoded questions)
+MAX_GAP_ROUNDS = 3  # Safety limit for LLM gap-analysis follow-up rounds per sub-phase
 
 SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
     SOPSubPhase.DEPLOYMENT: [
@@ -503,16 +507,30 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "sop_id": "P1.tools.b",
             "question_text": "What existing proprietary licenses or tools do you already have?",
             "category": "business",
-            "allow_multiple": False,
-            "options": [],
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_jira", "label": "Jira", "rationale": "Project tracking and issue management."},
+                {"id": "opt_confluence", "label": "Confluence", "rationale": "Documentation and knowledge base."},
+                {"id": "opt_datadog", "label": "Datadog", "rationale": "Monitoring and observability platform."},
+                {"id": "opt_pagerduty", "label": "PagerDuty", "rationale": "Incident management and alerting."},
+                {"id": "opt_splunk", "label": "Splunk", "rationale": "Log management and SIEM."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your proprietary tools."},
+            ],
             "depends_on": {"P1.tools.a": ["Proprietary"]},
         },
         {
             "sop_id": "P1.tools.c",
             "question_text": "What open source tools/frameworks are you already familiar with?",
             "category": "business",
-            "allow_multiple": False,
-            "options": [],
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_docker", "label": "Docker", "rationale": "Containerization standard."},
+                {"id": "opt_kubernetes", "label": "Kubernetes", "rationale": "Container orchestration."},
+                {"id": "opt_postgres", "label": "PostgreSQL", "rationale": "Full-featured relational database."},
+                {"id": "opt_redis", "label": "Redis", "rationale": "In-memory data store and cache."},
+                {"id": "opt_nginx", "label": "Nginx", "rationale": "Web server and reverse proxy."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your open source tools."},
+            ],
             "depends_on": {"P1.tools.a": ["Open Source"]},
         },
     ],
@@ -596,8 +614,17 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "sop_id": "P1.coding.c",
             "question_text": "Do you have any framework preferences?",
             "category": "architecture",
-            "allow_multiple": False,
-            "options": [],
+            "allow_multiple": True,
+            "options": [
+                {"id": "opt_fastapi", "label": "FastAPI", "rationale": "Modern Python async API framework.", "is_default": True},
+                {"id": "opt_django", "label": "Django", "rationale": "Full-featured Python web framework."},
+                {"id": "opt_flask", "label": "Flask", "rationale": "Lightweight Python web framework."},
+                {"id": "opt_express", "label": "Express.js", "rationale": "Minimal Node.js web framework."},
+                {"id": "opt_nextjs", "label": "Next.js", "rationale": "React meta-framework with SSR."},
+                {"id": "opt_spring", "label": "Spring Boot", "rationale": "Enterprise Java framework."},
+                {"id": "opt_rails", "label": "Ruby on Rails", "rationale": "Convention-over-configuration web framework."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your framework."},
+            ],
             "depends_on": None,
         },
         {
@@ -605,7 +632,17 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "question_text": "Do you have a package management preference?",
             "category": "architecture",
             "allow_multiple": False,
-            "options": [],
+            "options": [
+                {"id": "opt_pip", "label": "pip", "rationale": "Standard Python package manager."},
+                {"id": "opt_poetry", "label": "Poetry", "rationale": "Modern Python dependency management.", "is_default": True},
+                {"id": "opt_npm", "label": "npm", "rationale": "Default Node.js package manager."},
+                {"id": "opt_yarn", "label": "yarn", "rationale": "Fast, reliable Node.js package manager."},
+                {"id": "opt_pnpm", "label": "pnpm", "rationale": "Efficient, disk-space-saving Node.js package manager."},
+                {"id": "opt_maven", "label": "Maven", "rationale": "Java/JVM build and dependency tool."},
+                {"id": "opt_gradle", "label": "Gradle", "rationale": "Flexible JVM build tool."},
+                {"id": "opt_cargo", "label": "Cargo", "rationale": "Rust package manager."},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your preference."},
+            ],
             "depends_on": None,
         },
         {
@@ -1112,7 +1149,12 @@ SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
             "question_text": "Please rank your selected priorities from most to least important.",
             "category": "business",
             "allow_multiple": False,
-            "options": [],
+            "options": [
+                {"id": "opt_security_first", "label": "Security > Performance > Simplicity", "rationale": "Security-first approach for sensitive applications."},
+                {"id": "opt_performance_first", "label": "Performance > Scalability > Simplicity", "rationale": "Performance-oriented for high-traffic applications."},
+                {"id": "opt_simplicity_first", "label": "Simplicity > Frugality > Security", "rationale": "Simplicity-first for rapid development and maintainability.", "is_default": True},
+                {"id": "opt_other", "label": "Other", "rationale": "Specify your custom priority ranking."},
+            ],
             "depends_on": None,
         },
     ],
@@ -1124,7 +1166,9 @@ def _sop_phase1_fallback_questions() -> List[OpenQuestion]:
 
     Used when LLM-based spec extraction AND question generation both fail.
     Only includes root questions (no conditional follow-ups).
+    Every question is guaranteed at least 3 options.
     """
+    MIN_OPTIONS = 3
     fallback: List[OpenQuestion] = []
     for sub_phase, questions in SOP_PHASE1_QUESTIONS.items():
         for q_def in questions:
@@ -1141,8 +1185,20 @@ def _sop_phase1_fallback_questions() -> List[OpenQuestion]:
                         confidence=0.5,
                     )
                 )
+            # Ensure at least MIN_OPTIONS options
+            if len(options) < MIN_OPTIONS:
+                # Add "Other" if not present
+                if not any(o.label.lower() == "other" for o in options):
+                    options.append(
+                        QuestionOption(id="opt_other", label="Other", is_default=False, rationale="Specify your preference.", confidence=0.3)
+                    )
+                # Add a free-text placeholder if still short
+                if len(options) < MIN_OPTIONS:
+                    options.insert(0, QuestionOption(
+                        id="opt_text", label="(Please type your answer)", is_default=True, rationale="", confidence=0.5,
+                    ))
             if not options:
-                continue  # Skip free-text-only questions in fallback
+                continue  # Should not happen after above logic, but guard anyway
             fallback.append(
                 OpenQuestion(
                     id=q_def["sop_id"],
@@ -2786,6 +2842,241 @@ Previously Answered Questions:
             logger.warning("SOP spec extraction failed, will ask all questions: %s", str(exc)[:200])
             return []
 
+    def _generate_spec_aware_options(
+        self,
+        q_def: Dict[str, Any],
+        spec_content: str,
+        decisions_map: Dict[str, str],
+    ) -> List[QuestionOption]:
+        """Generate answer options for a question using the LLM, informed by the spec and prior decisions.
+
+        Returns a list of QuestionOption objects. Falls back to an empty list on failure.
+        """
+        prior_decisions_str = json.dumps(decisions_map, indent=2) if decisions_map else "{}"
+        prompt = SOP_GENERATE_OPTIONS_PROMPT.format(
+            question_text=q_def["question_text"],
+            sop_id=q_def["sop_id"],
+            prior_decisions=prior_decisions_str,
+            spec_excerpt=spec_content[:4000],
+        )
+        try:
+            raw = self.llm.complete_text(prompt)
+            if not raw or not raw.strip():
+                return []
+            parsed = self._parse_llm_json(raw)
+            if not isinstance(parsed, dict):
+                return []
+            raw_options = parsed.get("options", [])
+            if not isinstance(raw_options, list):
+                return []
+            options: List[QuestionOption] = []
+            for i, opt in enumerate(raw_options):
+                if not isinstance(opt, dict) or "label" not in opt:
+                    continue
+                options.append(
+                    QuestionOption(
+                        id=opt.get("id", f"opt_gen_{i}"),
+                        label=opt["label"],
+                        is_default=bool(opt.get("is_default", False)),
+                        rationale=str(opt.get("rationale", "")),
+                        confidence=float(opt.get("confidence", 0.5)),
+                    )
+                )
+            return options
+        except Exception as exc:
+            logger.warning("Spec-aware option generation failed for %s: %s", q_def["sop_id"], str(exc)[:200])
+            return []
+
+    def _build_question_options(
+        self,
+        q_def: Dict[str, Any],
+        spec_content: str,
+        decisions_map: Dict[str, str],
+    ) -> List[QuestionOption]:
+        """Build options for a question, ensuring at least 3 valid options.
+
+        Uses hardcoded options if >= 3 are available. Otherwise generates spec-aware
+        options via LLM and merges them with any existing hardcoded options.
+        """
+        MIN_OPTIONS = 3
+
+        # Start with hardcoded options
+        hardcoded = q_def.get("options", [])
+        options: List[QuestionOption] = []
+        for i, opt in enumerate(hardcoded):
+            options.append(
+                QuestionOption(
+                    id=opt.get("id", f"opt{i}"),
+                    label=opt["label"],
+                    is_default=opt.get("is_default", False),
+                    rationale=opt.get("rationale", ""),
+                    confidence=0.5,
+                )
+            )
+
+        if len(options) >= MIN_OPTIONS:
+            return options
+
+        # Not enough options — generate spec-aware options via LLM
+        generated = self._generate_spec_aware_options(q_def, spec_content, decisions_map)
+        existing_labels = {o.label.lower() for o in options}
+        for gen_opt in generated:
+            if gen_opt.label.lower() not in existing_labels:
+                options.append(gen_opt)
+                existing_labels.add(gen_opt.label.lower())
+
+        # Ensure "Other" option exists
+        if not any(o.label.lower() == "other" for o in options):
+            options.append(
+                QuestionOption(id="opt_other", label="Other", is_default=False, rationale="Specify your preference.", confidence=0.3)
+            )
+
+        # Final safety: if still < MIN_OPTIONS, add a free-text placeholder
+        if len(options) < MIN_OPTIONS:
+            options.insert(0, QuestionOption(
+                id="opt_text", label="(Please type your answer)", is_default=True, rationale="", confidence=0.5,
+            ))
+
+        return options
+
+    def _assess_sub_phase_gaps(
+        self,
+        sub_phase: SOPSubPhase,
+        spec_content: str,
+        all_decisions: List[SOPDecision],
+        decisions_map: Dict[str, str],
+    ) -> Tuple[bool, List[OpenQuestion]]:
+        """Assess whether a sub-phase is complete and generate follow-up questions for gaps.
+
+        Uses an LLM call to evaluate the sub-phase against its objectives and the
+        information collected so far (from spec + user answers). If gaps remain,
+        the LLM generates targeted follow-up questions with spec-aware options.
+
+        On LLM error or malformed response, returns ``(True, [])`` to gracefully
+        degrade and avoid blocking the workflow.
+
+        Returns (is_complete, follow_up_questions).
+        """
+        objective = SOP_SUB_PHASE_OBJECTIVES.get(sub_phase.value, "")
+        if not objective:
+            return True, []
+
+        # Collect decisions for this sub-phase only
+        sub_phase_decisions = [
+            {"sop_id": d.sop_id, "question": d.question_text, "decision": d.decision, "source": d.source}
+            for d in all_decisions if d.sub_phase == sub_phase
+        ]
+        # Also include all decisions for cross-referencing
+        all_decisions_summary = [
+            {"sop_id": d.sop_id, "sub_phase": d.sub_phase.value if isinstance(d.sub_phase, SOPSubPhase) else str(d.sub_phase), "decision": d.decision}
+            for d in all_decisions
+        ]
+        # Build list of existing question IDs so the LLM avoids regenerating them
+        existing_ids_str = ", ".join(sorted(decisions_map.keys())) if decisions_map else "(none)"
+
+        prompt = SOP_SUB_PHASE_GAP_ANALYSIS_PROMPT.format(
+            sub_phase_name=sub_phase.value,
+            sub_phase_objective=objective,
+            spec_excerpt=spec_content[:6000],
+            sub_phase_decisions=json.dumps(sub_phase_decisions, indent=2),
+            all_decisions=json.dumps(all_decisions_summary, indent=2),
+            existing_question_ids=existing_ids_str,
+        )
+
+        try:
+            raw = self.llm.complete_text(prompt)
+            if not raw or not raw.strip():
+                return True, []  # On failure, consider complete to avoid blocking
+            parsed = self._parse_llm_json(raw)
+            if not isinstance(parsed, dict):
+                return True, []
+
+            is_complete = bool(parsed.get("is_complete", True))
+            if is_complete:
+                logger.info(
+                    "SOP Phase 1: Sub-phase '%s' assessed as COMPLETE: %s",
+                    sub_phase.value, str(parsed.get("completeness_rationale", ""))[:200],
+                )
+                return True, []
+
+            logger.info(
+                "SOP Phase 1: Sub-phase '%s' has GAPS: %s",
+                sub_phase.value, str(parsed.get("completeness_rationale", ""))[:200],
+            )
+
+            # Parse follow-up questions
+            raw_questions = parsed.get("follow_up_questions", [])
+            if not isinstance(raw_questions, list):
+                return False, []
+
+            skipped_dupes = 0
+            follow_ups: List[OpenQuestion] = []
+            for rq in raw_questions:
+                if not isinstance(rq, dict) or "question_text" not in rq:
+                    continue
+                q_id = rq.get("id", f"P1.{sub_phase.value[:6]}.gen_{len(follow_ups) + 1}")
+                # Skip if we already have a decision for this question ID
+                if q_id in decisions_map:
+                    skipped_dupes += 1
+                    continue
+
+                # Parse options from LLM response
+                raw_opts = rq.get("options", [])
+                options: List[QuestionOption] = []
+                for i, opt in enumerate(raw_opts):
+                    if not isinstance(opt, dict) or "label" not in opt:
+                        continue
+                    options.append(
+                        QuestionOption(
+                            id=opt.get("id", f"opt_gen_{i}"),
+                            label=opt["label"],
+                            is_default=bool(opt.get("is_default", False)),
+                            rationale=str(opt.get("rationale", "")),
+                            confidence=float(opt.get("confidence", 0.5)),
+                        )
+                    )
+
+                # Ensure minimum 3 options
+                if len(options) < 3:
+                    if not any(o.label.lower() == "other" for o in options):
+                        options.append(QuestionOption(id="opt_other", label="Other", is_default=False, rationale="Specify your preference.", confidence=0.3))
+                    if len(options) < 3:
+                        options.insert(0, QuestionOption(id="opt_text", label="(Please type your answer)", is_default=False, rationale="", confidence=0.5))
+
+                # Ensure exactly one is_default=True
+                defaults = [o for o in options if o.is_default]
+                if len(defaults) == 0 and options:
+                    options[0] = options[0].model_copy(update={"is_default": True})
+                elif len(defaults) > 1:
+                    for o in defaults[1:]:
+                        idx = options.index(o)
+                        options[idx] = o.model_copy(update={"is_default": False})
+
+                follow_ups.append(
+                    OpenQuestion(
+                        id=q_id,
+                        question_text=rq["question_text"],
+                        context=str(rq.get("context", "")),
+                        category=str(rq.get("category", "general")),
+                        priority=str(rq.get("priority", "high")),
+                        allow_multiple=bool(rq.get("allow_multiple", False)),
+                        source="sop_phase1",
+                        sop_sub_phase=sub_phase.value,
+                        options=options,
+                    )
+                )
+
+            if skipped_dupes:
+                logger.warning(
+                    "SOP Phase 1: Sub-phase '%s' gap analysis generated %d question(s) with duplicate IDs — skipped",
+                    sub_phase.value, skipped_dupes,
+                )
+
+            return False, follow_ups
+        except Exception as exc:
+            logger.error("Sub-phase gap analysis failed for '%s': %s", sub_phase.value, str(exc)[:200])
+            return True, []  # On failure, consider complete to avoid blocking
+
     def _run_sop_phase1(
         self,
         spec_content: str,
@@ -2795,15 +3086,17 @@ Previously Answered Questions:
     ) -> Tuple[List[SOPDecision], str, List[AnsweredQuestion]]:
         """Run SOP Phase 1: Environment Constraints & Requirements.
 
-        Multi-round approach:
+        Sequential sub-phase approach:
         1. Extract answers already present in the spec.
-        2. For each round, collect all currently-askable questions (root Qs + conditional
-           Qs whose parents are answered). Present them to the user in one batch.
-        3. Repeat until no new questions emerge (max MAX_SOP_ROUNDS rounds).
+        2. Iterate through each sub-phase one at a time (DEPLOYMENT, REGULATIONS, ..., PRIORITIES).
+        3. For each sub-phase, first ask the hardcoded SOP questions (with conditional follow-ups).
+        4. Then assess whether the sub-phase is complete using LLM gap analysis.
+        5. If gaps remain, generate and ask follow-up questions until the sub-phase is complete.
+        6. Every question is guaranteed at least 3 answer options informed by the spec.
 
         Returns (all_decisions, updated_spec, answered_questions).
         """
-        # Step 1: Extract decisions from spec
+        # Step 1: Extract decisions from spec (single upfront call for efficiency)
         spec_decisions = self._extract_sop_decisions_from_spec(spec_content)
         decisions_map: Dict[str, str] = {d.sop_id: d.decision for d in spec_decisions}
         all_decisions = list(spec_decisions)
@@ -2816,49 +3109,29 @@ Previously Answered Questions:
                 [d.sop_id for d in spec_decisions],
             )
 
-        # Step 2: Multi-round question loop
-        for round_num in range(1, MAX_SOP_ROUNDS + 1):
-            round_questions: List[OpenQuestion] = []
+        # Step 2: Iterate through sub-phases ONE AT A TIME in order
+        for sub_phase in SOPSubPhase:
+            q_defs = SOP_PHASE1_QUESTIONS.get(sub_phase, [])
 
-            for sub_phase in SOPSubPhase:
-                q_defs = SOP_PHASE1_QUESTIONS.get(sub_phase, [])
+            # --- Phase A: Ask hardcoded SOP questions (including conditional follow-ups) ---
+            for round_num in range(1, MAX_SOP_ROUNDS + 1):
+                sub_phase_questions: List[OpenQuestion] = []
+
                 for q_def in q_defs:
                     sop_id = q_def["sop_id"]
                     if sop_id in decisions_map:
-                        continue  # Already answered
+                        continue  # Already answered (from spec or prior round)
 
                     cond_result = self._evaluate_sop_conditionals(q_def, decisions_map)
                     if cond_result is False:
                         continue  # Condition not met
                     if cond_result is None:
-                        continue  # Parent not answered yet — defer
+                        continue  # Parent not answered yet — defer to next round within this sub-phase
+                        
+                    # Build options ensuring at least 3 valid choices, informed by spec
+                    options = self._build_question_options(q_def, spec_content, decisions_map)
 
-                    # Build OpenQuestion from the definition
-                    options = []
-                    for i, opt in enumerate(q_def.get("options", [])):
-                        options.append(
-                            QuestionOption(
-                                id=opt.get("id", f"opt{i}"),
-                                label=opt["label"],
-                                is_default=opt.get("is_default", False),
-                                rationale=opt.get("rationale", ""),
-                                confidence=0.5,
-                            )
-                        )
-
-                    if not options:
-                        # Free-text question — still include with minimal options
-                        options = [
-                            QuestionOption(
-                                id="opt_text",
-                                label="(Please type your answer)",
-                                is_default=True,
-                                rationale="",
-                                confidence=0.5,
-                            ),
-                        ]
-
-                    round_questions.append(
+                    sub_phase_questions.append(
                         OpenQuestion(
                             id=sop_id,
                             question_text=q_def["question_text"],
@@ -2872,48 +3145,37 @@ Previously Answered Questions:
                         )
                     )
 
-            if not round_questions:
-                logger.info("SOP Phase 1: All questions answered after round %d", round_num - 1)
-                break
+                if not sub_phase_questions:
+                    break  # No more hardcoded questions for this sub-phase
 
-            logger.info(
-                "SOP Phase 1 round %d: asking %d questions", round_num, len(round_questions)
-            )
-            job_updater(
-                status_text=f"SOP Phase 1 round {round_num}: waiting for answers to {len(round_questions)} question(s)",
-            )
-
-            try:
-                answered = self._communicate_with_user(
-                    job_id=job_id,
-                    open_questions=round_questions,
-                    repo_path=repo_path,
-                    iteration=0,
+                logger.info(
+                    "SOP Phase 1 sub-phase '%s' round %d: asking %d questions",
+                    sub_phase.value, round_num, len(sub_phase_questions),
                 )
-            except Exception as exc:
-                logger.error("SOP Phase 1 communication failed: %s", exc)
-                raise
+                job_updater(
+                    status_text=f"SOP Phase 1 — {sub_phase.value}: waiting for answers to {len(sub_phase_questions)} question(s)",
+                )
 
-            if not answered:
-                logger.info("SOP Phase 1: No answers received in round %d", round_num)
-                break
+                try:
+                    answered = self._communicate_with_user(
+                        job_id=job_id,
+                        open_questions=sub_phase_questions,
+                        repo_path=repo_path,
+                        iteration=0,
+                    )
+                except Exception as exc:
+                    logger.error("SOP Phase 1 communication failed in sub-phase '%s': %s", sub_phase.value, exc)
+                    raise
 
-            # Record answers as SOPDecision objects
-            for aq in answered:
-                # Map question_id back to sub_phase
-                sub_phase_val = ""
-                for sp, q_defs in SOP_PHASE1_QUESTIONS.items():
-                    for q_def in q_defs:
-                        if q_def["sop_id"] == aq.question_id:
-                            sub_phase_val = sp
-                            break
-                    if sub_phase_val:
-                        break
+                if not answered:
+                    logger.info("SOP Phase 1: No answers received for sub-phase '%s' round %d", sub_phase.value, round_num)
+                    break
 
-                if sub_phase_val:
+                # Record answers as SOPDecision objects
+                for aq in answered:
                     decision = SOPDecision(
                         sop_id=aq.question_id,
-                        sub_phase=sub_phase_val,
+                        sub_phase=sub_phase,
                         question_text=aq.question_text,
                         decision=aq.selected_answer,
                         source="user",
@@ -2922,8 +3184,61 @@ Previously Answered Questions:
                     all_decisions.append(decision)
                     decisions_map[aq.question_id] = aq.selected_answer
 
-            all_answered.extend(answered)
-            self._record_answers(repo_path, answered, iteration=0)
+                all_answered.extend(answered)
+                self._record_answers(repo_path, answered, iteration=0)
+
+            # --- Phase B: Gap analysis — generate follow-up questions until sub-phase is complete ---
+            for gap_round in range(1, MAX_GAP_ROUNDS + 1):
+                job_updater(
+                    status_text=f"SOP Phase 1 — {sub_phase.value}: assessing completeness...",
+                )
+                is_complete, follow_ups = self._assess_sub_phase_gaps(
+                    sub_phase, spec_content, all_decisions, decisions_map,
+                )
+                if is_complete or not follow_ups:
+                    logger.info(
+                        "SOP Phase 1: Sub-phase '%s' is complete after %d gap-analysis round(s)",
+                        sub_phase.value, gap_round,
+                    )
+                    break
+
+                logger.info(
+                    "SOP Phase 1 sub-phase '%s' gap round %d: asking %d follow-up questions",
+                    sub_phase.value, gap_round, len(follow_ups),
+                )
+                job_updater(
+                    status_text=f"SOP Phase 1 — {sub_phase.value}: {len(follow_ups)} follow-up question(s) to fill gaps",
+                )
+
+                try:
+                    answered = self._communicate_with_user(
+                        job_id=job_id,
+                        open_questions=follow_ups,
+                        repo_path=repo_path,
+                        iteration=0,
+                    )
+                except Exception as exc:
+                    logger.error("SOP Phase 1 gap-analysis communication failed in sub-phase '%s': %s", sub_phase.value, exc)
+                    raise
+
+                if not answered:
+                    logger.info("SOP Phase 1: No answers to gap questions for sub-phase '%s'", sub_phase.value)
+                    break
+
+                for aq in answered:
+                    decision = SOPDecision(
+                        sop_id=aq.question_id,
+                        sub_phase=sub_phase,
+                        question_text=aq.question_text,
+                        decision=aq.selected_answer,
+                        source="user",
+                        confidence=1.0,
+                    )
+                    all_decisions.append(decision)
+                    decisions_map[aq.question_id] = aq.selected_answer
+
+                all_answered.extend(answered)
+                self._record_answers(repo_path, answered, iteration=0)
 
         # Step 3: Inject all decisions into spec
         if all_answered:
