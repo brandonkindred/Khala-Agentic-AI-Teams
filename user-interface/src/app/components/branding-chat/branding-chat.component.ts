@@ -51,6 +51,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
   @Input() conversationId: string | null = null;
   @Input() brandId: string | null = null;
   @Output() stateChange = new EventEmitter<BrandingChatState>();
+  @Output() brandAutoCreated = new EventEmitter<string>();
 
   @ViewChild('messagesContainer') messagesContainer!: ElementRef<HTMLDivElement>;
 
@@ -99,6 +100,8 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
     }
   }
 
+  private _lastBrandId: string | null = null;
+
   private applyState(res: ConversationStateResponse): void {
     this.messages = res.messages ?? [];
     this.mission = res.mission ?? null;
@@ -107,6 +110,11 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
     if (res.conversation_id) {
       this._conversationId = res.conversation_id;
     }
+    // Detect auto-created brand: brand_id appeared where there was none before.
+    if (res.brand_id && !this._lastBrandId) {
+      this.brandAutoCreated.emit(res.brand_id);
+    }
+    this._lastBrandId = res.brand_id ?? null;
     this.emitState();
   }
 
@@ -134,10 +142,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
   retryStartConversation(): void {
     this.error = null;
     this.loading = true;
-    const starter = this.brandId
-      ? this.api.createConversationForBrand(this.brandId)
-      : this.api.createConversation();
-    starter.subscribe({
+    this.api.createConversation().subscribe({
       next: (res) => {
         this.applyState(res);
         this.loading = false;
@@ -153,8 +158,10 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
 
   private bootstrapConversation(): void {
     this.error = null;
+    // If a conversation ID is provided (e.g. from a brand), load it directly.
     if (this.conversationId) {
       this._conversationId = this.conversationId;
+      this._lastBrandId = this.brandId ?? null;
       this.api.getConversation(this.conversationId).subscribe({
         next: (res) => this.applyState(res),
         error: (err) => {
@@ -165,10 +172,9 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
       });
       return;
     }
-    const starter = this.brandId
-      ? this.api.createConversationForBrand(this.brandId)
-      : this.api.createConversation();
-    starter.subscribe({
+    // No conversation ID — create a new unattached conversation.
+    // The backend will auto-create a brand once the user provides enough info.
+    this.api.createConversation().subscribe({
       next: (res) => this.applyState(res),
       error: (err) => {
         this.error = this.isUnreachableError(err)
@@ -189,10 +195,7 @@ export class BrandingChatComponent implements OnInit, OnChanges, AfterViewChecke
         { role: 'user', content: message, timestamp: new Date().toISOString() },
       ];
       this.loading = true;
-      const starter = this.brandId
-        ? this.api.createConversationForBrand(this.brandId, message)
-        : this.api.createConversation(message);
-      starter.subscribe({
+      this.api.createConversation(message).subscribe({
         next: (res) => {
           this.applyState(res);
           this.error = null;

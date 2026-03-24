@@ -108,6 +108,30 @@ class BrandingConversationStore:
             conn.execute("ALTER TABLE conversations ADD COLUMN updated_at TEXT")
             conn.execute("UPDATE conversations SET updated_at = ? WHERE updated_at IS NULL", (ts,))
 
+        # Enforce one conversation per brand.  For brands with multiple conversations,
+        # keep the one with the most messages and detach the rest.
+        dupes = conn.execute(
+            "SELECT brand_id, COUNT(*) FROM conversations WHERE brand_id IS NOT NULL GROUP BY brand_id HAVING COUNT(*) > 1"
+        ).fetchall()
+        for brand_id, _ in dupes:
+            rows = conn.execute(
+                "SELECT c.conversation_id, COUNT(m.id) AS cnt"
+                " FROM conversations c LEFT JOIN conv_messages m ON m.conversation_id = c.conversation_id"
+                " WHERE c.brand_id = ? GROUP BY c.conversation_id ORDER BY cnt DESC",
+                (brand_id,),
+            ).fetchall()
+            # Keep the first (most messages), detach the rest
+            for row in rows[1:]:
+                conn.execute(
+                    "UPDATE conversations SET brand_id = NULL WHERE conversation_id = ?",
+                    (row[0],),
+                )
+                logger.info("Detached duplicate conversation %s from brand %s", row[0], brand_id)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_brand_unique ON conversations(brand_id)"
+            " WHERE brand_id IS NOT NULL"
+        )
+
     @contextlib.contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
         if self._mem_conn is not None:
@@ -218,22 +242,29 @@ class BrandingConversationStore:
             )
         return result.rowcount > 0
 
-    def adopt_unattached_conversations(self, brand_id: str) -> int:
-        """Bulk-assign all conversations with ``brand_id IS NULL`` to *brand_id*.
+    def get_by_brand_id(
+        self, brand_id: str
+    ) -> Optional[tuple[str, List[_StoredMessage], BrandingMission, Optional[TeamOutput]]]:
+        """Return the single conversation for *brand_id*, or None.
 
-        Used when the first brand is created so that every prior conversation
-        is automatically associated with it.  Returns the number of rows updated.
+        Returns ``(conversation_id, messages, mission, latest_output)``.
         """
-        ts = datetime.now(tz=timezone.utc).isoformat()
         with self._db() as conn:
-            result = conn.execute(
-                "UPDATE conversations SET brand_id = ?, updated_at = ? WHERE brand_id IS NULL",
-                (brand_id, ts),
-            )
-        count = result.rowcount
-        if count:
-            logger.info("Adopted %d unattached conversation(s) → brand %s", count, brand_id)
-        return count
+            row = conn.execute(
+                "SELECT conversation_id, mission_json, latest_output_json FROM conversations WHERE brand_id = ?",
+                (brand_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            cid = str(row[0])
+            mission = BrandingMission.model_validate_json(row[1])
+            latest_output = TeamOutput.model_validate_json(row[2]) if row[2] else None
+            msg_rows = conn.execute(
+                "SELECT role, content, timestamp FROM conv_messages WHERE conversation_id = ? ORDER BY id",
+                (cid,),
+            ).fetchall()
+            messages = [_StoredMessage(role=r[0], content=r[1], timestamp=r[2]) for r in msg_rows]
+        return (cid, messages, mission, latest_output)
 
     def list_conversations(self, brand_id: Optional[str] = None) -> List[ConversationSummary]:
         with self._db() as conn:

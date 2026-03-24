@@ -42,6 +42,7 @@ export interface Brand {
   client_id: string;
   name: string;
   status: 'draft' | 'active' | 'evolving' | 'archived';
+  conversation_id?: string | null;
   mission: BrandingMissionSnapshot;
   latest_output?: unknown | null;
   version: number;

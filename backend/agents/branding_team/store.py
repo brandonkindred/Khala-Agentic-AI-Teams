@@ -189,6 +189,7 @@ class BrandingStore:
         mission: Optional[BrandingMission] = None,
         status: Optional[BrandStatus] = None,
         name: Optional[str] = None,
+        conversation_id: Optional[str] = None,
     ) -> Optional[Brand]:
         with self._db() as conn:
             row = conn.execute(
@@ -205,6 +206,8 @@ class BrandingStore:
                 updates["status"] = status
             if name is not None:
                 updates["name"] = name
+            if conversation_id is not None:
+                updates["conversation_id"] = conversation_id
             updated = brand.model_copy(update=updates)
             conn.execute(
                 "UPDATE brands SET data = ? WHERE id = ? AND client_id = ?",

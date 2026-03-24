@@ -521,6 +521,7 @@ class Brand(BaseModel):
     current_phase: BrandPhase = BrandPhase.STRATEGIC_CORE
     mission: BrandingMission
     latest_output: Optional[TeamOutput] = None
+    conversation_id: Optional[str] = None
     version: int = 0
     history: List[BrandVersionSummary] = Field(default_factory=list)
     created_at: str = ""

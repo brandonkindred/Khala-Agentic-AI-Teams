@@ -19,11 +19,9 @@ describe('BrandingDashboardComponent', () => {
     listClients: ReturnType<typeof vi.fn>;
     listBrands: ReturnType<typeof vi.fn>;
     createClient: ReturnType<typeof vi.fn>;
-    listConversations: ReturnType<typeof vi.fn>;
     createBrand: ReturnType<typeof vi.fn>;
     getBrand: ReturnType<typeof vi.fn>;
     createConversation: ReturnType<typeof vi.fn>;
-    createConversationForBrand: ReturnType<typeof vi.fn>;
   };
   let snackBarSpy: { open: ReturnType<typeof vi.fn> };
 
@@ -39,11 +37,9 @@ describe('BrandingDashboardComponent', () => {
       listClients: vi.fn().mockReturnValue(of([workspaceClient])),
       listBrands: vi.fn().mockReturnValue(of([])),
       createClient: vi.fn(),
-      listConversations: vi.fn().mockReturnValue(of([])),
       createBrand: vi.fn(),
       getBrand: vi.fn(),
       createConversation: vi.fn().mockReturnValue(of(emptyConversationState)),
-      createConversationForBrand: vi.fn().mockReturnValue(of(emptyConversationState)),
     };
     await TestBed.configureTestingModule({
       imports: [BrandingDashboardComponent, NoopAnimationsModule],
@@ -106,21 +102,22 @@ describe('BrandingDashboardComponent', () => {
     expect(apiSpy.health).toHaveBeenCalled();
   });
 
-  it('refreshConversations should call listConversations with selected brand id when set', () => {
-    component.selectedClient = workspaceClient as any;
-    component.selectedBrand = {
+  it('selectBrandForChat should set activeConversationId from brand', () => {
+    const brand = {
       id: 'b1',
       client_id: 'w1',
       name: 'B',
-      status: 'draft',
+      status: 'draft' as const,
+      conversation_id: 'conv-123',
       mission: {} as any,
       version: 1,
       history: [],
       created_at: '',
       updated_at: '',
     };
-    component.refreshConversations();
-    expect(apiSpy.listConversations).toHaveBeenCalledWith('b1');
+    component.selectBrandForChat(brand);
+    expect(component.selectedBrand).toEqual(brand);
+    expect(component.activeConversationId).toBe('conv-123');
   });
 });
 
@@ -137,11 +134,9 @@ describe('BrandingDashboardComponent workspace bootstrap', () => {
       }),
       listBrands: vi.fn().mockReturnValue(of([])),
       createClient: vi.fn().mockReturnValue(of(workspaceClient)),
-      listConversations: vi.fn().mockReturnValue(of([])),
       createBrand: vi.fn(),
       getBrand: vi.fn(),
       createConversation: vi.fn().mockReturnValue(of(emptyConversationState2)),
-      createConversationForBrand: vi.fn().mockReturnValue(of(emptyConversationState2)),
     };
 
     TestBed.resetTestingModule();

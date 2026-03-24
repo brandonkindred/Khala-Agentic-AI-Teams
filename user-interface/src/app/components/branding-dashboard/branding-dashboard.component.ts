@@ -26,7 +26,6 @@ import type {
   BrandingSessionResponse,
   BrandingTeamOutput,
   Client,
-  ConversationSummary,
   CreateBrandRequest,
   RunBrandingTeamRequest,
 } from '../../models';
@@ -78,8 +77,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   conversationMission: BrandingMissionSnapshot | null = null;
   conversationLatestOutput: BrandingTeamOutput | null = null;
   activeConversationId: string | null = null;
-  conversationHistory: ConversationSummary[] = [];
-  selectedHistoryConversationId: string | null = null;
 
   /** True during initial workspace bootstrap or heavy session operations (full-page spinner). */
   loading = false;
@@ -126,8 +123,27 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     this.conversationMission = state.mission;
     this.conversationLatestOutput = state.latest_output;
     this.syncBrandPreviewFromSelection();
-    this.refreshConversations();
     this.syncQueryParams();
+  }
+
+  /** Handle auto-created brand from chat: refresh brands and select it. */
+  onBrandAutoCreated(brandId: string): void {
+    if (!this.selectedClient) return;
+    this.api.listBrands(this.selectedClient.id).subscribe({
+      next: (brands) => {
+        this.brands = brands;
+        const created = brands.find((b) => b.id === brandId);
+        if (created) {
+          this.selectedBrand = created;
+          this.conversationMission = created.mission;
+          this.snackBar.open(
+            `Brand "${created.name}" auto-created from your conversation.`,
+            'Dismiss',
+            { duration: 6000 }
+          );
+        }
+      },
+    });
   }
 
   /** Keep URL query params in sync so the user can bookmark / deep-link back. */
@@ -209,12 +225,9 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     this.saveToAgencyError = null;
     this.api.createBrand(clientId, request).subscribe({
       next: (brand) => {
-        if (this.activeConversationId) {
-          this.api.attachConversationToBrand(this.activeConversationId, brand.id).subscribe({
-            // eslint-disable-next-line @typescript-eslint/no-empty-function
-            next: () => {},
-          });
-        }
+        // Brand creation now auto-creates a conversation on the backend.
+        // Switch to the brand's permanent conversation.
+        this.activeConversationId = brand.conversation_id ?? null;
         this.api.runBrand(clientId, brand.id).subscribe({
           next: () => {
             this.snackBar.open(`Brand "${brand.name}" saved and run completed.`, 'Dismiss', { duration: 5000 });
@@ -330,7 +343,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         this.brands = list;
         this.applyDefaultBrandSelection();
         this.syncBrandPreviewFromSelection();
-        this.refreshConversations();
         this.loading = false;
       },
       error: () => {
@@ -356,31 +368,14 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     if (this.pendingBrandId) {
       const match = this.brands.find((b) => b.id === this.pendingBrandId);
       if (match) {
-        this.selectedBrand = match;
-        this.conversationMission = match.mission;
-        this.conversationLatestOutput = (match.latest_output as BrandingTeamOutput | null) ?? null;
-        if (this.pendingConversationId) {
-          this.selectedHistoryConversationId = this.pendingConversationId;
-          this.activeConversationId = this.pendingConversationId;
-        } else {
-          this.resumeLatestConversation(match);
-        }
+        this.resumeOrStartBrand(match);
         this.pendingBrandId = null;
         this.pendingConversationId = null;
-        this.refreshConversations();
         return;
       }
     }
-    if (this.pendingConversationId) {
-      this.selectedHistoryConversationId = this.pendingConversationId;
-      this.activeConversationId = this.pendingConversationId;
-      this.pendingConversationId = null;
-      this.pendingBrandId = null;
-      const last = this.brands[this.brands.length - 1];
-      this.selectedBrand = last;
-      this.refreshConversations();
-      return;
-    }
+    this.pendingBrandId = null;
+    this.pendingConversationId = null;
 
     if (!this.selectedBrand) {
       const last = this.brands[this.brands.length - 1];
@@ -398,82 +393,21 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
    * Select a brand and try to resume the most recent conversation for it.
    * Falls back to creating a new conversation if none exist.
    */
+  /** Select a brand and open its single permanent conversation. */
   private resumeOrStartBrand(brand: Brand): void {
     this.selectedBrand = brand;
     this.conversationMission = brand.mission;
     this.conversationLatestOutput = (brand.latest_output as BrandingTeamOutput | null) ?? null;
-    this.resumeLatestConversation(brand);
-  }
-
-  /**
-   * Load conversations for the given brand and auto-select the most recent one.
-   * If no conversations exist, resets to a new conversation state.
-   */
-  private resumeLatestConversation(brand: Brand): void {
-    this.api.listConversations(brand.id).subscribe({
-      next: (rows) => {
-        this.conversationHistory = rows;
-        if (rows.length > 0) {
-          const latest = rows[0];
-          this.selectedHistoryConversationId = latest.conversation_id;
-          this.activeConversationId = latest.conversation_id;
-          this.syncQueryParams();
-        } else {
-          this.selectedHistoryConversationId = null;
-          this.activeConversationId = null;
-        }
-      },
-      error: () => {
-        this.conversationHistory = [];
-        this.selectedHistoryConversationId = null;
-        this.activeConversationId = null;
-      },
-    });
-  }
-
-  refreshConversations(): void {
-    if (!this.selectedClient) {
-      this.conversationHistory = [];
-      return;
-    }
-    const q = this.selectedBrand?.id ?? undefined;
-    this.api.listConversations(q).subscribe({
-      next: (rows) => {
-        this.conversationHistory = rows;
-      },
-      error: () => {
-        this.conversationHistory = [];
-      },
-    });
+    this.activeConversationId = brand.conversation_id ?? null;
+    this.syncQueryParams();
   }
 
   selectBrandForChat(brand: Brand): void {
-    this.selectedBrand = brand;
-    this.conversationMission = brand.mission;
-    this.conversationLatestOutput = (brand.latest_output as BrandingTeamOutput | null) ?? null;
-    this.resumeLatestConversation(brand);
-  }
-
-  selectConversationHistory(item: ConversationSummary): void {
-    this.selectedHistoryConversationId = item.conversation_id;
-    this.activeConversationId = item.conversation_id;
-    if (item.brand_id) {
-      const match = this.brands.find((b) => b.id === item.brand_id) ?? null;
-      this.selectedBrand = match;
-    }
-    this.refreshConversations();
-    this.syncQueryParams();
+    this.resumeOrStartBrand(brand);
   }
 
   startNewBrandConversation(brand: Brand): void {
     this.resumeOrStartBrand(brand);
-  }
-
-  /** Explicitly start a fresh conversation for the currently selected brand. */
-  startFreshConversation(): void {
-    this.selectedHistoryConversationId = null;
-    this.activeConversationId = null;
-    this.syncQueryParams();
   }
 
   openFormTabForNewBrand(): void {
@@ -491,9 +425,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     return !!this.activeConversationId && !!this.conversationMission;
   }
 
-  get hasConversationHistory(): boolean {
-    return !!this.activeConversationId;
-  }
+
 
   private syncBrandPreviewFromSelection(): void {
     if (!this.selectedBrand) return;

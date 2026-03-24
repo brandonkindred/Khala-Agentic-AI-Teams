@@ -77,53 +77,18 @@
       <div class="split-panel">
         <div class="panel chat-panel">
           <div class="chat-toolbar">
-            @if (selectedBrand) {
-              <button mat-stroked-button type="button" (click)="startFreshConversation()">
-                <mat-icon>add_comment</mat-icon>
-                New conversation
-              </button>
-            }
-            @if (hasConversationHistory && conversationMission) {
+            @if (!selectedBrand && conversationMission) {
               <button mat-stroked-button color="primary" type="button" (click)="onOpenSaveAsBrand()" [disabled]="!canCreateBrandFromChat">
                 Save conversation as brand
               </button>
             }
           </div>
           <app-branding-chat
-            [conversationId]="selectedHistoryConversationId"
+            [conversationId]="activeConversationId"
             [brandId]="selectedBrand?.id ?? null"
             (stateChange)="onChatStateChange($event)"
+            (brandAutoCreated)="onBrandAutoCreated($event)"
           />
-
-          @if (conversationHistory.length > 0) {
-            <mat-card class="history-card">
-              <mat-card-header>
-                <mat-card-title>Past conversations</mat-card-title>
-                <mat-card-subtitle>
-                  Continue a conversation below.
-                  @if (selectedBrand) {
-                    Showing threads for {{ selectedBrand.name }}; change brand above to load others.
-                  } @else {
-                    Pick a row to resume chatting.
-                  }
-                </mat-card-subtitle>
-              </mat-card-header>
-              <mat-card-content>
-                <div class="history-list">
-                  @for (item of conversationHistory; track item.conversation_id) {
-                    <button
-                      mat-stroked-button
-                      [color]="selectedHistoryConversationId === item.conversation_id ? 'primary' : undefined"
-                      (click)="selectConversationHistory(item)"
-                    >
-                      {{ item.brand_name || 'Unassigned' }} · {{ formatConversationTime(item.updated_at) }} ·
-                      {{ item.message_count }} messages
-                    </button>
-                  }
-                </div>
-              </mat-card-content>
-            </mat-card>
-          }
         </div>
         <div class="panel preview-panel">
           @if (isCompactLayout) {
