@@ -889,7 +889,7 @@ def run_pipeline(
                     selected_title=selected_title or None,
                     elicited_stories=elicited_stories_text or None,
                 )
-                previous_feedback_items = copy_editor_result.feedback_items
+                previous_feedback_items = previous_feedback_items + list(copy_editor_result.feedback_items)
                 draft_output_path = (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None
                 draft_result = draft_agent.revise(
                     revise_input,

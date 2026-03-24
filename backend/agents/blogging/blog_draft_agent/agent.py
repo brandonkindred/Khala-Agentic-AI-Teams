@@ -498,11 +498,25 @@ class BlogDraftAgent:
             "---",
             feedback_block,
             "",
+        ]
+        if revise_input.previous_feedback_items:
+            prev_lines = []
+            for i, item in enumerate(revise_input.previous_feedback_items, 1):
+                loc = f" [{item.location}]" if item.location else ""
+                prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
+            prompt_parts.extend([
+                "---",
+                "PREVIOUSLY ADDRESSED FEEDBACK (do NOT regress on these fixes — the editor already flagged them):",
+                "---",
+                "\n".join(prev_lines),
+                "",
+            ])
+        prompt_parts.extend([
             "---",
             "CURRENT DRAFT:",
             "---",
             draft,
-        ]
+        ])
         if revise_input.audience:
             prompt_parts.insert(0, f"Audience: {revise_input.audience}\n")
         if revise_input.tone_or_purpose:
