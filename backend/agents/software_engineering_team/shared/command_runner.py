@@ -1392,6 +1392,12 @@ _ANGULAR_DEV_DEPS = [
     f"@angular/compiler-cli@{_ANGULAR_VERSION}",
     f"@angular/build@{_ANGULAR_VERSION}",
     "typescript",
+    "angular-eslint",
+    "@eslint/js",
+    "typescript-eslint",
+    "vitest",
+    "@vitest/coverage-v8",
+    "jsdom",
 ]
 
 # ---------------------------------------------------------------------------
@@ -1415,9 +1421,13 @@ _REACT_DEV_DEPS = [
     "vite",
     "@vitejs/plugin-react",
     "vitest",
+    "@vitest/coverage-v8",
     "@testing-library/react",
     "@testing-library/jest-dom",
     "jsdom",
+    "@eslint/js",
+    "typescript-eslint",
+    "eslint",
 ]
 
 _MINIMAL_REACT_INDEX_HTML = """\
@@ -1487,6 +1497,102 @@ body {
 .app {
   min-height: 100vh;
 }
+"""
+
+_MINIMAL_REACT_ESLINT_CONFIG = """\
+import js from '@eslint/js';
+import tseslint from 'typescript-eslint';
+
+export default tseslint.config(
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  {
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+    },
+  },
+  {
+    ignores: ['dist/', 'node_modules/', 'coverage/'],
+  },
+);
+"""
+
+_MINIMAL_REACT_VITEST_CONFIG = """\
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      thresholds: { lines: 60 },
+      exclude: ['**/*.test.*', '**/*.spec.*', 'src/main.tsx'],
+    },
+  },
+});
+"""
+
+_MINIMAL_ANGULAR_ESLINT_CONFIG = """\
+// @ts-check
+const eslint = require("@eslint/js");
+const tseslint = require("typescript-eslint");
+const angular = require("angular-eslint");
+
+module.exports = tseslint.config(
+  {
+    files: ["**/*.ts"],
+    extends: [
+      eslint.configs.recommended,
+      ...tseslint.configs.recommended,
+      ...tseslint.configs.stylistic,
+      ...angular.configs.tsRecommended,
+    ],
+    processor: angular.processInlineTemplates,
+    rules: {
+      "@angular-eslint/directive-selector": ["error", { type: "attribute", prefix: "app", style: "camelCase" }],
+      "@angular-eslint/component-selector": ["error", { type: "element", prefix: "app", style: "kebab-case" }],
+    },
+  },
+  {
+    files: ["**/*.html"],
+    extends: [...angular.configs.templateRecommended, ...angular.configs.templateAccessibility],
+  },
+);
+"""
+
+_MINIMAL_ANGULAR_VITEST_CONFIG = """\
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    include: ['src/**/*.spec.ts'],
+    setupFiles: ['src/test-setup.ts'],
+    pool: 'forks',
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      thresholds: { lines: 60 },
+      exclude: ['**/*.spec.ts', '**/*.model.ts', 'src/environments/**', 'src/main.ts'],
+    },
+  },
+});
+"""
+
+_MINIMAL_ANGULAR_TEST_SETUP = """\
+import 'zone.js';
+import 'zone.js/testing';
+import { getTestBed } from '@angular/core/testing';
+import { BrowserDynamicTestingModule, platformBrowserDynamicTesting } from '@angular/platform-browser-dynamic/testing';
+
+getTestBed().initTestEnvironment(BrowserDynamicTestingModule, platformBrowserDynamicTesting());
 """
 
 _MINIMAL_REACT_VITE_CONFIG = """\
@@ -1676,11 +1782,43 @@ body { margin: 0; font-family: Roboto, "Helvetica Neue", sans-serif; }
     # Pin Node version for nvm use
     _write_if_missing(cwd / ".nvmrc", FRONTEND_NODE_VERSION + "\n")
 
+    # Linting and testing configuration
+    _write_if_missing(cwd / "eslint.config.js", _MINIMAL_ANGULAR_ESLINT_CONFIG)
+    _write_if_missing(cwd / "vitest.config.mts", _MINIMAL_ANGULAR_VITEST_CONFIG)
+    _write_if_missing(src / "test-setup.ts", _MINIMAL_ANGULAR_TEST_SETUP)
+
+    # Minimal test file so vitest runs without error
+    _write_if_missing(
+        app / "app.component.spec.ts",
+        "import { describe, it, expect } from 'vitest';\n\n"
+        "describe('AppComponent', () => {\n"
+        "  it('should be defined', () => {\n"
+        "    expect(true).toBe(true);\n"
+        "  });\n"
+        "});\n",
+    )
+
     # Create docs folder for documentation
     docs_dir = cwd / "docs"
     if not docs_dir.exists():
         docs_dir.mkdir(parents=True, exist_ok=True)
         _write_if_missing(docs_dir / ".gitkeep", "")
+
+    # Update package.json with lint/test scripts
+    pkg_path = cwd / "package.json"
+    if pkg_path.exists():
+        try:
+            import json
+
+            pkg_data = json.loads(pkg_path.read_text(encoding="utf-8"))
+            scripts = pkg_data.get("scripts", {})
+            scripts.setdefault("lint", "npx ng lint")
+            scripts.setdefault("test", "vitest run")
+            scripts.setdefault("test:coverage", "vitest run --coverage")
+            pkg_data["scripts"] = scripts
+            pkg_path.write_text(json.dumps(pkg_data, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning("Could not update package.json scripts: %s", e)
 
     logger.info("Angular project initialized successfully at %s", cwd)
     return CommandResult(
@@ -1724,6 +1862,21 @@ def _scaffold_react_project(cwd: Path) -> CommandResult:
     # Pin Node version for nvm use
     _write_if_missing(cwd / ".nvmrc", FRONTEND_NODE_VERSION + "\n")
 
+    # Linting and testing configuration
+    _write_if_missing(cwd / "eslint.config.mjs", _MINIMAL_REACT_ESLINT_CONFIG)
+    _write_if_missing(cwd / "vitest.config.ts", _MINIMAL_REACT_VITEST_CONFIG)
+
+    # Minimal test file so vitest runs without error
+    _write_if_missing(
+        src / "App.test.tsx",
+        "import { describe, it, expect } from 'vitest';\n\n"
+        "describe('App', () => {\n"
+        "  it('should be defined', () => {\n"
+        "    expect(true).toBe(true);\n"
+        "  });\n"
+        "});\n",
+    )
+
     # Update package.json with scripts
     pkg_path = cwd / "package.json"
     if pkg_path.exists():
@@ -1735,8 +1888,9 @@ def _scaffold_react_project(cwd: Path) -> CommandResult:
                 "dev": "vite",
                 "build": "tsc && vite build",
                 "preview": "vite preview",
-                "test": "vitest",
-                "lint": "eslint src --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+                "test": "vitest run",
+                "test:coverage": "vitest run --coverage",
+                "lint": "eslint .",
             }
             pkg_path.write_text(json.dumps(pkg_data, indent=2), encoding="utf-8")
         except Exception as e:
@@ -1822,6 +1976,74 @@ _MINIMAL_REQUIREMENTS_TXT = """fastapi>=0.115,<1.0
 uvicorn[standard]>=0.32,<1.0
 httpx>=0.24,<0.28
 sqlalchemy>=2.0,<3.0
+ruff>=0.4.0
+pytest>=8.0,<9.0
+pytest-cov>=5.0,<6.0
+"""
+
+_MINIMAL_PYPROJECT_TOML = """\
+[project]
+name = "app"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+addopts = "-v"
+testpaths = ["tests"]
+norecursedirs = [".git", "__pycache__", "*.egg-info", ".venv", "venv", "node_modules"]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["tests/*", "conftest.py", "__init__.py"]
+
+[tool.coverage.report]
+fail_under = 80
+"""
+
+_MINIMAL_MAKEFILE = """\
+.PHONY: install install-dev lint lint-fix test coverage run
+
+VENV ?= .venv
+PYTHON ?= $(VENV)/bin/python
+PIP ?= $(VENV)/bin/pip
+
+install:
+\t@python3 -m venv $(VENV) 2>/dev/null || true
+\t$(PIP) install --upgrade pip
+\t$(PIP) install -r requirements.txt
+
+install-dev: install
+\t$(PIP) install ruff pytest pytest-cov
+
+lint:
+\t$(PYTHON) -m ruff check .
+\t$(PYTHON) -m ruff format --check .
+
+lint-fix:
+\t$(PYTHON) -m ruff check . --fix
+\t$(PYTHON) -m ruff format .
+
+test:
+\t$(PYTHON) -m pytest -v
+
+coverage:
+\t$(PYTHON) -m pytest --cov=app --cov-report=term-missing --cov-fail-under=80
+
+run:
+\tuvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 """
 
 _MINIMAL_APP_MAIN_PY = """\"\"\"FastAPI application entry point.\"\"\"
@@ -1882,8 +2104,16 @@ def ensure_backend_project_initialized(
             tests_dir / "test_main.py",
             '"""Minimal test so pytest runs."""\n\ndef test_health():\n    assert True\n',
         )
+        _write_if_missing(
+            tests_dir / "conftest.py",
+            '"""Shared test fixtures."""\n',
+        )
     else:
         logger.info("Backend project already initialized at %s", cwd)
+
+    # Always ensure linting and testing configuration exists
+    _write_if_missing(cwd / "pyproject.toml", _MINIMAL_PYPROJECT_TOML)
+    _write_if_missing(cwd / "Makefile", _MINIMAL_MAKEFILE)
 
     # Always ensure repo files exist
     _write_if_missing(cwd / ".gitignore", _PYTHON_GITIGNORE)

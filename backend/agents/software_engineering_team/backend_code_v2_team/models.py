@@ -100,6 +100,12 @@ class SetupResult(BaseModel):
     readme_created: bool = Field(default=False)
     branch_created: bool = Field(default=False)
     master_renamed_to_main: bool = Field(default=False)
+    linting_configured: bool = Field(
+        default=False, description="Whether linting tools are configured in the project"
+    )
+    testing_configured: bool = Field(
+        default=False, description="Whether testing tools are configured in the project"
+    )
     summary: str = Field(default="")
 
 
