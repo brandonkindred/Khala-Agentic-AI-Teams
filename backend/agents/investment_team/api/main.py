@@ -12,9 +12,16 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from investment_team.agents import AgentIdentity, InvestmentCommitteeAgent, PolicyGuardianAgent
+from investment_team.agents import (
+    AgentIdentity,
+    FinancialAdvisorAgent,
+    InvestmentCommitteeAgent,
+    PolicyGuardianAgent,
+)
 from investment_team.models import (
     IPS,
+    AdvisorSession,
+    AdvisorSessionStatus,
     BacktestConfig,
     BacktestRecord,
     BacktestResult,
@@ -58,8 +65,11 @@ _strategies: Dict[str, StrategySpec] = {}
 _validations: Dict[str, ValidationReport] = {}
 _backtests: Dict[str, BacktestRecord] = {}
 _strategy_lab_records: Dict[str, StrategyLabRecord] = {}
+_advisor_sessions: Dict[str, AdvisorSession] = {}
 _workflow_state = WorkflowState()
 _lock = threading.Lock()
+
+_advisor_agent = FinancialAdvisorAgent()
 
 
 def _now() -> str:
@@ -1060,3 +1070,125 @@ def get_strategy_lab_results(winning: Optional[bool] = None) -> StrategyLabResul
         winning_count=winning_count,
         losing_count=losing_count,
     )
+
+
+# ---------------------------------------------------------------------------
+# Financial Advisor — conversational profile builder
+# ---------------------------------------------------------------------------
+
+
+class StartAdvisorSessionRequest(BaseModel):
+    user_id: str = Field(..., description="Unique user identifier")
+
+
+class StartAdvisorSessionResponse(BaseModel):
+    session_id: str
+    advisor_message: str
+    session: AdvisorSession
+
+
+class SendAdvisorMessageRequest(BaseModel):
+    message: str = Field(..., min_length=1, description="User's message to the advisor")
+
+
+class SendAdvisorMessageResponse(BaseModel):
+    advisor_message: str
+    session_status: str
+    current_topic: str
+    missing_fields: List[str] = Field(default_factory=list)
+
+
+class GetAdvisorSessionResponse(BaseModel):
+    session: Optional[AdvisorSession] = None
+    found: bool = True
+
+
+class CompleteAdvisorSessionResponse(BaseModel):
+    user_id: str
+    ips: IPS
+    message: str = "Investment Policy Statement created from advisor session."
+
+
+@app.post("/advisor/sessions", response_model=StartAdvisorSessionResponse)
+def start_advisor_session(request: StartAdvisorSessionRequest) -> StartAdvisorSessionResponse:
+    """Start a new financial advisor conversation to build an investment profile."""
+    session_id = f"adv-{uuid.uuid4().hex[:8]}"
+    session = _advisor_agent.start_session(session_id=session_id, user_id=request.user_id)
+
+    with _lock:
+        _advisor_sessions[session_id] = session
+
+    return StartAdvisorSessionResponse(
+        session_id=session_id,
+        advisor_message=session.messages[0].content,
+        session=session,
+    )
+
+
+@app.post("/advisor/sessions/{session_id}/messages", response_model=SendAdvisorMessageResponse)
+def send_advisor_message(
+    session_id: str, request: SendAdvisorMessageRequest
+) -> SendAdvisorMessageResponse:
+    """Send a message to the financial advisor and receive a response."""
+    with _lock:
+        session = _advisor_sessions.get(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Advisor session {session_id} not found")
+
+    reply = _advisor_agent.handle_message(session, request.message)
+    missing = _advisor_agent.missing_fields(session.collected)
+
+    with _lock:
+        _advisor_sessions[session_id] = session
+
+    return SendAdvisorMessageResponse(
+        advisor_message=reply,
+        session_status=session.status.value,
+        current_topic=session.current_topic.value,
+        missing_fields=missing,
+    )
+
+
+@app.get("/advisor/sessions/{session_id}", response_model=GetAdvisorSessionResponse)
+def get_advisor_session(session_id: str) -> GetAdvisorSessionResponse:
+    """Get the current state of an advisor session."""
+    with _lock:
+        session = _advisor_sessions.get(session_id)
+
+    if not session:
+        return GetAdvisorSessionResponse(session=None, found=False)
+    return GetAdvisorSessionResponse(session=session, found=True)
+
+
+@app.post("/advisor/sessions/{session_id}/complete", response_model=CompleteAdvisorSessionResponse)
+def complete_advisor_session(session_id: str) -> CompleteAdvisorSessionResponse:
+    """Finalize the advisor session and create an IPS from collected data.
+
+    Can be called once the session status is 'completed', or called early
+    if all required fields have been collected.
+    """
+    with _lock:
+        session = _advisor_sessions.get(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Advisor session {session_id} not found")
+
+    missing = _advisor_agent.missing_fields(session.collected)
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot finalize — missing required fields: {', '.join(missing)}",
+        )
+
+    try:
+        ips = _advisor_agent.build_ips(session)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    with _lock:
+        _profiles[session.user_id] = ips
+        session.status = AdvisorSessionStatus.COMPLETED
+        _advisor_sessions[session_id] = session
+
+    return CompleteAdvisorSessionResponse(user_id=session.user_id, ips=ips)

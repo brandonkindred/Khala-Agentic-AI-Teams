@@ -1,11 +1,22 @@
 """Multi-asset investment organization agents package."""
 
 from .agent_catalog import CORE_AGENTS, SPECIALIST_DESKS, AgentDefinition
-from .agents import AgentIdentity, InvestmentCommitteeAgent, PolicyGuardianAgent, PromotionGateAgent
+from .agents import (
+    AgentIdentity,
+    FinancialAdvisorAgent,
+    InvestmentCommitteeAgent,
+    PolicyGuardianAgent,
+    PromotionGateAgent,
+)
 from .models import (
     IPS,
+    AdvisorSession,
+    AdvisorSessionStatus,
+    AdvisorTopic,
     AssetUniverse,
     AuditContext,
+    ChatMessage,
+    CollectedProfileData,
     DiligenceFindings,
     ExecutionReport,
     GateCheckResult,
@@ -31,13 +42,19 @@ from .spec_models import (
 )
 
 __all__ = [
+    "AdvisorSession",
+    "AdvisorSessionStatus",
+    "AdvisorTopic",
     "AgentIdentity",
     "AssetUniverse",
     "AgentDefinition",
     "AuditContext",
+    "ChatMessage",
+    "CollectedProfileData",
     "CORE_AGENTS",
     "DiligenceFindings",
     "ExecutionReport",
+    "FinancialAdvisorAgent",
     "GateCheckResult",
     "GateResult",
     "IPS",

@@ -1,10 +1,18 @@
 import pytest
-from agents.investment_team.agents import AgentIdentity, PolicyGuardianAgent, PromotionGateAgent
+from agents.investment_team.agents import (
+    AgentIdentity,
+    FinancialAdvisorAgent,
+    PolicyGuardianAgent,
+    PromotionGateAgent,
+)
 from agents.investment_team.models import (
     IPS,
+    AdvisorSessionStatus,
+    AdvisorTopic,
     BacktestConfig,
     BacktestRecord,
     BacktestResult,
+    CollectedProfileData,
     IncomeProfile,
     InvestmentProfile,
     LiquidityNeeds,
@@ -388,3 +396,177 @@ def test_backtest_record_captures_strategy_and_metrics() -> None:
     assert record.strategy.strategy_id == "s-backtest"
     assert record.result.sharpe_ratio == 0.36
     assert record.config.initial_capital == 100000.0
+
+
+# ---------------------------------------------------------------------------
+# Financial Advisor Agent tests
+# ---------------------------------------------------------------------------
+
+
+def test_advisor_start_session_returns_greeting() -> None:
+    agent = FinancialAdvisorAgent()
+    session = agent.start_session(session_id="adv-1", user_id="u1")
+
+    assert session.session_id == "adv-1"
+    assert session.user_id == "u1"
+    assert session.status == AdvisorSessionStatus.ACTIVE
+    assert session.current_topic == AdvisorTopic.GREETING
+    assert len(session.messages) == 1
+    assert session.messages[0].role == "advisor"
+    assert "financial advisor" in session.messages[0].content.lower()
+
+
+def test_advisor_advances_through_topics() -> None:
+    agent = FinancialAdvisorAgent()
+    session = agent.start_session("adv-2", "u2")
+
+    # Greeting -> user says risk tolerance
+    agent.handle_message(session, "I'd say medium risk tolerance")
+    assert session.current_topic == AdvisorTopic.RISK_TOLERANCE
+    assert session.collected.risk_tolerance == "medium"
+
+    # Risk tolerance -> max drawdown
+    agent.handle_message(session, "I could handle a 25% drop")
+    assert session.current_topic == AdvisorTopic.TIME_HORIZON
+    assert session.collected.max_drawdown_tolerance_pct == 25.0
+
+    # Time horizon
+    agent.handle_message(session, "About 15 years")
+    assert session.current_topic == AdvisorTopic.INCOME
+    assert session.collected.time_horizon_years == 15
+
+
+def test_advisor_extracts_income_data() -> None:
+    agent = FinancialAdvisorAgent()
+    session = agent.start_session("adv-3", "u3")
+    # Skip to income topic
+    session.current_topic = AdvisorTopic.INCOME
+
+    agent.handle_message(session, "I make about 150k per year and it's pretty stable")
+    assert session.collected.annual_gross_income == 150000
+    assert session.collected.income_stability == "stable"
+
+
+def test_advisor_extracts_net_worth() -> None:
+    agent = FinancialAdvisorAgent()
+    session = agent.start_session("adv-4", "u4")
+    session.current_topic = AdvisorTopic.NET_WORTH
+
+    agent.handle_message(session, "Total net worth is about 500k, with 300k investable")
+    assert session.collected.total_net_worth == 500000
+    assert session.collected.investable_assets == 300000
+
+
+def test_advisor_extracts_savings() -> None:
+    agent = FinancialAdvisorAgent()
+    session = agent.start_session("adv-5", "u5")
+    session.current_topic = AdvisorTopic.SAVINGS
+
+    agent.handle_message(session, "I save about $3000 per month")
+    assert session.collected.monthly_savings == 3000
+    assert session.collected.annual_savings == 36000
+
+
+def test_advisor_extracts_tax_info() -> None:
+    agent = FinancialAdvisorAgent()
+    session = agent.start_session("adv-6", "u6")
+    session.current_topic = AdvisorTopic.TAX
+
+    agent.handle_message(session, "US, California. I have a 401k and a Roth IRA")
+    assert session.collected.tax_country == "US"
+    assert session.collected.tax_state == "CA"
+    assert "401k" in session.collected.account_types
+    assert "roth_ira" in session.collected.account_types
+
+
+def test_advisor_extracts_preferences() -> None:
+    agent = FinancialAdvisorAgent()
+    session = agent.start_session("adv-7", "u7")
+    session.current_topic = AdvisorTopic.PREFERENCES
+
+    agent.handle_message(session, "No crypto please, I care about ESG investing")
+    assert session.collected.crypto_allowed is False
+    assert session.collected.esg_preference == "moderate"
+
+
+def test_advisor_full_conversation_builds_ips() -> None:
+    agent = FinancialAdvisorAgent()
+    session = agent.start_session("adv-full", "u-full")
+
+    # Walk through all topics
+    replies = [
+        "I'm a high risk investor",
+        "30% drawdown is fine",
+        "20 years",
+        "200k annual income, stable",
+        "Total worth 1m, investable 600k",
+        "5000 a month",
+        "US, New York, I have a taxable brokerage and 401k",
+        "6 months emergency fund, no big expenses planned",
+        "Retirement, 2m target, high priority",
+        "I'm fine with everything, no exclusions, no ESG preference",
+        "10% max position, 70% equities max",
+        "Paper mode, quarterly rebalance, 10% speculative cap",
+    ]
+
+    for reply in replies:
+        agent.handle_message(session, reply)
+
+    # Should be at REVIEW now
+    assert session.current_topic == AdvisorTopic.REVIEW
+
+    # Confirm
+    agent.handle_message(session, "Looks good, confirm")
+    assert session.status == AdvisorSessionStatus.COMPLETED
+
+    # Build the IPS
+    ips = agent.build_ips(session)
+    assert ips.profile.user_id == "u-full"
+    assert ips.profile.risk_tolerance == RiskTolerance.HIGH
+    assert ips.profile.max_drawdown_tolerance_pct == 30.0
+    assert ips.profile.time_horizon_years == 20
+    assert ips.profile.income.annual_gross == 200000
+    assert ips.profile.net_worth.investable_assets == 600000
+    assert ips.profile.savings_rate.monthly == 5000
+    assert ips.profile.tax_profile.state == "NY"
+    assert ips.rebalance_frequency == "quarterly"
+
+
+def test_advisor_missing_fields_detected() -> None:
+    collected = CollectedProfileData()
+    missing = FinancialAdvisorAgent.missing_fields(collected)
+    assert "risk_tolerance" in missing
+    assert "annual_gross_income" in missing
+    assert "time_horizon_years" in missing
+    assert len(missing) == 6
+
+
+def test_advisor_build_ips_rejects_incomplete_data() -> None:
+    agent = FinancialAdvisorAgent()
+    session = agent.start_session("adv-incomplete", "u-inc")
+
+    with pytest.raises(ValueError, match="missing required fields"):
+        agent.build_ips(session)
+
+
+def test_advisor_number_extraction_with_suffixes() -> None:
+    agent = FinancialAdvisorAgent()
+    assert agent._extract_number("about 150k") == 150000
+    assert agent._extract_number("2.5m in assets") == 2500000
+    assert agent._extract_number("$3,000 per month") == 3000
+    assert agent._extract_number("no numbers here") is None
+
+
+def test_advisor_session_inactive_after_completion() -> None:
+    agent = FinancialAdvisorAgent()
+    session = agent.start_session("adv-done", "u-done")
+    session.status = AdvisorSessionStatus.COMPLETED
+
+    reply = agent.handle_message(session, "hello")
+    assert "no longer active" in reply.lower()
+
+
+def test_agent_catalog_includes_financial_advisor() -> None:
+    from agents.investment_team.agent_catalog import CORE_AGENTS
+
+    assert any(agent.name == "Financial Advisor Agent" for agent in CORE_AGENTS)

@@ -17,6 +17,17 @@ class AgentDefinition(BaseModel):
 
 CORE_AGENTS: List[AgentDefinition] = [
     AgentDefinition(
+        name="Financial Advisor Agent",
+        role="Conversational chatbot that guides users through building an InvestmentProfile via friendly Q&A instead of forms.",
+        inputs=["user chat messages"],
+        outputs=["InvestmentProfile", "IPS"],
+        hard_rules=[
+            "Collect all required fields before producing an IPS.",
+            "Provide sensible defaults when the user declines to answer optional questions.",
+            "Never give specific investment advice — only gather profile data.",
+        ],
+    ),
+    AgentDefinition(
         name="IPS Generator Agent",
         role="Convert InvestmentProfile into a normalized IPS constitution.",
         inputs=["InvestmentProfile"],

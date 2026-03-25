@@ -15,6 +15,30 @@ class RiskTolerance(str, Enum):
     VERY_HIGH = "very_high"
 
 
+class AdvisorSessionStatus(str, Enum):
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    ABANDONED = "abandoned"
+
+
+class AdvisorTopic(str, Enum):
+    """Conversation topics the advisor walks through to build an InvestmentProfile."""
+
+    GREETING = "greeting"
+    RISK_TOLERANCE = "risk_tolerance"
+    TIME_HORIZON = "time_horizon"
+    INCOME = "income"
+    NET_WORTH = "net_worth"
+    SAVINGS = "savings"
+    TAX = "tax"
+    LIQUIDITY = "liquidity"
+    GOALS = "goals"
+    PREFERENCES = "preferences"
+    CONSTRAINTS = "constraints"
+    TRADING_PREFERENCES = "trading_preferences"
+    REVIEW = "review"
+
+
 class PromotionStage(str, Enum):
     REJECT = "reject"
     REVISE = "revise"
@@ -329,3 +353,62 @@ class StrategyLabRecord(BaseModel):
     strategy_rationale: str  # why the agent chose this strategy
     analysis_narrative: str  # LLM post-backtest analysis
     created_at: str
+
+
+# ---------------------------------------------------------------------------
+# Financial Advisor chatbot models
+# ---------------------------------------------------------------------------
+
+
+class ChatMessage(BaseModel):
+    """A single message in an advisor conversation."""
+
+    role: str  # "user" or "advisor"
+    content: str
+    timestamp: str
+
+
+class CollectedProfileData(BaseModel):
+    """Partial profile data accumulated during the advisor conversation."""
+
+    risk_tolerance: Optional[str] = None
+    max_drawdown_tolerance_pct: Optional[float] = None
+    time_horizon_years: Optional[int] = None
+    annual_gross_income: Optional[float] = None
+    income_stability: Optional[str] = None
+    total_net_worth: Optional[float] = None
+    investable_assets: Optional[float] = None
+    monthly_savings: Optional[float] = None
+    annual_savings: Optional[float] = None
+    tax_country: Optional[str] = None
+    tax_state: Optional[str] = None
+    account_types: List[str] = Field(default_factory=list)
+    emergency_fund_months: Optional[int] = None
+    planned_large_expenses: List[PlannedLargeExpense] = Field(default_factory=list)
+    goals: List[UserGoal] = Field(default_factory=list)
+    excluded_asset_classes: List[str] = Field(default_factory=list)
+    excluded_industries: List[str] = Field(default_factory=list)
+    esg_preference: Optional[str] = None
+    crypto_allowed: Optional[bool] = None
+    options_allowed: Optional[bool] = None
+    leverage_allowed: Optional[bool] = None
+    max_single_position_pct: Optional[float] = None
+    max_asset_class_pct: Dict[str, float] = Field(default_factory=dict)
+    live_trading_enabled: Optional[bool] = None
+    human_approval_required_for_live: Optional[bool] = None
+    speculative_sleeve_cap_pct: Optional[float] = None
+    rebalance_frequency: Optional[str] = None
+    default_mode: Optional[str] = None
+
+
+class AdvisorSession(BaseModel):
+    """State of a financial advisor conversation."""
+
+    session_id: str
+    user_id: str
+    status: AdvisorSessionStatus = AdvisorSessionStatus.ACTIVE
+    current_topic: AdvisorTopic = AdvisorTopic.GREETING
+    messages: List[ChatMessage] = Field(default_factory=list)
+    collected: CollectedProfileData = Field(default_factory=CollectedProfileData)
+    created_at: str
+    updated_at: str
