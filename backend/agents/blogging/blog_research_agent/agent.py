@@ -377,18 +377,19 @@ class ResearchAgent:
         brief_input: ResearchBriefInput,
     ) -> Tuple[SourceDocument, float, float, float, str]:
         """Score a single document for relevance, authority, accuracy, and type. Used by _score_documents."""
-        # Budget: leave room for the prompt template (~2K), brief, and response tokens.
+        # Budget: use 1.0 chars/token (safe for web content which tokenizes poorly).
         ctx_tokens = (
             self.llm.get_max_context_tokens()
             if hasattr(self.llm, "get_max_context_tokens")
             else 16384
         )
-        max_content_chars = int(
-            (ctx_tokens - 6000) * 3.5
-        )  # reserve 6K tokens for prompt + response
+        max_content_chars = max(4000, ctx_tokens - 6000)  # 1 char ≈ 1 token for safety
         doc_content = compact_text(
             doc.content or "", max_content_chars, self.llm, "document for scoring"
         )
+        # Hard safety net: if compaction returned something still over budget, truncate.
+        if len(doc_content) > max_content_chars:
+            doc_content = doc_content[:max_content_chars]
         prompt = (
             DOC_RELEVANCE_SCORING_PROMPT
             + "\n\n"
@@ -468,10 +469,12 @@ class ResearchAgent:
             if hasattr(self.llm, "get_max_context_tokens")
             else 16384
         )
-        max_content_chars = int((ctx_tokens - 6000) * 3.5)
+        max_content_chars = max(4000, ctx_tokens - 6000)  # 1 char ≈ 1 token for safety
         doc_content = compact_text(
             doc.content or "", max_content_chars, self.llm, "document for summarization"
         )
+        if len(doc_content) > max_content_chars:
+            doc_content = doc_content[:max_content_chars]
         prompt = DOC_SUMMARIZATION_PROMPT + "\n\n" + (f"Brief:\n{brief_input.brief}\n")
         if brief_input.audience:
             prompt += f"Audience: {brief_input.audience}\n"
