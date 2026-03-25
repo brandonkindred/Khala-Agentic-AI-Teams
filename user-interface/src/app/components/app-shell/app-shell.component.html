@@ -26,9 +26,13 @@
 
       <div class="nav-group">
         <div class="nav-group-label">Content</div>
-        <a routerLink="/blogging" routerLinkActive="active" class="nav-link">
+        <a routerLink="/blogging" routerLinkActive="active" [routerLinkActiveOptions]="{exact: true}" class="nav-link">
           <mat-icon>article</mat-icon>
           <span>Blogging</span>
+        </a>
+        <a routerLink="/blogging/dashboard" routerLinkActive="active" class="nav-link nav-link-nested">
+          <mat-icon>space_dashboard</mat-icon>
+          <span>Pipeline Dashboard</span>
         </a>
         <a routerLink="/branding" routerLinkActive="active" class="nav-link">
           <mat-icon>palette</mat-icon>

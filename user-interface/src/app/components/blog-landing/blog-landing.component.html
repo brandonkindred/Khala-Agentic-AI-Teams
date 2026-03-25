@@ -1,0 +1,109 @@
+<!-- ================================================================
+     Hero Section
+     ================================================================ -->
+<section class="hero">
+  <div class="hero-glow"></div>
+  <div class="hero-content">
+    <span class="hero-badge">AI-Powered Blogging</span>
+    <h1 class="hero-title">
+      Write your first blog post<br />
+      <span class="hero-highlight">with an AI team behind you</span>
+    </h1>
+    <p class="hero-subtitle">
+      From research to publication-ready drafts, nine specialized AI agents handle
+      the heavy lifting while you stay in creative control. Just describe what you
+      want to write about and let the pipeline do the rest.
+    </p>
+    <div class="hero-actions">
+      <button mat-flat-button class="cta-primary" (click)="navigateToFullPipeline()">
+        <mat-icon>rocket_launch</mat-icon>
+        Start Writing
+      </button>
+      <button mat-stroked-button class="cta-secondary" (click)="navigateToResearch()">
+        <mat-icon>search</mat-icon>
+        Research a Topic First
+      </button>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================
+     How It Works — Pipeline Phases
+     ================================================================ -->
+<section class="pipeline-section">
+  <div class="section-header">
+    <h2 class="section-title">How it works</h2>
+    <p class="section-subtitle">
+      Eight phases, nine agents, one seamless pipeline. Every post goes through research,
+      planning, drafting, editing, and rigorous quality gates before it's ready to publish.
+    </p>
+  </div>
+
+  <div class="pipeline-track">
+    <div class="pipeline-line" aria-hidden="true"></div>
+    @for (phase of pipelinePhases; track phase.title; let i = $index) {
+      <div class="pipeline-step" [style.--step-delay]="(i * 60) + 'ms'">
+        <div class="step-marker">
+          <div class="step-icon-wrap">
+            <mat-icon>{{ phase.icon }}</mat-icon>
+          </div>
+          <span class="step-number">{{ i + 1 }}</span>
+        </div>
+        <div class="step-body">
+          <h3 class="step-title">{{ phase.title }}</h3>
+          <p class="step-description">{{ phase.description }}</p>
+        </div>
+      </div>
+    }
+  </div>
+</section>
+
+<!-- ================================================================
+     Features Grid
+     ================================================================ -->
+<section class="features-section">
+  <div class="section-header">
+    <h2 class="section-title">Built for serious content creators</h2>
+    <p class="section-subtitle">
+      Everything you need to produce research-backed, brand-aligned, publication-ready
+      content at a professional standard.
+    </p>
+  </div>
+
+  <div class="features-grid">
+    @for (feature of features; track feature.title) {
+      <div class="feature-card">
+        <div class="feature-icon-wrap">
+          <mat-icon>{{ feature.icon }}</mat-icon>
+        </div>
+        <h3 class="feature-title">{{ feature.title }}</h3>
+        <p class="feature-description">{{ feature.description }}</p>
+      </div>
+    }
+  </div>
+</section>
+
+<!-- ================================================================
+     Final CTA
+     ================================================================ -->
+<section class="final-cta">
+  <div class="cta-card">
+    <div class="cta-card-content">
+      <h2 class="cta-heading">Ready to write something great?</h2>
+      <p class="cta-text">
+        Describe your topic, choose a content profile, and let the AI blogging team
+        research, plan, draft, and polish your post. You stay in control at every step.
+      </p>
+      <div class="cta-buttons">
+        <button mat-flat-button class="cta-primary" (click)="navigateToFullPipeline()">
+          <mat-icon>edit</mat-icon>
+          Write My First Post
+        </button>
+        <button mat-stroked-button class="cta-secondary" (click)="navigateToDashboard()">
+          <mat-icon>dashboard</mat-icon>
+          Go to Dashboard
+        </button>
+      </div>
+    </div>
+  </div>
+</section>
