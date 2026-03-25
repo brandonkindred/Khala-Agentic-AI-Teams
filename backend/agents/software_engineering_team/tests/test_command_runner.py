@@ -193,7 +193,7 @@ def test_run_ng_serve_smoke_test_fail_when_exits_early(mock_popen: object, tmp_p
 def test_ensure_angular_material_in_package_json_adds_missing_deps(tmp_path: Path) -> None:
     """When package.json lacks @angular/material and @angular/cdk, they are added."""
     pkg = tmp_path / "package.json"
-    pkg.write_text('{"dependencies": {"@angular/core": "^18.0.0"}}', encoding="utf-8")
+    pkg.write_text('{"dependencies": {"@angular/core": "^19.0.0"}}', encoding="utf-8")
     _ensure_angular_material_in_package_json(tmp_path)
     data = __import__("json").loads(pkg.read_text(encoding="utf-8"))
     assert "@angular/material" in data["dependencies"]
@@ -202,7 +202,7 @@ def test_ensure_angular_material_in_package_json_adds_missing_deps(tmp_path: Pat
 
 def test_ensure_angular_material_in_package_json_noop_when_present(tmp_path: Path) -> None:
     """When package.json already has Material, it is unchanged."""
-    orig = '{"dependencies": {"@angular/material": "^18.0.0", "@angular/cdk": "^18.0.0"}}'
+    orig = '{"dependencies": {"@angular/material": "^19.0.0", "@angular/cdk": "^19.0.0"}}'
     pkg = tmp_path / "package.json"
     pkg.write_text(orig, encoding="utf-8")
     _ensure_angular_material_in_package_json(tmp_path)
@@ -226,7 +226,7 @@ def test_ensure_angular_material_in_package_json_malformed_json(tmp_path: Path) 
 def test_ensure_angular_common_in_package_json_adds_missing(tmp_path: Path) -> None:
     """When package.json lacks @angular/common, it is added."""
     pkg = tmp_path / "package.json"
-    pkg.write_text('{"dependencies": {"@angular/core": "^18.0.0"}}', encoding="utf-8")
+    pkg.write_text('{"dependencies": {"@angular/core": "^19.0.0"}}', encoding="utf-8")
     _ensure_angular_common_in_package_json(tmp_path)
     data = __import__("json").loads(pkg.read_text(encoding="utf-8"))
     assert "@angular/common" in data["dependencies"]
@@ -234,7 +234,7 @@ def test_ensure_angular_common_in_package_json_adds_missing(tmp_path: Path) -> N
 
 def test_ensure_angular_common_in_package_json_noop_when_present(tmp_path: Path) -> None:
     """When package.json already has @angular/common, it is unchanged."""
-    orig = '{"dependencies": {"@angular/common": "^18.0.0"}}'
+    orig = '{"dependencies": {"@angular/common": "^19.0.0"}}'
     pkg = tmp_path / "package.json"
     pkg.write_text(orig, encoding="utf-8")
     _ensure_angular_common_in_package_json(tmp_path)

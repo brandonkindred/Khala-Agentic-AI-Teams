@@ -1370,7 +1370,7 @@ export const environment = {
 
 # Angular runtime + dev dependencies (pinned to same major for compatibility)
 # @angular/common provides @angular/common/http (HttpClient, provideHttpClient)
-_ANGULAR_VERSION = "^18.0.0"
+_ANGULAR_VERSION = "^19.0.0"
 _ANGULAR_DEPS = [
     f"@angular/core@{_ANGULAR_VERSION}",
     f"@angular/common@{_ANGULAR_VERSION}",
