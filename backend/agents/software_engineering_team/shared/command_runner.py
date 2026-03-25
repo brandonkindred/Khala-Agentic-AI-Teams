@@ -1393,8 +1393,9 @@ _ANGULAR_DEV_DEPS = [
     f"@angular/build@{_ANGULAR_VERSION}",
     "typescript",
     f"angular-eslint@{_ANGULAR_VERSION}",
-    "@eslint/js",
-    "typescript-eslint",
+    "eslint@^9.0.0",
+    "@eslint/js@^9.0.0",
+    "typescript-eslint@^8.0.0",
     "vitest",
     "@vitest/coverage-v8",
     "jsdom",
@@ -1425,9 +1426,9 @@ _REACT_DEV_DEPS = [
     "@testing-library/react",
     "@testing-library/jest-dom",
     "jsdom",
-    "@eslint/js",
-    "typescript-eslint",
-    "eslint",
+    "eslint@^9.0.0",
+    "@eslint/js@^9.0.0",
+    "typescript-eslint@^8.0.0",
 ]
 
 _MINIMAL_REACT_INDEX_HTML = """\
