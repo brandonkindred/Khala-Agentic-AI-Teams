@@ -1,47 +1,27 @@
-import type { AgentInfo } from './studio-grid.model';
+/** Chat-based startup advisor models. */
 
-export type StartupStage = 'idea' | 'mvp' | 'early-revenue' | 'growth' | 'scale';
-
-export type FocusArea =
-  | 'customer_discovery'
-  | 'product_strategy'
-  | 'growth_gtm'
-  | 'fundraising_finance'
-  | 'operations_legal'
-  | 'founder_coaching';
-
-export interface StartupAdvisorIntake {
-  startupName: string;
-  founderRole: string;
-  stage: StartupStage;
-  primaryGoal: string;
-  currentChallenge: string;
-  targetHorizonWeeks: number;
-  teamSize: number;
-  budgetBand: string;
-  focusAreas: FocusArea[];
+export interface StartupAdvisorMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
 }
 
-export interface StartupAdvisorRecommendation {
-  agentId: string;
+export interface StartupAdvisorArtifact {
+  artifact_id: number;
+  artifact_type: string;
   title: string;
-  fitSummary: string;
-  confidence: number;
-  suggestedOutcomes: string[];
-  source: AgentInfo;
+  payload: Record<string, unknown>;
+  created_at: string;
 }
 
-export interface StartupExecutionMilestone {
-  id: string;
-  title: string;
-  owner: string;
-  eta: string;
-  successMetric: string;
+export interface StartupAdvisorConversationState {
+  conversation_id: string;
+  messages: StartupAdvisorMessage[];
+  context: Record<string, unknown>;
+  artifacts: StartupAdvisorArtifact[];
+  suggested_questions: string[];
 }
 
-export interface StartupExecutionPlan {
-  northStar: string;
-  timelineLabel: string;
-  milestones: StartupExecutionMilestone[];
-  risks: string[];
+export interface StartupAdvisorSendMessageRequest {
+  message: string;
 }

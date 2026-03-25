@@ -145,6 +145,12 @@ TEAM_CONFIGS: dict[str, TeamConfig] = {
         description="Create agentic teams and define their processes through conversation",
         tags=["agentic", "teams", "processes", "provisioning"],
     ),
+    "startup_advisor": TeamConfig(
+        name="Startup Advisor",
+        prefix="/api/startup-advisor",
+        description="Persistent conversational startup advisor with probing dialogue and artifact generation",
+        tags=["startup", "advisor", "coaching", "strategy"],
+    ),
 }
 
 

@@ -4,38 +4,118 @@
       <mat-icon>rocket_launch</mat-icon>
     </div>
     <div>
-      <h1>Startup Advisor Workspace</h1>
-      <p>Strategic guidance from intake to execution with a structured founder workflow.</p>
+      <h1>Startup Advisor</h1>
+      <p>Your persistent AI advisor for strategic startup guidance. Pick up right where you left off.</p>
     </div>
   </div>
 </section>
 
-<mat-card class="workflow-nav-card">
-  <nav class="workflow-nav" aria-label="Startup advisor workflow steps">
-    <a routerLink="intake" routerLinkActive="active" class="step-link">
-      <span class="step-count">1</span>
-      <div>
-        <span class="step-title">Intake</span>
-        <span class="step-caption">Founder context and goals</span>
-      </div>
-    </a>
-    <a routerLink="recommendations" routerLinkActive="active" class="step-link">
-      <span class="step-count">2</span>
-      <div>
-        <span class="step-title">Recommendations</span>
-        <span class="step-caption">Advisor fit and rationale</span>
-      </div>
-    </a>
-    <a routerLink="execution" routerLinkActive="active" class="step-link">
-      <span class="step-count">3</span>
-      <div>
-        <span class="step-title">Execution</span>
-        <span class="step-caption">Milestones and owner plan</span>
-      </div>
-    </a>
-  </nav>
-</mat-card>
+<div class="advisor-layout">
+  <mat-card class="chat-card">
+    <mat-card-content>
+      @if (error) {
+        <p class="error-text">{{ error }}</p>
+        <button mat-stroked-button (click)="retryConnect()" [disabled]="loading">
+          Retry
+        </button>
+      }
 
-<div class="workspace-content">
-  <router-outlet />
+      <div class="messages-container" #messagesContainer>
+        @for (msg of messages; track msg.timestamp + msg.content) {
+          <div class="message" [class.user]="msg.role === 'user'" [class.assistant]="msg.role === 'assistant'">
+            <div class="message-content">{{ msg.content }}</div>
+            <div class="message-time">{{ formatTime(msg.timestamp) }}</div>
+          </div>
+        }
+
+        @if (loading && messages.length > 0 && messages[messages.length - 1].role === 'user') {
+          <div class="message assistant">
+            <div class="typing-indicator">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+          </div>
+        }
+      </div>
+
+      <form [formGroup]="form" (ngSubmit)="onSubmit()" class="input-form">
+        <mat-form-field appearance="outline" class="message-input">
+          <mat-label>Ask your startup advisor...</mat-label>
+          <input
+            matInput
+            formControlName="message"
+            [attr.aria-label]="'Message input'"
+            (keydown.enter)="$event.preventDefault(); onSubmit()"
+          />
+        </mat-form-field>
+        <button
+          mat-fab
+          color="primary"
+          type="submit"
+          [disabled]="form.invalid || loading"
+          [attr.aria-label]="'Send message'"
+        >
+          <mat-icon>send</mat-icon>
+        </button>
+      </form>
+
+      @if (suggestedQuestions.length > 0) {
+        <div class="suggested-questions">
+          @for (q of suggestedQuestions; track q) {
+            <button mat-stroked-button (click)="onSuggestedQuestion(q)" [disabled]="loading">
+              {{ q }}
+            </button>
+          }
+        </div>
+      }
+    </mat-card-content>
+  </mat-card>
+
+  <div class="sidebar">
+    <mat-card class="context-card">
+      <mat-card-header>
+        <mat-icon mat-card-avatar>psychology</mat-icon>
+        <mat-card-title>Founder Profile</mat-card-title>
+        <mat-card-subtitle>What the advisor knows about you</mat-card-subtitle>
+      </mat-card-header>
+      <mat-card-content>
+        @if (contextEntries().length === 0) {
+          <p class="empty-hint">Start chatting and the advisor will build your profile as you share details.</p>
+        } @else {
+          <div class="context-grid">
+            @for (entry of contextEntries(); track entry[0]) {
+              <div class="context-item">
+                <span class="context-label">{{ formatContextKey(entry[0]) }}</span>
+                <span class="context-value">{{ entry[1] }}</span>
+              </div>
+            }
+          </div>
+        }
+      </mat-card-content>
+    </mat-card>
+
+    @if (artifacts.length > 0) {
+      <mat-card class="artifacts-card">
+        <mat-card-header>
+          <mat-icon mat-card-avatar>description</mat-icon>
+          <mat-card-title>Artifacts</mat-card-title>
+          <mat-card-subtitle>Plans and deliverables produced</mat-card-subtitle>
+        </mat-card-header>
+        <mat-card-content>
+          @for (art of artifacts; track art.artifact_id) {
+            <mat-card class="artifact-item">
+              <mat-card-header>
+                <mat-card-title>{{ art.title }}</mat-card-title>
+                <mat-card-subtitle>{{ formatArtifactType(art.artifact_type) }}</mat-card-subtitle>
+              </mat-card-header>
+              <mat-card-content>
+                <pre class="artifact-content">{{ art.payload | json }}</pre>
+              </mat-card-content>
+            </mat-card>
+          }
+        </mat-card-content>
+      </mat-card>
+    }
+  </div>
 </div>

@@ -23,5 +23,6 @@ export const environment = {
   studioGridApiUrl: `${apiBase}/api/studio-grid`,
   salesApiUrl: `${apiBase}/api/sales`,
   agenticTeamProvisioningApiUrl: `${apiBase}/api/agentic-team-provisioning`,
+  startupAdvisorApiUrl: `${apiBase}/api/startup-advisor`,
 };
 

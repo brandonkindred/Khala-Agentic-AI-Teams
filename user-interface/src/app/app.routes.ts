@@ -20,9 +20,6 @@ import { StudioGridDashboardComponent } from './components/studio-grid-dashboard
 import { SalesDashboardComponent } from './components/sales-dashboard/sales-dashboard.component';
 import { NutritionDashboardComponent } from './components/nutrition-dashboard/nutrition-dashboard.component';
 import { StartupAdvisorDashboardComponent } from './components/startup-advisor-dashboard/startup-advisor-dashboard.component';
-import { StartupAdvisorIntakeComponent } from './components/startup-advisor-intake/startup-advisor-intake.component';
-import { StartupAdvisorRecommendationsComponent } from './components/startup-advisor-recommendations/startup-advisor-recommendations.component';
-import { StartupAdvisorExecutionComponent } from './components/startup-advisor-execution/startup-advisor-execution.component';
 import { AgenticTeamDashboardComponent } from './components/agentic-team-dashboard/agentic-team-dashboard.component';
 
 export const routes: Routes = [
@@ -51,16 +48,7 @@ export const routes: Routes = [
       { path: 'sales', component: SalesDashboardComponent },
       { path: 'nutrition', component: NutritionDashboardComponent },
       { path: 'agentic-teams', component: AgenticTeamDashboardComponent },
-      {
-        path: 'startup-advisor',
-        component: StartupAdvisorDashboardComponent,
-        children: [
-          { path: '', redirectTo: 'intake', pathMatch: 'full' },
-          { path: 'intake', component: StartupAdvisorIntakeComponent },
-          { path: 'recommendations', component: StartupAdvisorRecommendationsComponent },
-          { path: 'execution', component: StartupAdvisorExecutionComponent },
-        ],
-      },
+      { path: 'startup-advisor', component: StartupAdvisorDashboardComponent },
     ],
   },
   { path: '**', redirectTo: '/dashboard' },

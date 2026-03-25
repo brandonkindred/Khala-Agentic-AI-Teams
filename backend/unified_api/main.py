@@ -158,6 +158,7 @@ TEAM_SERVICE_URL_ENVS: dict[str, str] = {
     "sales_team": "SALES_TEAM_SERVICE_URL",
     "road_trip_planning": "ROAD_TRIP_PLANNING_SERVICE_URL",
     "agentic_team_provisioning": "AGENTIC_TEAM_PROVISIONING_SERVICE_URL",
+    "startup_advisor": "STARTUP_ADVISOR_SERVICE_URL",
 }
 
 
@@ -408,6 +409,16 @@ def _try_mount_agentic_team_provisioning(app: FastAPI) -> bool:
     )
 
 
+def _try_mount_startup_advisor(app: FastAPI) -> bool:
+    """Mount Startup Advisor API."""
+    return try_mount_or_proxy(
+        app,
+        "startup_advisor",
+        "startup_advisor.api.main",
+        service_url_env="STARTUP_ADVISOR_SERVICE_URL",
+    )
+
+
 def mount_all_teams(app: FastAPI) -> dict[str, bool]:
     """Mount all enabled team APIs and return mount status."""
     mount_functions = {
@@ -429,6 +440,7 @@ def mount_all_teams(app: FastAPI) -> dict[str, bool]:
         "sales_team": _try_mount_sales_team,
         "road_trip_planning": _try_mount_road_trip_planning,
         "agentic_team_provisioning": _try_mount_agentic_team_provisioning,
+        "startup_advisor": _try_mount_startup_advisor,
     }
 
     results = {}
