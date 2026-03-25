@@ -173,9 +173,15 @@ def execute_linter(plan: LintPlan, repo_path: Path, agent_type: str) -> LintExec
     """
     # Handle skip case when no linter is available
     if plan.linter_name == "none" or not plan.linter_command:
-        logger.info("No linter configured or available; skipping lint check.")
+        logger.warning(
+            "No linter configured or available at %s. "
+            "Linting should be set up during the Setup phase before coding begins. "
+            "Skipping lint check for this run.",
+            repo_path,
+        )
         return LintExecutionResult(
-            success=True, raw_output="Lint check skipped: no linter available."
+            success=True,
+            raw_output="Lint check skipped: no linter available. Ensure linting is configured in Setup phase.",
         )
 
     if agent_type == "frontend" and plan.linter_name == "ng_lint":

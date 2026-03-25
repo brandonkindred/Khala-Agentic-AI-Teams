@@ -160,6 +160,43 @@ class BackendDevelopmentAgent:
             "[%s] WORKFLOW START: Backend Development Agent (per-microtask review gates)", task_id
         )
 
+        # ── Pre-flight: verify linting & testing are configured ───────
+        _has_lint = (
+            (repo_path / "ruff.toml").exists()
+            or (repo_path / ".flake8").exists()
+            or (
+                (repo_path / "pyproject.toml").exists()
+                and "[tool.ruff]"
+                in (repo_path / "pyproject.toml").read_text(encoding="utf-8", errors="replace")
+            )
+        )
+        _has_test = (repo_path / "tests").is_dir() and (
+            (repo_path / "pytest.ini").exists()
+            or (
+                (repo_path / "pyproject.toml").exists()
+                and "[tool.pytest"
+                in (repo_path / "pyproject.toml").read_text(encoding="utf-8", errors="replace")
+            )
+        )
+        if not _has_lint or not _has_test:
+            missing = []
+            if not _has_lint:
+                missing.append("linting")
+            if not _has_test:
+                missing.append("testing")
+            logger.error(
+                "[%s] Pre-flight check failed: %s not configured at %s",
+                task_id,
+                " and ".join(missing),
+                repo_path,
+            )
+            result.failure_reason = (
+                f"Pre-flight check failed: {' and '.join(missing)} not configured. "
+                "The build process requires linting and testing to be set up before coding tasks begin."
+            )
+            return result
+        logger.info("[%s] Pre-flight check passed: linting and testing configured", task_id)
+
         existing_code = self._read_repo_code(repo_path)
         tool_agents = _build_tool_agents(self.llm)
         tool_runners = self._build_tool_runners(tool_agents)
@@ -479,7 +516,37 @@ class BackendCodeV2TeamLead:
             result.failure_reason = f"Setup failed: {exc}"
             logger.error("[%s] %s", task_id, result.failure_reason)
             return result
-        _update_job(current_phase="setup", progress=5, status_text="Repository setup complete")
+        _update_job(current_phase="setup", progress=3, status_text="Repository setup complete")
+
+        # ── Verify linting and testing are configured ─────────────────
+        if not getattr(setup_result, "linting_configured", False):
+            logger.warning(
+                "[%s] Linting not configured after setup — coding cannot proceed without linting",
+                task_id,
+            )
+            result.failure_reason = (
+                "Setup completed but linting is not configured. "
+                "Linting must be set up before any coding tasks can begin."
+            )
+            return result
+
+        if not getattr(setup_result, "testing_configured", False):
+            logger.warning(
+                "[%s] Testing not configured after setup — coding cannot proceed without testing",
+                task_id,
+            )
+            result.failure_reason = (
+                "Setup completed but testing is not configured. "
+                "Testing must be set up before any coding tasks can begin."
+            )
+            return result
+
+        logger.info("[%s] Linting and testing verified — proceeding to coding phase", task_id)
+        _update_job(
+            current_phase="setup",
+            progress=5,
+            status_text="Linting and testing verified; ready for development",
+        )
 
         # ── Delegate to Backend Development Agent ──────────────────────
         dev_agent = BackendDevelopmentAgent(self.llm)
