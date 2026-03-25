@@ -7,6 +7,8 @@ import type {
   FeedbackResponse,
   MealHistoryResponse,
   MealPlanResponse,
+  NutritionChatRequest,
+  NutritionChatResponse,
   NutritionHealthResponse,
   NutritionPlanResponse,
   NutritionProfileUpdateRequest,
@@ -59,5 +61,9 @@ export class NutritionApiService {
 
   getMealHistory(clientId: string): Observable<MealHistoryResponse> {
     return this.http.get<MealHistoryResponse>(`${this.baseUrl}/history/meals?client_id=${encodeURIComponent(clientId)}`);
+  }
+
+  sendChatMessage(request: NutritionChatRequest): Observable<NutritionChatResponse> {
+    return this.http.post<NutritionChatResponse>(`${this.baseUrl}/chat`, request);
   }
 }

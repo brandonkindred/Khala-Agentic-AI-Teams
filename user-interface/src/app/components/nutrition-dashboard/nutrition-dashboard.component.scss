@@ -1,297 +1,567 @@
-.nutrition-page {
-  max-width: 960px;
+.nutrition-chat-page {
+  max-width: 900px;
   margin: 0 auto;
-  padding-bottom: 2.5rem;
+  height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
 }
 
-.welcome-hero {
-  margin-bottom: 1.5rem;
+// --- Header ---
 
-  .eyebrow {
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-size: 0.72rem;
-    opacity: 0.65;
-    margin: 0 0 0.35rem;
-  }
+.chat-header {
+  padding: 1rem 0;
+  flex-shrink: 0;
+}
+
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.title-area {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
 
   h1 {
-    font-size: 1.85rem;
+    font-size: 1.5rem;
     font-weight: 600;
-    margin: 0 0 0.5rem;
+    margin: 0;
     line-height: 1.2;
   }
 
-  .lead {
-    margin: 0 0 1rem;
-    line-height: 1.55;
-    opacity: 0.88;
-    max-width: 52rem;
-
-    strong {
-      font-weight: 600;
-      opacity: 1;
-    }
+  .subtitle {
+    font-size: 0.82rem;
+    opacity: 0.65;
+    margin: 0;
   }
 }
 
-.health-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.health-hint {
-  font-size: 0.85rem;
-  opacity: 0.7;
+.title-icon {
+  font-size: 1.8rem;
+  width: 1.8rem;
+  height: 1.8rem;
+  color: #81c784;
 }
 
 .health-chip {
   display: inline-block;
-  padding: 0.25rem 0.65rem;
+  padding: 0.2rem 0.6rem;
   border-radius: 999px;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   border: 1px solid transparent;
+
+  &.healthy {
+    color: #a5d6a7;
+    background: rgba(76, 175, 80, 0.12);
+    border-color: rgba(129, 199, 132, 0.45);
+  }
+  &.checking {
+    color: #ce93d8;
+    background: rgba(156, 39, 176, 0.12);
+    border-color: rgba(206, 147, 216, 0.4);
+  }
+  &.unhealthy {
+    color: #ef9a9a;
+    background: rgba(244, 67, 54, 0.1);
+    border-color: rgba(239, 154, 154, 0.45);
+  }
 }
 
-.health-chip.healthy {
-  color: #a5d6a7;
-  background: rgba(76, 175, 80, 0.12);
-  border-color: rgba(129, 199, 132, 0.45);
+// --- Phase progress ---
+
+.phase-progress {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0.5rem 0;
 }
 
-.health-chip.checking {
-  color: #ce93d8;
-  background: rgba(156, 39, 176, 0.12);
-  border-color: rgba(206, 147, 216, 0.4);
+.phase-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
 }
 
-.health-chip.unhealthy {
-  color: #ef9a9a;
-  background: rgba(244, 67, 54, 0.1);
-  border-color: rgba(239, 154, 154, 0.45);
+.phase-dot {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  transition: all 0.2s ease;
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+    color: rgba(255, 255, 255, 0.4);
+  }
+
+  .active & {
+    border-color: #81c784;
+    background: rgba(129, 199, 132, 0.15);
+
+    mat-icon {
+      color: #81c784;
+    }
+  }
+
+  .completed & {
+    border-color: #4caf50;
+    background: rgba(76, 175, 80, 0.25);
+
+    mat-icon {
+      color: #4caf50;
+    }
+  }
 }
 
-.status-card {
-  margin-bottom: 1rem;
+.phase-label {
+  font-size: 0.68rem;
+  opacity: 0.55;
+  text-align: center;
+  max-width: 80px;
+  line-height: 1.2;
+
+  .active & {
+    opacity: 1;
+    color: #81c784;
+    font-weight: 600;
+  }
+
+  .completed & {
+    opacity: 0.75;
+  }
 }
 
-.status-card.error {
-  border-left: 4px solid #e57373;
+.phase-connector {
+  flex: 1;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 0 0.25rem;
+  margin-bottom: 1.2rem;
+  transition: background 0.2s ease;
+
+  &.completed {
+    background: rgba(76, 175, 80, 0.5);
+  }
 }
 
-.status-card.success {
-  border-left: 4px solid #81c784;
+// --- Client ID card ---
+
+.id-card {
+  margin-top: 2rem;
 }
 
-.nutrition-stepper {
-  background: transparent;
+.id-intro {
+  line-height: 1.55;
+  opacity: 0.85;
+  margin: 0 0 1rem;
 }
 
-.step-card {
-  margin: 0.75rem 0 1.5rem;
-}
-
-.section-title {
-  margin: 1.25rem 0 0.25rem;
-  font-size: 1rem;
-  font-weight: 600;
-}
-
-.section-hint {
-  margin: 0 0 0.75rem;
-  font-size: 0.88rem;
-  opacity: 0.72;
-}
-
-.client-row {
-  margin-bottom: 0.5rem;
-}
-
-.row {
+.id-row {
   display: flex;
   gap: 0.75rem;
   align-items: flex-start;
   flex-wrap: wrap;
 }
 
-.row.wrap {
-  align-items: center;
+.id-input {
+  flex: 1 1 250px;
+  min-width: 200px;
 }
 
-.grow {
-  flex: 1 1 220px;
-  min-width: 180px;
+// --- Chat container ---
+
+.chat-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
-.client-id {
-  min-width: 220px;
-}
-
-.meal-types {
-  min-width: 260px;
-}
-
-.members-section {
+.messages-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem 0;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+
+  &::-webkit-scrollbar {
+    width: 6px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  &::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    &:hover {
+      background: rgba(255, 255, 255, 0.15);
+    }
+  }
 }
 
-.member-card {
-  padding: 0.75rem 1rem;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.02);
-}
+// --- Messages ---
 
-.member-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 0.5rem;
-}
-
-.member-label {
-  font-size: 0.8rem;
-  font-weight: 600;
-  opacity: 0.85;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.member-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 0.65rem;
-}
-
-.profile-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 0.75rem;
-}
-
-.full-row,
-.full-width {
-  grid-column: 1 / -1;
-  width: 100%;
-}
-
-.step-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.75rem;
-  margin-top: 1.25rem;
-}
-
-.action-hint {
-  font-size: 0.85rem;
-  opacity: 0.7;
-}
-
-.blocked-msg {
-  opacity: 0.8;
-  margin: 0.5rem 0 0;
-}
-
-.meal-form {
-  align-items: flex-end;
-  margin-bottom: 0.5rem;
-}
-
-.plan-block {
-  margin-top: 1rem;
-}
-
-.plan-block h3 {
-  font-size: 0.95rem;
-  margin: 0.75rem 0 0.35rem;
-}
-
-.plan-notes {
-  margin-top: 0.75rem;
-  line-height: 1.5;
-  opacity: 0.85;
-}
-
-.chips {
+.message {
   display: flex;
   gap: 0.5rem;
+  max-width: 85%;
+
+  &.user {
+    align-self: flex-end;
+    flex-direction: row-reverse;
+
+    .message-bubble {
+      background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+
+    .message-time {
+      color: rgba(255, 255, 255, 0.6);
+      text-align: right;
+    }
+  }
+
+  &.assistant {
+    align-self: flex-start;
+
+    .message-bubble {
+      background: #21262d;
+      color: #f0f6fc;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-bottom-left-radius: 4px;
+    }
+  }
+}
+
+.avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(129, 199, 132, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+
+  mat-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    color: #81c784;
+  }
+}
+
+.message-bubble {
+  padding: 0.75rem 1rem;
+  border-radius: 16px;
+  line-height: 1.5;
+  min-width: 60px;
+}
+
+.message-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message-time {
+  font-size: 0.7rem;
+  color: #8b949e;
+  margin-top: 0.35rem;
+}
+
+// --- Typing indicator ---
+
+.typing-indicator {
+  display: flex;
+  gap: 4px;
+  padding: 4px 0;
+
+  span {
+    width: 8px;
+    height: 8px;
+    background: #8b949e;
+    border-radius: 50%;
+    animation: bounce 1.4s infinite ease-in-out;
+
+    &:nth-child(1) { animation-delay: 0s; }
+    &:nth-child(2) { animation-delay: 0.2s; }
+    &:nth-child(3) { animation-delay: 0.4s; }
+  }
+}
+
+@keyframes bounce {
+  0%, 80%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-6px); }
+}
+
+// --- Inline cards (rich content in assistant messages) ---
+
+.inline-card {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.inline-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+    opacity: 0.8;
+  }
+}
+
+// Profile card
+
+.profile-summary {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.detail-chip {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  background: rgba(255, 255, 255, 0.08);
+
+  &.dietary {
+    background: rgba(100, 181, 246, 0.15);
+    color: #90caf9;
+  }
+  &.allergy {
+    background: rgba(239, 154, 154, 0.15);
+    color: #ef9a9a;
+  }
+  &.goal {
+    background: rgba(206, 147, 216, 0.15);
+    color: #ce93d8;
+  }
+}
+
+// Nutrition card
+
+.nutrition-targets {
+  display: flex;
+  gap: 0.4rem;
   flex-wrap: wrap;
   margin-bottom: 0.5rem;
 }
 
-.chips.warn mat-chip {
-  opacity: 0.95;
-}
-
-.day-section {
-  margin-top: 1.25rem;
-}
-
-.day-heading {
-  font-size: 1rem;
-  margin: 0 0 0.5rem;
-  font-weight: 600;
-  opacity: 0.9;
-}
-
-.recommendations {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 0.75rem;
-}
-
-.meal-card {
-  cursor: pointer;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-.meal-card:hover,
-.meal-card:focus-visible {
-  border-color: rgba(129, 199, 132, 0.45);
-  outline: none;
-}
-
-.meal-card--selected {
-  border-color: rgba(129, 199, 132, 0.75);
-  background: rgba(76, 175, 80, 0.06);
-}
-
-.rationale {
-  line-height: 1.45;
-  margin-bottom: 0.5rem;
-}
-
-.ingredients-label {
+.target-chip {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
   font-size: 0.75rem;
+  background: rgba(129, 199, 132, 0.15);
+  color: #a5d6a7;
+  font-weight: 500;
+}
+
+.nutrition-label {
+  font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  opacity: 0.65;
+  opacity: 0.6;
   margin: 0.5rem 0 0.25rem;
 }
 
-.ingredients {
-  margin: 0;
-  padding-left: 1.1rem;
-  font-size: 0.88rem;
-  opacity: 0.88;
+.nutrition-chips {
+  display: flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
 }
 
-.meta {
+.food-chip {
+  display: inline-block;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+
+  &.emphasize {
+    background: rgba(129, 199, 132, 0.12);
+    color: #a5d6a7;
+  }
+  &.avoid {
+    background: rgba(239, 154, 154, 0.1);
+    color: #ef9a9a;
+  }
+}
+
+// Meals card
+
+.meals-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.5rem;
+}
+
+.meal-tile {
+  padding: 0.65rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+
+  &:hover, &:focus-visible {
+    border-color: rgba(129, 199, 132, 0.4);
+    outline: none;
+  }
+
+  &.selected {
+    border-color: rgba(129, 199, 132, 0.7);
+    background: rgba(76, 175, 80, 0.06);
+  }
+}
+
+.meal-tile-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+
+  strong {
+    font-size: 0.88rem;
+  }
+}
+
+.meal-type-badge {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: rgba(100, 181, 246, 0.15);
+  color: #90caf9;
+  flex-shrink: 0;
+}
+
+.meal-date {
+  font-size: 0.72rem;
+  opacity: 0.6;
+}
+
+.meal-rationale {
+  font-size: 0.8rem;
+  opacity: 0.8;
+  line-height: 1.4;
+  margin: 0.25rem 0;
+}
+
+.meal-ingredients {
+  font-size: 0.78rem;
+  opacity: 0.75;
+  margin-top: 0.25rem;
+
+  summary {
+    cursor: pointer;
+    font-weight: 500;
+  }
+
+  ul {
+    margin: 0.25rem 0 0;
+    padding-left: 1rem;
+  }
+}
+
+.meal-meta {
+  display: block;
+  font-size: 0.72rem;
+  opacity: 0.55;
+  margin-top: 0.35rem;
+}
+
+// Feedback inline
+
+.feedback-inline {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+}
+
+.feedback-prompt {
   font-size: 0.82rem;
-  opacity: 0.7;
-  margin-top: 0.5rem;
-}
-
-.history-chip {
-  align-self: center;
-}
-
-::ng-deep .nutrition-stepper .mat-step-header .mat-step-label {
   font-weight: 500;
+  margin: 0.5rem 0;
+}
+
+.feedback-controls {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.rating-field {
+  width: 100px;
+}
+
+.feedback-notes-field {
+  width: 100%;
+  margin-bottom: 0.5rem;
+}
+
+// --- Input area ---
+
+.input-area {
+  flex-shrink: 0;
+  padding: 0.75rem 0 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.quick-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.65rem;
+
+  button {
+    font-size: 0.78rem;
+    border-color: rgba(255, 255, 255, 0.12);
+    color: #c9d1d9;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.04);
+      border-color: #81c784;
+      color: #81c784;
+    }
+  }
+}
+
+.input-form {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+
+  .message-input {
+    flex: 1;
+  }
+
+  button[mat-fab] {
+    margin-top: 4px;
+  }
 }

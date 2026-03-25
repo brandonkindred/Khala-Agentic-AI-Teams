@@ -12,10 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from llm_service import get_client
 
+from ..agents.chat_agent import NutritionChatAgent
 from ..agents.intake_profile_agent import IntakeProfileAgent
 from ..agents.meal_planning_agent import MealPlanningAgent
 from ..agents.nutritionist_agent import NutritionistAgent
 from ..models import (
+    ChatRequest,
+    ChatResponse,
     ClientProfile,
     FeedbackRequest,
     FeedbackResponse,
@@ -62,12 +65,139 @@ llm = get_client("nutrition_meal_planning")
 intake_agent = IntakeProfileAgent(llm)
 nutritionist_agent = NutritionistAgent(llm)
 meal_planning_agent = MealPlanningAgent(llm)
+chat_agent = NutritionChatAgent(llm, intake_agent, nutritionist_agent, meal_planning_agent)
 
 
 @app.get("/health")
 async def health():
     """Health check for the Nutrition & Meal Planning team."""
     return {"status": "ok", "team": "nutrition_meal_planning"}
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def post_chat_route(body: ChatRequest):
+    """Conversational chat endpoint.  Drives the full nutrition workflow through natural dialogue."""
+    client_id = body.client_id.strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id is required")
+
+    # Load current state
+    profile = profile_store.get_profile(client_id)
+    nutrition_plan = None
+    meal_suggestions_with_ids: list[MealRecommendationWithId] = []
+    meal_history = []
+
+    if profile is not None:
+        try:
+            nutrition_plan = nutritionist_agent.run(profile)
+        except Exception:
+            nutrition_plan = None
+        meal_history = meal_feedback_store.get_meal_history(client_id, limit=50)
+
+    history_dicts = [{"role": m.role, "content": m.content} for m in body.conversation_history]
+
+    # Run the chat agent
+    result = chat_agent.run(
+        client_id=client_id,
+        user_message=body.message,
+        conversation_history=history_dicts,
+        profile=profile,
+        nutrition_plan=nutrition_plan,
+        meal_suggestions=meal_suggestions_with_ids or None,
+        meal_history=meal_history or None,
+    )
+
+    action = result.get("action", "none")
+    response = ChatResponse(
+        message=result.get("message", ""),
+        phase=result.get("phase", "intake"),
+        action=action,
+    )
+
+    # --- Handle actions ---
+
+    if action == "save_profile":
+        extracted = result.get("extracted_profile") or {}
+        # Build a ProfileUpdateRequest from extracted data
+        update_data: dict = {}
+        if "household" in extracted:
+            update_data["household"] = extracted["household"]
+        if "dietary_needs" in extracted:
+            update_data["dietary_needs"] = extracted["dietary_needs"]
+        if "allergies_and_intolerances" in extracted:
+            update_data["allergies_and_intolerances"] = extracted["allergies_and_intolerances"]
+        if "lifestyle" in extracted:
+            update_data["lifestyle"] = extracted["lifestyle"]
+        if "preferences" in extracted:
+            update_data["preferences"] = extracted["preferences"]
+        if "goals" in extracted:
+            update_data["goals"] = extracted["goals"]
+
+        if update_data:
+            update_req = ProfileUpdateRequest.model_validate(update_data)
+            current = profile_store.get_profile(client_id)
+            if current is None:
+                current = profile_store.create_profile(client_id)
+            saved_profile = intake_agent.run(client_id, update=update_req, current_profile=current)
+            profile_store.save_profile(client_id, saved_profile)
+            response.profile = saved_profile
+        elif profile:
+            response.profile = profile
+
+    elif action == "generate_nutrition_plan":
+        p = profile or profile_store.get_profile(client_id)
+        if p:
+            try:
+                plan = nutritionist_agent.run(p)
+                response.nutrition_plan = plan
+            except Exception as e:
+                logger.warning("Nutrition plan generation failed during chat: %s", e)
+
+    elif action == "generate_meals":
+        p = profile or profile_store.get_profile(client_id)
+        if p:
+            try:
+                params = result.get("meal_plan_params") or {}
+                period_days = params.get("period_days", 7)
+                meal_types = params.get("meal_types", ["lunch", "dinner"])
+                np = nutritionist_agent.run(p)
+                mh = meal_feedback_store.get_meal_history(client_id, limit=50)
+                suggestions = meal_planning_agent.run(
+                    p, np, mh, period_days=period_days, meal_types=meal_types
+                )
+                with_ids: list[MealRecommendationWithId] = []
+                for s in suggestions:
+                    rec_id = meal_feedback_store.record_recommendation(client_id, s.model_dump())
+                    with_ids.append(
+                        MealRecommendationWithId(**s.model_dump(), recommendation_id=rec_id)
+                    )
+                response.meal_suggestions = with_ids
+            except Exception as e:
+                logger.warning("Meal plan generation failed during chat: %s", e)
+
+    elif action == "submit_feedback":
+        fb = result.get("feedback_data") or {}
+        meal_name = fb.get("meal_name", "").strip().lower()
+        rating = fb.get("rating")
+        would_make_again = fb.get("would_make_again")
+        notes = fb.get("notes", "")
+
+        # Try to find the recommendation by name in recent history
+        if meal_name and meal_history:
+            for entry in meal_history:
+                snap = entry.meal_snapshot or {}
+                name = (snap.get("name") or "").strip().lower()
+                if name and meal_name in name or name in meal_name:
+                    meal_feedback_store.record_feedback(
+                        entry.recommendation_id,
+                        rating=rating,
+                        would_make_again=would_make_again,
+                        notes=notes,
+                    )
+                    response.feedback_recorded = True
+                    break
+
+    return response
 
 
 @app.get("/profile/{client_id}", response_model=ClientProfile)
