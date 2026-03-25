@@ -1392,7 +1392,7 @@ _ANGULAR_DEV_DEPS = [
     f"@angular/compiler-cli@{_ANGULAR_VERSION}",
     f"@angular/build@{_ANGULAR_VERSION}",
     "typescript",
-    "angular-eslint",
+    f"angular-eslint@{_ANGULAR_VERSION}",
     "@eslint/js",
     "typescript-eslint",
     "vitest",
