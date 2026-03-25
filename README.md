@@ -7,11 +7,18 @@ Strands Agents is a monorepo for multi-agent "team" systems. Each team exposes a
 ```text
 strands-agents/
 ├── backend/
-│   ├── agents/                 # Team implementations + team-specific APIs
+│   ├── agents/                 # Team implementations + team-specific APIs (19 teams)
 │   ├── unified_api/            # Unified FastAPI app mounting all teams
 │   ├── run_unified_api.py      # Unified API launcher
-│   └── studiogrid/             # Temporal workflows and worker stack
-├── user-interface/             # Angular frontend
+│   ├── studiogrid/             # StudioGrid design-system workflow
+│   ├── blogging_service/       # Isolated blogging microservice container
+│   ├── job_service/            # Centralized job state tracking service (Postgres)
+│   ├── team_service/           # Generic team microservice container
+│   ├── studiogrid_service/     # StudioGrid microservice container
+│   ├── post_mortems/           # Agent failure audit log
+│   ├── Makefile                # Build, lint, test, run targets
+│   └── pyproject.toml          # Ruff + pytest config
+├── user-interface/             # Angular 19 frontend
 └── docker/                     # Full-stack Docker Compose setup
 ```
 
@@ -20,7 +27,9 @@ strands-agents/
 ### 1) Backend dependencies
 
 ```bash
-cd backend/agents
+cd backend
+make install          # Create venv, install deps
+# Or manually:
 pip install -r requirements.txt
 ```
 
@@ -45,7 +54,7 @@ UI: <http://localhost:4200>
 
 ## Unified API team routes
 
-The Unified API mounts teams under `/api/*` prefixes. Current configured routes:
+The Unified API mounts teams under `/api/*` prefixes. Current configured routes (19 teams):
 
 - `/api/blogging`
 - `/api/software-engineering`
@@ -64,6 +73,8 @@ The Unified API mounts teams under `/api/*` prefixes. Current configured routes:
 - `/api/studio-grid`
 - `/api/sales`
 - `/api/road-trip-planning`
+- `/api/agentic-team-provisioning`
+- `/api/startup-advisor`
 
 ## Team documentation
 
@@ -82,13 +93,17 @@ The Unified API mounts teams under `/api/*` prefixes. Current configured routes:
 - `backend/agents/nutrition_meal_planning_team/README.md`
 - `backend/agents/planning_v3_team/README.md`
 - `backend/agents/coding_team/README.md`
+- `backend/agents/sales_team/` (AI Sales Team)
+- `backend/agents/road_trip_planning_team/` (Road Trip Planning)
+- `backend/agents/agentic_team_provisioning/` (Agentic Team Provisioning)
+- `backend/agents/startup_advisor/` (Startup Advisor)
 
 ## Docker
 
 For the full stack (Postgres, Temporal, optional Ollama, backend APIs, and UI):
 
 ```bash
-docker compose -f docker/docker-compose.yml up --build
+docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
 ```
 
 See `docker/README.md` for env vars, ports, and deployment notes.
@@ -97,5 +112,6 @@ See `docker/README.md` for env vars, ports, and deployment notes.
 
 - `backend/unified_api/README.md`
 - `backend/studiogrid/README.md`
+- `backend/post_mortems/POST_MORTEMS.md`
 - `ARCHITECTURE.md`
 - `CONTRIBUTORS.md`

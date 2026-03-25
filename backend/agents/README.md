@@ -17,16 +17,20 @@ backend/agents/
 ├── soc2_compliance_team/
 ├── branding_team/
 ├── agent_provisioning_team/
+├── agentic_team_provisioning/         # Conversational team/process creation
 ├── accessibility_audit_team/
 ├── ai_systems_team/
 ├── investment_team/
 ├── nutrition_meal_planning_team/
 ├── road_trip_planning_team/
 ├── sales_team/
-├── agent_repair_team/
+├── startup_advisor/                   # Persistent conversational startup advisor
+├── agent_repair_team/                 # Agent crash recovery
 ├── integrations/                      # Shared integrations layer used across teams
 ├── llm_service/                       # Centralized LLM client (Ollama, dummy)
 ├── docker/                            # Agents-only Docker assets
+├── shared_job_management.py           # Shared job state helpers
+├── job_service_client.py              # HTTP client for centralized job service
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
@@ -40,7 +44,7 @@ From `backend/`:
 python run_unified_api.py
 ```
 
-This mounts all enabled team APIs behind one server on port `8080` by default.
+This mounts all 19 enabled team APIs behind one server on port `8080` by default.
 
 ## Running individual team APIs
 
@@ -77,6 +81,10 @@ For team-specific setup and env vars, use each team's README.
 - `ai_systems_team/README.md`
 - `investment_team/README.md`
 - `nutrition_meal_planning_team/README.md`
+- `road_trip_planning_team/`
+- `sales_team/`
+- `startup_advisor/`
+- `agentic_team_provisioning/`
 - `llm_service/README.md`
 
 ## Shared integrations

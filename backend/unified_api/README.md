@@ -4,7 +4,7 @@ The Unified API Server consolidates all Strands Agent team APIs under a single e
 
 ## Overview
 
-Instead of running multiple API servers on different ports, the unified server mounts all team APIs under namespaced prefixes on a single port (default: 8080).
+Instead of running multiple API servers on different ports, the unified server mounts all 19 team APIs under namespaced prefixes on a single port (default: 8080). Teams can also be deployed as standalone microservices; when a `*_SERVICE_URL` env var is set for a team, the unified API proxies requests to that external service instead of mounting in-process.
 
 ```mermaid
 graph TB
@@ -31,6 +31,8 @@ graph TB
             Studio["/api/studio-grid"]
             Sales["/api/sales"]
             RoadTrip["/api/road-trip-planning"]
+            AgenticProv["/api/agentic-team-provisioning"]
+            StartupAdv["/api/startup-advisor"]
         end
     end
     
@@ -87,6 +89,8 @@ python run_unified_api.py --workers 4 --log-level warning
 | StudioGrid | `/api/studio-grid` | `/api/studio-grid/docs` |
 | AI Sales Team | `/api/sales` | `/api/sales/docs` |
 | Road Trip Planning | `/api/road-trip-planning` | `/api/road-trip-planning/docs` |
+| Agentic Team Provisioning | `/api/agentic-team-provisioning` | `/api/agentic-team-provisioning/docs` |
+| Startup Advisor | `/api/startup-advisor` | `/api/startup-advisor/docs` |
 
 ## Environment Variables
 
@@ -181,7 +185,7 @@ If a team API fails to import (missing dependencies, configuration errors), the 
 
 ```
 2024-01-15 10:00:00 [WARNING] unified_api: Could not mount Investment Team API: No module named 'investment_team'
-2024-01-15 10:00:00 [INFO] unified_api: Mounted 7/8 team APIs
+2024-01-15 10:00:00 [INFO] unified_api: Mounted 18/19 team APIs
 ```
 
 ## Example Usage
