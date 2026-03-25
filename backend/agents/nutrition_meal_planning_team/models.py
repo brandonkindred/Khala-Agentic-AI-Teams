@@ -214,3 +214,34 @@ class MealHistoryResponse(BaseModel):
 
     client_id: str
     entries: List[MealHistoryEntry] = Field(default_factory=list)
+
+
+# --- Chat models ---
+
+
+class ChatMessage(BaseModel):
+    """One message in the conversation history."""
+
+    role: str = "user"  # "user" or "assistant"
+    content: str = ""
+
+
+class ChatRequest(BaseModel):
+    """Body for POST /chat."""
+
+    client_id: str
+    message: str
+    conversation_history: List[ChatMessage] = Field(default_factory=list)
+
+
+class ChatResponse(BaseModel):
+    """Response for POST /chat.  Always contains the agent message and current phase.
+    Optionally contains structured results when the agent triggers an action."""
+
+    message: str = ""
+    phase: str = "intake"
+    action: str = "none"
+    profile: Optional[ClientProfile] = None
+    nutrition_plan: Optional[NutritionPlan] = None
+    meal_suggestions: List[MealRecommendationWithId] = Field(default_factory=list)
+    feedback_recorded: bool = False

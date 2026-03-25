@@ -110,6 +110,36 @@ export interface FeedbackResponse {
   recorded: boolean;
 }
 
+// --- Chat models ---
+
+export interface NutritionChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp?: string;
+  /** Structured data attached to assistant messages after actions. */
+  profile?: ClientProfile | null;
+  nutritionPlan?: NutritionPlanResponse | null;
+  mealSuggestions?: MealRecommendation[];
+  phase?: string;
+  action?: string;
+}
+
+export interface NutritionChatRequest {
+  client_id: string;
+  message: string;
+  conversation_history: { role: string; content: string }[];
+}
+
+export interface NutritionChatResponse {
+  message: string;
+  phase: string;
+  action: string;
+  profile?: ClientProfile | null;
+  nutrition_plan?: NutritionPlanResponse['plan'] | null;
+  meal_suggestions?: MealRecommendation[];
+  feedback_recorded?: boolean;
+}
+
 export interface MealHistoryResponse {
   client_id: string;
   entries: {
