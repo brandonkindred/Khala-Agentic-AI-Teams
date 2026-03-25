@@ -11,6 +11,8 @@ from blog_research_agent.models import ResearchReference
 from pydantic import BaseModel, Field, model_validator
 from shared.content_plan import ContentPlan, content_plan_to_outline_markdown
 
+from .feedback_tracker import PersistentFeedbackItem
+
 
 class DraftInput(BaseModel):
     """Input for the blog draft agent: research and approved content plan."""
@@ -100,6 +102,10 @@ class ReviseDraftInput(BaseModel):
     previous_feedback_items: Optional[List[FeedbackItem]] = Field(
         None,
         description="Feedback from the prior iteration, so the writer knows what was already addressed.",
+    )
+    persistent_issues: Optional[List[PersistentFeedbackItem]] = Field(
+        None,
+        description="Issues flagged multiple times across iterations with occurrence counts and suggestions.",
     )
     research_document: Optional[str] = Field(
         None,

@@ -495,21 +495,43 @@ class BlogDraftAgent:
             "---",
             cp,
             "",
-            "---",
-            "COPY EDITOR FEEDBACK (apply every numbered item below):",
-            "---",
-            feedback_block,
-            "",
         ]
+        # Persistent issues — placed BEFORE current feedback for higher LLM attention.
+        if revise_input.persistent_issues:
+            pi_lines = []
+            for i, pi in enumerate(revise_input.persistent_issues, 1):
+                loc = f" [{pi.location}]" if pi.location else ""
+                line = f"{i}. [{pi.severity}] {pi.category}{loc} (flagged {pi.occurrence_count} times): {pi.issue}"
+                if pi.suggestion:
+                    line += f'\n   REQUIRED FIX: "{pi.suggestion}"'
+                pi_lines.append(line)
+            prompt_parts.extend(
+                [
+                    "---",
+                    "PERSISTENT ISSUES — THESE HAVE FAILED TO BE FIXED AND MUST BE RESOLVED THIS ITERATION:",
+                    "---",
+                    "\n\n".join(pi_lines),
+                    "",
+                ]
+            )
+        prompt_parts.extend(
+            [
+                "---",
+                "COPY EDITOR FEEDBACK (apply every numbered item below):",
+                "---",
+                feedback_block,
+                "",
+            ]
+        )
         if revise_input.previous_feedback_items:
             prev_lines = []
-            for i, item in enumerate(revise_input.previous_feedback_items, 1):
+            for i, item in enumerate(revise_input.previous_feedback_items[:10], 1):
                 loc = f" [{item.location}]" if item.location else ""
                 prev_lines.append(f"{i}. [{item.severity}] {item.category}{loc}: {item.issue}")
             prompt_parts.extend(
                 [
                     "---",
-                    "PREVIOUSLY ADDRESSED FEEDBACK (do NOT regress on these fixes — the editor already flagged them):",
+                    "RECENTLY RESOLVED FEEDBACK (do NOT regress on these):",
                     "---",
                     "\n".join(prev_lines),
                     "",

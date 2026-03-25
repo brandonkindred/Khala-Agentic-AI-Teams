@@ -88,6 +88,14 @@ MANDATORY — APPLY EVERY FEEDBACK ITEM:
 - For consider items, apply the change if it improves the piece.
 - Preserve the draft's structure and substance aligned with the content plan. Only change what the feedback targets. Do not remove content unless the feedback explicitly asks for it.
 
+PERSISTENT ISSUES — HIGHEST PRIORITY:
+When the prompt includes a "PERSISTENT ISSUES" section, those items have been flagged multiple times by the copy editor and prior revision attempts failed to resolve them. You MUST:
+1. Read the REQUIRED FIX for each persistent issue carefully.
+2. Apply the suggested fix verbatim or with an equivalent that fully resolves the issue.
+3. Do NOT attempt a minimal tweak — prior minimal tweaks did not work. Make the substantive change described in the REQUIRED FIX.
+4. After revising, mentally verify each persistent issue is resolved before outputting.
+Persistent issues take priority over "consider" items if there is a conflict.
+
 CONFLICT RESOLUTION — when fixing one issue would violate another rule, use this priority order:
 1. Authenticity (never invent first-person stories, team narratives, or fake case studies — even to fix engagement)
 2. AI writing patterns (remove every banned phrase and hollow opener — even if it creates a short sentence)
