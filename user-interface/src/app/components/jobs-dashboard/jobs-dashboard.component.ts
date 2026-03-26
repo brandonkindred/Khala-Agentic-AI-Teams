@@ -148,10 +148,10 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
           } as { jobs: RunningJobSummary[]; _error?: string })
         )
       ),
-      blogging: this.bloggingApi.getJobs(true).pipe(catchError(() => of([]))),
-      ai: this.aiSystemsApi.listJobs(true).pipe(catchError(() => of({ jobs: [] }))),
-      prov: this.agentProvisioningApi.listJobs(true).pipe(catchError(() => of({ jobs: [] }))),
-      social: this.socialMarketingApi.listJobs(true).pipe(catchError(() => of([]))),
+      blogging: this.bloggingApi.getJobs(false).pipe(catchError(() => of([]))),
+      ai: this.aiSystemsApi.listJobs(false).pipe(catchError(() => of({ jobs: [] }))),
+      prov: this.agentProvisioningApi.listJobs(false).pipe(catchError(() => of({ jobs: [] }))),
+      social: this.socialMarketingApi.listJobs(false).pipe(catchError(() => of([]))),
     }).pipe(
       map(({ se, blogging, ai, prov, social }) => {
         this.seFetchError = (se as { _error?: string })._error ?? null;

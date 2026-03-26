@@ -39,13 +39,18 @@ from social_media_marketing_team.trend_models import TrendDigest
 app = FastAPI(title="Social Media Marketing Team API", version="1.0.0")
 
 logger = logging.getLogger(__name__)
-_job_manager = JobServiceClient(team="social_media_marketing_team")
-_stale_monitor_stop = start_stale_job_monitor(
-    _job_manager,
-    interval_seconds=15.0,
-    stale_after_seconds=300.0,
-    reason="Job heartbeat stale while pending/running",
-)
+try:
+    _job_manager = JobServiceClient(team="social_media_marketing_team")
+    _stale_monitor_stop = start_stale_job_monitor(
+        _job_manager,
+        interval_seconds=15.0,
+        stale_after_seconds=300.0,
+        reason="Job heartbeat stale while pending/running",
+    )
+except Exception as _init_err:
+    logger.warning("Social marketing job manager init failed: %s", _init_err)
+    _job_manager = None  # type: ignore[assignment]
+    _stale_monitor_stop = None
 
 # Latest trend digest — updated by the daily cron and the manual trigger endpoint.
 # Each worker process maintains its own copy; for multi-worker deployments the last

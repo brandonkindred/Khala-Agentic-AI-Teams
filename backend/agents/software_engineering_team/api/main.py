@@ -129,7 +129,7 @@ def create_project_workspace(project_name: str, spec_content: bytes) -> Path:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """Start Temporal worker on startup if TEMPORAL_ADDRESS is set."""
+    """Start Temporal worker on startup if TEMPORAL_ADDRESS is set; mark jobs failed on shutdown."""
     try:
         from software_engineering_team.temporal.worker import start_se_temporal_worker_thread
 
@@ -137,6 +137,14 @@ async def _lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not start SE Temporal worker: %s", e)
     yield
+    # Shutdown: mark active jobs as failed so they can be resumed after restart
+    try:
+        from software_engineering_team.shared.job_store import mark_all_running_jobs_failed
+
+        mark_all_running_jobs_failed("Server shutdown — job can be resumed")
+        logger.info("Marked all active SE jobs as failed (server shutdown)")
+    except Exception as e:
+        logger.warning("Could not mark SE jobs as failed on shutdown: %s", e)
 
 
 app = FastAPI(

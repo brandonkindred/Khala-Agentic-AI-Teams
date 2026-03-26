@@ -323,9 +323,7 @@ class BlogDraftAgent:
         except (LLMJsonParseError, LLMTruncatedError) as e:
             logger.warning("Draft complete() failed: %s; trying complete_json fallback.", e)
             try:
-                data = self.llm.complete_json(
-                    prompt, temperature=0.2, think=True
-                )
+                data = self.llm.complete_json(prompt, temperature=0.2, think=True)
                 raw_draft = data.get("draft")
                 if isinstance(raw_draft, str) and raw_draft.strip():
                     draft = raw_draft.strip()
@@ -582,9 +580,7 @@ class BlogDraftAgent:
 
         if not revised or not revised.strip():
             try:
-                data = self.llm.complete_json(
-                    prompt, temperature=0.2, think=True
-                )
+                data = self.llm.complete_json(prompt, temperature=0.2, think=True)
                 raw_draft = data.get("draft") if data else None
                 if isinstance(raw_draft, str) and raw_draft.strip():
                     revised = raw_draft.strip()
