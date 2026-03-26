@@ -5,6 +5,7 @@ import { environment } from '../../environments/environment';
 import type {
   StartupAdvisorConversationState,
   StartupAdvisorArtifact,
+  StartupAdvisorUpdateContextRequest,
 } from '../models';
 
 @Injectable({ providedIn: 'root' })
@@ -28,5 +29,13 @@ export class StartupAdvisorApiService {
   /** GET /conversation/artifacts — list all artifacts */
   getArtifacts(): Observable<StartupAdvisorArtifact[]> {
     return this.http.get<StartupAdvisorArtifact[]>(`${this.baseUrl}/conversation/artifacts`);
+  }
+
+  /** PUT /conversation/context — manually update the founder profile context */
+  updateContext(context: Record<string, string>): Observable<StartupAdvisorConversationState> {
+    return this.http.put<StartupAdvisorConversationState>(
+      `${this.baseUrl}/conversation/context`,
+      { context } as StartupAdvisorUpdateContextRequest
+    );
   }
 }

@@ -8,70 +8,142 @@
       <p>Your persistent AI advisor for strategic startup guidance. Pick up right where you left off.</p>
     </div>
   </div>
+
+  <mat-button-toggle-group
+    class="mode-toggle"
+    [value]="mode"
+    (change)="mode = $event.value"
+    aria-label="Interaction mode"
+  >
+    <mat-button-toggle value="chat">
+      <mat-icon>chat</mat-icon>
+      Chat with Advisor
+    </mat-button-toggle>
+    <mat-button-toggle value="form">
+      <mat-icon>edit_note</mat-icon>
+      Fill in Manually
+    </mat-button-toggle>
+  </mat-button-toggle-group>
 </section>
 
 <div class="advisor-layout">
-  <mat-card class="chat-card">
-    <mat-card-content>
-      @if (error) {
-        <p class="error-text">{{ error }}</p>
-        <button mat-stroked-button (click)="retryConnect()" [disabled]="loading">
-          Retry
-        </button>
-      }
-
-      <div class="messages-container" #messagesContainer>
-        @for (msg of messages; track msg.timestamp + msg.content) {
-          <div class="message" [class.user]="msg.role === 'user'" [class.assistant]="msg.role === 'assistant'">
-            <div class="message-content">{{ msg.content }}</div>
-            <div class="message-time">{{ formatTime(msg.timestamp) }}</div>
-          </div>
+  <!-- ======== CHAT MODE ======== -->
+  @if (mode === 'chat') {
+    <mat-card class="chat-card">
+      <mat-card-content>
+        @if (error) {
+          <p class="error-text">{{ error }}</p>
+          <button mat-stroked-button (click)="retryConnect()" [disabled]="loading">
+            Retry
+          </button>
         }
 
-        @if (loading && messages.length > 0 && messages[messages.length - 1].role === 'user') {
-          <div class="message assistant">
-            <div class="typing-indicator">
-              <span></span>
-              <span></span>
-              <span></span>
+        <div class="messages-container" #messagesContainer>
+          @for (msg of messages; track msg.timestamp + msg.content) {
+            <div class="message" [class.user]="msg.role === 'user'" [class.assistant]="msg.role === 'assistant'">
+              <div class="message-content">{{ msg.content }}</div>
+              <div class="message-time">{{ formatTime(msg.timestamp) }}</div>
             </div>
-          </div>
-        }
-      </div>
+          }
 
-      <form [formGroup]="form" (ngSubmit)="onSubmit()" class="input-form">
-        <mat-form-field appearance="outline" class="message-input">
-          <mat-label>Ask your startup advisor...</mat-label>
-          <input
-            matInput
-            formControlName="message"
-            [attr.aria-label]="'Message input'"
-            (keydown.enter)="$event.preventDefault(); onSubmit()"
-          />
-        </mat-form-field>
-        <button
-          mat-fab
-          color="primary"
-          type="submit"
-          [disabled]="form.invalid || loading"
-          [attr.aria-label]="'Send message'"
-        >
-          <mat-icon>send</mat-icon>
-        </button>
-      </form>
-
-      @if (suggestedQuestions.length > 0) {
-        <div class="suggested-questions">
-          @for (q of suggestedQuestions; track q) {
-            <button mat-stroked-button (click)="onSuggestedQuestion(q)" [disabled]="loading">
-              {{ q }}
-            </button>
+          @if (loading && messages.length > 0 && messages[messages.length - 1].role === 'user') {
+            <div class="message assistant">
+              <div class="typing-indicator">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+            </div>
           }
         </div>
-      }
-    </mat-card-content>
-  </mat-card>
 
+        <form [formGroup]="form" (ngSubmit)="onSubmit()" class="input-form">
+          <mat-form-field appearance="outline" class="message-input">
+            <mat-label>Ask your startup advisor...</mat-label>
+            <input
+              matInput
+              formControlName="message"
+              [attr.aria-label]="'Message input'"
+              (keydown.enter)="$event.preventDefault(); onSubmit()"
+            />
+          </mat-form-field>
+          <button
+            mat-fab
+            color="primary"
+            type="submit"
+            [disabled]="form.invalid || loading"
+            [attr.aria-label]="'Send message'"
+          >
+            <mat-icon>send</mat-icon>
+          </button>
+        </form>
+
+        @if (suggestedQuestions.length > 0) {
+          <div class="suggested-questions">
+            @for (q of suggestedQuestions; track q) {
+              <button mat-stroked-button (click)="onSuggestedQuestion(q)" [disabled]="loading">
+                {{ q }}
+              </button>
+            }
+          </div>
+        }
+      </mat-card-content>
+    </mat-card>
+  }
+
+  <!-- ======== MANUAL FORM MODE ======== -->
+  @if (mode === 'form') {
+    <mat-card class="form-card">
+      <mat-card-header>
+        <mat-icon mat-card-avatar>edit_note</mat-icon>
+        <mat-card-title>Founder Profile</mat-card-title>
+        <mat-card-subtitle>Fill in your startup details directly. The advisor will use this context in future conversations.</mat-card-subtitle>
+      </mat-card-header>
+
+      <mat-card-content>
+        @if (error) {
+          <p class="error-text">{{ error }}</p>
+        }
+
+        <form [formGroup]="profileForm" (ngSubmit)="onSaveProfile()" class="profile-form">
+          @for (field of profileFields; track field.key) {
+            <mat-form-field appearance="outline" class="profile-field">
+              <mat-label>{{ field.label }}</mat-label>
+              <input
+                matInput
+                [formControlName]="field.key"
+                [placeholder]="field.placeholder"
+                [attr.aria-label]="field.label"
+              />
+            </mat-form-field>
+          }
+
+          <div class="form-actions">
+            <span class="field-count">{{ filledFieldCount() }} of {{ profileFields.length }} fields filled</span>
+            <button
+              mat-flat-button
+              color="primary"
+              type="submit"
+              [disabled]="savingProfile || filledFieldCount() === 0"
+            >
+              @if (savingProfile) {
+                Saving...
+              } @else {
+                Save Profile
+              }
+            </button>
+          </div>
+        </form>
+
+        <div class="form-hint">
+          <mat-icon>info</mat-icon>
+          <span>You can fill in as many or as few fields as you like. Switch to chat mode anytime to continue the conversation with this context.</span>
+        </div>
+      </mat-card-content>
+    </mat-card>
+  }
+
+  <!-- ======== SIDEBAR ======== -->
   <div class="sidebar">
     <mat-card class="context-card">
       <mat-card-header>
@@ -81,13 +153,43 @@
       </mat-card-header>
       <mat-card-content>
         @if (contextEntries().length === 0) {
-          <p class="empty-hint">Start chatting and the advisor will build your profile as you share details.</p>
+          <p class="empty-hint">Start chatting or fill in the form to build your profile.</p>
         } @else {
           <div class="context-grid">
             @for (entry of contextEntries(); track entry[0]) {
               <div class="context-item">
-                <span class="context-label">{{ formatContextKey(entry[0]) }}</span>
-                <span class="context-value">{{ entry[1] }}</span>
+                @if (editingContextKey === entry[0]) {
+                  <span class="context-label">{{ formatContextKey(entry[0]) }}</span>
+                  <div class="context-edit-row">
+                    <input
+                      class="context-edit-input"
+                      [value]="editingContextValue"
+                      (input)="editingContextValue = $any($event.target).value"
+                      (keydown.enter)="saveEditContext()"
+                      (keydown.escape)="cancelEditContext()"
+                      aria-label="Edit value"
+                    />
+                    <button mat-icon-button (click)="saveEditContext()" aria-label="Save">
+                      <mat-icon>check</mat-icon>
+                    </button>
+                    <button mat-icon-button (click)="cancelEditContext()" aria-label="Cancel">
+                      <mat-icon>close</mat-icon>
+                    </button>
+                  </div>
+                } @else {
+                  <span class="context-label">{{ formatContextKey(entry[0]) }}</span>
+                  <div class="context-value-row">
+                    <span class="context-value">{{ entry[1] }}</span>
+                    <button
+                      mat-icon-button
+                      class="context-edit-btn"
+                      (click)="startEditContext(entry[0], entry[1])"
+                      aria-label="Edit"
+                    >
+                      <mat-icon>edit</mat-icon>
+                    </button>
+                  </div>
+                }
               </div>
             }
           </div>
@@ -114,6 +216,25 @@
               </mat-card-content>
             </mat-card>
           }
+        </mat-card-content>
+      </mat-card>
+    }
+
+    @if (suggestedQuestions.length > 0 && mode === 'form') {
+      <mat-card class="suggestions-card">
+        <mat-card-header>
+          <mat-icon mat-card-avatar>lightbulb</mat-icon>
+          <mat-card-title>Suggested Topics</mat-card-title>
+          <mat-card-subtitle>Click to switch to chat and discuss</mat-card-subtitle>
+        </mat-card-header>
+        <mat-card-content>
+          <div class="suggested-questions">
+            @for (q of suggestedQuestions; track q) {
+              <button mat-stroked-button (click)="onSuggestedQuestion(q)" [disabled]="loading">
+                {{ q }}
+              </button>
+            }
+          </div>
         </mat-card-content>
       </mat-card>
     }
