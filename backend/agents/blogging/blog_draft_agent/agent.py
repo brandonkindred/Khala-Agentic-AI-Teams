@@ -454,7 +454,8 @@ class BlogDraftAgent:
                 [
                     "",
                     "---",
-                    "ALLOWED CLAIMS (preserve [CLAIM:id] tags; do not add new factual claims):",
+                    "ALLOWED CLAIMS (USE these to fix vague citations; tag each with [CLAIM:id]; do not add factual claims outside this list):",
+                    "When the editor flags a vague or unattributed claim, check this list first. If a matching claim exists, rewrite the sentence to use its text with the [CLAIM:id] tag and name the source.",
                     "---",
                     claims_text,
                 ]

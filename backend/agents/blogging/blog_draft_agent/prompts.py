@@ -240,10 +240,12 @@ Fix:
 - Any section that reads like reference documentation dropped into a narrative post
 - Paragraphs that restate the previous paragraph in different words (pure redundancy)
 
-**5. Authenticity — no fabrication**
+**5. Authenticity — no fabrication, no vague authority**
 - Never invent first-person or "we/our team" experience, specific past events, or case-study-style details that read as real but are not supported by attributed research, quoted sources, or explicit author-supplied material
 - When concreteness is needed and no real example is available: use research-backed detail with attribution, a clearly labeled hypothetical ("Imagine a team that…" without fake proper nouns), straight explanation, or an author placeholder: `[Author: add a brief real example from your experience that illustrates <topic>.]`
 - Never fill an author placeholder with invented text
+- **Vague authority is fabrication in disguise.** "Studies show", "research indicates", "experts agree", "it's well-known that", "data suggests", "many organizations have found" are all fabrication unless followed by a named source. For every factual claim: either cite the specific source by name, use a [CLAIM:id] tag from the allowed claims list, frame it as a clearly labeled hypothetical, or delete it. There is no middle ground.
+- When a claim has a matching entry in the ALLOWED CLAIMS list, ALWAYS use the [CLAIM:id] tag and name the source. This is the primary tool for fixing attribution issues.
 
 **6. Length — cut non-essential material, preserve load-bearing content**
 If the feedback flags length, identify and cut only non-essential material: repetition, tangents, a weaker duplicate example, a paragraph that restates the intro. Keep load-bearing definitions, the central claim chain, and the minimum evidence needed for trust and clarity. When cutting, preserve flow with a bridging sentence if needed.
@@ -322,7 +324,25 @@ WHEN FIXING SPECIFIC ISSUE TYPES:
 - To fix a cold/impersonal section: add "you"/"your" or frame advice in terms of what the reader experiences — without fabricating personal anecdotes.
 - To fix a paragraph of loosely related facts: identify the central argument, then rewrite so every sentence supports and develops that single idea.
 
-Before outputting, verify mentally that every numbered feedback item has been addressed in the draft."""
+FIXING VAGUE CITATIONS, AUTHORITY CLAIMS, AND HALLUCINATION FLAGS — THIS IS THE MOST COMMON REVISION FAILURE:
+The editor frequently flags sentences that sound authoritative but lack specific attribution. These are the hardest issues to fix because the instinct is to make a minimal tweak (rewording slightly) rather than a structural fix. Follow this decision tree for EVERY sentence flagged as vague, unattributed, or potentially hallucinated:
+
+1. **Check the ALLOWED CLAIMS list.** If the flagged fact matches a claim in the list, rewrite the sentence to use the claim text with its [CLAIM:id] tag and name the source explicitly: "According to [source name], [fact] [CLAIM:id]." This is always the best fix.
+2. **Check the RESEARCH section.** If the fact came from a research source, attribute it directly: "AWS documentation shows that..." or "A 2024 study by [author] found that..." Never say "studies show" or "experts agree" without naming the specific study or expert.
+3. **If no source supports the claim**, the sentence is hallucinated. You MUST either:
+   a. **Delete the sentence entirely** and rewrite the paragraph without it, OR
+   b. **Replace it with a clearly labeled hypothetical**: "Imagine a scenario where..." / "A common pattern is...", OR
+   c. **Insert an author placeholder**: `[Author: verify and add source for the claim that <X>.]`
+4. **Never do a minimal rewording** that preserves the unsourced authority. "Research suggests X" is NOT a fix for "Studies show X" — both are vague. The fix is naming the specific source or removing the claim.
+5. **Scan for these red-flag patterns** that the editor will flag again if you leave them:
+   - "Studies show..." / "Research indicates..." / "Experts agree..." (WHO? WHICH study?)
+   - "It's well-known that..." / "It's widely recognized..." (BY WHOM?)
+   - "According to industry best practices..." (WHOSE best practices? Name the standard or org.)
+   - "Statistics show..." / "Data suggests..." (WHAT data? FROM WHERE?)
+   - "Many organizations have found..." / "Teams often discover..." (vague authority)
+   - Specific numbers, percentages, or dollar figures without a named source
+
+Before outputting, verify mentally that every numbered feedback item has been addressed in the draft. THEN do a second pass specifically for attribution: scan every factual claim and verify it either has a [CLAIM:id] tag, names a specific source, is clearly hypothetical, or has an author placeholder."""
 
 
 # ---------------------------------------------------------------------------
@@ -359,10 +379,10 @@ Example format:
 # Allowed-claims instruction template (inserted when claims are provided)
 # ---------------------------------------------------------------------------
 ALLOWED_CLAIMS_INSTRUCTION = """
-ALLOWED FACTUAL CLAIMS (you MUST use only these for facts; tag each with [CLAIM:id]):
-When you use a factual claim from this list, place [CLAIM:<id>] immediately after it in the draft.
-Example: "Studies show that 80% of teams adopt CI/CD within two years [CLAIM:1]."
-Do NOT introduce new factual claims not in this list. Opinions and recommendations need not be tagged.
+ALLOWED FACTUAL CLAIMS — YOUR ONLY SOURCE OF TRUTH FOR FACTS (tag each with [CLAIM:id]):
+Every factual statement in the draft MUST come from this list or from the research document with explicit attribution. When you use a claim, place [CLAIM:<id>] immediately after it and name the source: "According to [source], [fact] [CLAIM:1]."
+Do NOT introduce new factual claims not in this list. Do NOT use vague attributions like "studies show" or "research indicates" — name the specific source from the claim's citations.
+Opinions, recommendations, and clearly labeled hypotheticals need not be tagged.
 ---
 {claims_text}
 ---
