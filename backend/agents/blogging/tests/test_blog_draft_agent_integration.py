@@ -81,8 +81,7 @@ _skip_reason = "Integration test requires real LLM (set LLM_PROVIDER=ollama and 
 
 
 @pytest.mark.skipif(
-    os.environ.get("LLM_PROVIDER", "").lower() == "dummy"
-    or os.environ.get("SW_LLM_PROVIDER", "").lower() == "dummy",
+    os.environ.get("LLM_PROVIDER", "").lower() == "dummy",
     reason=_skip_reason,
 )
 def test_draft_agent_with_ollama_produces_real_content() -> None:

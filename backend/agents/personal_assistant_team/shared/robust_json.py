@@ -409,7 +409,7 @@ class RobustJSONExtractor:
         )
 
         suggestions.append(
-            "Check LLM configuration: Ensure SW_LLM_MODEL and SW_LLM_BASE_URL are "
+            "Check LLM configuration: Ensure LLM_MODEL and LLM_BASE_URL are "
             "correctly configured for a capable model."
         )
 
@@ -422,7 +422,7 @@ class RobustJSONExtractor:
                 )
 
         suggestions.append(
-            "Increase timeout: Set SW_LLM_TIMEOUT to a higher value (e.g., 300) "
+            "Increase timeout: Set LLM_TIMEOUT to a higher value (e.g., 300) "
             "if the model needs more time to generate complete responses."
         )
 

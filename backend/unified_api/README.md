@@ -105,7 +105,7 @@ python run_unified_api.py --workers 4 --log-level warning
 | `SLACK_WEBHOOK_URL` | (none) | Optional. Slack Incoming Webhook URL; used as fallback when not set via Integrations UI. When set, open questions and Personal Assistant replies can be sent to Slack if Slack integration is enabled. |
 | `UI_BASE_URL` | `http://localhost:4200` | Base URL of the Angular UI; used in Slack messages for "Answer in UI" links. |
 
-Team-specific environment variables (e.g., `OLLAMA_API_KEY`, `SW_LLM_*`, `PA_*`) are passed through to the mounted team APIs.
+Team-specific environment variables (e.g., `OLLAMA_API_KEY`, `LLM_*`, `PA_*`) are passed through to the mounted team APIs.
 
 ## CLI Options
 

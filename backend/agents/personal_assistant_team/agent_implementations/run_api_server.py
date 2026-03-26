@@ -41,8 +41,8 @@ def main():
     port = int(os.getenv("PA_PORT", "8015"))
 
     logger.info("Starting Personal Assistant API server on %s:%d", host, port)
-    logger.info("LLM Provider: %s", os.getenv("SW_LLM_PROVIDER", "ollama"))
-    logger.info("LLM Model: %s", os.getenv("SW_LLM_MODEL", "default"))
+    logger.info("LLM Provider: %s", os.getenv("LLM_PROVIDER", "ollama"))
+    logger.info("LLM Model: %s", os.getenv("LLM_MODEL", "default"))
     logger.info("UI available at http://%s:%d/", host if host != "0.0.0.0" else "localhost", port)
 
     from personal_assistant_team.api.main import app

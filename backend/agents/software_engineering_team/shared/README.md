@@ -40,15 +40,15 @@ The LLM client provides a unified interface for text and JSON generation with su
 
 | Environment Variable | Description | Default |
 |---------------------|-------------|---------|
-| `SW_LLM_PROVIDER` | `ollama` or `dummy` | `dummy` |
-| `SW_LLM_MODEL` | Model name | `qwen3.5:397b-cloud` |
-| `SW_LLM_BASE_URL` | Ollama API URL | `http://127.0.0.1:11434` |
-| `SW_LLM_TIMEOUT` | Request timeout (seconds) | 600 |
-| `SW_LLM_MAX_RETRIES` | Retry attempts | 4 |
-| `SW_LLM_MAX_CONCURRENCY` | Concurrent calls | 2 |
-| `SW_LLM_MAX_TOKENS` | Max output tokens | min(context, 32768) |
-| `SW_LLM_CONTEXT_SIZE` | Context window | Model-specific |
-| `SW_LLM_MODEL_<AGENT>` | Per-agent model override | — |
+| `LLM_PROVIDER` | `ollama` or `dummy` | `dummy` |
+| `LLM_MODEL` | Model name | `qwen3.5:397b-cloud` |
+| `LLM_BASE_URL` | Ollama API URL | `http://127.0.0.1:11434` |
+| `LLM_TIMEOUT` | Request timeout (seconds) | 600 |
+| `LLM_MAX_RETRIES` | Retry attempts | 4 |
+| `LLM_MAX_CONCURRENCY` | Concurrent calls | 2 |
+| `LLM_MAX_TOKENS` | Max output tokens | min(context, 32768) |
+| `LLM_CONTEXT_SIZE` | Context window | Model-specific |
+| `LLM_MODEL_<AGENT>` | Per-agent model override | — |
 
 ### Agent-Specific Models
 
@@ -91,7 +91,7 @@ result = llm.complete_json(
 ```python
 from shared.llm import get_llm_for_agent
 
-# Uses SW_LLM_MODEL_BACKEND or agent default
+# Uses LLM_MODEL_BACKEND or agent default
 llm = get_llm_for_agent("backend")
 ```
 

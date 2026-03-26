@@ -22,21 +22,21 @@ max_ctx = client.get_max_context_tokens()
 
 ## Config (environment variables)
 
-| Variable | Meaning | Backward compat |
-|----------|---------|-----------------|
-| `LLM_PROVIDER` | `dummy` or `ollama` | `SW_LLM_PROVIDER` |
-| `LLM_MODEL` | Model name | `SW_LLM_MODEL` |
-| `LLM_MODEL_<agent_key>` | Per-agent model override | `SW_LLM_MODEL_<agent_key>` |
-| `LLM_BASE_URL` | Ollama base URL (default `https://ollama.com`) | `SW_LLM_BASE_URL` |
-| `LLM_TIMEOUT` | Request timeout in seconds (default 600; raise for slow cloud models / long prompts) | `SW_LLM_TIMEOUT` |
-| `LLM_CONTEXT_SIZE` | Override context size | `SW_LLM_CONTEXT_SIZE` |
-| `LLM_MAX_TOKENS` | Max output tokens | `SW_LLM_MAX_TOKENS` |
-| `LLM_MAX_RETRIES` | Retries for transient errors | `SW_LLM_MAX_RETRIES` |
-| `LLM_BACKOFF_BASE` | Backoff base (seconds) | `SW_LLM_BACKOFF_BASE` |
-| `LLM_BACKOFF_MAX` | Max backoff (seconds) | `SW_LLM_BACKOFF_MAX_SECONDS` |
-| `LLM_MAX_CONCURRENCY` | Max concurrent Ollama calls | `SW_LLM_MAX_CONCURRENCY` |
-| `LLM_ENABLE_THINKING` | Enable thinking for qwen3.5 | `SW_LLM_ENABLE_THINKING` |
-| `OLLAMA_API_KEY` | **Required for Ollama Cloud.** API key from https://ollama.com/settings/keys. All LLM requests use this when set. | `LLM_OLLAMA_API_KEY`, `SW_LLM_OLLAMA_API_KEY` (overrides) |
+| Variable | Meaning |
+|----------|---------|
+| `LLM_PROVIDER` | `dummy` or `ollama` |
+| `LLM_MODEL` | Model name |
+| `LLM_MODEL_<agent_key>` | Per-agent model override |
+| `LLM_BASE_URL` | Ollama base URL (default `https://ollama.com`) |
+| `LLM_TIMEOUT` | Request timeout in seconds (default 600; raise for slow cloud models / long prompts) |
+| `LLM_CONTEXT_SIZE` | Override context size |
+| `LLM_MAX_TOKENS` | Max output tokens |
+| `LLM_MAX_RETRIES` | Retries for transient errors |
+| `LLM_BACKOFF_BASE` | Backoff base (seconds) |
+| `LLM_BACKOFF_MAX` | Max backoff (seconds) |
+| `LLM_MAX_CONCURRENCY` | Max concurrent Ollama calls |
+| `LLM_ENABLE_THINKING` | Enable thinking for qwen3.5 |
+| `OLLAMA_API_KEY` | **Required for Ollama Cloud.** API key from https://ollama.com/settings/keys. All LLM requests use this when set. |
 
 ### Troubleshooting
 
@@ -48,13 +48,13 @@ max_ctx = client.get_max_context_tokens()
 
 **500 Internal Server Error from Ollama Cloud**
 
-- **Thinking mode:** With `qwen3.5:397b-cloud`, the client may send `think: true`, which some endpoints reject. Set `LLM_ENABLE_THINKING=false` (or `SW_LLM_ENABLE_THINKING=false`) and retry.
+- **Thinking mode:** With `qwen3.5:397b-cloud`, the client may send `think: true`, which some endpoints reject. Set `LLM_ENABLE_THINKING=false` and retry.
 - **Quota / capacity:** Check your Ollama Cloud account and https://status.ollama.com (or Ollama’s status page) for outages or rate limits.
 - **Model / size:** Try a smaller model (e.g. `LLM_MODEL=qwen3.5:8b-cloud`) or reduce prompt size to rule out server-side overload.
 
 ### Docker and name resolution
 
-If the app runs inside Docker, the default `LLM_BASE_URL` (`https://ollama.com`) may be unreachable (e.g. "Temporary failure in name resolution") if the container has no outbound DNS or network. Set `LLM_BASE_URL` (or `SW_LLM_BASE_URL`) to a reachable endpoint:
+If the app runs inside Docker, the default `LLM_BASE_URL` (`https://ollama.com`) may be unreachable (e.g. "Temporary failure in name resolution") if the container has no outbound DNS or network. Set `LLM_BASE_URL` to a reachable endpoint:
 
 - **Local Ollama on the host:** `http://host.docker.internal:11434` (Mac/Windows Docker Desktop) or the host’s LAN IP and port (e.g. `http://192.168.1.2:11434`).
 - **Ollama in another container:** Use the Docker service name and port (e.g. `http://ollama:11434`) and ensure both containers share a network.
@@ -62,7 +62,6 @@ If the app runs inside Docker, the default `LLM_BASE_URL` (`https://ollama.com`)
 
 **Legacy mapping (same behavior via central config):**
 
-- `SW_LLM_*` → read when `LLM_*` unset (software engineering / shared)
 - `BLOG_LLM_*` → use `LLM_*` or `LLM_MODEL_blog`
 - `SOC2_LLM_*` → use `LLM_*` or `LLM_MODEL_soc2`
 

@@ -174,9 +174,9 @@ curl "http://127.0.0.1:8015/users/user123/tasks/lists"
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SW_LLM_PROVIDER` | LLM provider (ollama, dummy) | ollama |
-| `SW_LLM_MODEL` | LLM model name | llama3.2 |
-| `SW_LLM_BASE_URL` | Ollama base URL | http://127.0.0.1:11434 |
+| `LLM_PROVIDER` | LLM provider (ollama, dummy) | ollama |
+| `LLM_MODEL` | LLM model name | llama3.2 |
+| `LLM_BASE_URL` | Ollama base URL | http://127.0.0.1:11434 |
 | `PA_HOST` | API server host | 0.0.0.0 |
 | `PA_PORT` | API server port | 8015 |
 | `PA_CREDENTIAL_KEY` | Fernet encryption key | (required) |

@@ -34,7 +34,7 @@ from software_engineering_team.shared.models import ProductRequirements, TaskTyp
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# Uses get_llm_client() which reads SW_LLM_PROVIDER, SW_LLM_MODEL (default: qwen3.5:397b-cloud)
+# Uses get_llm_client() which reads LLM_PROVIDER, LLM_MODEL (default: qwen3.5:397b-cloud)
 LLM = get_client()
 
 # Example product requirements

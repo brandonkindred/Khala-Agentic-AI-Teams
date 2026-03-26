@@ -86,21 +86,9 @@ def _parse_retry_config() -> tuple[int, float, float]:
 
     Backoff is exponential: wait initial * 2^attempt after each failure (first retry ~initial seconds).
     """
-    raw_retries = (
-        os.environ.get(llm_config.ENV_LLM_MAX_RETRIES)
-        or os.environ.get(llm_config.ENV_LLM_MAX_RETRIES_SW)
-        or "6"
-    )
-    raw_initial = (
-        os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE)
-        or os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE_SW)
-        or "2"
-    )
-    raw_max = (
-        os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX)
-        or os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX_SW)
-        or "120"
-    )
+    raw_retries = os.environ.get(llm_config.ENV_LLM_MAX_RETRIES) or "6"
+    raw_initial = os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE) or "2"
+    raw_max = os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX) or "120"
     try:
         max_retries = max(0, int(raw_retries))
     except ValueError:
@@ -134,11 +122,7 @@ def _get_ollama_semaphore() -> threading.BoundedSemaphore:
     global _ollama_semaphore
     with _semaphore_lock:
         if _ollama_semaphore is None:
-            raw = (
-                os.environ.get(llm_config.ENV_LLM_MAX_CONCURRENCY)
-                or os.environ.get(llm_config.ENV_LLM_MAX_CONCURRENCY_SW)
-                or "4"
-            )
+            raw = os.environ.get(llm_config.ENV_LLM_MAX_CONCURRENCY) or "4"
             try:
                 limit = max(1, int(raw))
             except ValueError:
@@ -167,7 +151,6 @@ class OllamaLLMClient(LLMClient):
         key = (
             (os.environ.get("OLLAMA_API_KEY") or "")
             or (os.environ.get(llm_config.ENV_LLM_OLLAMA_API_KEY) or "")
-            or (os.environ.get(llm_config.ENV_LLM_OLLAMA_API_KEY_SW) or "")
         ).strip()
         if not key:
             return {}
@@ -477,11 +460,7 @@ class OllamaLLMClient(LLMClient):
 
     def _should_enable_thinking(self) -> bool:
         """Global default: enable thinking for all models; disable via LLM_ENABLE_THINKING=false."""
-        env_val = (
-            os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING)
-            or os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING_SW)
-            or ""
-        ).lower()
+        env_val = (os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING) or "").lower()
         return env_val != "false"
 
     def _resolve_think(self, think: Optional[bool]) -> bool:
@@ -744,7 +723,7 @@ class OllamaLLMClient(LLMClient):
                                     )
                                 if status == 401:
                                     auth_hint = (
-                                        " Set OLLAMA_API_KEY (or LLM_OLLAMA_API_KEY / SW_LLM_OLLAMA_API_KEY) for Ollama Cloud."
+                                        " Set OLLAMA_API_KEY (or LLM_OLLAMA_API_KEY) for Ollama Cloud."
                                         if not headers
                                         else " Check that the key is valid and not expired."
                                     )
@@ -846,7 +825,7 @@ class OllamaLLMClient(LLMClient):
                 timeout_hint = ""
                 if isinstance(e, httpx.ReadTimeout):
                     timeout_hint = (
-                        f" Per-request timeout is {int(self.timeout)}s; increase LLM_TIMEOUT or SW_LLM_TIMEOUT "
+                        f" Per-request timeout is {int(self.timeout)}s; increase LLM_TIMEOUT "
                         "(e.g. 900–1200) for slow cloud models or very long prompts."
                     )
                 logger.error(
@@ -891,9 +870,7 @@ class OllamaLLMClient(LLMClient):
         )
         max_tokens = kwargs.pop("max_tokens", None)
         if max_tokens is None:
-            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS) or os.environ.get(
-                llm_config.ENV_LLM_MAX_TOKENS_SW
-            )
+            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
             if env_max:
                 try:
                     max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)

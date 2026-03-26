@@ -32,15 +32,15 @@ curl http://localhost:18005/health
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SW_LLM_PROVIDER` | `ollama` | LLM provider (ollama or dummy) |
-| `SW_LLM_BASE_URL` | `http://host.docker.internal:11434` | Ollama API URL. Use this to reach Ollama on the host. |
-| `SW_LLM_MODEL` | `qwen3.5:397b-cloud` | Default model for agents |
-| `SW_LLM_MODEL_<AGENT_KEY>` | - | Per-agent model override (e.g. `SW_LLM_MODEL_BACKEND_EXPERT`) |
+| `LLM_PROVIDER` | `ollama` | LLM provider (ollama or dummy) |
+| `LLM_BASE_URL` | `http://host.docker.internal:11434` | Ollama API URL. Use this to reach Ollama on the host. |
+| `LLM_MODEL` | `qwen3.5:397b-cloud` | Default model for agents |
+| `LLM_MODEL_<AGENT_KEY>` | - | Per-agent model override (e.g. `LLM_MODEL_BACKEND_EXPERT`) |
 | `PYTHONUNBUFFERED` | `1` | Ensures Python output is not buffered |
 
-To override the default model, create a `.env` file with `SW_LLM_MODEL=your-model` and add it to the service, or run:
+To override the default model, create a `.env` file with `LLM_MODEL=your-model` and add it to the service, or run:
 ```bash
-SW_LLM_MODEL=llama3.2:latest docker-compose up -d
+LLM_MODEL=llama3.2:latest docker-compose up -d
 ```
 
 ## Port Mapping
@@ -151,7 +151,7 @@ docker exec strands-agents supervisorctl status
 **Solutions:**
 1. Ensure Ollama is running on the host: `curl http://localhost:11434/api/tags`
 2. On Linux, `host.docker.internal` requires `extra_hosts: host.docker.internal:host-gateway` (included in docker-compose.yml)
-3. If using a custom Ollama URL, set `SW_LLM_BASE_URL` (e.g. `http://192.168.1.100:11434`)
+3. If using a custom Ollama URL, set `LLM_BASE_URL` (e.g. `http://192.168.1.100:11434`)
 
 ### Docker Build Failures
 

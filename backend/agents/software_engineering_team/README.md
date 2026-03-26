@@ -171,20 +171,20 @@ By default, the script uses `DummyLLMClient` for testing without an LLM. To use 
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SW_LLM_PROVIDER` | `dummy` or `ollama` | `dummy` |
-| `SW_LLM_MODEL` | Model name for Ollama | `qwen3.5:397b-cloud` |
-| `SW_LLM_BASE_URL` | Ollama API base URL | `http://127.0.0.1:11434` |
-| `SW_LLM_TIMEOUT` | Timeout in seconds | `1800` |
-| `SW_LLM_MAX_RETRIES` | Max retries for 429/5xx errors | `4` |
-| `SW_LLM_BACKOFF_BASE` | Base seconds for exponential backoff | `2` |
-| `SW_LLM_BACKOFF_MAX_SECONDS` | Max backoff seconds | `60` |
-| `SW_LLM_MAX_CONCURRENCY` | Max concurrent LLM calls (default 4; set 4–6 for faster runs with parallel planning and backend+frontend workers; lower to 2 if GPU/memory limited) | `4` |
-| `SW_LLM_MAX_TOKENS` | Max tokens to generate; if unset, uses min(context size, 32768) so APIs that cap output (e.g. 32K) work | 32768 (capped) |
-| `SW_LLM_CONTEXT_SIZE` | Context window in tokens; if unset, uses known model table or Ollama /api/show. Effective context = max minus largest agent reservation. qwen3.5:397b-cloud: 256K max (242K effective). | (model-dependent) |
-| `SW_LLM_ENABLE_THINKING` | Enable thinking mode for qwen3.5 models; improves reasoning quality but increases latency and token usage. Set to `false` to disable. | `true` (for qwen3.5) |
+| `LLM_PROVIDER` | `dummy` or `ollama` | `dummy` |
+| `LLM_MODEL` | Model name for Ollama | `qwen3.5:397b-cloud` |
+| `LLM_BASE_URL` | Ollama API base URL | `http://127.0.0.1:11434` |
+| `LLM_TIMEOUT` | Timeout in seconds | `1800` |
+| `LLM_MAX_RETRIES` | Max retries for 429/5xx errors | `4` |
+| `LLM_BACKOFF_BASE` | Base seconds for exponential backoff | `2` |
+| `LLM_BACKOFF_MAX_SECONDS` | Max backoff seconds | `60` |
+| `LLM_MAX_CONCURRENCY` | Max concurrent LLM calls (default 4; set 4–6 for faster runs with parallel planning and backend+frontend workers; lower to 2 if GPU/memory limited) | `4` |
+| `LLM_MAX_TOKENS` | Max tokens to generate; if unset, uses min(context size, 32768) so APIs that cap output (e.g. 32K) work | 32768 (capped) |
+| `LLM_CONTEXT_SIZE` | Context window in tokens; if unset, uses known model table or Ollama /api/show. Effective context = max minus largest agent reservation. qwen3.5:397b-cloud: 256K max (242K effective). | (model-dependent) |
+| `LLM_ENABLE_THINKING` | Enable thinking mode for qwen3.5 models; improves reasoning quality but increases latency and token usage. Set to `false` to disable. | `true` (for qwen3.5) |
 | `SW_ENABLE_PLANNING_CACHE` | Reuse cached TaskAssignment when spec and architecture unchanged; set to `0` or `false` to disable | `1` (enabled) |
 
-**Per-agent model configuration:** Each agent can use a different model. Set `SW_LLM_MODEL_<agent_key>` to override (e.g. `SW_LLM_MODEL_backend`, `SW_LLM_MODEL_tech_lead`). Model resolution order: per-agent env var → `SW_LLM_MODEL` (global fallback) → recommended default for that agent → `qwen3.5:397b-cloud`.
+**Per-agent model configuration:** Each agent can use a different model. Set `LLM_MODEL_<agent_key>` to override (e.g. `LLM_MODEL_backend`, `LLM_MODEL_tech_lead`). Model resolution order: per-agent env var → `LLM_MODEL` (global fallback) → recommended default for that agent → `qwen3.5:397b-cloud`.
 
 Recommended defaults (all :cloud versions) when no overrides are set:
 
@@ -192,16 +192,16 @@ Recommended defaults (all :cloud versions) when no overrides are set:
 |-------|--------|
 | qwen3.5:397b-cloud | All agents (backend, frontend, code_review, repair, devops, dbc_comments, tech_lead, architecture, spec_intake, spec_clarification, product_analysis, project_planning, integration, api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, acceptance_verifier, documentation, qa, security, accessibility) |
 
-Example: `export SW_LLM_MODEL_tech_lead=qwen3.5:cloud` overrides only the Tech Lead; other agents use their defaults or `SW_LLM_MODEL`.
+Example: `export LLM_MODEL_tech_lead=qwen3.5:cloud` overrides only the Tech Lead; other agents use their defaults or `LLM_MODEL`.
 
 Example with Ollama:
 ```bash
-export SW_LLM_PROVIDER=ollama
-export SW_LLM_MODEL=qwen3.5:397b-cloud
+export LLM_PROVIDER=ollama
+export LLM_MODEL=qwen3.5:397b-cloud
 python -m agent_implementations.run_team
 ```
 
-Ensure Ollama is running with the model (e.g. `ollama run qwen3.5:397b-cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `SW_LLM_MODEL` to a model your API supports (e.g. `export SW_LLM_MODEL=llama3.2` for Ollama, or your provider's model id).
+Ensure Ollama is running with the model (e.g. `ollama run qwen3.5:397b-cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `LLM_MODEL` to a model your API supports (e.g. `export LLM_MODEL=llama3.2` for Ollama, or your provider's model id).
 
 **Iteration caps (environment variables):** Lowering these can speed runs but may reduce refinement.
 
@@ -232,7 +232,7 @@ When `SW_ENABLE_PLANNING_CACHE=1` (default), the first successful planning run s
 ### Faster runs summary
 
 - **Parallel planning:** Domain planning agents (API Contract, Data Arch, UI/UX, Infra, etc.) run in dependency tiers with internal parallelism (Tier 1 → Tier 2 → Tier 3).
-- **LLM concurrency:** Default `SW_LLM_MAX_CONCURRENCY=4`; set 4–6 for faster runs when GPU/memory allows.
+- **LLM concurrency:** Default `LLM_MAX_CONCURRENCY=4`; set 4–6 for faster runs when GPU/memory allows.
 - **Skip planning:** `SW_SKIP_PLANNING_AGENTS` or `SW_MINIMAL_PLANNING=1` for time-sensitive runs.
 - **Iteration caps:** Lower `SW_MAX_*` env vars to reduce refinement rounds (may reduce quality).
 

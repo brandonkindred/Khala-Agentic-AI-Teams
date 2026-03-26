@@ -299,12 +299,12 @@ class LLMClient(_BaseLLMClient):
                 "Try reducing context or being more concise."
             )
         suggestions.append("Use a larger model with higher token limits.")
-        suggestions.append("Check LLM configuration: SW_LLM_MODEL and SW_LLM_BASE_URL.")
+        suggestions.append("Check LLM configuration: LLM_MODEL and LLM_BASE_URL.")
         if raw_responses and (
             "error" in raw_responses[-1].lower() or "cannot" in raw_responses[-1].lower()
         ):
             suggestions.append("Review LLM response: The model may be refusing the request.")
-        suggestions.append("Increase timeout: Set SW_LLM_TIMEOUT to a higher value.")
+        suggestions.append("Increase timeout: Set LLM_TIMEOUT to a higher value.")
         return suggestions
 
 

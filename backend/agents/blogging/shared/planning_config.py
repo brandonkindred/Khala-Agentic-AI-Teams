@@ -18,7 +18,7 @@ def planning_model_override() -> Optional[str]:
     """
     When set, the planning phase uses this Ollama model name instead of the pipeline default.
 
-    Same base URL and auth as `SW_LLM_*` / `OLLAMA_API_KEY`. Ignored for non-Ollama test clients.
+    Same base URL and auth as `LLM_*` / `OLLAMA_API_KEY`. Ignored for non-Ollama test clients.
     """
     raw = (os.environ.get("BLOG_PLANNING_MODEL") or "").strip()
     return raw or None

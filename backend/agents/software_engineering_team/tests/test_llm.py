@@ -31,7 +31,7 @@ def test_ollama_429_raises_rate_limit_error_after_retries() -> None:
         mock_client.stream.return_value.__enter__.return_value = mock_response
         mock_client_cls.return_value.__enter__.return_value = mock_client
 
-        with patch.dict(os.environ, {"SW_LLM_MAX_RETRIES": "1"}, clear=False):
+        with patch.dict(os.environ, {"LLM_MAX_RETRIES": "1"}, clear=False):
             with pytest.raises(LLMRateLimitError) as exc_info:
                 client.complete_json("test prompt")
 
@@ -55,7 +55,7 @@ def test_ollama_500_raises_temporary_error_after_retries() -> None:
         mock_client.stream.return_value.__enter__.return_value = mock_response
         mock_client_cls.return_value.__enter__.return_value = mock_client
 
-        with patch.dict(os.environ, {"SW_LLM_MAX_RETRIES": "1"}, clear=False):
+        with patch.dict(os.environ, {"LLM_MAX_RETRIES": "1"}, clear=False):
             with pytest.raises(LLMTemporaryError) as exc_info:
                 client.complete_json("test prompt")
 
@@ -130,7 +130,7 @@ def test_ollama_connection_error_raises_temporary_error_after_retries() -> None:
         mock_client.stream.side_effect = httpx.ConnectError("Connection refused")
         mock_client_cls.return_value.__enter__.return_value = mock_client
 
-        with patch.dict(os.environ, {"SW_LLM_MAX_RETRIES": "1"}, clear=False):
+        with patch.dict(os.environ, {"LLM_MAX_RETRIES": "1"}, clear=False):
             with pytest.raises(LLMTemporaryError) as exc_info:
                 client.complete_json("test prompt")
 
@@ -249,7 +249,7 @@ def test_get_llm_for_agent_per_agent_env_overrides() -> None:
 
 
 def test_get_llm_for_agent_global_fallback() -> None:
-    """When no per-agent env, SW_LLM_MODEL is used."""
+    """When no per-agent env, LLM_MODEL is used."""
     _clear_client_cache_for_testing()
     with patch.dict(
         os.environ,

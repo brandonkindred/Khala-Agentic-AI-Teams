@@ -73,7 +73,7 @@ When `work_dir` is provided, the pipeline persists all outputs as versioned arti
 
 **API**: `POST /full-pipeline` runs the full pipeline with gates. `POST /research-and-review` runs **research + planning** (same planning step as the full pipeline) and accepts optional `work_dir` or `run_id` to persist artifacts.
 
-**Env (planning):** `BLOG_PLANNING_MAX_ITERATIONS` (default 5), `BLOG_PLANNING_MAX_PARSE_RETRIES` (default 3), optional `BLOG_PLANNING_MODEL` (Ollama model name for planning only; same API base as `SW_LLM_*`).
+**Env (planning):** `BLOG_PLANNING_MAX_ITERATIONS` (default 5), `BLOG_PLANNING_MAX_PARSE_RETRIES` (default 3), optional `BLOG_PLANNING_MODEL` (Ollama model name for planning only; same API base as `LLM_*`).
 
 ### Planning definition of done (refine loop)
 

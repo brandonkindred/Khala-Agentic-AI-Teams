@@ -53,8 +53,8 @@ This directory defines a **Docker Compose stack** that runs:
 
 Optional (defaults in compose / `docker/.env.example`; copy to `docker/.env` and set as needed):
 
-- **SW_LLM_BASE_URL** – default is `https://ollama.com` (Ollama Cloud). Set to `http://ollama:11434` to use the local Ollama container instead.
-- **SW_LLM_MODEL** – default `qwen3.5:397b-cloud`
+- **LLM_BASE_URL** – default is `https://ollama.com` (Ollama Cloud). Set to `http://ollama:11434` to use the local Ollama container instead.
+- **LLM_MODEL** – default `qwen3.5:397b-cloud`
 - **POSTGRES_USER**, **POSTGRES_PASSWORD**, **POSTGRES_DB** – used for the default Postgres superuser; init scripts create `temporal` and `strands` DBs and users.
 
 Personal Assistant credential encryption uses a key generated at **Docker image build time** (stored in the image), so credentials persist across container restarts without setting any env var.

@@ -22,15 +22,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ENV_LLM_ENABLE_THINKING = "SW_LLM_ENABLE_THINKING"
-ENV_LLM_OLLAMA_API_KEY = "SW_LLM_OLLAMA_API_KEY"
-ENV_LLM_MAX_TOKENS = "SW_LLM_MAX_TOKENS"
+ENV_LLM_ENABLE_THINKING = "LLM_ENABLE_THINKING"
+ENV_LLM_OLLAMA_API_KEY = "LLM_OLLAMA_API_KEY"
+ENV_LLM_MAX_TOKENS = "LLM_MAX_TOKENS"
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
 
 def _ollama_auth_headers() -> Dict[str, str]:
     """Return Authorization Bearer header for Ollama Cloud when API key is set."""
-    key = os.environ.get(ENV_LLM_OLLAMA_API_KEY) or os.environ.get("OLLAMA_API_KEY")
+    key = os.environ.get("OLLAMA_API_KEY") or os.environ.get(ENV_LLM_OLLAMA_API_KEY)
     if not key:
         return {}
     return {"Authorization": f"Bearer {key}"}
@@ -107,7 +107,7 @@ class ResponseContinuator:
             timeout: Request timeout in seconds.
             max_cycles: Maximum number of continuation cycles.
             num_predict: Max tokens to generate per continuation turn. If None, uses
-                SW_LLM_MAX_TOKENS env or DEFAULT_MAX_OUTPUT_TOKENS (32768) to match main LLM client.
+                LLM_MAX_TOKENS env or DEFAULT_MAX_OUTPUT_TOKENS (32768) to match main LLM client.
         """
         self.base_url = base_url.rstrip("/")
         self.model = model

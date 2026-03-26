@@ -11,7 +11,6 @@ from llm_service.interface import LLMPermanentError, LLMRateLimitError, LLMTempo
 
 def test_ollama_get_max_context_tokens_known_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_CONTEXT_SIZE", raising=False)
-    monkeypatch.delenv("SW_LLM_CONTEXT_SIZE", raising=False)
     client = OllamaLLMClient(
         model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5
     )

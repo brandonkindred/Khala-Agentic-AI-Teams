@@ -50,7 +50,7 @@ Build a web-based todo app where users can:
 
 ### Suggested Fixes
 
-- **Review token limits**: Check `SW_LLM_MAX_TOKENS` and model context size.
+- **Review token limits**: Check `LLM_MAX_TOKENS` and model context size.
 - **Reduce prompt complexity**: Simplify the original prompt or provide more focused instructions.
 - **Check for infinite loops**: Ensure the LLM isn't generating repetitive content that never terminates naturally.
 

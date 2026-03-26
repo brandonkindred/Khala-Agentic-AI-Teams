@@ -1,8 +1,7 @@
 """
 Single source of configuration for the LLM service.
 
-Environment variables use LLM_* prefix with backward compatibility for SW_LLM_*
-(and optionally BLOG_LLM_*, SOC2_LLM_* for migration). Known model context and
+Environment variables use LLM_* prefix. Known model context and
 per-agent default models live here.
 """
 
@@ -15,41 +14,21 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Environment variable names (prefer LLM_*, fallback to SW_LLM_*)
+# Environment variable names (LLM_*)
 # ---------------------------------------------------------------------------
 
-
-def _env(key_llm: str, key_sw: str, default: str) -> str:
-    """Return env value: LLM_* if set, else SW_LLM_*, else default."""
-    v = os.environ.get(key_llm) or os.environ.get(key_sw)
-    return (v or default).strip()
-
-
-# Primary (LLM_*) and backward-compat (SW_LLM_*)
 ENV_LLM_PROVIDER = "LLM_PROVIDER"
-ENV_LLM_PROVIDER_SW = "SW_LLM_PROVIDER"
 ENV_LLM_MODEL = "LLM_MODEL"
-ENV_LLM_MODEL_SW = "SW_LLM_MODEL"
 ENV_LLM_BASE_URL = "LLM_BASE_URL"
-ENV_LLM_BASE_URL_SW = "SW_LLM_BASE_URL"
 ENV_LLM_TIMEOUT = "LLM_TIMEOUT"
-ENV_LLM_TIMEOUT_SW = "SW_LLM_TIMEOUT"
 ENV_LLM_CONTEXT_SIZE = "LLM_CONTEXT_SIZE"
-ENV_LLM_CONTEXT_SIZE_SW = "SW_LLM_CONTEXT_SIZE"
 ENV_LLM_MAX_TOKENS = "LLM_MAX_TOKENS"
-ENV_LLM_MAX_TOKENS_SW = "SW_LLM_MAX_TOKENS"
 ENV_LLM_MAX_RETRIES = "LLM_MAX_RETRIES"
-ENV_LLM_MAX_RETRIES_SW = "SW_LLM_MAX_RETRIES"
 ENV_LLM_BACKOFF_BASE = "LLM_BACKOFF_BASE"
-ENV_LLM_BACKOFF_BASE_SW = "SW_LLM_BACKOFF_BASE"
 ENV_LLM_BACKOFF_MAX = "LLM_BACKOFF_MAX"
-ENV_LLM_BACKOFF_MAX_SW = "SW_LLM_BACKOFF_MAX_SECONDS"
 ENV_LLM_MAX_CONCURRENCY = "LLM_MAX_CONCURRENCY"
-ENV_LLM_MAX_CONCURRENCY_SW = "SW_LLM_MAX_CONCURRENCY"
 ENV_LLM_ENABLE_THINKING = "LLM_ENABLE_THINKING"
-ENV_LLM_ENABLE_THINKING_SW = "SW_LLM_ENABLE_THINKING"
 ENV_LLM_OLLAMA_API_KEY = "LLM_OLLAMA_API_KEY"
-ENV_LLM_OLLAMA_API_KEY_SW = "SW_LLM_OLLAMA_API_KEY"
 
 # Default cap for max_tokens (many APIs limit output to 32K even when context is 256K)
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
@@ -115,7 +94,7 @@ DEFAULT_FALLBACK_MODEL = "qwen3.5:397b-cloud"
 
 def resolve_provider() -> str:
     """Return effective LLM provider: 'dummy' or 'ollama' (default)."""
-    return _env(ENV_LLM_PROVIDER, ENV_LLM_PROVIDER_SW, "ollama").lower().strip()
+    return (os.environ.get(ENV_LLM_PROVIDER) or "ollama").lower().strip()
 
 
 def resolve_model(agent_key: Optional[str] = None) -> str:
@@ -123,12 +102,10 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
     Resolve model name: LLM_MODEL_<agent_key>, then LLM_MODEL, then AGENT_DEFAULT_MODELS[agent_key], then fallback.
     """
     if agent_key:
-        per_agent = os.environ.get(f"LLM_MODEL_{agent_key}") or os.environ.get(
-            f"SW_LLM_MODEL_{agent_key}"
-        )
+        per_agent = os.environ.get(f"LLM_MODEL_{agent_key}")
         if per_agent:
             return per_agent.strip()
-    global_model = _env(ENV_LLM_MODEL, ENV_LLM_MODEL_SW, "")
+    global_model = (os.environ.get(ENV_LLM_MODEL) or "").strip()
     if global_model:
         return global_model
     if agent_key and agent_key in AGENT_DEFAULT_MODELS:
@@ -138,16 +115,16 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
 
 def resolve_base_url() -> str:
     """Return Ollama base URL (default https://ollama.com for Ollama Cloud)."""
-    return _env(ENV_LLM_BASE_URL, ENV_LLM_BASE_URL_SW, "https://ollama.com").rstrip("/")
+    return (os.environ.get(ENV_LLM_BASE_URL) or "https://ollama.com").strip().rstrip("/")
 
 
 def resolve_timeout(agent_key: Optional[str] = None) -> float:
     """Return timeout in seconds (default 600).
 
     Large cloud models (e.g. long copy-edit prompts) often exceed 300s per request; override with
-    LLM_TIMEOUT / SW_LLM_TIMEOUT if you need higher.
+    LLM_TIMEOUT if you need higher.
     """
-    raw = os.environ.get(ENV_LLM_TIMEOUT) or os.environ.get(ENV_LLM_TIMEOUT_SW) or "600"
+    raw = os.environ.get(ENV_LLM_TIMEOUT) or "600"
     try:
         return float(raw)
     except ValueError:
@@ -159,7 +136,7 @@ def resolve_context_size_for_model(model: str) -> Optional[int]:
     Resolve context size (tokens) for a model: env LLM_CONTEXT_SIZE (global override),
     then KNOWN_MODEL_CONTEXT[model], else None (caller may use /api/show or default).
     """
-    raw = os.environ.get(ENV_LLM_CONTEXT_SIZE) or os.environ.get(ENV_LLM_CONTEXT_SIZE_SW)
+    raw = os.environ.get(ENV_LLM_CONTEXT_SIZE)
     if raw:
         try:
             return max(2048, int(raw))

@@ -112,7 +112,7 @@ All teams mount under `/api/{team-slug}`. Team configs are defined in `backend/u
 - **Ollama** (local inference or Cloud API via `OLLAMA_API_KEY`) — including thinking mode
 - **Claude** (via httpx direct calls)
 
-Environment variables for LLM: `SW_LLM_PROVIDER`, `SW_LLM_BASE_URL`, `SW_LLM_MODEL`
+Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 
 ## Code Style
 
@@ -127,9 +127,9 @@ Environment variables for LLM: `SW_LLM_PROVIDER`, `SW_LLM_BASE_URL`, `SW_LLM_MOD
 | Variable | Purpose |
 |---|---|
 | `OLLAMA_API_KEY` | Required for Ollama Cloud API |
-| `SW_LLM_PROVIDER` | LLM provider selection |
-| `SW_LLM_BASE_URL` | LLM server URL |
-| `SW_LLM_MODEL` | Model name |
+| `LLM_PROVIDER` | LLM provider selection |
+| `LLM_BASE_URL` | LLM server URL |
+| `LLM_MODEL` | Model name |
 | `TEMPORAL_ADDRESS` | Enables Temporal mode when set |
 | `TEMPORAL_NAMESPACE` | Temporal namespace |
 | `TEMPORAL_TASK_QUEUE` | Temporal task queue name |
@@ -139,7 +139,7 @@ Environment variables for LLM: `SW_LLM_PROVIDER`, `SW_LLM_BASE_URL`, `SW_LLM_MOD
 | `MEDIUM_GOOGLE_REDIRECT_URI` | Optional; fixed OAuth redirect for Medium’s Google identity link (`…/api/integrations/medium/oauth/google/callback`) when the API is behind a proxy |
 | `BLOG_PLANNING_MAX_ITERATIONS` | Blog planning refine loop cap (default 5) |
 | `BLOG_PLANNING_MAX_PARSE_RETRIES` | JSON parse/repair attempts per planning LLM call (default 3) |
-| `BLOG_PLANNING_MODEL` | Optional Ollama model name for **planning only** (same base URL as `SW_LLM_*`) |
+| `BLOG_PLANNING_MODEL` | Optional Ollama model name for **planning only** (same base URL as `LLM_*`) |
 
 **Blogging pipeline:** `research → planning (ContentPlan) → draft → gates`; `POST /research-and-review` runs research + the same planning step. See `backend/agents/blogging/README.md` and repo `CHANGELOG.md`.
 

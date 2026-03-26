@@ -53,7 +53,7 @@ jobs:
       run:
         working-directory: backend/agents
     env:
-      SW_LLM_PROVIDER: dummy
+      LLM_PROVIDER: dummy
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

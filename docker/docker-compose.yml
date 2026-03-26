@@ -114,9 +114,9 @@ services:
       temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
-      SW_LLM_PROVIDER: ${SW_LLM_PROVIDER:-ollama}
-      SW_LLM_BASE_URL: ${SW_LLM_BASE_URL:-https://ollama.com}
-      SW_LLM_MODEL: ${SW_LLM_MODEL:-qwen3.5:397b-cloud}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
+      LLM_MODEL: ${LLM_MODEL:-qwen3.5:397b-cloud}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       PYTHONUNBUFFERED: "1"
       POSTGRES_HOST: postgres
@@ -156,9 +156,9 @@ services:
       temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment: &team-env-base
-      SW_LLM_PROVIDER: ${SW_LLM_PROVIDER:-ollama}
-      SW_LLM_BASE_URL: ${SW_LLM_BASE_URL:-https://ollama.com}
-      SW_LLM_MODEL: ${SW_LLM_MODEL:-qwen3.5:397b-cloud}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
+      LLM_MODEL: ${LLM_MODEL:-qwen3.5:397b-cloud}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       PYTHONUNBUFFERED: "1"
       POSTGRES_HOST: postgres
@@ -651,9 +651,9 @@ services:
     cpus: "8"
     mem_limit: 2g
     environment:
-      SW_LLM_PROVIDER: ${SW_LLM_PROVIDER:-ollama}
-      SW_LLM_BASE_URL: ${SW_LLM_BASE_URL:-https://ollama.com}
-      SW_LLM_MODEL: ${SW_LLM_MODEL:-qwen3.5:397b-cloud}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
+      LLM_MODEL: ${LLM_MODEL:-qwen3.5:397b-cloud}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       PYTHONUNBUFFERED: "1"
       POSTGRES_HOST: postgres

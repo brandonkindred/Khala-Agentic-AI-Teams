@@ -93,9 +93,9 @@ Create a `.env` file in `agents/` (or export in your shell) for local developmen
 OLLAMA_API_KEY=your_ollama_key
 
 # Software Engineering (for real LLM runs)
-SW_LLM_PROVIDER=ollama
-SW_LLM_MODEL=qwen3.5:397b-cloud
-SW_LLM_BASE_URL=http://127.0.0.1:11434
+LLM_PROVIDER=ollama
+LLM_MODEL=qwen3.5:397b-cloud
+LLM_BASE_URL=http://127.0.0.1:11434
 
 # SOC2 (optional)
 SOC2_LLM_PROVIDER=ollama

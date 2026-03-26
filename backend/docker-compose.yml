@@ -12,9 +12,9 @@ services:
       - "8080:8080"
     environment:
       PYTHONUNBUFFERED: "1"
-      SW_LLM_PROVIDER: ${SW_LLM_PROVIDER:-ollama}
-      SW_LLM_BASE_URL: ${SW_LLM_BASE_URL:-https://ollama.com}
-      SW_LLM_MODEL: ${SW_LLM_MODEL:-qwen3.5:397b-cloud}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
+      LLM_MODEL: ${LLM_MODEL:-qwen3.5:397b-cloud}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
