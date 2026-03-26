@@ -3,22 +3,34 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response, UploadFile
+from fastapi.responses import FileResponse
 
 from agentic_team_provisioning.assistant.agent import ProcessDesignerAgent
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
+from agentic_team_provisioning.infrastructure import get_team_infrastructure, provision_team
 from agentic_team_provisioning.models import (
+    AssetInfo,
     ConversationStateResponse,
     ConversationSummaryResponse,
     CreateConversationRequest,
+    CreateFormRecordRequest,
     CreateTeamRequest,
     CreateTeamResponse,
+    FormRecord,
     ProcessDefinition,
     SendMessageRequest,
+    SubmitTeamAnswersRequest,
     TeamDetailResponse,
+    TeamJobDetail,
+    TeamJobSummary,
+    TeamPendingQuestion,
     TeamSummary,
+    UpdateFormRecordRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,6 +42,13 @@ app = FastAPI(
 
 _store = AgenticTeamStore()
 _agent = ProcessDesignerAgent()
+
+# Retroactive provisioning: ensure all existing teams have infrastructure
+try:
+    for _team_row in _store.list_teams():
+        get_team_infrastructure(_team_row["team_id"])
+except Exception as _e:
+    logger.warning("Could not retroactively provision team infrastructure: %s", _e)
 
 GREETING = (
     "Hello! I'm your Process Designer assistant. I'll help you define a process "
@@ -62,6 +81,7 @@ def health():
 @app.post("/teams", response_model=CreateTeamResponse)
 def create_team(req: CreateTeamRequest):
     team = _store.create_team(name=req.name, description=req.description)
+    provision_team(team.team_id)
     return CreateTeamResponse(
         team_id=team.team_id,
         name=team.name,
@@ -212,3 +232,195 @@ def list_conversations(team_id: str):
         raise HTTPException(status_code=404, detail="Team not found")
     rows = _store.list_conversations(team_id)
     return [ConversationSummaryResponse(**r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Per-team infrastructure helper
+# ---------------------------------------------------------------------------
+
+
+def _get_infra_or_404(team_id: str):  # noqa: ANN202
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    return get_team_infrastructure(team_id)
+
+
+# ---------------------------------------------------------------------------
+# Team / Job Status
+# ---------------------------------------------------------------------------
+
+
+@app.get("/teams/{team_id}/jobs", response_model=List[TeamJobSummary])
+def list_team_jobs(team_id: str):
+    """List all jobs for a provisioned team."""
+    infra = _get_infra_or_404(team_id)
+    raw_jobs = infra.job_client.list_jobs() or []
+    return [
+        TeamJobSummary(
+            job_id=j.get("job_id", ""),
+            status=j.get("status", "unknown"),
+            created_at=j.get("created_at", ""),
+            updated_at=j.get("updated_at", ""),
+        )
+        for j in raw_jobs
+    ]
+
+
+@app.get("/teams/{team_id}/jobs/{job_id}", response_model=TeamJobDetail)
+def get_team_job(team_id: str, job_id: str):
+    """Get a single job's detail."""
+    infra = _get_infra_or_404(team_id)
+    job = infra.job_client.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return TeamJobDetail(
+        job_id=job.get("job_id", job_id),
+        status=job.get("status", "unknown"),
+        data=job,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Questions
+# ---------------------------------------------------------------------------
+
+
+@app.get("/teams/{team_id}/questions", response_model=List[TeamPendingQuestion])
+def list_team_questions(team_id: str):
+    """Collect pending questions from all active jobs for a team."""
+    infra = _get_infra_or_404(team_id)
+    active_jobs = infra.job_client.list_jobs(statuses=["pending", "running"]) or []
+    result: List[TeamPendingQuestion] = []
+    for j in active_jobs:
+        jid = j.get("job_id", "")
+        for q in j.get("pending_questions", []):
+            result.append(TeamPendingQuestion(job_id=jid, question=q))
+    return result
+
+
+@app.post("/teams/{team_id}/questions/{job_id}/answers")
+def submit_team_answers(team_id: str, job_id: str, req: SubmitTeamAnswersRequest):
+    """Submit answers to pending questions for a job."""
+    infra = _get_infra_or_404(team_id)
+    job = infra.job_client.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    infra.job_client.atomic_update(
+        job_id,
+        merge_fields={"pending_questions": [], "waiting_for_answers": False},
+        append_to={"submitted_answers": req.answers},
+    )
+    return {"job_id": job_id, "message": "Answers submitted"}
+
+
+# ---------------------------------------------------------------------------
+# Assets (File System)
+# ---------------------------------------------------------------------------
+
+
+def _safe_asset_name(name: str) -> str:
+    """Sanitize asset name to prevent path traversal."""
+    sanitized = Path(name).name
+    if not sanitized or sanitized in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid asset name")
+    return sanitized
+
+
+@app.get("/teams/{team_id}/assets", response_model=List[AssetInfo])
+def list_team_assets(team_id: str):
+    """List files in the team's asset directory."""
+    infra = _get_infra_or_404(team_id)
+    assets: List[AssetInfo] = []
+    if infra.assets_dir.is_dir():
+        for p in sorted(infra.assets_dir.iterdir()):
+            if p.is_file():
+                stat = p.stat()
+                assets.append(
+                    AssetInfo(
+                        name=p.name,
+                        size_bytes=stat.st_size,
+                        modified_at=datetime.fromtimestamp(
+                            stat.st_mtime, tz=timezone.utc
+                        ).isoformat(),
+                    )
+                )
+    return assets
+
+
+@app.get("/teams/{team_id}/assets/{name}")
+def download_team_asset(team_id: str, name: str):
+    """Download a specific asset file."""
+    infra = _get_infra_or_404(team_id)
+    safe_name = _safe_asset_name(name)
+    path = infra.assets_dir / safe_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return FileResponse(str(path), filename=safe_name)
+
+
+@app.post("/teams/{team_id}/assets", response_model=AssetInfo)
+async def upload_team_asset(team_id: str, file: UploadFile):
+    """Upload a file to the team's asset directory."""
+    infra = _get_infra_or_404(team_id)
+    safe_name = _safe_asset_name(file.filename or "upload")
+    dest = infra.assets_dir / safe_name
+    content = await file.read()
+    dest.write_bytes(content)
+    stat = dest.stat()
+    return AssetInfo(
+        name=safe_name,
+        size_bytes=stat.st_size,
+        modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Form Information (Database)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/teams/{team_id}/forms", response_model=List[str])
+def list_team_form_keys(team_id: str):
+    """List distinct form keys that have records."""
+    infra = _get_infra_or_404(team_id)
+    return infra.form_store.list_form_keys()
+
+
+@app.get("/teams/{team_id}/forms/{form_key}", response_model=List[FormRecord])
+def list_team_form_records(team_id: str, form_key: str):
+    """Get all records for a form key."""
+    infra = _get_infra_or_404(team_id)
+    rows = infra.form_store.get_records(form_key)
+    return [FormRecord(**r) for r in rows]
+
+
+@app.post("/teams/{team_id}/forms/{form_key}", response_model=FormRecord, status_code=201)
+def create_team_form_record(team_id: str, form_key: str, req: CreateFormRecordRequest):
+    """Create a new form record."""
+    infra = _get_infra_or_404(team_id)
+    record = infra.form_store.create_record(form_key, req.data)
+    return FormRecord(**record)
+
+
+@app.put("/teams/{team_id}/forms/{form_key}/{record_id}", response_model=FormRecord)
+def update_team_form_record(
+    team_id: str, form_key: str, record_id: str, req: UpdateFormRecordRequest
+):
+    """Update an existing form record."""
+    infra = _get_infra_or_404(team_id)
+    if not infra.form_store.update_record(record_id, req.data):
+        raise HTTPException(status_code=404, detail="Record not found")
+    record = infra.form_store.get_record(record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Record not found after update")
+    return FormRecord(**record)
+
+
+@app.delete("/teams/{team_id}/forms/{form_key}/{record_id}", status_code=204)
+def delete_team_form_record(team_id: str, form_key: str, record_id: str):
+    """Delete a form record."""
+    infra = _get_infra_or_404(team_id)
+    if not infra.form_store.delete_record(record_id):
+        raise HTTPException(status_code=404, detail="Record not found")
+    return Response(status_code=204)

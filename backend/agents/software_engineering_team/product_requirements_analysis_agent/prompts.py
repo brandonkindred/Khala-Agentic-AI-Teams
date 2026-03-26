@@ -883,6 +883,17 @@ Respond with a JSON object only, no markdown:
 # Maps each sub-phase to a description of the information the PRA agent should collect.
 # Used by the gap-analysis prompt to help the LLM understand what "complete" means.
 SOP_SUB_PHASE_OBJECTIVES: Dict[str, str] = {
+    "tenets": (
+        "Establish the foundational context BEFORE any technical decisions. "
+        "This includes: organizational maturity (startup vs enterprise), expected user scale "
+        "(zero users vs millions on day one), budget philosophy (frugal at all costs vs invest for quality), "
+        "industry-specific regulatory requirements (HIPAA, PCI-DSS, SOC2, GDPR, FedRAMP, etc.), "
+        "primary release goal (MVP vs production-ready vs migration), non-negotiable tenets "
+        "(cloud-native, open-source, performance, security-first, simplicity, scalability, DX, data sovereignty), "
+        "and tradeoff priorities (budget vs timeline vs scope). "
+        "These tenets inform every subsequent technical decision. No specific technologies, "
+        "tools, or architecture patterns should be discussed until tenets are established."
+    ),
     "deployment": (
         "Determine WHERE and HOW the application will be hosted/deployed. "
         "This includes: deployment model (cloud / on-prem / PaaS / hybrid), specific cloud provider(s), "

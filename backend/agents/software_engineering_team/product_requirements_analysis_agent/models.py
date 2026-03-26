@@ -25,8 +25,14 @@ class AnalysisPhase(str, Enum):
 
 
 class SOPSubPhase(str, Enum):
-    """Sub-phases of SOP Phase 1: Environment Constraints & Requirements."""
+    """Sub-phases of SOP Phase 1: Environment Constraints & Requirements.
 
+    TENETS runs first to establish foundational context (org maturity, scale,
+    budget philosophy, regulatory landscape, and strategic priorities) before
+    any specific technical questions are asked.
+    """
+
+    TENETS = "tenets"
     DEPLOYMENT = "deployment"
     REGULATIONS = "regulations"
     TOOL_PREFERENCES = "tool_preferences"

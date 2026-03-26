@@ -303,6 +303,267 @@ MAX_SOP_ROUNDS = 5  # Safety limit for multi-round SOP Phase 1 (hardcoded questi
 MAX_GAP_ROUNDS = 3  # Safety limit for LLM gap-analysis follow-up rounds per sub-phase
 
 SOP_PHASE1_QUESTIONS: Dict[SOPSubPhase, List[Dict[str, Any]]] = {
+    # ------------------------------------------------------------------
+    # TENETS — foundational context collected BEFORE any technical details
+    # ------------------------------------------------------------------
+    SOPSubPhase.TENETS: [
+        {
+            "sop_id": "P1.tenets.a",
+            "question_text": "What is the organizational context for this project?",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [
+                {
+                    "id": "opt_early_startup",
+                    "label": "Early-stage startup (pre-revenue, small team)",
+                    "rationale": "Speed and frugality dominate; MVP-first, validate before investing.",
+                },
+                {
+                    "id": "opt_growth_startup",
+                    "label": "Growth-stage startup (product-market fit, scaling)",
+                    "rationale": "Balance speed with reliability; technical debt matters.",
+                },
+                {
+                    "id": "opt_smb",
+                    "label": "Small/medium business (established, modest team)",
+                    "rationale": "Pragmatic choices; budget-conscious but stable.",
+                },
+                {
+                    "id": "opt_enterprise",
+                    "label": "Enterprise (large org, many teams, mature processes)",
+                    "rationale": "Compliance, governance, and scale requirements from day one.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_personal",
+                    "label": "Personal/side project",
+                    "rationale": "Simplicity and low cost above all.",
+                },
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.tenets.b",
+            "question_text": "What is the expected user scale at launch and within the first year?",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [
+                {
+                    "id": "opt_zero",
+                    "label": "Starting from zero (no existing user base)",
+                    "rationale": "Build lean; scale-up architecture rather than scale-out.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_small",
+                    "label": "Small (hundreds to low thousands of users)",
+                    "rationale": "Simple infrastructure; optimize for development speed.",
+                },
+                {
+                    "id": "opt_medium",
+                    "label": "Medium (tens of thousands of users)",
+                    "rationale": "Needs reliability and basic scaling patterns.",
+                },
+                {
+                    "id": "opt_large",
+                    "label": "Large (hundreds of thousands to millions of users)",
+                    "rationale": "Scalability, observability, and incident response from day one.",
+                },
+                {
+                    "id": "opt_massive",
+                    "label": "Massive (millions+ from day one, e.g. adding to existing platform)",
+                    "rationale": "Production-grade everything; zero tolerance for downtime.",
+                },
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.tenets.c",
+            "question_text": "How would you describe the budget philosophy for this project?",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [
+                {
+                    "id": "opt_frugal",
+                    "label": "Frugal at all costs (minimize spend, use free tiers, open source)",
+                    "rationale": "Every dollar counts; defer paid services until validated.",
+                },
+                {
+                    "id": "opt_cost_conscious",
+                    "label": "Cost-conscious (spend where it matters, but keep it reasonable)",
+                    "rationale": "Invest strategically; avoid waste but don't sacrifice quality.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_balanced",
+                    "label": "Balanced (willing to pay for productivity and reliability)",
+                    "rationale": "Use managed services to reduce ops burden; budget is available.",
+                },
+                {
+                    "id": "opt_invest",
+                    "label": "Invest for quality (budget is not the primary constraint)",
+                    "rationale": "Focus on performance, reliability, and developer experience.",
+                },
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.tenets.d",
+            "question_text": "Are there industry-specific regulations or compliance requirements?",
+            "category": "business",
+            "allow_multiple": True,
+            "options": [
+                {
+                    "id": "opt_none",
+                    "label": "None / not sure",
+                    "rationale": "No known regulatory obligations.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_hipaa",
+                    "label": "HIPAA (healthcare data)",
+                    "rationale": "PHI protection, audit trails, encryption requirements.",
+                },
+                {
+                    "id": "opt_pci",
+                    "label": "PCI-DSS (payment card data)",
+                    "rationale": "Cardholder data protection, network segmentation.",
+                },
+                {
+                    "id": "opt_soc2",
+                    "label": "SOC 2 (service organization controls)",
+                    "rationale": "Security, availability, confidentiality controls.",
+                },
+                {
+                    "id": "opt_gdpr",
+                    "label": "GDPR (EU data protection)",
+                    "rationale": "Data residency, consent management, right to deletion.",
+                },
+                {
+                    "id": "opt_fedramp",
+                    "label": "FedRAMP / government (US federal)",
+                    "rationale": "Government-grade security, authorized cloud regions.",
+                },
+                {
+                    "id": "opt_financial",
+                    "label": "Financial regulations (SEC, FINRA, etc.)",
+                    "rationale": "Audit trails, data retention, reporting requirements.",
+                },
+                {
+                    "id": "opt_other_reg",
+                    "label": "Other (specify in comments)",
+                    "rationale": "Industry-specific regulation not listed.",
+                },
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.tenets.e",
+            "question_text": "What is the primary goal for the initial release?",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [
+                {
+                    "id": "opt_mvp",
+                    "label": "Quick MVP (validate the idea, iterate fast)",
+                    "rationale": "Ship fast, learn from real users, iterate.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_production",
+                    "label": "Production-ready (reliable, scalable from launch)",
+                    "rationale": "Users expect stability; reputation matters on day one.",
+                },
+                {
+                    "id": "opt_internal",
+                    "label": "Internal tool (reliability matters, polish less so)",
+                    "rationale": "Focus on function over form; internal SLAs.",
+                },
+                {
+                    "id": "opt_migration",
+                    "label": "Migration / rewrite of existing system",
+                    "rationale": "Feature parity with existing system; zero data loss.",
+                },
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.tenets.f",
+            "question_text": "What are your non-negotiable tenets for this system? (select all that apply)",
+            "category": "business",
+            "allow_multiple": True,
+            "options": [
+                {
+                    "id": "opt_cloud_native",
+                    "label": "Cloud-native (designed for cloud from the ground up)",
+                    "rationale": "Leverage cloud services, auto-scaling, managed infrastructure.",
+                },
+                {
+                    "id": "opt_open_source",
+                    "label": "Open-source first (avoid vendor lock-in)",
+                    "rationale": "Portability, community support, no licensing costs.",
+                },
+                {
+                    "id": "opt_performance",
+                    "label": "Performance and low latency above all",
+                    "rationale": "Every millisecond counts; optimize aggressively.",
+                },
+                {
+                    "id": "opt_security_first",
+                    "label": "Security first (zero-trust, defense in depth)",
+                    "rationale": "Security is a feature, not an afterthought.",
+                },
+                {
+                    "id": "opt_simplicity",
+                    "label": "Simplicity (fewer moving parts, easier to maintain)",
+                    "rationale": "Reduce operational complexity; boring technology is good.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_scalability",
+                    "label": "Scalability (design for 10x growth from day one)",
+                    "rationale": "Architecture decisions that support horizontal scaling.",
+                },
+                {
+                    "id": "opt_developer_experience",
+                    "label": "Developer experience (fast feedback loops, great tooling)",
+                    "rationale": "Ship faster with better DX; invest in CI/CD and local dev.",
+                },
+                {
+                    "id": "opt_data_sovereignty",
+                    "label": "Data sovereignty (data stays in specific regions/jurisdictions)",
+                    "rationale": "Legal or business requirement for data residency.",
+                },
+            ],
+            "depends_on": None,
+        },
+        {
+            "sop_id": "P1.tenets.g",
+            "question_text": "If budget and timeline conflict, which wins?",
+            "category": "business",
+            "allow_multiple": False,
+            "options": [
+                {
+                    "id": "opt_budget",
+                    "label": "Budget (stay under budget even if it takes longer)",
+                    "rationale": "Financial constraints are hard limits.",
+                },
+                {
+                    "id": "opt_timeline",
+                    "label": "Timeline (ship on time even if it costs more)",
+                    "rationale": "Market window or commitment deadline is critical.",
+                    "is_default": True,
+                },
+                {
+                    "id": "opt_scope",
+                    "label": "Scope (cut features to stay on budget and timeline)",
+                    "rationale": "Deliver less but deliver it well and on time/budget.",
+                },
+            ],
+            "depends_on": None,
+        },
+    ],
+    # ------------------------------------------------------------------
     SOPSubPhase.DEPLOYMENT: [
         {
             "sop_id": "P1.deploy.a",

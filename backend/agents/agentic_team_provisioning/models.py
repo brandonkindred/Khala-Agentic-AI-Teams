@@ -176,3 +176,56 @@ class ConversationSummaryResponse(BaseModel):
     created_at: str
     updated_at: str
     message_count: int
+
+
+# ---------------------------------------------------------------------------
+# Per-team infrastructure API models
+# ---------------------------------------------------------------------------
+
+
+class FormRecord(BaseModel):
+    """A single form data record."""
+
+    record_id: str
+    form_key: str
+    data: dict = Field(default_factory=dict)
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class CreateFormRecordRequest(BaseModel):
+    data: dict = Field(..., description="Arbitrary JSON data for this form record")
+
+
+class UpdateFormRecordRequest(BaseModel):
+    data: dict = Field(..., description="Updated JSON data")
+
+
+class AssetInfo(BaseModel):
+    """Metadata for a file in the team's asset directory."""
+
+    name: str
+    size_bytes: int
+    modified_at: str
+
+
+class TeamJobSummary(BaseModel):
+    job_id: str
+    status: str
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class TeamJobDetail(BaseModel):
+    job_id: str
+    status: str
+    data: dict = Field(default_factory=dict)
+
+
+class TeamPendingQuestion(BaseModel):
+    job_id: str
+    question: dict = Field(default_factory=dict)
+
+
+class SubmitTeamAnswersRequest(BaseModel):
+    answers: list[dict] = Field(..., description="List of answer objects")

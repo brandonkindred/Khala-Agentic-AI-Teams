@@ -1,0 +1,102 @@
+"""Tests for per-team infrastructure scaffolding."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_agent_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+    # Reset module-level cache so each test gets fresh state
+    import agentic_team_provisioning.infrastructure as infra_mod
+
+    infra_mod._AGENT_CACHE = str(tmp_path)
+    infra_mod._infra_cache.clear()
+
+
+def test_provision_team_creates_directories(tmp_path: Path) -> None:
+    from agentic_team_provisioning.infrastructure import provision_team
+
+    infra = provision_team("test-team-1")
+    assert infra.assets_dir.is_dir()
+    assert infra.runs_dir.is_dir()
+    assert infra.base_dir == tmp_path / "provisioned_teams" / "test-team-1"
+
+
+def test_provision_team_creates_database(tmp_path: Path) -> None:
+    from agentic_team_provisioning.infrastructure import provision_team
+
+    infra = provision_team("test-team-2")
+    assert infra.db_path.is_file()
+    # Verify the form_data table exists
+    import sqlite3
+
+    conn = sqlite3.connect(str(infra.db_path))
+    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='form_data'")
+    assert cursor.fetchone() is not None
+    conn.close()
+
+
+def test_provision_team_is_idempotent(tmp_path: Path) -> None:
+    from agentic_team_provisioning.infrastructure import provision_team
+
+    infra1 = provision_team("test-team-3")
+    infra2 = provision_team("test-team-3")
+    assert infra1.base_dir == infra2.base_dir
+
+
+def test_get_team_infrastructure_caching(tmp_path: Path) -> None:
+    from agentic_team_provisioning.infrastructure import get_team_infrastructure
+
+    infra1 = get_team_infrastructure("test-team-4")
+    infra2 = get_team_infrastructure("test-team-4")
+    assert infra1 is infra2
+
+
+def test_form_store_crud(tmp_path: Path) -> None:
+    from agentic_team_provisioning.infrastructure import provision_team
+
+    infra = provision_team("test-team-5")
+    store = infra.form_store
+
+    # Create
+    record = store.create_record("intake", {"name": "Alice", "role": "engineer"})
+    assert record["form_key"] == "intake"
+    assert record["data"]["name"] == "Alice"
+    record_id = record["record_id"]
+
+    # Read
+    records = store.get_records("intake")
+    assert len(records) == 1
+    assert records[0]["record_id"] == record_id
+
+    fetched = store.get_record(record_id)
+    assert fetched is not None
+    assert fetched["data"]["name"] == "Alice"
+
+    # Update
+    assert store.update_record(record_id, {"name": "Alice", "role": "lead"})
+    updated = store.get_record(record_id)
+    assert updated is not None
+    assert updated["data"]["role"] == "lead"
+
+    # List keys
+    keys = store.list_form_keys()
+    assert "intake" in keys
+
+    # Delete
+    assert store.delete_record(record_id)
+    assert store.get_record(record_id) is None
+    assert store.get_records("intake") == []
+
+
+def test_form_store_nonexistent_record(tmp_path: Path) -> None:
+    from agentic_team_provisioning.infrastructure import provision_team
+
+    infra = provision_team("test-team-6")
+    assert infra.form_store.get_record("nonexistent") is None
+    assert not infra.form_store.update_record("nonexistent", {"x": 1})
+    assert not infra.form_store.delete_record("nonexistent")

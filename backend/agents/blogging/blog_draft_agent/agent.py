@@ -505,6 +505,163 @@ class BlogDraftAgent:
         )
         return "\n".join(prompt_parts)
 
+    def _build_revise_single_item_prompt(
+        self,
+        draft: str,
+        item: Any,
+        item_index: int,
+        total_items: int,
+        style_guide_text: str,
+        revise_input: ReviseDraftInput,
+    ) -> str:
+        """Build a revision prompt for a single feedback item."""
+        brand_section = (
+            self._brand_spec_prompt
+            if self._brand_spec_prompt
+            else "No brand specification was provided. Follow the style guide below."
+        )
+        feedback_line = self._format_feedback_item_line(item, 1)
+        cp = compact_text(
+            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self.llm, "content plan"
+        )
+        prompt_parts = [
+            REVISION_TASK_INSTRUCTIONS,
+            "",
+            f"You are addressing feedback item {item_index}/{total_items}. "
+            "Focus ONLY on this one issue. Do not change anything else in the draft.",
+            "",
+            "---",
+            "BRAND AND STYLE (mandatory for every sentence):",
+            "---",
+            brand_section,
+            "",
+            "---",
+            "STYLE GUIDE (follow in the revised draft):",
+            "---",
+            style_guide_text,
+            "",
+            "---",
+            "CONTENT PLAN (preserve section intent and narrative flow):",
+            "---",
+            cp,
+            "",
+            "---",
+            "FEEDBACK TO ADDRESS (this is the ONLY change to make):",
+            "---",
+            feedback_line,
+            "",
+        ]
+        if revise_input.research_document:
+            prompt_parts.extend(
+                [
+                    "---",
+                    "RESEARCH (use for attribution when fixing citation issues):",
+                    "---",
+                    revise_input.research_document.strip(),
+                ]
+            )
+        if revise_input.allowed_claims and revise_input.allowed_claims.get("claims"):
+            claims_list = revise_input.allowed_claims["claims"]
+            claims_text = "\n".join(
+                f"- [CLAIM:{c.get('id', '')}] {c.get('text', '')}" for c in claims_list
+            )
+            prompt_parts.extend(
+                [
+                    "",
+                    "---",
+                    "ALLOWED CLAIMS (USE these to fix vague citations; tag each with [CLAIM:id]):",
+                    "---",
+                    claims_text,
+                ]
+            )
+        if revise_input.selected_title:
+            prompt_parts.extend(
+                [
+                    "",
+                    "---",
+                    f"AUTHOR-CHOSEN TITLE (preserve this exact H1): {revise_input.selected_title}",
+                ]
+            )
+        if revise_input.elicited_stories:
+            prompt_parts.extend(
+                ["", "---", "AUTHOR'S PERSONAL STORIES:\n" + revise_input.elicited_stories]
+            )
+        length_block = (
+            revise_input.length_guidance.strip()
+            if (revise_input.length_guidance or "").strip()
+            else f"TARGET LENGTH: approximately {revise_input.target_word_count} words."
+        )
+        prompt_parts.extend(
+            [
+                "",
+                "---",
+                "CURRENT DRAFT:",
+                "---",
+                draft,
+                "",
+                "---",
+                length_block,
+                "",
+                "---",
+                'Use this format: first line {"draft": 0}, then ---DRAFT---, '
+                "then the full revised blog post in Markdown.",
+            ]
+        )
+        return "\n".join(prompt_parts)
+
+    def _revise_single_item(
+        self,
+        draft: str,
+        item: Any,
+        item_index: int,
+        total_items: int,
+        style_guide_text: str,
+        revise_input: ReviseDraftInput,
+    ) -> str:
+        """Apply one feedback item to the draft. Returns revised draft or original on failure."""
+        revise_max_tokens = 32768
+        prompt = self._build_revise_single_item_prompt(
+            draft, item, item_index, total_items, style_guide_text, revise_input
+        )
+        for attempt in range(2):
+            try:
+                raw_response = self.llm.complete(
+                    prompt,
+                    temperature=0.2,
+                    max_tokens=revise_max_tokens,
+                    system_prompt=WRITING_SYSTEM_PROMPT,
+                    think=True,
+                )
+                revised = _extract_draft_after_marker(raw_response)
+                if revised and revised.strip():
+                    return revised.strip()
+            except LLMTemporaryError:
+                logger.warning(
+                    "Revise item %s/%s: transient error (attempt %s/2); retrying.",
+                    item_index,
+                    total_items,
+                    attempt + 1,
+                )
+                time.sleep(2.0 + attempt)
+            except (LLMJsonParseError, LLMTruncatedError) as e:
+                logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
+        # Fallback
+        try:
+            data = self.llm.complete_json(
+                prompt, temperature=0.2, max_tokens=revise_max_tokens, think=True
+            )
+            raw_draft = data.get("draft") if data else None
+            if isinstance(raw_draft, str) and raw_draft.strip():
+                return raw_draft.strip()
+        except (LLMJsonParseError, LLMTruncatedError):
+            pass
+        logger.warning(
+            "Revise item %s/%s: could not produce revision; keeping draft as-is.",
+            item_index,
+            total_items,
+        )
+        return draft
+
     def revise(
         self,
         revise_input: ReviseDraftInput,
@@ -513,18 +670,12 @@ class BlogDraftAgent:
         draft_output_path: Optional[Union[str, Path]] = None,
     ) -> DraftOutput:
         """
-        Revise a draft by addressing all copy editor feedback in a single LLM pass.
+        Revise a draft by addressing copy editor feedback one item at a time.
 
-        One prompt lists every feedback item; the model must apply all must_fix /
-        should_fix items (and consider items where appropriate). No self-review or
-        compliance check is performed here; the pipeline sends the result back to the editor.
-
-        When draft_output_path is set, writes the final revised draft to that path and logs the path.
-
-        Preconditions:
-            - revise_input has non-empty draft and feedback_items.
-        Postconditions:
-            - Returns DraftOutput with the complete revised draft (never partial).
+        Each feedback item gets its own LLM call with the current draft so the
+        model can focus on a single change without losing track of other fixes.
+        Items are processed in order (must_fix first, then should_fix, then consider)
+        as provided by the copy editor.
         """
         draft = revise_input.draft.strip()
         if not draft:
@@ -535,69 +686,23 @@ class BlogDraftAgent:
             return DraftOutput(draft=draft)
 
         style_guide_text = self._style_prompt
-        num_items = len(revise_input.feedback_items)
-
-        logger.info("Revising draft for %s feedback items in a single pass", num_items)
-        if on_llm_request:
-            on_llm_request(f"Addressing all copy editor feedback ({num_items} items)...")
-
-        prompt = self._build_revise_all_items_prompt(
-            draft, list(revise_input.feedback_items), style_guide_text, revise_input
-        )
-
-        revised: Optional[str] = None
-        for attempt in range(3):
-            try:
-                raw_response = self.llm.complete(
-                    prompt,
-                    temperature=0.2,
-                    system_prompt=WRITING_SYSTEM_PROMPT,
-                    think=True,
-                )
-                revised = _extract_draft_after_marker(raw_response)
-                if revised and revised.strip():
-                    break
-            except LLMTemporaryError:
-                if attempt < 2:
-                    logger.warning(
-                        "Revise (batch): empty/transient LLM response (attempt %s/3); retrying.",
-                        attempt + 1,
-                    )
-                    time.sleep(2.0 + attempt)
-                else:
-                    logger.warning(
-                        "Revise (batch): empty/transient after 3 attempts; keeping original draft.",
-                    )
-                    break
-            except (LLMJsonParseError, LLMTruncatedError) as e:
-                if attempt == 0:
-                    logger.warning("Revise (batch) complete() failed: %s; retrying.", e)
-                else:
-                    logger.warning(
-                        "Revise (batch) failed after retry; trying complete_json fallback."
-                    )
-                    break
-
-        if not revised or not revised.strip():
-            try:
-                data = self.llm.complete_json(prompt, temperature=0.2, think=True)
-                raw_draft = data.get("draft") if data else None
-                if isinstance(raw_draft, str) and raw_draft.strip():
-                    revised = raw_draft.strip()
-            except (LLMJsonParseError, LLMTruncatedError):
-                pass
+        items = list(revise_input.feedback_items)
+        num_items = len(items)
+        logger.info("Revising draft: %s feedback items, one at a time", num_items)
 
         current_draft = draft
-        if revised and revised.strip():
-            current_draft = revised.strip()
-            logger.info("Draft revised in one pass: length=%s", len(current_draft))
-        else:
-            logger.warning("Revise (batch) produced no content; keeping original draft.")
+        for idx, item in enumerate(items, start=1):
+            severity = getattr(item, "severity", "unknown")
+            category = getattr(item, "category", "unknown")
+            if on_llm_request:
+                on_llm_request(f"Addressing feedback {idx}/{num_items}: [{severity}] {category}")
+            logger.info("Revise item %s/%s: [%s] %s", idx, num_items, severity, category)
+            current_draft = self._revise_single_item(
+                current_draft, item, idx, num_items, style_guide_text, revise_input
+            )
 
         logger.info(
-            "Final revised draft: length=%s (%s feedback items in prompt)",
-            len(current_draft),
-            num_items,
+            "Revision complete: %s items addressed, final length=%s", num_items, len(current_draft)
         )
         if draft_output_path:
             _write_draft_to_path(current_draft, draft_output_path)

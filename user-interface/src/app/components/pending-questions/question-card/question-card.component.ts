@@ -47,7 +47,7 @@ export class QuestionCardComponent {
   autoAnswerConfidence = 0;
 
   get isMultiSelect(): boolean {
-    return this.question.allow_multiple !== false;
+    return this.question.allow_multiple === true;
   }
 
   onOptionToggle(optionId: string, checked: boolean): void {
