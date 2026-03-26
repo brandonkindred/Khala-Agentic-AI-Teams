@@ -10,6 +10,24 @@
     <app-health-indicator [healthCheck]="healthCheck" label="Agent Provisioning API" />
   </header>
 
+  <div class="mode-toggle">
+    <button mat-stroked-button [class.active]="mode === 'chat'" (click)="mode = 'chat'">
+      <mat-icon>chat</mat-icon> Chat
+    </button>
+    <button mat-stroked-button [class.active]="mode === 'form'" (click)="mode = 'form'">
+      <mat-icon>edit_note</mat-icon> Form
+    </button>
+  </div>
+
+  @if (mode === 'chat') {
+    <app-team-assistant-chat
+      [teamApiUrl]="'/api/agent-provisioning/assistant'"
+      [teamName]="'Agent Provisioning'"
+      [teamDescription]="'Provision agent environments with infrastructure'"
+    />
+  }
+
+  @if (mode === 'form') {
   <mat-tab-group
     [selectedIndex]="selectedTabIndex"
     (selectedIndexChange)="onTabChange($event)"
@@ -304,4 +322,5 @@
       </div>
     </mat-tab>
   </mat-tab-group>
+  }
 </div>

@@ -8,6 +8,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { SalesApiService } from '../../services/sales-api.service';
+import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { SalesPipelineFormComponent } from '../sales-pipeline-form/sales-pipeline-form.component';
 import { SalesPipelineResultsComponent } from '../sales-pipeline-results/sales-pipeline-results.component';
 import { SalesJobsPanelComponent } from '../sales-jobs-panel/sales-jobs-panel.component';
@@ -32,6 +33,7 @@ const POLL_STATUS_MS = 2000;
     SalesPipelineResultsComponent,
     SalesJobsPanelComponent,
     SalesLearningPanelComponent,
+    TeamAssistantChatComponent,
   ],
   templateUrl: './sales-dashboard.component.html',
   styleUrl: './sales-dashboard.component.scss',
@@ -42,6 +44,8 @@ export class SalesDashboardComponent implements OnInit, OnDestroy {
 
   private jobsSub: Subscription | null = null;
   private statusPollSub: Subscription | null = null;
+
+  mode: 'chat' | 'form' = 'chat';
 
   jobs: SalesPipelineJobListItem[] = [];
   selectedJobId: string | null = null;

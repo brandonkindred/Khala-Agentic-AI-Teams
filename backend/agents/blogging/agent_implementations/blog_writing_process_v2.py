@@ -217,10 +217,12 @@ def run_research_and_planning(
         raise PlanningError(f"Planning failed: {e}", cause=e) from e
 
     plan = planning_phase_result.content_plan
+    plan_brief_md = content_plan_to_content_brief_markdown(plan)
     logger.info(
-        "Planning complete: %s iteration(s), %s title candidates",
+        "Planning complete: %s iteration(s), %s title candidates\n%s",
         planning_phase_result.planning_iterations_used,
         len(plan.title_candidates),
+        plan_brief_md,
     )
     _update(
         BlogPhase.PLANNING,
@@ -232,6 +234,7 @@ def run_research_and_planning(
         planning_iterations_used=planning_phase_result.planning_iterations_used,
         parse_retry_count=planning_phase_result.parse_retry_count,
         planning_wall_ms_total=planning_phase_result.planning_wall_ms_total,
+        content_plan_detail=content_plan_to_markdown_doc(plan),
     )
 
     if work_dir is not None:

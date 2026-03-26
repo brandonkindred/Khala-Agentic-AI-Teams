@@ -2,6 +2,8 @@ import { Component, inject, OnDestroy, OnInit } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { MatCardModule } from '@angular/material/card';
+import { MatIconModule } from '@angular/material/icon';
+import { MatButtonModule } from '@angular/material/button';
 import { Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
@@ -10,6 +12,7 @@ import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-sp
 import { ErrorMessageComponent } from '../../shared/error-message/error-message.component';
 import { PlanningV3RunFormComponent } from '../planning-v3-run-form/planning-v3-run-form.component';
 import { PlanningV3JobStatusComponent } from '../planning-v3-job-status/planning-v3-job-status.component';
+import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import type { PlanningV3RunRequest, PlanningV3JobSummary } from '../../models';
 
 @Component({
@@ -18,11 +21,14 @@ import type { PlanningV3RunRequest, PlanningV3JobSummary } from '../../models';
   imports: [
     CommonModule,
     MatCardModule,
+    MatIconModule,
+    MatButtonModule,
     HealthIndicatorComponent,
     LoadingSpinnerComponent,
     ErrorMessageComponent,
     PlanningV3RunFormComponent,
     PlanningV3JobStatusComponent,
+    TeamAssistantChatComponent,
   ],
   templateUrl: './planning-v3-page.component.html',
   styleUrl: './planning-v3-page.component.scss',
@@ -33,6 +39,7 @@ export class PlanningV3PageComponent implements OnInit, OnDestroy {
   private jobsSub: Subscription | null = null;
   private pendingJobId: string | null = null;
 
+  mode: 'chat' | 'form' = 'chat';
   loading = false;
   error: string | null = null;
   jobId: string | null = null;

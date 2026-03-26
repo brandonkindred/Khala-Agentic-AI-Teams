@@ -151,6 +151,8 @@ export interface BlogJobStatusResponse {
   approved_by?: string;
   job_type?: string | null;
   content_plan_summary?: string;
+  /** Full content plan as human-readable markdown (titles, outline, requirements analysis). */
+  content_plan_detail?: string;
   planning_iterations_used?: number;
   parse_retry_count?: number;
   planning_wall_ms_total?: number;

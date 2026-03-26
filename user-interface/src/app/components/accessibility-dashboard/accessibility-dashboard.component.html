@@ -12,6 +12,14 @@
     </div>
 
     <div class="header-actions">
+      <div class="mode-toggle">
+        <button mat-stroked-button [class.active]="mode === 'chat'" (click)="mode = 'chat'">
+          <mat-icon>chat</mat-icon> Chat
+        </button>
+        <button mat-stroked-button [class.active]="mode === 'form'" (click)="mode = 'form'">
+          <mat-icon>edit_note</mat-icon> Form
+        </button>
+      </div>
       <!-- Health Indicator -->
       <div class="health-indicator" [class.healthy]="healthStatus?.status === 'ok'" [class.error]="healthError">
         <mat-icon>{{ healthStatus?.status === 'ok' ? 'check_circle' : 'error' }}</mat-icon>
@@ -35,6 +43,15 @@
     </div>
   </div>
 
+  @if (mode === 'chat') {
+    <app-team-assistant-chat
+      [teamApiUrl]="'/api/accessibility-audit/assistant'"
+      [teamName]="'Accessibility Audit'"
+      [teamDescription]="'Set up an accessibility audit for your web pages or mobile apps'"
+    />
+  }
+
+  @if (mode === 'form') {
   <!-- Active Job Info -->
   @if (jobId || auditId) {
     <div class="active-job-bar">
@@ -166,4 +183,5 @@
       </div>
     </mat-tab>
   </mat-tab-group>
+  }
 </div>

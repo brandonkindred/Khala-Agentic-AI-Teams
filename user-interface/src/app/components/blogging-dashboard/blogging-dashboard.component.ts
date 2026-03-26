@@ -24,6 +24,7 @@ import { FullPipelineFormComponent } from '../full-pipeline-form/full-pipeline-f
 import { FullPipelineResultsComponent } from '../full-pipeline-results/full-pipeline-results.component';
 import { MediumStatsFormComponent } from '../medium-stats-form/medium-stats-form.component';
 import { BlogPipelineFlowComponent } from '../blog-pipeline-flow/blog-pipeline-flow.component';
+import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { Router } from '@angular/router';
 import type {
   ResearchAndReviewRequest,
@@ -41,8 +42,8 @@ import type {
  * Shows Jobs panel (running and completed) with job details and produced assets.
  */
 const TERMINAL_STATUSES = ['completed', 'needs_human_review', 'failed'] as const;
-const POLL_JOBS_MS = 20000;
-const POLL_STATUS_MS = 20000; // Poll selected job status — pipeline jobs are long-running
+const POLL_JOBS_MS = 60000;
+const POLL_STATUS_MS = 60000; // Poll selected job status — pipeline jobs are long-running
 
 export function artifactLabel(name: string): string {
   const labels: Record<string, string> = {
@@ -89,6 +90,7 @@ export function artifactLabel(name: string): string {
     FullPipelineResultsComponent,
     MediumStatsFormComponent,
     BlogPipelineFlowComponent,
+    TeamAssistantChatComponent,
   ],
   templateUrl: './blogging-dashboard.component.html',
   styleUrl: './blogging-dashboard.component.scss',
@@ -104,6 +106,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   private queryParamsSub: Subscription | null = null;
   private pendingJobId: string | null = null;
 
+  mode: 'chat' | 'form' = 'chat';
   loading = false;
   error: string | null = null;
   researchReviewResult: ResearchAndReviewResponse | null = null;

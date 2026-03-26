@@ -30,6 +30,7 @@ import { PendingQuestionsComponent } from '../pending-questions/pending-question
 import { ProductAnalysisRunFormComponent } from '../product-analysis-run-form/product-analysis-run-form.component';
 import { ProductAnalysisJobStatusComponent } from '../product-analysis-job-status/product-analysis-job-status.component';
 import { StartFromSpecFormComponent } from '../start-from-spec-form/start-from-spec-form.component';
+import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import type {
   RunTeamResponse,
   JobStatusResponse,
@@ -75,6 +76,7 @@ import type {
     ProductAnalysisRunFormComponent,
     ProductAnalysisJobStatusComponent,
     StartFromSpecFormComponent,
+    TeamAssistantChatComponent,
   ],
   templateUrl: './software-engineering-dashboard.component.html',
   styleUrl: './software-engineering-dashboard.component.scss',
@@ -94,6 +96,7 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
   private pendingJobId: string | null = null;
   private pendingTabIndex: number | null = null;
 
+  mode: 'chat' | 'form' = 'chat';
   loading = false;
   error: string | null = null;
   jobId: string | null = null;

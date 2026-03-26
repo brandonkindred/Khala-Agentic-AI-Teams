@@ -5,6 +5,24 @@
   <app-health-indicator [healthCheck]="healthCheck" label="SOC2 Compliance API" />
 </div>
 
+<div class="mode-toggle">
+  <button mat-stroked-button [class.active]="mode === 'chat'" (click)="mode = 'chat'">
+    <mat-icon>chat</mat-icon> Chat
+  </button>
+  <button mat-stroked-button [class.active]="mode === 'form'" (click)="mode = 'form'">
+    <mat-icon>edit_note</mat-icon> Form
+  </button>
+</div>
+
+@if (mode === 'chat') {
+  <app-team-assistant-chat
+    [teamApiUrl]="'/api/soc2-compliance/assistant'"
+    [teamName]="'SOC2 Compliance'"
+    [teamDescription]="'Set up a SOC2 compliance audit for your repository'"
+  />
+}
+
+@if (mode === 'form') {
 @if (loading) {
   <app-loading-spinner message="Starting audit..." />
 }
@@ -19,3 +37,4 @@
     <app-soc2-audit-status [jobId]="jobId" />
   }
 </div>
+}

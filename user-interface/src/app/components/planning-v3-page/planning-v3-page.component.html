@@ -5,49 +5,68 @@
   <app-health-indicator [healthCheck]="healthCheck" label="Planning V3 API" />
 </div>
 
-@if (loading) {
-  <app-loading-spinner message="Starting..." />
+<div class="mode-toggle">
+  <button mat-stroked-button [class.active]="mode === 'chat'" (click)="mode = 'chat'">
+    <mat-icon>chat</mat-icon> Chat
+  </button>
+  <button mat-stroked-button [class.active]="mode === 'form'" (click)="mode = 'form'">
+    <mat-icon>edit_note</mat-icon> Form
+  </button>
+</div>
+
+@if (mode === 'chat') {
+  <app-team-assistant-chat
+    [teamApiUrl]="'/api/planning-v3/assistant'"
+    [teamName]="'Planning V3'"
+    [teamDescription]="'Scope and plan your project with discovery and requirements gathering'"
+  />
 }
 
-@if (error) {
-  <app-error-message [message]="error" />
-}
+@if (mode === 'form') {
+  @if (loading) {
+    <app-loading-spinner message="Starting..." />
+  }
 
-<div class="page-layout">
-  <div class="main-content">
-    <app-planning-v3-run-form (submitRequest)="onPlanningV3Submit($event)" />
+  @if (error) {
+    <app-error-message [message]="error" />
+  }
 
-    @if (jobId) {
-      <app-planning-v3-job-status [jobId]="jobId" />
+  <div class="page-layout">
+    <div class="main-content">
+      <app-planning-v3-run-form (submitRequest)="onPlanningV3Submit($event)" />
+
+      @if (jobId) {
+        <app-planning-v3-job-status [jobId]="jobId" />
+      }
+    </div>
+
+    @if (planningV3Jobs.length > 0) {
+      <aside class="jobs-panel">
+        <mat-card>
+          <mat-card-header>
+            <mat-card-title>Planning V3 jobs</mat-card-title>
+            <mat-card-subtitle>{{ planningV3Jobs.length }} job(s)</mat-card-subtitle>
+          </mat-card-header>
+          <mat-card-content>
+            <div class="jobs-list">
+              @for (job of planningV3Jobs; track job.job_id) {
+                <button
+                  type="button"
+                  class="job-item"
+                  [class.selected]="selectedJob?.job_id === job.job_id"
+                  (click)="selectJob(job)"
+                >
+                  <span class="job-status">{{ job.status }}</span>
+                  <span class="job-id">{{ job.job_id | slice:0:8 }}...</span>
+                  @if (job.repo_path) {
+                    <span class="job-repo">{{ job.repo_path }}</span>
+                  }
+                </button>
+              }
+            </div>
+          </mat-card-content>
+        </mat-card>
+      </aside>
     }
   </div>
-
-  @if (planningV3Jobs.length > 0) {
-    <aside class="jobs-panel">
-      <mat-card>
-        <mat-card-header>
-          <mat-card-title>Planning V3 jobs</mat-card-title>
-          <mat-card-subtitle>{{ planningV3Jobs.length }} job(s)</mat-card-subtitle>
-        </mat-card-header>
-        <mat-card-content>
-          <div class="jobs-list">
-            @for (job of planningV3Jobs; track job.job_id) {
-              <button
-                type="button"
-                class="job-item"
-                [class.selected]="selectedJob?.job_id === job.job_id"
-                (click)="selectJob(job)"
-              >
-                <span class="job-status">{{ job.status }}</span>
-                <span class="job-id">{{ job.job_id | slice:0:8 }}...</span>
-                @if (job.repo_path) {
-                  <span class="job-repo">{{ job.repo_path }}</span>
-                }
-              </button>
-            }
-          </div>
-        </mat-card-content>
-      </mat-card>
-    </aside>
-  }
-</div>
+}

@@ -5,6 +5,24 @@
   <app-health-indicator [healthCheck]="healthCheck" label="Software Engineering API" />
 </div>
 
+<div class="mode-toggle">
+  <button mat-stroked-button [class.active]="mode === 'chat'" (click)="mode = 'chat'">
+    <mat-icon>chat</mat-icon> Chat
+  </button>
+  <button mat-stroked-button [class.active]="mode === 'form'" (click)="mode = 'form'">
+    <mat-icon>edit_note</mat-icon> Form
+  </button>
+</div>
+
+@if (mode === 'chat') {
+  <app-team-assistant-chat
+    [teamApiUrl]="'/api/software-engineering/assistant'"
+    [teamName]="'Software Engineering'"
+    [teamDescription]="'Describe your project and the team will build it'"
+  />
+}
+
+@if (mode === 'form') {
 @if (loading) {
   <app-loading-spinner message="Processing..." />
 }
@@ -195,3 +213,4 @@
     </aside>
   }
 </div>
+}

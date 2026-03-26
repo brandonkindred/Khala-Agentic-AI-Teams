@@ -5,6 +5,9 @@ import { ErrorMessageComponent } from '../../shared/error-message/error-message.
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { MarketResearchFormComponent } from '../market-research-form/market-research-form.component';
 import { MarketResearchResultsComponent } from '../market-research-results/market-research-results.component';
+import { MatButtonModule } from '@angular/material/button';
+import { MatIconModule } from '@angular/material/icon';
+import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import type { RunMarketResearchRequest, TeamOutput } from '../../models';
 
 @Component({
@@ -16,6 +19,9 @@ import type { RunMarketResearchRequest, TeamOutput } from '../../models';
     HealthIndicatorComponent,
     MarketResearchFormComponent,
     MarketResearchResultsComponent,
+    MatButtonModule,
+    MatIconModule,
+    TeamAssistantChatComponent,
   ],
   templateUrl: './market-research-dashboard.component.html',
   styleUrl: './market-research-dashboard.component.scss',
@@ -23,6 +29,7 @@ import type { RunMarketResearchRequest, TeamOutput } from '../../models';
 export class MarketResearchDashboardComponent {
   private readonly api = inject(MarketResearchApiService);
 
+  mode: 'chat' | 'form' = 'chat';
   loading = false;
   error: string | null = null;
   result: TeamOutput | null = null;

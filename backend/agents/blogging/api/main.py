@@ -622,6 +622,10 @@ class BlogJobStatusResponse(BaseModel):
         None,
         description="Short summary from ContentPlan when pipeline completed planning",
     )
+    content_plan_detail: Optional[str] = Field(
+        None,
+        description="Full content plan as human-readable markdown (titles, outline, requirements analysis)",
+    )
     planning_iterations_used: Optional[int] = Field(
         None, description="Planning refine iterations completed"
     )
@@ -707,6 +711,7 @@ def _blog_job_dict_to_status_response(
         approved_by=job.get("approved_by"),
         job_type=job.get("job_type"),
         content_plan_summary=job.get("content_plan_summary"),
+        content_plan_detail=job.get("content_plan_detail"),
         planning_iterations_used=job.get("planning_iterations_used"),
         parse_retry_count=job.get("parse_retry_count"),
         planning_wall_ms_total=job.get("planning_wall_ms_total"),

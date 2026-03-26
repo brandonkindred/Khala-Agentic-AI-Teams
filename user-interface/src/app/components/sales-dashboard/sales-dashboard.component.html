@@ -11,7 +11,25 @@
     </div>
   </div>
 
+  <div class="mode-toggle">
+    <button mat-stroked-button [class.active]="mode === 'chat'" (click)="mode = 'chat'">
+      <mat-icon>chat</mat-icon> Chat
+    </button>
+    <button mat-stroked-button [class.active]="mode === 'form'" (click)="mode = 'form'">
+      <mat-icon>edit_note</mat-icon> Form
+    </button>
+  </div>
+
+  @if (mode === 'chat') {
+    <app-team-assistant-chat
+      [teamApiUrl]="'/api/sales/assistant'"
+      [teamName]="'AI Sales Team'"
+      [teamDescription]="'Set up a B2B sales campaign with prospecting, outreach, and proposals'"
+    />
+  }
+
   <!-- Main two-column layout -->
+  @if (mode === 'form') {
   <div class="dashboard-columns">
 
     <!-- Left: main content (tabs) -->
@@ -151,4 +169,5 @@
     </div>
 
   </div>
+  }
 </div>
