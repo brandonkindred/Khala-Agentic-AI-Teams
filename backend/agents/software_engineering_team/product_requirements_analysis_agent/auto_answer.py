@@ -116,7 +116,7 @@ def auto_answer_question(
     )
 
     try:
-        raw = llm.complete_json(prompt)
+        raw = llm.complete_json(prompt, think=True)
         result = _parse_auto_answer_response(raw, question)
         logger.info(
             "Auto-answered question %s: selected %s with confidence %.2f",

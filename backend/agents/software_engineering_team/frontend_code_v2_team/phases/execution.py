@@ -74,7 +74,7 @@ def _run_general_microtask(
         existing_code=existing_code[:8000] if existing_code else "(none)",
         architecture_context=arch_ctx or "(none)",
     )
-    raw = llm.complete_text(prompt)
+    raw = llm.complete_text(prompt, think=True)
     data = parse_files_and_summary_template(raw)
     files = data.get("files") or {}
 

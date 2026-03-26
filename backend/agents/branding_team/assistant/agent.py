@@ -183,6 +183,7 @@ class BrandingAssistantAgent:
                 prompt,
                 temperature=0.5,
                 system_prompt=SYSTEM_PROMPT,
+                think=True,
             )
         except Exception:
             reply_text = "I'm here to help build your brand. Could you tell me your company name and what you do?"

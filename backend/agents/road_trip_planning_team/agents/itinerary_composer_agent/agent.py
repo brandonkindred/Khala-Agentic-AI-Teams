@@ -125,6 +125,7 @@ class ItineraryComposerAgent:
                 temperature=0.4,
                 system_prompt=SYSTEM_PROMPT,
                 expected_keys=["title", "days", "total_days"],
+                think=True,
             )
         except LLMJsonParseError as e:
             logger.warning("ItineraryComposerAgent JSON parse failed: %s", e)

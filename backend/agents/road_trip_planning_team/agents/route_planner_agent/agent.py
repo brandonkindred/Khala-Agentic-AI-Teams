@@ -61,6 +61,7 @@ class RoutePlannerAgent:
                 temperature=0.3,
                 system_prompt=SYSTEM_PROMPT,
                 expected_keys=["ordered_stops", "route_summary", "suggested_total_days"],
+                think=True,
             )
         except LLMJsonParseError as e:
             logger.warning("RoutePlannerAgent JSON parse failed: %s", e)

@@ -38,7 +38,7 @@ class TaskGeneratorAgent:
         from tech_lead_agent.prompts import TECH_LEAD_PROMPT
 
         prompt = self._build_prompt(input_data, TECH_LEAD_PROMPT)
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
         return data
 
     def _build_prompt(self, input_data: TaskGeneratorInput, tech_lead_prompt: str) -> str:

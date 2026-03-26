@@ -2913,7 +2913,7 @@ Previously Answered Questions:
         )
 
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
             if not raw or not raw.strip():
                 return []
             parsed = self._parse_llm_json(raw)
@@ -2972,7 +2972,7 @@ Previously Answered Questions:
             spec_excerpt=spec_content[:4000],
         )
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
             if not raw or not raw.strip():
                 return []
             parsed = self._parse_llm_json(raw)
@@ -3123,7 +3123,7 @@ Previously Answered Questions:
         )
 
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
             if not raw or not raw.strip():
                 return True, []  # On failure, consider complete to avoid blocking
             parsed = self._parse_llm_json(raw)
@@ -3474,7 +3474,7 @@ Previously Answered Questions:
         )
 
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
             if raw and raw.strip():
                 parsed = self._parse_llm_json(raw)
                 if isinstance(parsed, dict):
@@ -3693,7 +3693,7 @@ Previously Answered Questions:
         spec_excerpt = (spec_content or "")[:4000]
         prompt = CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT.format(spec_excerpt=spec_excerpt)
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
             if not raw or not raw.strip():
                 return _context_discovery_fallback_questions()
             # Try to extract JSON (allow optional markdown code fence)
@@ -4223,7 +4223,7 @@ Previously Answered Questions:
         )
 
         try:
-            updated_spec = self.llm.complete_text(prompt)
+            updated_spec = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.error("Failed to update spec with LLM: %s", e)
             return current_spec
@@ -4413,7 +4413,7 @@ Previously Answered Questions:
         )
 
         try:
-            prd_content = self.llm.complete_text(prompt)
+            prd_content = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.error("Failed to generate PRD with LLM: %s", e)
             return cleaned_spec
@@ -4478,7 +4478,7 @@ Previously Answered Questions:
         )
 
         try:
-            clarified_spec = self.llm.complete_text(prompt)
+            clarified_spec = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.error("Failed to clarify spec with LLM: %s", e)
             return current_spec
@@ -4522,7 +4522,7 @@ Previously Answered Questions:
             qa_source=qa_source,
         )
         try:
-            updated_spec = self.llm.complete_text(prompt)
+            updated_spec = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.error("Failed to update spec for consistency with LLM: %s", e)
             return current_spec

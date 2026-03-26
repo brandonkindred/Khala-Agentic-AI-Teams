@@ -61,7 +61,7 @@ class DataEngineeringToolAgent:
             existing_code=inp.existing_code[:4000] if inp.existing_code else "(none)",
         )
         logger.info("DataEngineering: running for microtask %s", inp.microtask.id)
-        raw = self.llm.complete_text(prompt)
+        raw = self.llm.complete_text(prompt, think=True)
         data = parse_files_and_summary_template(raw)
         return ToolAgentOutput(
             files=data.get("files") or {},

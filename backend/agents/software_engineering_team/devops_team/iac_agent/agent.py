@@ -23,7 +23,9 @@ class InfrastructureAsCodeAgent:
             f"excluded={spec.scope.excluded}\n"
             f"repo_summary={input_data.repo_summary}\n"
         )
-        data = self.llm.complete_json(IAC_AGENT_PROMPT + "\n\n---\n\n" + context, temperature=0.1)
+        data = self.llm.complete_json(
+            IAC_AGENT_PROMPT + "\n\n---\n\n" + context, temperature=0.1, think=True
+        )
         return IaCAgentOutput(
             artifacts=data.get("artifacts") or {},
             summary=data.get("summary", ""),

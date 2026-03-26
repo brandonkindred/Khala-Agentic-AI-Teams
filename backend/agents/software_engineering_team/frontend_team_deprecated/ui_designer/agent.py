@@ -55,7 +55,7 @@ class UIDesignerAgent:
             context_parts.append(f"**Architecture:**\n{input_data.architecture.overview}")
 
         prompt = UI_DESIGNER_PROMPT + "\n\n---\n\n" + "\n\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
 
         return UIDesignerOutput(
             component_specs=data.get("component_specs", "") or "",

@@ -125,7 +125,7 @@ def run_planning(
     prompt = _build_context(task, architecture, existing_code, language)
 
     logger.info("[%s] Planning phase: generating microtasks (stack=%s)", task.id, language)
-    raw = llm.complete_text(prompt)
+    raw = llm.complete_text(prompt, think=True)
     raw_parsed = parse_planning_template(raw)
     result = _parse_planning_output(raw_parsed, language)
     logger.info(
@@ -192,7 +192,7 @@ def plan_fixes_for_unresolved_issues(
     logger.info(
         "[%s] Planning fix microtasks for %d unresolved issues", task.id, len(unresolved_issues)
     )
-    raw = llm.complete_text(prompt)
+    raw = llm.complete_text(prompt, think=True)
     raw_parsed = parse_planning_template(raw)
     result = _parse_planning_output(raw_parsed, language)
     return result.microtasks

@@ -203,7 +203,7 @@ class BuildSpecialistAdapterAgent:
                 current_code=relevant_code,
             )
             try:
-                raw = self.llm.complete_text(prompt)
+                raw = self.llm.complete_text(prompt, think=True)
             except Exception as e:
                 logger.warning(
                     "Build Specialist fix for issue %s failed: %s",

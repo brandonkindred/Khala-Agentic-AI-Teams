@@ -79,7 +79,7 @@ class TestingQAToolAgent:
             code=code_text,
         )
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.warning("Testing/QA review LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="Testing/QA review failed (LLM error).")
@@ -125,7 +125,7 @@ class TestingQAToolAgent:
                 current_code=relevant_code,
             )
             try:
-                raw = self.llm.complete_text(prompt)
+                raw = self.llm.complete_text(prompt, think=True)
             except Exception as e:
                 logger.warning("Testing/QA fix for issue %s failed: %s", issue.description[:50], e)
                 continue

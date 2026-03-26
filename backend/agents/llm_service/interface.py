@@ -103,7 +103,7 @@ class LLMClient(ABC):
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
-        think: Optional[bool] = None,
+        think: bool = False,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """
@@ -114,10 +114,7 @@ class LLMClient(ABC):
         value is a list of tool-call objects (id, type, function.name, function.arguments).
         Optional kwargs may include expected_keys, decomposition_hints for PA-style robust extraction.
 
-        ``think`` controls chain-of-thought / reasoning mode:
-        - ``None`` (default): use the global setting (``LLM_ENABLE_THINKING`` env var).
-        - ``True``: force thinking on for this call.
-        - ``False``: force thinking off (use for simple extraction / scoring).
+        ``think`` controls chain-of-thought / reasoning mode (default ``False``).
         """
         ...
 
@@ -129,7 +126,7 @@ class LLMClient(ABC):
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
-        think: Optional[bool] = None,
+        think: bool = False,
     ) -> str:
         """
         Run the model and return raw text.
@@ -137,7 +134,7 @@ class LLMClient(ABC):
         Override in implementations that support it. Default uses complete_json and extracts text.
         Pass ``tools`` for function/tool calling; tool-call responses are returned as JSON strings.
 
-        ``think`` controls chain-of-thought / reasoning mode (see ``complete_json``).
+        ``think`` controls chain-of-thought / reasoning mode (default ``False``).
         """
         result = self.complete_json(
             prompt,
@@ -160,9 +157,7 @@ class LLMClient(ABC):
         return 16384
 
     # Alias for SE code that uses complete_text
-    def complete_text(
-        self, prompt: str, *, temperature: float = 0.0, think: Optional[bool] = None
-    ) -> str:
+    def complete_text(self, prompt: str, *, temperature: float = 0.0, think: bool = False) -> str:
         """Alias for complete() for backward compatibility with SE team."""
         return self.complete(
             prompt, temperature=temperature, max_tokens=None, system_prompt=None, think=think

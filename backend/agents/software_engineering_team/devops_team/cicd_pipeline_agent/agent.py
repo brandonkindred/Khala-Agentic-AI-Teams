@@ -24,7 +24,7 @@ class CICDPipelineAgent:
             f"existing_pipeline={input_data.existing_pipeline[:4000]}\n"
         )
         data = self.llm.complete_json(
-            CICD_PIPELINE_PROMPT + "\n\n---\n\n" + context, temperature=0.1
+            CICD_PIPELINE_PROMPT + "\n\n---\n\n" + context, temperature=0.1, think=True
         )
         return CICDPipelineAgentOutput(
             artifacts=data.get("artifacts") or {},

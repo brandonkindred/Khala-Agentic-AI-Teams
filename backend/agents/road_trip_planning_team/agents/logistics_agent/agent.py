@@ -71,6 +71,7 @@ class LogisticsAgent:
                 temperature=0.3,
                 system_prompt=SYSTEM_PROMPT,
                 expected_keys=["stop_logistics", "packing_suggestions", "travel_tips"],
+                think=True,
             )
         except LLMJsonParseError as e:
             logger.warning("LogisticsAgent JSON parse failed: %s", e)

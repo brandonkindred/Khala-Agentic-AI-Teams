@@ -342,7 +342,7 @@ class RecursiveProcessor(Generic[T]):
         try:
             if process_fn:
                 return process_fn(prompt)
-            return llm.complete_json(prompt)
+            return llm.complete_json(prompt, think=True)
         except LLMTruncatedError as e:
             context.add_partial_response(e.partial_content)
             if not context.continuation_attempted:

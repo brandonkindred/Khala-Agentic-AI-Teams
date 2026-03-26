@@ -9,14 +9,26 @@
           <p class="subtitle">Your personal meal planning assistant</p>
         </div>
       </div>
-      <span class="health-chip" [class]="healthStatus">
-        @if (healthStatus === 'healthy') { Online }
-        @if (healthStatus === 'checking') { Connecting… }
-        @if (healthStatus === 'unhealthy') { Offline }
-      </span>
+      <div class="header-controls">
+        <mat-button-toggle-group [(value)]="viewMode" class="view-toggle" aria-label="Interaction mode">
+          <mat-button-toggle value="chat" matTooltip="Chat with your nutritionist">
+            <mat-icon>chat</mat-icon>
+            <span class="toggle-label">Chat</span>
+          </mat-button-toggle>
+          <mat-button-toggle value="forms" matTooltip="Manage profile and plans using forms">
+            <mat-icon>dashboard</mat-icon>
+            <span class="toggle-label">Forms</span>
+          </mat-button-toggle>
+        </mat-button-toggle-group>
+        <span class="health-chip" [class]="healthStatus">
+          @if (healthStatus === 'healthy') { Online }
+          @if (healthStatus === 'checking') { Connecting… }
+          @if (healthStatus === 'unhealthy') { Offline }
+        </span>
+      </div>
     </div>
 
-    @if (clientIdConfirmed) {
+    @if (viewMode === 'chat' && clientIdConfirmed) {
       <div class="phase-progress">
         @for (p of phases; track p.key; let i = $index) {
           <div
@@ -41,8 +53,14 @@
     }
   </header>
 
+  <!-- Forms View -->
+  @if (viewMode === 'forms') {
+    <app-nutrition-forms [clientId]="clientId"></app-nutrition-forms>
+  }
+
+  <!-- Chat View (Primary) -->
   <!-- Client ID gate -->
-  @if (!clientIdConfirmed) {
+  @if (viewMode === 'chat' && !clientIdConfirmed) {
     <mat-card class="id-card" appearance="outlined">
       <mat-card-content>
         <p class="id-intro">
@@ -79,7 +97,7 @@
   }
 
   <!-- Chat area -->
-  @if (clientIdConfirmed) {
+  @if (viewMode === 'chat' && clientIdConfirmed) {
     <div class="chat-container">
       <div class="messages-area" #messagesContainer>
         @for (msg of messages; track msg.timestamp) {

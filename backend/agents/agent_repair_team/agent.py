@@ -42,7 +42,7 @@ class RepairExpertAgent:
         prompt = REPAIR_PROMPT + "\n\n---\n\n" + context
         log_llm_prompt(logger, "Repair", "analyze", input_data.task_id[:40], prompt)
         try:
-            raw = self.llm.complete_json(prompt, temperature=0.1)
+            raw = self.llm.complete_json(prompt, temperature=0.1, think=True)
             data = json.loads(raw) if isinstance(raw, str) else raw
             fixes = data.get("suggested_fixes", [])
             if not isinstance(fixes, list):

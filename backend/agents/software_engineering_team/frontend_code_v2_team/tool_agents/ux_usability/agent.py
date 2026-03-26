@@ -161,7 +161,7 @@ class UxUsabilityToolAgent:
             spec_content=(inp.task_description or "")[:6000],
         )
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.warning("UX plan LLM call failed: %s", e)
             return ToolAgentPhaseOutput(
@@ -210,7 +210,7 @@ class UxUsabilityToolAgent:
             code=code_text,
         )
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.warning("UX review LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="UX review failed (LLM error).")
@@ -267,7 +267,7 @@ class UxUsabilityToolAgent:
                 current_code=relevant_code,
             )
             try:
-                raw = self.llm.complete_text(prompt)
+                raw = self.llm.complete_text(prompt, think=True)
             except Exception as e:
                 logger.warning(
                     "UX fix for issue %s failed: %s",

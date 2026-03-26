@@ -66,7 +66,7 @@ class SpecChunkAnalyzer:
             len(spec_chunk),
         )
 
-        data = self.llm.complete_json(prompt, temperature=0.1)
+        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
 
         return SpecChunkAnalysis(
             data_entities=data.get("data_entities") or [],

@@ -18,7 +18,7 @@ def run_deliver(
         f"Review passed: {review_result.passed}\n"
         f"Review issues: {[issue.description for issue in review_result.issues]}\n"
     )
-    raw = llm.complete_json(prompt)
+    raw = llm.complete_json(prompt, think=True)
     return DeliverResult(
         summary=raw.get("summary", ""),
         handoff_notes=raw.get("handoff_notes") or [],

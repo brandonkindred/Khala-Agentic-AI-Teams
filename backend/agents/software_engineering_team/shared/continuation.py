@@ -303,15 +303,6 @@ class ResponseContinuator:
             f"Continue the response seamlessly without repeating what you already wrote."
         )
 
-    def _should_enable_thinking(self) -> bool:
-        """Check if thinking mode should be enabled for this model."""
-        env_val = os.environ.get(ENV_LLM_ENABLE_THINKING, "").lower()
-        if env_val == "false":
-            return False
-        if env_val == "true":
-            return "qwen3.5" in self.model.lower()
-        return "qwen3.5" in self.model.lower()
-
     def _send_chat_request(
         self,
         messages: List[Dict[str, str]],
@@ -338,7 +329,7 @@ class ResponseContinuator:
             "messages": messages,
             "stream": False,
             "options": {"num_predict": self.num_predict},
-            "think": self._should_enable_thinking(),
+            "think": False,
         }
 
         if json_mode:

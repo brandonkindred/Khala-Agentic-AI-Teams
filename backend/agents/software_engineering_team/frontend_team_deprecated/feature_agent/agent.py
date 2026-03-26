@@ -254,7 +254,7 @@ def _llm_allowed_extensions(llm_client: Any, extensions: set[str]) -> set[str]:
         "Allowed:"
     )
     try:
-        response = llm_client.complete_text(prompt, temperature=0.0)
+        response = llm_client.complete_text(prompt, temperature=0.0, think=True)
         text = (response or "").strip().lower()
         if not text or "none" in text:
             return set()
@@ -286,7 +286,7 @@ def _llm_allowed_root_paths(llm_client: Any, paths: list[str]) -> set[str]:
         "Allowed paths:"
     )
     try:
-        response = llm_client.complete_text(prompt, temperature=0.0)
+        response = llm_client.complete_text(prompt, temperature=0.0, think=True)
         text = (response or "").strip()
         if not text or "none" in text.lower():
             return set()
@@ -571,7 +571,7 @@ class FrontendExpertAgent:
         log_llm_prompt(logger, "Frontend", "planning", (task.description or "")[:80], prompt)
         try:
             data = call_llm_with_retries(
-                lambda: self.llm.complete_json(prompt, temperature=0.2),
+                lambda: self.llm.complete_json(prompt, temperature=0.2, think=True),
                 max_attempts=3,
                 backoff_base=2.0,
             )
@@ -814,7 +814,7 @@ class FrontendExpertAgent:
         raw_files = {}
         for attempt in range(2):
             data = call_llm_with_retries(
-                lambda: self.llm.complete_json(prompt, temperature=0.2),
+                lambda: self.llm.complete_json(prompt, temperature=0.2, think=True),
                 max_attempts=3,
                 backoff_base=2.0,
             )

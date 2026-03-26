@@ -136,7 +136,7 @@ class AccessibilityToolAgent:
             code=code_text,
         )
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.warning("Accessibility review LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="Accessibility review failed (LLM error).")
@@ -193,7 +193,7 @@ class AccessibilityToolAgent:
                 current_code=relevant_code,
             )
             try:
-                raw = self.llm.complete_text(prompt)
+                raw = self.llm.complete_text(prompt, think=True)
             except Exception as e:
                 logger.warning(
                     "Accessibility fix for issue %s failed: %s",

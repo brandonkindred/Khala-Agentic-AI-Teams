@@ -205,7 +205,7 @@ class BlogCopyEditorAgent:
         for llm_round in range(_MAX_COPY_EDITOR_LLM_ROUNDS):
             for json_attempt in range(2):
                 try:
-                    data = self.llm.complete_json(working_prompt, temperature=0.2)
+                    data = self.llm.complete_json(working_prompt, temperature=0.2, think=True)
                     break
                 except LLMJsonParseError as e:
                     if json_attempt == 0:

@@ -628,7 +628,7 @@ class OllamaLLMClient(LLMClient):
                                     logger.warning(
                                         "LLM produced reasoning tokens but no content (caller=%s) — "
                                         "model likely spent its token budget on thinking. "
-                                        "Consider raising max_tokens or disabling thinking (LLM_ENABLE_THINKING=false).",
+                                        "Consider raising max_tokens or passing think=False.",
                                         caller,
                                     )
                                 tool_calls = None
@@ -686,7 +686,7 @@ class OllamaLLMClient(LLMClient):
                                     "ollama.com" in self.base_url
                                     and "qwen3.5" in self.model.lower()
                                 ):
-                                    hint = " If using Ollama Cloud with qwen3.5, try LLM_ENABLE_THINKING=false."
+                                    hint = " If using Ollama Cloud with qwen3.5, try passing think=False."
                                 last_error = LLMTemporaryError(
                                     f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}.{hint}",
                                     status_code=status,
@@ -848,20 +848,19 @@ class OllamaLLMClient(LLMClient):
         *,
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
-        think: Optional[bool] = None,
+        think: bool = False,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Run the model with JSON mode and return a decoded dict."""
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         sem = _get_ollama_semaphore()
-        use_think = self._resolve_think(think)
         caller = _caller_tag()
         self._current_caller = caller
         logger.info(
             "LLM request: caller=%s provider=ollama model=%s think=%s",
             caller,
             self.model,
-            use_think,
+            think,
         )
         system_message = system_prompt or (
             "You are a strict JSON generator. Respond with a single valid JSON object only, "
@@ -888,7 +887,7 @@ class OllamaLLMClient(LLMClient):
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt},
             ],
-            "think": use_think,
+            "think": think,
         }
         if tools:
             payload["tools"] = tools
@@ -909,7 +908,7 @@ class OllamaLLMClient(LLMClient):
                 content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
             if not (content or "").strip():
                 raise LLMTemporaryError(
-                    "Empty response from LLM after retries; try again or set LLM_ENABLE_THINKING=false for qwen3.5."
+                    "Empty response from LLM after retries; try again or pass think=False if thinking is enabled."
                 )
             return self._extract_json(content)
         except LLMTruncatedError as e:
@@ -923,7 +922,7 @@ class OllamaLLMClient(LLMClient):
                 backoff_base=backoff_base,
                 backoff_max=backoff_max,
                 sem=sem,
-                use_think=use_think,
+                use_think=think,
             )
         except LLMJsonParseError:
             # If content starts with '{' but is unparseable, the server likely cut off the
@@ -945,7 +944,7 @@ class OllamaLLMClient(LLMClient):
                     backoff_base=backoff_base,
                     backoff_max=backoff_max,
                     sem=sem,
-                    use_think=use_think,
+                    use_think=think,
                 )
             raise
 
@@ -982,7 +981,7 @@ class OllamaLLMClient(LLMClient):
         backoff_base: float,
         backoff_max: float,
         sem: threading.BoundedSemaphore,
-        use_think: bool = True,
+        use_think: bool,
     ) -> Dict[str, Any]:
         """On truncation: continue via multi-turn conversation, then parse JSON (same as SE team)."""
         accumulated = initial_partial
@@ -1035,19 +1034,18 @@ class OllamaLLMClient(LLMClient):
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
-        think: Optional[bool] = None,
+        think: bool = False,
     ) -> str:
         """Return raw text from the model (no JSON mode). Pass tools for function/tool calling."""
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         sem = _get_ollama_semaphore()
-        use_think = self._resolve_think(think)
         caller = _caller_tag()
         self._current_caller = caller
         logger.info(
             "LLM request (text): caller=%s provider=ollama model=%s think=%s",
             caller,
             self.model,
-            use_think,
+            think,
         )
         env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
         if max_tokens is None:
@@ -1064,7 +1062,7 @@ class OllamaLLMClient(LLMClient):
             "temperature": temperature,
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
-            "think": use_think,
+            "think": think,
         }
         if system_prompt:
             payload["messages"] = [
@@ -1086,7 +1084,7 @@ class OllamaLLMClient(LLMClient):
                 backoff_base=backoff_base,
                 backoff_max=backoff_max,
                 sem=sem,
-                use_think=use_think,
+                use_think=think,
             )
 
     def _complete_text_with_continuation(
@@ -1100,7 +1098,7 @@ class OllamaLLMClient(LLMClient):
         backoff_base: float,
         backoff_max: float,
         sem: threading.BoundedSemaphore,
-        use_think: bool = True,
+        use_think: bool,
     ) -> str:
         """On truncation: continue via multi-turn conversation, return merged text."""
         accumulated = initial_partial

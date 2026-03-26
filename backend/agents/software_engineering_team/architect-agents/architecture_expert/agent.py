@@ -198,7 +198,7 @@ class ArchitectureExpertAgent:
         prompt = ARCHITECTURE_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
 
         try:
-            data: Dict[str, Any] = self.llm.complete_json(prompt, temperature=0.2) or {}
+            data: Dict[str, Any] = self.llm.complete_json(prompt, temperature=0.2, think=True) or {}
         except LLMPermanentError:
             logger.warning(
                 "Architecture Expert: LLM returned non-JSON response, falling back to synthetic architecture"

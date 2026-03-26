@@ -35,7 +35,7 @@ class UXDesignerAgent:
             context_parts.append(f"**Architecture:**\n{input_data.architecture.overview}")
 
         prompt = UX_DESIGNER_PROMPT + "\n\n---\n\n" + "\n\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
 
         return UXDesignerOutput(
             user_journeys=data.get("user_journeys", "") or "",

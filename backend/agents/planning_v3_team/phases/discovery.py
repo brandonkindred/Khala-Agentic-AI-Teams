@@ -67,6 +67,7 @@ def run_discovery(
         response = llm.complete_text(
             DISCOVERY_PROMPT.format(input_text=input_text[:15000]),
             temperature=0.0,
+            think=True,
         )
         text = (response or "").strip()
         if text.startswith("```"):

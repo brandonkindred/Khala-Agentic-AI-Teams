@@ -83,6 +83,7 @@ class ActivitiesExpertAgent:
                 temperature=0.5,
                 system_prompt=SYSTEM_PROMPT,
                 expected_keys=["activities", "dining"],
+                think=True,
             )
         except LLMJsonParseError as e:
             logger.warning("ActivitiesExpertAgent JSON parse failed for %s: %s", location, e)

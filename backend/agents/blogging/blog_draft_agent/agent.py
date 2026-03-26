@@ -128,7 +128,7 @@ class BlogDraftAgent:
             prompt += f"Tone/Purpose: {tone}\n"
         prompt += f"\n---\nSOURCE: {ref.title}\nURL: {ref.url}\n---\nDocument text:\n{doc_text}"
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            data = self.llm.complete_json(prompt, temperature=0.2, think=True)
             notes = data.get("notes") or ""
             citations = data.get("citations")
             if not isinstance(citations, list):
@@ -319,12 +319,15 @@ class BlogDraftAgent:
                 temperature=0.3,
                 max_tokens=draft_max_tokens,
                 system_prompt=WRITING_SYSTEM_PROMPT,
+                think=True,
             )
             draft = _extract_draft_after_marker(raw_response)
         except (LLMJsonParseError, LLMTruncatedError) as e:
             logger.warning("Draft complete() failed: %s; trying complete_json fallback.", e)
             try:
-                data = self.llm.complete_json(prompt, temperature=0.3, max_tokens=draft_max_tokens)
+                data = self.llm.complete_json(
+                    prompt, temperature=0.3, max_tokens=draft_max_tokens, think=True
+                )
                 raw_draft = data.get("draft")
                 if isinstance(raw_draft, str) and raw_draft.strip():
                     draft = raw_draft.strip()
@@ -554,6 +557,7 @@ class BlogDraftAgent:
                     temperature=0.2,
                     max_tokens=revise_max_tokens,
                     system_prompt=WRITING_SYSTEM_PROMPT,
+                    think=True,
                 )
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
@@ -581,7 +585,9 @@ class BlogDraftAgent:
 
         if not revised or not revised.strip():
             try:
-                data = self.llm.complete_json(prompt, temperature=0.2, max_tokens=revise_max_tokens)
+                data = self.llm.complete_json(
+                    prompt, temperature=0.2, max_tokens=revise_max_tokens, think=True
+                )
                 raw_draft = data.get("draft") if data else None
                 if isinstance(raw_draft, str) and raw_draft.strip():
                     revised = raw_draft.strip()

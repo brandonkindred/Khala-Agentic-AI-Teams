@@ -46,6 +46,19 @@
   color: #81c784;
 }
 
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.view-toggle {
+  .toggle-label {
+    margin-left: 6px;
+    font-size: 0.8125rem;
+  }
+}
+
 .health-chip {
   display: inline-block;
   padding: 0.2rem 0.6rem;

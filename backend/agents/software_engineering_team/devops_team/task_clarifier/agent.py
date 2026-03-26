@@ -103,7 +103,7 @@ class DevOpsTaskClarifierAgent:
             f"rollback={spec.rollback_requirements}\n"
         )
         data = self.llm.complete_json(
-            DEVOPS_TASK_CLARIFIER_PROMPT + "\n\n---\n\n" + context, temperature=0.0
+            DEVOPS_TASK_CLARIFIER_PROMPT + "\n\n---\n\n" + context, temperature=0.0, think=True
         )
         return DevOpsTaskClarifierOutput(
             approved_for_execution=bool(data.get("approved_for_execution", True)),

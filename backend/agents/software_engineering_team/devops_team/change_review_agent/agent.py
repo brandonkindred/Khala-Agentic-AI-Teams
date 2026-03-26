@@ -20,7 +20,7 @@ class ChangeReviewAgent:
             f"task={input_data.task_description}\nartifacts={list(input_data.artifacts.keys())}\n"
         )
         data = self.llm.complete_json(
-            CHANGE_REVIEW_PROMPT + "\n\n---\n\n" + context, temperature=0.0
+            CHANGE_REVIEW_PROMPT + "\n\n---\n\n" + context, temperature=0.0, think=True
         )
         findings = [ReviewFinding(**f) for f in (data.get("findings") or []) if isinstance(f, dict)]
         blocking = any(f.blocking for f in findings)

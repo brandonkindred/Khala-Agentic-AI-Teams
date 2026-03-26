@@ -89,7 +89,7 @@ class CicdAdapterAgent:
             spec_content=spec_excerpt if spec_excerpt.strip() else "(no spec provided)",
         )
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.warning("CI/CD plan LLM call failed: %s", e)
             return ToolAgentPhaseOutput(
@@ -129,7 +129,7 @@ class CicdAdapterAgent:
             spec_content=spec_excerpt if spec_excerpt.strip() else "(no spec provided)",
         )
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.warning("CI/CD deliver LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="CI/CD deliver failed (LLM error).")

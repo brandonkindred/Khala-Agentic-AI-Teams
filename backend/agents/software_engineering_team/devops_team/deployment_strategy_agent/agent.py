@@ -23,7 +23,7 @@ class DeploymentStrategyAgent:
             f"nfr={spec.non_functional_requirements}\n"
         )
         data = self.llm.complete_json(
-            DEPLOYMENT_STRATEGY_PROMPT + "\n\n---\n\n" + context, temperature=0.1
+            DEPLOYMENT_STRATEGY_PROMPT + "\n\n---\n\n" + context, temperature=0.1, think=True
         )
         return DeploymentStrategyAgentOutput(
             artifacts=data.get("artifacts") or {},

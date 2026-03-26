@@ -58,6 +58,7 @@ class SeniorSWEAgent:
                 user,
                 temperature=0.2,
                 system_prompt=prompts.IMPLEMENT_TASK_SYSTEM,
+                think=True,
             )
         except Exception as e:
             logger.warning("Senior SWE implement LLM failed: %s", e)

@@ -35,7 +35,7 @@ class BuildReleaseAgent:
             context_parts.append(f"**Existing pipeline:**\n{input_data.existing_pipeline[:3000]}")
 
         prompt = BUILD_RELEASE_PROMPT + "\n\n---\n\n" + "\n\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
 
         return BuildReleaseOutput(
             ci_plan=data.get("ci_plan", "") or "",

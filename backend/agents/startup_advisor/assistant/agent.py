@@ -148,6 +148,7 @@ class StartupAdvisorAgent:
                 prompt,
                 temperature=0.5,
                 system_prompt=SYSTEM_PROMPT,
+                think=True,
             )
         except Exception:
             logger.exception("LLM call failed for startup advisor")

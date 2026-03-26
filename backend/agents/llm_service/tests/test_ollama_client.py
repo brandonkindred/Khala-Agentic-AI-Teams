@@ -132,25 +132,6 @@ def test_ollama_complete_json_404_raises_permanent(monkeypatch: pytest.MonkeyPat
         assert exc_info.value.status_code == 404
 
 
-def test_thinking_enabled_for_all_models() -> None:
-    """_should_enable_thinking() returns True for any model unless explicitly disabled."""
-    client = OllamaLLMClient(model="llama3", base_url="http://localhost:9999", timeout=5)
-    assert client._should_enable_thinking() is True
-
-    client_qwen = OllamaLLMClient(
-        model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5
-    )
-    assert client_qwen._should_enable_thinking() is True
-
-
-def test_thinking_disabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
-    client = OllamaLLMClient(
-        model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5
-    )
-    assert client._should_enable_thinking() is False
-
-
 def test_ollama_tool_call_response(monkeypatch: pytest.MonkeyPatch) -> None:
     """Streaming tool_calls deltas are accumulated and returned as __tool_calls__."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")

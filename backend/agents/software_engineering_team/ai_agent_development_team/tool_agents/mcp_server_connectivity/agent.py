@@ -36,7 +36,8 @@ class MCPServerConnectivityToolAgent:
             PROMPT.format(
                 microtask=inp.microtask.description or inp.microtask.title,
                 spec=inp.spec_context[:5000],
-            )
+            ),
+            think=True,
         )
         return ToolAgentOutput(
             files=raw.get("files") or {},

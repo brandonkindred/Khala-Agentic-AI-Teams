@@ -98,7 +98,7 @@ class SpecIntakeAgent:
                 + ("..." if len(input_data.spec_content) > 50000 else "")
             )
         )
-        data: Dict[str, Any] = self.llm.complete_json(prompt, temperature=0.1) or {}
+        data: Dict[str, Any] = self.llm.complete_json(prompt, temperature=0.1, think=True) or {}
 
         # Parse acceptance criteria index
         ac_index: List[AcceptanceCriterionItem] = []

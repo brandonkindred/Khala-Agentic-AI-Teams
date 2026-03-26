@@ -23,7 +23,7 @@ class DevOpsTestValidationAgent:
             f"tool_results={input_data.tool_results}\n"
         )
         data = self.llm.complete_json(
-            DEVOPS_TEST_VALIDATION_PROMPT + "\n\n---\n\n" + context, temperature=0.0
+            DEVOPS_TEST_VALIDATION_PROMPT + "\n\n---\n\n" + context, temperature=0.0, think=True
         )
         gates = data.get("quality_gates") or {}
         approved = bool(data.get("approved", False))

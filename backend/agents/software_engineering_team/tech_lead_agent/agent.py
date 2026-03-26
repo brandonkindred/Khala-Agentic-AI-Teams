@@ -57,7 +57,7 @@ class TechLeadAgent:
             + "\n\n---\n\n**EXISTING CODEBASE:**\n"
             + existing_codebase
         )
-        data = self.llm.complete_json(prompt, temperature=0.1)
+        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
         return json.dumps(data, indent=2)
 
     def _read_plan_artifacts(self, repo_path: str) -> str:
@@ -244,7 +244,7 @@ class TechLeadAgent:
             codebase_analysis = self._analyze_codebase(existing_codebase)
 
         prompt = self._build_planning_prompt(input_data, codebase_analysis)
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
 
         if data.get("spec_clarification_needed"):
             clarification_questions = data.get("clarification_questions") or []
@@ -494,7 +494,7 @@ class TechLeadAgent:
             )
 
         prompt = TECH_LEAD_REFINE_TASK_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
 
         return Task(
             id=task.id,
@@ -545,7 +545,7 @@ class TechLeadAgent:
             context_parts.extend(["", "**Architecture:**", architecture.overview])
 
         prompt = TECH_LEAD_EVALUATE_QA_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
 
         tasks = []
         for t in data.get("tasks") or []:
@@ -610,7 +610,7 @@ class TechLeadAgent:
             ),
         ]
         prompt = TECH_LEAD_SHOULD_RUN_SECURITY_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1)
+        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
         run_security = bool(data.get("run_security", False))
         logger.info("Tech Lead: run_security=%s (%s)", run_security, data.get("rationale", "")[:80])
         return run_security
@@ -716,7 +716,7 @@ class TechLeadAgent:
             )
 
         prompt = TECH_LEAD_REVIEW_PROGRESS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
 
         new_tasks: List[Task] = []
         for t in data.get("tasks") or []:
@@ -825,7 +825,7 @@ class TechLeadAgent:
                     )
 
                 prompt = TECH_LEAD_TRIGGER_DOCS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-                data = self.llm.complete_json(prompt, temperature=0.1)
+                data = self.llm.complete_json(prompt, temperature=0.1, think=True)
                 should_update = bool(data.get("should_update_docs", False))
                 rationale = data.get("rationale", "")
 

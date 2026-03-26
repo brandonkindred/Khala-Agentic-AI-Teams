@@ -97,6 +97,18 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+
+class _HealthCheckFilter(logging.Filter):
+    """Suppress /health access logs unless the logger is at DEBUG level."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage().find("/health") != -1:
+            return record.levelno <= logging.DEBUG
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
+
 # Base directory for run artifacts (when work_dir is requested)
 RUN_ARTIFACTS_BASE = Path(tempfile.gettempdir()) / "blogging_runs"
 

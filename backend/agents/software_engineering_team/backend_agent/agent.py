@@ -638,7 +638,7 @@ class BackendExpertAgent:
         prompt = BACKEND_PLANNING_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         log_llm_prompt(logger, "Backend", "planning", (task.description or "")[:80], prompt)
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            data = self.llm.complete_json(prompt, temperature=0.2, think=True)
             plan = TaskPlan.from_llm_json(data)
             return (plan.to_markdown(), False)
         except Exception as e:
@@ -2886,7 +2886,7 @@ class BackendExpertAgent:
         code = ""
         tests = ""
         for attempt in range(4):
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            data = self.llm.complete_json(prompt, temperature=0.2, think=True)
             code = data.get("code", "")
             if code and "\\n" in code:
                 code = code.replace("\\n", "\n")

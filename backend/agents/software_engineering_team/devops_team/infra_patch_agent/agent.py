@@ -37,6 +37,7 @@ class InfraPatchAgent:
         data = self.llm.complete_json(
             INFRA_PATCH_PROMPT + "\n\n---\n\n" + context,
             temperature=0.1,
+            think=True,
         )
 
         patched = data.get("patched_artifacts") or {}

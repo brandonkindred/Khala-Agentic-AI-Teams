@@ -131,7 +131,7 @@ def run_batch_coding_fixes(
     )
 
     try:
-        raw = llm.complete_text(prompt)
+        raw = llm.complete_text(prompt, think=True)
     except Exception as exc:
         logger.error(
             "[%s] Microtask %s: batch fix LLM call failed: %s",
@@ -271,7 +271,7 @@ def run_problem_solving(
                 current_code=relevant_code,
             )
             try:
-                raw = llm.complete_text(prompt)
+                raw = llm.complete_text(prompt, think=True)
             except Exception as exc:
                 logger.warning(
                     "[%s] Problem-solving LLM call failed (issue %d, attempt %d): %s",
@@ -432,7 +432,7 @@ def run_problem_solving_for_microtask(
                 current_code=relevant_code,
             )
             try:
-                raw = llm.complete_text(prompt)
+                raw = llm.complete_text(prompt, think=True)
             except Exception as exc:
                 logger.warning(
                     "[%s] Microtask %s: problem-solving LLM call failed (issue %d, attempt %d): %s",
@@ -606,7 +606,7 @@ def _run_phase_fixes(
                 current_code=relevant_code,
             )
             try:
-                raw = llm.complete_text(prompt)
+                raw = llm.complete_text(prompt, think=True)
             except Exception as exc:
                 logger.warning(
                     "[%s] Microtask %s: %s fix LLM call failed (issue %d, attempt %d): %s",

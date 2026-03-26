@@ -20,7 +20,7 @@ def run_planning(
         f"Task: {task.description}\n"
         f"Spec:\n{(spec_content or '')[:7000]}"
     )
-    raw = llm.complete_json(prompt)
+    raw = llm.complete_json(prompt, think=True)
     microtasks = []
     for item in raw.get("microtasks") or []:
         if not isinstance(item, dict) or not item.get("id"):

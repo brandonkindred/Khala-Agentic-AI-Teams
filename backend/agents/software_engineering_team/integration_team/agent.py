@@ -55,7 +55,7 @@ class IntegrationAgent:
             context_parts.append(f"**Architecture:** {input_data.architecture.overview}")
 
         prompt = INTEGRATION_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1)
+        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
 
         issues = []
         for i in data.get("issues") or []:

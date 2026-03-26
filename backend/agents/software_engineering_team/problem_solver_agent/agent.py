@@ -42,7 +42,7 @@ class ProblemSolverAgent:
             )
 
         prompt = PROBLEM_SOLVER_PROMPT + "\n\n---\n\n" + "\n".join(context)
-        data = self.llm.complete_json(prompt, temperature=0.1)
+        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
         return ProblemSolverOutput(
             plan=str(data.get("plan", "")),
             execution_steps=str(data.get("execution_steps", "")),

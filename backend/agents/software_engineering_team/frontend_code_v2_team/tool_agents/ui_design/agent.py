@@ -87,7 +87,7 @@ class UiDesignToolAgent:
             spec_content=(inp.task_description or "")[:5000],
         )
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.warning("UI Design plan LLM call failed: %s", e)
             return ToolAgentPhaseOutput(

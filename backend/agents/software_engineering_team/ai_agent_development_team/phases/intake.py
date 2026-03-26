@@ -18,7 +18,7 @@ def run_intake(*, llm: LLMClient, task: Task, spec_content: str) -> IntakeResult
         f"Acceptance criteria: {task.acceptance_criteria}\n"
         f"Spec:\n{(spec_content or '')[:8000]}"
     )
-    raw = llm.complete_json(prompt)
+    raw = llm.complete_json(prompt, think=True)
     return IntakeResult(
         system_goal=raw.get("system_goal", ""),
         constraints=raw.get("constraints") or [],

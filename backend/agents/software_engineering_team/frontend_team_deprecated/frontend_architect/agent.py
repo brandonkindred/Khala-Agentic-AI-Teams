@@ -73,7 +73,7 @@ class FrontendArchitectAgent:
                 )
 
         prompt = FRONTEND_ARCHITECT_PROMPT + "\n\n---\n\n" + "\n\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
 
         return FrontendArchitectOutput(
             folder_structure=data.get("folder_structure", "") or "",

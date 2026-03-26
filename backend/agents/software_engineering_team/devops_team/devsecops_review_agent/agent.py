@@ -22,7 +22,7 @@ class DevSecOpsReviewAgent:
             f"artifacts={list(input_data.artifacts.keys())}\n"
         )
         data = self.llm.complete_json(
-            DEVSECOPS_REVIEW_PROMPT + "\n\n---\n\n" + context, temperature=0.0
+            DEVSECOPS_REVIEW_PROMPT + "\n\n---\n\n" + context, temperature=0.0, think=True
         )
         findings = [ReviewFinding(**f) for f in (data.get("findings") or []) if isinstance(f, dict)]
         blocking = any(f.blocking or f.severity in ("critical", "high") for f in findings)

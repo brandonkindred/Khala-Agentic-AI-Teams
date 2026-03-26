@@ -134,7 +134,7 @@ class PerformanceToolAgent:
             code=code_text,
         )
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = self.llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.warning("Performance review LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="Performance review failed (LLM error).")
@@ -191,7 +191,7 @@ class PerformanceToolAgent:
                 current_code=relevant_code,
             )
             try:
-                raw = self.llm.complete_text(prompt)
+                raw = self.llm.complete_text(prompt, think=True)
             except Exception as e:
                 logger.warning(
                     "Performance fix for issue %s failed: %s",

@@ -502,3 +502,43 @@ export interface StrategyLabResultsResponse {
   winning_count: number;
   losing_count: number;
 }
+
+// ---------------------------------------------------------------------------
+// Financial Advisor (Chat) Models
+// ---------------------------------------------------------------------------
+
+export interface StartAdvisorSessionRequest {
+  user_id: string;
+}
+
+export interface SendAdvisorMessageRequest {
+  message: string;
+}
+
+export interface AdvisorSessionResponse {
+  session_id: string;
+  advisor_message: string;
+  session_status: 'active' | 'completed' | 'awaiting_confirmation';
+  current_topic?: string;
+  missing_fields?: string[];
+}
+
+export interface AdvisorSessionStateResponse {
+  session_id: string;
+  session_status: 'active' | 'completed' | 'awaiting_confirmation';
+  current_topic?: string;
+  missing_fields?: string[];
+  messages: AdvisorChatMessage[];
+}
+
+export interface AdvisorChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
+export interface CompleteAdvisorSessionResponse {
+  session_id: string;
+  ips: IPS;
+  message: string;
+}

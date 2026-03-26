@@ -103,7 +103,7 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     )
 
     prompt = CODE_REVIEW_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-    data = llm.complete_json(prompt, temperature=0.1)
+    data = llm.complete_json(prompt, temperature=0.1, think=True)
 
     issues = []
     for issue_data in data.get("issues") or []:

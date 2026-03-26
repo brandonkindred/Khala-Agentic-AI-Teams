@@ -64,7 +64,7 @@ class SpecAnalysisMerger:
             len(chunk_results),
         )
 
-        data = self.llm.complete_json(prompt, temperature=0.1)
+        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
 
         return MergedSpecAnalysis(
             data_entities=data.get("data_entities") or [],

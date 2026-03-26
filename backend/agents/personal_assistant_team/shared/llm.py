@@ -93,7 +93,7 @@ class LLMClient(_BaseLLMClient):
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
         json_mode: bool = False,
-        think: Optional[bool] = None,
+        think: bool = False,
     ) -> str:
         """Override in subclasses to call the LLM and return raw text."""
         raise NotImplementedError("Subclasses must implement _ollama_complete")
@@ -118,7 +118,7 @@ class LLMClient(_BaseLLMClient):
         continuation_attempts = 0
         decomposition_attempts = 0
 
-        think = kwargs.pop("think", None)
+        think = kwargs.pop("think", False)
         # --- direct attempt ---
         response = self._ollama_complete(
             prompt,
@@ -322,7 +322,7 @@ class _PALLMClientWrapper(LLMClient):
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
         json_mode: bool = False,
-        think: Optional[bool] = None,
+        think: bool = False,
     ) -> str:
         return self._inner.complete(
             prompt,
@@ -338,7 +338,7 @@ class _PALLMClientWrapper(LLMClient):
         *,
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
-        think: Optional[bool] = None,
+        think: bool = False,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         try:

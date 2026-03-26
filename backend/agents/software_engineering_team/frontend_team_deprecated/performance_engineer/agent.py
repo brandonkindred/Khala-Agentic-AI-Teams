@@ -40,7 +40,7 @@ class PerformanceEngineerAgent:
             context_parts.insert(2, f"**Architecture:** {input_data.architecture.overview}")
 
         prompt = PERFORMANCE_ENGINEER_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1)
+        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
 
         issues: List[Dict[str, Any]] = []
         for i in data.get("issues") or []:

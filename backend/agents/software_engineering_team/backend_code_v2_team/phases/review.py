@@ -47,7 +47,7 @@ def _run_llm_review(
         else "N/A",
         code=code_text[:12000],
     )
-    raw = llm.complete_text(prompt)
+    raw = llm.complete_text(prompt, think=True)
     data = parse_review_template(raw)
     issues: List[ReviewIssue] = []
     for item in data.get("issues") or []:
@@ -988,7 +988,7 @@ def run_documentation_self_review(
         )
 
         try:
-            raw = llm.complete_text(prompt)
+            raw = llm.complete_text(prompt, think=True)
         except Exception as exc:
             logger.warning(
                 "Documentation self-review LLM call failed (iteration %d): %s",

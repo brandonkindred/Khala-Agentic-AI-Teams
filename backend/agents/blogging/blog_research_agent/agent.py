@@ -578,7 +578,7 @@ class ResearchAgent:
         )
         self._report_llm("Synthesizing overview...", 0.78)
         try:
-            data = self.llm.complete_json(prompt, temperature=0.3)
+            data = self.llm.complete_json(prompt, temperature=0.3, think=True)
         except LLMJsonParseError as e:
             logger.warning(
                 "Overview synthesis: LLM returned invalid or empty JSON (%s). Using fallback.",

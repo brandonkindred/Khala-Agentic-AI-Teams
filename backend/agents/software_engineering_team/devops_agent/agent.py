@@ -210,7 +210,7 @@ class DevOpsExpertAgent:
         prompt = DEVOPS_PLANNING_PROMPT + "\n\n---\n\n" + context
         log_llm_prompt(logger, "DevOps", "planning", (task_description or "")[:80], prompt)
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            data = self.llm.complete_json(prompt, temperature=0.2, think=True)
             plan = TaskPlan.from_llm_json(data)
             return plan.to_markdown()
         except Exception as e:
@@ -283,7 +283,7 @@ class DevOpsExpertAgent:
             )
 
         prompt = DEVOPS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
 
         summary = data.get("summary", "")
         needs_clarification = bool(data.get("needs_clarification", False))

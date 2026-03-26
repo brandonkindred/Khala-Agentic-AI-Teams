@@ -90,7 +90,7 @@ class DevOpsReviewAgent:
         )
 
         prompt = DEVOPS_REVIEW_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1)
+        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
 
         issues: List[DevOpsReviewIssue] = []
         for issue_data in data.get("issues") or []:

@@ -133,6 +133,7 @@ class StrategyIdeationAgent:
             prompt,
             temperature=0.8,
             system_prompt=_IDEATION_SYSTEM,
+            think=True,
         )
 
         rationale = str(data.pop("rationale", "No rationale provided."))
@@ -176,5 +177,6 @@ class StrategyIdeationAgent:
             prompt,
             temperature=0.3,
             system_prompt=_ANALYSIS_SYSTEM,
+            think=True,
         )
         return str(data.get("narrative", "Analysis not available."))

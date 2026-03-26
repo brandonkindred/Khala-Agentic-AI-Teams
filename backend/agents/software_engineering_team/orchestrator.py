@@ -1135,7 +1135,7 @@ def _try_build_fix_one_at_a_time(
                 current_code=relevant_code,
             )
         try:
-            raw = llm.complete_text(prompt)
+            raw = llm.complete_text(prompt, think=True)
         except Exception as e:
             logger.warning(
                 "[%s] Build fix attempt %d/%d failed: LLM call error: %s. Next step -> Skipping to next issue",

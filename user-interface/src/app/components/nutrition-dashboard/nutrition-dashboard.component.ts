@@ -11,7 +11,9 @@ import { MatDividerModule } from '@angular/material/divider';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { FormsModule } from '@angular/forms';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
+import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { NutritionApiService } from '../../services/nutrition-api.service';
+import { NutritionFormsComponent } from '../nutrition-forms/nutrition-forms.component';
 import type {
   ClientProfile,
   MealRecommendation,
@@ -45,6 +47,8 @@ const PHASES = [
     MatDividerModule,
     MatTooltipModule,
     MatSlideToggleModule,
+    MatButtonToggleModule,
+    NutritionFormsComponent,
   ],
   templateUrl: './nutrition-dashboard.component.html',
   styleUrl: './nutrition-dashboard.component.scss',
@@ -56,6 +60,7 @@ export class NutritionDashboardComponent implements OnInit, AfterViewChecked {
   private readonly fb = inject(FormBuilder);
 
   // --- State ---
+  viewMode: 'chat' | 'forms' = 'chat';
   clientId = '';
   clientIdConfirmed = false;
   loading = false;

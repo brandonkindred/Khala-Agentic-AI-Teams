@@ -52,7 +52,7 @@ class AcceptanceVerifierAgent:
             context_parts.append(f"**Architecture:** {input_data.architecture.overview}")
 
         prompt = ACCEPTANCE_VERIFIER_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1)
+        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
 
         per_criterion: List[CriterionStatus] = []
         for item in data.get("per_criterion") or []:

@@ -57,7 +57,7 @@ class BuildFixSpecialistAgent:
             context_parts.insert(0, f"**Task context:** {input_data.task_description}\n")
 
         prompt = BUILD_FIX_SPECIALIST_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.0)
+        data = self.llm.complete_json(prompt, temperature=0.0, think=True)
 
         edits: List[CodeEdit] = []
         for e in data.get("edits") or []:

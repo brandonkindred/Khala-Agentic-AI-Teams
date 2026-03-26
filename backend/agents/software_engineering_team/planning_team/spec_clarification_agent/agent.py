@@ -39,7 +39,7 @@ class SpecClarificationAgent:
             question=question,
             user_message=user_message[:2000] + ("..." if len(user_message) > 2000 else ""),
         )
-        data: Dict[str, Any] = self.llm.complete_json(prompt, temperature=0.1) or {}
+        data: Dict[str, Any] = self.llm.complete_json(prompt, temperature=0.1, think=True) or {}
         answer_summary = data.get("answer_summary") or user_message[:500]
         category = data.get("category") or "other"
 
@@ -61,7 +61,7 @@ class SpecClarificationAgent:
             questions="\n".join(f"- {q}" for q in remaining),
             assumptions="\n".join(f"- {a}" for a in assumptions) if assumptions else "None",
         )
-        data_next = self.llm.complete_json(prompt_next, temperature=0.2) or {}
+        data_next = self.llm.complete_json(prompt_next, temperature=0.2, think=True) or {}
         return SpecClarificationOutput(
             assistant_message=data_next.get("assistant_message")
             or f"Next question: {remaining[0]}",
@@ -91,7 +91,7 @@ class SpecClarificationAgent:
             questions="\n".join(f"- {q}" for q in open_questions),
             assumptions="\n".join(f"- {a}" for a in assumptions) if assumptions else "None",
         )
-        data = self.llm.complete_json(prompt, temperature=0.2) or {}
+        data = self.llm.complete_json(prompt, temperature=0.2, think=True) or {}
         return SpecClarificationOutput(
             assistant_message=data.get("assistant_message")
             or f"First question: {open_questions[0]}",

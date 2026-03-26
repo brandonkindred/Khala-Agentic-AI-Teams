@@ -34,6 +34,7 @@ class InfraDebugAgent:
         data = self.llm.complete_json(
             INFRA_DEBUG_PROMPT + "\n\n---\n\n" + context,
             temperature=0.1,
+            think=True,
         )
 
         errors = []

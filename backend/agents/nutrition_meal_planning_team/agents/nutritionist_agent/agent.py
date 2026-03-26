@@ -41,6 +41,7 @@ class NutritionistAgent:
                 prompt,
                 temperature=0.3,
                 system_prompt=SYSTEM_PROMPT,
+                think=True,
                 expected_keys=[
                     "daily_targets",
                     "balance_guidelines",

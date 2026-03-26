@@ -53,7 +53,7 @@ class QAExpertAgent:
 
         prompt = base_prompt + "\n\n---\n\n" + "\n".join(context_parts)
         try:
-            data = self.llm.complete_json(prompt, temperature=0.1)
+            data = self.llm.complete_json(prompt, temperature=0.1, think=True)
         except LLMJsonParseError as e:
             logger.warning(
                 "QA: LLM returned non-JSON output, returning fallback: %s",

@@ -49,7 +49,7 @@ def complete_json_with_continuation(
     continuation internally on truncation; other clients may raise LLMTruncatedError.
     max_continuation_cycles and task_id are ignored when using Ollama.
     """
-    return client.complete_json(prompt, temperature=temperature)
+    return client.complete_json(prompt, temperature=temperature, think=True)
 
 
 __all__ = [

@@ -113,6 +113,7 @@ class BlogPlanningAgent:
                     prompt,
                     temperature=0.25,
                     system_prompt=system,
+                    think=True,
                 )
                 if isinstance(data, dict) and data:
                     return data, parse_retries
@@ -125,6 +126,7 @@ class BlogPlanningAgent:
                     prompt + "\n\nRespond with a single JSON object only, no markdown fences.",
                     temperature=0.25,
                     system_prompt=system,
+                    think=True,
                 )
                 data = parse_json_object(raw)
                 return data, parse_retries

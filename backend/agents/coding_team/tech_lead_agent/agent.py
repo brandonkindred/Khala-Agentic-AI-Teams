@@ -50,6 +50,7 @@ class TechLeadAgent:
                 user,
                 temperature=0.2,
                 system_prompt=prompts.PLAN_TO_TASK_GRAPH_SYSTEM,
+                think=True,
             )
         except Exception as e:
             logger.warning("Tech Lead plan_to_task_graph LLM failed: %s", e)
@@ -100,6 +101,7 @@ class TechLeadAgent:
                 user,
                 temperature=0.2,
                 system_prompt=prompts.GROOM_TASK_SYSTEM,
+                think=True,
             )
         except Exception as e:
             logger.warning("Tech Lead groom_task LLM failed: %s", e)
@@ -137,6 +139,7 @@ class TechLeadAgent:
                 user,
                 temperature=0.1,
                 system_prompt=prompts.ASSIGNMENT_SYSTEM,
+                think=True,
             )
         except Exception as e:
             logger.warning("Tech Lead assignments LLM failed: %s", e)
@@ -169,6 +172,7 @@ class TechLeadAgent:
                 user,
                 temperature=0.1,
                 system_prompt=prompts.CODE_REVIEW_SYSTEM,
+                think=True,
             )
         except Exception as e:
             logger.warning("Tech Lead code_review LLM failed: %s", e)

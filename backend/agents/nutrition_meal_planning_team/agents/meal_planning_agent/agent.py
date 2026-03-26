@@ -91,6 +91,7 @@ class MealPlanningAgent:
                 temperature=0.4,
                 system_prompt=SYSTEM_PROMPT,
                 expected_keys=["suggestions"],
+                think=True,
             )
         except (LLMJsonParseError, LLMError) as e:
             logger.warning("Meal planning LLM call failed: %s", e)
