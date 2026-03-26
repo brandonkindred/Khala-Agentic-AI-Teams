@@ -7,8 +7,10 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDividerModule } from '@angular/material/divider';
+import { MatButtonToggleModule } from '@angular/material/button-toggle';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
+import { InvestmentChatComponent } from '../investment-chat/investment-chat.component';
 import { InvestmentProfileFormComponent } from '../investment-profile-form/investment-profile-form.component';
 import { InvestmentProposalComponent } from '../investment-proposal/investment-proposal.component';
 import { InvestmentStrategyComponent } from '../investment-strategy/investment-strategy.component';
@@ -34,6 +36,8 @@ import {
     MatChipsModule,
     MatTooltipModule,
     MatDividerModule,
+    MatButtonToggleModule,
+    InvestmentChatComponent,
     InvestmentProfileFormComponent,
     InvestmentProposalComponent,
     InvestmentStrategyComponent,
@@ -47,6 +51,7 @@ import {
 export class InvestmentDashboardComponent implements OnInit {
   private readonly api = inject(InvestmentApiService);
 
+  viewMode: 'chat' | 'forms' = 'chat';
   selectedTabIndex = 0;
   healthStatus: 'checking' | 'healthy' | 'unhealthy' = 'checking';
 

@@ -1,0 +1,95 @@
+<div class="chat-container">
+  <!-- Session Status Bar -->
+  @if (sessionId) {
+    <div class="session-bar">
+      <div class="session-info">
+        <mat-icon>forum</mat-icon>
+        <span class="session-label">Session active</span>
+        @if (currentTopic) {
+          <span class="session-topic">{{ currentTopic }}</span>
+        }
+      </div>
+      @if (missingFields.length > 0) {
+        <div class="missing-fields">
+          <span class="missing-label">Still needed:</span>
+          @for (field of missingFields; track field) {
+            <span class="missing-chip">{{ field }}</span>
+          }
+        </div>
+      }
+    </div>
+  }
+
+  <!-- Messages -->
+  <div class="messages-container" #messagesContainer>
+    @for (msg of messages; track msg.timestamp) {
+      <div class="message" [class.user]="msg.role === 'user'" [class.assistant]="msg.role === 'assistant'">
+        @if (msg.role === 'assistant') {
+          <mat-icon class="avatar">account_balance</mat-icon>
+        }
+        <div class="message-bubble">
+          <div class="message-content">{{ msg.content }}</div>
+          <div class="message-time">{{ formatTime(msg.timestamp) }}</div>
+        </div>
+      </div>
+    }
+
+    @if (loading) {
+      <div class="message assistant">
+        <mat-icon class="avatar">account_balance</mat-icon>
+        <div class="message-bubble">
+          <div class="typing-indicator">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+      </div>
+    }
+  </div>
+
+  <!-- Confirmation Banner -->
+  @if (sessionStatus === 'awaiting_confirmation') {
+    <div class="confirmation-banner">
+      <mat-icon>task_alt</mat-icon>
+      <span>Your advisor has gathered enough information to build your profile.</span>
+      <button mat-flat-button color="primary" (click)="onConfirmProfile()" [disabled]="loading">
+        <mat-icon>check</mat-icon>
+        Create My IPS
+      </button>
+    </div>
+  }
+
+  <!-- Input Area -->
+  <form [formGroup]="form" (ngSubmit)="onSubmit()" class="input-form">
+    <mat-form-field appearance="outline" class="message-input">
+      <mat-label>Ask your investment advisor...</mat-label>
+      <input
+        matInput
+        formControlName="message"
+        [attr.aria-label]="'Message input'"
+        (keydown.enter)="$event.preventDefault(); onSubmit()"
+      />
+    </mat-form-field>
+    <button
+      mat-fab
+      color="primary"
+      type="submit"
+      [disabled]="form.invalid || loading"
+      [attr.aria-label]="'Send message'"
+    >
+      <mat-icon>send</mat-icon>
+    </button>
+  </form>
+
+  <!-- Quick Actions -->
+  @if (messages.length <= 1) {
+    <div class="quick-actions">
+      @for (action of quickActions; track action.label) {
+        <button mat-stroked-button (click)="onQuickAction(action)" [disabled]="loading">
+          {{ action.label }}
+        </button>
+      }
+    </div>
+  }
+</div>

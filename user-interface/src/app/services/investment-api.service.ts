@@ -25,6 +25,11 @@ import type {
   RunStrategyLabRequest,
   StrategyLabRunResponse,
   StrategyLabResultsResponse,
+  StartAdvisorSessionRequest,
+  SendAdvisorMessageRequest,
+  AdvisorSessionResponse,
+  AdvisorSessionStateResponse,
+  CompleteAdvisorSessionResponse,
 } from '../models';
 
 /**
@@ -166,6 +171,40 @@ export class InvestmentApiService {
     return this.http.get<StrategyLabResultsResponse>(
       `${this.baseUrl}/strategy-lab/results`,
       { params }
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Financial Advisor (Chat)
+  // ---------------------------------------------------------------------------
+
+  startAdvisorSession(request: StartAdvisorSessionRequest): Observable<AdvisorSessionResponse> {
+    return this.http.post<AdvisorSessionResponse>(
+      `${this.baseUrl}/advisor/sessions`,
+      request
+    );
+  }
+
+  sendAdvisorMessage(
+    sessionId: string,
+    request: SendAdvisorMessageRequest
+  ): Observable<AdvisorSessionResponse> {
+    return this.http.post<AdvisorSessionResponse>(
+      `${this.baseUrl}/advisor/sessions/${sessionId}/messages`,
+      request
+    );
+  }
+
+  getAdvisorSession(sessionId: string): Observable<AdvisorSessionStateResponse> {
+    return this.http.get<AdvisorSessionStateResponse>(
+      `${this.baseUrl}/advisor/sessions/${sessionId}`
+    );
+  }
+
+  completeAdvisorSession(sessionId: string): Observable<CompleteAdvisorSessionResponse> {
+    return this.http.post<CompleteAdvisorSessionResponse>(
+      `${this.baseUrl}/advisor/sessions/${sessionId}/complete`,
+      {}
     );
   }
 }
