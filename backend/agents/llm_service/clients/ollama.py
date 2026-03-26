@@ -479,7 +479,6 @@ class OllamaLLMClient(LLMClient):
         """Global default: enable thinking for all models; disable via LLM_ENABLE_THINKING=false."""
         env_val = (
             os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING)
-            or os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING_SW)
             or ""
         ).lower()
         return env_val != "false"
