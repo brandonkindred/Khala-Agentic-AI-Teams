@@ -11,6 +11,7 @@ import { AccessibilityJobStatusComponent } from '../accessibility-job-status/acc
 import { AccessibilityFindingsComponent } from '../accessibility-findings/accessibility-findings.component';
 import { AccessibilityReportComponent } from '../accessibility-report/accessibility-report.component';
 import { AccessibilityDesignSystemComponent } from '../accessibility-design-system/accessibility-design-system.component';
+import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import type {
   CreateAuditRequest,
   AuditJobResponse,
@@ -35,6 +36,7 @@ type DashboardTab = 'create' | 'status' | 'findings' | 'report' | 'design-system
     AccessibilityFindingsComponent,
     AccessibilityReportComponent,
     AccessibilityDesignSystemComponent,
+    TeamAssistantChatComponent,
   ],
   templateUrl: './accessibility-dashboard.component.html',
   styleUrl: './accessibility-dashboard.component.scss',
@@ -43,6 +45,7 @@ export class AccessibilityDashboardComponent implements OnInit, OnDestroy {
   private readonly api = inject(AccessibilityApiService);
   private healthSub: Subscription | null = null;
 
+  mode: 'chat' | 'form' = 'chat';
   selectedTabIndex = 0;
   activeTab: DashboardTab = 'create';
 

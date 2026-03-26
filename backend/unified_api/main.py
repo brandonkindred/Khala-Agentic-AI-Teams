@@ -467,6 +467,23 @@ async def lifespan(app: FastAPI):
     total_count = len(get_enabled_teams())
     logger.info("Mounted %d/%d team APIs", mounted_count, total_count)
 
+    # Mount team assistant sub-apps for teams that have assistant configs
+    try:
+        from team_assistant.api import create_assistant_app
+        from team_assistant.config import TEAM_ASSISTANT_CONFIGS
+
+        assistant_count = 0
+        for team_key, assistant_config in TEAM_ASSISTANT_CONFIGS.items():
+            if _mounted_teams.get(team_key):
+                team_cfg = TEAM_CONFIGS.get(team_key)
+                if team_cfg:
+                    assistant_app = create_assistant_app(assistant_config)
+                    app.mount(f"{team_cfg.prefix}/assistant", assistant_app)
+                    assistant_count += 1
+        logger.info("Mounted %d team assistant sub-apps", assistant_count)
+    except Exception:
+        logger.warning("Could not mount team assistant sub-apps", exc_info=True)
+
     # Start each team's Temporal worker when mounted and TEMPORAL_ADDRESS is set.
     # Map: team_key -> (module_path, start_function_name)
     _temporal_worker_starters: dict[str, tuple] = {

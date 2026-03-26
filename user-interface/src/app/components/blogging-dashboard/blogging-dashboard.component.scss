@@ -336,6 +336,32 @@
       }
     }
 
+    .content-plan-detail {
+      margin-top: var(--kh-space-3);
+      border: 1px solid var(--kh-border);
+      border-radius: var(--kh-radius-md);
+      background: var(--kh-surface-3);
+
+      summary {
+        padding: var(--kh-space-2) var(--kh-space-3);
+        cursor: pointer;
+        font-size: var(--kh-text-xs);
+        color: var(--kh-text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      .content-plan-pre {
+        padding: var(--kh-space-2) var(--kh-space-3);
+        margin: 0;
+        font-size: var(--kh-text-xs);
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 400px;
+        overflow-y: auto;
+      }
+    }
+
     .draft-preview {
       margin-top: var(--kh-space-3);
       padding: var(--kh-space-3);

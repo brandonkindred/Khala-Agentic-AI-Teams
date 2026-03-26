@@ -12,6 +12,7 @@ import { SocialMarketingRunFormComponent } from '../social-marketing-run-form/so
 import { SocialMarketingStatusComponent } from '../social-marketing-status/social-marketing-status.component';
 import { SocialMarketingPerformanceComponent } from '../social-marketing-performance/social-marketing-performance.component';
 import { SocialMarketingReviseComponent } from '../social-marketing-revise/social-marketing-revise.component';
+import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import type {
   RunMarketingTeamRequest,
   PostPerformanceObservation,
@@ -32,6 +33,7 @@ import type {
     SocialMarketingStatusComponent,
     SocialMarketingPerformanceComponent,
     SocialMarketingReviseComponent,
+    TeamAssistantChatComponent,
   ],
   templateUrl: './social-marketing-dashboard.component.html',
   styleUrl: './social-marketing-dashboard.component.scss',
@@ -41,6 +43,7 @@ export class SocialMarketingDashboardComponent implements OnInit, OnDestroy {
   private readonly route = inject(ActivatedRoute);
   private queryParamsSub: Subscription | null = null;
 
+  mode: 'chat' | 'form' = 'chat';
   loading = false;
   error: string | null = null;
   jobId: string | null = null;

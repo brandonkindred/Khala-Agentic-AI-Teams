@@ -5,82 +5,101 @@
   <app-health-indicator [healthCheck]="healthCheck" label="Personal Assistant API" />
 </div>
 
-@if (loading) {
-  <app-loading-spinner message="Processing..." />
+<div class="mode-toggle">
+  <button mat-stroked-button [class.active]="mode === 'chat'" (click)="mode = 'chat'">
+    <mat-icon>chat</mat-icon> Chat
+  </button>
+  <button mat-stroked-button [class.active]="mode === 'form'" (click)="mode = 'form'">
+    <mat-icon>edit_note</mat-icon> Form
+  </button>
+</div>
+
+@if (mode === 'chat') {
+  <app-team-assistant-chat
+    [teamApiUrl]="'/api/personal-assistant/assistant'"
+    [teamName]="'Personal Assistant'"
+    [teamDescription]="'Manage your email, calendar, tasks, deals, and reservations'"
+  />
 }
 
-@if (error) {
-  <app-error-message [message]="error" />
+@if (mode === 'form') {
+  @if (loading) {
+    <app-loading-spinner message="Processing..." />
+  }
+
+  @if (error) {
+    <app-error-message [message]="error" />
+  }
+
+  <mat-tab-group class="pa-tabs" animationDuration="200ms">
+    <mat-tab>
+      <ng-template mat-tab-label>
+        <mat-icon>chat</mat-icon>
+        <span class="tab-label">Chat</span>
+      </ng-template>
+      <div class="tab-content">
+        <app-pa-chat [userId]="userId" />
+      </div>
+    </mat-tab>
+
+    <mat-tab>
+      <ng-template mat-tab-label>
+        <mat-icon>person</mat-icon>
+        <span class="tab-label">Profile</span>
+      </ng-template>
+      <div class="tab-content">
+        <app-pa-profile [userId]="userId" (userIdChange)="onUserIdChange($event)" />
+      </div>
+    </mat-tab>
+
+    <mat-tab>
+      <ng-template mat-tab-label>
+        <mat-icon>checklist</mat-icon>
+        <span class="tab-label">Tasks</span>
+      </ng-template>
+      <div class="tab-content">
+        <app-pa-tasks [userId]="userId" />
+      </div>
+    </mat-tab>
+
+    <mat-tab>
+      <ng-template mat-tab-label>
+        <mat-icon>event</mat-icon>
+        <span class="tab-label">Calendar</span>
+      </ng-template>
+      <div class="tab-content">
+        <app-pa-calendar [userId]="userId" />
+      </div>
+    </mat-tab>
+
+    <mat-tab>
+      <ng-template mat-tab-label>
+        <mat-icon>local_offer</mat-icon>
+        <span class="tab-label">Deals</span>
+      </ng-template>
+      <div class="tab-content">
+        <app-pa-deals [userId]="userId" />
+      </div>
+    </mat-tab>
+
+    <mat-tab>
+      <ng-template mat-tab-label>
+        <mat-icon>restaurant</mat-icon>
+        <span class="tab-label">Reservations</span>
+      </ng-template>
+      <div class="tab-content">
+        <app-pa-reservations [userId]="userId" />
+      </div>
+    </mat-tab>
+
+    <mat-tab>
+      <ng-template mat-tab-label>
+        <mat-icon>description</mat-icon>
+        <span class="tab-label">Documents</span>
+      </ng-template>
+      <div class="tab-content">
+        <app-pa-documents [userId]="userId" />
+      </div>
+    </mat-tab>
+  </mat-tab-group>
 }
-
-<mat-tab-group class="pa-tabs" animationDuration="200ms">
-  <mat-tab>
-    <ng-template mat-tab-label>
-      <mat-icon>chat</mat-icon>
-      <span class="tab-label">Chat</span>
-    </ng-template>
-    <div class="tab-content">
-      <app-pa-chat [userId]="userId" />
-    </div>
-  </mat-tab>
-
-  <mat-tab>
-    <ng-template mat-tab-label>
-      <mat-icon>person</mat-icon>
-      <span class="tab-label">Profile</span>
-    </ng-template>
-    <div class="tab-content">
-      <app-pa-profile [userId]="userId" (userIdChange)="onUserIdChange($event)" />
-    </div>
-  </mat-tab>
-
-  <mat-tab>
-    <ng-template mat-tab-label>
-      <mat-icon>checklist</mat-icon>
-      <span class="tab-label">Tasks</span>
-    </ng-template>
-    <div class="tab-content">
-      <app-pa-tasks [userId]="userId" />
-    </div>
-  </mat-tab>
-
-  <mat-tab>
-    <ng-template mat-tab-label>
-      <mat-icon>event</mat-icon>
-      <span class="tab-label">Calendar</span>
-    </ng-template>
-    <div class="tab-content">
-      <app-pa-calendar [userId]="userId" />
-    </div>
-  </mat-tab>
-
-  <mat-tab>
-    <ng-template mat-tab-label>
-      <mat-icon>local_offer</mat-icon>
-      <span class="tab-label">Deals</span>
-    </ng-template>
-    <div class="tab-content">
-      <app-pa-deals [userId]="userId" />
-    </div>
-  </mat-tab>
-
-  <mat-tab>
-    <ng-template mat-tab-label>
-      <mat-icon>restaurant</mat-icon>
-      <span class="tab-label">Reservations</span>
-    </ng-template>
-    <div class="tab-content">
-      <app-pa-reservations [userId]="userId" />
-    </div>
-  </mat-tab>
-
-  <mat-tab>
-    <ng-template mat-tab-label>
-      <mat-icon>description</mat-icon>
-      <span class="tab-label">Documents</span>
-    </ng-template>
-    <div class="tab-content">
-      <app-pa-documents [userId]="userId" />
-    </div>
-  </mat-tab>
-</mat-tab-group>

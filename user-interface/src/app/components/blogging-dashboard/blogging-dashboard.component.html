@@ -3,6 +3,24 @@
   <p class="page-subtitle">Research, planning, drafting, and publication pipeline with quality gates.</p>
 </div>
 
+<div class="mode-toggle">
+  <button mat-stroked-button [class.active]="mode === 'chat'" (click)="mode = 'chat'">
+    <mat-icon>chat</mat-icon> Chat
+  </button>
+  <button mat-stroked-button [class.active]="mode === 'form'" (click)="mode = 'form'">
+    <mat-icon>edit_note</mat-icon> Form
+  </button>
+</div>
+
+@if (mode === 'chat') {
+  <app-team-assistant-chat
+    [teamApiUrl]="'/api/blogging/assistant'"
+    [teamName]="'Blogging'"
+    [teamDescription]="'Describe what you want to write about and the team will research, plan, and draft it'"
+  />
+}
+
+@if (mode === 'form') {
 @if (loading) {
   <app-loading-spinner message="Processing..." />
 }
@@ -403,6 +421,12 @@
                   <p class="detail-row"><strong>Title choices</strong> {{ selectedJobStatus.title_choices.length }}</p>
                 }
               </div>
+              @if (selectedJobStatus.content_plan_detail) {
+                <details class="content-plan-detail">
+                  <summary><strong>Content plan</strong></summary>
+                  <pre class="content-plan-pre">{{ selectedJobStatus.content_plan_detail }}</pre>
+                </details>
+              }
               @if (selectedJobStatus.draft_preview) {
                 <div class="draft-preview">
                   <strong>Draft preview</strong>
@@ -449,6 +473,7 @@
     </mat-card>
   </aside>
 </div>
+}
 
 @if (viewArtifactModal !== null || viewArtifactLoading || viewArtifactError) {
   <div class="artifact-view-overlay" (click)="closeViewModal()" role="button" tabindex="0" (keydown.escape)="closeViewModal()">

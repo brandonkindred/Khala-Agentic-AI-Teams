@@ -20,3 +20,4 @@ export * from './studio-grid.model';
 export * from './sales-team.model';
 export * from './startup-advisor.model';
 export * from './agentic-team.model';
+export * from './team-assistant.model';

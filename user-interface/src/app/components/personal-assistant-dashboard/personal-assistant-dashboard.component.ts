@@ -1,7 +1,9 @@
 import { Component, inject, OnInit } from '@angular/core';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatIconModule } from '@angular/material/icon';
+import { MatButtonModule } from '@angular/material/button';
 import { PersonalAssistantApiService } from '../../services/personal-assistant-api.service';
+import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
 import { ErrorMessageComponent } from '../../shared/error-message/error-message.component';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
@@ -22,6 +24,7 @@ import { PaDocumentsComponent } from '../pa-documents/pa-documents.component';
   imports: [
     MatTabsModule,
     MatIconModule,
+    MatButtonModule,
     LoadingSpinnerComponent,
     ErrorMessageComponent,
     HealthIndicatorComponent,
@@ -32,6 +35,7 @@ import { PaDocumentsComponent } from '../pa-documents/pa-documents.component';
     PaDealsComponent,
     PaReservationsComponent,
     PaDocumentsComponent,
+    TeamAssistantChatComponent,
   ],
   templateUrl: './personal-assistant-dashboard.component.html',
   styleUrl: './personal-assistant-dashboard.component.scss',
@@ -39,6 +43,7 @@ import { PaDocumentsComponent } from '../pa-documents/pa-documents.component';
 export class PersonalAssistantDashboardComponent implements OnInit {
   private readonly api = inject(PersonalAssistantApiService);
 
+  mode: 'chat' | 'form' = 'chat';
   userId = 'default';
   loading = false;
   error: string | null = null;

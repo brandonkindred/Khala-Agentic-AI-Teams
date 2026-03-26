@@ -1,6 +1,24 @@
 <h1>Social Media Marketing API</h1>
 <p>Campaign planning, performance ingestion, revision.</p>
 
+<div class="mode-toggle">
+  <button mat-stroked-button [class.active]="mode === 'chat'" (click)="mode = 'chat'">
+    <mat-icon>chat</mat-icon> Chat
+  </button>
+  <button mat-stroked-button [class.active]="mode === 'form'" (click)="mode = 'form'">
+    <mat-icon>edit_note</mat-icon> Form
+  </button>
+</div>
+
+@if (mode === 'chat') {
+  <app-team-assistant-chat
+    [teamApiUrl]="'/api/social-marketing/assistant'"
+    [teamName]="'Social Media Marketing'"
+    [teamDescription]="'Plan a social media campaign for your brand'"
+  />
+}
+
+@if (mode === 'form') {
 <div class="header-row">
   <app-health-indicator [healthCheck]="healthCheck" label="Social Marketing API" />
 </div>
@@ -55,3 +73,4 @@
     </mat-tab>
   }
 </mat-tab-group>
+}

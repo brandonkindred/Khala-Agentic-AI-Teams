@@ -16,6 +16,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { Observable, Subscription, interval, switchMap, takeWhile } from 'rxjs';
 import { AISystemsApiService } from '../../services/ai-systems-api.service';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
+import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import type {
   AISystemRequest,
   AISystemStatusResponse,
@@ -44,6 +45,7 @@ type DashboardTab = 'build' | 'jobs' | 'blueprints';
     MatExpansionModule,
     MatTooltipModule,
     HealthIndicatorComponent,
+    TeamAssistantChatComponent,
   ],
   templateUrl: './ai-systems-dashboard.component.html',
   styleUrl: './ai-systems-dashboard.component.scss',
@@ -56,6 +58,8 @@ export class AISystemsDashboardComponent implements OnInit, OnDestroy {
   private jobPollSub: Subscription | null = null;
   private queryParamsSub: Subscription | null = null;
   private pendingJobId: string | null = null;
+
+  mode: 'chat' | 'form' = 'chat';
 
   selectedTabIndex = 0;
   activeTab: DashboardTab = 'build';
