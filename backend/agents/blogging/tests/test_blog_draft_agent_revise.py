@@ -1,4 +1,4 @@
-"""Tests for BlogDraftAgent.revise (one-item-at-a-time feedback processing)."""
+"""Tests for BlogDraftAgent.revise (plan-first batch feedback processing)."""
 
 from __future__ import annotations
 
@@ -31,10 +31,17 @@ def _minimal_plan() -> ContentPlan:
     )
 
 
-def test_revise_processes_each_feedback_item_separately() -> None:
+def test_revise_generates_plan_then_applies_all_feedback() -> None:
     llm = MagicMock()
-    llm.complete.return_value = '{"draft": 0}\n---DRAFT---\n# Revised title\n\nBody here.\n'
-    agent = BlogDraftAgent(llm_client=llm, writing_style_guide_content="Use short paragraphs.")
+    llm.complete.side_effect = [
+        "1) Priority order\n2) Section updates\n3) Citation fixes",
+        '{"draft": 0}\n---DRAFT---\n# Revised title\n\nBody here.\n',
+    ]
+    agent = BlogDraftAgent(
+        llm_client=llm,
+        writing_style_guide_content="Use short paragraphs.",
+        brand_spec_content="Brand voice: practical and direct.",
+    )
     items = [
         FeedbackItem(
             category="style",
@@ -57,25 +64,27 @@ def test_revise_processes_each_feedback_item_separately() -> None:
     )
     out = agent.revise(inp)
 
-    # One LLM call per feedback item
+    # Two LLM calls: plan + apply
     assert llm.complete.call_count == 2
     llm.complete_json.assert_not_called()
 
-    # First call addresses item 1
+    # First call generates the revision plan from all feedback items
     first_prompt = llm.complete.call_args_list[0][0][0]
-    assert "1/2" in first_prompt
+    assert "Create a revision plan for this draft." in first_prompt
     assert "Opening is weak." in first_prompt
-    assert "FEEDBACK TO ADDRESS" in first_prompt
+    assert "Section two drags." in first_prompt
 
-    # Second call addresses item 2
+    # Second call applies the planned batch revision
     second_prompt = llm.complete.call_args_list[1][0][0]
-    assert "2/2" in second_prompt
+    assert "REVISION PLAN (execute this plan before writing):" in second_prompt
+    assert "COPY EDITOR FEEDBACK (apply every numbered item below):" in second_prompt
     assert "Section two drags." in second_prompt
 
-    # Both calls use the writing system prompt
-    for call in llm.complete.call_args_list:
-        assert call.kwargs.get("system_prompt") == WRITING_SYSTEM_PROMPT
-        assert call.kwargs.get("temperature") == 0.2
+    # Both calls use the writing system prompt with plan-then-apply temperatures
+    assert llm.complete.call_args_list[0].kwargs.get("system_prompt") == WRITING_SYSTEM_PROMPT
+    assert llm.complete.call_args_list[0].kwargs.get("temperature") == 0.1
+    assert llm.complete.call_args_list[1].kwargs.get("system_prompt") == WRITING_SYSTEM_PROMPT
+    assert llm.complete.call_args_list[1].kwargs.get("temperature") == 0.2
 
     assert "# Revised title" in out.draft
     assert "Body here." in out.draft

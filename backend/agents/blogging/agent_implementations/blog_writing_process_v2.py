@@ -19,7 +19,6 @@ from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 from blog_copy_editor_agent.models import FeedbackItem
 from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput
 from blog_fact_check_agent import BlogFactCheckAgent
-from blog_planning_agent import BlogPlanningAgent
 from blog_publication_agent.models import PublishingPack
 from blog_research_agent.agent import ResearchAgent
 from blog_research_agent.allowed_claims import extract_allowed_claims
@@ -203,8 +202,12 @@ def run_research_and_planning(
     )
 
     try:
-        planning_agent = BlogPlanningAgent(llm_client=planning_llm_client(llm_client))
-        planning_phase_result = planning_agent.run(
+        planning_draft_agent = BlogDraftAgent(
+            llm_client=planning_llm_client(llm_client),
+            writing_style_guide_content="",
+            brand_spec_content="",
+        )
+        planning_phase_result = planning_draft_agent.plan_content(
             planning_input,
             length_policy=length_policy,
             on_llm_request=lambda msg: _update(BlogPhase.PLANNING, status_text=msg),
@@ -740,6 +743,18 @@ def run_pipeline(
     # Draft + Copy Editor loop (load style and brand spec as raw text for draft/editor agents)
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
     brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
+    if not writing_style_content or not brand_spec_content:
+        missing_parts: list[str] = []
+        if not writing_style_content:
+            missing_parts.append(f"writing guidelines ({STYLE_GUIDE_PATH})")
+        if not brand_spec_content:
+            missing_parts.append(f"brand guidelines ({BRAND_SPEC_PROMPT_PATH})")
+        missing_msg = ", ".join(missing_parts)
+        raise DraftError(
+            "Cannot start drafting without required guideline inputs. "
+            f"Missing: {missing_msg}.",
+            cause=ValueError(missing_msg),
+        )
     allowed_claims_data = (
         read_artifact(work_dir, "allowed_claims.json") if work_dir is not None else None
     )

@@ -76,7 +76,11 @@ def test_reject_and_revision_loop(agent, temp_blog_root) -> None:
     )
     assert rejection.ready_to_revise
 
-    draft_agent = BlogDraftAgent(llm_client=DummyLLMClient())
+    draft_agent = BlogDraftAgent(
+        llm_client=DummyLLMClient(),
+        writing_style_guide_content="Use clear sentence flow and plain language.",
+        brand_spec_content="Brand voice: practical and trustworthy.",
+    )
     copy_editor_agent = BlogCopyEditorAgent(llm_client=DummyLLMClient())
 
     revision = agent.run_revision_loop(

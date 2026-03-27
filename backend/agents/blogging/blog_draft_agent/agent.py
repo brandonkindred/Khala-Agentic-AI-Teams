@@ -15,6 +15,8 @@ from typing import Any, Callable, Optional, Union
 
 from blog_research_agent.models import ResearchReference
 
+from blog_planning_agent.json_utils import parse_json_object
+from blog_planning_agent.prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
 from llm_service import (
     LLMClient,
     LLMJsonParseError,
@@ -22,6 +24,18 @@ from llm_service import (
     LLMTruncatedError,
     compact_text,
 )
+from shared.content_plan import (
+    ContentPlan,
+    PlanningFailureReason,
+    PlanningInput,
+    PlanningPhaseResult,
+    TitleCandidate,
+    build_research_digest,
+    content_plan_to_outline_markdown,
+    section_count_bounds_for_profile,
+)
+from shared.content_profile import LengthPolicy, resolve_length_policy
+from shared.errors import PlanningError
 
 from .models import DraftInput, DraftOutput, ReviseDraftInput
 from .prompts import (
@@ -149,6 +163,195 @@ class BlogDraftAgent:
         if self._writing_style_prompt:
             parts.append("--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt)
         self._style_prompt = "\n\n".join(parts)
+
+    def _assert_guidelines_present(self) -> None:
+        """Require both brand and writing guideline inputs before drafting/revising."""
+        missing: list[str] = []
+        if not self._brand_spec_prompt:
+            missing.append("brand guidelines")
+        if not self._writing_style_prompt:
+            missing.append("writing guidelines")
+        if missing:
+            raise ValueError(
+                "BlogDraftAgent requires both brand and writing guidelines to ensure compliant output. "
+                f"Missing: {', '.join(missing)}."
+            )
+
+    # ------------------------------------------------------------------
+    # Embedded planning (merged from blog_planning_agent)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _post_validate_plan(plan: ContentPlan, policy: LengthPolicy) -> ContentPlan:
+        lo, hi = section_count_bounds_for_profile(policy.content_profile.value)
+        n = len(plan.sections)
+        ra = plan.requirements_analysis.model_copy(deep=True)
+        if n < lo or n > hi:
+            ra.plan_acceptable = False
+            ra.gaps = [
+                *list(ra.gaps),
+                f"Section count {n} outside expected range [{lo},{hi}] for profile {policy.content_profile.value}.",
+            ]
+        return plan.model_copy(update={"requirements_analysis": ra})
+
+    @staticmethod
+    def _planning_done(plan: ContentPlan) -> bool:
+        ra = plan.requirements_analysis
+        return bool(ra.plan_acceptable and ra.scope_feasible)
+
+    @staticmethod
+    def _build_generate_plan_prompt(inp: PlanningInput) -> str:
+        parts = [
+            "Produce the JSON content plan for ONE blog post.",
+            "[CONTENT_PLAN_JSON_V1]",
+            "",
+            "--- BRIEF ---",
+            inp.brief.strip(),
+            "",
+            "--- LENGTH / PROFILE ---",
+            inp.length_policy_context.strip(),
+        ]
+        if inp.audience:
+            parts.extend(["", f"Audience: {inp.audience}"])
+        if inp.tone_or_purpose:
+            parts.append(f"Tone/Purpose: {inp.tone_or_purpose}")
+        if inp.series_context_block and inp.series_context_block.strip():
+            parts.extend(["", inp.series_context_block.strip()])
+        parts.extend(
+            [
+                "",
+                "--- RESEARCH DIGEST (ground the plan in this; flag gaps) ---",
+                inp.research_digest.strip(),
+            ]
+        )
+        return "\n".join(parts)
+
+    def _build_refine_plan_prompt(self, inp: PlanningInput, previous: ContentPlan, feedback: str) -> str:
+        base = self._build_generate_plan_prompt(inp)
+        prev_json = previous.model_dump(mode="json")
+        return (
+            base
+            + "\n\n--- PREVIOUS PLAN (JSON) ---\n"
+            + json.dumps(prev_json, indent=2)
+            + "\n\n--- REFINEMENT FEEDBACK ---\n"
+            + feedback
+            + "\n\n--- TASK ---\nReturn an improved full JSON plan as specified."
+        )
+
+    def _complete_plan_json(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        on_llm_request: Optional[Callable[[str], None]],
+        max_parse_retries: int,
+    ) -> tuple[dict[str, Any], int]:
+        parse_retries = 0
+        last_err: Optional[Exception] = None
+        for attempt in range(max_parse_retries):
+            if on_llm_request:
+                on_llm_request("Planning: generating structured plan...")
+            try:
+                data = self.llm.complete_json(
+                    prompt,
+                    temperature=0.25,
+                    system_prompt=system,
+                    think=True,
+                )
+                if isinstance(data, dict) and data:
+                    return data, parse_retries
+            except (LLMJsonParseError, TypeError, ValueError) as e:
+                last_err = e
+                parse_retries += 1
+                logger.warning("complete_json failed (attempt %s): %s", attempt + 1, e)
+            try:
+                raw = self.llm.complete(
+                    prompt + "\n\nRespond with a single JSON object only, no markdown fences.",
+                    temperature=0.25,
+                    system_prompt=system,
+                    think=True,
+                )
+                data = parse_json_object(raw)
+                return data, parse_retries
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                last_err = e
+                parse_retries += 1
+                logger.warning("parse_json_object failed (attempt %s): %s", attempt + 1, e)
+        msg = f"Planning JSON parse failed after {max_parse_retries} attempts"
+        if last_err:
+            msg += f": {last_err}"
+        raise PlanningError(
+            msg,
+            failure_reason=PlanningFailureReason.PARSE_FAILURE.value,
+            cause=last_err,
+        )
+
+    def plan_content(
+        self,
+        planning_input: PlanningInput,
+        *,
+        length_policy: LengthPolicy,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+        max_iterations: int = 5,
+        max_parse_retries: int = 3,
+    ) -> PlanningPhaseResult:
+        t0 = time.monotonic()
+        total_parse_retries = 0
+        last_plan: Optional[ContentPlan] = None
+        for iteration in range(1, max_iterations + 1):
+            if iteration == 1:
+                prompt = self._build_generate_plan_prompt(planning_input)
+                system = GENERATE_PLAN_SYSTEM
+            else:
+                assert last_plan is not None
+                feedback = (
+                    "The plan is not yet acceptable. "
+                    f"requirements_analysis: plan_acceptable={last_plan.requirements_analysis.plan_acceptable}, "
+                    f"scope_feasible={last_plan.requirements_analysis.scope_feasible}. "
+                    "Fix gaps, scope, and research alignment."
+                )
+                prompt = self._build_refine_plan_prompt(planning_input, last_plan, feedback)
+                system = REFINE_PLAN_SYSTEM
+            data, pr = self._complete_plan_json(
+                prompt,
+                system=system,
+                on_llm_request=on_llm_request,
+                max_parse_retries=max_parse_retries,
+            )
+            total_parse_retries += pr
+            try:
+                plan = ContentPlan.model_validate(data)
+            except Exception as e:
+                raise PlanningError(
+                    f"Invalid content plan schema: {e}",
+                    failure_reason=PlanningFailureReason.PARSE_FAILURE.value,
+                    cause=e,
+                ) from e
+            plan = self._post_validate_plan(plan, length_policy)
+            if not plan.title_candidates:
+                plan = plan.model_copy(
+                    update={
+                        "title_candidates": [
+                            TitleCandidate(
+                                title=plan.overarching_topic[:120],
+                                probability_of_success=0.5,
+                            )
+                        ]
+                    }
+                )
+            last_plan = plan.model_copy(update={"plan_version": iteration})
+            if self._planning_done(last_plan):
+                wall_ms = (time.monotonic() - t0) * 1000.0
+                return PlanningPhaseResult(
+                    content_plan=last_plan,
+                    planning_iterations_used=iteration,
+                    parse_retry_count=total_parse_retries,
+                    planning_wall_ms_total=wall_ms,
+                )
+        raise PlanningError(
+            f"Planning did not converge after {max_iterations} iterations",
+            failure_reason=PlanningFailureReason.MAX_ITERATIONS_REACHED.value,
+        )
 
     # ------------------------------------------------------------------
     # Self-check: deterministic + LLM review
@@ -355,9 +558,10 @@ class BlogDraftAgent:
 
         When draft_output_path is set, writes the draft to that path and logs the path.
         """
-        outline = draft_input.outline_for_prompt().strip()
-        outline = compact_text(outline, COMPACT_OUTLINE_CHARS, self.llm, "content plan")
-        if not outline:
+        self._assert_guidelines_present()
+        provisional_outline = draft_input.outline_for_prompt().strip()
+        provisional_outline = compact_text(provisional_outline, COMPACT_OUTLINE_CHARS, self.llm, "content plan")
+        if not provisional_outline:
             logger.warning("Empty content plan; returning minimal draft.")
             return DraftOutput(draft="# Draft\n\nAdd a content plan to generate a draft.")
 
@@ -371,7 +575,7 @@ class BlogDraftAgent:
                     executor.submit(
                         self._extract_notes_from_source,
                         ref,
-                        outline,
+                        provisional_outline,
                         draft_input.audience,
                         draft_input.tone_or_purpose,
                     )
@@ -402,6 +606,36 @@ class BlogDraftAgent:
                 return DraftOutput(
                     draft="# Draft\n\nAdd research document and outline to generate a draft."
                 )
+
+        # The draft agent now owns planning: generate/refine a content plan before writing.
+        planning_input = PlanningInput(
+            brief=(draft_input.content_plan.overarching_topic or provisional_outline)[:8000],
+            audience=draft_input.audience,
+            tone_or_purpose=draft_input.tone_or_purpose,
+            research_digest=build_research_digest(research, llm=self.llm),
+            length_policy_context=draft_input.length_guidance
+            or f"TARGET LENGTH: approximately {draft_input.target_word_count} words.",
+            series_context_block=None,
+        )
+        length_policy = resolve_length_policy(
+            explicit_target_word_count=draft_input.target_word_count
+        )
+        try:
+            planning_result = self.plan_content(
+                planning_input,
+                length_policy=length_policy,
+                on_llm_request=on_llm_request,
+            )
+            effective_plan = planning_result.content_plan
+        except Exception as e:
+            logger.warning("Draft-time planning failed; using provided content_plan. Error: %s", e)
+            effective_plan = draft_input.content_plan
+        outline = compact_text(
+            content_plan_to_outline_markdown(effective_plan),
+            COMPACT_OUTLINE_CHARS,
+            self.llm,
+            "content plan",
+        )
 
         style_guide_text = self._style_prompt
 
@@ -575,6 +809,7 @@ class BlogDraftAgent:
         self,
         draft: str,
         feedback_items: list[Any],
+        revision_plan: str,
         style_guide_text: str,
         revise_input: ReviseDraftInput,
     ) -> str:
@@ -632,6 +867,11 @@ class BlogDraftAgent:
             )
         prompt_parts.extend(
             [
+                "---",
+                "REVISION PLAN (execute this plan before writing):",
+                "---",
+                revision_plan.strip() or "No explicit plan generated; apply all feedback directly.",
+                "",
                 "---",
                 "COPY EDITOR FEEDBACK (apply every numbered item below):",
                 "---",
@@ -728,6 +968,58 @@ class BlogDraftAgent:
             ]
         )
         return "\n".join(prompt_parts)
+
+    def _build_revision_plan_prompt(self, draft: str, feedback_items: list[Any], revise_input: ReviseDraftInput) -> str:
+        feedback_lines = [
+            self._format_feedback_item_line(item, i)
+            for i, item in enumerate(feedback_items, start=1)
+        ]
+        cp = compact_text(
+            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self.llm, "content plan"
+        )
+        parts = [
+            "Create a revision plan for this draft.",
+            "Return plain text only with this structure:",
+            "1) Priority order",
+            "2) Section-by-section changes",
+            "3) Claim/citation fixes",
+            "4) Risks/regression checks",
+            "",
+            "---",
+            "CONTENT PLAN:",
+            "---",
+            cp,
+            "",
+            "---",
+            "FEEDBACK ITEMS:",
+            "---",
+            "\n\n".join(feedback_lines),
+            "",
+            "---",
+            "CURRENT DRAFT:",
+            "---",
+            draft,
+        ]
+        return "\n".join(parts)
+
+    def _generate_revision_plan(
+        self,
+        draft: str,
+        feedback_items: list[Any],
+        revise_input: ReviseDraftInput,
+    ) -> str:
+        prompt = self._build_revision_plan_prompt(draft, feedback_items, revise_input)
+        try:
+            plan = self.llm.complete(
+                prompt,
+                temperature=0.1,
+                system_prompt=WRITING_SYSTEM_PROMPT,
+                think=True,
+            )
+            return (plan or "").strip()
+        except Exception as e:
+            logger.warning("Revision planning failed: %s", e)
+            return ""
 
     def _build_revise_single_item_prompt(
         self,
@@ -901,6 +1193,7 @@ class BlogDraftAgent:
         Items are processed in order (must_fix first, then should_fix, then consider)
         as provided by the copy editor.
         """
+        self._assert_guidelines_present()
         draft = revise_input.draft.strip()
         if not draft:
             logger.warning("Empty draft in revise; returning as-is.")
@@ -912,22 +1205,56 @@ class BlogDraftAgent:
         style_guide_text = self._style_prompt
         items = list(revise_input.feedback_items)
         num_items = len(items)
-        logger.info("Revising draft: %s feedback items, one at a time", num_items)
+        logger.info("Revising draft: %s feedback items (plan-first batch revision)", num_items)
 
-        current_draft = draft
-        for idx, item in enumerate(items, start=1):
-            severity = getattr(item, "severity", "unknown")
-            category = getattr(item, "category", "unknown")
-            if on_llm_request:
-                on_llm_request(f"Addressing feedback {idx}/{num_items}: [{severity}] {category}")
-            logger.info("Revise item %s/%s: [%s] %s", idx, num_items, severity, category)
-            current_draft = self._revise_single_item(
-                current_draft, item, idx, num_items, style_guide_text, revise_input
-            )
+        if on_llm_request:
+            on_llm_request("Planning revision changes...")
+        revision_plan = self._generate_revision_plan(draft, items, revise_input)
 
-        logger.info(
-            "Revision complete: %s items addressed, final length=%s", num_items, len(current_draft)
+        if on_llm_request:
+            on_llm_request("Applying revision plan...")
+        prompt = self._build_revise_all_items_prompt(
+            draft,
+            items,
+            revision_plan,
+            style_guide_text,
+            revise_input,
         )
+        current_draft = draft
+        revise_max_tokens = 32768
+        for attempt in range(3):
+            try:
+                raw_response = self.llm.complete(
+                    prompt,
+                    temperature=0.2,
+                    max_tokens=revise_max_tokens,
+                    system_prompt=WRITING_SYSTEM_PROMPT,
+                    think=True,
+                )
+                revised = _extract_draft_after_marker(raw_response)
+                if revised and revised.strip():
+                    current_draft = revised.strip()
+                    break
+            except LLMTemporaryError:
+                logger.warning(
+                    "Batch revise transient error (attempt %s/3); retrying.",
+                    attempt + 1,
+                )
+                time.sleep(2.0 * (2**attempt))
+            except (LLMJsonParseError, LLMTruncatedError) as e:
+                logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
+        if current_draft == draft:
+            try:
+                data = self.llm.complete_json(
+                    prompt, temperature=0.2, max_tokens=revise_max_tokens, think=True
+                )
+                raw_draft = data.get("draft") if data else None
+                if isinstance(raw_draft, str) and raw_draft.strip():
+                    current_draft = raw_draft.strip()
+            except (LLMJsonParseError, LLMTruncatedError):
+                pass
+
+        logger.info("Revision complete: %s items addressed, final length=%s", num_items, len(current_draft))
         if draft_output_path:
             _write_draft_to_path(current_draft, draft_output_path)
         return DraftOutput(draft=current_draft)

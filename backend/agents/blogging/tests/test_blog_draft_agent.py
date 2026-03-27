@@ -91,7 +91,11 @@ def test_golden_draft_h2_headings_match_content_plan_sections() -> None:
             )
             return '{"draft": 0}\n---DRAFT---\n# Post title\n\n' + body
 
-    agent = BlogDraftAgent(llm_client=H2DraftLLM())
+    agent = BlogDraftAgent(
+        llm_client=H2DraftLLM(),
+        writing_style_guide_content="Use clear sentence flow and plain language.",
+        brand_spec_content="Brand voice: practical and trustworthy.",
+    )
     out = agent.run(DraftInput(research_document="Compiled research text.", content_plan=plan))
     h2s = re.findall(r"^## (.+)$", out.draft, re.MULTILINE)
     expected = [s.title for s in sorted(plan.sections, key=lambda x: x.order)]
@@ -101,7 +105,11 @@ def test_golden_draft_h2_headings_match_content_plan_sections() -> None:
 def test_blog_draft_agent_run() -> None:
     """BlogDraftAgent returns a non-empty draft from research + content plan."""
     llm = DummyLLMClient()
-    agent = BlogDraftAgent(llm_client=llm)
+    agent = BlogDraftAgent(
+        llm_client=llm,
+        writing_style_guide_content="Use clear sentence flow and plain language.",
+        brand_spec_content="Brand voice: practical and trustworthy.",
+    )
 
     draft_input = DraftInput(
         research_document="Compiled research: Source 1 summary. Source 2 key points.",
@@ -125,7 +133,7 @@ def test_blog_draft_agent_with_style_guide() -> None:
     agent = BlogDraftAgent(
         llm_client=llm,
         writing_style_guide_content="Write like a mentor. Clear, natural-length sentences. No em dashes.",
-        brand_spec_content="",
+        brand_spec_content="Brand voice: practical and clear.",
     )
 
     draft_input = DraftInput(
@@ -140,7 +148,11 @@ def test_blog_draft_agent_with_style_guide() -> None:
 def test_blog_draft_agent_run_with_research_references() -> None:
     """BlogDraftAgent runs parallel extraction then draft when research_references is provided."""
     llm = DummyLLMClient()
-    agent = BlogDraftAgent(llm_client=llm)
+    agent = BlogDraftAgent(
+        llm_client=llm,
+        writing_style_guide_content="Use clear sentence flow and plain language.",
+        brand_spec_content="Brand voice: practical and trustworthy.",
+    )
 
     refs = [
         ResearchReference(
@@ -177,7 +189,7 @@ def test_draft_prompt_includes_provided_brand_spec() -> None:
     llm = _PromptCapturingLLM()
     agent = BlogDraftAgent(
         llm_client=llm,
-        writing_style_guide_content="",
+        writing_style_guide_content="Use concise, natural sentences.",
         brand_spec_content="MyBrand: Test brand. Voice: friendly and clear.",
     )
     draft_input = DraftInput(
@@ -203,9 +215,9 @@ def test_outline_for_prompt_includes_section_titles() -> None:
     assert "Main" in text
 
 
-def test_draft_prompt_includes_fallback_when_no_brand_spec() -> None:
-    """When brand_spec_content is empty, the draft prompt includes the fallback line and no hardcoded primer."""
-    llm = _PromptCapturingLLM()
+def test_draft_run_requires_both_guidelines() -> None:
+    """Draft agent rejects run() when brand/writing guidelines are missing."""
+    llm = DummyLLMClient()
     agent = BlogDraftAgent(
         llm_client=llm,
         writing_style_guide_content="",
@@ -215,8 +227,5 @@ def test_draft_prompt_includes_fallback_when_no_brand_spec() -> None:
         research_document="Research here.",
         content_plan=_minimal_plan(),
     )
-    agent.run(draft_input)
-    draft_prompt = llm.all_prompts[0]
-    assert "No brand specification was provided. Follow the style guide below." in draft_prompt
-    assert "BRAND AND STYLE" in draft_prompt
-    assert "You are writing in a specific brand voice" not in draft_prompt
+    with pytest.raises(ValueError, match="requires both brand and writing guidelines"):
+        agent.run(draft_input)

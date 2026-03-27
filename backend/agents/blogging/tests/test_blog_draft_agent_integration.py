@@ -99,7 +99,7 @@ def test_draft_agent_with_ollama_produces_real_content() -> None:
             "Clear, conversational prose: full thoughts in natural-length sentences (~8th grade). "
             "No em dashes. Define terms on first use."
         ),
-        brand_spec_content="",
+        brand_spec_content="Brand voice: practical, direct, and transparent.",
     )
     plan = ContentPlan(
         overarching_topic="Observability for production systems",
