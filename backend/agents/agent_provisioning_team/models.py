@@ -158,6 +158,10 @@ class OnboardingPacket(BaseModel):
     tools: List[ToolOnboardingInfo] = Field(default_factory=list)
     access_tier: str
     environment_variables: Dict[str, str] = Field(default_factory=dict)
+    anatomy_bundle_path: Optional[str] = Field(
+        default=None,
+        description="Host path to docs/agent_anatomy/ with AGENT_ANATOMY.md and design PNGs when materialized",
+    )
 
 
 class DocumentationResult(BaseModel):

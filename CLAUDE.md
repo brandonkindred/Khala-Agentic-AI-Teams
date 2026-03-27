@@ -155,6 +155,7 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 
 ## Reference Docs
 
+- `backend/agents/agent_provisioning_team/AGENT_ANATOMY.md` — Required structure for AI agents (Input/Output, Tools, Memory, Prompts, Security Guardrails, Subagents); diagrams in `design_assets/`
 - `ARCHITECTURE.md` — 26KB detailed architecture with Mermaid diagrams (11 sections)
 - `backend/agents/software_engineering_team/README.md` — 31KB SE team deep dive
 - `docker/README.md` — Full-stack setup, ports, env vars, security

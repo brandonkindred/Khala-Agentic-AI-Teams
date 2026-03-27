@@ -69,9 +69,21 @@ class ToolProvisionerInterface(Protocol):
 
 
 class BaseToolProvisioner(ABC):
-    """Base class for tool provisioners with common functionality."""
+    """Base class for tool provisioners with common functionality.
+
+    Provisioned environments host AI agents that must follow the canonical anatomy
+    in ``agent_provisioning_team.AGENT_ANATOMY.md``; use
+    ``canonical_anatomy_prompt_preamble()`` when generating LLM-facing docs or designs.
+    """
 
     tool_name: str = "base"
+
+    @staticmethod
+    def canonical_anatomy_prompt_preamble() -> str:
+        """Full Strands agent anatomy text for prompts (AGENT_ANATOMY.md + diagram list)."""
+        from ..anatomy_assets import get_anatomy_prompt_preamble
+
+        return get_anatomy_prompt_preamble()
 
     @abstractmethod
     def provision(

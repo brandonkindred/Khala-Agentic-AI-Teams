@@ -156,7 +156,12 @@ class GitProvisionerTool(BaseToolProvisioner):
 
             readme = repo_path / "README.md"
             if not readme.exists():
-                readme.write_text("# Workspace\n\nAgent workspace repository.\n")
+                readme.write_text(
+                    "# Workspace\n\n"
+                    "Agent workspace repository.\n\n"
+                    "After provisioning, see `docs/agent_anatomy/` for the canonical AI agent anatomy "
+                    "(AGENT_ANATOMY.md and reference diagrams).\n"
+                )
 
             gitignore = repo_path / ".gitignore"
             if not gitignore.exists():

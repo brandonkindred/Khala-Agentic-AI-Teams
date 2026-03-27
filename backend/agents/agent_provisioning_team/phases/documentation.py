@@ -14,6 +14,7 @@ from ..models import (
     ToolOnboardingInfo,
     ToolProvisionResult,
 )
+from ..anatomy_assets import try_materialize_anatomy_bundle
 from ..shared.tool_manifest import ToolManifest
 
 
@@ -87,6 +88,8 @@ def run_documentation(
     env_vars["WORKSPACE"] = workspace_path
     env_vars["AGENT_ID"] = agent_id
 
+    anatomy_bundle_path = try_materialize_anatomy_bundle(workspace_path)
+
     summary = _generate_summary(
         agent_id=agent_id,
         tool_count=len(successful_tools),
@@ -98,6 +101,7 @@ def run_documentation(
         tools=tool_docs,
         access_tier=access_tier.value,
         environment_variables=env_vars,
+        anatomy_bundle_path=anatomy_bundle_path,
     )
 
     if progress_callback:
@@ -182,9 +186,39 @@ def generate_readme(onboarding: OnboardingPacket) -> str:
         "",
         f"**Access Tier:** {onboarding.access_tier}",
         "",
-        "## Available Tools",
+        "## Standard AI agent anatomy",
+        "",
+        "Every AI agent in Strands must follow the canonical **Agent Provisioning** anatomy: "
+        "Input/Output, Agent core, Tools, tiered Memory, Prompt roles (System/User/Assistant), "
+        "Security Guardrails, and Subagents with recursive INPUT/OUTPUT.",
         "",
     ]
+    if onboarding.anatomy_bundle_path:
+        lines.extend(
+            [
+                f"On this workspace, the specification and diagrams were copied to: "
+                f"`{onboarding.anatomy_bundle_path}/`",
+                "",
+                "- `AGENT_ANATOMY.md` — full checklist",
+                "- `*.png` — reference diagrams (high-level, detailed, subagents, chaining)",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "When the workspace path is available on the provisioning host, "
+                "`docs/agent_anatomy/` is populated with `AGENT_ANATOMY.md` and `design_assets/*.png`. "
+                "In the repository they live under `backend/agents/agent_provisioning_team/`.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Available Tools",
+            "",
+        ]
+    )
 
     for tool in onboarding.tools:
         lines.append(f"### {tool.name}")

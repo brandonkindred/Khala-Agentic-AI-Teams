@@ -2,6 +2,10 @@
 
 A swarm of agents that provisions sandboxed Docker environments with configurable tool accounts for AI agents, following an employee-onboarding model with least-privilege access and comprehensive onboarding documentation.
 
+## Standard agent anatomy (required)
+
+The Agent Provisioning team **must** design and deliver AI agents that match the canonical structure in **[`AGENT_ANATOMY.md`](AGENT_ANATOMY.md)**. That document is the normative checklist (Input/Output, Agent core, Tools, tiered Memory, Prompt roles, Security Guardrails, and Subagents with recursive INPUT/OUTPUT). Reference diagrams live in [`design_assets/`](design_assets/).
+
 ## Overview
 
 The Agent Provisioning Team automates the process of setting up development environments for AI agents. Like onboarding a new employee at a company, it provisions:
