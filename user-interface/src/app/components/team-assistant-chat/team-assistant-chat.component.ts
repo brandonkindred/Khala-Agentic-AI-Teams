@@ -121,7 +121,7 @@ export class TeamAssistantChatComponent implements OnInit, AfterViewChecked {
         this.context = res.context ?? this.context;
         this.checkReadiness();
       },
-      error: () => {},
+      error: () => { /* Context update failed silently; local state is already set */ },
     });
   }
 
