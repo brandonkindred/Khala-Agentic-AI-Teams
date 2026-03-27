@@ -23,8 +23,10 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import type {
   AgenticTeam,
+  AgenticTeamAgent,
   AgenticConversationMessage,
   ProcessDefinition,
+  RosterValidationResult,
 } from '../../models';
 
 @Component({
@@ -59,6 +61,11 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   loading = signal(false);
   error = signal<string | null>(null);
   flowchartSvg = signal<SafeHtml | null>(null);
+
+  rosterAgents = signal<AgenticTeamAgent[]>([]);
+  rosterValidation = signal<RosterValidationResult | null>(null);
+  rosterLoading = signal(false);
+  expandedAgent = signal<string | null>(null);
 
   private conversationId: string | null = null;
 
@@ -111,6 +118,32 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.currentProcess.set(res.current_process);
     this.suggestedQuestions.set(res.suggested_questions);
     this.buildFlowchart(res.current_process);
+    this.refreshRoster();
+  }
+
+  refreshRoster(): void {
+    this.rosterLoading.set(true);
+    this.api.listTeamAgents(this.team.team_id).subscribe({
+      next: (agents) => {
+        this.rosterAgents.set(agents);
+        this.rosterLoading.set(false);
+        this.api.validateRoster(this.team.team_id).subscribe({
+          next: (result) => this.rosterValidation.set(result),
+          error: () => this.rosterValidation.set(null),
+        });
+      },
+      error: () => this.rosterLoading.set(false),
+    });
+  }
+
+  toggleAgentExpand(agentName: string): void {
+    this.expandedAgent.update((current) => (current === agentName ? null : agentName));
+  }
+
+  gapCountForAgent(agentName: string): number {
+    const v = this.rosterValidation();
+    if (!v) return 0;
+    return v.gaps.filter((g) => g.agent_name === agentName).length;
   }
 
   onSubmit(): void {

@@ -10,11 +10,15 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 
+from agentic_team_provisioning.agent_env_provisioning import schedule_provision_step_agents
 from agentic_team_provisioning.assistant.agent import ProcessDesignerAgent
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agentic_team_provisioning.infrastructure import get_team_infrastructure, provision_team
 from agentic_team_provisioning.models import (
+    AgentEnvProvisionSummary,
+    AgenticTeamAgent,
     AssetInfo,
+    RosterValidationResult,
     ConversationStateResponse,
     ConversationSummaryResponse,
     CreateConversationRequest,
@@ -51,9 +55,9 @@ except Exception as _e:
     logger.warning("Could not retroactively provision team infrastructure: %s", _e)
 
 GREETING = (
-    "Hello! I'm your Process Designer assistant. I'll help you define a process "
-    "for your team. Let's start — what process would you like to create? "
-    "Tell me what it does at a high level, and we'll work through the details together."
+    "Hello! I'm your Process Designer assistant. I'll help you design an agentic "
+    "team — its agents and processes. Tell me what the team should do at a high "
+    "level, and we'll work through the agents you need and the processes they'll run."
 )
 
 DEFAULT_SUGGESTIONS = [
@@ -61,6 +65,34 @@ DEFAULT_SUGGESTIONS = [
     "Help me create a content review workflow",
     "I need a process for handling support tickets",
 ]
+
+
+def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
+    """Persist agents roster from the LLM ``agents`` block (if present)."""
+    if not agents_data:
+        return
+    agents: list[AgenticTeamAgent] = []
+    for a in agents_data:
+        name = a.get("agent_name", "")
+        if not name:
+            continue
+        agents.append(
+            AgenticTeamAgent(
+                agent_name=name,
+                role=a.get("role", ""),
+                skills=a.get("skills", []),
+                capabilities=a.get("capabilities", []),
+                tools=a.get("tools", []),
+                expertise=a.get("expertise", []),
+            )
+        )
+    if agents:
+        _store.save_team_agents(team_id, agents)
+
+
+def _after_process_saved(team_id: str, process: ProcessDefinition) -> None:
+    """Provision per-step agent environments via agent_provisioning_team (background)."""
+    schedule_provision_step_agents(team_id, process, _store)
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +134,31 @@ def get_team(team_id: str):
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
     return TeamDetailResponse(team=team)
+
+
+# ---------------------------------------------------------------------------
+# Team agents pool
+# ---------------------------------------------------------------------------
+
+
+@app.get("/teams/{team_id}/agents", response_model=list[AgenticTeamAgent])
+def list_team_agents(team_id: str):
+    """Named agents pool (roster) for this team."""
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    return team.agents
+
+
+@app.get("/teams/{team_id}/roster/validation", response_model=RosterValidationResult)
+def validate_team_roster(team_id: str):
+    """Validate whether the roster fully covers the team's process needs."""
+    from agentic_team_provisioning.roster_validation import validate_roster
+
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    return validate_roster(team)
 
 
 # ---------------------------------------------------------------------------
@@ -156,19 +213,26 @@ def create_conversation(req: CreateConversationRequest):
     conversation_id = _store.create_conversation(team_id=req.team_id)
 
     if req.initial_message:
-        # User sent an opening message — process it
         _store.append_message(conversation_id, "user", req.initial_message)
 
-        reply, process, suggestions = _agent.respond(
+        existing_agents = [
+            {"agent_name": a.agent_name, "role": a.role}
+            for a in _store.list_team_agents(req.team_id)
+        ] or None
+
+        reply, process, suggestions, agents_data = _agent.respond(
             conversation_history=[],
             current_process=None,
             user_message=req.initial_message,
+            current_agents=existing_agents,
         )
 
         _store.append_message(conversation_id, "assistant", reply)
+        _save_agents_from_llm(req.team_id, agents_data)
         if process:
             _store.save_process(req.team_id, process)
             _store.set_conversation_process(conversation_id, process.process_id)
+            _after_process_saved(req.team_id, process)
 
         return _build_state_response(conversation_id, req.team_id, process, suggestions)
 
@@ -183,32 +247,35 @@ def send_message(conversation_id: str, req: SendMessageRequest):
     if not team_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    # Load current process (if any)
     process_id = _store.get_conversation_process_id(conversation_id)
     current_process = _store.get_process(process_id) if process_id else None
 
-    # Build conversation history pairs
+    existing_agents = [
+        {"agent_name": a.agent_name, "role": a.role}
+        for a in _store.list_team_agents(team_id)
+    ] or None
+
     existing_messages = _store.get_messages(conversation_id)
     history = [(m.role, m.content) for m in existing_messages]
 
-    # Record user message
     _store.append_message(conversation_id, "user", req.message)
 
-    # Get LLM response
-    reply, updated_process, suggestions = _agent.respond(
+    reply, updated_process, suggestions, agents_data = _agent.respond(
         conversation_history=history,
         current_process=current_process,
         user_message=req.message,
+        current_agents=existing_agents,
     )
 
     _store.append_message(conversation_id, "assistant", reply)
+    _save_agents_from_llm(team_id, agents_data)
 
-    # Persist process updates
     effective_process = current_process
     if updated_process:
         _store.save_process(team_id, updated_process)
         _store.set_conversation_process(conversation_id, updated_process.process_id)
         effective_process = updated_process
+        _after_process_saved(team_id, updated_process)
 
     return _build_state_response(conversation_id, team_id, effective_process, suggestions)
 
@@ -232,6 +299,16 @@ def list_conversations(team_id: str):
         raise HTTPException(status_code=404, detail="Team not found")
     rows = _store.list_conversations(team_id)
     return [ConversationSummaryResponse(**r) for r in rows]
+
+
+@app.get("/teams/{team_id}/agent-environments", response_model=List[AgentEnvProvisionSummary])
+def list_team_agent_environments(team_id: str):
+    """Per-step agent provisioning status (Agent Provisioning team / sandboxed envs)."""
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    rows = _store.list_agent_env_provisions(team_id)
+    return [AgentEnvProvisionSummary(**r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

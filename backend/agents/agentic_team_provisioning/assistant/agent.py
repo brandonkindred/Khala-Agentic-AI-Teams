@@ -26,26 +26,101 @@ _TRIGGER_MAP = {v.value: v for v in TriggerType}
 _STEP_TYPE_MAP = {v.value: v for v in StepType}
 
 SYSTEM_PROMPT = """\
-You are a Process Designer assistant. Your job is to help the user define \
-business or technical processes for an agentic team through conversation.
+You are a Process Designer assistant. You help users create and refine **agentic \
+teams** — teams of AI agents that execute business or technical processes.
 
-A process has:
+## Required agentic team architecture
+
+Every team you design MUST follow this architecture:
+
+### API layer (5 categories, handled by the platform)
+The platform exposes: **User Requests / Chat**, **Questions for User**, \
+**Job Status**, **Assets** (file system), and **Form Information** (database). \
+You do not design these — they exist automatically.
+
+### Orchestrator Agent
+The central coordinator inside the team. It receives user requests, manages \
+**Job Tracking** and **Question Tracking**, delegates work to named agents, \
+and executes processes. The platform acts as the orchestrator.
+
+### Agents pool / Roster (Agent 1 … Agent N)
+Each team maintains a **roster** — a named pool of agents. The roster is \
+validated to ensure the team is fully staffed: every skill, capability, tool, \
+and expertise area needed by the team's processes must be covered by at least \
+one rostered agent. Each agent has:
+- **agent_name** — stable, unique within the team; used for provisioning.
+- **role** — primary role on the team.
+- **skills** — specific skills (e.g. "data analysis", "copywriting").
+- **capabilities** — functional capabilities (e.g. "code generation", "web search").
+- **tools** — tools or integrations the agent can use (e.g. "Git", "Slack API").
+- **expertise** — domain expertise areas (e.g. "customer support", "HIPAA compliance").
+
+Each named agent is provisioned by the **Agent Provisioning** team: they \
+receive a sandboxed environment per the canonical agent anatomy (Input/Output, \
+Tools, Memory tiers, Prompts, Security Guardrails, Subagents). Use clear, \
+stable names — they participate in provisioning.
+
+**You MUST provide all six fields** for every agent. The roster is validated \
+automatically; agents missing skills/capabilities/tools/expertise will be \
+flagged as incomplete.
+
+### Processes pool (Process 1 … Process N)
+Each team defines one or more processes. A process has:
 - A **trigger** (message, event, schedule, or manual) that starts it.
-- A series of **steps**, each with a name, description, type, assigned agents, \
-  and connections to subsequent steps.
-- A clear **output** describing the deliverable and where it goes when the process completes.
+- A series of **steps**, each assigned to agents **from the team's agents pool**.
+- A clear **output** (deliverable + destination).
 
 Step types: action, decision, parallel_split, parallel_join, wait, subprocess.
 
-Guidelines:
-1. Ask clarifying questions to fully understand the process.
-2. Strive for completeness — every process must have a clear start (trigger) and \
-   a clear end (output/deliverable).
-3. After gathering enough information, produce or update the process definition.
-4. When you update the process, include a JSON block wrapped in ```process ... ``` \
-   fences. The JSON must conform to this schema:
+### Infrastructure (automatic)
+- **File System** for assets.
+- **SQLite Database** for form data.
+- **Job Service** for job lifecycle.
 
-```example
+## Your responsibilities
+
+1. Ask clarifying questions to fully understand the team's purpose and processes.
+2. First define the **agents pool** — the full roster of named agents the team needs.
+3. Then define **processes** that reference those agents by name.
+4. Every agent mentioned in a process step MUST appear in the agents pool.
+5. Every process must have a trigger, at least one step, and an output.
+
+## Output format
+
+When you produce or update the team definition, include TWO JSON blocks:
+
+### ```agents``` block — the full team roster
+```agents-example
+[
+  {
+    "agent_name": "Triage Agent",
+    "role": "Classifies tickets by urgency",
+    "skills": ["text classification", "priority assessment"],
+    "capabilities": ["NLP analysis", "rule-based routing"],
+    "tools": ["Ticket API", "Label service"],
+    "expertise": ["customer support", "SLA management"]
+  },
+  {
+    "agent_name": "Router Agent",
+    "role": "Decides which team handles the ticket",
+    "skills": ["intent detection", "team matching"],
+    "capabilities": ["decision making", "workload balancing"],
+    "tools": ["Team directory API", "Queue manager"],
+    "expertise": ["operations", "resource allocation"]
+  },
+  {
+    "agent_name": "Resolution Agent",
+    "role": "Resolves the ticket and writes summary",
+    "skills": ["problem solving", "technical writing"],
+    "capabilities": ["knowledge base search", "solution generation"],
+    "tools": ["Knowledge base", "Ticket API"],
+    "expertise": ["technical support", "documentation"]
+  }
+]
+```
+
+### ```process``` block — a complete process definition
+```process-example
 {
   "name": "Process Name",
   "description": "Short description",
@@ -73,40 +148,48 @@ Guidelines:
 }
 ```
 
-5. Always include the FULL process JSON when updating — not partial diffs.
-6. You may also include a ```suggestions ... ``` block with a JSON array of \
+6. Always include the FULL JSON when updating — not partial diffs.
+7. Always include the ```agents``` block when you update the process (even if \
+   agents haven't changed) so the roster stays in sync.
+8. You may also include a ```suggestions ... ``` block with a JSON array of \
    follow-up question strings.
-7. Keep your conversational replies concise and friendly.
+9. Keep your conversational replies concise and friendly.
 """
 
 
 def _build_messages(
     conversation_history: list[tuple[str, str]],
     current_process: Optional[ProcessDefinition],
+    current_agents: Optional[list[dict]],
     user_message: str,
 ) -> list[dict]:
     """Build the LLM message list."""
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # Inject current process state if we have one
+    state_parts: list[str] = []
+    if current_agents:
+        state_parts.append(
+            "Current team agents pool:\n"
+            f"```json\n{json.dumps(current_agents, indent=2)}\n```"
+        )
     if current_process and current_process.name:
         process_json = current_process.model_dump(mode="json")
+        state_parts.append(
+            "Current process definition (the user has built so far):\n"
+            f"```json\n{json.dumps(process_json, indent=2)}\n```"
+        )
+    if state_parts:
         messages.append(
             {
                 "role": "system",
-                "content": (
-                    "Current process definition (the user has built so far):\n"
-                    f"```json\n{json.dumps(process_json, indent=2)}\n```\n"
-                    "Continue refining this process based on the user's input."
-                ),
+                "content": "\n\n".join(state_parts)
+                + "\n\nContinue refining based on the user's input.",
             }
         )
 
-    # Prior conversation turns
     for role, content in conversation_history:
         messages.append({"role": role, "content": content})
 
-    # Latest user message
     messages.append({"role": "user", "content": user_message})
     return messages
 
@@ -140,9 +223,26 @@ def _parse_suggestions(text: str) -> list[str]:
     return []
 
 
+def _parse_agents_json(text: str) -> Optional[list]:
+    """Extract the ```agents ... ``` JSON block (array of agent dicts)."""
+    pattern = r"```agents\s*\n?(.*?)```"
+    match = re.search(pattern, text, re.DOTALL)
+    if not match:
+        return None
+    raw = match.group(1).strip()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return data
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse agents JSON from assistant response")
+    return None
+
+
 def _strip_code_blocks(text: str) -> str:
-    """Remove ```process``` and ```suggestions``` blocks from the visible reply."""
+    """Remove ```process```, ```agents```, and ```suggestions``` blocks from the visible reply."""
     text = re.sub(r"```process\s*\n?.*?```", "", text, flags=re.DOTALL)
+    text = re.sub(r"```agents\s*\n?.*?```", "", text, flags=re.DOTALL)
     text = re.sub(r"```suggestions\s*\n?.*?```", "", text, flags=re.DOTALL)
     return text.strip()
 
@@ -193,30 +293,33 @@ def _dict_to_process(data: dict, existing_id: Optional[str] = None) -> ProcessDe
 
 
 class ProcessDesignerAgent:
-    """Conversational agent that helps users design agentic team processes."""
+    """Conversational agent that helps users design agentic team processes.
+
+    The LLM is instructed to produce both an **agents** roster and a **process**
+    definition so teams comply with the canonical agentic team architecture
+    (Orchestrator → Agents pool + Processes pool).
+    """
 
     def respond(
         self,
         conversation_history: list[tuple[str, str]],
         current_process: Optional[ProcessDefinition],
         user_message: str,
-    ) -> tuple[str, Optional[ProcessDefinition], list[str]]:
-        """Send user message to LLM and return (reply, updated_process, suggestions).
-
-        Parameters
-        ----------
-        conversation_history:
-            List of (role, content) pairs for prior turns (excluding the new message).
-        current_process:
-            The process being designed so far, or None.
-        user_message:
-            The latest message from the user.
+        current_agents: Optional[list[dict]] = None,
+    ) -> tuple[str, Optional[ProcessDefinition], list[str], Optional[list[dict]]]:
+        """Send user message to LLM and return structured outputs.
 
         Returns
         -------
-        tuple of (reply_text, updated_process_or_None, suggested_questions)
+        tuple of (reply_text, updated_process_or_None, suggested_questions,
+                  agents_roster_or_None)
+
+        ``agents_roster`` is a list of dicts with ``agent_name`` and ``role``
+        when the LLM included an ``agents`` block; None otherwise.
         """
-        messages = _build_messages(conversation_history, current_process, user_message)
+        messages = _build_messages(
+            conversation_history, current_process, current_agents, user_message
+        )
 
         client = get_client(agent_key="agentic_team_provisioning")
         response = client.complete(messages)
@@ -225,6 +328,7 @@ class ProcessDesignerAgent:
 
         # Parse structured blocks
         process_data = _parse_process_json(raw_text)
+        agents_data = _parse_agents_json(raw_text)
         suggestions = _parse_suggestions(raw_text)
         reply_text = _strip_code_blocks(raw_text)
 
@@ -238,9 +342,9 @@ class ProcessDesignerAgent:
         if not suggestions:
             if not current_process and not updated_process:
                 suggestions = [
-                    "What triggers this process?",
-                    "What are the main steps involved?",
-                    "What is the final deliverable?",
+                    "What is the team's purpose?",
+                    "What agents should be on this team?",
+                    "What processes will they run?",
                 ]
 
-        return reply_text, updated_process, suggestions
+        return reply_text, updated_process, suggestions, agents_data

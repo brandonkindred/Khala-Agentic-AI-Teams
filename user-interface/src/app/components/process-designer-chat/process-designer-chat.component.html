@@ -71,6 +71,147 @@
     </mat-card>
   </div>
 
+  <!-- Roster panel -->
+  <div class="roster-panel">
+    <mat-card class="roster-card">
+      <mat-card-header>
+        <mat-card-title>
+          <mat-icon>badge</mat-icon>
+          Team Roster
+        </mat-card-title>
+        <span class="spacer"></span>
+        @if (rosterValidation(); as v) {
+          <mat-chip [class]="v.is_fully_staffed ? 'roster-badge staffed' : 'roster-badge gaps'">
+            <mat-icon matChipAvatar>{{ v.is_fully_staffed ? 'check_circle' : 'warning' }}</mat-icon>
+            {{ v.is_fully_staffed ? 'Fully Staffed' : v.gaps.length + ' gap' + (v.gaps.length !== 1 ? 's' : '') }}
+          </mat-chip>
+        }
+        <button mat-icon-button (click)="refreshRoster()" matTooltip="Refresh roster" [disabled]="rosterLoading()">
+          <mat-icon>sync</mat-icon>
+        </button>
+      </mat-card-header>
+
+      <mat-card-content>
+        @if (rosterLoading() && rosterAgents().length === 0) {
+          <div class="roster-loading">
+            <div class="typing-indicator">
+              <span></span><span></span><span></span>
+            </div>
+            <p>Loading roster...</p>
+          </div>
+        } @else if (rosterAgents().length === 0) {
+          <div class="roster-empty">
+            <mat-icon class="empty-icon">person_add</mat-icon>
+            <p>No agents on the roster yet. As you design the team through the chat, agents will appear here.</p>
+          </div>
+        } @else {
+          @if (rosterValidation(); as v) {
+            <div class="roster-summary" [class.staffed]="v.is_fully_staffed" [class.has-gaps]="!v.is_fully_staffed">
+              <p>{{ v.summary }}</p>
+            </div>
+          }
+
+          <div class="roster-list">
+            @for (agent of rosterAgents(); track agent.agent_name) {
+              <div
+                class="agent-card"
+                [class.expanded]="expandedAgent() === agent.agent_name"
+                [class.has-gap]="gapCountForAgent(agent.agent_name) > 0"
+                (click)="toggleAgentExpand(agent.agent_name)"
+              >
+                <div class="agent-card-header">
+                  <div class="agent-avatar">
+                    <mat-icon>smart_toy</mat-icon>
+                  </div>
+                  <div class="agent-identity">
+                    <span class="agent-name">{{ agent.agent_name }}</span>
+                    <span class="agent-role">{{ agent.role }}</span>
+                  </div>
+                  <mat-icon class="expand-icon">
+                    {{ expandedAgent() === agent.agent_name ? 'expand_less' : 'expand_more' }}
+                  </mat-icon>
+                </div>
+
+                @if (expandedAgent() === agent.agent_name) {
+                  <div class="agent-details">
+                    @if (agent.skills.length > 0) {
+                      <div class="detail-group">
+                        <span class="detail-label">
+                          <mat-icon>psychology</mat-icon> Skills
+                        </span>
+                        <div class="detail-tags">
+                          @for (s of agent.skills; track s) {
+                            <span class="tag skill">{{ s }}</span>
+                          }
+                        </div>
+                      </div>
+                    }
+                    @if (agent.capabilities.length > 0) {
+                      <div class="detail-group">
+                        <span class="detail-label">
+                          <mat-icon>bolt</mat-icon> Capabilities
+                        </span>
+                        <div class="detail-tags">
+                          @for (c of agent.capabilities; track c) {
+                            <span class="tag capability">{{ c }}</span>
+                          }
+                        </div>
+                      </div>
+                    }
+                    @if (agent.tools.length > 0) {
+                      <div class="detail-group">
+                        <span class="detail-label">
+                          <mat-icon>build</mat-icon> Tools
+                        </span>
+                        <div class="detail-tags">
+                          @for (t of agent.tools; track t) {
+                            <span class="tag tool">{{ t }}</span>
+                          }
+                        </div>
+                      </div>
+                    }
+                    @if (agent.expertise.length > 0) {
+                      <div class="detail-group">
+                        <span class="detail-label">
+                          <mat-icon>school</mat-icon> Expertise
+                        </span>
+                        <div class="detail-tags">
+                          @for (e of agent.expertise; track e) {
+                            <span class="tag expertise">{{ e }}</span>
+                          }
+                        </div>
+                      </div>
+                    }
+                    @if (agent.skills.length === 0 && agent.capabilities.length === 0 && agent.tools.length === 0 && agent.expertise.length === 0) {
+                      <p class="no-detail-text">No skills, capabilities, tools, or expertise defined yet.</p>
+                    }
+                  </div>
+                }
+              </div>
+            }
+          </div>
+
+          @if (rosterValidation(); as v) {
+            @if (v.gaps.length > 0) {
+              <div class="roster-gaps">
+                <h4>
+                  <mat-icon>warning</mat-icon>
+                  Staffing Gaps
+                </h4>
+                @for (gap of v.gaps; track gap.detail) {
+                  <div class="gap-item">
+                    <mat-icon class="gap-icon">{{ gap.category === 'unrostered_agent' ? 'person_off' : gap.category === 'unstaffed_step' ? 'block' : gap.category === 'unused_agent' ? 'person_remove' : 'info' }}</mat-icon>
+                    <span>{{ gap.detail }}</span>
+                  </div>
+                }
+              </div>
+            }
+          }
+        }
+      </mat-card-content>
+    </mat-card>
+  </div>
+
   <!-- Process visualization panel -->
   <div class="process-panel">
     <mat-card class="process-card">

@@ -97,16 +97,52 @@ class ProcessDefinition(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Agents pool (team-level roster)
+# ---------------------------------------------------------------------------
+
+
+class AgenticTeamAgent(BaseModel):
+    """A named agent in the team's roster.
+
+    The roster captures enough detail to validate that the team is fully
+    staffed: every process need (skill, capability, tool, expertise) must be
+    covered by at least one agent on the roster.
+    """
+
+    agent_name: str = Field(..., description="Stable, unique name within the team")
+    role: str = Field(..., description="Primary role this agent fills on the team")
+    skills: list[str] = Field(
+        default_factory=list,
+        description="Specific skills the agent possesses (e.g. 'data analysis', 'copywriting')",
+    )
+    capabilities: list[str] = Field(
+        default_factory=list,
+        description="Functional capabilities (e.g. 'code generation', 'web search', 'image classification')",
+    )
+    tools: list[str] = Field(
+        default_factory=list,
+        description="Tools or integrations the agent can use (e.g. 'Git', 'PostgreSQL', 'Slack API')",
+    )
+    expertise: list[str] = Field(
+        default_factory=list,
+        description="Domain expertise areas (e.g. 'customer support', 'financial analysis', 'HIPAA compliance')",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Agentic Team
 # ---------------------------------------------------------------------------
 
 
 class AgenticTeam(BaseModel):
-    """Top-level team definition containing processes."""
+    """Top-level team definition containing an agents pool and processes."""
 
     team_id: str = Field(..., description="Unique id (UUID)")
     name: str = Field(..., description="Team display name")
     description: str = Field(default="", description="Short description of what the team does")
+    agents: list[AgenticTeamAgent] = Field(
+        default_factory=list, description="Named agents pool (Agent 1 … Agent N)"
+    )
     processes: list[ProcessDefinition] = Field(default_factory=list)
     created_at: str = Field(default="")
     updated_at: str = Field(default="")
@@ -229,3 +265,44 @@ class TeamPendingQuestion(BaseModel):
 
 class SubmitTeamAnswersRequest(BaseModel):
     answers: list[dict] = Field(..., description="List of answer objects")
+
+
+class RosterGap(BaseModel):
+    """A specific gap in the team's roster coverage."""
+
+    category: str = Field(
+        ...,
+        description="Gap category: 'unrostered_agent', 'missing_skill', 'missing_capability', "
+        "'missing_tool', 'missing_expertise', 'unstaffed_step'",
+    )
+    detail: str = Field(..., description="Human-readable description of the gap")
+    process_id: Optional[str] = Field(default=None, description="Process where the gap was found")
+    step_id: Optional[str] = Field(default=None, description="Step where the gap was found")
+    agent_name: Optional[str] = Field(default=None, description="Agent involved (if applicable)")
+
+
+class RosterValidationResult(BaseModel):
+    """Result of validating whether the roster fully covers the team's needs."""
+
+    is_fully_staffed: bool = Field(..., description="True when no gaps were found")
+    agent_count: int = Field(default=0)
+    process_count: int = Field(default=0)
+    gaps: list[RosterGap] = Field(default_factory=list)
+    summary: str = Field(default="", description="Human-readable summary of the validation")
+
+
+class AgentEnvProvisionSummary(BaseModel):
+    """Status of an Agent Provisioning run for a process step agent."""
+
+    stable_key: str
+    process_id: str
+    step_id: str
+    agent_name: str
+    provisioning_agent_id: str = Field(
+        ...,
+        description="agent_id passed to agent_provisioning_team",
+    )
+    status: str
+    error_message: Optional[str] = None
+    created_at: str = ""
+    updated_at: str = ""

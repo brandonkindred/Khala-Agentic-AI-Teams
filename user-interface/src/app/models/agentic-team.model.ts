@@ -41,10 +41,37 @@ export interface ProcessDefinition {
   status: ProcessStatus;
 }
 
+/** Named agent in the team's roster (per agentic team architecture). */
+export interface AgenticTeamAgent {
+  agent_name: string;
+  role: string;
+  skills: string[];
+  capabilities: string[];
+  tools: string[];
+  expertise: string[];
+}
+
+export interface RosterGap {
+  category: string;
+  detail: string;
+  process_id?: string | null;
+  step_id?: string | null;
+  agent_name?: string | null;
+}
+
+export interface RosterValidationResult {
+  is_fully_staffed: boolean;
+  agent_count: number;
+  process_count: number;
+  gaps: RosterGap[];
+  summary: string;
+}
+
 export interface AgenticTeam {
   team_id: string;
   name: string;
   description: string;
+  agents: AgenticTeamAgent[];
   processes: ProcessDefinition[];
   created_at: string;
   updated_at: string;
@@ -108,4 +135,17 @@ export interface AgenticConversationSummary {
   created_at: string;
   updated_at: string;
   message_count: number;
+}
+
+/** Per-step agent sandbox status (Agent Provisioning team). */
+export interface AgentEnvProvisionSummary {
+  stable_key: string;
+  process_id: string;
+  step_id: string;
+  agent_name: string;
+  provisioning_agent_id: string;
+  status: string;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
 }

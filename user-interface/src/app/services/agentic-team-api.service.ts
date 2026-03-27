@@ -5,11 +5,14 @@ import { environment } from '../../environments/environment';
 import type {
   AgenticTeamSummary,
   AgenticTeamDetailResponse,
+  AgenticTeamAgent,
   CreateAgenticTeamRequest,
   CreateAgenticTeamResponse,
   AgenticConversationStateResponse,
   AgenticConversationSummary,
+  AgentEnvProvisionSummary,
   ProcessDefinition,
+  RosterValidationResult,
 } from '../models';
 
 @Injectable({ providedIn: 'root' })
@@ -33,6 +36,16 @@ export class AgenticTeamApiService {
 
   getTeam(teamId: string): Observable<AgenticTeamDetailResponse> {
     return this.http.get<AgenticTeamDetailResponse>(`${this.base}/teams/${teamId}`);
+  }
+
+  // Roster (agents pool)
+  listTeamAgents(teamId: string): Observable<AgenticTeamAgent[]> {
+    return this.http.get<AgenticTeamAgent[]>(`${this.base}/teams/${teamId}/agents`);
+  }
+
+  /** Validate whether the roster fully covers the team's process needs. */
+  validateRoster(teamId: string): Observable<RosterValidationResult> {
+    return this.http.get<RosterValidationResult>(`${this.base}/teams/${teamId}/roster/validation`);
   }
 
   // Processes
@@ -65,5 +78,10 @@ export class AgenticTeamApiService {
 
   listConversations(teamId: string): Observable<AgenticConversationSummary[]> {
     return this.http.get<AgenticConversationSummary[]>(`${this.base}/teams/${teamId}/conversations`);
+  }
+
+  /** Sandbox provisioning status for each process step agent (Agent Provisioning team). */
+  listAgentEnvironments(teamId: string): Observable<AgentEnvProvisionSummary[]> {
+    return this.http.get<AgentEnvProvisionSummary[]>(`${this.base}/teams/${teamId}/agent-environments`);
   }
 }

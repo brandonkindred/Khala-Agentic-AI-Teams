@@ -17,6 +17,7 @@
       <p class="team-description">{{ team.description }}</p>
     </div>
     <mat-chip-set>
+      <mat-chip>{{ team.agents.length }} agent{{ team.agents.length !== 1 ? 's' : '' }}</mat-chip>
       <mat-chip>{{ team.processes.length }} process{{ team.processes.length !== 1 ? 'es' : '' }}</mat-chip>
     </mat-chip-set>
   </div>
