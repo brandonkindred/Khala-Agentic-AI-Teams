@@ -1,9 +1,0 @@
-<div class="stream-container">
-  <h3>Execution Stream (SSE)</h3>
-  <p>GET /execution/stream - live events</p>
-  <div class="events" [attr.aria-live]="'polite'">
-    @for (e of events; track $index) {
-      <pre class="event">{{ e | json }}</pre>
-    }
-  </div>
-</div>
