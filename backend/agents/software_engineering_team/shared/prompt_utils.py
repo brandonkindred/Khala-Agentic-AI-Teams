@@ -96,3 +96,16 @@ def log_llm_prompt(
         )
     except Exception as e:
         log.warning("Failed to log LLM prompt: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Shared JSON output instruction — append to any prompt that expects JSON.
+# Replaces the per-prompt variants ("Respond with valid JSON only") with a
+# consistent, more specific instruction that reduces JSON parse failures.
+# ---------------------------------------------------------------------------
+JSON_OUTPUT_INSTRUCTION = """
+**CRITICAL — JSON output only:** Respond with exactly one JSON object and nothing else.
+- Do NOT wrap in ```json``` code fences or markdown formatting
+- Do NOT include any text, explanation, or commentary before or after the JSON
+- Escape special characters in strings: newlines as \\n, tabs as \\t, literal double-quotes as \\"
+- Ensure all strings, arrays, and objects are properly closed with matching delimiters"""

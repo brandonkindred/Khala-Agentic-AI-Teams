@@ -12,6 +12,9 @@ Analyze the user's message and classify it into one or more of these categories:
 - profile: Updating user preferences, goals, personal information
 - general: General questions or conversations
 
+If you cannot classify with confidence > 0.5, set primary_intent to "general" and explain the uncertainty in a "notes" field.
+If the input is empty or unintelligible, return confidence 0.0 with primary_intent "general" and a helpful "notes" field.
+
 Respond with JSON:
 {
   "primary_intent": "<category>",
@@ -23,7 +26,8 @@ Respond with JSON:
     "people": [...],
     "items": [...]
   },
-  "confidence": 0.0-1.0
+  "confidence": 0.0-1.0,
+  "notes": "<optional: explain ambiguity or low confidence>"
 }
 
 User message: {message}
@@ -43,6 +47,8 @@ Extract any relevant information that could be added to a user profile. Look for
 - Health information (allergies, fitness goals)
 - Travel preferences (destinations, airlines, hotels)
 - Shopping preferences (stores, sizes, styles)
+
+If the text contains no extractable profile information, return an empty "extracted_info" list with a brief "reasoning" explaining why.
 
 Respond with JSON:
 {
@@ -69,6 +75,8 @@ Look for any mentions of:
 - Locations
 - Attendees
 - Deadlines or due dates
+
+If no events are found, return an empty "events" list. For partial information (e.g. a date without a time), include what you can and set missing fields to null.
 
 Respond with JSON:
 {

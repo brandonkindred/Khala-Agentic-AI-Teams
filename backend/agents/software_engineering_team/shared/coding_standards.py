@@ -121,3 +121,41 @@ GIT_BRANCHING_RULES = """
 - Tech Lead must ensure `development` branch exists before team commits; create it if missing
 - All commits use Conventional Commits format (semantic-versioning compliant)
 """
+
+# ---------------------------------------------------------------------------
+# Subset of coding standards relevant to agents that REVIEW code but do not
+# write it (code review agent, security agent, QA agent). Omits git branching,
+# commit messages, and README rules that only apply to code authors.
+# ---------------------------------------------------------------------------
+REVIEW_STANDARDS = """
+**CODING STANDARDS TO ENFORCE DURING REVIEW:**
+
+1. **Design by Contract** -- Code should use Design by Contract:
+   - Preconditions: conditions that must hold before a method/function is called
+   - Postconditions: conditions guaranteed to hold after successful execution
+   - Invariants: conditions that hold before and after each public operation
+   - Contracts should be documented in comments; assertions or validation used where appropriate
+
+2. **SOLID Principles** -- Code should conform to:
+   - **S**ingle Responsibility: each class/function has one reason to change
+   - **O**pen/Closed: open for extension, closed for modification
+   - **L**iskov Substitution: subtypes must be substitutable for base types
+   - **I**nterface Segregation: many specific interfaces over one general
+   - **D**ependency Inversion: depend on abstractions, not concretions
+
+3. **Documentation** -- Classes, methods, and functions should have docstrings/comments explaining:
+   - **How** it is used (usage examples or call pattern)
+   - **Why** it exists (purpose, role in the system)
+   - **Constraints** enforced (preconditions, postconditions, invariants, edge cases)
+
+4. **Test Coverage** -- Minimum 85% code coverage:
+   - Unit tests for all public methods and critical paths
+   - Integration tests for API boundaries and component interactions
+
+5. **Naming Conventions** -- Names must follow professional standards:
+   - Names describe WHAT the thing IS or DOES -- never derived from task descriptions
+   - Names must be 1-3 words maximum
+   - Python: snake_case for modules/functions, PascalCase for classes
+   - TypeScript: kebab-case for files/folders, PascalCase for components/classes, camelCase for variables
+   - Java: PascalCase for classes, camelCase for methods/variables
+"""

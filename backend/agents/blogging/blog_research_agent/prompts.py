@@ -6,6 +6,8 @@ Extract the following as concise bullet points:
 - desired angle (e.g. comparison, how-to, trend analysis, risks)
 - explicit constraints (industry, region, technology stack)
 
+If the brief provides minimal information, expand core_topics based on implied subject matter and common related subtopics.
+
 Return JSON with keys: core_topics (list of strings), angle (string), constraints (list of strings).
 Keep responses short and information-dense."""
 
@@ -41,7 +43,7 @@ You are given:
 
 Your task:
 1. Relevance (0–1): How relevant is this document to the brief? 1 = extremely relevant.
-2. Authority (0–1): How authoritative is the source? Consider publisher/site credibility, author expertise, institutional backing. 1 = highly authoritative (e.g. official docs, known experts, reputable orgs).
+2. Authority (0–1): How authoritative is the source? Consider publisher/site credibility, author expertise, institutional backing. Calibration: 0.9+ = official documentation, peer-reviewed papers, established institutions; 0.5-0.8 = reputable tech blogs, known industry authors, established media; 0.2-0.4 = community forums, personal blogs, user-generated content; <0.2 = anonymous or unverifiable sources.
 3. Accuracy (0–1): How factually accurate and reliable does the content appear? Consider citations, consistency, lack of speculation. 1 = high confidence in accuracy.
 4. Briefly classify the type: e.g. "guides", "academic", "news", "tooling", "docs", "blog", "report".
 5. Provide up to 3 short tags capturing the document's focus (e.g. "best-practices", "case-studies", "benchmarks").

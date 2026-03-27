@@ -60,10 +60,10 @@
       @for (field of fields; track field.key) {
         <div class="form-field" [class.filled]="isFieldFilled(field.key)" [class.required]="field.required" [class.editing]="editingField === field.key">
           <div class="field-header">
-            <label class="field-label">
+            <span class="field-label">
               {{ field.label }}
               @if (field.required) { <span class="required-marker">*</span> }
-            </label>
+            </span>
             @if (editingField !== field.key) {
               <button mat-icon-button class="edit-btn" (click)="startEdit(field.key)" matTooltip="Edit manually">
                 <mat-icon>edit</mat-icon>
@@ -87,7 +87,7 @@
               </div>
             </div>
           } @else {
-            <div class="field-value" (click)="startEdit(field.key)">
+            <div class="field-value" role="button" tabindex="0" (click)="startEdit(field.key)" (keydown.enter)="startEdit(field.key)">
               @if (isFieldFilled(field.key)) {
                 <span class="value-text">{{ fieldValue(field.key) }}</span>
               } @else {
