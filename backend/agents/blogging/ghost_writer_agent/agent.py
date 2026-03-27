@@ -135,7 +135,48 @@ class GhostWriterElicitationAgent:
         """
         Analyse the content plan and return sections where a personal story would help.
         Returns at most 3 gaps.
+
+        First checks the planning agent's ``story_opportunity`` fields — if the planner
+        already identified story opportunities, those are converted directly to gaps
+        without an extra LLM call. Falls back to LLM gap-finding only when the plan
+        has no story_opportunity fields populated.
         """
+        # Check if the planning agent already identified story opportunities
+        plan_gaps = self._extract_gaps_from_plan(content_plan)
+        if plan_gaps:
+            logger.info(
+                "Ghost writer: using %s story gap(s) from planning agent's story_opportunity fields",
+                len(plan_gaps),
+            )
+            return plan_gaps[:3]
+
+        # Fallback: use LLM to find gaps (for plans without story_opportunity fields)
+        return self._find_gaps_via_llm(content_plan)
+
+    def _extract_gaps_from_plan(self, content_plan: ContentPlan) -> List[StoryGap]:
+        """Convert planning agent's story_opportunity fields to StoryGap objects."""
+        gaps = []
+        for sec in sorted(content_plan.sections, key=lambda s: s.order):
+            opp = getattr(sec, "story_opportunity", None)
+            if not opp:
+                continue
+            # Generate a seed question from the story opportunity description
+            seed = (
+                f'For the section "{sec.title}", the plan calls for a personal story: {opp}\n\n'
+                f"Do you have a real experience that fits this? Tell me about a specific moment, "
+                f"situation, or incident — even a small one."
+            )
+            gaps.append(
+                StoryGap(
+                    section_title=sec.title,
+                    section_context=f"{sec.coverage_description} — Story needed: {opp}",
+                    seed_question=seed,
+                )
+            )
+        return gaps
+
+    def _find_gaps_via_llm(self, content_plan: ContentPlan) -> List[StoryGap]:
+        """Fallback: use LLM to identify story gaps when plan lacks story_opportunity fields."""
         outline_text = self._plan_to_text(content_plan)
         prompt = f"Content plan:\n\n{outline_text}\n\nIdentify story gaps."
 
@@ -145,7 +186,6 @@ class GhostWriterElicitationAgent:
                 system=_FIND_GAPS_SYSTEM,
             )
             raw = response.strip()
-            # Extract JSON array
             start = raw.find("[")
             end = raw.rfind("]") + 1
             if start == -1 or end == 0:
@@ -161,7 +201,7 @@ class GhostWriterElicitationAgent:
                         seed_question=item.get("seed_question", ""),
                     )
                 )
-            logger.info("Ghost writer: found %s story gap(s)", len(gaps))
+            logger.info("Ghost writer: found %s story gap(s) via LLM", len(gaps))
             return gaps
         except Exception as e:
             logger.warning("Ghost writer find_story_gaps failed: %s", e)

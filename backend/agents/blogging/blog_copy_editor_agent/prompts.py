@@ -79,11 +79,32 @@ The post must feel like it was written by a knowledgeable person who cares about
 - Any section that reads like reference documentation dropped into a narrative post
 - Paragraphs that restate the previous paragraph in different words (pure redundancy)
 
-**5. Authenticity — experience and anecdotes (no fabrication)**
-The model often invents first-person stories, "we" narratives, or realistic-sounding case studies. Treat that as a serious trust issue.
+**5. Authenticity — experience, anecdotes, and citations (no fabrication)**
+The model often invents first-person stories, "we" narratives, or realistic-sounding case studies. Treat that as a serious trust issue. However, this is a blog post — not an academic paper. Apply citation standards appropriately.
 
+**Citation requirements depend on the type of claim:**
+
+MUST CITE (flag as `must_fix` if missing):
+- Specific numbers, percentages, or statistics ("80% of teams...", "reduces latency by 40%")
+- Study findings or research results ("A 2024 analysis found...")
+- Quotes or paraphrases from named individuals
+- Product-specific capability claims ("Strands supports 3 agent patterns")
+
+ACCEPTABLE WITHOUT CITATION (do NOT flag):
+- General domain knowledge ("Microservices add operational complexity", "Testing before deployment reduces bugs")
+- Widely-understood engineering practices that any practitioner would agree with
+- Rhetorical generalities used as setup for a specific, cited point ("Teams often struggle with X" → followed by concrete solution)
+- Hypotheticals clearly framed as such ("Imagine a team that...")
+- The author's own opinions and recommendations
+
+INLINE LINKS COUNT AS CITATIONS:
+- A markdown hyperlink like `[source](URL)` is a complete citation for a blog post
+- "According to [AWS docs](https://...)" is properly cited — do NOT flag it
+- Do NOT require author names, publication dates, or academic-style references — a link is enough
+
+**Fabrication rules (unchanged):**
 - Flag as `must_fix` when the draft uses first-person or "we/our team" experience, specific past events, or case-study-style details that read as **real** but are **not** supported by attributed research, quoted sources, or explicit author-supplied material in the brief. Suggest: **remove** the invented narrative and replace with informational explanation, a cited fact from research, a clearly framed hypothetical, or an author placeholder such as `[Author: add a brief real example from your experience that illustrates …]`.
-- Flag as `must_fix` when real data from sources is wrapped in a fabricated personal narrative. Example: the research contains a metric like "20,000 tokens" from AWS documentation, and the draft says "Last year I shipped a system that consumed 20,000 tokens." The data is real but the story of the author experiencing it is fabricated. The fix: attribute the data to its actual source ("AWS documentation shows that…") or use a labeled hypothetical.
+- Flag as `must_fix` when real data from sources is wrapped in a fabricated personal narrative. Example: the research contains a metric like "20,000 tokens" from AWS documentation, and the draft says "Last year I shipped a system that consumed 20,000 tokens." The data is real but the story of the author experiencing it is fabricated. The fix: attribute the data to its actual source or use a labeled hypothetical.
 - Flag as `should_fix` when proper nouns, timelines, or "we shipped X" / "last quarter" style details appear without a source and read like fabricated specificity.
 - Do **not** flag "lack of story" alone if the post is clear and well supported — useful information without a personal anecdote is acceptable.
 

@@ -33,15 +33,23 @@ def _minimal_plan() -> ContentPlan:
 
 
 class _PromptCapturingLLM(DummyLLMClient):
-    """Dummy LLM that records the last prompt passed to complete() for tests."""
+    """Dummy LLM that records all prompts passed to complete() for tests."""
 
     def __init__(self) -> None:
         super().__init__()
         self.last_prompt: str = ""
+        self.all_prompts: list[str] = []
         self.last_complete_json_prompt: str = ""
 
     def complete(self, prompt: str, **kwargs: object) -> str:
         self.last_prompt = prompt
+        self.all_prompts.append(prompt)
+        # Return a self-review-clean draft (empty JSON array = no issues)
+        if "Review this draft" in prompt:
+            return "[]"
+        # Return a deterministic-fix-clean draft
+        if "Fix ONLY these" in prompt:
+            return '{"draft": 0}\n---DRAFT---\n# Draft\n\nPlaceholder draft content.'
         return '{"draft": 0}\n---DRAFT---\n# Draft\n\nPlaceholder draft content.'
 
     def complete_json(self, prompt: str, **kwargs: object) -> dict:
@@ -177,8 +185,10 @@ def test_draft_prompt_includes_provided_brand_spec() -> None:
         content_plan=_minimal_plan(),
     )
     agent.run(draft_input)
-    assert "MyBrand: Test brand." in llm.last_prompt
-    assert "BRAND AND STYLE" in llm.last_prompt
+    # First prompt is the draft generation; subsequent ones are self-review
+    draft_prompt = llm.all_prompts[0]
+    assert "MyBrand: Test brand." in draft_prompt
+    assert "BRAND AND STYLE" in draft_prompt
 
 
 def test_outline_for_prompt_includes_section_titles() -> None:
@@ -206,6 +216,7 @@ def test_draft_prompt_includes_fallback_when_no_brand_spec() -> None:
         content_plan=_minimal_plan(),
     )
     agent.run(draft_input)
-    assert "No brand specification was provided. Follow the style guide below." in llm.last_prompt
-    assert "BRAND AND STYLE" in llm.last_prompt
-    assert "You are writing in a specific brand voice" not in llm.last_prompt
+    draft_prompt = llm.all_prompts[0]
+    assert "No brand specification was provided. Follow the style guide below." in draft_prompt
+    assert "BRAND AND STYLE" in draft_prompt
+    assert "You are writing in a specific brand voice" not in draft_prompt

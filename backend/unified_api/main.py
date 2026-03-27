@@ -205,6 +205,14 @@ def try_mount_or_proxy(
     try:
         mod = importlib.import_module(import_path)
         team_app = getattr(mod, app_attr)
+        # Sub-apps don't inherit parent middleware, so add CORS to each one.
+        team_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
         app.mount(config.prefix, team_app)
         logger.info("Mounted %s at %s", config.name, config.prefix)
         return True
@@ -478,6 +486,13 @@ async def lifespan(app: FastAPI):
                 team_cfg = TEAM_CONFIGS.get(team_key)
                 if team_cfg:
                     assistant_app = create_assistant_app(assistant_config)
+                    assistant_app.add_middleware(
+                        CORSMiddleware,
+                        allow_origins=["*"],
+                        allow_credentials=True,
+                        allow_methods=["*"],
+                        allow_headers=["*"],
+                    )
                     app.mount(f"{team_cfg.prefix}/assistant", assistant_app)
                     assistant_count += 1
         logger.info("Mounted %d team assistant sub-apps", assistant_count)

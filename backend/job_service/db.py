@@ -413,7 +413,9 @@ def mark_stale_active_jobs_failed(
 ) -> list[str]:
     """Mark pending/running jobs with no recent heartbeat as failed.
 
-    Excludes jobs where data->>waiting_field is 'true'.
+    Excludes jobs in any waiting state (waiting_for_answers, waiting_for_title_selection,
+    waiting_for_story_input) — those are paused for user input and should not be
+    marked as failed.
     """
     now = _now()
     failed_ids: list[str] = []
@@ -427,6 +429,8 @@ def mark_stale_active_jobs_failed(
                 WHERE team = %s
                   AND status IN ('pending', 'running')
                   AND COALESCE((data->>%s)::boolean, false) = false
+                  AND COALESCE((data->>'waiting_for_title_selection')::boolean, false) = false
+                  AND COALESCE((data->>'waiting_for_story_input')::boolean, false) = false
                   AND last_heartbeat_at < %s
                 RETURNING job_id
                 """,
@@ -445,7 +449,12 @@ def mark_stale_active_jobs_failed(
 
 
 def mark_all_active_jobs_failed(team: str, reason: str) -> list[str]:
-    """Mark all pending/running jobs as failed (e.g. on shutdown)."""
+    """Mark all pending/running jobs as failed (e.g. on shutdown).
+
+    Excludes jobs in any waiting state (waiting_for_answers, waiting_for_title_selection,
+    waiting_for_story_input) — those are paused for user input and should not be
+    marked as failed since they will resume when the user responds.
+    """
     now = _now_iso()
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -455,6 +464,9 @@ def mark_all_active_jobs_failed(team: str, reason: str) -> list[str]:
                     data = data || %s::jsonb,
                     updated_at = %s
                 WHERE team = %s AND status IN ('pending', 'running')
+                  AND COALESCE((data->>'waiting_for_answers')::boolean, false) = false
+                  AND COALESCE((data->>'waiting_for_title_selection')::boolean, false) = false
+                  AND COALESCE((data->>'waiting_for_story_input')::boolean, false) = false
                 RETURNING job_id
                 """,
             (json.dumps({"error": reason}), now, team),

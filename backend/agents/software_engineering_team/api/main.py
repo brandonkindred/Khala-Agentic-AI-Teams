@@ -428,6 +428,16 @@ class ArchitectDesignResponse(BaseModel):
     summary: str = Field(default="", description="Architecture summary")
 
 
+# Track active orchestrator threads so we can detect when a server restart killed one
+_active_orchestrator_threads: Dict[str, threading.Thread] = {}
+
+
+def _is_orchestrator_alive(job_id: str) -> bool:
+    """Return True if an orchestrator thread is still running for this job."""
+    thread = _active_orchestrator_threads.get(job_id)
+    return thread is not None and thread.is_alive()
+
+
 def _run_orchestrator_background(
     job_id: str,
     repo_path: str,
@@ -437,6 +447,7 @@ def _run_orchestrator_background(
     planning_only: bool = False,
 ) -> None:
     """Run orchestrator in background thread."""
+    _active_orchestrator_threads[job_id] = threading.current_thread()
     try:
         from orchestrator import run_orchestrator
 
@@ -450,6 +461,8 @@ def _run_orchestrator_background(
     except Exception as e:
         logger.exception("Orchestrator failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+    finally:
+        _active_orchestrator_threads.pop(job_id, None)
 
 
 def _run_retry_background(job_id: str) -> None:
@@ -918,12 +931,16 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
         from software_engineering_team.temporal.client import is_temporal_enabled
         from software_engineering_team.temporal.start_workflow import start_run_team_workflow
 
+        # Pass previously submitted answers so the orchestrator doesn't re-ask questions
+        submitted_answers = data.get("submitted_answers") or None
+
         if is_temporal_enabled():
             start_run_team_workflow(job_id, str(repo_path))
         else:
             thread = threading.Thread(
                 target=_run_orchestrator_background,
                 args=(job_id, str(repo_path)),
+                kwargs={"resolved_questions_override": submitted_answers},
                 daemon=True,
             )
             thread.start()
@@ -1118,6 +1135,22 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
         for a in request.answers
     ]
     store_submit_answers(job_id, answers_dicts)
+
+    # If the orchestrator thread is alive, its _wait_for_user_answers polling loop
+    # will pick up the answers automatically (waiting_for_answers is now False).
+    # If the thread is dead (server restarted), the job stays in running state
+    # with answers stored — the user or UI should call POST /run-team/{job_id}/resume.
+    if not _is_orchestrator_alive(job_id):
+        logger.info(
+            "Orchestrator thread for job %s is not running; answers stored. "
+            "Call POST /run-team/%s/resume to restart the orchestrator.",
+            job_id,
+            job_id,
+        )
+        update_job(
+            job_id,
+            status_text="Answers received. Resume the job to continue processing.",
+        )
 
     updated_data = get_job(job_id)
     return JobStatusResponse(

@@ -329,9 +329,10 @@ WHEN FIXING SPECIFIC ISSUE TYPES:
 FIXING VAGUE CITATIONS, AUTHORITY CLAIMS, AND HALLUCINATION FLAGS — THIS IS THE MOST COMMON REVISION FAILURE:
 The editor frequently flags sentences that sound authoritative but lack specific attribution. These are the hardest issues to fix because the instinct is to make a minimal tweak (rewording slightly) rather than a structural fix. Follow this decision tree for EVERY sentence flagged as vague, unattributed, or potentially hallucinated:
 
-1. **Check the ALLOWED CLAIMS list.** If the flagged fact matches a claim in the list, rewrite the sentence to use the claim text with its [CLAIM:id] tag and name the source explicitly: "According to [source name], [fact] [CLAIM:id]." This is always the best fix.
-2. **Check the RESEARCH section.** If the fact came from a research source, attribute it directly: "AWS documentation shows that..." or "A 2024 study by [author] found that..." Never say "studies show" or "experts agree" without naming the specific study or expert.
-3. **If no source supports the claim**, the sentence is hallucinated. You MUST either:
+1. **Check the ALLOWED CLAIMS list.** If the flagged fact matches a claim in the list, rewrite with an inline link and [CLAIM:id] tag: "According to [source name](URL), [fact] [CLAIM:id]." Use the SOURCE URLS section for the link target. This is always the best fix.
+2. **Check the RESEARCH section and SOURCE URLS.** If the fact came from a research source, link to it: "[AWS documentation](https://...) shows that..." or "A [2024 analysis by TechCrunch](https://...) found that..." A hyperlink IS a complete citation for a blog post.
+3. **Check if it's general domain knowledge.** "Microservices add operational complexity" or "You should test before deploying" don't need citations — they're consensus knowledge. If the flagged sentence states something any practitioner in the field would agree with, it's fine as-is. Remove the vague authority phrasing ("studies show") but keep the statement.
+4. **If no source supports the claim AND it's not general knowledge**, the sentence is hallucinated. You MUST either:
    a. **Delete the sentence entirely** and rewrite the paragraph without it, OR
    b. **Replace it with a clearly labeled hypothetical**: "Imagine a scenario where..." / "A common pattern is...", OR
    c. **Insert an author placeholder**: `[Author: verify and add source for the claim that <X>.]`
@@ -381,11 +382,45 @@ Example format:
 # ---------------------------------------------------------------------------
 # Allowed-claims instruction template (inserted when claims are provided)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Self-review prompt — focused check for the top 5 subjective violations
+# ---------------------------------------------------------------------------
+SELF_REVIEW_PROMPT = """You are a quality checker reviewing a blog post draft for the 5 most common writing violations. You are NOT rewriting the draft — you are finding issues so they can be fixed.
+
+Scan the draft below and return a JSON array of issues found. Each issue is an object with:
+- "location": where in the draft (section name, paragraph number, or quote the problematic text)
+- "issue": what's wrong (be specific — quote the offending text)
+- "fix": how to fix it (concrete suggestion)
+
+Check for EXACTLY these 5 things:
+
+1. **Fabricated stories**: Any first-person "I" or "we/our team" narrative that describes a specific event, incident, or experience. These are fabricated unless they came from the AUTHOR'S PERSONAL STORIES section. Quote the fabricated sentence.
+
+2. **Fabricated titles/references**: Any blog post title, article title, paper title, or book title in quotes or italics. If it wasn't in the research, it's hallucinated. Quote the fabricated reference.
+
+3. **Vague authority WITHOUT follow-through**: Sentences using "studies show", "research indicates", "experts agree", "it's well-known that", "data suggests", or similar phrases that cite no specific source AND are not immediately followed by a concrete, cited claim or inline link. Do NOT flag general domain knowledge that any practitioner would agree with (e.g. "Microservices add operational complexity"). Do NOT flag rhetorical setups like "Teams often find X" if immediately followed by a specific point. DO flag when vague authority is the entire claim with nothing backing it up.
+
+4. **Staccato prose**: Any sequence of 3+ consecutive sentences where each is 7 words or fewer. This reads like ad copy, not a person explaining ideas. Quote the staccato sequence.
+
+5. **Broken section transitions**: Any H2 section that opens without referencing what was just established in the prior section. The first sentence after an H2 heading should connect to the previous section's conclusion.
+
+If the draft is clean on all 5 checks, return an empty array: []
+If you find issues, return the array with one object per issue.
+
+Return ONLY the JSON array, no explanation or markdown fencing."""
+
 ALLOWED_CLAIMS_INSTRUCTION = """
 ALLOWED FACTUAL CLAIMS — YOUR ONLY SOURCE OF TRUTH FOR FACTS (tag each with [CLAIM:id]):
-Every factual statement in the draft MUST come from this list or from the research document with explicit attribution. When you use a claim, place [CLAIM:<id>] immediately after it and name the source: "According to [source], [fact] [CLAIM:1]."
-Do NOT introduce new factual claims not in this list. Do NOT use vague attributions like "studies show" or "research indicates" — name the specific source from the claim's citations.
-Opinions, recommendations, and clearly labeled hypotheticals need not be tagged.
+Every factual statement in the draft MUST come from this list or from the research document with explicit attribution.
+
+CITATION FORMAT — this is a blog post, not an academic paper:
+- PREFERRED: Inline hyperlink — [source name](URL) [CLAIM:id]. Example: "According to [AWS Strands documentation](https://docs.aws.amazon.com/strands/...), agents can share context via tool results [CLAIM:3]."
+- ACCEPTABLE: Named source without link — "AWS documentation shows that..." [CLAIM:id]
+- NOT ACCEPTABLE: Vague authority — "Studies show..." or "Research indicates..."
+- Use the SOURCE URLS section (if provided) for hyperlink targets.
+
+Do NOT introduce new factual claims not in this list.
+General domain knowledge (facts any practitioner would agree with) and clearly labeled hypotheticals do not need tags or citations.
 ---
 {claims_text}
 ---

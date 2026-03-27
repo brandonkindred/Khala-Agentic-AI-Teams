@@ -59,15 +59,69 @@ app = FastAPI(
     version="1.0.0",
 )
 
-_profiles: Dict[str, IPS] = {}
-_proposals: Dict[str, PortfolioProposal] = {}
-_strategies: Dict[str, StrategySpec] = {}
-_validations: Dict[str, ValidationReport] = {}
-_backtests: Dict[str, BacktestRecord] = {}
-_strategy_lab_records: Dict[str, StrategyLabRecord] = {}
-_advisor_sessions: Dict[str, AdvisorSession] = {}
 _workflow_state = WorkflowState()
 _lock = threading.Lock()
+
+
+# ---------------------------------------------------------------------------
+# Persistent storage backed by JobServiceClient (survives server restarts)
+# ---------------------------------------------------------------------------
+class _PersistentDict:
+    """Dict-like wrapper around JobServiceClient for restart-safe entity storage."""
+
+    def __init__(self, entity_type: str) -> None:
+        from job_service_client import JobServiceClient
+
+        self._client = JobServiceClient(team=f"investment_{entity_type}")
+        self._entity_type = entity_type
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        data = value.model_dump(mode="json") if hasattr(value, "model_dump") else {"value": value}
+        existing = self._client.get_job(key)
+        if existing:
+            self._client.update_job(key, data=data)
+        else:
+            self._client.create_job(key, status="stored", data=data)
+
+    def __getitem__(self, key: str) -> Any:
+        job = self._client.get_job(key)
+        if job is None:
+            raise KeyError(key)
+        return job.get("data", job)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        job = self._client.get_job(key)
+        if job is None:
+            return default
+        return job.get("data", job)
+
+    def __contains__(self, key: str) -> bool:
+        return self._client.get_job(key) is not None
+
+    def __delitem__(self, key: str) -> None:
+        self._client.delete_job(key)
+
+    def pop(self, key: str, *args: Any) -> Any:
+        job = self._client.get_job(key)
+        if job is None:
+            if args:
+                return args[0]
+            raise KeyError(key)
+        self._client.delete_job(key)
+        return job.get("data", job)
+
+    def values(self) -> list:
+        jobs = self._client.list_jobs() or []
+        return [j.get("data", j) for j in jobs]
+
+
+_profiles: _PersistentDict = _PersistentDict("profiles")
+_proposals: _PersistentDict = _PersistentDict("proposals")
+_strategies: _PersistentDict = _PersistentDict("strategies")
+_validations: _PersistentDict = _PersistentDict("validations")
+_backtests: _PersistentDict = _PersistentDict("backtests")
+_strategy_lab_records: _PersistentDict = _PersistentDict("strategy_lab_records")
+_advisor_sessions: _PersistentDict = _PersistentDict("advisor_sessions")
 
 _advisor_agent = FinancialAdvisorAgent()
 

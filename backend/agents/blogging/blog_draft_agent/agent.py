@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -28,10 +29,54 @@ from .prompts import (
     DRAFT_TASK_INSTRUCTIONS,
     EXTRACT_NOTES_PROMPT,
     REVISION_TASK_INSTRUCTIONS,
+    SELF_REVIEW_PROMPT,
     WRITING_SYSTEM_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Deterministic compliance constants
+# ---------------------------------------------------------------------------
+
+BANNED_PHRASES = [
+    "In today's fast-paced world",
+    "In the ever-evolving landscape of",
+    "In an era where",
+    "Now more than ever",
+    "As we navigate",
+    "With the rise of",
+    "As technology continues to evolve",
+    "It's worth noting that",
+    "It's important to understand that",
+    "It bears mentioning",
+    "It's no secret that",
+    "Needless to say",
+    "Of course,",
+    "As mentioned above",
+    "This is a game-changer",
+    "This is incredibly important",
+    "This is essential for success",
+    "Harnessing the power of",
+    "Furthermore,",
+    "Moreover,",
+    "Additionally,",
+    "In conclusion,",
+    "To summarize,",
+]
+
+VAGUE_CITATION_PATTERNS = [
+    r"[Ss]tudies show",
+    r"[Rr]esearch indicates",
+    r"[Ee]xperts agree",
+    r"[Ii]t'?s well[- ]known that",
+    r"[Dd]ata suggests",
+    r"[Mm]any organizations have found",
+    r"[Tt]eams often discover",
+    r"[Aa]ccording to industry best practices",
+    r"[Ss]tatistics show",
+    r"[Ii]t'?s widely recognized",
+]
 
 # Context budget for compaction — content exceeding these thresholds is compacted
 # (LLM-summarised) rather than naively truncated, preserving technical detail.
@@ -104,6 +149,159 @@ class BlogDraftAgent:
         if self._writing_style_prompt:
             parts.append("--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt)
         self._style_prompt = "\n\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # Self-check: deterministic + LLM review
+    # ------------------------------------------------------------------
+
+    def _deterministic_self_check(self, draft: str) -> list[str]:
+        """Scan draft for mechanical violations. Returns list of violation descriptions."""
+        violations: list[str] = []
+        draft_lower = draft.lower()
+        paragraphs = [p.strip() for p in draft.split("\n\n") if p.strip()]
+
+        # 1. Em/en dashes
+        for i, para in enumerate(paragraphs, 1):
+            if "\u2014" in para or "\u2013" in para:
+                violations.append(f"Em/en dash found in paragraph {i}")
+
+        # 2. Banned phrases
+        for phrase in BANNED_PHRASES:
+            if phrase.lower() in draft_lower:
+                violations.append(f"Banned phrase found: '{phrase}'")
+
+        # 3. Vague citation patterns — only flag if NOT followed by a source/link within ~150 chars
+        for pattern in VAGUE_CITATION_PATTERNS:
+            for match in re.finditer(pattern, draft):
+                after = draft[match.end() : match.end() + 150]
+                # Skip if followed by an inline link, [CLAIM:] tag, or URL
+                if (
+                    re.search(r"\[CLAIM:", after)
+                    or re.search(r"https?://", after)
+                    or re.search(r"\]\(http", after)
+                ):
+                    continue
+                violations.append(
+                    f"Vague citation: '{match.group()}' — add an inline link or name a specific source"
+                )
+
+        # 4. Reader address count
+        you_count = len(re.findall(r"\byou(?:r|rs|rself)?\b", draft_lower))
+        if you_count < 3:
+            violations.append(
+                f"Reader address 'you/your' appears only {you_count} time(s) — need at least 3"
+            )
+
+        # 5. Staccato detection — 3+ consecutive sentences with ≤ 7 words
+        for i, para in enumerate(paragraphs, 1):
+            if para.startswith("#"):
+                continue
+            sentences = re.split(r"(?<=[.!?])\s+", para)
+            streak = 0
+            for sent in sentences:
+                word_count = len(sent.split())
+                if word_count <= 7:
+                    streak += 1
+                    if streak >= 3:
+                        violations.append(
+                            f"Staccato prose in paragraph {i}: {streak}+ consecutive short sentences"
+                        )
+                        break
+                else:
+                    streak = 0
+
+        return violations
+
+    def _fix_deterministic_violations(self, draft: str, violations: list[str]) -> str:
+        """Call LLM once to fix deterministic violations. Returns cleaned draft."""
+        checklist = "\n".join(f"- {v}" for v in violations)
+        prompt = (
+            "Fix ONLY these specific issues in the draft below. Do not change anything else.\n\n"
+            f"ISSUES TO FIX:\n{checklist}\n\n"
+            "---\nCURRENT DRAFT:\n---\n"
+            f"{draft}\n\n"
+            '---\nUse this format: first line {{"draft": 0}}, then ---DRAFT---, '
+            "then the full fixed blog post in Markdown."
+        )
+        try:
+            raw = self.llm.complete(
+                prompt,
+                temperature=0.1,
+                max_tokens=32768,
+                system_prompt=WRITING_SYSTEM_PROMPT,
+                think=False,
+            )
+            fixed = _extract_draft_after_marker(raw)
+            if fixed and fixed.strip():
+                logger.info("Deterministic self-check: fixed %s violations", len(violations))
+                return fixed.strip()
+        except Exception as e:
+            logger.warning("Deterministic fix LLM call failed: %s", e)
+        return draft
+
+    def _llm_self_review(self, draft: str) -> str:
+        """Run a focused LLM self-review for subjective violations. Returns cleaned draft."""
+        try:
+            raw = self.llm.complete(
+                f"Review this draft:\n\n{draft}",
+                temperature=0.1,
+                system_prompt=SELF_REVIEW_PROMPT,
+                think=True,
+            )
+            cleaned = raw.strip()
+            # Extract JSON array
+            start = cleaned.find("[")
+            end = cleaned.rfind("]") + 1
+            if start == -1 or end <= start:
+                logger.info("LLM self-review: no issues found (no JSON array)")
+                return draft
+            issues = json.loads(cleaned[start:end])
+            if not issues:
+                logger.info("LLM self-review: draft passed all 5 checks")
+                return draft
+
+            logger.info("LLM self-review found %s issue(s); applying fixes", len(issues))
+            issue_lines = []
+            for i, iss in enumerate(issues, 1):
+                loc = iss.get("location", "")
+                desc = iss.get("issue", "")
+                fix = iss.get("fix", "")
+                issue_lines.append(f"{i}. [{loc}] {desc}\n   Fix: {fix}")
+
+            fix_prompt = (
+                "Fix ONLY these issues found during self-review. Do not change anything else.\n\n"
+                "ISSUES:\n" + "\n\n".join(issue_lines) + "\n\n"
+                "---\nCURRENT DRAFT:\n---\n" + draft + "\n\n"
+                '---\nUse this format: first line {{"draft": 0}}, then ---DRAFT---, '
+                "then the full fixed blog post in Markdown."
+            )
+            raw_fix = self.llm.complete(
+                fix_prompt,
+                temperature=0.1,
+                max_tokens=32768,
+                system_prompt=WRITING_SYSTEM_PROMPT,
+                think=True,
+            )
+            fixed = _extract_draft_after_marker(raw_fix)
+            if fixed and fixed.strip():
+                logger.info("LLM self-review: applied fixes, new length=%s", len(fixed.strip()))
+                return fixed.strip()
+        except Exception as e:
+            logger.warning("LLM self-review failed: %s", e)
+        return draft
+
+    def _self_review(self, draft: str) -> str:
+        """Run deterministic check then LLM self-review. Returns cleaned draft."""
+        # Step 1: Deterministic checks
+        violations = self._deterministic_self_check(draft)
+        if violations:
+            logger.info("Deterministic self-check found %s violation(s)", len(violations))
+            draft = self._fix_deterministic_violations(draft, violations)
+
+        # Step 2: LLM self-review for subjective issues
+        draft = self._llm_self_review(draft)
+
+        return draft
 
     def _extract_notes_from_source(
         self,
@@ -250,6 +448,28 @@ class BlogDraftAgent:
                 "RESEARCH DOCUMENT (use this for facts, examples, and substance):",
                 "---",
                 research,
+            ]
+        )
+        # Add source URLs for inline citations if research_references are available
+        if draft_input.research_references:
+            url_lines = []
+            for ref in draft_input.research_references:
+                url = str(ref.url) if hasattr(ref, "url") and ref.url else ""
+                title = getattr(ref, "title", "Untitled")
+                if url:
+                    url_lines.append(f"- {title}: {url}")
+            if url_lines:
+                prompt_parts.extend(
+                    [
+                        "",
+                        "---",
+                        "SOURCE URLS FOR INLINE CITATIONS (use these for hyperlinks in the draft):",
+                        "---",
+                        *url_lines,
+                    ]
+                )
+        prompt_parts.extend(
+            [
                 "",
                 "---",
                 "CONTENT PLAN (follow narrative flow and section coverage):",
@@ -335,6 +555,10 @@ class BlogDraftAgent:
             draft = "# Draft\n\nNo draft was generated. Check the model response or try again."
 
         logger.info("Draft generated: length=%s", len(draft))
+        if draft and not draft.startswith("# Draft\n\nNo draft"):
+            if on_llm_request:
+                on_llm_request("Running self-review...")
+            draft = self._self_review(draft)
         if draft_output_path:
             _write_draft_to_path(draft, draft_output_path)
         return DraftOutput(draft=draft)

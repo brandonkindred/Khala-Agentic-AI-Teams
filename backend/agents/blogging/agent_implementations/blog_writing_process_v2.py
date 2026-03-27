@@ -754,8 +754,11 @@ def run_pipeline(
         brand_spec_content=brand_spec_content,
     )
 
+    from blog_draft_agent.feedback_tracker import FeedbackTracker
+
     draft_result = None
     previous_feedback_items: list[FeedbackItem] = []
+    feedback_tracker = FeedbackTracker(window_size=3)
     for iteration in range(1, draft_editor_iterations + 1):
         if iteration == 1:
             # Initial draft
@@ -888,6 +891,11 @@ def run_pipeline(
                     len(copy_editor_result.feedback_items),
                 )
 
+                # Track feedback for staleness detection and persistent issue escalation
+                feedback_tracker.record_iteration(
+                    iteration, list(copy_editor_result.feedback_items)
+                )
+
                 if copy_editor_result.approved:
                     logger.info(
                         "Copy editor approved draft at iteration %s, stopping loop.", copy_edit_num
@@ -900,13 +908,36 @@ def run_pipeline(
                     )
                     break
 
+                # Detect stalled loop — same issues repeating without resolution
+                if iteration > 3 and feedback_tracker.is_stalled():
+                    logger.warning(
+                        "Copy-edit loop stalled at iteration %s (same issues repeating); accepting draft.",
+                        iteration,
+                    )
+                    _update(
+                        BlogPhase.COPY_EDIT_LOOP,
+                        sub_progress=1.0,
+                        status_text=f"Draft accepted after {copy_edit_num} pass(es) (editor loop converged)",
+                        draft_iterations=iteration,
+                    )
+                    break
+
+                persistent_issues = feedback_tracker.get_persistent_issues(min_occurrences=2)
+                if persistent_issues:
+                    logger.info(
+                        "Escalating %s persistent issue(s) to revision prompt",
+                        len(persistent_issues),
+                    )
+
                 revise_input = ReviseDraftInput(
                     draft=draft_result.draft,
                     feedback_items=copy_editor_result.feedback_items,
                     feedback_summary=copy_editor_result.summary,
-                    previous_feedback_items=previous_feedback_items
-                    if previous_feedback_items
-                    else None,
+                    previous_feedback_items=feedback_tracker.get_capped_previous_feedback(
+                        max_items=15
+                    )
+                    or None,
+                    persistent_issues=persistent_issues or None,
                     research_document=research_document,
                     content_plan=plan,
                     audience=brief.audience,
@@ -919,8 +950,8 @@ def run_pipeline(
                     selected_title=selected_title or None,
                     elicited_stories=elicited_stories_text or None,
                 )
-                previous_feedback_items = previous_feedback_items + list(
-                    copy_editor_result.feedback_items
+                previous_feedback_items = feedback_tracker.get_capped_previous_feedback(
+                    max_items=15
                 )
                 draft_output_path = (
                     (Path(work_dir) / f"draft_v{iteration}.md") if work_dir is not None else None

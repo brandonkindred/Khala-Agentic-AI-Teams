@@ -212,7 +212,15 @@ class JobServiceClient:
         if not self._is_remote:
             local = self._get_local()
             failed: List[str] = []
+            _waiting_fields = (
+                "waiting_for_answers",
+                "waiting_for_title_selection",
+                "waiting_for_story_input",
+            )
             for job in local.list_jobs(statuses=list(_ACTIVE_STATUSES)):
+                # Skip jobs in any waiting state — they are paused for user input
+                if any(job.get(wf) for wf in _waiting_fields):
+                    continue
                 jid = job.get("job_id")
                 if jid:
                     local.update_job(jid, status=JOB_STATUS_FAILED, error=reason)

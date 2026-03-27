@@ -166,6 +166,11 @@ class CentralJobManager:
         waiting_field: str = "waiting_for_answers",
     ) -> List[str]:
         failed_job_ids: List[str] = []
+        _all_waiting_fields = (
+            waiting_field,
+            "waiting_for_title_selection",
+            "waiting_for_story_input",
+        )
         now = datetime.now(timezone.utc)
         with self._lock:
             for path in self._jobs_dir().glob("*.json"):
@@ -175,7 +180,8 @@ class CentralJobManager:
                 status = data.get("status")
                 if status not in _ACTIVE_STATUSES:
                     continue
-                if data.get(waiting_field):
+                # Skip jobs in any waiting state — paused for user input
+                if any(data.get(wf) for wf in _all_waiting_fields):
                     continue
                 hb_raw = (
                     data.get("last_heartbeat_at")
