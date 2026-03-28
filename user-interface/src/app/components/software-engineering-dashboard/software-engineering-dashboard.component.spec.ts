@@ -1,6 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 import { provideHttpClient } from '@angular/common/http';
+import { ActivatedRoute } from '@angular/router';
 import { vi } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { SoftwareEngineeringDashboardComponent } from './software-engineering-dashboard.component';
@@ -20,6 +21,7 @@ describe('SoftwareEngineeringDashboardComponent', () => {
       providers: [
         provideHttpClient(),
         { provide: SoftwareEngineeringApiService, useValue: apiSpy },
+        { provide: ActivatedRoute, useValue: {} },
       ],
     }).compileComponents();
 
