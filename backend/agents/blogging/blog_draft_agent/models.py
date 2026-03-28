@@ -13,6 +13,77 @@ from shared.content_plan import ContentPlan, content_plan_to_outline_markdown
 
 from .feedback_tracker import PersistentFeedbackItem
 
+# ---------------------------------------------------------------------------
+# Interactive draft review models
+# ---------------------------------------------------------------------------
+
+
+class WritingGuidelineUpdate(BaseModel):
+    """A single update to apply to the writing guidelines based on user feedback."""
+
+    category: str = Field(
+        ...,
+        description="Category of the update: tone, cadence, structure, vocabulary, patterns, voice, or other.",
+    )
+    description: str = Field(
+        ...,
+        description="Human-readable description of the guideline change.",
+    )
+    guideline_text: str = Field(
+        ...,
+        description="The new guideline rule or modification to append/merge into the writing style guide.",
+    )
+
+
+class UserDraftFeedback(BaseModel):
+    """User/editor feedback on a draft during the interactive review cycle."""
+
+    approved: bool = Field(
+        default=False,
+        description="True if the user approves the draft as-is (no further revisions needed).",
+    )
+    feedback: Optional[str] = Field(
+        None,
+        description="Free-form feedback text from the user about the draft.",
+    )
+    guideline_updates_requested: bool = Field(
+        default=False,
+        description=(
+            "Set to True when the user's feedback references tone, cadence, sound, "
+            "writing patterns, or content structure, indicating the writing guidelines "
+            "should be updated."
+        ),
+    )
+
+
+class UncertaintyQuestion(BaseModel):
+    """A question the draft agent needs answered before proceeding with confidence."""
+
+    question_id: str = Field(..., description="Unique identifier for this question.")
+    question: str = Field(..., description="The question text for the user.")
+    context: str = Field(
+        ...,
+        description="Why the agent is uncertain and how the answer will affect the draft.",
+    )
+    section: Optional[str] = Field(
+        None,
+        description="Which section of the draft this uncertainty relates to.",
+    )
+
+
+class DraftReviewResult(BaseModel):
+    """Result of the draft agent's analysis after producing a draft, before user review."""
+
+    draft: str = Field(..., description="The draft text.")
+    uncertainty_questions: List[UncertaintyQuestion] = Field(
+        default_factory=list,
+        description="Questions the agent wants to ask the user before finalizing.",
+    )
+    revision_number: int = Field(
+        default=1,
+        description="Which revision of the draft this is (1 = initial).",
+    )
+
 
 class DraftInput(BaseModel):
     """Input for the blog draft agent: research and approved content plan."""

@@ -13,17 +13,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
-from blog_research_agent.models import ResearchReference
-
 from blog_planning_agent.json_utils import parse_json_object
 from blog_planning_agent.prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
-from llm_service import (
-    LLMClient,
-    LLMJsonParseError,
-    LLMTemporaryError,
-    LLMTruncatedError,
-    compact_text,
-)
+from blog_research_agent.models import ResearchReference
 from shared.content_plan import (
     ContentPlan,
     PlanningFailureReason,
@@ -37,13 +29,31 @@ from shared.content_plan import (
 from shared.content_profile import LengthPolicy, resolve_length_policy
 from shared.errors import PlanningError
 
-from .models import DraftInput, DraftOutput, ReviseDraftInput
+from llm_service import (
+    LLMClient,
+    LLMJsonParseError,
+    LLMTemporaryError,
+    LLMTruncatedError,
+    compact_text,
+)
+
+from .models import (
+    DraftInput,
+    DraftOutput,
+    ReviseDraftInput,
+    UncertaintyQuestion,
+    WritingGuidelineUpdate,
+)
 from .prompts import (
     ALLOWED_CLAIMS_INSTRUCTION,
+    ANALYZE_USER_FEEDBACK_FOR_GUIDELINES_PROMPT,
     DRAFT_TASK_INSTRUCTIONS,
+    ESCALATION_SUMMARY_PROMPT,
     EXTRACT_NOTES_PROMPT,
     REVISION_TASK_INSTRUCTIONS,
     SELF_REVIEW_PROMPT,
+    UNCERTAINTY_DETECTION_PROMPT,
+    USER_FEEDBACK_REVISION_INSTRUCTIONS,
     WRITING_SYSTEM_PROMPT,
 )
 
@@ -1258,3 +1268,293 @@ class BlogDraftAgent:
         if draft_output_path:
             _write_draft_to_path(current_draft, draft_output_path)
         return DraftOutput(draft=current_draft)
+
+    # ------------------------------------------------------------------
+    # Interactive draft review: user-as-editor methods
+    # ------------------------------------------------------------------
+
+    def identify_uncertainty_questions(
+        self,
+        draft: str,
+        content_plan_text: str,
+    ) -> list[UncertaintyQuestion]:
+        """Scan a draft for areas of high uncertainty that need user input.
+
+        Returns a list of UncertaintyQuestion objects. An empty list means
+        the agent is confident in the draft and no user questions are needed.
+        """
+        prompt = UNCERTAINTY_DETECTION_PROMPT.format(
+            content_plan=content_plan_text,
+            draft=draft,
+        )
+        try:
+            raw = self.llm.complete(
+                prompt,
+                temperature=0.1,
+                system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.",
+                think=True,
+            )
+            cleaned = raw.strip()
+            start = cleaned.find("[")
+            end = cleaned.rfind("]") + 1
+            if start == -1 or end <= start:
+                return []
+            items = json.loads(cleaned[start:end])
+            if not items:
+                return []
+            questions = []
+            for item in items:
+                try:
+                    questions.append(
+                        UncertaintyQuestion(
+                            question_id=item.get("question_id", f"q-{len(questions)}"),
+                            question=item["question"],
+                            context=item.get("context", ""),
+                            section=item.get("section"),
+                        )
+                    )
+                except (KeyError, TypeError) as e:
+                    logger.warning("Skipping malformed uncertainty question: %s", e)
+            logger.info("Identified %s uncertainty question(s) in draft", len(questions))
+            return questions
+        except Exception as e:
+            logger.warning("Uncertainty detection failed: %s", e)
+            return []
+
+    def analyze_user_feedback_for_guideline_updates(
+        self,
+        user_feedback: str,
+        current_guidelines: str,
+    ) -> list[WritingGuidelineUpdate]:
+        """Analyze user feedback and extract any writing guideline updates.
+
+        When the user/editor gives feedback about tone, cadence, sound, writing
+        patterns, content structure, etc., this method extracts those as
+        concrete guideline updates that can be persisted to the writing style guide.
+
+        Returns an empty list if the feedback has no guideline-relevant content.
+        """
+        prompt = ANALYZE_USER_FEEDBACK_FOR_GUIDELINES_PROMPT.format(
+            user_feedback=user_feedback,
+            current_guidelines=current_guidelines,
+        )
+        try:
+            data = self.llm.complete_json(
+                prompt,
+                temperature=0.1,
+                think=True,
+            )
+            if not isinstance(data, dict):
+                return []
+            if not data.get("has_guideline_updates"):
+                logger.info("User feedback contains no guideline updates")
+                return []
+            updates = []
+            for item in data.get("updates", []):
+                try:
+                    updates.append(
+                        WritingGuidelineUpdate(
+                            category=item["category"],
+                            description=item["description"],
+                            guideline_text=item["guideline_text"],
+                        )
+                    )
+                except (KeyError, TypeError) as e:
+                    logger.warning("Skipping malformed guideline update: %s", e)
+            logger.info("Extracted %s writing guideline update(s) from user feedback", len(updates))
+            return updates
+        except Exception as e:
+            logger.warning("Guideline update analysis failed: %s", e)
+            return []
+
+    def revise_from_user_feedback(
+        self,
+        draft: str,
+        user_feedback: str,
+        content_plan_text: str,
+        *,
+        audience: Optional[str] = None,
+        tone_or_purpose: Optional[str] = None,
+        selected_title: Optional[str] = None,
+        elicited_stories: Optional[str] = None,
+        research_document: Optional[str] = None,
+        allowed_claims: Optional[dict] = None,
+        target_word_count: int = 1000,
+        length_guidance: str = "",
+        uncertainty_answers: Optional[dict[str, str]] = None,
+        on_llm_request: Optional[Callable[[str], None]] = None,
+        draft_output_path: Optional[Union[str, Path]] = None,
+    ) -> DraftOutput:
+        """Revise a draft based on direct user/editor feedback.
+
+        Unlike ``revise()`` which handles structured copy-editor feedback items,
+        this method handles free-form user feedback from the interactive review
+        cycle where the user acts as the editor.
+        """
+        self._assert_guidelines_present()
+        if not draft.strip():
+            return DraftOutput(draft=draft)
+
+        style_guide_text = self._style_prompt
+        brand_section = (
+            self._brand_spec_prompt
+            if self._brand_spec_prompt
+            else "No brand specification was provided. Follow the style guide below."
+        )
+
+        prompt_parts = [
+            USER_FEEDBACK_REVISION_INSTRUCTIONS.format(user_feedback=user_feedback),
+            "",
+            "---",
+            "BRAND AND STYLE (mandatory for every sentence):",
+            "---",
+            brand_section,
+            "",
+            "---",
+            "STYLE GUIDE (follow in the revised draft):",
+            "---",
+            style_guide_text,
+            "",
+            "---",
+            "CONTENT PLAN:",
+            "---",
+            content_plan_text,
+            "",
+        ]
+
+        if uncertainty_answers:
+            answer_lines = []
+            for qid, answer in uncertainty_answers.items():
+                answer_lines.append(f"- {qid}: {answer}")
+            prompt_parts.extend(
+                [
+                    "---",
+                    "ANSWERS TO PREVIOUSLY ASKED QUESTIONS (incorporate these into the revision):",
+                    "---",
+                    "\n".join(answer_lines),
+                    "",
+                ]
+            )
+
+        if research_document:
+            prompt_parts.extend(
+                ["---", "RESEARCH (for context):", "---", research_document.strip(), ""]
+            )
+        if allowed_claims and allowed_claims.get("claims"):
+            claims_list = allowed_claims["claims"]
+            claims_text = "\n".join(
+                f"- [CLAIM:{c.get('id', '')}] {c.get('text', '')}" for c in claims_list
+            )
+            prompt_parts.extend(
+                ["---", "ALLOWED CLAIMS:", "---", claims_text, ""]
+            )
+        if selected_title:
+            prompt_parts.extend(
+                ["---", f"AUTHOR-CHOSEN TITLE (preserve this exact H1): {selected_title}", ""]
+            )
+        if elicited_stories:
+            prompt_parts.extend(
+                ["---", "AUTHOR'S PERSONAL STORIES:\n" + elicited_stories, ""]
+            )
+        if audience:
+            prompt_parts.append(f"Audience: {audience}")
+        if tone_or_purpose:
+            prompt_parts.append(f"Tone/Purpose: {tone_or_purpose}")
+
+        length_block = (
+            length_guidance.strip()
+            if length_guidance.strip()
+            else f"TARGET LENGTH: approximately {target_word_count} words."
+        )
+        prompt_parts.extend(
+            [
+                "",
+                "---",
+                "CURRENT DRAFT:",
+                "---",
+                draft,
+                "",
+                "---",
+                length_block,
+                "",
+                "---",
+                'Use this format: first line {"draft": 0}, then ---DRAFT---, then the full revised blog post in Markdown.',
+            ]
+        )
+        prompt = "\n".join(prompt_parts)
+
+        if on_llm_request:
+            on_llm_request("Revising draft based on editor feedback...")
+
+        current_draft = draft
+        for attempt in range(3):
+            try:
+                raw_response = self.llm.complete(
+                    prompt,
+                    temperature=0.2,
+                    system_prompt=WRITING_SYSTEM_PROMPT,
+                    think=True,
+                )
+                revised = _extract_draft_after_marker(raw_response)
+                if revised and revised.strip():
+                    current_draft = revised.strip()
+                    break
+            except LLMTemporaryError:
+                logger.warning("User-feedback revision transient error (attempt %s/3); retrying.", attempt + 1)
+                time.sleep(2.0 * (2**attempt))
+            except (LLMJsonParseError, LLMTruncatedError) as e:
+                logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
+
+        if current_draft == draft:
+            try:
+                data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+                raw_draft = data.get("draft") if data else None
+                if isinstance(raw_draft, str) and raw_draft.strip():
+                    current_draft = raw_draft.strip()
+            except (LLMJsonParseError, LLMTruncatedError):
+                pass
+
+        logger.info("User-feedback revision complete, final length=%s", len(current_draft))
+        if draft_output_path:
+            _write_draft_to_path(current_draft, draft_output_path)
+        return DraftOutput(draft=current_draft)
+
+    def generate_escalation_summary(
+        self,
+        revision_count: int,
+        latest_feedback_items: list[Any],
+        persistent_issues: list[Any],
+    ) -> str:
+        """Generate a human-readable summary when the copy-edit loop hits the escalation threshold.
+
+        Called when the automated editor has gone through ``revision_count`` iterations
+        without approving the draft, to produce a clear explanation for the user about
+        what is stuck and what guidance is needed.
+        """
+        feedback_text = "\n".join(
+            f"- [{getattr(item, 'severity', 'unknown')}] {getattr(item, 'category', '')}: {getattr(item, 'issue', '')}"
+            for item in latest_feedback_items
+        )
+        persistent_text = "\n".join(
+            f"- [{getattr(item, 'severity', 'unknown')}] {getattr(item, 'category', '')} (flagged {getattr(item, 'occurrence_count', '?')} times): {getattr(item, 'issue', '')}"
+            for item in persistent_issues
+        ) if persistent_issues else "None"
+
+        prompt = ESCALATION_SUMMARY_PROMPT.format(
+            revision_count=revision_count,
+            latest_feedback=feedback_text or "No specific feedback items.",
+            persistent_issues=persistent_text,
+        )
+        try:
+            summary = self.llm.complete(
+                prompt,
+                temperature=0.1,
+                think=False,
+            )
+            return (summary or "").strip()
+        except Exception as e:
+            logger.warning("Escalation summary generation failed: %s", e)
+            return (
+                f"The draft has been through {revision_count} automated revision cycles "
+                "without reaching approval. Please review the current draft and provide feedback."
+            )

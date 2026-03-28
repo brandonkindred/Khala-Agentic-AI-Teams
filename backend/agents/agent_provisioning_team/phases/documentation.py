@@ -6,6 +6,7 @@ This is phase 5 of the provisioning workflow.
 
 from typing import Callable, Dict, List, Optional
 
+from ..anatomy_assets import try_materialize_anatomy_bundle
 from ..models import (
     AccessTier,
     DocumentationResult,
@@ -14,7 +15,6 @@ from ..models import (
     ToolOnboardingInfo,
     ToolProvisionResult,
 )
-from ..anatomy_assets import try_materialize_anatomy_bundle
 from ..shared.tool_manifest import ToolManifest
 
 

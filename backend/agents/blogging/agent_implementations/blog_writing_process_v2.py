@@ -1,9 +1,9 @@
 """
 Brand-aligned blog writing pipeline with artifact persistence and gates.
 
-Runs research -> planning -> draft -> copy-editor loop. When work_dir is provided,
-persists artifacts and runs validators, fact-check, and compliance. On FAIL,
-enters closed-loop rewrite until PASS or max_rewrite_iterations.
+Runs research -> planning -> draft -> interactive user review -> copy-editor loop.
+When work_dir is provided, persists artifacts and runs validators, fact-check, and
+compliance. On FAIL, enters closed-loop rewrite until PASS or max_rewrite_iterations.
 
 Supports job_updater callback for UI phase tracking.
 """
@@ -24,6 +24,13 @@ from blog_research_agent.agent import ResearchAgent
 from blog_research_agent.allowed_claims import extract_allowed_claims
 from blog_research_agent.models import ResearchBriefInput
 from shared.artifacts import read_artifact, write_artifact
+from shared.blog_job_store import (
+    get_blog_job,
+    get_user_draft_feedback,
+    is_waiting_for_draft_feedback,
+    record_guideline_updates,
+    request_draft_feedback,
+)
 from shared.brand_spec import load_brand_spec_prompt
 from shared.content_plan import (
     PlanningInput,
@@ -52,7 +59,7 @@ from shared.errors import (
 )
 from shared.models import BlogPhase, get_phase_progress
 from shared.planning_config import planning_model_override
-from shared.style_loader import load_style_file
+from shared.style_loader import append_guidelines, load_style_file
 from temporalio.exceptions import CancelledError
 from validators.runner import run_validators_from_work_dir
 
@@ -68,6 +75,8 @@ STYLE_GUIDE_PATH = _blogging_docs / "writing_guidelines.md"
 BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 DRAFT_EDITOR_ITERATIONS = 500
 MAX_REWRITE_ITERATIONS = 100
+# After this many copy-edit revisions without editor approval, escalate to the user
+COPY_EDIT_ESCALATION_THRESHOLD = 10
 
 # Default model - use environment variable or this default
 DEFAULT_MODEL = "qwen3.5:397b-cloud"
@@ -316,7 +325,6 @@ def _fill_story_placeholders(
     from ghost_writer_agent.models import StoryGap
     from shared.blog_job_store import (
         add_story_agent_message,
-        get_blog_job,
         update_blog_job,
     )
 
@@ -861,6 +869,158 @@ def run_pipeline(
                     iteration=iteration,
                 )
 
+            # ── Interactive draft review (user-as-editor) ──────────────────
+            # After the initial draft, present it to the user for review.
+            # The user acts as the editor: they can approve, provide feedback,
+            # or answer uncertainty questions. This loop continues until the
+            # user approves a draft.
+            if job_id is not None and job_updater is not None:
+                content_plan_text = content_plan_to_outline_markdown(plan)
+                user_review_revision = 1
+
+                # Detect uncertainty questions on the initial draft
+                _update(
+                    BlogPhase.DRAFT_REVIEW,
+                    sub_progress=0.0,
+                    status_text="Checking draft for areas of uncertainty...",
+                )
+                uncertainty_questions = draft_agent.identify_uncertainty_questions(
+                    draft_result.draft, content_plan_text
+                )
+                uncertainty_q_dicts = [
+                    {
+                        "question_id": q.question_id,
+                        "question": q.question,
+                        "context": q.context,
+                        "section": q.section,
+                    }
+                    for q in uncertainty_questions
+                ]
+
+                # Present draft to user for feedback
+                _update(
+                    BlogPhase.DRAFT_REVIEW,
+                    sub_progress=0.1,
+                    status_text="Waiting for editor review of draft...",
+                )
+                request_draft_feedback(
+                    job_id,
+                    draft=draft_result.draft,
+                    revision=user_review_revision,
+                    uncertainty_questions=uncertainty_q_dicts if uncertainty_q_dicts else None,
+                )
+
+                # Poll until user submits feedback
+                while is_waiting_for_draft_feedback(job_id):
+                    job_data = get_blog_job(job_id)
+                    if job_data and job_data.get("status") in ("failed", "cancelled"):
+                        return research_result, planning_phase_result, draft_result, "FAIL"
+                    time.sleep(2)
+
+                # Process user feedback in a loop until approved
+                while True:
+                    feedback_data = get_user_draft_feedback(job_id)
+                    if not feedback_data:
+                        logger.warning("No user draft feedback found; proceeding with current draft.")
+                        break
+
+                    if feedback_data.get("approved"):
+                        logger.info("User approved draft at revision %s", user_review_revision)
+                        _update(
+                            BlogPhase.DRAFT_REVIEW,
+                            sub_progress=1.0,
+                            status_text=f"Draft approved by editor (revision {user_review_revision})",
+                        )
+                        break
+
+                    user_feedback_text = feedback_data.get("feedback", "")
+                    logger.info(
+                        "User feedback received (revision %s): %s chars",
+                        user_review_revision,
+                        len(user_feedback_text),
+                    )
+
+                    # Analyze feedback for writing guideline updates
+                    if user_feedback_text:
+                        _update(
+                            BlogPhase.DRAFT_REVIEW,
+                            status_text="Analyzing feedback for guideline updates...",
+                        )
+                        guideline_updates = draft_agent.analyze_user_feedback_for_guideline_updates(
+                            user_feedback_text, writing_style_content
+                        )
+                        if guideline_updates:
+                            update_dicts = [u.model_dump() for u in guideline_updates]
+                            if append_guidelines(STYLE_GUIDE_PATH, update_dicts):
+                                logger.info(
+                                    "Applied %s guideline update(s) from user feedback",
+                                    len(guideline_updates),
+                                )
+                                # Reload the updated style guide
+                                writing_style_content = load_style_file(
+                                    STYLE_GUIDE_PATH, "writing style guide"
+                                )
+                                # Rebuild agent with updated guidelines
+                                draft_agent = BlogDraftAgent(
+                                    llm_client=llm_client,
+                                    writing_style_guide_content=writing_style_content,
+                                    brand_spec_content=brand_spec_content,
+                                )
+                                copy_editor_agent = BlogCopyEditorAgent(
+                                    llm_client=llm_client,
+                                    writing_style_guide_content=writing_style_content,
+                                    brand_spec_content=brand_spec_content,
+                                )
+                                record_guideline_updates(job_id, update_dicts)
+
+                    # Revise draft based on user feedback
+                    user_review_revision += 1
+                    _update(
+                        BlogPhase.DRAFT_REVIEW,
+                        sub_progress=min(0.9, user_review_revision * 0.1),
+                        status_text=f"Revising draft (revision {user_review_revision})...",
+                    )
+                    draft_output_path = (
+                        (Path(work_dir) / f"draft_user_rev_{user_review_revision}.md")
+                        if work_dir is not None
+                        else None
+                    )
+                    draft_result = draft_agent.revise_from_user_feedback(
+                        draft=draft_result.draft,
+                        user_feedback=user_feedback_text,
+                        content_plan_text=content_plan_text,
+                        audience=brief.audience,
+                        tone_or_purpose=brief.tone_or_purpose,
+                        selected_title=selected_title or None,
+                        elicited_stories=elicited_stories_text or None,
+                        research_document=research_document,
+                        allowed_claims=allowed_claims_data
+                        if isinstance(allowed_claims_data, dict)
+                        else None,
+                        target_word_count=length_policy.target_word_count,
+                        length_guidance=build_draft_length_instruction(length_policy),
+                        on_llm_request=lambda msg: _update(BlogPhase.DRAFT_REVIEW, status_text=msg),
+                        draft_output_path=draft_output_path,
+                    )
+
+                    # Present revised draft for another round of review
+                    _update(
+                        BlogPhase.DRAFT_REVIEW,
+                        status_text="Waiting for editor review of revised draft...",
+                    )
+                    request_draft_feedback(
+                        job_id,
+                        draft=draft_result.draft,
+                        revision=user_review_revision,
+                    )
+
+                    # Poll until user submits feedback
+                    while is_waiting_for_draft_feedback(job_id):
+                        job_data = get_blog_job(job_id)
+                        if job_data and job_data.get("status") in ("failed", "cancelled"):
+                            return research_result, planning_phase_result, draft_result, "FAIL"
+                        time.sleep(2)
+
         else:
             # Copy edit loop
             copy_edit_num = iteration - 1
@@ -936,6 +1096,118 @@ def run_pipeline(
                         draft_iterations=iteration,
                     )
                     break
+
+                # ── Escalation to user after N revisions without approval ──
+                # When the copy-editor has iterated COPY_EDIT_ESCALATION_THRESHOLD
+                # times without approving, pause the pipeline and ask the user
+                # (human editor) for feedback or explicit approval.
+                if (
+                    copy_edit_num > 0
+                    and copy_edit_num % COPY_EDIT_ESCALATION_THRESHOLD == 0
+                    and job_id is not None
+                    and job_updater is not None
+                ):
+                    persistent_issues_for_esc = feedback_tracker.get_persistent_issues(
+                        min_occurrences=2
+                    )
+                    logger.warning(
+                        "Copy-edit loop reached %s iterations without approval; escalating to user.",
+                        copy_edit_num,
+                    )
+                    _update(
+                        BlogPhase.COPY_EDIT_LOOP,
+                        status_text=(
+                            f"Draft has been through {copy_edit_num} automated revisions "
+                            "without approval. Requesting editor feedback..."
+                        ),
+                    )
+
+                    escalation_summary = draft_agent.generate_escalation_summary(
+                        revision_count=copy_edit_num,
+                        latest_feedback_items=list(copy_editor_result.feedback_items),
+                        persistent_issues=persistent_issues_for_esc,
+                    )
+
+                    request_draft_feedback(
+                        job_id,
+                        draft=draft_result.draft,
+                        revision=copy_edit_num,
+                        escalation_summary=escalation_summary,
+                    )
+
+                    # Poll until user submits feedback
+                    while is_waiting_for_draft_feedback(job_id):
+                        job_data = get_blog_job(job_id)
+                        if job_data and job_data.get("status") in ("failed", "cancelled"):
+                            return research_result, planning_phase_result, draft_result, "FAIL"
+                        time.sleep(2)
+
+                    esc_feedback = get_user_draft_feedback(job_id)
+                    if esc_feedback and esc_feedback.get("approved"):
+                        logger.info(
+                            "User approved draft during escalation at iteration %s",
+                            copy_edit_num,
+                        )
+                        _update(
+                            BlogPhase.COPY_EDIT_LOOP,
+                            sub_progress=1.0,
+                            status_text=f"Draft approved by editor after {copy_edit_num} pass(es)",
+                            draft_iterations=iteration,
+                        )
+                        break
+
+                    esc_feedback_text = (esc_feedback or {}).get("feedback", "")
+                    if esc_feedback_text:
+                        # Analyze for guideline updates
+                        guideline_updates = draft_agent.analyze_user_feedback_for_guideline_updates(
+                            esc_feedback_text, writing_style_content
+                        )
+                        if guideline_updates:
+                            update_dicts = [u.model_dump() for u in guideline_updates]
+                            if append_guidelines(STYLE_GUIDE_PATH, update_dicts):
+                                writing_style_content = load_style_file(
+                                    STYLE_GUIDE_PATH, "writing style guide"
+                                )
+                                draft_agent = BlogDraftAgent(
+                                    llm_client=llm_client,
+                                    writing_style_guide_content=writing_style_content,
+                                    brand_spec_content=brand_spec_content,
+                                )
+                                copy_editor_agent = BlogCopyEditorAgent(
+                                    llm_client=llm_client,
+                                    writing_style_guide_content=writing_style_content,
+                                    brand_spec_content=brand_spec_content,
+                                )
+                                record_guideline_updates(job_id, update_dicts)
+
+                        # Revise based on user feedback before continuing the loop
+                        content_plan_text = content_plan_to_outline_markdown(plan)
+                        draft_output_path = (
+                            (Path(work_dir) / f"draft_v{iteration}_esc.md")
+                            if work_dir is not None
+                            else None
+                        )
+                        draft_result = draft_agent.revise_from_user_feedback(
+                            draft=draft_result.draft,
+                            user_feedback=esc_feedback_text,
+                            content_plan_text=content_plan_text,
+                            audience=brief.audience,
+                            tone_or_purpose=brief.tone_or_purpose,
+                            selected_title=selected_title or None,
+                            elicited_stories=elicited_stories_text or None,
+                            research_document=research_document,
+                            allowed_claims=allowed_claims_data
+                            if isinstance(allowed_claims_data, dict)
+                            else None,
+                            target_word_count=length_policy.target_word_count,
+                            length_guidance=build_draft_length_instruction(length_policy),
+                            on_llm_request=lambda msg: _update(
+                                BlogPhase.COPY_EDIT_LOOP, status_text=msg
+                            ),
+                            draft_output_path=draft_output_path,
+                        )
+                        # Continue copy-edit loop with revised draft
+                        continue
 
                 persistent_issues = feedback_tracker.get_persistent_issues(min_occurrences=2)
                 if persistent_issues:

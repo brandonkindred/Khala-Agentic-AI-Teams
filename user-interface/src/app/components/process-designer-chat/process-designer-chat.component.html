@@ -118,6 +118,10 @@
                 [class.expanded]="expandedAgent() === agent.agent_name"
                 [class.has-gap]="gapCountForAgent(agent.agent_name) > 0"
                 (click)="toggleAgentExpand(agent.agent_name)"
+                (keydown.enter)="toggleAgentExpand(agent.agent_name)"
+                (keydown.space)="toggleAgentExpand(agent.agent_name)"
+                role="button"
+                tabindex="0"
               >
                 <div class="agent-card-header">
                   <div class="agent-avatar">

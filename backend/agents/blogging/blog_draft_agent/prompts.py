@@ -261,6 +261,102 @@ If you find issues, return the array with one object per issue.
 
 Return ONLY the JSON array, no explanation or markdown fencing."""
 
+# ---------------------------------------------------------------------------
+# Prompt: analyse user feedback for writing guideline updates
+# ---------------------------------------------------------------------------
+ANALYZE_USER_FEEDBACK_FOR_GUIDELINES_PROMPT = """You are a writing style analyst. The user (editor) has just reviewed a blog post draft and provided feedback. Your job is to determine whether their feedback contains instructions about **tone, cadence, sound, writing patterns, content structure, vocabulary, or voice** that should be permanently captured as writing guidelines.
+
+USER FEEDBACK:
+{user_feedback}
+
+CURRENT WRITING STYLE GUIDE (for context — do not repeat existing rules):
+{current_guidelines}
+
+Analyze the feedback and return a JSON object with exactly these keys:
+- "has_guideline_updates": boolean — true ONLY if the feedback references tone, cadence, sound, writing patterns, content structure, vocabulary, or voice in a way that should become a permanent guideline.
+- "updates": array of objects, each with:
+  - "category": one of "tone", "cadence", "structure", "vocabulary", "patterns", "voice", "other"
+  - "description": short human-readable description of the change
+  - "guideline_text": the exact rule text to add to the writing style guide (imperative form, e.g. "Use shorter paragraphs in technical sections")
+
+If the feedback is purely about content accuracy, factual corrections, section ordering, or other non-style concerns, return {{"has_guideline_updates": false, "updates": []}}.
+
+Return ONLY the JSON object, no explanation or markdown fencing."""
+
+
+# ---------------------------------------------------------------------------
+# Prompt: revise draft based on user/editor feedback (not copy-editor)
+# ---------------------------------------------------------------------------
+USER_FEEDBACK_REVISION_INSTRUCTIONS = """YOUR TASK: Revise the draft based on the editor's feedback below.
+
+The editor (user) has reviewed this draft and provided feedback. Apply their feedback carefully:
+- Address every point the editor raised.
+- Preserve the draft's structure and substance unless the editor specifically asks for structural changes.
+- Maintain compliance with the brand spec and writing style guide.
+- Do NOT introduce new content that the editor did not request.
+
+EDITOR'S FEEDBACK:
+{user_feedback}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Prompt: identify areas of high uncertainty in the draft
+# ---------------------------------------------------------------------------
+UNCERTAINTY_DETECTION_PROMPT = """You are reviewing a blog post draft to identify areas where you have HIGH UNCERTAINTY and need input from the author/editor before proceeding.
+
+Flag uncertainty ONLY for these situations:
+1. **Ambiguous requirements**: The content plan or brief is unclear about what a section should cover, and you had to guess.
+2. **Missing context**: A section references a concept, product, or experience that you don't have enough information to write about accurately.
+3. **Tone/voice judgment calls**: A section could go in multiple very different directions (e.g. humorous vs. serious, high-level vs. deep-dive) and the brief doesn't clarify.
+4. **Factual gaps**: The research doesn't cover a claim or topic the content plan requires, and you had to use general knowledge or a placeholder.
+5. **Audience mismatch risk**: You're unsure whether the technical depth is appropriate for the stated audience.
+
+Do NOT flag:
+- Minor stylistic choices (the editor will catch those)
+- Things covered adequately by the research
+- Standard writing decisions that any skilled writer would make the same way
+
+CONTENT PLAN:
+{content_plan}
+
+DRAFT:
+{draft}
+
+Return a JSON array of uncertainty objects. Each object has:
+- "question_id": a short slug like "section-2-depth" or "intro-tone"
+- "question": the question for the user (clear, specific, actionable)
+- "context": why you're uncertain and how the answer affects the draft (1-2 sentences)
+- "section": which section of the draft this relates to (use the H2 heading text, or "overall" for post-level concerns)
+
+If there are no high-uncertainty areas, return an empty array: []
+Return ONLY the JSON array, no explanation or markdown fencing."""
+
+
+# ---------------------------------------------------------------------------
+# Prompt: detect whether the copy-editor loop should escalate to the user
+# ---------------------------------------------------------------------------
+ESCALATION_SUMMARY_PROMPT = """You are summarizing the state of a blog draft that has gone through {revision_count} revision cycles with the automated copy editor without reaching approval.
+
+The draft has been revised {revision_count} times. The copy editor continues to find issues. This suggests either:
+1. The feedback is contradictory or circular (the editor asks for changes that conflict with other rules).
+2. The draft needs subjective judgment that an automated editor cannot provide.
+3. There are fundamental structural or voice issues that incremental fixes cannot resolve.
+
+LATEST COPY EDITOR FEEDBACK:
+{latest_feedback}
+
+PERSISTENT ISSUES (flagged multiple times):
+{persistent_issues}
+
+Produce a concise summary for the human editor explaining:
+1. What the main unresolved issues are.
+2. Why automated revision hasn't been able to fix them.
+3. What specific guidance from the editor would help break the deadlock.
+
+Keep this under 300 words. Be direct and specific. Return plain text only."""
+
+
 ALLOWED_CLAIMS_INSTRUCTION = """
 ALLOWED FACTUAL CLAIMS — YOUR ONLY SOURCE OF TRUTH FOR FACTS (tag each with [CLAIM:id]):
 Every factual statement in the draft MUST come from this list or from the research document with explicit attribution.

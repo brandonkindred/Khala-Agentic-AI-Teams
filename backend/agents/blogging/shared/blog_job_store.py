@@ -116,6 +116,14 @@ def create_blog_job(
         "pending_questions": [],
         "waiting_for_answers": False,
         "submitted_answers": [],
+        # Interactive draft review (user-as-editor)
+        "waiting_for_draft_feedback": False,
+        "draft_for_review": None,
+        "draft_review_revision": 0,
+        "draft_review_questions": [],
+        "draft_escalation_summary": None,
+        "user_draft_feedback": None,
+        "guideline_updates_applied": [],
         "events": [],
     }
     _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **fields)
@@ -419,6 +427,91 @@ def is_waiting_for_blog_answers(
     """Return True if the pipeline is paused waiting for Q&A answers."""
     job = _client(cache_dir).get_job(job_id)
     return bool(job.get("waiting_for_answers")) if job else False
+
+
+# ---------------------------------------------------------------------------
+# Interactive draft review pause/resume (user-as-editor)
+# ---------------------------------------------------------------------------
+
+
+def request_draft_feedback(
+    job_id: str,
+    draft: str,
+    revision: int,
+    *,
+    uncertainty_questions: Optional[List[Dict[str, Any]]] = None,
+    escalation_summary: Optional[str] = None,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Pause the pipeline and present a draft to the user for feedback.
+
+    Sets ``waiting_for_draft_feedback=True`` so the pipeline blocks until the
+    user submits feedback or approves the draft via ``submit_draft_feedback``.
+    """
+    fields: Dict[str, Any] = {
+        "waiting_for_draft_feedback": True,
+        "draft_for_review": draft,
+        "draft_review_revision": revision,
+        "user_draft_feedback": None,
+    }
+    if uncertainty_questions is not None:
+        fields["draft_review_questions"] = uncertainty_questions
+    if escalation_summary is not None:
+        fields["draft_escalation_summary"] = escalation_summary
+    _client(cache_dir).atomic_update(job_id, merge_fields=fields)
+
+
+def submit_draft_feedback(
+    job_id: str,
+    feedback: str,
+    approved: bool,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Store user feedback on the draft and resume the pipeline.
+
+    Args:
+        feedback: Free-form feedback text from the user.
+        approved: True if the user approves the draft as-is.
+    """
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={
+            "waiting_for_draft_feedback": False,
+            "user_draft_feedback": {"feedback": feedback, "approved": approved},
+            "draft_review_questions": [],
+            "draft_escalation_summary": None,
+        },
+    )
+
+
+def is_waiting_for_draft_feedback(
+    job_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> bool:
+    """Return True if the pipeline is paused waiting for user feedback on a draft."""
+    job = _client(cache_dir).get_job(job_id)
+    return bool(job.get("waiting_for_draft_feedback")) if job else False
+
+
+def get_user_draft_feedback(
+    job_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> Optional[Dict[str, Any]]:
+    """Retrieve the latest user draft feedback (or None if not yet submitted)."""
+    job = _client(cache_dir).get_job(job_id)
+    return job.get("user_draft_feedback") if job else None
+
+
+def record_guideline_updates(
+    job_id: str,
+    updates: List[Dict[str, Any]],
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Append applied guideline updates to the job record for audit trail."""
+    _client(cache_dir).atomic_update(
+        job_id,
+        append_to={"guideline_updates_applied": updates},
+    )
 
 
 # Start stale job monitor when module is loaded (e.g. when blogging API is mounted)

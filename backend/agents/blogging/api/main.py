@@ -62,11 +62,13 @@ try:
         delete_blog_job,
         fail_blog_job,
         get_blog_job,
+        is_waiting_for_draft_feedback,
         list_blog_jobs,
         medium_stats_run_dir,
         skip_current_story_gap,
         start_blog_job,
         submit_blog_answers,
+        submit_draft_feedback,
         submit_story_user_message,
         submit_title_selection,
         unapprove_blog_job,
@@ -88,6 +90,8 @@ except ImportError:
     submit_story_user_message = None
     skip_current_story_gap = None
     submit_blog_answers = None
+    submit_draft_feedback = None
+    is_waiting_for_draft_feedback = None
     JOB_STATUS_COMPLETED = "completed"
     JOB_STATUS_NEEDS_REVIEW = "needs_human_review"
     BloggingError = Exception
@@ -674,6 +678,31 @@ class BlogJobStatusResponse(BaseModel):
     waiting_for_answers: bool = Field(
         False, description="True when the pipeline is paused waiting for Q&A answers"
     )
+    # Interactive draft review collaboration fields
+    waiting_for_draft_feedback: bool = Field(
+        False,
+        description="True when the pipeline is paused waiting for the editor to review a draft",
+    )
+    draft_for_review: Optional[str] = Field(
+        None,
+        description="Full draft text currently awaiting editor review",
+    )
+    draft_review_revision: int = Field(
+        0,
+        description="Which revision number is currently being reviewed",
+    )
+    draft_review_questions: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Uncertainty questions the draft agent wants the editor to answer",
+    )
+    draft_escalation_summary: Optional[str] = Field(
+        None,
+        description="Summary of why the copy-edit loop is stuck (present when escalating after 10+ revisions)",
+    )
+    guideline_updates_applied: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Writing guideline updates derived from editor feedback during this job",
+    )
 
 
 def _blog_job_dict_to_status_response(
@@ -725,6 +754,12 @@ def _blog_job_dict_to_status_response(
         elicited_stories=job.get("elicited_stories", []),
         pending_questions=job.get("pending_questions", []),
         waiting_for_answers=bool(job.get("waiting_for_answers", False)),
+        waiting_for_draft_feedback=bool(job.get("waiting_for_draft_feedback", False)),
+        draft_for_review=job.get("draft_for_review"),
+        draft_review_revision=job.get("draft_review_revision", 0),
+        draft_review_questions=job.get("draft_review_questions", []),
+        draft_escalation_summary=job.get("draft_escalation_summary"),
+        guideline_updates_applied=job.get("guideline_updates_applied", []),
     )
 
 
@@ -1337,6 +1372,47 @@ def submit_answers(job_id: str, request: BlogAnswersRequest) -> BlogJobStatusRes
     return _blog_job_dict_to_status_response(updated, job_id)
 
 
+class DraftFeedbackRequest(BaseModel):
+    """Request body for submitting feedback on a draft during interactive review."""
+
+    feedback: str = Field(
+        default="",
+        description="Free-form feedback text from the editor about the draft.",
+    )
+    approved: bool = Field(
+        default=False,
+        description="True if the editor approves the draft as-is (no further revisions needed).",
+    )
+
+
+@app.post(
+    "/job/{job_id}/draft-feedback",
+    response_model=BlogJobStatusResponse,
+    summary="Submit draft feedback or approval",
+    description=(
+        "Resume the pipeline after the editor reviews a draft. "
+        "Sets waiting_for_draft_feedback=False and stores the feedback. "
+        "When approved=true, the draft proceeds without further revision."
+    ),
+)
+def draft_feedback(job_id: str, request: DraftFeedbackRequest) -> BlogJobStatusResponse:
+    """Editor submits feedback on a draft or approves it."""
+    if get_blog_job is None or submit_draft_feedback is None:
+        raise HTTPException(status_code=501, detail="Job store not available")
+    job = get_blog_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if not job.get("waiting_for_draft_feedback"):
+        raise HTTPException(
+            status_code=400, detail="Job is not currently waiting for draft feedback"
+        )
+    submit_draft_feedback(job_id, request.feedback, request.approved)
+    updated = get_blog_job(job_id)
+    if updated is None:
+        raise HTTPException(status_code=500, detail="Job not found after feedback submission")
+    return _blog_job_dict_to_status_response(updated, job_id)
+
+
 @app.get(
     "/job/{job_id}/artifacts",
     response_model=ArtifactListResponse,
@@ -1470,6 +1546,7 @@ def _rebuild_api_models() -> None:
         StartPipelineResponse,
         CancelJobResponse,
         DeleteJobResponse,
+        DraftFeedbackRequest,
     ):
         _cls.model_rebuild(_types_namespace=_ns)
 
