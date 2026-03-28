@@ -427,6 +427,16 @@ def _try_mount_startup_advisor(app: FastAPI) -> bool:
     )
 
 
+def _try_mount_user_agent_founder(app: FastAPI) -> bool:
+    """Mount User Agent Founder API."""
+    return try_mount_or_proxy(
+        app,
+        "user_agent_founder",
+        "user_agent_founder.api.main",
+        service_url_env="USER_AGENT_FOUNDER_SERVICE_URL",
+    )
+
+
 def mount_all_teams(app: FastAPI) -> dict[str, bool]:
     """Mount all enabled team APIs and return mount status."""
     mount_functions = {
@@ -449,6 +459,7 @@ def mount_all_teams(app: FastAPI) -> dict[str, bool]:
         "road_trip_planning": _try_mount_road_trip_planning,
         "agentic_team_provisioning": _try_mount_agentic_team_provisioning,
         "startup_advisor": _try_mount_startup_advisor,
+        "user_agent_founder": _try_mount_user_agent_founder,
     }
 
     results = {}

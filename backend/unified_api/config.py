@@ -172,6 +172,12 @@ TEAM_CONFIGS: dict[str, TeamConfig] = {
         description="Persistent conversational startup advisor with probing dialogue and artifact generation",
         tags=["startup", "advisor", "coaching", "strategy"],
     ),
+    "user_agent_founder": TeamConfig(
+        name="User Agent Founder",
+        prefix="/api/user-agent-founder",
+        description="Autonomous startup founder agent that drives the SE team to build a task management service",
+        tags=["user-agent", "founder", "simulation"],
+    ),
 }
 
 
