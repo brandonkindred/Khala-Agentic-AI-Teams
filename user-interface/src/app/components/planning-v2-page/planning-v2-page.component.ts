@@ -11,6 +11,7 @@ import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-sp
 import { ErrorMessageComponent } from '../../shared/error-message/error-message.component';
 import { PlanningV2RunFormComponent } from '../planning-v2-run-form/planning-v2-run-form.component';
 import { PlanningV2JobStatusComponent } from '../planning-v2-job-status/planning-v2-job-status.component';
+import { PlanningArtifactsViewerComponent } from '../planning-artifacts-viewer/planning-artifacts-viewer.component';
 import type { PlanningV2RunRequest, RunningJobSummary } from '../../models';
 
 @Component({
@@ -25,6 +26,7 @@ import type { PlanningV2RunRequest, RunningJobSummary } from '../../models';
     ErrorMessageComponent,
     PlanningV2RunFormComponent,
     PlanningV2JobStatusComponent,
+    PlanningArtifactsViewerComponent,
   ],
   templateUrl: './planning-v2-page.component.html',
   styleUrl: './planning-v2-page.component.scss',

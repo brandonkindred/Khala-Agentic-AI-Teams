@@ -31,6 +31,7 @@ from ..models import (
 )
 from ..output_templates import looks_like_truncated_file_content, parse_fix_output
 from ..prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
+from ..shared_planning_document import shared_doc_asset_path
 from ..tool_agents.json_utils import complete_with_continuation
 
 logger = logging.getLogger(__name__)
@@ -254,6 +255,8 @@ def run_problem_solving(
                 fix_result = agent.fix_all_issues(agent_issues, single_issue_input)
                 if fix_result.files:
                     for rel_path, content in fix_result.files.items():
+                        if rel_path == shared_doc_asset_path():
+                            continue  # Already written to shared doc by agent
                         full_path = repo_path / rel_path
                         full_path.parent.mkdir(parents=True, exist_ok=True)
                         full_path.write_text(content, encoding="utf-8")
@@ -322,6 +325,8 @@ def run_problem_solving(
 
                     if fix_result.files:
                         for rel_path, content in fix_result.files.items():
+                            if rel_path == shared_doc_asset_path():
+                                continue  # Already written to shared doc by agent
                             full_path = repo_path / rel_path
                             full_path.parent.mkdir(parents=True, exist_ok=True)
                             full_path.write_text(content, encoding="utf-8")
@@ -364,6 +369,8 @@ def run_problem_solving(
                     if file_updates and isinstance(file_updates, dict):
                         for rel_path, content in file_updates.items():
                             if isinstance(content, str) and content.strip():
+                                if rel_path == shared_doc_asset_path():
+                                    continue  # Already written to shared doc by agent
                                 if looks_like_truncated_file_content(content):
                                     logger.warning(
                                         "Planning-v2 Problem-solving: skipping file %s — content may be truncated",

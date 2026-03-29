@@ -27,6 +27,8 @@ import type {
   ProductAnalysisRunRequest,
   ProductAnalysisRunResponse,
   ProductAnalysisStatusResponse,
+  PlanningArtifactListResponse,
+  PlanningArtifactContentResponse,
 } from '../models';
 
 /**
@@ -337,6 +339,31 @@ export class SoftwareEngineeringApiService {
     return this.http.post<AutoAnswerResponse>(
       `${this.baseUrl}/planning-v2/${jobId}/auto-answer/${questionId}`,
       request ?? {}
+    );
+  }
+
+  /**
+   * GET /planning-v2/{job_id}/artifacts
+   * List planning artifacts for a planning-v2 job.
+   */
+  getPlanningV2Artifacts(
+    jobId: string
+  ): Observable<PlanningArtifactListResponse> {
+    return this.http.get<PlanningArtifactListResponse>(
+      `${this.baseUrl}/planning-v2/${jobId}/artifacts`
+    );
+  }
+
+  /**
+   * GET /planning-v2/{job_id}/artifacts/{artifact_name}
+   * Get the content of a specific planning artifact.
+   */
+  getPlanningV2ArtifactContent(
+    jobId: string,
+    artifactName: string
+  ): Observable<PlanningArtifactContentResponse> {
+    return this.http.get<PlanningArtifactContentResponse>(
+      `${this.baseUrl}/planning-v2/${jobId}/artifacts/${encodeURIComponent(artifactName)}`
     );
   }
 

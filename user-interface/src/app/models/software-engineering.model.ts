@@ -460,3 +460,27 @@ export interface ProductAnalysisStatusResponse {
   summary?: string;
   validated_spec_path?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Planning Artifact Viewing
+// ---------------------------------------------------------------------------
+
+/** Metadata for a single planning artifact file. */
+export interface PlanningArtifactMeta {
+  name: string;
+  size_bytes: number;
+  modified_at: string;
+  sections?: string[];
+}
+
+/** Response listing planning artifacts for a job. */
+export interface PlanningArtifactListResponse {
+  artifacts: PlanningArtifactMeta[];
+}
+
+/** Response with the content of a single planning artifact. */
+export interface PlanningArtifactContentResponse {
+  name: string;
+  content: string | Record<string, unknown>;
+  content_type: string;
+}

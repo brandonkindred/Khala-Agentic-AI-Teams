@@ -20,11 +20,18 @@ from software_engineering_team.shared.models import (
     TaskPlan,
 )
 
-from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
+from ...models import ToolAgentKind, ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
 from ...output_templates import (
     looks_like_truncated_file_content,
     parse_fix_output,
     parse_review_output,
+)
+from ...shared_planning_document import (
+    AGENT_SECTION_MAP,
+    read_other_sections,
+    read_section,
+    shared_doc_asset_path,
+    write_section,
 )
 from ..json_utils import attempt_fix_output_continuation, complete_text_with_continuation
 
@@ -501,19 +508,15 @@ class UserStoryToolAgent:
             fix_inp = inp.model_copy(update={"current_files": current_files})
             result = self.fix_all_issues(story_issues, fix_inp)
             if result.files:
-                repo = Path(inp.repo_path or ".")
                 for rel_path, content in result.files.items():
-                    full_path = repo / rel_path
-                    full_path.parent.mkdir(parents=True, exist_ok=True)
-                    full_path.write_text(content, encoding="utf-8")
-                    file_name = full_path.name
+                    repo = Path(inp.repo_path or ".")
+                    write_section(repo, AGENT_SECTION_MAP[ToolAgentKind.USER_STORY], content)
                     logger.info(
-                        "UserStory: applied fix — writing to file: %s (%d chars)",
-                        file_name,
+                        "UserStory: applied fix — writing to shared doc (%d chars)",
                         len(content),
                     )
-                    if rel_path not in files_written:
-                        files_written.append(rel_path)
+                    if shared_doc_asset_path() not in files_written:
+                        files_written.append(shared_doc_asset_path())
                     current_files[rel_path] = content
                 fixes_applied.append(result.summary)
             if result.hierarchy:
@@ -532,7 +535,7 @@ class UserStoryToolAgent:
 
         existing_user_stories = (inp.current_files or {}).get(
             planning_asset_path("user_stories.md")
-        )
+        ) or read_section(Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.USER_STORY])
         if existing_user_stories and not story_issues:
             return ToolAgentPhaseOutput(
                 summary="User story artifacts unchanged (file exists, no review issues).",
@@ -543,13 +546,17 @@ class UserStoryToolAgent:
             )
 
         if not files_written:
+            # Blackboard: read other agents' sections for cross-referencing
+            blackboard_context = read_other_sections(
+                Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.USER_STORY]
+            )
+            if blackboard_context:
+                logger.info("UserStory: read %d chars of cross-agent context from blackboard", len(blackboard_context))
+
             content = _hierarchy_to_markdown(hierarchy)
             repo = Path(inp.repo_path or ".")
-            rel_path = planning_asset_path("user_stories.md")
-            full_path = repo / rel_path
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-            full_path.write_text(content, encoding="utf-8")
-            files_written = [rel_path]
+            write_section(repo, AGENT_SECTION_MAP[ToolAgentKind.USER_STORY], content)
+            files_written = [shared_doc_asset_path()]
 
         summary = "User story artifacts generated."
         if fixes_applied:
@@ -647,6 +654,8 @@ class UserStoryToolAgent:
                 if "user_stor" in path.lower() or "planning" in path.lower():
                     current_artifact = content
                     break
+        if not current_artifact:
+            current_artifact = read_section(Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.USER_STORY]) or ""
 
         prompt = USER_STORY_FIX_SINGLE_ISSUE_PROMPT.format(
             issue=issue,
@@ -779,6 +788,8 @@ class UserStoryToolAgent:
                 if "user_stor" in path.lower() or "planning" in path.lower():
                     current_artifact = content
                     break
+        if not current_artifact:
+            current_artifact = read_section(Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.USER_STORY]) or ""
 
         issues_list = "\n".join(f"{i + 1}. {issue}" for i, issue in enumerate(issues))
         prompt = USER_STORY_FIX_ALL_ISSUES_PROMPT.format(
@@ -807,7 +818,9 @@ class UserStoryToolAgent:
                 updated_content = next(iter(file_updates.values()), "")
 
             files: Dict[str, str] = {}
-            hierarchy: Optional[PlanningHierarchy] = None
+            # Preserve existing hierarchy from input — fixes update the markdown but don't
+            # restructure the hierarchy object itself.
+            hierarchy: Optional[PlanningHierarchy] = inp.hierarchy
             if updated_content and isinstance(updated_content, str) and updated_content.strip():
                 if looks_like_truncated_file_content(updated_content):
                     continued = attempt_fix_output_continuation(

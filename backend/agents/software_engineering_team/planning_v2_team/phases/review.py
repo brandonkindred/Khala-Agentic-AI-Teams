@@ -27,6 +27,7 @@ from ..models import (
 )
 from ..output_templates import parse_review_output
 from ..prompts import REVIEW_PROMPT
+from ..shared_planning_document import shared_doc_asset_path
 from ..tool_agents.json_utils import complete_with_continuation
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,8 @@ def run_review(
                     logger.info("Review: %s found %d issues", agent_kind.value, len(result.issues))
                     if result.files:
                         for rel_path, content in result.files.items():
+                            if rel_path == shared_doc_asset_path():
+                                continue  # Already written to shared doc by agent
                             full_path = repo_path / rel_path
                             full_path.parent.mkdir(parents=True, exist_ok=True)
                             full_path.write_text(content, encoding="utf-8")

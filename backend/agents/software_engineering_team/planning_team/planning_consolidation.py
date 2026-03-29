@@ -39,6 +39,7 @@ def run_planning_consolidation(
     ]
 
     artifact_files = [
+        "planning_team/planning_document.md",
         "spec_lint_report.md",
         "glossary.md",
         "assumptions_and_questions.md",

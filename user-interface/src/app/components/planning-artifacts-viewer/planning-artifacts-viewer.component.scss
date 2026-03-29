@@ -1,0 +1,146 @@
+@use '../../shared/markdown-content' as md;
+
+.error-card {
+  margin-bottom: 1rem;
+}
+
+.error-text {
+  color: var(--mat-sys-error, #d32f2f);
+}
+
+.artifacts-card {
+  margin-top: 1rem;
+}
+
+.artifacts-layout {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.5rem;
+}
+
+.artifacts-list {
+  width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.artifact-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  width: 100%;
+
+  &:hover {
+    background: var(--mat-sys-surface-container-highest, rgba(0, 0, 0, 0.04));
+  }
+
+  &.selected {
+    border-color: var(--mat-sys-primary);
+    background: var(--mat-sys-surface-container-high, rgba(25, 118, 210, 0.08));
+  }
+
+  &.primary-doc {
+    border-left: 3px solid var(--mat-sys-primary, #1976d2);
+  }
+}
+
+.artifact-icon {
+  margin-top: 2px;
+  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+  font-size: 1.25rem;
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.artifact-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.artifact-name {
+  font-weight: 500;
+  font-size: 0.875rem;
+  word-break: break-all;
+}
+
+.artifact-meta {
+  font-size: 0.75rem;
+  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+}
+
+.artifact-sections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.section-chip {
+  font-size: 0.625rem;
+}
+
+.artifact-content-panel {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.content-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
+
+  h3 {
+    margin: 0;
+    font-size: 0.9375rem;
+    font-weight: 500;
+  }
+
+  .open-btn {
+    mat-icon {
+      font-size: 1rem;
+      width: 1rem;
+      height: 1rem;
+      margin-right: 0.25rem;
+      vertical-align: middle;
+    }
+  }
+}
+
+.content-body {
+  padding: 1rem;
+  max-height: 500px;
+  overflow-y: auto;
+
+  pre {
+    margin: 0;
+    padding: 0.75rem;
+    font-size: 0.8125rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
+    border-radius: 4px;
+    font-family: ui-monospace, monospace;
+  }
+
+  .markdown-content {
+    @include md.rendered;
+  }
+}

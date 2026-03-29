@@ -1,0 +1,27 @@
+// Shared styles for rendering Markdown content from agent-generated artifacts.
+// Usage: @use '../../../shared/markdown-content' as md; then include .markdown-content { @include md.rendered; }
+// Or simply import this partial file inside the component's .markdown-content block.
+
+@mixin rendered {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+
+  ::ng-deep h1 { font-size: 1.5rem; margin: 1rem 0 0.5rem 0; }
+  ::ng-deep h2 { font-size: 1.25rem; margin: 0.75rem 0 0.5rem 0; }
+  ::ng-deep h3 { font-size: 1.1rem; margin: 0.5rem 0 0.25rem 0; }
+  ::ng-deep p { margin: 0.5rem 0; }
+  ::ng-deep ul, ::ng-deep ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+  ::ng-deep code {
+    background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.04));
+    padding: 0.1em 0.3em;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  ::ng-deep pre {
+    background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.04));
+    padding: 0.75rem;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin: 0.5rem 0;
+  }
+}

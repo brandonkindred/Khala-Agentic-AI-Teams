@@ -2440,6 +2440,7 @@ def run_orchestrator(
             update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
             return
 
+        adapter_result.shared_planning_doc_path = str(Path(path) / "plan" / "planning_team" / "planning_document.md")
         requirements = adapter_result.requirements
         project_overview = adapter_result.project_overview
         spec_intake_open_questions = adapter_result.open_questions

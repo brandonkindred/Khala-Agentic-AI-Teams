@@ -11,11 +11,18 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
+from ...models import ToolAgentKind, ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
 from ...output_templates import (
     looks_like_truncated_file_content,
     parse_fix_output,
     parse_planning_tool_output,
+)
+from ...shared_planning_document import (
+    AGENT_SECTION_MAP,
+    read_other_sections,
+    read_section,
+    shared_doc_asset_path,
+    write_section,
 )
 from ..json_utils import attempt_fix_output_continuation, complete_text_with_continuation
 
@@ -225,19 +232,15 @@ class UIDesignToolAgent:
             fix_inp = inp.model_copy(update={"current_files": current_files})
             result = self.fix_all_issues(ui_issues, fix_inp)
             if result.files:
-                repo = Path(inp.repo_path or ".")
                 for rel_path, content in result.files.items():
-                    full_path = repo / rel_path
-                    full_path.parent.mkdir(parents=True, exist_ok=True)
-                    full_path.write_text(content, encoding="utf-8")
-                    file_name = full_path.name
+                    repo = Path(inp.repo_path or ".")
+                    write_section(repo, AGENT_SECTION_MAP[ToolAgentKind.UI_DESIGN], content)
                     logger.info(
-                        "UIDesign: applied fix — writing to file: %s (%d chars)",
-                        file_name,
+                        "UIDesign: applied fix — writing to shared doc (%d chars)",
                         len(content),
                     )
-                    if rel_path not in files_written:
-                        files_written.append(rel_path)
+                    if shared_doc_asset_path() not in files_written:
+                        files_written.append(shared_doc_asset_path())
                     current_files[rel_path] = content
                 fixes_applied.append(result.summary)
             logger.info(
@@ -246,9 +249,8 @@ class UIDesignToolAgent:
             )
 
         existing_doc = (
-            inp.current_files.get(planning_asset_path("ui_design.md"))
-            if inp.current_files
-            else None
+            (inp.current_files.get(planning_asset_path("ui_design.md")) if inp.current_files else None)
+            or read_section(Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.UI_DESIGN])
         )
         if existing_doc and not ui_issues:
             return ToolAgentPhaseOutput(
@@ -273,6 +275,13 @@ class UIDesignToolAgent:
         layouts = inp.metadata.get("layouts", []) if inp.metadata else []
         breakpoints = inp.metadata.get("breakpoints", {}) if inp.metadata else {}
         accessibility = inp.metadata.get("accessibility", []) if inp.metadata else []
+
+        # Blackboard: read other agents' sections for cross-referencing
+        blackboard_context = read_other_sections(
+            Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.UI_DESIGN]
+        )
+        if blackboard_context:
+            logger.info("UIDesign: read %d chars of cross-agent context from blackboard", len(blackboard_context))
 
         content_parts = ["# UI Design Plan\n\n"]
 
@@ -312,13 +321,10 @@ class UIDesignToolAgent:
             content_parts.append("\n")
 
         if design_tokens or components:
-            rel_path = planning_asset_path("ui_design.md")
             content = "".join(content_parts)
             repo = Path(inp.repo_path or ".")
-            full_path = repo / rel_path
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-            full_path.write_text(content, encoding="utf-8")
-            files_written.append(rel_path)
+            write_section(repo, AGENT_SECTION_MAP[ToolAgentKind.UI_DESIGN], content)
+            files_written.append(shared_doc_asset_path())
 
         return ToolAgentPhaseOutput(
             summary="UI Design artifacts generated.",
@@ -350,6 +356,10 @@ class UIDesignToolAgent:
                     if "ui_design" in path.lower():
                         current_artifact = content
                         break
+        if not current_artifact:
+            current_artifact = read_section(
+                Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.UI_DESIGN]
+            ) or ""
 
         prompt = UI_DESIGN_FIX_SINGLE_ISSUE_PROMPT.format(
             issue=issue,
@@ -483,6 +493,10 @@ class UIDesignToolAgent:
                     if "ui_design" in path.lower():
                         current_artifact = content
                         break
+        if not current_artifact:
+            current_artifact = read_section(
+                Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.UI_DESIGN]
+            ) or ""
 
         issues_list = "\n".join(f"{i + 1}. {issue}" for i, issue in enumerate(issues))
         prompt = UI_DESIGN_FIX_ALL_ISSUES_PROMPT.format(

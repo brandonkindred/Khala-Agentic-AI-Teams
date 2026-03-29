@@ -1606,6 +1606,26 @@ class PlanningV2ResultResponse(BaseModel):
     error: Optional[str] = None
 
 
+class PlanningArtifactMeta(BaseModel):
+    """Metadata for a single planning artifact file."""
+    name: str = Field(..., description="Artifact filename.")
+    size_bytes: int = Field(..., description="File size in bytes.")
+    modified_at: str = Field(..., description="ISO timestamp of last modification.")
+    sections: List[str] = Field(default_factory=list, description="Section names (for shared planning document only).")
+
+
+class PlanningArtifactListResponse(BaseModel):
+    """Response listing planning artifacts for a job."""
+    artifacts: List[PlanningArtifactMeta] = Field(default_factory=list)
+
+
+class PlanningArtifactContentResponse(BaseModel):
+    """Response with the content of a single planning artifact."""
+    name: str = Field(..., description="Artifact filename.")
+    content: str = Field(..., description="File content (markdown or JSON string).")
+    content_type: str = Field(..., description="Content type: 'markdown' or 'json'.")
+
+
 def _run_backend_code_v2_background(
     job_id: str, repo_path: str, task_dict: dict, architecture_overview: str
 ) -> None:
@@ -2847,6 +2867,86 @@ def get_logs(
     if not parts:
         return PlainTextResponse(content="(no log files found)\n", status_code=200)
     return PlainTextResponse(content="\n\n".join(parts))
+
+
+@app.get(
+    "/planning-v2/{job_id}/artifacts",
+    response_model=PlanningArtifactListResponse,
+    summary="List planning-v2 artifacts",
+    description="List artifact files in plan/planning_team/ for a planning-v2 job.",
+)
+def list_planning_v2_artifacts(job_id: str) -> PlanningArtifactListResponse:
+    """List planning artifacts for a planning-v2 job."""
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    repo_path = data.get("repo_path")
+    if not repo_path:
+        raise HTTPException(status_code=404, detail="Job has no repo_path")
+
+    plan_dir = Path(repo_path) / "plan" / "planning_team"
+    if not plan_dir.exists():
+        return PlanningArtifactListResponse(artifacts=[])
+
+    artifacts: list[PlanningArtifactMeta] = []
+    for f in sorted(plan_dir.iterdir()):
+        if f.is_file() and f.suffix in (".md", ".json"):
+            stat = f.stat()
+            sections: list[str] = []
+            if f.name == "planning_document.md":
+                try:
+                    from planning_v2_team.shared_planning_document import (
+                        list_sections as _list_sections,
+                    )
+                    sections = _list_sections(Path(repo_path))
+                except Exception:
+                    pass
+            artifacts.append(
+                PlanningArtifactMeta(
+                    name=f.name,
+                    size_bytes=stat.st_size,
+                    modified_at=datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z",
+                    sections=sections,
+                )
+            )
+    return PlanningArtifactListResponse(artifacts=artifacts)
+
+
+@app.get(
+    "/planning-v2/{job_id}/artifacts/{artifact_name}",
+    response_model=PlanningArtifactContentResponse,
+    summary="Get planning-v2 artifact content",
+    description="Return the content of a specific planning artifact file.",
+)
+def get_planning_v2_artifact_content(job_id: str, artifact_name: str) -> PlanningArtifactContentResponse:
+    """Get the content of a planning artifact."""
+    if ".." in artifact_name or "/" in artifact_name or "\\" in artifact_name:
+        raise HTTPException(status_code=400, detail="Invalid artifact name")
+
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    repo_path = data.get("repo_path")
+    if not repo_path:
+        raise HTTPException(status_code=404, detail="Job has no repo_path")
+
+    artifact_path = Path(repo_path) / "plan" / "planning_team" / artifact_name
+    if not artifact_path.exists() or not artifact_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Artifact '{artifact_name}' not found")
+
+    try:
+        content = artifact_path.read_text(encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read artifact: {e}")
+
+    content_type = "json" if artifact_name.endswith(".json") else "markdown"
+    return PlanningArtifactContentResponse(
+        name=artifact_name,
+        content=content,
+        content_type=content_type,
+    )
 
 
 @app.get("/health")

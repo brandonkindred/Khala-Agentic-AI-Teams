@@ -23,6 +23,7 @@ import { SalesDashboardComponent } from './components/sales-dashboard/sales-dash
 import { NutritionDashboardComponent } from './components/nutrition-dashboard/nutrition-dashboard.component';
 import { StartupAdvisorDashboardComponent } from './components/startup-advisor-dashboard/startup-advisor-dashboard.component';
 import { AgenticTeamDashboardComponent } from './components/agentic-team-dashboard/agentic-team-dashboard.component';
+import { PlanningArtifactDetailComponent } from './components/planning-artifact-detail/planning-artifact-detail.component';
 
 export const routes: Routes = [
   {
@@ -37,6 +38,7 @@ export const routes: Routes = [
       { path: 'software-engineering', component: SoftwareEngineeringDashboardComponent },
       { path: 'software-engineering/planning-v3', component: PlanningV3PageComponent },
       { path: 'software-engineering/coding-team', component: CodingTeamPageComponent },
+      { path: 'software-engineering/planning-v2/jobs/:jobId/artifacts/:artifactName', component: PlanningArtifactDetailComponent },
       { path: 'market-research', component: MarketResearchDashboardComponent },
       { path: 'soc2-compliance', component: Soc2ComplianceDashboardComponent },
       { path: 'social-marketing', component: SocialMarketingDashboardComponent },

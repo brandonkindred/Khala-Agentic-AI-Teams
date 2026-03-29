@@ -1,0 +1,72 @@
+@if (error && artifacts.length === 0) {
+  <mat-card class="error-card">
+    <mat-card-content>
+      <p class="error-text">{{ error }}</p>
+    </mat-card-content>
+  </mat-card>
+}
+
+@if (artifacts.length > 0) {
+  <mat-card class="artifacts-card">
+    <mat-card-header>
+      <mat-card-title>Planning Artifacts</mat-card-title>
+      <mat-card-subtitle>{{ artifacts.length }} file(s) available</mat-card-subtitle>
+    </mat-card-header>
+    <mat-card-content>
+      <div class="artifacts-layout">
+        <div class="artifacts-list">
+          @for (artifact of artifacts; track artifact.name) {
+            <button
+              type="button"
+              class="artifact-item"
+              [class.selected]="isSelected(artifact)"
+              [class.primary-doc]="isPrimaryDoc(artifact)"
+              (click)="selectArtifact(artifact)"
+            >
+              <mat-icon class="artifact-icon">{{ artifactIcon(artifact) }}</mat-icon>
+              <div class="artifact-info">
+                <span class="artifact-name">{{ artifact.name }}</span>
+                <span class="artifact-meta">{{ formatSize(artifact.size_bytes) }} · {{ formatDate(artifact.modified_at) }}</span>
+                @if (artifact.sections && artifact.sections.length > 0) {
+                  <div class="artifact-sections">
+                    @for (section of artifact.sections; track section) {
+                      <mat-chip-row class="section-chip">{{ section }}</mat-chip-row>
+                    }
+                  </div>
+                }
+              </div>
+            </button>
+          }
+        </div>
+
+        @if (selectedArtifact) {
+          <div class="artifact-content-panel">
+            <div class="content-header">
+              <h3>{{ selectedArtifact.name }}</h3>
+              <a
+                [routerLink]="['/software-engineering/planning-v2/jobs', jobId, 'artifacts', selectedArtifact.name]"
+                mat-stroked-button
+                class="open-btn"
+              >
+                <mat-icon>open_in_new</mat-icon>
+                Open
+              </a>
+            </div>
+
+            @if (loadingContent) {
+              <mat-progress-bar mode="indeterminate"></mat-progress-bar>
+            } @else if (selectedContent !== null) {
+              <div class="content-body">
+                @if (selectedArtifact.name.endsWith('.md') && renderedHtml) {
+                  <div class="markdown-content" [innerHTML]="renderedHtml"></div>
+                } @else {
+                  <pre>{{ selectedContent }}</pre>
+                }
+              </div>
+            }
+          </div>
+        }
+      </div>
+    </mat-card-content>
+  </mat-card>
+}

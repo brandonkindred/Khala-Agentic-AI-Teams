@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from planning_v2_team.models import PLAN_PLANNING_TEAM_DIR
+from planning_v2_team.shared_planning_document import SHARED_DOC_FILENAME
 
 from software_engineering_team.shared.models import PlanningHierarchy, ProductRequirements
 
@@ -27,11 +31,13 @@ class PlanningV2AdapterResult:
     hierarchy: Optional[PlanningHierarchy] = field(default=None)
     final_spec_content: Optional[str] = field(default=None)
     architecture_overview: Optional[str] = field(default=None)
+    shared_planning_doc_path: Optional[str] = field(default=None)
 
 
 def adapt_planning_v2_result(
     result: Any,
     spec_title: str = "Project",
+    repo_path: Optional[str] = None,
 ) -> PlanningV2AdapterResult:
     """
     Map PlanningV2WorkflowResult to ProductRequirements, project_overview, open_questions, assumptions.
@@ -39,6 +45,7 @@ def adapt_planning_v2_result(
     Args:
         result: PlanningV2WorkflowResult from PlanningV2TeamLead.run_workflow().
         spec_title: Optional title for the requirements (e.g. from initial spec).
+        repo_path: Optional repo path to derive shared_planning_doc_path.
 
     Returns:
         PlanningV2AdapterResult with requirements, project_overview, open_questions, assumptions.
@@ -138,6 +145,10 @@ def adapt_planning_v2_result(
     # Extract the final spec content from the result
     final_spec_content: Optional[str] = getattr(result, "final_spec_content", None)
 
+    shared_doc_path: Optional[str] = None
+    if repo_path:
+        shared_doc_path = str(Path(repo_path) / PLAN_PLANNING_TEAM_DIR / SHARED_DOC_FILENAME)
+
     return PlanningV2AdapterResult(
         requirements=requirements,
         project_overview=project_overview,
@@ -146,4 +157,5 @@ def adapt_planning_v2_result(
         hierarchy=hierarchy,
         final_spec_content=final_spec_content,
         architecture_overview=None,
+        shared_planning_doc_path=shared_doc_path,
     )

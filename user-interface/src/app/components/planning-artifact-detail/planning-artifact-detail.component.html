@@ -1,0 +1,26 @@
+<div class="artifact-viewer-page">
+  <header class="artifact-viewer-header">
+    <a routerLink="/software-engineering" class="back-link">
+      <mat-icon>arrow_back</mat-icon>
+      Back to Software Engineering
+    </a>
+    @if (artifactName) {
+      <h1>{{ artifactLabel() }}</h1>
+      <p class="meta">Job: {{ jobId }} · {{ artifactName }}</p>
+    }
+  </header>
+
+  @if (loading) {
+    <app-loading-spinner message="Loading artifact..." />
+  } @else if (error) {
+    <app-error-message [message]="error" />
+  } @else if (content !== null) {
+    <div class="artifact-viewer-body" [class.artifact-json]="isJson()">
+      @if (isMarkdown()) {
+        <div class="markdown-content" [innerHTML]="getMarkdownHtml()"></div>
+      } @else {
+        <pre>{{ content }}</pre>
+      }
+    </div>
+  }
+</div>

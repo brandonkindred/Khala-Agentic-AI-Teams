@@ -13,13 +13,20 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from software_engineering_team.shared.models import LicenseType, PricingTier, ToolRecommendation
 
-from ...models import ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
+from ...models import ToolAgentKind, ToolAgentPhaseInput, ToolAgentPhaseOutput, planning_asset_path
 from ...output_templates import (
     looks_like_truncated_file_content,
     parse_architecture_planning_output,
     parse_fix_output,
     parse_review_output,
     parse_spec_review_output,
+)
+from ...shared_planning_document import (
+    AGENT_SECTION_MAP,
+    read_other_sections,
+    read_section,
+    shared_doc_asset_path,
+    write_section,
 )
 from ..json_utils import attempt_fix_output_continuation, complete_text_with_continuation
 
@@ -340,19 +347,15 @@ class ArchitectureToolAgent:
             fix_inp = inp.model_copy(update={"current_files": current_files})
             result = self.fix_all_issues(arch_issues, fix_inp)
             if result.files:
-                repo = Path(inp.repo_path or ".")
                 for rel_path, content in result.files.items():
-                    full_path = repo / rel_path
-                    full_path.parent.mkdir(parents=True, exist_ok=True)
-                    full_path.write_text(content, encoding="utf-8")
-                    file_name = full_path.name
+                    repo = Path(inp.repo_path or ".")
+                    write_section(repo, AGENT_SECTION_MAP[ToolAgentKind.ARCHITECTURE], content)
                     logger.info(
-                        "Architecture: applied fix — writing to file: %s (%d chars)",
-                        file_name,
+                        "Architecture: applied fix — writing to shared doc (%d chars)",
                         len(content),
                     )
-                    if rel_path not in files_written:
-                        files_written.append(rel_path)
+                    if shared_doc_asset_path() not in files_written:
+                        files_written.append(shared_doc_asset_path())
                     current_files[rel_path] = content
                 fixes_applied.append(result.summary)
             logger.info(
@@ -360,7 +363,9 @@ class ArchitectureToolAgent:
                 len(arch_issues),
             )
 
-        existing_arch = (inp.current_files or {}).get(planning_asset_path("architecture.md"))
+        existing_arch = (inp.current_files or {}).get(planning_asset_path("architecture.md")) or read_section(
+            Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.ARCHITECTURE]
+        )
         if existing_arch and not arch_issues:
             return ToolAgentPhaseOutput(
                 summary="Architecture artifacts unchanged (file exists, no review issues).",
@@ -373,6 +378,13 @@ class ArchitectureToolAgent:
         layers = inp.metadata.get("layers", [])
         cross_cutting = inp.metadata.get("cross_cutting", [])
         deployment_model = inp.metadata.get("deployment_model", "")
+
+        # Blackboard: read other agents' sections for cross-referencing
+        blackboard_context = read_other_sections(
+            Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.ARCHITECTURE]
+        )
+        if blackboard_context:
+            logger.info("Architecture: read %d chars of cross-agent context from blackboard", len(blackboard_context))
 
         content_parts = ["# Architecture\n"]
 
@@ -399,14 +411,11 @@ class ArchitectureToolAgent:
         if deployment_model:
             content_parts.append(f"## Deployment Model\n{deployment_model}\n\n")
 
-        if (arch_style or layers) and planning_asset_path("architecture.md") not in files_written:
-            rel_path = planning_asset_path("architecture.md")
+        if (arch_style or layers) and shared_doc_asset_path() not in files_written:
             content = "".join(content_parts)
             repo = Path(inp.repo_path or ".")
-            full_path = repo / rel_path
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-            full_path.write_text(content, encoding="utf-8")
-            files_written.append(rel_path)
+            write_section(repo, AGENT_SECTION_MAP[ToolAgentKind.ARCHITECTURE], content)
+            files_written.append(shared_doc_asset_path())
 
         summary = "Architecture artifacts generated."
         if fixes_applied:
@@ -491,7 +500,9 @@ class ArchitectureToolAgent:
                 resolved=False,
             )
 
-        current_artifact = inp.current_files.get(planning_asset_path("architecture.md"), "")
+        current_artifact = inp.current_files.get(planning_asset_path("architecture.md"), "") or read_section(
+            Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.ARCHITECTURE]
+        ) or ""
         if not current_artifact:
             for path, content in inp.current_files.items():
                 if "architect" in path.lower():
@@ -622,7 +633,9 @@ class ArchitectureToolAgent:
                 resolved=False,
             )
 
-        current_artifact = inp.current_files.get(planning_asset_path("architecture.md"), "")
+        current_artifact = inp.current_files.get(planning_asset_path("architecture.md"), "") or read_section(
+            Path(inp.repo_path or "."), AGENT_SECTION_MAP[ToolAgentKind.ARCHITECTURE]
+        ) or ""
         if not current_artifact:
             for path, content in inp.current_files.items():
                 if "architect" in path.lower():
