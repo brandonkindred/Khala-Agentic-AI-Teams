@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 _worker_thread: Optional[threading.Thread] = None
 _activity_executor: Optional[ThreadPoolExecutor] = None
+_worker_instance: Optional[Worker] = None
+_worker_running_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def create_blogging_worker(client: Optional[object] = None) -> Optional[Worker]:
@@ -49,16 +51,24 @@ def create_blogging_worker(client: Optional[object] = None) -> Optional[Worker]:
 
 
 async def _run_worker_async() -> None:
+    global _worker_instance, _worker_running_loop
     client = await connect_temporal_client()
     if client is None:
         return
+    loop = asyncio.get_running_loop()
     set_temporal_client(client)
-    set_temporal_loop(asyncio.get_running_loop())
+    set_temporal_loop(loop)
     worker = create_blogging_worker(client)
     if worker is None:
         return
+    _worker_running_loop = loop
+    _worker_instance = worker
     logger.info("Blogging Temporal worker starting")
-    await worker.run()
+    try:
+        await worker.run()
+    finally:
+        _worker_instance = None
+        _worker_running_loop = None
 
 
 def _worker_thread_target() -> None:
@@ -93,3 +103,33 @@ def start_blogging_temporal_worker_thread() -> bool:
     _worker_thread.start()
     logger.info("Blogging Temporal worker thread started")
     return True
+
+
+def shutdown_blogging_temporal_components(*, worker_shutdown_timeout: float = 30.0) -> None:
+    """Stop the Temporal worker and activity executor (called from FastAPI lifespan shutdown).
+
+    Avoids leaving non-daemon ThreadPoolExecutor threads alive after Uvicorn exits.
+    """
+    global _activity_executor, _worker_instance, _worker_running_loop
+
+    worker = _worker_instance
+    loop = _worker_running_loop
+    if worker is not None and loop is not None and loop.is_running():
+        fut = asyncio.run_coroutine_threadsafe(worker.shutdown(), loop)
+        try:
+            fut.result(timeout=worker_shutdown_timeout)
+        except Exception as exc:
+            logger.warning(
+                "Temporal worker shutdown did not complete within %.1fs: %s",
+                worker_shutdown_timeout,
+                exc,
+            )
+    elif worker is not None and loop is not None:
+        logger.debug("Temporal worker loop not running; skipping graceful shutdown")
+
+    if _activity_executor is not None:
+        try:
+            _activity_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            logger.exception("ThreadPoolExecutor shutdown failed")
+        _activity_executor = None

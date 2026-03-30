@@ -75,14 +75,22 @@ class JobServiceClient:
     def _url(self, path: str) -> str:
         return f"{self._base_url}{path}"
 
-    @staticmethod
-    def _request(method: str, url: str, **kwargs) -> httpx.Response:
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        timeout: float = 30.0,
+        max_retries: int = 3,
+        **kwargs: Any,
+    ) -> httpx.Response:
         """Execute an HTTP request with retry on transient errors."""
         delays = [0.5, 1.0, 2.0]
         last_exc: Exception | None = None
-        for attempt in range(len(delays) + 1):
+        total_attempts = max_retries + 1
+        for attempt in range(total_attempts):
             try:
-                with httpx.Client(timeout=30.0) as client:
+                with httpx.Client(timeout=timeout) as client:
                     resp = client.request(method, url, **kwargs)
                     resp.raise_for_status()
                     return resp
@@ -93,8 +101,9 @@ class JobServiceClient:
                 httpx.PoolTimeout,
             ) as exc:
                 last_exc = exc
-                if attempt < len(delays):
-                    time.sleep(delays[attempt])
+                if attempt < max_retries:
+                    delay = delays[min(attempt, len(delays) - 1)]
+                    time.sleep(delay)
                     continue
                 raise
             except httpx.HTTPStatusError:
@@ -208,7 +217,13 @@ class JobServiceClient:
         )
         return resp.json().get("failed_job_ids", [])
 
-    def mark_all_active_jobs_failed(self, reason: str) -> List[str]:
+    def mark_all_active_jobs_failed(
+        self,
+        reason: str,
+        *,
+        http_timeout: float = 30.0,
+        http_max_retries: int = 3,
+    ) -> List[str]:
         if not self._is_remote:
             local = self._get_local()
             failed: List[str] = []
@@ -230,6 +245,8 @@ class JobServiceClient:
             "POST",
             self._url(f"/jobs/{self.team}/mark-all-running-failed"),
             json={"reason": reason},
+            timeout=http_timeout,
+            max_retries=http_max_retries,
         )
         return resp.json().get("failed_job_ids", [])
 

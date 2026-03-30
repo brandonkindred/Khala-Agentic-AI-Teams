@@ -1,6 +1,5 @@
 """Blogging microservice entrypoint: FastAPI server + optional Temporal worker."""
 
-import atexit
 import logging
 import os
 
@@ -23,20 +22,8 @@ def _start_temporal_worker() -> None:
         logger.warning("Could not start Temporal worker", exc_info=True)
 
 
-def _shutdown_hook() -> None:
-    """Mark active blogging jobs as failed on service shutdown."""
-    try:
-        from job_service_client import JobServiceClient
-
-        client = JobServiceClient(team="blogging_team")
-        client.mark_all_active_jobs_failed("Blogging service shutting down")
-    except Exception:
-        logger.warning("Shutdown hook failed", exc_info=True)
-
-
 if __name__ == "__main__":
     _start_temporal_worker()
-    atexit.register(_shutdown_hook)
     # workers=1 is required: the Temporal worker thread stores the client and
     # event loop in module-level globals. With workers>1 uvicorn forks, and
     # child processes lose access to the parent's globals. Using 1 worker

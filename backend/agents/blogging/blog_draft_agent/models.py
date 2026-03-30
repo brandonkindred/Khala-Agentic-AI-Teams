@@ -154,6 +154,34 @@ class DraftOutput(BaseModel):
     )
 
 
+class RevisionPlanChange(BaseModel):
+    """A single planned change in the revision plan."""
+
+    section: str = Field(..., description="Which section or location in the draft this change targets.")
+    feedback_ids: List[int] = Field(
+        default_factory=list, description="1-based indices of feedback items addressed by this change."
+    )
+    action: str = Field(..., description="What will be done: rewrite, delete, merge, add, rephrase, etc.")
+    rationale: str = Field(..., description="Why this change is needed and what it fixes.")
+
+
+class RevisionPlan(BaseModel):
+    """Structured plan produced before executing a draft revision.
+
+    Persisted as ``revision_plan_{iteration}.json`` in the job's work directory
+    so the user can see exactly what the agent intends to do.
+    """
+
+    summary: str = Field(..., description="One-paragraph overview of the revision strategy.")
+    changes: List[RevisionPlanChange] = Field(
+        default_factory=list, description="Ordered list of planned changes (priority order)."
+    )
+    risks: List[str] = Field(
+        default_factory=list,
+        description="Potential regressions or trade-offs the plan is aware of.",
+    )
+
+
 class ReviseDraftInput(BaseModel):
     """Input for revising a draft based on copy editor or compliance feedback."""
 

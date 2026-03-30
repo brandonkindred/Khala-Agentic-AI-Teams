@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -122,10 +123,42 @@ RUN_ARTIFACTS_BASE = (
     else Path(tempfile.gettempdir()) / "blogging_runs"
 )
 
+
+def _run_blogging_service_shutdown() -> None:
+    """Runs while Uvicorn still has the event loop; before process exit (replaces atexit hook)."""
+    logger.info("Blogging service shutdown: notifying job-service…")
+    try:
+        from job_service_client import JobServiceClient
+
+        client = JobServiceClient(team="blogging_team")
+        client.mark_all_active_jobs_failed(
+            "Blogging service shutting down",
+            http_timeout=5.0,
+            http_max_retries=0,
+        )
+    except Exception:
+        logger.warning("Job-service shutdown notification failed", exc_info=True)
+
+    logger.info("Blogging service shutdown: stopping Temporal worker…")
+    try:
+        from blogging.temporal.worker import shutdown_blogging_temporal_components
+
+        shutdown_blogging_temporal_components(worker_shutdown_timeout=30.0)
+    except Exception:
+        logger.warning("Temporal worker shutdown failed", exc_info=True)
+
+
+@asynccontextmanager
+async def _blogging_lifespan(app: FastAPI):
+    yield
+    _run_blogging_service_shutdown()
+
+
 app = FastAPI(
     title="Blog Research & Review API",
     description="Blog pipeline: planning, drafting, and quality gates. Supports sync and async execution with job polling and SSE.",
     version="0.3.0",
+    lifespan=_blogging_lifespan,
 )
 
 

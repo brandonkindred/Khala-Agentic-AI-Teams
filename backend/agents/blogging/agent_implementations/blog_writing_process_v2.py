@@ -1165,6 +1165,8 @@ def run_pipeline(
                     revise_input,
                     on_llm_request=lambda msg: _update(BlogPhase.COPY_EDIT_LOOP, status_text=msg),
                     draft_output_path=draft_output_path,
+                    work_dir=work_dir,
+                    iteration=iteration,
                 )
             except BloggingError:
                 raise
@@ -1406,6 +1408,8 @@ def run_pipeline(
                     revise_input,
                     on_llm_request=lambda msg: _update(BlogPhase.REWRITE_LOOP, status_text=msg),
                     draft_output_path=draft_output_path,
+                    work_dir=work_dir,
+                    iteration=rewrite_iter + 1,
                 )
             except BloggingError:
                 raise

@@ -41,6 +41,8 @@ from .models import (
     DraftInput,
     DraftOutput,
     ReviseDraftInput,
+    RevisionPlan,
+    RevisionPlanChange,
     UncertaintyQuestion,
     WritingGuidelineUpdate,
 )
@@ -994,12 +996,23 @@ class BlogDraftAgent:
             revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self.llm, "content plan"
         )
         parts = [
-            "Create a revision plan for this draft.",
-            "Return plain text only with this structure:",
-            "1) Priority order",
-            "2) Section-by-section changes",
-            "3) Claim/citation fixes",
-            "4) Risks/regression checks",
+            "Analyse ALL feedback items and create a structured revision plan for this draft.",
+            "Return valid JSON matching this schema exactly:",
+            '{',
+            '  "summary": "One-paragraph overview of the revision strategy",',
+            '  "changes": [',
+            '    {',
+            '      "section": "Which section or location this change targets",',
+            '      "feedback_ids": [1, 2],',
+            '      "action": "rewrite | delete | merge | add | rephrase | restructure",',
+            '      "rationale": "Why this change is needed"',
+            '    }',
+            '  ],',
+            '  "risks": ["Potential regressions or trade-offs"]',
+            '}',
+            "",
+            "List changes in priority order (must_fix severity first).",
+            "Reference feedback items by their 1-based index number.",
             "",
             "---",
             "CONTENT PLAN:",
@@ -1023,19 +1036,34 @@ class BlogDraftAgent:
         draft: str,
         feedback_items: list[Any],
         revise_input: ReviseDraftInput,
-    ) -> str:
+    ) -> RevisionPlan:
         prompt = self._build_revision_plan_prompt(draft, feedback_items, revise_input)
         try:
-            plan = self.llm.complete(
+            data = self.llm.complete_json(
                 prompt,
                 temperature=0.1,
                 system_prompt=WRITING_SYSTEM_PROMPT,
                 think=True,
             )
-            return (plan or "").strip()
+            if not data or not isinstance(data, dict):
+                return RevisionPlan(summary="Planning produced no output.", changes=[], risks=[])
+            return RevisionPlan(
+                summary=data.get("summary", ""),
+                changes=[
+                    RevisionPlanChange(**c) for c in (data.get("changes") or []) if isinstance(c, dict)
+                ],
+                risks=data.get("risks") or [],
+            )
         except Exception as e:
-            logger.warning("Revision planning failed: %s", e)
-            return ""
+            logger.warning("Structured revision planning failed: %s — falling back to unstructured", e)
+            # Graceful degradation: try plain-text plan
+            try:
+                plain = self.llm.complete(
+                    prompt, temperature=0.1, system_prompt=WRITING_SYSTEM_PROMPT, think=True
+                )
+                return RevisionPlan(summary=(plain or "").strip(), changes=[], risks=[])
+            except Exception:
+                return RevisionPlan(summary="Revision planning failed.", changes=[], risks=[])
 
     def _build_revise_single_item_prompt(
         self,
@@ -1200,14 +1228,19 @@ class BlogDraftAgent:
         *,
         on_llm_request: Optional[Callable[[str], None]] = None,
         draft_output_path: Optional[Union[str, Path]] = None,
+        work_dir: Optional[Union[str, Path]] = None,
+        iteration: Optional[int] = None,
     ) -> DraftOutput:
         """
-        Revise a draft by addressing copy editor feedback one item at a time.
+        Revise a draft by analysing all feedback, creating a structured revision
+        plan, then executing the plan in a single pass.
 
-        Each feedback item gets its own LLM call with the current draft so the
-        model can focus on a single change without losing track of other fixes.
-        Items are processed in order (must_fix first, then should_fix, then consider)
-        as provided by the copy editor.
+        Steps:
+            1. **Analyse** — review all feedback items at once.
+            2. **Plan** — produce a ``RevisionPlan`` (summary, ordered changes, risks).
+               Persisted as ``revision_plan_{iteration}.json`` in *work_dir*.
+            3. **Execute** — apply the plan to produce the revised draft.
+               Persisted as *draft_output_path* (e.g. ``draft_v{iteration}.md``).
         """
         self._assert_guidelines_present()
         draft = revise_input.draft.strip()
@@ -1223,16 +1256,46 @@ class BlogDraftAgent:
         num_items = len(items)
         logger.info("Revising draft: %s feedback items (plan-first batch revision)", num_items)
 
+        # ── Step 1+2: Analyse feedback and create structured revision plan ──
         if on_llm_request:
-            on_llm_request("Planning revision changes...")
-        revision_plan = self._generate_revision_plan(draft, items, revise_input)
+            on_llm_request(f"Analysing {num_items} feedback items and creating revision plan...")
+        revision_plan: RevisionPlan = self._generate_revision_plan(draft, items, revise_input)
+        logger.info(
+            "Revision plan: %s planned changes, %s risks identified",
+            len(revision_plan.changes),
+            len(revision_plan.risks),
+        )
 
+        # Persist the plan as a JSON artifact so it's visible to the user
+        if work_dir is not None:
+            plan_name = f"revision_plan_{iteration}.json" if iteration else "revision_plan.json"
+            try:
+                from shared.artifacts import write_artifact
+                write_artifact(work_dir, plan_name, revision_plan.model_dump(mode="json"))
+                logger.info("Persisted %s", plan_name)
+            except Exception as e:
+                logger.warning("Failed to persist revision plan: %s", e)
+
+        # ── Step 3: Execute the plan ────────────────────────────────────────
         if on_llm_request:
-            on_llm_request("Applying revision plan...")
+            on_llm_request(f"Executing revision plan ({len(revision_plan.changes)} changes)...")
+        # Serialise the structured plan for the LLM prompt
+        plan_text = revision_plan.summary
+        if revision_plan.changes:
+            plan_text += "\n\nPLANNED CHANGES (execute in order):\n"
+            for i, ch in enumerate(revision_plan.changes, 1):
+                ids = ", ".join(str(fid) for fid in ch.feedback_ids)
+                plan_text += f"\n{i}. [{ch.action.upper()}] {ch.section}"
+                if ids:
+                    plan_text += f"  (feedback #{ids})"
+                plan_text += f"\n   {ch.rationale}"
+        if revision_plan.risks:
+            plan_text += "\n\nRISKS TO WATCH:\n" + "\n".join(f"- {r}" for r in revision_plan.risks)
+
         prompt = self._build_revise_all_items_prompt(
             draft,
             items,
-            revision_plan,
+            plan_text,
             style_guide_text,
             revise_input,
         )
