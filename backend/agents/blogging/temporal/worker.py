@@ -81,6 +81,13 @@ def _worker_thread_target() -> None:
         loop.run_until_complete(_run_worker_async())
     except asyncio.CancelledError:
         pass
+    except RuntimeError as e:
+        # Common when shutdown_blogging_temporal_components calls loop.stop() while worker.run() is stuck.
+        msg = str(e).lower()
+        if "event loop stopped" in msg or "loop stopped" in msg:
+            logger.info("Temporal worker event loop stopped during shutdown")
+        else:
+            logger.exception("Blogging Temporal worker failed: %s", e)
     except Exception as e:
         logger.exception("Blogging Temporal worker failed: %s", e)
     finally:
@@ -105,27 +112,38 @@ def start_blogging_temporal_worker_thread() -> bool:
     return True
 
 
-def shutdown_blogging_temporal_components(*, worker_shutdown_timeout: float = 30.0) -> None:
+def shutdown_blogging_temporal_components(*, worker_shutdown_timeout: float = 8.0) -> None:
     """Stop the Temporal worker and activity executor (called from FastAPI lifespan shutdown).
 
-    Avoids leaving non-daemon ThreadPoolExecutor threads alive after Uvicorn exits.
+    When Temporal server is already gone, ``Worker.shutdown()`` may never complete because the
+    SDK retries gRPC polls indefinitely. In that case we force-stop the worker's asyncio loop
+    so the process can exit (Docker stop / compose down).
     """
-    global _activity_executor, _worker_instance, _worker_running_loop
+    global _activity_executor, _worker_instance, _worker_running_loop, _worker_thread
 
     worker = _worker_instance
     loop = _worker_running_loop
-    if worker is not None and loop is not None and loop.is_running():
-        fut = asyncio.run_coroutine_threadsafe(worker.shutdown(), loop)
-        try:
-            fut.result(timeout=worker_shutdown_timeout)
-        except Exception as exc:
-            logger.warning(
-                "Temporal worker shutdown did not complete within %.1fs: %s",
-                worker_shutdown_timeout,
-                exc,
-            )
+    if loop is not None and loop.is_running():
+        if worker is not None:
+            fut = asyncio.run_coroutine_threadsafe(worker.shutdown(), loop)
+            try:
+                fut.result(timeout=worker_shutdown_timeout)
+            except Exception as exc:
+                logger.warning(
+                    "Temporal worker.shutdown() did not finish in %.1fs (%s); forcing loop stop",
+                    worker_shutdown_timeout,
+                    exc,
+                )
+                _force_stop_worker_loop(loop)
+        else:
+            _force_stop_worker_loop(loop)
     elif worker is not None and loop is not None:
         logger.debug("Temporal worker loop not running; skipping graceful shutdown")
+
+    if _worker_thread is not None and _worker_thread.is_alive():
+        _worker_thread.join(timeout=5.0)
+        if _worker_thread.is_alive():
+            logger.warning("Temporal worker thread did not exit within 5s after loop stop")
 
     if _activity_executor is not None:
         try:
@@ -133,3 +151,16 @@ def shutdown_blogging_temporal_components(*, worker_shutdown_timeout: float = 30
         except Exception:
             logger.exception("ThreadPoolExecutor shutdown failed")
         _activity_executor = None
+
+
+def _force_stop_worker_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Stop the worker thread's event loop from another thread (Temporal unreachable / stuck)."""
+
+    def _stop() -> None:
+        if loop.is_running():
+            loop.stop()
+
+    try:
+        loop.call_soon_threadsafe(_stop)
+    except Exception:
+        logger.exception("Could not schedule Temporal worker loop stop")

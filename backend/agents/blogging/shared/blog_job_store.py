@@ -42,6 +42,13 @@ def _start_blog_stale_monitor() -> None:
         logger.warning("Could not start blog stale job monitor: %s", e)
 
 
+def stop_blog_stale_monitor() -> None:
+    """Signal the stale-job background thread to exit (call during API shutdown)."""
+    global _blog_stale_monitor_stop
+    if _blog_stale_monitor_stop is not None:
+        _blog_stale_monitor_stop.set()
+
+
 # Job status constants
 JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"

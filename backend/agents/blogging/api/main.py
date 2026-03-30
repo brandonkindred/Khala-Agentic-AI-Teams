@@ -126,6 +126,13 @@ RUN_ARTIFACTS_BASE = (
 
 def _run_blogging_service_shutdown() -> None:
     """Runs while Uvicorn still has the event loop; before process exit (replaces atexit hook)."""
+    try:
+        from shared.blog_job_store import stop_blog_stale_monitor
+
+        stop_blog_stale_monitor()
+    except Exception:
+        logger.debug("Stale job monitor stop skipped", exc_info=True)
+
     logger.info("Blogging service shutdown: notifying job-service…")
     try:
         from job_service_client import JobServiceClient
@@ -143,7 +150,7 @@ def _run_blogging_service_shutdown() -> None:
     try:
         from blogging.temporal.worker import shutdown_blogging_temporal_components
 
-        shutdown_blogging_temporal_components(worker_shutdown_timeout=30.0)
+        shutdown_blogging_temporal_components(worker_shutdown_timeout=8.0)
     except Exception:
         logger.warning("Temporal worker shutdown failed", exc_info=True)
 
