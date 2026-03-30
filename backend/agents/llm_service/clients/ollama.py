@@ -566,18 +566,44 @@ class OllamaLLMClient(LLMClient):
                                 finish_reason: Optional[str] = None
                                 tool_call_buffers: dict[int, dict] = {}
                                 has_reasoning: bool = False
-                                for line in response.iter_lines():
-                                    if not line or not line.startswith("data:"):
+                                partial_buf = ""  # buffer for lines split across TCP chunks
+                                for raw_line in response.iter_lines():
+                                    if not raw_line:
                                         continue
-                                    chunk_data = line[5:].lstrip()
-                                    if chunk_data.strip() == "[DONE]":
-                                        break
-                                    try:
-                                        chunk = json.loads(chunk_data)
-                                    except json.JSONDecodeError as e:
-                                        raise LLMTemporaryError(
-                                            f"Malformed SSE chunk (JSON decode failed): {chunk_data[:200]!r}"
-                                        ) from e
+
+                                    # --- Resolve partial-buffer / current-line into chunk_data ---
+                                    chunk_data: Optional[str] = None
+                                    if partial_buf:
+                                        # Try joining buffered partial with this line
+                                        combined = partial_buf + raw_line
+                                        partial_buf = ""
+                                        if combined.startswith("data:"):
+                                            cdata = combined[5:].lstrip()
+                                            if cdata.strip() == "[DONE]":
+                                                break
+                                            try:
+                                                json.loads(cdata)  # validate
+                                                chunk_data = cdata
+                                            except json.JSONDecodeError:
+                                                # Combined still invalid — discard buffer,
+                                                # fall through to try raw_line on its own.
+                                                logger.debug("Discarding unrecoverable partial SSE buffer")
+
+                                    if chunk_data is None:
+                                        # Process raw_line normally
+                                        if not raw_line.startswith("data:"):
+                                            continue
+                                        chunk_data = raw_line[5:].lstrip()
+                                        if chunk_data.strip() == "[DONE]":
+                                            break
+                                        try:
+                                            json.loads(chunk_data)  # validate
+                                        except json.JSONDecodeError:
+                                            # May be split across TCP frames — buffer for next line
+                                            partial_buf = raw_line
+                                            continue
+
+                                    chunk = json.loads(chunk_data)
                                     choices = chunk.get("choices") or []
                                     if choices:
                                         delta = choices[0].get("delta", {})

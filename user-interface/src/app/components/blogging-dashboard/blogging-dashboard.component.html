@@ -6,7 +6,7 @@
 <app-team-assistant-chat
   [teamApiUrl]="'/api/blogging/assistant'"
   [teamName]="'Blogging'"
-  [teamDescription]="'Describe what you want to write about and the team will research, plan, and draft it'"
+  [teamDescription]="'Describe what you want to write about and the team will plan, draft, and refine it'"
   [fields]="[
     {key: 'brief', label: 'Blog brief', placeholder: 'What should the post be about?', required: true},
     {key: 'audience', label: 'Target audience', placeholder: 'Who is this for?'},
@@ -29,7 +29,8 @@
     <!-- ════════════════════════════════════════════════════════════════════ -->
 
     <!-- Title Selection ──────────────────────────────────────────────── -->
-    @if (selectedJobStatus?.waiting_for_title_selection && selectedJobStatus.title_choices?.length) {
+    @if (selectedJobStatus; as job) {
+      @if (job.waiting_for_title_selection && job.title_choices.length) {
       <mat-card class="collaboration-card title-selection-card">
         <mat-card-header>
           <mat-icon mat-card-avatar>spellcheck</mat-icon>
@@ -41,7 +42,7 @@
             <app-error-message [message]="collaborationError" />
           }
           <div class="title-candidates">
-            @for (choice of selectedJobStatus.title_choices; track choice.title) {
+            @for (choice of job.title_choices; track choice.title) {
               <button class="title-candidate-btn" mat-stroked-button
                       (click)="selectTitle(choice.title)">
                 <span class="title-text">{{ choice.title }}</span>
@@ -51,6 +52,7 @@
           </div>
         </mat-card-content>
       </mat-card>
+      }
     }
 
     <!-- Story Elicitation ────────────────────────────────────────────── -->
@@ -113,19 +115,20 @@
     }
 
     <!-- Q&A Questions ────────────────────────────────────────────────── -->
-    @if (selectedJobStatus?.waiting_for_answers && selectedJobStatus.pending_questions?.length) {
+    @if (selectedJobStatus; as job) {
+      @if (job.waiting_for_answers && job.pending_questions && job.pending_questions.length > 0) {
       <mat-card class="collaboration-card qa-card">
         <mat-card-header>
           <mat-icon mat-card-avatar>help_outline</mat-icon>
           <mat-card-title>Questions From the Team</mat-card-title>
-          <mat-card-subtitle>{{ selectedJobStatus.pending_questions.length }} question{{ selectedJobStatus.pending_questions.length === 1 ? '' : 's' }} need your input</mat-card-subtitle>
+          <mat-card-subtitle>{{ job.pending_questions.length }} question{{ job.pending_questions.length === 1 ? '' : 's' }} need your input</mat-card-subtitle>
         </mat-card-header>
         <mat-card-content>
           @if (collaborationError) {
             <app-error-message [message]="collaborationError" />
           }
 
-          @for (q of selectedJobStatus.pending_questions; track q.id) {
+          @for (q of job.pending_questions; track q.id) {
             <div class="qa-question">
               <p class="qa-question-text">
                 {{ q.question_text }}
@@ -172,14 +175,16 @@
           </div>
         </mat-card-content>
       </mat-card>
+      }
     }
 
     <!-- Draft Review ─────────────────────────────────────────────────── -->
-    @if (selectedJobStatus?.waiting_for_draft_feedback) {
+    @if (selectedJobStatus; as job) {
+      @if (job.waiting_for_draft_feedback) {
       <mat-card class="collaboration-card qa-card">
         <mat-card-header>
           <mat-icon mat-card-avatar>rate_review</mat-icon>
-          <mat-card-title>Review Draft (Revision {{ selectedJobStatus.draft_review_revision }})</mat-card-title>
+          <mat-card-title>Review Draft (Revision {{ job.draft_review_revision ?? 0 }})</mat-card-title>
           <mat-card-subtitle>The draft agent is waiting for your feedback</mat-card-subtitle>
         </mat-card-header>
         <mat-card-content>
@@ -187,22 +192,22 @@
             <app-error-message [message]="collaborationError" />
           }
 
-          @if (selectedJobStatus.draft_escalation_summary) {
+          @if (job.draft_escalation_summary) {
             <div style="padding: var(--kh-space-3); margin-bottom: var(--kh-space-3); background: var(--kh-error-subtle); border-radius: var(--kh-radius-md); color: var(--kh-error); font-size: var(--kh-text-sm);">
-              {{ selectedJobStatus.draft_escalation_summary }}
+              {{ job.draft_escalation_summary }}
             </div>
           }
 
-          @if (selectedJobStatus.draft_for_review) {
+          @if (job.draft_for_review) {
             <details class="content-plan-detail" open>
               <summary>Draft content</summary>
-              <pre class="content-plan-pre">{{ selectedJobStatus.draft_for_review }}</pre>
+              <pre class="content-plan-pre">{{ job.draft_for_review }}</pre>
             </details>
           }
 
-          @if (selectedJobStatus.draft_review_questions?.length) {
+          @if (job.draft_review_questions?.length) {
             <h4 class="detail-section-title" style="margin-top: var(--kh-space-4);">Agent uncertainty questions</h4>
-            @for (dq of selectedJobStatus.draft_review_questions; track $index) {
+            @for (dq of job.draft_review_questions; track $index) {
               <p style="font-size: var(--kh-text-sm); color: var(--kh-text-secondary); margin: var(--kh-space-1) 0;">
                 {{ $index + 1 }}. {{ dq['question'] ?? dq['text'] ?? (dq | json) }}
               </p>
@@ -231,6 +236,7 @@
           </div>
         </mat-card-content>
       </mat-card>
+      }
     }
 
   </div>
@@ -339,9 +345,6 @@
           <p class="detail-row"><strong>Progress</strong> {{ selectedJobStatus.progress }}%</p>
           @if (selectedJobStatus.status_text) {
             <p class="detail-row"><strong>Activity</strong> {{ selectedJobStatus.status_text }}</p>
-          }
-          @if (selectedJobStatus.research_sources_count) {
-            <p class="detail-row"><strong>Sources</strong> {{ selectedJobStatus.research_sources_count }}</p>
           }
           @if (selectedJobStatus.selected_title) {
             <p class="detail-row detail-row-full"><strong>Title</strong> {{ selectedJobStatus.selected_title }}</p>

@@ -1,7 +1,7 @@
 """
 Brand-aligned blog writing pipeline with artifact persistence and gates.
 
-Runs research -> planning -> draft -> interactive user review -> copy-editor loop.
+Runs planning -> draft -> interactive user review -> copy-editor loop.
 When work_dir is provided, persists artifacts and runs validators, fact-check, and
 compliance. On FAIL, enters closed-loop rewrite until PASS or max_rewrite_iterations.
 
@@ -20,10 +20,8 @@ from blog_copy_editor_agent.models import FeedbackItem
 from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput
 from blog_fact_check_agent import BlogFactCheckAgent
 from blog_publication_agent.models import PublishingPack
-from blog_research_agent.agent import ResearchAgent
-from blog_research_agent.allowed_claims import extract_allowed_claims
 from blog_research_agent.models import ResearchBriefInput
-from shared.artifacts import read_artifact, write_artifact
+from shared.artifacts import write_artifact
 from shared.blog_job_store import (
     get_blog_job,
     get_user_draft_feedback,
@@ -35,7 +33,6 @@ from shared.brand_spec import load_brand_spec_prompt
 from shared.content_plan import (
     PlanningInput,
     PlanningPhaseResult,
-    build_research_digest,
     content_plan_to_content_brief_markdown,
     content_plan_to_markdown_doc,
     content_plan_to_outline_markdown,
@@ -55,7 +52,6 @@ from shared.errors import (
     DraftError,
     FactCheckError,
     PlanningError,
-    ResearchError,
 )
 from shared.models import BlogPhase, get_phase_progress
 from shared.planning_config import planning_model_override
@@ -112,7 +108,7 @@ def planning_llm_client(base: LLMClient) -> LLMClient:
     return base
 
 
-def run_research_and_planning(
+def run_planning(
     brief: ResearchBriefInput,
     *,
     work_dir: Optional[Union[str, Path]],
@@ -120,11 +116,11 @@ def run_research_and_planning(
     length_policy: LengthPolicy,
     series_context: Optional[SeriesContext],
     job_updater: Optional[JobUpdater],
-) -> Tuple[Any, str, PlanningPhaseResult]:
+) -> PlanningPhaseResult:
     """
-    Shared Research → Planning steps for full pipeline and POST /research-and-review.
+    Planning step for the full pipeline.
 
-    Returns research agent result, compiled research_document markdown, and planning phase result.
+    Returns planning phase result (content plan with title candidates, sections, etc.).
     """
 
     def _update(
@@ -147,65 +143,16 @@ def run_research_and_planning(
             except Exception as e:
                 logger.warning("Failed to update job status: %s", e)
 
-    def _research_progress(status_text: str, sub_progress: float) -> None:
-        _update(BlogPhase.RESEARCH, sub_progress=sub_progress, status_text=status_text)
-
-    try:
-        research_agent = ResearchAgent(llm_client=llm_client)
-        research_result = research_agent.run(brief, progress_callback=_research_progress)
-    except BloggingError:
-        raise
-    except CancelledError:
-        raise
-    except Exception as e:
-        if _is_external_cancellation(e):
-            raise
-        raise ResearchError(f"Research failed: {e}", cause=e) from e
-
-    logger.info("Research complete: %s references", len(research_result.references))
-    _update(
-        BlogPhase.RESEARCH,
-        sub_progress=1.0,
-        status_text=f"Research complete: {len(research_result.references)} sources found",
-        research_sources_count=len(research_result.references),
-    )
-
-    parts = ["## Sources\n"]
-    for ref in research_result.references:
-        parts.append(f"- **{ref.title}** ({ref.url}): {ref.summary}")
-        if ref.key_points:
-            parts.append("  Key points: " + "; ".join(ref.key_points))
-    research_document = "\n".join(parts)
-
-    if work_dir is not None:
-        write_artifact(work_dir, "research_packet.md", research_document)
-        logger.info("Persisted research_packet.md")
-        try:
-            allowed = extract_allowed_claims(
-                llm_client,
-                research_document,
-                research_result.references,
-                topic=brief.brief,
-            )
-            write_artifact(work_dir, "allowed_claims.json", allowed.to_dict())
-            logger.info("Persisted allowed_claims.json (%s claims)", len(allowed.claims))
-        except CancelledError:
-            raise
-        except Exception as e:
-            logger.warning("Could not extract allowed claims: %s", e)
-
     _update(
         BlogPhase.PLANNING,
         sub_progress=0.0,
         status_text="Generating content plan...",
     )
 
-    research_digest = build_research_digest(research_document, llm=llm_client)
     planning_input = PlanningInput(
         brief=brief.brief,
         audience=brief.audience,
         tone_or_purpose=brief.tone_or_purpose,
-        research_digest=research_digest,
         length_policy_context=build_planning_length_context(length_policy),
         series_context_block=series_context_block(series_context),
     )
@@ -256,7 +203,7 @@ def run_research_and_planning(
         write_artifact(work_dir, "content_brief.md", content_plan_to_content_brief_markdown(plan))
         logger.info("Persisted content_plan.json, content_plan.md, outline.md, content_brief.md")
 
-    return research_result, research_document, planning_phase_result
+    return planning_phase_result
 
 
 def _extract_plan_keywords(plan: Any) -> list[str]:
@@ -492,7 +439,7 @@ def run_pipeline(
     target_word_count: Optional[int] = None,
 ):
     """
-    Run the full blog writing pipeline: research -> planning -> draft -> copy-editor loop.
+    Run the full blog writing pipeline: planning -> draft -> copy-editor loop.
 
     When work_dir is provided, persists artifacts. When run_gates is True (default when
     work_dir is set), runs validators, fact-check, and compliance. On FAIL, enters
@@ -515,11 +462,10 @@ def run_pipeline(
         target_word_count: Optional override for numeric target (100–10_000).
 
     Returns:
-        Tuple of (research_result, planning_phase_result, draft_result, status).
+        Tuple of (planning_phase_result, draft_result, status).
         status is PASS, FAIL, or NEEDS_HUMAN_REVIEW.
 
     Raises:
-        ResearchError: If research phase fails.
         PlanningError: If content planning fails.
         DraftError: If draft generation fails.
         ComplianceError: If compliance check fails unrecoverably.
@@ -563,7 +509,7 @@ def run_pipeline(
         work_path.mkdir(parents=True, exist_ok=True)
         logger.info("Artifact work_dir: %s", work_path)
 
-    research_result, research_document, planning_phase_result = run_research_and_planning(
+    planning_phase_result = run_planning(
         brief,
         work_dir=work_dir,
         llm_client=llm_client,
@@ -603,7 +549,7 @@ def run_pipeline(
             while is_waiting_for_title_selection(job_id):
                 job_data = get_blog_job(job_id)
                 if job_data and job_data.get("status") in ("failed", "cancelled"):
-                    return research_result, planning_phase_result, None, "FAIL"
+                    return planning_phase_result, None, "FAIL"
                 time.sleep(20)
 
             job_data = get_blog_job(job_id)
@@ -762,9 +708,6 @@ def run_pipeline(
             f"Cannot start drafting without required guideline inputs. Missing: {missing_msg}.",
             cause=ValueError(missing_msg),
         )
-    allowed_claims_data = (
-        read_artifact(work_dir, "allowed_claims.json") if work_dir is not None else None
-    )
     draft_agent = BlogDraftAgent(
         llm_client=llm_client,
         writing_style_guide_content=writing_style_content,
@@ -793,16 +736,9 @@ def run_pipeline(
 
             try:
                 draft_input = DraftInput(
-                    research_document=research_document,
-                    research_references=research_result.references
-                    if research_result.references
-                    else None,
                     content_plan=plan,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
-                    allowed_claims=allowed_claims_data
-                    if isinstance(allowed_claims_data, dict)
-                    else None,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=selected_title or None,
@@ -850,16 +786,9 @@ def run_pipeline(
                     elicited_stories_text=elicited_stories_text,
                     draft_agent=draft_agent,
                     draft_input_kwargs=dict(
-                        research_document=research_document,
-                        research_references=research_result.references
-                        if research_result.references
-                        else None,
                         content_plan=plan,
                         audience=brief.audience,
                         tone_or_purpose=brief.tone_or_purpose,
-                        allowed_claims=allowed_claims_data
-                        if isinstance(allowed_claims_data, dict)
-                        else None,
                         target_word_count=length_policy.target_word_count,
                         length_guidance=build_draft_length_instruction(length_policy),
                         selected_title=selected_title or None,
@@ -913,7 +842,7 @@ def run_pipeline(
                 while is_waiting_for_draft_feedback(job_id):
                     job_data = get_blog_job(job_id)
                     if job_data and job_data.get("status") in ("failed", "cancelled"):
-                        return research_result, planning_phase_result, draft_result, "FAIL"
+                        return planning_phase_result, draft_result, "FAIL"
                     time.sleep(20)
 
                 # Process user feedback in a loop until approved
@@ -994,10 +923,6 @@ def run_pipeline(
                         tone_or_purpose=brief.tone_or_purpose,
                         selected_title=selected_title or None,
                         elicited_stories=elicited_stories_text or None,
-                        research_document=research_document,
-                        allowed_claims=allowed_claims_data
-                        if isinstance(allowed_claims_data, dict)
-                        else None,
                         target_word_count=length_policy.target_word_count,
                         length_guidance=build_draft_length_instruction(length_policy),
                         on_llm_request=lambda msg: _update(BlogPhase.DRAFT_REVIEW, status_text=msg),
@@ -1019,7 +944,7 @@ def run_pipeline(
                     while is_waiting_for_draft_feedback(job_id):
                         job_data = get_blog_job(job_id)
                         if job_data and job_data.get("status") in ("failed", "cancelled"):
-                            return research_result, planning_phase_result, draft_result, "FAIL"
+                            return planning_phase_result, draft_result, "FAIL"
                         time.sleep(2)
 
         else:
@@ -1140,7 +1065,7 @@ def run_pipeline(
                     while is_waiting_for_draft_feedback(job_id):
                         job_data = get_blog_job(job_id)
                         if job_data and job_data.get("status") in ("failed", "cancelled"):
-                            return research_result, planning_phase_result, draft_result, "FAIL"
+                            return planning_phase_result, draft_result, "FAIL"
                         time.sleep(2)
 
                     esc_feedback = get_user_draft_feedback(job_id)
@@ -1196,10 +1121,6 @@ def run_pipeline(
                             tone_or_purpose=brief.tone_or_purpose,
                             selected_title=selected_title or None,
                             elicited_stories=elicited_stories_text or None,
-                            research_document=research_document,
-                            allowed_claims=allowed_claims_data
-                            if isinstance(allowed_claims_data, dict)
-                            else None,
                             target_word_count=length_policy.target_word_count,
                             length_guidance=build_draft_length_instruction(length_policy),
                             on_llm_request=lambda msg: _update(
@@ -1226,13 +1147,9 @@ def run_pipeline(
                     )
                     or None,
                     persistent_issues=persistent_issues or None,
-                    research_document=research_document,
                     content_plan=plan,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
-                    allowed_claims=allowed_claims_data
-                    if isinstance(allowed_claims_data, dict)
-                    else None,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=selected_title or None,
@@ -1293,9 +1210,6 @@ def run_pipeline(
                 validator_report = run_validators_from_work_dir(work_dir)
                 fact_report = fact_check_agent.run(
                     draft_result.draft,
-                    allowed_claims=allowed_claims_data
-                    if isinstance(allowed_claims_data, dict)
-                    else None,
                     require_disclaimer_for=require_disclaimer_for,
                     work_dir=work_dir,
                     on_llm_request=lambda msg: _update(BlogPhase.FACT_CHECK, status_text=msg),
@@ -1479,13 +1393,9 @@ def run_pipeline(
                     draft=draft_result.draft,
                     feedback_items=feedback_items,
                     feedback_summary=feedback_summary,
-                    research_document=research_document,
                     content_plan=plan,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
-                    allowed_claims=allowed_claims_data
-                    if isinstance(allowed_claims_data, dict)
-                    else None,
                     target_word_count=length_policy.target_word_count,
                     length_guidance=build_draft_length_instruction(length_policy),
                     selected_title=selected_title or None,
@@ -1518,7 +1428,7 @@ def run_pipeline(
             status_text="Pipeline complete (gates skipped)",
         )
 
-    return research_result, planning_phase_result, draft_result, status
+    return planning_phase_result, draft_result, status
 
 
 def main() -> None:

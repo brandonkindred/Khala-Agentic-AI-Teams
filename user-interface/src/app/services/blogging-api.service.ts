@@ -3,8 +3,6 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import type {
-  ResearchAndReviewRequest,
-  ResearchAndReviewResponse,
   FullPipelineRequest,
   FullPipelineResponse,
   BloggingHealthResponse,
@@ -28,19 +26,6 @@ export class BloggingApiService {
   private readonly baseUrl = environment.bloggingApiUrl;
 
   /**
-   * POST /research-and-review
-   * Runs research and structured planning; returns title choices and outline.
-   */
-  researchAndReview(
-    request: ResearchAndReviewRequest
-  ): Observable<ResearchAndReviewResponse> {
-    return this.http.post<ResearchAndReviewResponse>(
-      `${this.baseUrl}/research-and-review`,
-      request
-    );
-  }
-
-  /**
    * POST /full-pipeline
    * Runs full blog pipeline with gates (research, planning, draft, validators, compliance).
    */
@@ -58,17 +43,6 @@ export class BloggingApiService {
   startFullPipelineAsync(request: FullPipelineRequest): Observable<StartJobResponse> {
     return this.http.post<StartJobResponse>(
       `${this.baseUrl}/full-pipeline-async`,
-      request
-    );
-  }
-
-  /**
-   * POST /research-and-review-async
-   * Starts research and planning in the background. Returns job_id for polling.
-   */
-  startResearchReviewAsync(request: ResearchAndReviewRequest): Observable<StartJobResponse> {
-    return this.http.post<StartJobResponse>(
-      `${this.baseUrl}/research-and-review-async`,
       request
     );
   }

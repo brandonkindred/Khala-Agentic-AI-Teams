@@ -139,13 +139,9 @@ class DraftInput(BaseModel):
         return content_plan_to_outline_markdown(self.content_plan)
 
     @model_validator(mode="after")
-    def require_research_source(self) -> "DraftInput":
-        has_doc = self.research_document and self.research_document.strip()
-        has_refs = self.research_references and len(self.research_references) > 0
-        if not has_doc and not has_refs:
-            raise ValueError(
-                "DraftInput requires either research_document or non-empty research_references"
-            )
+    def _validate_plan_required(self) -> "DraftInput":
+        if not self.content_plan:
+            raise ValueError("DraftInput requires a content_plan")
         return self
 
 

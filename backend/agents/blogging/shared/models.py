@@ -16,7 +16,6 @@ class BlogPhase(str, Enum):
     Each phase has an associated progress range for UI display.
     """
 
-    RESEARCH = "research"
     PLANNING = "planning"
     DRAFT_INITIAL = "draft_initial"
     DRAFT_REVIEW = "draft_review"
@@ -29,13 +28,12 @@ class BlogPhase(str, Enum):
 
 # Progress ranges for each phase (min, max percentage)
 PHASE_PROGRESS_RANGES: Dict[BlogPhase, tuple[int, int]] = {
-    BlogPhase.RESEARCH: (0, 12),
-    BlogPhase.PLANNING: (12, 24),
-    BlogPhase.DRAFT_INITIAL: (24, 38),
-    BlogPhase.DRAFT_REVIEW: (38, 50),
-    BlogPhase.COPY_EDIT_LOOP: (50, 65),
-    BlogPhase.FACT_CHECK: (65, 73),
-    BlogPhase.COMPLIANCE: (73, 82),
+    BlogPhase.PLANNING: (0, 15),
+    BlogPhase.DRAFT_INITIAL: (15, 30),
+    BlogPhase.DRAFT_REVIEW: (30, 45),
+    BlogPhase.COPY_EDIT_LOOP: (45, 60),
+    BlogPhase.FACT_CHECK: (60, 70),
+    BlogPhase.COMPLIANCE: (70, 82),
     BlogPhase.REWRITE_LOOP: (82, 95),
     BlogPhase.FINALIZE: (95, 100),
 }

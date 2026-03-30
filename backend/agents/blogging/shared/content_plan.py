@@ -195,8 +195,8 @@ class PlanningInput(BaseModel):
     audience: Optional[str] = None
     tone_or_purpose: Optional[str] = None
     research_digest: str = Field(
-        ...,
-        description="Bounded digest of research (claims, sources); capped by caller.",
+        default="",
+        description="Bounded digest of research (claims, sources); capped by caller. Empty when research is skipped.",
     )
     length_policy_context: str = Field(
         ...,

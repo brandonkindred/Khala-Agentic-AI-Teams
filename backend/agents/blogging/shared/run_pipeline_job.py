@@ -184,7 +184,7 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
 
     try:
         length_policy = resolve_length_policy_from_request_dict(request_dict)
-        _research_result, planning_phase_result, draft_result, status = run_pipeline(
+        planning_phase_result, draft_result, status = run_pipeline(
             brief_input,
             work_dir=work_dir,
             run_gates=bool(request_dict.get("run_gates", True)),

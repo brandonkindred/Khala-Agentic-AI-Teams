@@ -75,21 +75,22 @@ def test_ollama_streams_and_accumulates_chunks(monkeypatch: pytest.MonkeyPatch) 
     assert result == {"key": "value"}
 
 
-def test_ollama_sse_malformed_chunk_raises_temporary_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-JSON SSE chunk must raise LLMTemporaryError (retriable) instead of being silently dropped."""
+def test_ollama_sse_malformed_chunk_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-JSON SSE chunk is buffered (TCP split recovery) and skipped if still invalid — valid content is preserved."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.setenv("LLM_MAX_RETRIES", "0")
     sse_lines = [
-        'data: {"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"content":"{\\"v\\":1}"},"finish_reason":null}]}',
         "data: <not json at all>",
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
         "data: [DONE]",
     ]
     mock_client, _ = _make_streaming_mock(200, sse_lines)
     with patch("httpx.Client") as mock_client_cls:
         mock_client_cls.return_value = mock_client
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
-        with pytest.raises(LLMTemporaryError, match="Malformed SSE chunk"):
-            client.complete_json("test", temperature=0)
+        result = client.complete_json("test", temperature=0)
+        assert result == {"v": 1}
 
 
 def test_ollama_sse_no_space_after_colon(monkeypatch: pytest.MonkeyPatch) -> None:

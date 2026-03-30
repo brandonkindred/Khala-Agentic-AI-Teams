@@ -1,8 +1,7 @@
 """
-FastAPI application exposing research + planning (research-and-review) and the full pipeline.
+FastAPI application exposing the full blogging pipeline (planning -> draft -> gates).
 
-The review-only agent has been replaced by a planning phase that produces a ContentPlan.
-Supports synchronous and asynchronous execution with job polling for UI integration.
+Supports synchronous and asynchronous execution with job polling and SSE streaming for UI integration.
 """
 
 from __future__ import annotations
@@ -125,7 +124,7 @@ RUN_ARTIFACTS_BASE = (
 
 app = FastAPI(
     title="Blog Research & Review API",
-    description="Runs research and review agents. Supports sync and async execution with job polling for UI.",
+    description="Blog pipeline: planning, drafting, and quality gates. Supports sync and async execution with job polling and SSE.",
     version="0.3.0",
 )
 
@@ -151,85 +150,11 @@ class AudienceDetails(BaseModel):
     )
 
 
-class ResearchAndReviewRequest(BaseModel):
-    """Request body for the research-and-review endpoint."""
-
-    brief: str = Field(
-        ..., max_length=50_000, description="Short description of the content topic."
-    )
-    title_concept: Optional[str] = Field(
-        None,
-        description="Optional idea or angle for the title.",
-    )
-    audience: Optional[Union[AudienceDetails, str]] = Field(
-        None,
-        description="Audience details (object or free-text string).",
-    )
-    tone_or_purpose: Optional[str] = Field(
-        None,
-        description="e.g. 'educational', 'technical deep-dive', 'persuasive'.",
-    )
-    max_results: int = Field(
-        20,
-        ge=1,
-        le=50,
-        description="Maximum number of references to return.",
-    )
-    work_dir: Optional[str] = Field(
-        None,
-        description="Optional directory path for persisting research/outline artifacts.",
-    )
-    run_id: Optional[str] = Field(
-        None,
-        description="Optional run ID; artifacts are written to a subdir under RUN_ARTIFACTS_BASE when set.",
-    )
-    content_profile: Optional[ContentProfile] = Field(
-        None,
-        description="Writing format; drives planning length/scope (default standard article).",
-    )
-    series_context: Optional[SeriesContext] = Field(
-        None,
-        description="When this post is part of a series — scopes planning to this instalment.",
-    )
-    length_notes: Optional[str] = Field(
-        None,
-        max_length=4000,
-        description="Optional author notes merged into length/format guidance for planning.",
-    )
-    target_word_count: Optional[int] = Field(
-        None,
-        ge=100,
-        le=10000,
-        description="Numeric word target override for planning/draft length.",
-    )
-
-
 class TitleChoiceResponse(BaseModel):
     """A title choice with probability of success."""
 
     title: str
     probability_of_success: float
-
-
-class ResearchAndReviewResponse(BaseModel):
-    """Response from the research-and-review endpoint."""
-
-    title_choices: List[TitleChoiceResponse] = Field(
-        ...,
-        description="Top title choices with probability of success.",
-    )
-    outline: str = Field(
-        ...,
-        description="Detailed blog outline with notes for the first draft.",
-    )
-    compiled_document: Optional[str] = Field(
-        None,
-        description="Formatted research document (sources, academic papers, similar topics).",
-    )
-    notes: Optional[str] = Field(
-        None,
-        description="High-level synthesis and suggestions from the research agent.",
-    )
 
 
 def _format_audience(audience: Optional[Union[AudienceDetails, str]]) -> str:
@@ -260,200 +185,6 @@ def _get_llm_client() -> OllamaLLMClient:
     if _llm_client is None:
         _llm_client = OllamaLLMClient()
     return _llm_client
-
-
-@app.post(
-    "/research-and-review",
-    response_model=ResearchAndReviewResponse,
-    summary="Run research and planning pipeline",
-    description=(
-        "Executes research (web + arXiv) then structured content planning: title choices and outline "
-        "from the approved content plan."
-    ),
-)
-def research_and_review(request: ResearchAndReviewRequest) -> ResearchAndReviewResponse:
-    """
-    Run research then planning (same planning step as the full pipeline).
-
-    Returns title choices, outline derived from the content plan, and the compiled research document.
-    """
-    try:
-        llm_client = _get_llm_client()
-    except Exception as e:
-        logger.exception("Failed to initialize LLM client")
-        raise HTTPException(status_code=500, detail=f"Agent initialization failed: {e}") from e
-
-    llm_requests_before = llm_client.request_count
-
-    brief_text = request.brief.strip()
-    if request.title_concept:
-        brief_text = f"{brief_text}. Title concept: {request.title_concept.strip()}"
-
-    audience_str = _format_audience(request.audience)
-
-    work_dir = None
-    if request.work_dir:
-        work_dir = Path(request.work_dir)
-    elif request.run_id:
-        work_dir = RUN_ARTIFACTS_BASE / request.run_id
-        work_dir.mkdir(parents=True, exist_ok=True)
-
-    brief_input = ResearchBriefInput(
-        brief=brief_text,
-        audience=audience_str or None,
-        tone_or_purpose=request.tone_or_purpose,
-        max_results=request.max_results,
-    )
-
-    length_policy = resolve_length_policy(
-        content_profile=request.content_profile,
-        explicit_target_word_count=request.target_word_count,
-        length_notes=request.length_notes,
-        series_context=request.series_context,
-    )
-
-    try:
-        from agent_implementations.blog_writing_process_v2 import run_research_and_planning
-
-        research_result, _research_document, planning_phase_result = run_research_and_planning(
-            brief_input,
-            work_dir=work_dir,
-            llm_client=llm_client,
-            length_policy=length_policy,
-            series_context=request.series_context,
-            job_updater=None,
-        )
-    except PlanningError as e:
-        logger.exception("Planning failed")
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "planning_failed",
-                "message": str(e),
-                "failure_reason": getattr(e, "failure_reason", None),
-            },
-        ) from e
-    except Exception as e:
-        logger.exception("Research-and-planning failed")
-        raise HTTPException(status_code=500, detail=f"Pipeline failed: {e}") from e
-
-    plan = planning_phase_result.content_plan
-    outline = content_plan_to_outline_markdown(plan)
-
-    llm_requests_after = llm_client.request_count
-    logger.info(
-        "Completed research-and-planning pipeline with %s LLM requests",
-        llm_requests_after - llm_requests_before,
-    )
-
-    return ResearchAndReviewResponse(
-        title_choices=[
-            TitleChoiceResponse(
-                title=tc.title,
-                probability_of_success=tc.probability_of_success,
-            )
-            for tc in plan.title_candidates
-        ],
-        outline=outline,
-        compiled_document=research_result.compiled_document,
-        notes=research_result.notes,
-    )
-
-
-def _run_research_review_with_tracking(job_id: str, request: ResearchAndReviewRequest) -> None:
-    """Run research + planning in a background thread with job tracking."""
-    try:
-        import sys
-        from pathlib import Path as P
-
-        _root = P(__file__).resolve().parent.parent
-        if str(_root) not in sys.path:
-            sys.path.insert(0, str(_root))
-        from agent_implementations.blog_writing_process_v2 import run_research_and_planning
-
-        llm_client = _get_llm_client()
-    except Exception as e:
-        logger.exception("Failed to initialize for job %s", job_id)
-        if fail_blog_job is not None:
-            fail_blog_job(job_id, error=f"Agent initialization failed: {e}")
-        return
-
-    brief_text = request.brief.strip()
-    if request.title_concept:
-        brief_text = f"{brief_text}. Title concept: {request.title_concept.strip()}"
-    audience_str = _format_audience(request.audience)
-
-    work_dir = RUN_ARTIFACTS_BASE / job_id
-    work_dir.mkdir(parents=True, exist_ok=True)
-    if update_blog_job is not None:
-        try:
-            update_blog_job(job_id, work_dir=str(work_dir))
-        except Exception as e:
-            logger.warning("Failed to set work_dir for job %s: %s", job_id, e)
-
-    brief_input = ResearchBriefInput(
-        brief=brief_text,
-        audience=audience_str or None,
-        tone_or_purpose=request.tone_or_purpose,
-        max_results=request.max_results,
-    )
-
-    length_policy = resolve_length_policy(
-        content_profile=request.content_profile,
-        explicit_target_word_count=request.target_word_count,
-        length_notes=request.length_notes,
-        series_context=request.series_context,
-    )
-
-    if start_blog_job is not None:
-        start_blog_job(job_id)
-
-    def job_updater(**kwargs: Any) -> None:
-        if update_blog_job is not None:
-            try:
-                update_blog_job(job_id, **kwargs)
-            except Exception as e:
-                logger.warning("Failed to update job %s: %s", job_id, e)
-
-    try:
-        research_result, _rd, planning_phase_result = run_research_and_planning(
-            brief_input,
-            work_dir=work_dir,
-            llm_client=llm_client,
-            length_policy=length_policy,
-            series_context=request.series_context,
-            job_updater=job_updater,
-        )
-    except PlanningError as e:
-        logger.exception("Planning failed for job %s", job_id)
-        if fail_blog_job is not None:
-            fail_blog_job(
-                job_id,
-                error=str(e),
-                failed_phase="planning",
-                planning_failure_reason=getattr(e, "failure_reason", None),
-            )
-        return
-    except Exception as e:
-        logger.exception("Research-and-planning failed for job %s", job_id)
-        if fail_blog_job is not None:
-            fail_blog_job(job_id, error=f"Pipeline failed: {e}")
-        return
-
-    plan = planning_phase_result.content_plan
-    outline = content_plan_to_outline_markdown(plan)
-    title_choices = [
-        {"title": tc.title, "probability_of_success": tc.probability_of_success}
-        for tc in plan.title_candidates
-    ]
-    if complete_blog_job is not None:
-        complete_blog_job(
-            job_id,
-            status=JOB_STATUS_COMPLETED,
-            title_choices=title_choices,
-            outline=outline,
-        )
-    logger.info("Completed research-and-planning job %s", job_id)
 
 
 class FullPipelineRequest(BaseModel):
@@ -517,7 +248,7 @@ class FullPipelineResponse(BaseModel):
     "/full-pipeline",
     response_model=FullPipelineResponse,
     summary="Run full blog pipeline with gates",
-    description="Runs research -> planning -> draft -> validators -> compliance -> rewrite loop. Persists all artifacts.",
+    description="Runs planning -> draft -> validators -> compliance -> rewrite loop. Persists all artifacts.",
 )
 def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
     """Run the full brand-aligned pipeline with artifact persistence and gates."""
@@ -552,7 +283,7 @@ def full_pipeline(request: FullPipelineRequest) -> FullPipelineResponse:
         series_context=request.series_context,
     )
     try:
-        research_result, planning_phase_result, draft_result, status = run_pipeline(
+        planning_phase_result, draft_result, status = run_pipeline(
             brief_input,
             work_dir=work_dir,
             run_gates=request.run_gates,
@@ -931,7 +662,7 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
             series_context=request.series_context,
         )
         try:
-            _research_result, planning_phase_result, draft_result, status = run_pipeline(
+            planning_phase_result, draft_result, status = run_pipeline(
                 brief_input,
                 work_dir=work_dir,
                 run_gates=request.run_gates,
@@ -1042,41 +773,6 @@ def start_full_pipeline_async(request: FullPipelineRequest) -> StartPipelineResp
 
     logger.info("Started async pipeline job %s", job_id)
     return StartPipelineResponse(job_id=job_id, message="Pipeline started")
-
-
-@app.post(
-    "/research-and-review-async",
-    response_model=StartPipelineResponse,
-    summary="Start research and review asynchronously",
-    description="Starts the research and review pipeline in the background. Returns a job_id for polling status.",
-)
-def start_research_review_async(request: ResearchAndReviewRequest) -> StartPipelineResponse:
-    """Start research-and-review asynchronously and return job_id for polling."""
-    if create_blog_job is None:
-        raise HTTPException(
-            status_code=501,
-            detail="Async research-and-review not available - job store module not found",
-        )
-
-    job_id = str(uuid.uuid4())[:8]
-    audience_str = _format_audience(request.audience)
-
-    create_blog_job(
-        job_id,
-        brief=request.brief[:500],
-        audience=audience_str or None,
-        tone_or_purpose=request.tone_or_purpose,
-    )
-
-    thread = threading.Thread(
-        target=_run_research_review_with_tracking,
-        args=(job_id, request),
-        daemon=True,
-    )
-    thread.start()
-
-    logger.info("Started async research-and-review job %s", job_id)
-    return StartPipelineResponse(job_id=job_id, message="Research and review started")
 
 
 @app.post(
@@ -1631,9 +1327,7 @@ def _rebuild_api_models() -> None:
     _ns: Dict[str, Any] = {**globals()}
     for _cls in (
         AudienceDetails,
-        ResearchAndReviewRequest,
         TitleChoiceResponse,
-        ResearchAndReviewResponse,
         FullPipelineRequest,
         FullPipelineResponse,
         BlogJobStatusResponse,

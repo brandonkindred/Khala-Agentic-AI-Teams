@@ -13,31 +13,10 @@ export interface AudienceDetails {
   other?: string;
 }
 
-/** Request for POST /research-and-review (research + planning; same length options as full pipeline). */
-export interface ResearchAndReviewRequest {
-  brief: string;
-  title_concept?: string;
-  audience?: AudienceDetails | string;
-  tone_or_purpose?: string;
-  max_results?: number;
-  content_profile?: BlogContentProfile;
-  series_context?: BlogSeriesContext;
-  length_notes?: string;
-  target_word_count?: number;
-}
-
 /** A title choice with probability of success. */
 export interface TitleChoiceResponse {
   title: string;
   probability_of_success: number;
-}
-
-/** Response from POST /research-and-review. */
-export interface ResearchAndReviewResponse {
-  title_choices: TitleChoiceResponse[];
-  outline: string;
-  compiled_document?: string;
-  notes?: string;
 }
 
 /**
@@ -141,7 +120,6 @@ export interface BlogJobStatusResponse {
   outline?: string;
   draft_preview?: string;
   work_dir?: string;
-  research_sources_count: number;
   draft_iterations: number;
   rewrite_iterations: number;
   created_at?: string;
@@ -170,6 +148,12 @@ export interface BlogJobStatusResponse {
   // General Q&A
   pending_questions?: BlogPendingQuestion[];
   waiting_for_answers?: boolean;
+  // Draft review (human-in-the-loop; matches blogging job store + GET /job/{id})
+  waiting_for_draft_feedback?: boolean;
+  draft_for_review?: string;
+  draft_review_revision?: number;
+  draft_review_questions?: Array<Record<string, unknown>>;
+  draft_escalation_summary?: string;
 }
 
 /** SSE event from GET /job/{job_id}/stream. */
