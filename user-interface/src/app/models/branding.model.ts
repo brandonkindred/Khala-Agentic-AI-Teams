@@ -101,6 +101,7 @@ export interface CreateBrandRequest {
   desired_voice?: string;
   existing_brand_material?: string[];
   wiki_path?: string | null;
+  conversation_id?: string | null;
 }
 
 export interface UpdateBrandRequest {

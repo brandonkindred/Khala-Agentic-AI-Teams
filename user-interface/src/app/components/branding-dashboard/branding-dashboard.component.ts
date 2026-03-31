@@ -221,12 +221,12 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
       differentiators: mission.differentiators,
       desired_voice: mission.desired_voice,
       existing_brand_material: mission.existing_brand_material,
+      conversation_id: this.activeConversationId,
     };
     this.saveToAgencyError = null;
     this.api.createBrand(clientId, request).subscribe({
       next: (brand) => {
-        // Brand creation now auto-creates a conversation on the backend.
-        // Switch to the brand's permanent conversation.
+        // Switch to the brand's conversation (existing chat is now attached).
         this.activeConversationId = brand.conversation_id ?? null;
         this.api.runBrand(clientId, brand.id).subscribe({
           next: () => {
@@ -423,6 +423,15 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
 
   get canCreateBrandFromChat(): boolean {
     return !!this.activeConversationId && !!this.conversationMission;
+  }
+
+  /** Deselect current brand and start a fresh unattached conversation for a new brand. */
+  startFreshConversation(): void {
+    this.selectedBrand = null;
+    this.activeConversationId = null;
+    this.conversationMission = null;
+    this.conversationLatestOutput = null;
+    this.syncQueryParams();
   }
 
 

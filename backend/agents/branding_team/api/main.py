@@ -79,6 +79,7 @@ class CreateBrandRequest(BaseModel):
     desired_voice: str = Field(default="clear, confident, human")
     existing_brand_material: List[str] = Field(default_factory=list)
     wiki_path: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 class UpdateBrandRequest(BaseModel):
@@ -316,6 +317,12 @@ def _parse_target_phase(raw: Optional[str]) -> Optional[BrandPhase]:
         raise HTTPException(status_code=400, detail=f"Invalid target_phase: {raw}")
 
 
+def _mission_has_brand_name(mission: BrandingMission) -> bool:
+    """True if company_name is a real value (not a placeholder)."""
+    placeholders = ("TBD", "To be discussed.", "—", "")
+    return (mission.company_name or "").strip() not in placeholders
+
+
 def _mission_has_minimal_required_fields(mission: BrandingMission) -> bool:
     """True if we have real company name, description, and target audience (not placeholders)."""
     placeholders = ("TBD", "To be discussed.", "—", "")
@@ -461,8 +468,20 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     if not brand:
         raise HTTPException(status_code=404, detail="Client not found")
 
-    # Create the single, permanent conversation for this brand.
-    conv_id = conversation_store.create(brand_id=brand.id, mission=mission)
+    # Attach an existing conversation if provided, otherwise create a new one.
+    existing_conv_id = (payload.conversation_id or "").strip() or None
+    if existing_conv_id and conversation_store.get(existing_conv_id) is not None:
+        existing_brand = conversation_store.get_conversation_brand_id(existing_conv_id)
+        if existing_brand:
+            raise HTTPException(
+                status_code=409,
+                detail="Conversation is already attached to another brand",
+            )
+        conversation_store.set_brand(existing_conv_id, brand.id)
+        conversation_store.update_mission(existing_conv_id, mission)
+        conv_id = existing_conv_id
+    else:
+        conv_id = conversation_store.create(brand_id=brand.id, mission=mission)
     brand = branding_store.update_brand(client_id, brand.id, conversation_id=conv_id)
 
     return brand
@@ -798,6 +817,23 @@ def create_branding_conversation(
         output = _run_orchestrator_if_ready(updated_mission)
         if output is not None:
             conversation_store.update_output(conversation_id, output)
+
+        # Auto-create a brand when the user provided enough info in the initial message.
+        if not brand_id and _mission_has_brand_name(updated_mission):
+            client_id = _ensure_default_client()
+            brand = branding_store.create_brand(
+                client_id=client_id,
+                mission=updated_mission,
+                name=updated_mission.company_name,
+            )
+            if brand:
+                conversation_store.set_brand(conversation_id, brand.id)
+                branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
+                if output:
+                    branding_store.append_brand_version(client_id, brand.id, output)
+                brand_id = brand.id
+                logger.info("Auto-created brand %s from initial message in conversation %s", brand.id, conversation_id)
+
         messages, mission, latest_output = conversation_store.get(conversation_id) or (
             [],
             updated_mission,
@@ -855,8 +891,8 @@ def send_branding_conversation_message(
     if output is not None:
         conversation_store.update_output(conversation_id, output)
 
-    # Auto-create a brand when the mission has enough info and conversation is unattached.
-    if not brand_id and _mission_has_minimal_required_fields(updated_mission):
+    # Auto-create a brand when the user has provided at least a company name and conversation is unattached.
+    if not brand_id and _mission_has_brand_name(updated_mission):
         client_id = _ensure_default_client()
         brand = branding_store.create_brand(
             client_id=client_id,
