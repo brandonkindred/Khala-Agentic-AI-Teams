@@ -257,12 +257,7 @@ def mark_all_running_jobs_failed(
 ) -> None:
     """Mark all pending or running blog jobs as failed (e.g. on server shutdown)."""
     try:
-        client = _client(cache_dir)
-        active = client.list_jobs(statuses=["pending", "running"])
-        for job in active:
-            jid = job.get("job_id")
-            if jid:
-                client.update_job(jid, status="failed", error=reason)
+        _client(cache_dir).mark_all_active_jobs_failed(reason)
     except Exception as e:
         logger.warning("mark_all_running_jobs_failed: %s", e)
 
