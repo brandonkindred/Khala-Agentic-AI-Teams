@@ -108,7 +108,7 @@ TITLE ACCURACY RULES (hard requirements — reject any title that violates these
 - Each title should promise the reader they will LEARN something concrete and valuable. The reader should think "I need to read this — I'll walk away knowing something I didn't before."
   BAD: "A Guide to Agent Architectures" (vague, no learning promise)
   GOOD: "The 3 Agent Patterns That Handle 90% of Real-World AI Tasks (and When to Use Each)" (specific, promises concrete takeaway)
-- Before finalizing each title, verify it against the overarching_topic: does the title support, reflect, or accurately tease the article's actual argument? If not, discard it and generate a replacement.
+- Before finalizing each title, verify it against the overarching_topic: does the title support, reflect, or accurately tease the article's actual argument? If not, discard it and generate a replacement. Do NOT include any title that fails this check.
 
 Additional rules:
 - Do not invent citations; only reference themes present in the digest.

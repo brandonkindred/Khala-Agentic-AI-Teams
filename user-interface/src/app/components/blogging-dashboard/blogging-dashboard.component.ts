@@ -6,7 +6,7 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { marked } from 'marked';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatCardModule } from '@angular/material/card';
-import { Subscription, timer } from 'rxjs';
+import { Observable, Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import type { BlogJobStreamEvent } from '../../models';
 import { BloggingApiService } from '../../services/blogging-api.service';
@@ -708,7 +708,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
     }
   }
 
-  getTitleRating(title: string): string | undefined {
+  getTitleRating(title: string): 'dislike' | 'like' | 'love' | undefined {
     return this.titleRatings[title];
   }
 
@@ -716,9 +716,21 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   submitSingleTitleRating(title: string, rating: 'dislike' | 'like'): void {
     const jobId = this.selectedBlogJob?.job_id;
     if (!jobId || this.titleRatingSubmitting) return;
+    this.submitTitleAction(this.api.rateTitles(jobId, [{ title, rating }]));
+  }
+
+  /** Select a loved title directly, advancing the pipeline. */
+  selectTitle(title: string): void {
+    const jobId = this.selectedBlogJob?.job_id;
+    if (!jobId || this.titleRatingSubmitting) return;
+    this.submitTitleAction(this.api.selectTitle(jobId, title));
+  }
+
+  /** Shared handler for title selection API calls. */
+  private submitTitleAction(action$: Observable<BlogJobStatusResponse>): void {
     this.titleRatingSubmitting = true;
     this.collaborationError = null;
-    this.api.rateTitles(jobId, [{ title, rating }]).subscribe({
+    action$.subscribe({
       next: (status) => {
         this.selectedJobStatus = status;
         this.titleRatings = {};
@@ -726,25 +738,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
       },
       error: (err) => {
         this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit title rating';
-        this.titleRatingSubmitting = false;
-      },
-    });
-  }
-
-  /** Select a loved title directly, advancing the pipeline. */
-  selectTitle(title: string): void {
-    const jobId = this.selectedBlogJob?.job_id;
-    if (!jobId || this.titleRatingSubmitting) return;
-    this.titleRatingSubmitting = true;
-    this.collaborationError = null;
-    this.api.selectTitle(jobId, title).subscribe({
-      next: (status) => {
-        this.selectedJobStatus = status;
-        this.titleRatings = {};
-        this.titleRatingSubmitting = false;
-      },
-      error: (err) => {
-        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit title selection';
+        // Keep titleRatings so the user can see which title they tried to rate
         this.titleRatingSubmitting = false;
       },
     });
