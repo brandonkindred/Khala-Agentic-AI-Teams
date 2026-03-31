@@ -471,7 +471,7 @@ class BlogJobStatusResponse(BaseModel):
     )
     draft_review_questions: List[Dict[str, Any]] = Field(
         default_factory=list,
-        description="Uncertainty questions the draft agent wants the editor to answer",
+        description="Uncertainty questions the writer agent wants the editor to answer",
     )
     draft_escalation_summary: Optional[str] = Field(
         None,

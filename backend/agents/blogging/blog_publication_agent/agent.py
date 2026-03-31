@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from blog_copy_editor_agent import BlogCopyEditorAgent
-    from blog_draft_agent import BlogDraftAgent
+    from blog_writer_agent import BlogWriterAgent
 
 from shared.content_plan import (
     ContentPlan,
@@ -255,7 +255,7 @@ class BlogPublicationAgent:
         self,
         submission_id: str,
         *,
-        draft_agent: "BlogDraftAgent",
+        draft_agent: "BlogWriterAgent",
         copy_editor_agent: "BlogCopyEditorAgent",
         research_document: Optional[str] = None,
         outline: Optional[str] = None,
@@ -268,7 +268,7 @@ class BlogPublicationAgent:
         """
         from blog_copy_editor_agent import CopyEditorInput
         from blog_copy_editor_agent.models import FeedbackItem
-        from blog_draft_agent import ReviseDraftInput
+        from blog_writer_agent import ReviseWriterInput
 
         meta_path = self.pending_dir / f"{submission_id}_meta.json"
         if not meta_path.exists():
@@ -326,7 +326,7 @@ class BlogPublicationAgent:
                 else copy_editor_result.feedback_items
             )
 
-            revise_input = ReviseDraftInput(
+            revise_input = ReviseWriterInput(
                 draft=draft,
                 feedback_items=all_feedback,
                 feedback_summary=copy_editor_result.summary,

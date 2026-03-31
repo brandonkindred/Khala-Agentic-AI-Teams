@@ -1,5 +1,5 @@
 """
-Blog draft agent: takes a research document and an outline and generates
+Blog writer agent: takes a research document and an outline and generates
 a blog post draft that complies with a brand and writing style guide.
 """
 
@@ -34,12 +34,12 @@ from llm_service import (
 )
 
 from .models import (
-    DraftInput,
-    DraftOutput,
-    ReviseDraftInput,
+    ReviseWriterInput,
     RevisionPlan,
     RevisionPlanChange,
     UncertaintyQuestion,
+    WriterInput,
+    WriterOutput,
     WritingGuidelineUpdate,
 )
 from .prompts import (
@@ -138,7 +138,7 @@ def _write_draft_to_path(draft: str, path: Union[str, Path]) -> None:
     logger.info("Draft written to %s", p)
 
 
-class BlogDraftAgent:
+class BlogWriterAgent:
     """
     Expert agent that generates a blog post draft from a research document and outline,
     following a provided brand and writing style guide.
@@ -176,7 +176,7 @@ class BlogDraftAgent:
             missing.append("writing guidelines")
         if missing:
             raise ValueError(
-                "BlogDraftAgent requires both brand and writing guidelines to ensure compliant output. "
+                "BlogWriterAgent requires both brand and writing guidelines to ensure compliant output. "
                 f"Missing: {', '.join(missing)}."
             )
 
@@ -513,11 +513,11 @@ class BlogDraftAgent:
 
     def run(
         self,
-        draft_input: DraftInput,
+        draft_input: WriterInput,
         *,
         on_llm_request: Optional[Callable[[str], None]] = None,
         draft_output_path: Optional[Union[str, Path]] = None,
-    ) -> DraftOutput:
+    ) -> WriterOutput:
         """
         Generate a blog post draft from the approved content plan.
 
@@ -528,7 +528,7 @@ class BlogDraftAgent:
         outline = compact_text(outline, COMPACT_OUTLINE_CHARS, self.llm, "content plan")
         if not outline:
             logger.warning("Empty content plan; returning minimal draft.")
-            return DraftOutput(draft="# Draft\n\nAdd a content plan to generate a draft.")
+            return WriterOutput(draft="# Draft\n\nAdd a content plan to generate a draft.")
 
         style_guide_text = self._style_prompt
 
@@ -651,7 +651,7 @@ class BlogDraftAgent:
             draft = self._self_review(draft)
         if draft_output_path:
             _write_draft_to_path(draft, draft_output_path)
-        return DraftOutput(draft=draft)
+        return WriterOutput(draft=draft)
 
     def _format_feedback_item_line(self, item: Any, index: int) -> str:
         """One numbered feedback line (+ optional suggestion) for batch revise prompts."""
@@ -667,7 +667,7 @@ class BlogDraftAgent:
         feedback_items: list[Any],
         revision_plan: str,
         style_guide_text: str,
-        revise_input: ReviseDraftInput,
+        revise_input: ReviseWriterInput,
     ) -> str:
         """Build one revision prompt that applies every copy-editor feedback item."""
         brand_section = (
@@ -800,7 +800,7 @@ class BlogDraftAgent:
         return "\n".join(prompt_parts)
 
     def _build_revision_plan_prompt(
-        self, draft: str, feedback_items: list[Any], revise_input: ReviseDraftInput
+        self, draft: str, feedback_items: list[Any], revise_input: ReviseWriterInput
     ) -> str:
         feedback_lines = [
             self._format_feedback_item_line(item, i)
@@ -849,7 +849,7 @@ class BlogDraftAgent:
         self,
         draft: str,
         feedback_items: list[Any],
-        revise_input: ReviseDraftInput,
+        revise_input: ReviseWriterInput,
     ) -> RevisionPlan:
         prompt = self._build_revision_plan_prompt(draft, feedback_items, revise_input)
         try:
@@ -886,7 +886,7 @@ class BlogDraftAgent:
         item_index: int,
         total_items: int,
         style_guide_text: str,
-        revise_input: ReviseDraftInput,
+        revise_input: ReviseWriterInput,
     ) -> str:
         """Build a revision prompt for a single feedback item."""
         brand_section = (
@@ -970,7 +970,7 @@ class BlogDraftAgent:
         item_index: int,
         total_items: int,
         style_guide_text: str,
-        revise_input: ReviseDraftInput,
+        revise_input: ReviseWriterInput,
     ) -> str:
         """Apply one feedback item to the draft. Returns revised draft or original on failure."""
         revise_max_tokens = 32768
@@ -1018,13 +1018,13 @@ class BlogDraftAgent:
 
     def revise(
         self,
-        revise_input: ReviseDraftInput,
+        revise_input: ReviseWriterInput,
         *,
         on_llm_request: Optional[Callable[[str], None]] = None,
         draft_output_path: Optional[Union[str, Path]] = None,
         work_dir: Optional[Union[str, Path]] = None,
         iteration: Optional[int] = None,
-    ) -> DraftOutput:
+    ) -> WriterOutput:
         """
         Revise a draft by analysing all feedback, creating a structured revision
         plan, then executing the plan in a single pass.
@@ -1040,10 +1040,10 @@ class BlogDraftAgent:
         draft = revise_input.draft.strip()
         if not draft:
             logger.warning("Empty draft in revise; returning as-is.")
-            return DraftOutput(draft=revise_input.draft)
+            return WriterOutput(draft=revise_input.draft)
         if not revise_input.feedback_items:
             logger.info("No feedback items; returning draft unchanged.")
-            return DraftOutput(draft=draft)
+            return WriterOutput(draft=draft)
 
         style_guide_text = self._style_prompt
         items = list(revise_input.feedback_items)
@@ -1132,7 +1132,7 @@ class BlogDraftAgent:
         )
         if draft_output_path:
             _write_draft_to_path(current_draft, draft_output_path)
-        return DraftOutput(draft=current_draft)
+        return WriterOutput(draft=current_draft)
 
     # ------------------------------------------------------------------
     # Interactive draft review: user-as-editor methods
@@ -1247,7 +1247,7 @@ class BlogDraftAgent:
         uncertainty_answers: Optional[dict[str, str]] = None,
         on_llm_request: Optional[Callable[[str], None]] = None,
         draft_output_path: Optional[Union[str, Path]] = None,
-    ) -> DraftOutput:
+    ) -> WriterOutput:
         """Revise a draft based on direct user/editor feedback.
 
         Unlike ``revise()`` which handles structured copy-editor feedback items,
@@ -1256,7 +1256,7 @@ class BlogDraftAgent:
         """
         self._assert_guidelines_present()
         if not draft.strip():
-            return DraftOutput(draft=draft)
+            return WriterOutput(draft=draft)
 
         style_guide_text = self._style_prompt
         brand_section = (
@@ -1371,7 +1371,7 @@ class BlogDraftAgent:
         logger.info("User-feedback revision complete, final length=%s", len(current_draft))
         if draft_output_path:
             _write_draft_to_path(current_draft, draft_output_path)
-        return DraftOutput(draft=current_draft)
+        return WriterOutput(draft=current_draft)
 
     def generate_escalation_summary(
         self,

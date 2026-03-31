@@ -39,7 +39,7 @@ def _caller_tag() -> str:
         mod = frame_info.frame.f_globals.get("__name__", "")
         if mod and "llm_service" not in mod:
             func = frame_info.function
-            # Shorten module path: "blogging.blog_draft_agent.agent" -> "blog_draft_agent.agent"
+            # Shorten module path: "blogging.blog_writer_agent.agent" -> "blog_writer_agent.agent"
             parts = mod.rsplit(".", 2)
             short = ".".join(parts[-2:]) if len(parts) > 1 else mod
             return f"{short}.{func}"

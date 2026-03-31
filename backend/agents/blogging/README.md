@@ -1,6 +1,6 @@
 # Blogging Agent Suite
 
-This package provides the **blogging agent suite**: research, **planning**, draft, copy-edit, and publication (with optional platform-specific output for Medium, dev.to, and Substack).
+This package provides the **blogging agent suite**: research, **planning**, writer, copy-edit, and publication (with optional platform-specific output for Medium, dev.to, and Substack).
 
 ## Agents overview
 
@@ -8,9 +8,9 @@ This package provides the **blogging agent suite**: research, **planning**, draf
 |-------|------|
 | **Research** | Brief → web (Ollama web_search) + arXiv search → ranked references, compiled document, notes |
 | **Planning** | Research digest + length profile → structured **content plan** (titles, narrative flow, per-section coverage, requirements analysis) with refine-until-done |
-| **Draft** | Research document + **content plan** + style guide → draft; supports revise-from-feedback (e.g. from Copy Editor) |
-| **Copy Editor** | Draft → feedback items and summary (for Draft revision loop); optional **content plan** context for structure-aware feedback |
-| **Publication** | Submit draft → pending; human approve → write to `blog_posts`, generate Medium/dev.to/Substack versions; reject → optional revision loop with Draft + Copy Editor |
+| **Writer** | Research document + **content plan** + style guide → draft; supports revise-from-feedback (e.g. from Copy Editor) |
+| **Copy Editor** | Draft → feedback items and summary (for Writer revision loop); optional **content plan** context for structure-aware feedback |
+| **Publication** | Submit draft → pending; human approve → write to `blog_posts`, generate Medium/dev.to/Substack versions; reject → optional revision loop with Writer + Copy Editor |
 | **Medium stats** | Playwright automation using the **Medium.com platform integration** (stored browser session) → scrape [medium.com/me/stats](https://medium.com/me/stats) → `medium_stats_report.json` artifact |
 
 ### Medium statistics agent (use at your own risk)
@@ -33,14 +33,14 @@ Optional env: `BLOGGING_MEDIUM_STATS_ROOT` (job work dir base); Google redirect 
 ## Full pipeline
 
 ```
-Research → Planning → Draft → (optional) Draft ↔ Copy Editor revision loop → (optional) Publication
+Research → Planning → Writer → (optional) Writer ↔ Copy Editor revision loop → (optional) Publication
 ```
 
 - **Research** fetches and ranks sources from the web and arXiv.
 - **Planning** produces a persisted content plan (`content_plan.json` / `content_plan.md`): titles, narrative flow, section coverage, and analysis; refine loop until the plan is acceptable for the profile.
-- **Draft** writes the initial draft from research + **content plan**. Style and brand content are loaded by the caller before agent creation and passed in as full file contents (see Style guide below).
-- **Copy Editor** reviews the draft and returns feedback; the **Draft** agent revises based on feedback. In the v2 pipeline this loop runs up to `DRAFT_EDITOR_ITERATIONS` times (default 500; stops early when the editor approves).
-- **Publication** receives the final draft: submit → human approve/reject. On approve: write to `blog_posts/`, generate platform-specific versions. On reject: optional revision loop with Draft + Copy Editor.
+- **Writer** writes the initial draft from research + **content plan**. Style and brand content are loaded by the caller before agent creation and passed in as full file contents (see Style guide below).
+- **Copy Editor** reviews the draft and returns feedback; the **Writer** agent revises based on feedback. In the v2 pipeline this loop runs up to `DRAFT_EDITOR_ITERATIONS` times (default 500; stops early when the editor approves).
+- **Publication** receives the final draft: submit → human approve/reject. On approve: write to `blog_posts/`, generate platform-specific versions. On reject: optional revision loop with Writer + Copy Editor.
 
 **Example scripts:**
 - [blogging/agent_implementations/blog_writing_process.py](agent_implementations/blog_writing_process.py) – Legacy pipeline (superseded by v2 for production).
@@ -69,7 +69,7 @@ When `work_dir` is provided, the pipeline persists all outputs as versioned arti
 - Fact-Checker / Risk → claims and risk PASS
 - Brand and Style Enforcer → `compliance_report.json` (veto on FAIL)
 
-**Closed-loop rewrite**: On any FAIL, the pipeline passes `required_fixes` to the Draft agent and re-runs gates until PASS or max iterations (default 3). Then status is `NEEDS_HUMAN_REVIEW`.
+**Closed-loop rewrite**: On any FAIL, the pipeline passes `required_fixes` to the Writer agent and re-runs gates until PASS or max iterations (default 3). Then status is `NEEDS_HUMAN_REVIEW`.
 
 **API**: `POST /full-pipeline` runs the full pipeline with gates. `POST /research-and-review` runs **research + planning** (same planning step as the full pipeline) and accepts optional `work_dir` or `run_id` to persist artifacts.
 
@@ -198,10 +198,10 @@ Interactive docs: http://localhost:8000/docs
 
 ## Style guide and brand spec
 
-The Draft and Copy Editor agents do **not** accept file paths. Callers must load the writing style guide and brand spec **before** instantiating the agents, then pass the **full file contents** as strings:
+The Writer and Copy Editor agents do **not** accept file paths. Callers must load the writing style guide and brand spec **before** instantiating the agents, then pass the **full file contents** as strings:
 
 - **Writing style guide**: typically `docs/writing_guidelines.md` (read as UTF-8 text).
-- **Brand spec prompt**: typically `docs/brand_spec_prompt.md` (read as full text via `load_brand_spec_prompt` for draft/editor and compliance; validators use a default in-memory spec).
+- **Brand spec prompt**: typically `docs/brand_spec_prompt.md` (read as full text via `load_brand_spec_prompt` for writer/editor and compliance; validators use a default in-memory spec).
 
 Use `shared.load_style_file(path, label)` to load a file: on success it returns the stripped content; on failure (missing file, read error) it **logs an error** and returns an empty string. Then instantiate the agents with `writing_style_guide_content=...` and `brand_spec_content=...`. If both contents are empty, the agents use a minimal built-in fallback.
 
@@ -239,7 +239,7 @@ blogging/
 │       ├── web_fetch.py     # Web fetch/scrape
 │       └── arxiv_search.py # arXiv search
 ├── blog_planning_agent/     # Structured content plan + refine loop
-├── blog_draft_agent/        # Draft from research + content plan; revise from feedback
+├── blog_writer_agent/       # Writer: draft from research + content plan; revise from feedback
 ├── blog_copy_editor_agent/  # Draft → feedback items
 ├── blog_compliance_agent/   # Brand/style enforcer (veto on FAIL)
 ├── blog_fact_check_agent/   # Claims and risk officer

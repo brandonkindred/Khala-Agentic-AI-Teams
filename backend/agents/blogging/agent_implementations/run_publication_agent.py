@@ -14,11 +14,11 @@ import logging
 from pathlib import Path
 
 from blog_copy_editor_agent import BlogCopyEditorAgent
-from blog_draft_agent import BlogDraftAgent
 from blog_publication_agent import (
     BlogPublicationAgent,
     SubmitDraftInput,
 )
+from blog_writer_agent import BlogWriterAgent
 from shared.style_loader import load_style_file
 
 from llm_service import get_client
@@ -65,7 +65,7 @@ def main() -> None:
         max_revision_loops=3,
     )
 
-    BlogDraftAgent(
+    BlogWriterAgent(
         llm_client=llm,
         writing_style_guide_content=writing_style_content,
         brand_spec_content=brand_spec_content,

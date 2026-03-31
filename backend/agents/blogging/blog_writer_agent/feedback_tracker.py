@@ -1,7 +1,7 @@
 """Track copy-editor feedback across revision iterations.
 
 Provides persistent-issue detection, occurrence counting, and capped
-previous-feedback extraction so the draft agent can prioritise issues
+previous-feedback extraction so the writer agent can prioritise issues
 that have been flagged multiple times.
 """
 

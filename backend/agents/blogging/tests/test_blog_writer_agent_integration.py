@@ -1,8 +1,8 @@
 """
-Integration test for the blog draft agent with a real Ollama LLM.
+Integration test for the blog writer agent with a real Ollama LLM.
 
 Run with a live LLM (e.g. LLM_PROVIDER=ollama and Ollama/Ollama Cloud available):
-  pytest agents/blogging/tests/test_blog_draft_agent_integration.py -v
+  pytest agents/blogging/tests/test_blog_writer_agent_integration.py -v
 
 Skipped when LLM_PROVIDER=dummy so CI does not require an LLM by default.
 """
@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 import pytest
-from blog_draft_agent import BlogDraftAgent, DraftInput, DraftOutput
+from blog_writer_agent import BlogWriterAgent, WriterInput, WriterOutput
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -84,16 +84,16 @@ _skip_reason = "Integration test requires real LLM (set LLM_PROVIDER=ollama and 
     os.environ.get("LLM_PROVIDER", "").lower() == "dummy",
     reason=_skip_reason,
 )
-def test_draft_agent_with_ollama_produces_real_content() -> None:
+def test_writer_agent_with_ollama_produces_real_content() -> None:
     """
-    Run the draft agent with the configured Ollama LLM and verify the output
+    Run the writer agent with the configured Ollama LLM and verify the output
     contains real blog-like content using fuzzy rules (length, structure, sentences).
     """
     client = get_client("blog")
     if not isinstance(client, OllamaLLMClient):
         pytest.skip("LLM client is not Ollama; integration test expects Ollama")
 
-    agent = BlogDraftAgent(
+    agent = BlogWriterAgent(
         llm_client=client,
         writing_style_guide_content=(
             "Clear, conversational prose: full thoughts in natural-length sentences (~8th grade). "
@@ -135,7 +135,7 @@ def test_draft_agent_with_ollama_produces_real_content() -> None:
             research_gaps=[],
         ),
     )
-    draft_input = DraftInput(
+    draft_input = WriterInput(
         research_document=(
             "Observability helps teams understand system behavior in production. "
             "Key practices include structured logging, distributed tracing, and metrics. "
@@ -155,7 +155,7 @@ def test_draft_agent_with_ollama_produces_real_content() -> None:
         # e.g. 5xx, timeout – skip so CI without stable LLM doesn't fail
         pytest.skip(f"LLM temporarily unavailable: {e}")
 
-    assert isinstance(result, DraftOutput)
+    assert isinstance(result, WriterOutput)
     assert result.draft, "draft must be non-empty"
 
     # Write full draft to file and log preview for review

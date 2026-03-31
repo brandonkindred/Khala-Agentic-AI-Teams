@@ -1,12 +1,12 @@
-"""Tests for BlogDraftAgent.revise (plan-first batch feedback processing)."""
+"""Tests for BlogWriterAgent.revise (plan-first batch feedback processing)."""
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
 from blog_copy_editor_agent.models import FeedbackItem
-from blog_draft_agent import BlogDraftAgent, ReviseDraftInput
-from blog_draft_agent.prompts import WRITING_SYSTEM_PROMPT
+from blog_writer_agent import BlogWriterAgent, ReviseWriterInput
+from blog_writer_agent.prompts import WRITING_SYSTEM_PROMPT
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -37,7 +37,7 @@ def test_revise_generates_plan_then_applies_all_feedback() -> None:
         "1) Priority order\n2) Section updates\n3) Citation fixes",
         '{"draft": 0}\n---DRAFT---\n# Revised title\n\nBody here.\n',
     ]
-    agent = BlogDraftAgent(
+    agent = BlogWriterAgent(
         llm_client=llm,
         writing_style_guide_content="Use short paragraphs.",
         brand_spec_content="Brand voice: practical and direct.",
@@ -57,7 +57,7 @@ def test_revise_generates_plan_then_applies_all_feedback() -> None:
             suggestion="Tighten examples.",
         ),
     ]
-    inp = ReviseDraftInput(
+    inp = ReviseWriterInput(
         draft="# Original\n\nOld body.\n",
         feedback_items=items,
         content_plan=_minimal_plan(),

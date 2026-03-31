@@ -17,10 +17,10 @@ from typing import Any, Callable, List, Literal, Optional, Tuple, Union
 from blog_compliance_agent import BlogComplianceAgent
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 from blog_copy_editor_agent.models import FeedbackItem
-from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput
 from blog_fact_check_agent import BlogFactCheckAgent
 from blog_publication_agent.models import PublishingPack
 from blog_research_agent.models import ResearchBriefInput
+from blog_writer_agent import BlogWriterAgent, ReviseWriterInput, WriterInput
 from shared.artifacts import write_artifact
 from shared.blog_job_store import (
     add_blog_pending_questions,
@@ -157,7 +157,7 @@ def run_planning(
     )
 
     try:
-        planning_draft_agent = BlogDraftAgent(
+        planning_draft_agent = BlogWriterAgent(
             llm_client=planning_llm_client(llm_client),
             writing_style_guide_content="",
             brand_spec_content="",
@@ -265,7 +265,7 @@ def _fill_story_placeholders(
 
     Returns ``(updated_draft_result, updated_elicited_stories_text)``.
     """
-    from blog_draft_agent.models import DraftInput, DraftOutput
+    from blog_writer_agent.models import WriterInput, WriterOutput
     from ghost_writer_agent import GhostWriterElicitationAgent
     from ghost_writer_agent.agent import MAX_ROUNDS_POST_DRAFT
     from ghost_writer_agent.models import StoryGap
@@ -276,7 +276,7 @@ def _fill_story_placeholders(
 
     placeholders = _extract_story_placeholders(draft_text)
     if not placeholders:
-        return DraftOutput(draft=draft_text), elicited_stories_text
+        return WriterOutput(draft=draft_text), elicited_stories_text
 
     logger.info("Post-draft: found %d story placeholder(s) to fill", len(placeholders))
     job_updater(
@@ -370,7 +370,7 @@ def _fill_story_placeholders(
     )
 
     if not new_narratives and not skipped_topics:
-        return DraftOutput(draft=draft_text), elicited_stories_text
+        return WriterOutput(draft=draft_text), elicited_stories_text
 
     # Merge new narratives into elicited_stories_text
     if new_narratives:
@@ -397,7 +397,7 @@ def _fill_story_placeholders(
         )
 
     try:
-        draft_input = DraftInput(
+        draft_input = WriterInput(
             **draft_input_kwargs,
             elicited_stories=(elicited_stories_text or "") + skip_instruction or None,
         )
@@ -418,7 +418,7 @@ def _fill_story_placeholders(
         return redraft_result, elicited_stories_text
     except Exception as e:
         logger.warning("Post-draft re-draft failed (keeping original): %s", e)
-        return DraftOutput(draft=draft_text), elicited_stories_text
+        return WriterOutput(draft=draft_text), elicited_stories_text
 
 
 def run_pipeline(
@@ -762,7 +762,7 @@ def run_pipeline(
                     length_policy_context=build_planning_length_context(length_policy),
                     series_context_block=series_context_block(series_context),
                 )
-                planning_draft_agent = BlogDraftAgent(
+                planning_draft_agent = BlogWriterAgent(
                     llm_client=planning_llm_client(llm_client),
                     writing_style_guide_content="",
                     brand_spec_content="",
@@ -822,7 +822,7 @@ def run_pipeline(
             f"Cannot start drafting without required guideline inputs. Missing: {missing_msg}.",
             cause=ValueError(missing_msg),
         )
-    draft_agent = BlogDraftAgent(
+    draft_agent = BlogWriterAgent(
         llm_client=llm_client,
         writing_style_guide_content=writing_style_content,
         brand_spec_content=brand_spec_content,
@@ -833,7 +833,7 @@ def run_pipeline(
         brand_spec_content=brand_spec_content,
     )
 
-    from blog_draft_agent.feedback_tracker import FeedbackTracker
+    from blog_writer_agent.feedback_tracker import FeedbackTracker
 
     draft_result = None
     previous_feedback_items: list[FeedbackItem] = []
@@ -849,7 +849,7 @@ def run_pipeline(
             )
 
             try:
-                draft_input = DraftInput(
+                draft_input = WriterInput(
                     content_plan=plan,
                     audience=brief.audience,
                     tone_or_purpose=brief.tone_or_purpose,
@@ -1070,7 +1070,7 @@ def run_pipeline(
                                     STYLE_GUIDE_PATH, "writing style guide"
                                 )
                                 # Rebuild agent with updated guidelines
-                                draft_agent = BlogDraftAgent(
+                                draft_agent = BlogWriterAgent(
                                     llm_client=llm_client,
                                     writing_style_guide_content=writing_style_content,
                                     brand_spec_content=brand_spec_content,
@@ -1273,7 +1273,7 @@ def run_pipeline(
                                 writing_style_content = load_style_file(
                                     STYLE_GUIDE_PATH, "writing style guide"
                                 )
-                                draft_agent = BlogDraftAgent(
+                                draft_agent = BlogWriterAgent(
                                     llm_client=llm_client,
                                     writing_style_guide_content=writing_style_content,
                                     brand_spec_content=brand_spec_content,
@@ -1317,7 +1317,7 @@ def run_pipeline(
                         len(persistent_issues),
                     )
 
-                revise_input = ReviseDraftInput(
+                revise_input = ReviseWriterInput(
                     draft=draft_result.draft,
                     feedback_items=copy_editor_result.feedback_items,
                     feedback_summary=copy_editor_result.summary,
@@ -1570,7 +1570,7 @@ def run_pipeline(
             feedback_summary = "; ".join(gate_failures) if gate_failures else "Gates failed"
 
             try:
-                revise_input = ReviseDraftInput(
+                revise_input = ReviseWriterInput(
                     draft=draft_result.draft,
                     feedback_items=feedback_items,
                     feedback_summary=feedback_summary,

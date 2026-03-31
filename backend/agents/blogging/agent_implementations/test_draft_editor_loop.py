@@ -13,8 +13,8 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput  # noqa: E402
-from blog_draft_agent import BlogDraftAgent, DraftInput, ReviseDraftInput  # noqa: E402
 from blog_research_agent.models import ResearchReference  # noqa: E402
+from blog_writer_agent import BlogWriterAgent, ReviseWriterInput, WriterInput  # noqa: E402
 from shared.content_plan import (  # noqa: E402
     ContentPlan,
     ContentPlanSection,
@@ -70,7 +70,7 @@ def main() -> None:
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
     brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")
 
-    draft_agent = BlogDraftAgent(
+    draft_agent = BlogWriterAgent(
         llm_client=llm,
         writing_style_guide_content=writing_style_content,
         brand_spec_content=brand_spec_content,
@@ -84,7 +84,7 @@ def main() -> None:
     draft_result = None
     for iteration in range(1, DRAFT_EDITOR_ITERATIONS + 1):
         if iteration == 1:
-            draft_input = DraftInput(
+            draft_input = WriterInput(
                 research_document=RESEARCH_DOC,
                 content_plan=CONTENT_PLAN,
                 audience="CTOs and platform teams",
@@ -105,7 +105,7 @@ def main() -> None:
                 f"\n--- Iteration {iteration}: Copy editor found {len(copy_editor_result.feedback_items)} feedback items ---"
             )
 
-            revise_input = ReviseDraftInput(
+            revise_input = ReviseWriterInput(
                 draft=draft_result.draft,
                 feedback_items=copy_editor_result.feedback_items,
                 feedback_summary=copy_editor_result.summary,

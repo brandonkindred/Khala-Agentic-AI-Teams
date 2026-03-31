@@ -1,10 +1,10 @@
-"""Tests for the blog draft agent."""
+"""Tests for the blog writer agent."""
 
 import re
 
 import pytest
-from blog_draft_agent import BlogDraftAgent, DraftInput, DraftOutput
 from blog_research_agent.models import ResearchReference
+from blog_writer_agent import BlogWriterAgent, WriterInput, WriterOutput
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
@@ -58,12 +58,12 @@ class _PromptCapturingLLM(DummyLLMClient):
 
 
 def test_draft_input_requires_research_source() -> None:
-    """DraftInput raises when both research_document and research_references are empty."""
+    """WriterInput raises when both research_document and research_references are empty."""
     p = _minimal_plan()
     with pytest.raises(
         ValueError, match="either research_document or non-empty research_references"
     ):
-        DraftInput(
+        WriterInput(
             research_document=None,
             research_references=None,
             content_plan=p,
@@ -71,7 +71,7 @@ def test_draft_input_requires_research_source() -> None:
     with pytest.raises(
         ValueError, match="either research_document or non-empty research_references"
     ):
-        DraftInput(
+        WriterInput(
             research_document="",
             research_references=[],
             content_plan=p,
@@ -91,34 +91,34 @@ def test_golden_draft_h2_headings_match_content_plan_sections() -> None:
             )
             return '{"draft": 0}\n---DRAFT---\n# Post title\n\n' + body
 
-    agent = BlogDraftAgent(
+    agent = BlogWriterAgent(
         llm_client=H2DraftLLM(),
         writing_style_guide_content="Use clear sentence flow and plain language.",
         brand_spec_content="Brand voice: practical and trustworthy.",
     )
-    out = agent.run(DraftInput(research_document="Compiled research text.", content_plan=plan))
+    out = agent.run(WriterInput(research_document="Compiled research text.", content_plan=plan))
     h2s = re.findall(r"^## (.+)$", out.draft, re.MULTILINE)
     expected = [s.title for s in sorted(plan.sections, key=lambda x: x.order)]
     assert h2s == expected
 
 
-def test_blog_draft_agent_run() -> None:
-    """BlogDraftAgent returns a non-empty draft from research + content plan."""
+def test_blog_writer_agent_run() -> None:
+    """BlogWriterAgent returns a non-empty draft from research + content plan."""
     llm = DummyLLMClient()
-    agent = BlogDraftAgent(
+    agent = BlogWriterAgent(
         llm_client=llm,
         writing_style_guide_content="Use clear sentence flow and plain language.",
         brand_spec_content="Brand voice: practical and trustworthy.",
     )
 
-    draft_input = DraftInput(
+    draft_input = WriterInput(
         research_document="Compiled research: Source 1 summary. Source 2 key points.",
         content_plan=_minimal_plan(),
     )
 
     result = agent.run(draft_input)
 
-    assert isinstance(result, DraftOutput)
+    assert isinstance(result, WriterOutput)
     assert result.draft
     assert (
         "draft" in result.draft.lower()
@@ -127,16 +127,16 @@ def test_blog_draft_agent_run() -> None:
     )
 
 
-def test_blog_draft_agent_with_style_guide() -> None:
-    """BlogDraftAgent uses writing_style_guide_content passed at init."""
+def test_blog_writer_agent_with_style_guide() -> None:
+    """BlogWriterAgent uses writing_style_guide_content passed at init."""
     llm = DummyLLMClient()
-    agent = BlogDraftAgent(
+    agent = BlogWriterAgent(
         llm_client=llm,
         writing_style_guide_content="Write like a mentor. Clear, natural-length sentences. No em dashes.",
         brand_spec_content="Brand voice: practical and clear.",
     )
 
-    draft_input = DraftInput(
+    draft_input = WriterInput(
         research_document="Research here.",
         content_plan=_minimal_plan(),
     )
@@ -145,10 +145,10 @@ def test_blog_draft_agent_with_style_guide() -> None:
     assert result.draft
 
 
-def test_blog_draft_agent_run_with_research_references() -> None:
-    """BlogDraftAgent runs parallel extraction then draft when research_references is provided."""
+def test_blog_writer_agent_run_with_research_references() -> None:
+    """BlogWriterAgent runs parallel extraction then draft when research_references is provided."""
     llm = DummyLLMClient()
-    agent = BlogDraftAgent(
+    agent = BlogWriterAgent(
         llm_client=llm,
         writing_style_guide_content="Use clear sentence flow and plain language.",
         brand_spec_content="Brand voice: practical and trustworthy.",
@@ -167,7 +167,7 @@ def test_blog_draft_agent_run_with_research_references() -> None:
             summary="Summary of second source.",
         ),
     ]
-    draft_input = DraftInput(
+    draft_input = WriterInput(
         research_document=None,
         research_references=refs,
         content_plan=_minimal_plan(),
@@ -175,7 +175,7 @@ def test_blog_draft_agent_run_with_research_references() -> None:
 
     result = agent.run(draft_input)
 
-    assert isinstance(result, DraftOutput)
+    assert isinstance(result, WriterOutput)
     assert result.draft
     assert (
         "draft" in result.draft.lower()
@@ -187,12 +187,12 @@ def test_blog_draft_agent_run_with_research_references() -> None:
 def test_draft_prompt_includes_provided_brand_spec() -> None:
     """When brand_spec_content is provided, the draft prompt includes it in the BRAND AND STYLE section."""
     llm = _PromptCapturingLLM()
-    agent = BlogDraftAgent(
+    agent = BlogWriterAgent(
         llm_client=llm,
         writing_style_guide_content="Use concise, natural sentences.",
         brand_spec_content="MyBrand: Test brand. Voice: friendly and clear.",
     )
-    draft_input = DraftInput(
+    draft_input = WriterInput(
         research_document="Research here.",
         content_plan=_minimal_plan(),
     )
@@ -205,7 +205,7 @@ def test_draft_prompt_includes_provided_brand_spec() -> None:
 
 def test_outline_for_prompt_includes_section_titles() -> None:
     """outline_for_prompt flattens the content plan for LLM consumption."""
-    inp = DraftInput(
+    inp = WriterInput(
         research_document="R",
         content_plan=_minimal_plan(),
     )
@@ -218,12 +218,12 @@ def test_outline_for_prompt_includes_section_titles() -> None:
 def test_draft_run_requires_both_guidelines() -> None:
     """Draft agent rejects run() when brand/writing guidelines are missing."""
     llm = DummyLLMClient()
-    agent = BlogDraftAgent(
+    agent = BlogWriterAgent(
         llm_client=llm,
         writing_style_guide_content="",
         brand_spec_content="",
     )
-    draft_input = DraftInput(
+    draft_input = WriterInput(
         research_document="Research here.",
         content_plan=_minimal_plan(),
     )

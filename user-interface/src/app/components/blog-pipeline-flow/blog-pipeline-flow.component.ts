@@ -15,7 +15,7 @@ export interface BlogPhaseDefinition {
 export const BLOG_PHASES: BlogPhaseDefinition[] = [
   { id: 'research', label: 'Research', icon: 'search' },
   { id: 'planning', label: 'Planning', icon: 'account_tree' },
-  { id: 'draft_initial', label: 'Draft', icon: 'edit_note' },
+  { id: 'draft_initial', label: 'Writer', icon: 'edit_note' },
   { id: 'copy_edit', label: 'Copy edit', icon: 'spellcheck' },
   { id: 'fact_check', label: 'Fact check', icon: 'fact_check' },
   { id: 'compliance', label: 'Compliance', icon: 'gavel' },

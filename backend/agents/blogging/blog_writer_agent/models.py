@@ -1,5 +1,5 @@
 """
-Models for the blog draft agent (draft from content plan).
+Models for the blog writer agent (write from content plan).
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ class UserDraftFeedback(BaseModel):
 
 
 class UncertaintyQuestion(BaseModel):
-    """A question the draft agent needs answered before proceeding with confidence."""
+    """A question the writer agent needs answered before proceeding with confidence."""
 
     question_id: str = Field(..., description="Unique identifier for this question.")
     question: str = Field(..., description="The question text for the user.")
@@ -71,7 +71,7 @@ class UncertaintyQuestion(BaseModel):
 
 
 class DraftReviewResult(BaseModel):
-    """Result of the draft agent's analysis after producing a draft, before user review."""
+    """Result of the writer agent's analysis after producing a draft, before user review."""
 
     draft: str = Field(..., description="The draft text.")
     uncertainty_questions: List[UncertaintyQuestion] = Field(
@@ -84,8 +84,8 @@ class DraftReviewResult(BaseModel):
     )
 
 
-class DraftInput(BaseModel):
-    """Input for the blog draft agent: approved content plan and writing context."""
+class WriterInput(BaseModel):
+    """Input for the blog writer agent: approved content plan and writing context."""
 
     content_plan: ContentPlan = Field(
         ...,
@@ -126,14 +126,14 @@ class DraftInput(BaseModel):
         return content_plan_to_outline_markdown(self.content_plan)
 
     @model_validator(mode="after")
-    def _validate_plan_required(self) -> "DraftInput":
+    def _validate_plan_required(self) -> "WriterInput":
         if not self.content_plan:
-            raise ValueError("DraftInput requires a content_plan")
+            raise ValueError("WriterInput requires a content_plan")
         return self
 
 
-class DraftOutput(BaseModel):
-    """Output from the blog draft agent: the blog post draft in Markdown."""
+class WriterOutput(BaseModel):
+    """Output from the blog writer agent: the blog post draft in Markdown."""
 
     draft: str = Field(
         ...,
@@ -169,7 +169,7 @@ class RevisionPlan(BaseModel):
     )
 
 
-class ReviseDraftInput(BaseModel):
+class ReviseWriterInput(BaseModel):
     """Input for revising a draft based on copy editor or compliance feedback."""
 
     draft: str = Field(..., description="The current draft to revise.")

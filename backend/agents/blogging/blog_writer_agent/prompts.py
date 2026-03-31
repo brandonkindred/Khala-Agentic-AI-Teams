@@ -1,5 +1,5 @@
 """
-Prompts for the blog draft agent.
+Prompts for the blog writer agent.
 
 The brand spec and writing guidelines are injected at call time as context.
 These prompts tell the LLM how to USE those documents, not what the rules are.

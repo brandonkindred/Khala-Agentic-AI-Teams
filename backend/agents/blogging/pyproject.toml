@@ -22,6 +22,6 @@ dev = ["pytest"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["blog_research_agent*", "blog_planning_agent*", "blog_draft_agent*", "blog_copy_editor_agent*", "blog_publication_agent*"]
+include = ["blog_research_agent*", "blog_planning_agent*", "blog_writer_agent*", "blog_copy_editor_agent*", "blog_publication_agent*"]
 namespaces = false
 

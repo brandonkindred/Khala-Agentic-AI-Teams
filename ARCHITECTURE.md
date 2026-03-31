@@ -547,7 +547,7 @@ flowchart TB
     SWTeam --> swShared["shared/\n(LLM, models, git, utils)"]
     SWTeam --> swTests["tests/"]
 
-    BlogTeam --> blogAgents["research, draft, review,\ncopy_editor, publication"]
+    BlogTeam --> blogAgents["research, writer, review,\ncopy_editor, publication"]
 ```
 
 Each agent directory follows a consistent structure: `agent.py` (core logic), `models.py` (Pydantic input/output contracts), and `prompts.py` (LLM prompt templates). Shared utilities (LLM client, git operations, repo I/O, logging) live in `shared/`.

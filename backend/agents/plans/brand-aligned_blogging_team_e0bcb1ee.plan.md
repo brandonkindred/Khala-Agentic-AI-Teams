@@ -21,7 +21,7 @@ todos:
     content: After Review agent run, persist outline to work_dir/outline.md and optionally title choices into content_brief or separate artifact
     status: completed
   - id: pipeline-persist-drafts
-    content: After each Draft/Copy Editor iteration, persist draft to work_dir/draft_v1.md, draft_v2.md, and final candidate to work_dir/final.md as appropriate
+    content: After each Writer/Copy Editor iteration, persist draft to work_dir/draft_v1.md, draft_v2.md, and final candidate to work_dir/final.md as appropriate
     status: completed
   - id: brand-spec-schema
     content: Add Pydantic/dataclass schema in blogging/shared/brand_spec.py for brand_spec_prompt / brand_spec.yaml (brand, voice, readability, formatting, content_rules, examples, definition_of_done)
@@ -32,8 +32,8 @@ todos:
   - id: brand-spec-yaml
     content: "Create initial blogging/brand_spec_prompt.md (or docs/brand_spec_prompt.md) by extracting from writing_guidelines: banned_phrases, paragraph rules (min/max sentences), disallow_em_dash, target_grade_level 8, definition_of_done list"
     status: completed
-  - id: draft-agent-brand-spec
-    content: Update BlogDraftAgent to accept optional brand_spec_path or brand_spec dict; when set, load YAML and inject structured rules into prompt alongside or instead of raw style guide
+  - id: writer-agent-brand-spec
+    content: Update BlogWriterAgent to accept optional brand_spec_path or brand_spec dict; when set, load YAML and inject structured rules into prompt alongside or instead of raw style guide
     status: completed
   - id: copy-editor-brand-spec
     content: Update BlogCopyEditorAgent to accept optional brand_spec_path or brand_spec dict and use it when provided
@@ -68,11 +68,11 @@ todos:
   - id: research-persist-claims
     content: When work_dir provided, Research agent (or pipeline) writes allowed_claims to work_dir/allowed_claims.json
     status: completed
-  - id: draft-input-claims
-    content: Add allowed_claims_path or allowed_claims to DraftInput and ReviseDraftInput in blog_draft_agent/models.py
+  - id: writer-input-claims
+    content: Add allowed_claims_path or allowed_claims to WriterInput and ReviseWriterInput in blog_writer_agent/models.py
     status: completed
-  - id: draft-prompts-claims
-    content: Update Draft agent prompts to instruct writer to use only claims from allowed_claims and tag with [CLAIM:id]; include example in prompt
+  - id: writer-prompts-claims
+    content: Update Writer agent prompts to instruct writer to use only claims from allowed_claims and tag with [CLAIM:id]; include example in prompt
     status: completed
   - id: validator-claims-check
     content: "Implement claims policy validator: require [CLAIM:id] for factual-looking sentences; validate every [CLAIM:id] exists in allowed_claims.json; fail on untagged factual claim or unknown id"
@@ -102,7 +102,7 @@ todos:
     content: In blog_writing_process (or v2), after producing final candidate, run validators -> validator_report.json; run fact-check -> risk/claims status; run compliance agent -> compliance_report.json
     status: completed
   - id: orchestrator-rewrite-loop
-    content: On any FAIL, pass compliance_report.required_fixes (and validator details) to Draft revise or Copy Editor; re-run validators and compliance; repeat until PASS or max_iterations (e.g. 3–5)
+    content: On any FAIL, pass compliance_report.required_fixes (and validator details) to Writer revise or Copy Editor; re-run validators and compliance; repeat until PASS or max_iterations (e.g. 3–5)
     status: completed
   - id: orchestrator-escalation
     content: On max iterations without PASS, set status NEEDS_HUMAN_REVIEW; output best draft plus all failure reports (validator_report, compliance_report)
@@ -172,11 +172,11 @@ isProject: false
 
 - **Research** → web + arXiv, `compiled_document`, `references` (no `allowed_claims.json`).
 - **Review** → title choices + outline (no formal content brief, audience model, or angle strategy).
-- **Draft** → draft from research + outline + style guide (markdown; no claim tagging).
+- **Writer** → draft from research + outline + style guide (markdown; no claim tagging).
 - **Copy Editor** → feedback items only (no PASS/FAIL, no `compliance_report.json`, no veto).
 - **Publication** → submit/approve/reject, platform formats (no `publishing_pack.json` schema).
 
-**Pipeline** ([blogging/agent_implementations/blog_writing_process.py](blogging/agent_implementations/blog_writing_process.py)): linear Research → Review → Draft ↔ Copy Editor loop (fixed iterations). No artifact persistence, no gates, no validators.
+**Pipeline** ([blogging/agent_implementations/blog_writing_process.py](blogging/agent_implementations/blog_writing_process.py)): linear Research → Review → Writer ↔ Copy Editor loop (fixed iterations). No artifact persistence, no gates, no validators.
 
 **Style guide**: Single markdown file ([blogging/docs/writing_guidelines.md](blogging/docs/writing_guidelines.md)); spec requires structured `brand_spec_prompt.md` with banned phrases, formatting rules, definition of done, etc.
 
@@ -207,7 +207,7 @@ flowchart LR
 
   subgraph content [Content]
     CA[Content Architect]
-    DW[Draft Writer]
+    DW[Writer]
     DE[Developmental Editor]
     LE[Line Editor]
   end
@@ -249,7 +249,7 @@ flowchart LR
 - Fact-Checker / Risk → claims and risk PASS.
 - Brand and Style Enforcer → `compliance_report.json` (status PASS/FAIL); veto on FAIL.
 
-**Closed-loop rewrite**: On any FAIL, route `compliance_report.json` (and validator details) back to Draft Writer or Line Editor; re-run validators and compliance until PASS or max iterations (e.g. 3–5); then escalate to human or output best draft + reports.
+**Closed-loop rewrite**: On any FAIL, route `compliance_report.json` (and validator details) back to Writer or Line Editor; re-run validators and compliance until PASS or max iterations (e.g. 3–5); then escalate to human or output best draft + reports.
 
 ---
 
@@ -273,13 +273,13 @@ flowchart LR
 
 - **Introduce `brand_spec_prompt.md**` as the canonical brand and style source. Minimum fields (per spec): `brand` (name, audience, purpose), `voice` (tone, style_notes, banned_phrases, banned_patterns), `readability` (target_grade_level, max_grade_level), `formatting` (require_sections, min/max paragraph sentences, prefer_short_paragraphs, disallow_em_dash, avoid_excessive_bullets), `content_rules` (claims_policy, safety disclaimers), `examples` (on_brand, off_brand), `definition_of_done`.
 - **Create an initial `brand_spec_prompt.md**` derived from [blogging/docs/writing_guidelines.md](blogging/docs/writing_guidelines.md): extract banned phrases (e.g. “corporate buzzword soup”, “crushing it”), paragraph rules (e.g. 2–4 sentences), no em dash, reading level 8, etc. Keep the markdown as optional supplementary reading; agents and validators load only the YAML.
-- **Loader**: Add `blogging/shared/brand_spec.py` (or under `blogging/`) to load and validate `brand_spec_prompt.md` / `brand_spec.yaml` (Pydantic model or dataclass) and expose it to validators, compliance agent, and draft/copy-editor agents.
-- **Draft and Copy Editor agents**: When a brand spec path (or `work_dir` with `brand_spec_prompt.md`) is provided, load YAML and inject structured rules (and optionally the full YAML or a summary) into prompts; keep fallback to existing style guide path for backward compatibility during migration.
+- **Loader**: Add `blogging/shared/brand_spec.py` (or under `blogging/`) to load and validate `brand_spec_prompt.md` / `brand_spec.yaml` (Pydantic model or dataclass) and expose it to validators, compliance agent, and writer/copy-editor agents.
+- **Writer and Copy Editor agents**: When a brand spec path (or `work_dir` with `brand_spec_prompt.md`) is provided, load YAML and inject structured rules (and optionally the full YAML or a summary) into prompts; keep fallback to existing style guide path for backward compatibility during migration.
 
 **Files to add/change**:
 
 - New: `blogging/brand_spec_prompt.md` (or `blogging/docs/brand_spec_prompt.md`), `blogging/shared/brand_spec.py` (loader + schema).
-- Update: `blog_draft_agent`, `blog_copy_editor_agent` to accept `brand_spec_path` or `brand_spec` dict and use it when present.
+- Update: `blog_writer_agent`, `blog_copy_editor_agent` to accept `brand_spec_path` or `brand_spec` dict and use it when present.
 
 ---
 
@@ -301,17 +301,17 @@ flowchart LR
 
 ---
 
-### 4. Allowed claims policy (Research Librarian + Draft Writer)
+### 4. Allowed claims policy (Research Librarian + Writer)
 
 - **Research Librarian output**: Extend or wrap the current Research agent so that in addition to `research_packet.md` (e.g. current `compiled_document`), it produces `**allowed_claims.json**`: list of claims with `id`, `text`, `citations`, `risk_level`. Research agent should explicitly extract “evidence-backed factual claims” from sources and list them; optionally flag risky/weak statements.
 - **Schema**: Match spec example: `{ "topic": "...", "claims": [ { "id": "123", "text": "...", "citations": ["..."], "risk_level": "low" } ] }`.
-- **Draft Writer**: Instruct (via prompt and optional few-shot) to use **only** claims from `allowed_claims.json` and tag them in the draft as `[CLAIM:123]`. No new factual claims allowed; opinions or general advice need not be tagged.
+- **Writer**: Instruct (via prompt and optional few-shot) to use **only** claims from `allowed_claims.json` and tag them in the draft as `[CLAIM:123]`. No new factual claims allowed; opinions or general advice need not be tagged.
 - **Validator**: Claims check: (1) any sentence that looks like a factual claim (heuristic: numbers, “studies show”, “X%”, etc.) must have a `[CLAIM:id]` tag; (2) every `[CLAIM:id]` must exist in `allowed_claims.json`. Simplest reliable approach is requiring tags for all factual claims and strict ID matching.
 
 **Files to add/change**:
 
 - New: `blogging/blog_research_agent/allowed_claims.py` (schema + extraction prompt/step in research flow) or extend [blogging/blog_research_agent/agent.py](blogging/blog_research_agent/agent.py) to output `allowed_claims` and persist as `allowed_claims.json` in `work_dir`.
-- Update: [blogging/blog_draft_agent/prompts.py](blogging/blog_draft_agent/prompts.py) and agent to accept `allowed_claims.json` path/content and enforce tagging; [blogging/blog_draft_agent/models.py](blogging/blog_draft_agent/models.py) add optional `allowed_claims_path` or `allowed_claims` to `DraftInput`.
+- Update: [blogging/blog_writer_agent/prompts.py](blogging/blog_writer_agent/prompts.py) and agent to accept `allowed_claims.json` path/content and enforce tagging; [blogging/blog_writer_agent/models.py](blogging/blog_writer_agent/models.py) add optional `allowed_claims_path` or `allowed_claims` to `WriterInput`.
 - Update: Validator claims check to read `allowed_claims.json` and scan draft for tags and untagged factual-looking statements.
 
 ---
@@ -347,9 +347,9 @@ flowchart LR
 
 - **Orchestrator logic** (in `blog_writing_process` or new Editorial Director script):
   - After producing a draft candidate (e.g. `final.md`), run validators → `validator_report.json`; run Fact-Checker → risk/claims status; run Brand/Style Enforcer → `compliance_report.json`.
-  - If any of these is FAIL: pass `compliance_report.json` (and validator failure details) to the **Draft Writer** or **Line Editor** with instructions to apply `required_fixes` exactly and not introduce new factual claims. Re-run validators and compliance. Repeat until PASS or **max iterations** (e.g. 3–5).
+  - If any of these is FAIL: pass `compliance_report.json` (and validator failure details) to the **Writer** or **Line Editor** with instructions to apply `required_fixes` exactly and not introduce new factual claims. Re-run validators and compliance. Repeat until PASS or **max iterations** (e.g. 3–5).
   - **Escalation**: If max iterations reached, output best draft plus all failure reports and set status to `NEEDS_HUMAN_REVIEW`.
-- **Line Editor**: Spec calls out a separate “Line Editor” that tightens prose and applies brand constraints to produce `final.md`. Currently the Copy Editor only gives feedback. Options: (a) add a dedicated Line Editor agent that takes draft + compliance/validator feedback and outputs revised `final.md`; or (b) use the existing Draft revision path with Copy Editor feedback replaced or augmented by `required_fixes` from compliance. Prefer (b) for minimal new agents first, then add a dedicated Line Editor if needed.
+- **Line Editor**: Spec calls out a separate “Line Editor” that tightens prose and applies brand constraints to produce `final.md`. Currently the Copy Editor only gives feedback. Options: (a) add a dedicated Line Editor agent that takes draft + compliance/validator feedback and outputs revised `final.md`; or (b) use the existing Writer revision path with Copy Editor feedback replaced or augmented by `required_fixes` from compliance. Prefer (b) for minimal new agents first, then add a dedicated Line Editor if needed.
 - **Status codes**: Use `PASS`, `FAIL`, `NEEDS_HUMAN_REVIEW` in reports and orchestrator.
 
 **Files to change**:
@@ -365,7 +365,7 @@ flowchart LR
   - **Option B**: Extend the Review agent to output a fuller `content_brief.md` (audience + angles + outline) and persist it; then keep a thin orchestrator that sequences stages.
 - **Audience and Industry Analyst**: Could be a dedicated agent that writes the “Audience model” section of `content_brief.md` (pain points, incentives, vocabulary, taboos, objections). Same for **Trend and Angle Strategist** (3–5 angles, primary thesis, counterargument). Implement as separate small agents or as one “Planning” agent that fills the brief.
 - **Content Architect**: Spec says “Outline Engineer” that builds `outline.md` from brief + research and maps sections to goals. Current Review agent already produces an outline; rename or split so that “Content Architect” is responsible for `outline.md` from `content_brief.md` + `research_packet.md`.
-- **Developmental Editor**: Spec: “Fixes structure, flow, logic, pacing” → `draft_v2.md`. **Line Editor**: “Tightens prose, enforces style” → `final.md`. Today: Draft → Copy Editor feedback → Draft revises (no separate developmental vs line). Phased approach: (1) Keep current Draft + Copy Editor loop but add compliance/validator gates and required_fixes-driven revisions. (2) Optionally add a Developmental Editor step (Draft → Developmental → draft_v2) and a Line Editor step (draft_v2 → Line → final) for clearer separation.
+- **Developmental Editor**: Spec: “Fixes structure, flow, logic, pacing” → `draft_v2.md`. **Line Editor**: “Tightens prose, enforces style” → `final.md`. Today: Writer → Copy Editor feedback → Writer revises (no separate developmental vs line). Phased approach: (1) Keep current Writer + Copy Editor loop but add compliance/validator gates and required_fixes-driven revisions. (2) Optionally add a Developmental Editor step (Writer → Developmental → draft_v2) and a Line Editor step (draft_v2 → Line → final) for clearer separation.
 
 **Recommendation**: Implement **Phase 1** (artifacts, brand_spec, validators, allowed_claims, compliance agent, fact-check agent, rewrite loop) without adding all new agents. Add **Phase 2** (Editorial Director, Audience Analyst, Angle Strategist, Content Architect, Developmental + Line Editor, SEO/Packaging, Repurposing) as separate tasks so the pipeline first becomes “gate-based” and “auditable,” then “richer” in planning and editing stages.
 
@@ -405,9 +405,9 @@ A blog post is **publish-ready** when:
 Execute the frontmatter `todos` in this order for a runnable pipeline at each step:
 
 1. **Artifact layer** – `shared-dir` → `artifacts-module` → `artifact-constants` → `pipeline-work-dir` → `pipeline-persist-research` → `pipeline-persist-outline` → `pipeline-persist-drafts`.
-2. **Brand spec** – `brand-spec-schema` → `brand-spec-loader` → `brand-spec-yaml` → `draft-agent-brand-spec` → `copy-editor-brand-spec`.
+2. **Brand spec** – `brand-spec-schema` → `brand-spec-loader` → `brand-spec-yaml` → `writer-agent-brand-spec` → `copy-editor-brand-spec`.
 3. **Validators (no claims yet)** – `validators-module` → `validator-banned-phrases` → `validator-banned-patterns` → `validator-paragraph-length` → `validator-reading-level` → `validator-required-sections` → `validators-runner`. Add `tests-validators` when runner is done.
-4. **Allowed claims** – `allowed-claims-schema` → `research-output-claims` → `research-persist-claims` → `draft-input-claims` → `draft-prompts-claims` → `validator-claims-check`.
+4. **Allowed claims** – `allowed-claims-schema` → `research-output-claims` → `research-persist-claims` → `writer-input-claims` → `writer-prompts-claims` → `validator-claims-check`.
 5. **Compliance agent** – `compliance-agent-module` → `compliance-models` → `compliance-agent-run` → `compliance-veto` → `tests-compliance`.
 6. **Fact-Checker** – `fact-check-agent-module` → `fact-check-models` → `fact-check-agent-run`.
 7. **Closed-loop** – `orchestrator-gates` → `orchestrator-rewrite-loop` → `orchestrator-escalation` → `orchestrator-status-codes`.
