@@ -590,7 +590,11 @@ def run_pipeline(
                 # Ask the LLM to generate better titles based on the feedback
                 feedback_prompt = (
                     "Generate 5 new blog post title candidates based on this feedback.\n\n"
-                    f"TOPIC: {plan.overarching_topic}\n\n"
+                    f"TOPIC (the article's core argument — every title MUST align with this): {plan.overarching_topic}\n\n"
+                    "REQUIREMENTS:\n"
+                    "- Each title MUST accurately reflect the topic above. Do NOT generate titles that contradict or misrepresent the article's argument.\n"
+                    "- Each title should promise the reader they will learn something concrete and valuable.\n"
+                    "- Avoid vague or generic titles. Be specific about what the reader will gain.\n\n"
                 )
                 if liked:
                     feedback_prompt += "Titles the user LIKED (generate titles with a similar style/angle):\n"

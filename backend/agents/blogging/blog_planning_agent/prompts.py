@@ -101,6 +101,15 @@ CRITICAL RULES FOR PLAN QUALITY — a plan is NOT acceptable unless it meets ALL
 
 13. **title_candidates** must have AT LEAST 5 titles. Each title must include a full scoring breakdown across 5 dimensions (curiosity_gap, specificity, audience_fit, seo_potential, emotional_pull — each 0.0 to 1.0) plus a rationale explaining the score. The overall probability_of_success is the weighted average: curiosity_gap * 0.25 + specificity * 0.25 + audience_fit * 0.20 + seo_potential * 0.15 + emotional_pull * 0.15. Vary the styles: include at least one "how-to", one provocative/contrarian, one numbered list, and one that leads with a specific outcome or result.
 
+TITLE ACCURACY RULES (hard requirements — reject any title that violates these):
+- Every title MUST accurately reflect the overarching_topic. If the post argues FOR multi-agent architectures, the title must not frame them negatively. If the post is about a specific technology, the title must reference that technology or its core concept.
+- Never generate a title that contradicts the article's stance. Example: if the overarching_topic is about choosing between agent patterns in AWS Strands, do NOT generate "Stop Over-Engineering: Why Single Agents Are All You Need" — that contradicts the nuanced argument.
+- Titles must not contain redundant or contradictory clauses (e.g., avoid titles where the subtitle restates or contradicts the main title).
+- Each title should promise the reader they will LEARN something concrete and valuable. The reader should think "I need to read this — I'll walk away knowing something I didn't before."
+  BAD: "A Guide to Agent Architectures" (vague, no learning promise)
+  GOOD: "The 3 Agent Patterns That Handle 90% of Real-World AI Tasks (and When to Use Each)" (specific, promises concrete takeaway)
+- Before finalizing each title, verify it against the overarching_topic: does the title support, reflect, or accurately tease the article's actual argument? If not, discard it and generate a replacement.
+
 Additional rules:
 - Do not invent citations; only reference themes present in the digest.
 - use research_support_note to tie sections to sources, or set gap_flag true if research is thin.

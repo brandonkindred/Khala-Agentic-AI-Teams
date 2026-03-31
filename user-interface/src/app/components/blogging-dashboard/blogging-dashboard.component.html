@@ -276,7 +276,7 @@
         <mat-card-header>
           <mat-icon mat-card-avatar>spellcheck</mat-icon>
           <mat-card-title>Rate These Titles</mat-card-title>
-          <mat-card-subtitle>Love a title to select it, or rate them all and we'll generate better options</mat-card-subtitle>
+          <mat-card-subtitle>Love a title to use it. Like or dislike to get new suggestions.</mat-card-subtitle>
         </mat-card-header>
         <mat-card-content>
           @if (collaborationError) { <app-error-message [message]="collaborationError" /> }
@@ -289,6 +289,7 @@
                           [class.rating-active]="getTitleRating(choice.title) === 'dislike'"
                           class="rating-dislike"
                           (click)="rateTitle(choice.title, 'dislike')"
+                          [disabled]="titleRatingSubmitting"
                           matTooltip="Dislike">
                     <mat-icon>thumb_down</mat-icon>
                   </button>
@@ -296,6 +297,7 @@
                           [class.rating-active]="getTitleRating(choice.title) === 'like'"
                           class="rating-like"
                           (click)="rateTitle(choice.title, 'like')"
+                          [disabled]="titleRatingSubmitting"
                           matTooltip="Like">
                     <mat-icon>thumb_up</mat-icon>
                   </button>
@@ -303,6 +305,7 @@
                           [class.rating-active]="getTitleRating(choice.title) === 'love'"
                           class="rating-love"
                           (click)="rateTitle(choice.title, 'love')"
+                          [disabled]="titleRatingSubmitting"
                           matTooltip="Love — use this title">
                     <mat-icon>favorite</mat-icon>
                   </button>
@@ -310,18 +313,11 @@
               </div>
             }
           </div>
-          <div class="title-submit-row">
-            <button mat-raised-button color="primary"
-                    (click)="submitTitleRatings()"
-                    [disabled]="titleRatingSubmitting || !canSubmitTitleRatings()">
-              {{ titleRatingSubmitting ? 'Submitting...' : 'Submit Ratings' }}
-            </button>
-            <span class="title-submit-hint">
-              @if (!canSubmitTitleRatings()) {
-                Rate all titles to continue
-              }
-            </span>
-          </div>
+          @if (titleRatingSubmitting) {
+            <div class="title-submit-row">
+              <span class="title-submit-hint">Submitting...</span>
+            </div>
+          }
         </mat-card-content>
       </mat-card>
     }
