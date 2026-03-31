@@ -174,9 +174,9 @@ def mark_all_running_jobs_failed(
     reason: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
-    """Mark all pending or running jobs as failed (e.g. on server shutdown)."""
+    """Mark all pending or running jobs as interrupted (e.g. on server shutdown)."""
     try:
-        _client(cache_dir).mark_all_active_jobs_failed(reason)
+        _client(cache_dir).mark_all_active_jobs_interrupted(reason)
     except Exception as e:
         logger.warning("mark_all_running_jobs_failed: %s", e)
 
