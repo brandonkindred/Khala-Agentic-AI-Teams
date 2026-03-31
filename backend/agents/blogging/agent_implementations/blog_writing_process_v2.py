@@ -540,15 +540,14 @@ def run_pipeline(
 
             while True:
                 title_round += 1
-                update_blog_job(
-                    job_id,
-                    waiting_for_title_selection=True,
-                    title_choices=title_choices,
-                )
+                # Use job_updater for all fields so SSE clients receive the
+                # waiting_for_title_selection and title_choices updates.
                 job_updater(
                     phase="title_selection",
                     progress=25,
                     status_text=f"Rate titles (round {title_round}, {len(title_choices)} candidates)...",
+                    waiting_for_title_selection=True,
+                    title_choices=title_choices,
                 )
 
                 # Block until user submits ratings
@@ -574,12 +573,14 @@ def run_pipeline(
                 # No love — collect ratings and generate new titles
                 round_ratings = job_data.get("title_ratings", [])
                 all_ratings.extend(round_ratings)
-                liked = [r["title"] for r in round_ratings if r.get("rating") == "like"]
-                disliked = [r["title"] for r in round_ratings if r.get("rating") == "dislike"]
+
+                # Build feedback from ALL accumulated ratings for richer signal
+                all_liked = [r["title"] for r in all_ratings if r.get("rating") == "like"]
+                all_disliked = [r["title"] for r in all_ratings if r.get("rating") == "dislike"]
 
                 logger.info(
-                    "Title ratings round %s: %s liked, %s disliked — generating new candidates",
-                    title_round, len(liked), len(disliked),
+                    "Title ratings round %s: %s liked, %s disliked (cumulative) — generating new candidates",
+                    title_round, len(all_liked), len(all_disliked),
                 )
                 job_updater(
                     phase="title_selection",
@@ -590,14 +591,26 @@ def run_pipeline(
                 # Ask the LLM to generate better titles based on the feedback
                 feedback_prompt = (
                     "Generate 5 new blog post title candidates based on this feedback.\n\n"
-                    f"TOPIC: {plan.overarching_topic}\n\n"
+                    f"TOPIC (the article's core argument — every title MUST align with this): {plan.overarching_topic}\n\n"
                 )
-                if liked:
+                if plan.target_reader:
+                    feedback_prompt += f"TARGET READER: {plan.target_reader}\n\n"
+                section_titles = [sec.title for sec in sorted(plan.sections, key=lambda s: s.order)]
+                if section_titles:
+                    feedback_prompt += "ARTICLE SECTIONS:\n"
+                    feedback_prompt += "\n".join(f"- {t}" for t in section_titles) + "\n\n"
+                feedback_prompt += (
+                    "REQUIREMENTS:\n"
+                    "- Each title MUST accurately reflect the topic above. Do NOT generate titles that contradict or misrepresent the article's argument.\n"
+                    "- Each title should promise the reader they will learn something concrete and valuable.\n"
+                    "- Avoid vague or generic titles. Be specific about what the reader will gain.\n\n"
+                )
+                if all_liked:
                     feedback_prompt += "Titles the user LIKED (generate titles with a similar style/angle):\n"
-                    feedback_prompt += "\n".join(f"- {t}" for t in liked) + "\n\n"
-                if disliked:
+                    feedback_prompt += "\n".join(f"- {t}" for t in all_liked) + "\n\n"
+                if all_disliked:
                     feedback_prompt += "Titles the user DISLIKED (avoid this style/angle):\n"
-                    feedback_prompt += "\n".join(f"- {t}" for t in disliked) + "\n\n"
+                    feedback_prompt += "\n".join(f"- {t}" for t in all_disliked) + "\n\n"
 
                 # Include all previous titles so the LLM doesn't repeat them
                 all_previous = [r["title"] for r in all_ratings]

@@ -6,7 +6,7 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { marked } from 'marked';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatCardModule } from '@angular/material/card';
-import { Subscription, timer } from 'rxjs';
+import { Observable, Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import type { BlogJobStreamEvent } from '../../models';
 import { BloggingApiService } from '../../services/blogging-api.service';
@@ -701,51 +701,45 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
 
   rateTitle(title: string, rating: 'dislike' | 'like' | 'love'): void {
     this.titleRatings[title] = rating;
+    if (rating === 'love') {
+      this.selectTitle(title);
+    } else {
+      this.submitSingleTitleRating(title, rating);
+    }
   }
 
-  getTitleRating(title: string): string | undefined {
+  getTitleRating(title: string): 'dislike' | 'like' | 'love' | undefined {
     return this.titleRatings[title];
   }
 
-  canSubmitTitleRatings(): boolean {
-    const choices = this.selectedJobStatus?.title_choices ?? [];
-    return choices.length > 0 && choices.every((c) => !!this.titleRatings[c.title]);
+  /** Submit a single like/dislike rating to trigger new title generation. */
+  submitSingleTitleRating(title: string, rating: 'dislike' | 'like'): void {
+    const jobId = this.selectedBlogJob?.job_id;
+    if (!jobId || this.titleRatingSubmitting) return;
+    this.submitTitleAction(this.api.rateTitles(jobId, [{ title, rating }]));
   }
 
-  submitTitleRatings(): void {
+  /** Select a loved title directly, advancing the pipeline. */
+  selectTitle(title: string): void {
     const jobId = this.selectedBlogJob?.job_id;
-    if (!jobId) return;
-    const choices = this.selectedJobStatus?.title_choices ?? [];
-    const ratings = choices.map((c) => ({
-      title: c.title,
-      rating: this.titleRatings[c.title] ?? ('like' as const),
-    }));
+    if (!jobId || this.titleRatingSubmitting) return;
+    this.submitTitleAction(this.api.selectTitle(jobId, title));
+  }
+
+  /** Shared handler for title selection API calls. */
+  private submitTitleAction(action$: Observable<BlogJobStatusResponse>): void {
     this.titleRatingSubmitting = true;
     this.collaborationError = null;
-    this.api.rateTitles(jobId, ratings).subscribe({
+    action$.subscribe({
       next: (status) => {
         this.selectedJobStatus = status;
         this.titleRatings = {};
         this.titleRatingSubmitting = false;
       },
       error: (err) => {
-        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit title ratings';
+        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit title rating';
+        // Keep titleRatings so the user can see which title they tried to rate
         this.titleRatingSubmitting = false;
-      },
-    });
-  }
-
-  /** Legacy: direct title selection (kept for backward compat). */
-  selectTitle(title: string): void {
-    const jobId = this.selectedBlogJob?.job_id;
-    if (!jobId) return;
-    this.collaborationError = null;
-    this.api.selectTitle(jobId, title).subscribe({
-      next: (status) => {
-        this.selectedJobStatus = status;
-      },
-      error: (err) => {
-        this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to submit title selection';
       },
     });
   }
