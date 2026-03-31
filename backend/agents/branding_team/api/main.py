@@ -471,6 +471,12 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     # Attach an existing conversation if provided, otherwise create a new one.
     existing_conv_id = (payload.conversation_id or "").strip() or None
     if existing_conv_id and conversation_store.get(existing_conv_id) is not None:
+        existing_brand = conversation_store.get_conversation_brand_id(existing_conv_id)
+        if existing_brand:
+            raise HTTPException(
+                status_code=409,
+                detail="Conversation is already attached to another brand",
+            )
         conversation_store.set_brand(existing_conv_id, brand.id)
         conversation_store.update_mission(existing_conv_id, mission)
         conv_id = existing_conv_id
