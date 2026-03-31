@@ -1061,6 +1061,83 @@ def get_strategy_lab_results(winning: Optional[bool] = None) -> StrategyLabResul
     )
 
 
+class ClearStrategyLabStorageResponse(BaseModel):
+    """Counts of job-service rows removed (Postgres ``jobs`` or local file cache)."""
+
+    deleted_lab_records: int = 0
+    deleted_lab_strategies: int = 0
+    deleted_lab_backtests: int = 0
+    deleted_paper_trading_sessions: int = 0
+    message: str = "Strategy lab and paper-trading session storage cleared."
+
+
+def _purge_strategy_lab_job_storage() -> dict[str, int]:
+    """Delete strategy lab jobs plus all paper-trading session jobs for this team."""
+    from job_service_client import JobServiceClient
+
+    deleted_lab_records = 0
+    deleted_lab_strategies = 0
+    deleted_lab_backtests = 0
+    deleted_paper_trading_sessions = 0
+
+    lab_client = JobServiceClient(team="investment_strategy_lab_records")
+    for job in lab_client.list_jobs() or []:
+        jid = job.get("job_id")
+        if jid and lab_client.delete_job(str(jid)):
+            deleted_lab_records += 1
+
+    strat_client = JobServiceClient(team="investment_strategies")
+    for job in strat_client.list_jobs() or []:
+        jid = str(job.get("job_id") or "")
+        if jid.startswith("strat-lab-") and strat_client.delete_job(jid):
+            deleted_lab_strategies += 1
+
+    bt_client = JobServiceClient(team="investment_backtests")
+    for job in bt_client.list_jobs() or []:
+        jid = str(job.get("job_id") or "")
+        if jid.startswith("bt-lab-") and bt_client.delete_job(jid):
+            deleted_lab_backtests += 1
+
+    paper_client = JobServiceClient(team="investment_paper_trading_sessions")
+    for job in paper_client.list_jobs() or []:
+        jid = job.get("job_id")
+        if jid and paper_client.delete_job(str(jid)):
+            deleted_paper_trading_sessions += 1
+
+    return {
+        "deleted_lab_records": deleted_lab_records,
+        "deleted_lab_strategies": deleted_lab_strategies,
+        "deleted_lab_backtests": deleted_lab_backtests,
+        "deleted_paper_trading_sessions": deleted_paper_trading_sessions,
+    }
+
+
+@app.delete("/strategy-lab/storage", response_model=ClearStrategyLabStorageResponse)
+def clear_strategy_lab_storage() -> ClearStrategyLabStorageResponse:
+    """
+    Remove all persisted strategy lab data from the job service (Postgres ``strands_jobs.jobs``
+    when ``JOB_SERVICE_URL`` is set, or local ``AGENT_CACHE`` files otherwise).
+
+    Deletes:
+
+    - Team ``investment_strategy_lab_records`` (all lab run cards).
+    - Team ``investment_strategies`` rows whose job id starts with ``strat-lab-`` (lab-generated only).
+    - Team ``investment_backtests`` rows whose job id starts with ``bt-lab-``.
+    - Team ``investment_paper_trading_sessions`` (all paper trading runs tied to the lab flow).
+
+    Does **not** remove advisor sessions, IPS, proposals, or strategies/backtests created via
+    ``POST /strategies`` / ``POST /backtests`` outside the lab.
+    """
+    with _lock:
+        counts = _purge_strategy_lab_job_storage()
+    return ClearStrategyLabStorageResponse(
+        deleted_lab_records=counts["deleted_lab_records"],
+        deleted_lab_strategies=counts["deleted_lab_strategies"],
+        deleted_lab_backtests=counts["deleted_lab_backtests"],
+        deleted_paper_trading_sessions=counts["deleted_paper_trading_sessions"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Paper Trading — simulated live trading with real market data
 # ---------------------------------------------------------------------------
