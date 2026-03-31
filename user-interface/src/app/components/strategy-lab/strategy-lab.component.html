@@ -162,6 +162,21 @@
             <!-- Expandable panels -->
             <mat-accordion class="card-accordion" multi>
 
+              @if (hasSignalBrief(record)) {
+                <mat-expansion-panel class="signal-panel">
+                  <mat-expansion-panel-header>
+                    <mat-panel-title>
+                      <mat-icon class="panel-icon">radar</mat-icon>
+                      Signal intelligence
+                    </mat-panel-title>
+                    <mat-panel-description>
+                      Expert brief for this batch (not financial advice)
+                    </mat-panel-description>
+                  </mat-expansion-panel-header>
+                  <pre class="signal-json">{{ record.signal_intelligence_brief | json }}</pre>
+                </mat-expansion-panel>
+              }
+
               <!-- Trade Ledger panel -->
               @if (record.backtest.trades.length > 0) {
                 <mat-expansion-panel class="ledger-panel">

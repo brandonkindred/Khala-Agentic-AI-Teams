@@ -23,10 +23,14 @@ flowchart LR
     Prof --> IPS
   end
   subgraph lab [Strategy Lab track]
+    MD[Free-tier market snapshot]
+    SIG[SignalIntelligenceExpert]
     SI[StrategyIdeationAgent]
     SL[POST /strategy-lab/run]
     ST[POST /strategies]
     BT[POST /backtests]
+    MD --> SIG
+    SIG --> SI
     SI --> SL
     ST --> BT
   end
@@ -46,7 +50,8 @@ flowchart LR
 | **PromotionGateAgent** | Yes (IPS) | Live/paper gates from IPS |
 | **ValidationAgent** | No | Only `ValidationReport` checklist |
 | **InvestmentCommitteeAgent** | Yes (user id) | Memo `prepared_for_user_id` |
-| **StrategyIdeationAgent** | No | Prior lab results only |
+| **SignalIntelligenceExpert** | No | Prior lab results + `MarketLabContext` (free-tier APIs); brief persisted on `StrategyLabRecord` |
+| **StrategyIdeationAgent** | No | Prior lab results + optional precomputed signal brief (Policy B: one brief per batch) |
 | **InvestmentTeamOrchestrator** | Mixed | Promotion needs IPS; web tool coordinator has no profile |
 | **InvestmentWebInterfaceCoordinator** | No investment profile | Provider login/config only |
 

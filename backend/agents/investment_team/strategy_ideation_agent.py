@@ -10,6 +10,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from llm_service.interface import LLMClient
 
 from .models import StrategyLabRecord, TradeRecord
+from .signal_intelligence_agent import brief_to_prompt_block
+from .signal_intelligence_models import SignalIntelligenceBriefV1
+from .strategy_lab_context import asset_class_mix_hint, format_prior_results
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,8 @@ Goal: exceed 8% annualized in principle, with explicit risk controls.
 
 ## Asset-class diversity (mandatory)
 {asset_class_mix_hint}
+
+{signal_section}
 
 ## Multi-signal & confounding factors (mandatory)
 Design strategies as a **mixture of signal types**, not a single indicator. At minimum, combine ideas from:
@@ -170,100 +175,6 @@ Return ONLY JSON with no markdown:
 """
 
 
-def _format_prior_results(records: List[StrategyLabRecord], *, max_records: int = 50) -> str:
-    if not records:
-        return "None yet — this is the first strategy."
-    ordered = sorted(records, key=lambda x: x.created_at)
-    if len(ordered) > max_records:
-        ordered = ordered[-max_records:]
-    lines = []
-    for i, r in enumerate(ordered, start=1):
-        label = "WINNING" if r.is_winning else "LOSING"
-        hyp = r.strategy.hypothesis.replace("\n", " ").strip()
-        if len(hyp) > 160:
-            hyp = hyp[:157] + "..."
-        analysis = (r.analysis_narrative or "").replace("\n", " ").strip()
-        if len(analysis) > 420:
-            analysis = analysis[:417] + "..."
-        rationale = (r.strategy_rationale or "").replace("\n", " ").strip()
-        if len(rationale) > 220:
-            rationale = rationale[:217] + "..."
-        res = r.backtest.result
-        lines.append(
-            f"{i}. [{label}] {r.strategy.asset_class} | {hyp}\n"
-            f"   Metrics: annual {res.annualized_return_pct:.1f}%, Sharpe {res.sharpe_ratio:.2f}, "
-            f"max DD {res.max_drawdown_pct:.1f}%, win rate {res.win_rate_pct:.1f}%\n"
-            f"   Ideation rationale: {rationale}\n"
-            f"   Post-backtest analysis: {analysis}"
-        )
-    return "\n\n".join(lines)
-
-
-_CANONICAL_ASSET_CLASSES: tuple[str, ...] = (
-    "stocks",
-    "crypto",
-    "forex",
-    "options",
-    "futures",
-    "commodities",
-)
-
-
-def _normalize_asset_class(ac: str) -> str:
-    x = (ac or "").lower().strip()
-    if x in ("equities", "equity", "stock"):
-        return "stocks"
-    if x in ("fx",):
-        return "forex"
-    if x in ("commodity", "metal", "energy"):
-        return "commodities"
-    if x in _CANONICAL_ASSET_CLASSES:
-        return x
-    return "stocks"
-
-
-def _asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) -> str:
-    """Steer the LLM toward a balanced mix of asset classes across lab runs."""
-    if not records:
-        return (
-            "No prior lab strategies. Choose **asset_class** from "
-            "stocks, crypto, forex, options, futures, or commodities with similar frequency over time — "
-            "do **not** default to stocks; pick the class that best fits your multi-signal story."
-        )
-
-    ordered = sorted(records, key=lambda x: x.created_at)
-    sample = ordered[-tail:] if len(ordered) > tail else ordered
-    counts = {c: 0 for c in _CANONICAL_ASSET_CLASSES}
-    for r in sample:
-        k = _normalize_asset_class(r.strategy.asset_class)
-        if k in counts:
-            counts[k] += 1
-        else:
-            counts["stocks"] += 1
-
-    n_sample = len(sample)
-    stock_share = counts["stocks"] / n_sample if n_sample else 0.0
-    min_n = min(counts.values())
-    underrep = [c for c, n in counts.items() if n == min_n]
-
-    parts: List[str] = [
-        "Recent asset-class counts (last "
-        f"{n_sample} strategies): "
-        + ", ".join(f"{k}={v}" for k, v in counts.items())
-        + "."
-    ]
-    if stock_share > 0.35 and n_sample >= 2:
-        parts.append(
-            "Equities are relatively heavy in this window — **strongly prefer** "
-            "crypto, forex, options, futures, or commodities for this run if you can state coherent rules."
-        )
-    parts.append(
-        "Underrepresented line(s) to favor when ties: "
-        f"{', '.join(underrep)} — use one of these **unless** your thesis clearly requires a different class."
-    )
-    return " ".join(parts)
-
-
 def _format_simulated_trades_summary(trades: List[TradeRecord], *, max_sample_rows: int = 14) -> str:
     """Compact evidence string from the simulated ledger for analysis + self-review."""
     if not trades:
@@ -334,22 +245,39 @@ class StrategyIdeationAgent:
     def ideate_strategy(
         self,
         prior_results: Optional[List[StrategyLabRecord]] = None,
+        *,
+        precomputed_signal_brief: Optional[SignalIntelligenceBriefV1] = None,
     ) -> Tuple[Dict[str, Any], str]:
         """
         Generate a new strategy spec dict and rationale.
+
+        When ``precomputed_signal_brief`` is set (Policy B: one brief per batch), it is injected
+        into the ideation prompt inside guarded delimiters.
 
         Returns:
             (strategy_dict, rationale) — strategy_dict matches StrategySpec fields,
             rationale is the LLM's explanation for the choice.
         """
         prior_results = prior_results or []
-        prior_text = _format_prior_results(prior_results)
-        mix_hint = _asset_class_mix_hint(prior_results)
+        prior_text = format_prior_results(prior_results)
+        mix_hint = asset_class_mix_hint(prior_results)
+
+        if precomputed_signal_brief is not None:
+            inner = brief_to_prompt_block(precomputed_signal_brief)
+            signal_section = (
+                "## Signal intelligence brief (research lab context; not financial advice)\n"
+                "<signal_intelligence_brief>\n"
+                f"{inner}\n"
+                "</signal_intelligence_brief>"
+            )
+        else:
+            signal_section = ""
 
         prompt = _IDEATION_PROMPT.format(
             n_prior=len(prior_results),
             prior_results_text=prior_text,
             asset_class_mix_hint=mix_hint,
+            signal_section=signal_section,
         )
 
         data = self.llm.complete_json(

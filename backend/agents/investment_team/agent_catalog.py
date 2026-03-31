@@ -17,6 +17,20 @@ class AgentDefinition(BaseModel):
 
 CORE_AGENTS: List[AgentDefinition] = [
     AgentDefinition(
+        name="Signal Intelligence Expert",
+        role=(
+            "LLM step that produces a versioned JSON brief (macro/micro themes, hypotheses, trade-structure hints) "
+            "from prior Strategy Lab results, asset-class mix steering, and a free-tier market snapshot "
+            "(FX, optional FRED macro, optional crypto) before StrategyIdeationAgent runs."
+        ),
+        inputs=["prior StrategyLabRecord rows", "asset_class_mix_hint", "MarketLabContext"],
+        outputs=["SignalIntelligenceBriefV1"],
+        hard_rules=[
+            "Ground hypotheses in priors and/or the market snapshot; use as-of language when citing data.",
+            "Treat external feeds as delayed and non-authoritative—not investment advice.",
+        ],
+    ),
+    AgentDefinition(
         name="Financial Advisor Agent",
         role="Conversational chatbot that guides users through building an InvestmentProfile via friendly Q&A instead of forms.",
         inputs=["user chat messages"],

@@ -472,6 +472,9 @@ export interface BacktestRecord {
 // Strategy Lab Models
 // ---------------------------------------------------------------------------
 
+/** Signal Intelligence Expert output or skip metadata from the strategy lab batch run. */
+export type SignalIntelligenceBriefPayload = Record<string, unknown> | null;
+
 export interface StrategyLabRecord {
   lab_record_id: string;
   strategy: StrategySpec;
@@ -480,6 +483,8 @@ export interface StrategyLabRecord {
   strategy_rationale: string;
   analysis_narrative: string;
   created_at: string;
+  /** Present on new runs: expert JSON or `{ skipped, skipped_reason }`. Legacy rows: undefined/null. */
+  signal_intelligence_brief?: SignalIntelligenceBriefPayload;
 }
 
 export interface RunStrategyLabRequest {

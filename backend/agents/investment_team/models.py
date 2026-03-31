@@ -353,6 +353,10 @@ class StrategyLabRecord(BaseModel):
     strategy_rationale: str  # why the agent chose this strategy
     analysis_narrative: str  # LLM post-backtest analysis
     created_at: str
+    signal_intelligence_brief: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Signal Intelligence Expert JSON (brief_version, themes, …) or skipped metadata; null for legacy rows.",
+    )
 
 
 # ---------------------------------------------------------------------------

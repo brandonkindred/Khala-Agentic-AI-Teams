@@ -1,5 +1,5 @@
 import { Component, OnInit, inject } from '@angular/core';
-import { CommonModule, DecimalPipe, DatePipe, CurrencyPipe } from '@angular/common';
+import { CommonModule, DecimalPipe, DatePipe, CurrencyPipe, JsonPipe } from '@angular/common';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -26,6 +26,7 @@ type FilterMode = 'all' | 'winning' | 'losing';
     DecimalPipe,
     DatePipe,
     CurrencyPipe,
+    JsonPipe,
     MatCardModule,
     MatButtonModule,
     MatIconModule,
@@ -165,5 +166,9 @@ export class StrategyLabComponent implements OnInit {
     if (price >= 1000) return price.toFixed(0);
     if (price >= 1) return price.toFixed(2);
     return price.toFixed(4);
+  }
+
+  hasSignalBrief(record: StrategyLabRecord): boolean {
+    return record.signal_intelligence_brief != null && Object.keys(record.signal_intelligence_brief).length > 0;
   }
 }

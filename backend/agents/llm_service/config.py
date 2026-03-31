@@ -83,6 +83,8 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     "personal_assistant": "llama3.2",
     "nutrition_meal_planning": "llama3.2",
     "accessibility_audit": "llama3.1",
+    "strategy_ideation": "qwen3.5:397b-cloud",
+    "signal_intelligence": "qwen3.5:397b-cloud",
 }
 
 DEFAULT_FALLBACK_MODEL = "qwen3.5:397b-cloud"

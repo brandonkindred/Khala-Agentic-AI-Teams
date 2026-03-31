@@ -570,3 +570,9 @@ def test_agent_catalog_includes_financial_advisor() -> None:
     from agents.investment_team.agent_catalog import CORE_AGENTS
 
     assert any(agent.name == "Financial Advisor Agent" for agent in CORE_AGENTS)
+
+
+def test_agent_catalog_includes_signal_intelligence_expert() -> None:
+    from agents.investment_team.agent_catalog import CORE_AGENTS
+
+    assert any(agent.name == "Signal Intelligence Expert" for agent in CORE_AGENTS)

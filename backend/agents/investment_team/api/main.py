@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -17,6 +18,11 @@ from investment_team.agents import (
     FinancialAdvisorAgent,
     InvestmentCommitteeAgent,
     PolicyGuardianAgent,
+)
+from investment_team.market_lab_data import (
+    FreeTierMarketDataProvider,
+    MarketLabContext,
+    StrategyLabDataRequest,
 )
 from investment_team.models import (
     IPS,
@@ -48,6 +54,8 @@ from investment_team.models import (
     WorkflowMode,
 )
 from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
+from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
+from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
 from investment_team.strategy_ideation_agent import StrategyIdeationAgent
 
 logging.basicConfig(level=logging.INFO)
@@ -1073,6 +1081,9 @@ def _normalize_strategy_lab_asset_class(raw: object) -> str:
 def _run_one_strategy_lab_cycle(
     agent: StrategyIdeationAgent,
     config: BacktestConfig,
+    *,
+    precomputed_signal_brief: Optional[SignalIntelligenceBriefV1] = None,
+    signal_brief_storage: Optional[Dict[str, Any]] = None,
 ) -> StrategyLabRecord:
     """Single ideation → backtest → analysis; persists to store so the next cycle sees full history."""
     with _lock:
@@ -1082,7 +1093,10 @@ def _run_one_strategy_lab_cycle(
     prior_records.sort(key=lambda r: r.created_at)
 
     try:
-        strategy_data, rationale = agent.ideate_strategy(prior_results=prior_records)
+        strategy_data, rationale = agent.ideate_strategy(
+            prior_results=prior_records,
+            precomputed_signal_brief=precomputed_signal_brief,
+        )
     except Exception as exc:
         logger.error("Strategy ideation failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Strategy ideation failed: {exc}") from exc
@@ -1149,6 +1163,7 @@ def _run_one_strategy_lab_cycle(
         strategy_rationale=rationale,
         analysis_narrative=narrative,
         created_at=now,
+        signal_intelligence_brief=signal_brief_storage,
     )
 
     with _lock:
@@ -1159,12 +1174,22 @@ def _run_one_strategy_lab_cycle(
     return record
 
 
+def _strategy_lab_signal_expert_enabled() -> bool:
+    return os.environ.get("STRATEGY_LAB_SIGNAL_EXPERT_ENABLED", "true").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+
+
 @app.post("/strategy-lab/run", response_model=StrategyLabRunResponse)
 def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunResponse:
     """
     Ideate novel swing trading strategies using the LLM (one per step), backtest each,
     then generate an analysis narrative. Each step sees all prior lab records including
     metrics, outcomes, and post-backtest narratives. Default batch size is 10 per run.
+
+    Policy B: one Signal Intelligence brief + one market snapshot per batch; reused for each cycle.
     """
     from llm_service.factory import get_client
 
@@ -1180,10 +1205,78 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunResponse:
         slippage_bps=request.slippage_bps,
     )
 
+    precomputed_brief: Optional[SignalIntelligenceBriefV1] = None
+    signal_brief_storage: Optional[Dict[str, Any]] = None
+    provider: Optional[FreeTierMarketDataProvider] = None
+
+    if _strategy_lab_signal_expert_enabled():
+        provider = FreeTierMarketDataProvider()
+        try:
+            market_ctx = provider.fetch_context(
+                StrategyLabDataRequest(benchmark_symbol=request.benchmark_symbol)
+            )
+        except Exception as exc:
+            logger.warning("Market data fetch failed: %s", exc)
+            market_ctx = MarketLabContext(
+                fetched_at=_now(),
+                degraded=True,
+                degraded_reason=str(exc),
+                sources_used=[],
+            )
+        with _lock:
+            raw_prior = list(_strategy_lab_records.values())
+        prior_for_brief = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior]
+        prior_for_brief.sort(key=lambda r: r.created_at)
+
+        llm_signal = get_client("signal_intelligence")
+        expert = SignalIntelligenceExpert(llm_signal)
+        t0 = datetime.now(tz=timezone.utc)
+        try:
+            brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
+            precomputed_brief = brief
+            signal_brief_storage = brief.model_dump(mode="json")
+            prov_text = market_ctx.as_prompt_text()
+            signal_brief_storage["brief_provenance"] = {
+                "expert": "signal_intelligence_v1",
+                "market_snapshot_hash": hashlib.sha256(prov_text.encode()).hexdigest()[:16],
+                "market_fetched_at": market_ctx.fetched_at,
+                "market_degraded": market_ctx.degraded,
+                "duration_ms": int(
+                    (datetime.now(tz=timezone.utc) - t0).total_seconds() * 1000
+                ),
+            }
+            logger.info(
+                "signal_intelligence brief_version=%s len=%s degraded_market=%s",
+                signal_brief_storage.get("brief_version"),
+                len(str(signal_brief_storage)),
+                market_ctx.degraded,
+            )
+        except Exception as exc:
+            logger.warning("Signal intelligence expert failed: %s", exc)
+            precomputed_brief = None
+            signal_brief_storage = {
+                "skipped": True,
+                "skipped_reason": "expert_failed",
+                "error": str(exc)[:500],
+            }
+        finally:
+            if provider is not None:
+                provider.close()
+    else:
+        signal_brief_storage = {
+            "skipped": True,
+            "skipped_reason": "signal_expert_disabled",
+        }
+
     records: List[StrategyLabRecord] = []
     for i in range(request.batch_size):
         try:
-            record = _run_one_strategy_lab_cycle(agent, config)
+            record = _run_one_strategy_lab_cycle(
+                agent,
+                config,
+                precomputed_signal_brief=precomputed_brief,
+                signal_brief_storage=signal_brief_storage,
+            )
         except HTTPException:
             raise
         except Exception as exc:
