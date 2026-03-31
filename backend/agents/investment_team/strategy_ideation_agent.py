@@ -18,34 +18,45 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _IDEATION_SYSTEM = (
-    "You are an expert quantitative trading strategy designer specializing in swing trading. "
-    "Your role is to generate novel, testable trading strategies for stocks and cryptocurrency markets. "
-    "Focus on strategies that could realistically achieve 8%+ annualized returns through systematic rules."
+    "You are an expert quantitative trading strategy designer for multi-asset swing and short-horizon systems. "
+    "You combine several signal families (price/volatility, macro, sentiment, corporate events) into coherent rules. "
+    "You explicitly reason about information not in raw OHLCV: news and social sentiment, issuer filings, "
+    "macro and micro structure, liquidity regimes, and confounding drivers that backtests may omit. "
+    "You diversify across asset classes (stocks, crypto, forex, options, futures, commodities) rather than "
+    "defaulting to equities."
 )
 
 _IDEATION_PROMPT = """\
-Generate a novel swing trading strategy for stocks or cryptocurrency.
-
-Swing trading targets holding periods of 2–14 days, capturing short-term price swings.
-Goal: exceed 8% annualized return with controlled drawdown.
+Generate ONE novel swing-style strategy (typical holds ~2–14 days unless the asset class implies shorter).
+Goal: exceed 8% annualized in principle, with explicit risk controls.
 
 ## Prior Strategy Results ({n_prior} tested so far, chronological)
 {prior_results_text}
 
+## Asset-class diversity (mandatory)
+{asset_class_mix_hint}
+
+## Multi-signal & confounding factors (mandatory)
+Design strategies as a **mixture of signal types**, not a single indicator. At minimum, combine ideas from:
+- **Market microstructure / price**: momentum, mean reversion, volatility/volume regimes, cross-asset leads.
+- **Macro & micro dynamics**: rates, FX, sector rotation, carry, liquidity, seasonal or event windows.
+- **Information not in price alone** (describe how you would operationalize as rules, even if data is proxy/synthetic in backtest): news sentiment, social/media buzz, earnings/guidance or other **issuer financial disclosures**, regulatory/legal catalysts, commodity supply/demand narratives.
+Name which confounders you are leaning on and how they interact with price signals.
+
 ## Instructions
-Each prior entry includes: outcome (WINNING/LOSING vs 8% annual), key metrics, the ideation rationale, and the post-backtest analysis (why it succeeded or failed).
-Generate ONE new strategy that DIFFERS from all of the above — explore under-tested approaches and learn from those outcomes.
+Each prior entry includes outcome, metrics, rationale, and post-backtest analysis. Generate a strategy that **differs** from prior ones and learns from their failures.
 Return ONLY a JSON object with no markdown:
 {{
-  "asset_class": "stocks" or "crypto",
-  "hypothesis": "1-2 sentence investment thesis",
-  "signal_definition": "specific technical or fundamental signal description",
-  "entry_rules": ["entry rule 1", "entry rule 2", "entry rule 3"],
+  "asset_class": "stocks" | "crypto" | "forex" | "options" | "futures" | "commodities",
+  "hypothesis": "1-3 sentence investment thesis tying multiple signals to edge",
+  "signal_definition": "Describe the **ensemble** of signals (e.g. price filter + macro gate + sentiment/filings trigger) and how they combine (AND/OR, scoring, veto rules)",
+  "signal_sources": ["list of families used, e.g. price_action, macro_rates, news_sentiment, filings, social_sentiment, cross_asset"],
+  "entry_rules": ["rule 1", "rule 2", "rule 3"],
   "exit_rules": ["exit rule 1", "exit rule 2"],
   "sizing_rules": ["sizing rule 1"],
   "risk_limits": {{"max_position_pct": 5, "stop_loss_pct": 3}},
   "speculative": false,
-  "rationale": "why you chose this strategy given prior results"
+  "rationale": "Why this strategy and asset_class now, given priors and the diversity hint; acknowledge confounders the backtest may only approximate"
 }}
 """
 
@@ -188,6 +199,71 @@ def _format_prior_results(records: List[StrategyLabRecord], *, max_records: int 
     return "\n\n".join(lines)
 
 
+_CANONICAL_ASSET_CLASSES: tuple[str, ...] = (
+    "stocks",
+    "crypto",
+    "forex",
+    "options",
+    "futures",
+    "commodities",
+)
+
+
+def _normalize_asset_class(ac: str) -> str:
+    x = (ac or "").lower().strip()
+    if x in ("equities", "equity", "stock"):
+        return "stocks"
+    if x in ("fx",):
+        return "forex"
+    if x in ("commodity", "metal", "energy"):
+        return "commodities"
+    if x in _CANONICAL_ASSET_CLASSES:
+        return x
+    return "stocks"
+
+
+def _asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) -> str:
+    """Steer the LLM toward a balanced mix of asset classes across lab runs."""
+    if not records:
+        return (
+            "No prior lab strategies. Choose **asset_class** from "
+            "stocks, crypto, forex, options, futures, or commodities with similar frequency over time — "
+            "do **not** default to stocks; pick the class that best fits your multi-signal story."
+        )
+
+    ordered = sorted(records, key=lambda x: x.created_at)
+    sample = ordered[-tail:] if len(ordered) > tail else ordered
+    counts = {c: 0 for c in _CANONICAL_ASSET_CLASSES}
+    for r in sample:
+        k = _normalize_asset_class(r.strategy.asset_class)
+        if k in counts:
+            counts[k] += 1
+        else:
+            counts["stocks"] += 1
+
+    n_sample = len(sample)
+    stock_share = counts["stocks"] / n_sample if n_sample else 0.0
+    min_n = min(counts.values())
+    underrep = [c for c, n in counts.items() if n == min_n]
+
+    parts: List[str] = [
+        "Recent asset-class counts (last "
+        f"{n_sample} strategies): "
+        + ", ".join(f"{k}={v}" for k, v in counts.items())
+        + "."
+    ]
+    if stock_share > 0.35 and n_sample >= 2:
+        parts.append(
+            "Equities are relatively heavy in this window — **strongly prefer** "
+            "crypto, forex, options, futures, or commodities for this run if you can state coherent rules."
+        )
+    parts.append(
+        "Underrepresented line(s) to favor when ties: "
+        f"{', '.join(underrep)} — use one of these **unless** your thesis clearly requires a different class."
+    )
+    return " ".join(parts)
+
+
 def _format_simulated_trades_summary(trades: List[TradeRecord], *, max_sample_rows: int = 14) -> str:
     """Compact evidence string from the simulated ledger for analysis + self-review."""
     if not trades:
@@ -268,20 +344,23 @@ class StrategyIdeationAgent:
         """
         prior_results = prior_results or []
         prior_text = _format_prior_results(prior_results)
+        mix_hint = _asset_class_mix_hint(prior_results)
 
         prompt = _IDEATION_PROMPT.format(
             n_prior=len(prior_results),
             prior_results_text=prior_text,
+            asset_class_mix_hint=mix_hint,
         )
 
         data = self.llm.complete_json(
             prompt,
-            temperature=0.8,
+            temperature=0.85,
             system_prompt=_IDEATION_SYSTEM,
             think=True,
         )
 
         rationale = str(data.pop("rationale", "No rationale provided."))
+        data.pop("signal_sources", None)
         return data, rationale
 
     def analyze_result(

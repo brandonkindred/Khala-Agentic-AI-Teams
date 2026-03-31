@@ -745,6 +745,19 @@ def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
 _STOCK_SYMBOLS = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "JPM", "AMD", "SPY"]
 _CRYPTO_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "XRP", "MATIC", "AVAX", "LINK", "ADA", "DOT"]
 _OTHER_SYMBOLS = ["GLD", "USO", "TLT", "VIX", "QQQ", "IWM", "EEM", "GDX", "XLE", "XLF"]
+_FOREX_SYMBOLS = [
+    "EURUSD",
+    "GBPUSD",
+    "USDJPY",
+    "AUDUSD",
+    "USDCAD",
+    "NZDUSD",
+    "USDCHF",
+    "EURGBP",
+    "EURJPY",
+    "GBPJPY",
+]
+_FUTURES_SYMBOLS = ["ES", "NQ", "CL", "GC", "SI", "ZB", "6E", "NG", "ZM", "ZS"]
 
 _SYMBOL_BASE_PRICES = {
     "AAPL": 170,
@@ -777,6 +790,26 @@ _SYMBOL_BASE_PRICES = {
     "GDX": 29,
     "XLE": 92,
     "XLF": 40,
+    "EURUSD": 1.085,
+    "GBPUSD": 1.265,
+    "USDJPY": 149.5,
+    "AUDUSD": 0.655,
+    "USDCAD": 1.355,
+    "NZDUSD": 0.595,
+    "USDCHF": 0.885,
+    "EURGBP": 0.855,
+    "EURJPY": 162.0,
+    "GBPJPY": 189.0,
+    "ES": 5200.0,
+    "NQ": 18200.0,
+    "CL": 78.0,
+    "GC": 2350.0,
+    "SI": 28.5,
+    "ZB": 118.0,
+    "6E": 1.085,
+    "NG": 2.35,
+    "ZM": 440.0,
+    "ZS": 1180.0,
 }
 
 
@@ -803,10 +836,22 @@ def _generate_trade_ledger(
 
     # Symbol universe based on asset class
     asset = strategy.asset_class.lower()
+    if asset in ("equities", "equity", "stock"):
+        asset = "stocks"
+    if asset in ("fx",):
+        asset = "forex"
     if asset == "crypto":
         symbols = _CRYPTO_SYMBOLS
-    elif asset in ("stocks", "equities"):
+    elif asset in ("stocks",):
         symbols = _STOCK_SYMBOLS
+    elif asset in ("forex",):
+        symbols = _FOREX_SYMBOLS
+    elif asset == "futures":
+        symbols = _FUTURES_SYMBOLS
+    elif asset == "options":
+        symbols = _STOCK_SYMBOLS
+    elif asset in ("commodities",):
+        symbols = _OTHER_SYMBOLS
     else:
         symbols = _OTHER_SYMBOLS
 
@@ -935,13 +980,19 @@ def _strategy_lab_backtest(
         + (1 if strategy.speculative else 0)
     )
 
+    ac = strategy.asset_class.lower()
+    if ac in ("equities", "equity", "stock"):
+        ac = "stocks"
+    if ac in ("fx",):
+        ac = "forex"
     asset_class_base = {
         "crypto": 5.5,
         "stocks": 3.5,
         "options": 4.5,
         "forex": 2.5,
         "commodities": 2.0,
-    }.get(strategy.asset_class.lower(), 3.5)
+        "futures": 3.2,
+    }.get(ac, 3.5)
 
     # hash_factor in range -8.0 to +12.0 (asymmetric — harder to win)
     hash_factor = (strat_hash % 201 - 80) / 10.0
@@ -1004,6 +1055,21 @@ class StrategyLabResultsResponse(BaseModel):
     losing_count: int = 0
 
 
+def _normalize_strategy_lab_asset_class(raw: object) -> str:
+    """Map LLM output to canonical labels used by the simulated ledger."""
+    x = str(raw or "stocks").lower().strip()
+    if x in ("equities", "equity", "stock"):
+        return "stocks"
+    if x in ("fx",):
+        return "forex"
+    if x in ("commodity", "metal", "energy"):
+        return "commodities"
+    allowed = frozenset({"stocks", "crypto", "forex", "options", "futures", "commodities"})
+    if x in allowed:
+        return x
+    return "stocks"
+
+
 def _run_one_strategy_lab_cycle(
     agent: StrategyIdeationAgent,
     config: BacktestConfig,
@@ -1025,7 +1091,7 @@ def _run_one_strategy_lab_cycle(
     strategy = StrategySpec(
         strategy_id=strategy_id,
         authored_by="strategy_ideation_agent",
-        asset_class=str(strategy_data.get("asset_class", "stocks")),
+        asset_class=_normalize_strategy_lab_asset_class(strategy_data.get("asset_class")),
         hypothesis=str(strategy_data.get("hypothesis", "")),
         signal_definition=str(strategy_data.get("signal_definition", "")),
         entry_rules=[str(r) for r in (strategy_data.get("entry_rules") or [])],
