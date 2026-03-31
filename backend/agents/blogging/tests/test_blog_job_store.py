@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:
-    """mark_all_running_jobs_failed sets all running/pending blog jobs to failed with reason."""
+    """mark_all_running_jobs_failed sets all running/pending blog jobs to interrupted with reason."""
     from shared.blog_job_store import (
         create_blog_job,
         get_blog_job,
@@ -22,7 +22,7 @@ def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:
 
     job_data = get_blog_job(job_id, cache_dir=cache_dir)
     assert job_data is not None
-    assert job_data.get("status") == "failed"
+    assert job_data.get("status") == "interrupted"
     assert job_data.get("error") == "test"
 
 

@@ -33,10 +33,17 @@ def _minimal_plan() -> ContentPlan:
 
 def test_revise_generates_plan_then_applies_all_feedback() -> None:
     llm = MagicMock()
-    llm.complete.side_effect = [
-        "1) Priority order\n2) Section updates\n3) Citation fixes",
-        '{"draft": 0}\n---DRAFT---\n# Revised title\n\nBody here.\n',
-    ]
+    # complete_json is called first to generate the structured revision plan
+    llm.complete_json.return_value = {
+        "summary": "Fix opening hook and tighten section two.",
+        "changes": [
+            {"section": "intro", "feedback_ids": [1], "action": "rewrite", "rationale": "Weak opening."},
+            {"section": "section two", "feedback_ids": [2], "action": "rephrase", "rationale": "Drags."},
+        ],
+        "risks": [],
+    }
+    # complete is called to apply the revision plan
+    llm.complete.return_value = '{"draft": 0}\n---DRAFT---\n# Revised title\n\nBody here.\n'
     agent = BlogWriterAgent(
         llm_client=llm,
         writing_style_guide_content="Use short paragraphs.",
@@ -64,27 +71,26 @@ def test_revise_generates_plan_then_applies_all_feedback() -> None:
     )
     out = agent.revise(inp)
 
-    # Two LLM calls: plan + apply
-    assert llm.complete.call_count == 2
-    llm.complete_json.assert_not_called()
+    # One complete_json call for the revision plan, one complete call to apply it
+    assert llm.complete_json.call_count == 1
+    assert llm.complete.call_count == 1
 
-    # First call generates the revision plan from all feedback items
-    first_prompt = llm.complete.call_args_list[0][0][0]
-    assert "Create a revision plan for this draft." in first_prompt
-    assert "Opening is weak." in first_prompt
-    assert "Section two drags." in first_prompt
+    # Plan call includes all feedback items
+    plan_prompt = llm.complete_json.call_args_list[0][0][0]
+    assert "Opening is weak." in plan_prompt
+    assert "Section two drags." in plan_prompt
 
-    # Second call applies the planned batch revision
-    second_prompt = llm.complete.call_args_list[1][0][0]
-    assert "REVISION PLAN (execute this plan before writing):" in second_prompt
-    assert "COPY EDITOR FEEDBACK (apply every numbered item below):" in second_prompt
-    assert "Section two drags." in second_prompt
+    # Apply call includes both the revision plan and the feedback
+    apply_prompt = llm.complete.call_args_list[0][0][0]
+    assert "REVISION PLAN (execute this plan before writing):" in apply_prompt
+    assert "COPY EDITOR FEEDBACK (apply every numbered item below):" in apply_prompt
+    assert "Section two drags." in apply_prompt
 
-    # Both calls use the writing system prompt with plan-then-apply temperatures
+    # Plan call uses low temperature; apply call uses slightly higher
+    assert llm.complete_json.call_args_list[0].kwargs.get("system_prompt") == WRITING_SYSTEM_PROMPT
+    assert llm.complete_json.call_args_list[0].kwargs.get("temperature") == 0.1
     assert llm.complete.call_args_list[0].kwargs.get("system_prompt") == WRITING_SYSTEM_PROMPT
-    assert llm.complete.call_args_list[0].kwargs.get("temperature") == 0.1
-    assert llm.complete.call_args_list[1].kwargs.get("system_prompt") == WRITING_SYSTEM_PROMPT
-    assert llm.complete.call_args_list[1].kwargs.get("temperature") == 0.2
+    assert llm.complete.call_args_list[0].kwargs.get("temperature") == 0.2
 
     assert "# Revised title" in out.draft
     assert "Body here." in out.draft

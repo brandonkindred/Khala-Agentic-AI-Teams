@@ -57,24 +57,11 @@ class _PromptCapturingLLM(DummyLLMClient):
         return {"draft": "# Draft\n\nPlaceholder."}
 
 
-def test_draft_input_requires_research_source() -> None:
-    """WriterInput raises when both research_document and research_references are empty."""
-    p = _minimal_plan()
-    with pytest.raises(
-        ValueError, match="either research_document or non-empty research_references"
-    ):
+def test_writer_input_requires_content_plan() -> None:
+    """WriterInput raises when content_plan is missing."""
+    with pytest.raises(ValueError, match="WriterInput requires a content_plan"):
         WriterInput(
-            research_document=None,
-            research_references=None,
-            content_plan=p,
-        )
-    with pytest.raises(
-        ValueError, match="either research_document or non-empty research_references"
-    ):
-        WriterInput(
-            research_document="",
-            research_references=[],
-            content_plan=p,
+            content_plan=None,  # type: ignore[arg-type]
         )
 
 

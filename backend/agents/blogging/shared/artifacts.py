@@ -21,6 +21,7 @@ ARTIFACT_NAMES = (
     "content_plan.json",
     "content_plan.md",
     "outline.md",
+    "research_packet.md",
     "draft_v1.md",
     "draft_v2.md",
     "final.md",
