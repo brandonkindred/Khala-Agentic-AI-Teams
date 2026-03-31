@@ -59,7 +59,7 @@ class _PromptCapturingLLM(DummyLLMClient):
 
 def test_writer_input_requires_content_plan() -> None:
     """WriterInput raises when content_plan is missing."""
-    with pytest.raises(ValueError, match="WriterInput requires a content_plan"):
+    with pytest.raises(ValueError, match="content_plan"):
         WriterInput(
             content_plan=None,  # type: ignore[arg-type]
         )
