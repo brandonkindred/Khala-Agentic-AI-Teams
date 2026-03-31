@@ -647,7 +647,9 @@ def run_backtest(request: RunBacktestRequest) -> RunBacktestResponse:
 def list_backtests(strategy_id: Optional[str] = None) -> ListBacktestsResponse:
     """List recorded backtests, optionally filtered by strategy ID."""
     with _lock:
-        items = list(_backtests.values())
+        raw = list(_backtests.values())
+
+    items = [BacktestRecord(**r) if isinstance(r, dict) else r for r in raw]
 
     if strategy_id:
         items = [item for item in items if item.strategy_id == strategy_id]
@@ -1004,8 +1006,9 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunResponse:
     from llm_service.factory import get_client
 
     with _lock:
-        prior_records = list(_strategy_lab_records.values())
+        raw_prior = list(_strategy_lab_records.values())
 
+    prior_records = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior]
     llm = get_client("strategy_ideation")
     agent = StrategyIdeationAgent(llm_client=llm)
 
@@ -1108,8 +1111,9 @@ def get_strategy_lab_results(winning: Optional[bool] = None) -> StrategyLabResul
     Filter by winning/losing with ?winning=true or ?winning=false.
     """
     with _lock:
-        items = list(_strategy_lab_records.values())
+        raw = list(_strategy_lab_records.values())
 
+    items = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw]
     items.sort(key=lambda r: r.created_at, reverse=True)
 
     winning_count = sum(1 for r in items if r.is_winning)

@@ -218,6 +218,43 @@ class JobServiceClient:
         )
         return resp.json().get("failed_job_ids", [])
 
+    def mark_all_active_jobs_failed(
+        self,
+        reason: str,
+        *,
+        http_timeout: float = 30.0,
+        http_max_retries: int = 3,
+    ) -> List[str]:
+        """Mark all active (pending/running) jobs as failed (e.g. on server shutdown).
+
+        Skips jobs in a waiting state (waiting_for_answers, waiting_for_title_selection,
+        waiting_for_story_input).
+        """
+        if not self._is_remote:
+            local = self._get_local()
+            failed: List[str] = []
+            _waiting_fields = (
+                "waiting_for_answers",
+                "waiting_for_title_selection",
+                "waiting_for_story_input",
+            )
+            for job in local.list_jobs(statuses=list(_ACTIVE_STATUSES)):
+                if any(job.get(wf) for wf in _waiting_fields):
+                    continue
+                jid = job.get("job_id")
+                if jid:
+                    local.update_job(jid, status=JOB_STATUS_FAILED, error=reason)
+                    failed.append(jid)
+            return failed
+        resp = self._request(
+            "POST",
+            self._url(f"/jobs/{self.team}/mark-all-running-failed"),
+            json={"reason": reason},
+            timeout=http_timeout,
+            max_retries=http_max_retries,
+        )
+        return resp.json().get("failed_job_ids", [])
+
     def mark_all_active_jobs_interrupted(
         self,
         reason: str,

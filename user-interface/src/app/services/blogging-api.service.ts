@@ -173,7 +173,7 @@ export class BloggingApiService {
    * POST /job/{job_id}/rate-titles
    * Rate titles as dislike/like/love. Love selects the title. Otherwise new titles are generated.
    */
-  rateTitles(jobId: string, ratings: Array<{ title: string; rating: 'dislike' | 'like' | 'love' }>): Observable<BlogJobStatusResponse> {
+  rateTitles(jobId: string, ratings: { title: string; rating: 'dislike' | 'like' | 'love' }[]): Observable<BlogJobStatusResponse> {
     return this.http.post<BlogJobStatusResponse>(
       `${this.baseUrl}/job/${jobId}/rate-titles`,
       { ratings }
