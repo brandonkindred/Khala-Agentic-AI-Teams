@@ -7,7 +7,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from job_service_client import (
     JOB_STATUS_FAILED,
@@ -89,6 +89,14 @@ class CreateAuditRequest(BaseModel):
     sampling_strategy: str = Field(default="journey_based")
     wcag_levels: List[str] = Field(default_factory=lambda: ["A", "AA"])
     tech_stack: Dict[str, str] = Field(default_factory=lambda: {"web": "other", "mobile": "other"})
+
+    @field_validator("web_urls")
+    @classmethod
+    def validate_urls(cls, v: List[str]) -> List[str]:
+        for url in v:
+            if not url.startswith(("http://", "https://")):
+                raise ValueError(f"Invalid URL (must start with http:// or https://): {url}")
+        return v
 
 
 class RetestRequest(BaseModel):
@@ -267,9 +275,11 @@ async def get_audit_findings(
     audit_id: str,
     severity: Optional[str] = None,
     state: Optional[str] = None,
+    offset: int = 0,
+    limit: int = 50,
 ) -> FindingsListResponse:
     """
-    Get findings for an audit with optional filters.
+    Get findings for an audit with optional filters and pagination.
     """
     orchestrator = get_orchestrator()
 
@@ -282,7 +292,9 @@ async def get_audit_findings(
         if status.get("status") == "not_found":
             raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
 
-    # Count by severity
+    total = len(findings)
+
+    # Count by severity (over full result set, before pagination)
     by_severity = {}
     for sev in Severity:
         count = sum(1 for f in findings if f.severity == sev)
@@ -295,12 +307,18 @@ async def get_audit_findings(
         issue_type = f.issue_type.value
         by_issue_type[issue_type] = by_issue_type.get(issue_type, 0) + 1
 
+    # Apply pagination
+    paginated = findings[offset : offset + limit]
+
     return FindingsListResponse(
         audit_id=audit_id,
-        total=len(findings),
-        findings=findings,
+        total=total,
+        findings=paginated,
         by_severity=by_severity,
         by_issue_type=by_issue_type,
+        offset=offset,
+        limit=limit,
+        has_more=(offset + limit) < total,
     )
 
 
@@ -399,7 +417,7 @@ async def retest_findings(
 @router.post("/audit/{audit_id}/export", response_model=BacklogExportResponse)
 async def export_backlog(
     audit_id: str,
-    format: str = "json",
+    export_format: str = "json",
     include_evidence: bool = True,
 ) -> BacklogExportResponse:
     """
@@ -420,13 +438,13 @@ async def export_backlog(
         audit_id=audit_id,
         findings=findings,
         patterns=patterns,
-        format=format,
+        export_format=export_format,
         include_evidence=include_evidence,
     )
 
     return BacklogExportResponse(
         audit_id=audit_id,
-        format=format,
+        format=export_format,
         artifact_ref=result["artifact_ref"],
         counts=result["counts"],
     )
@@ -444,12 +462,19 @@ async def create_monitoring_baseline(
     """
     Create a monitoring baseline for regression detection.
     """
-    baseline_ref = f"baseline_{uuid.uuid4().hex[:8]}"
+    from ..addons.monitoring_agent import AccessibilityMonitoringAgent
 
-    # Store baseline (would be persistent in production)
+    arm = AccessibilityMonitoringAgent()
+    baseline = await arm.create_baseline(
+        audit_id="",
+        env=request.env,
+        targets=request.targets,
+        checks=request.checks,
+    )
+
     return {
-        "baseline_ref": baseline_ref,
-        "env": request.env,
+        "baseline_ref": baseline.baseline_ref,
+        "env": baseline.env,
         "targets_count": len(request.targets),
         "checks": request.checks,
         "status": "created",
@@ -463,15 +488,20 @@ async def run_monitoring_checks(
     """
     Run monitoring checks against a baseline.
     """
-    run_id = f"monitor_run_{uuid.uuid4().hex[:8]}"
+    from ..addons.monitoring_agent import AccessibilityMonitoringAgent
 
-    # Would run actual checks in production
+    arm = AccessibilityMonitoringAgent()
+    run_result = await arm.run_checks(
+        baseline_ref=request.baseline_ref,
+        env=request.env,
+    )
+
     return {
-        "run_id": run_id,
-        "baseline_ref": request.baseline_ref,
-        "env": request.env,
+        "run_id": run_result.run_id,
+        "baseline_ref": run_result.baseline_ref,
+        "env": run_result.env,
         "status": "complete",
-        "new_issues": 0,
+        "new_issues": len(run_result.findings),
         "resolved_issues": 0,
         "unchanged_issues": 0,
     }
@@ -482,12 +512,20 @@ async def get_monitoring_diff(run_id: str) -> Dict[str, Any]:
     """
     Get the diff between a monitoring run and its baseline.
     """
+    from ..addons.monitoring_agent import AccessibilityMonitoringAgent
+
+    arm = AccessibilityMonitoringAgent()
+    diff = await arm.diff_against_baseline(
+        monitor_run_id=run_id,
+        baseline_ref="",
+    )
+
     return {
-        "run_id": run_id,
-        "new_issues": [],
-        "resolved_issues": [],
-        "unchanged_issues": [],
-        "alerts_triggered": 0,
+        "run_id": diff.run_id,
+        "new_issues": diff.new_issues,
+        "resolved_issues": diff.resolved_issues,
+        "unchanged_issues": diff.unchanged_issues,
+        "alerts_triggered": diff.alerts_triggered,
     }
 
 
@@ -503,13 +541,20 @@ async def build_component_inventory(
     """
     Build an inventory of design system components.
     """
-    inventory_ref = f"inventory_{uuid.uuid4().hex[:8]}"
+    from ..addons.design_system_agent import AccessibleDesignSystemAgent
+
+    adse = AccessibleDesignSystemAgent()
+    inventory = await adse.build_inventory(
+        system_name=request.system_name,
+        source=request.source,
+        components=request.components,
+    )
 
     return {
-        "inventory_ref": inventory_ref,
-        "system_name": request.system_name,
-        "source": request.source,
-        "components_count": len(request.components),
+        "inventory_ref": inventory.inventory_ref,
+        "system_name": inventory.system_name,
+        "source": inventory.source,
+        "components_count": len(inventory.components),
         "status": "created",
     }
 
@@ -521,20 +566,23 @@ async def generate_a11y_contract(
     """
     Generate an accessibility contract for a component.
     """
-    contract_ref = f"contract_{uuid.uuid4().hex[:8]}"
+    from ..addons.design_system_agent import AccessibleDesignSystemAgent
+
+    adse = AccessibleDesignSystemAgent()
+    contract = await adse.generate_contract(
+        system_name=request.system_name,
+        component=request.component,
+        platform=request.platform,
+        linked_patterns=request.linked_patterns,
+    )
 
     return {
-        "contract_ref": contract_ref,
-        "system_name": request.system_name,
-        "component": request.component,
-        "platform": request.platform,
+        "contract_ref": contract.contract_ref,
+        "system_name": contract.system_name,
+        "component": contract.component,
+        "platform": contract.platform,
         "status": "created",
-        "requirements": {
-            "keyboard_accessible": True,
-            "focus_visible": True,
-            "proper_labeling": True,
-            "sufficient_contrast": True,
-        },
+        "requirements": contract.requirements,
     }
 
 

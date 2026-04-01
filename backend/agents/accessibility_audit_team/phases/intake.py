@@ -16,6 +16,7 @@ Outputs: AuditPlan, CoverageMatrix, TestRunConfig
 from typing import Any, Optional
 
 from ..agents import AccessibilityProgramLead, StandardsMappingSpecialist
+from ..agents.base import MessageBus
 from ..models import (
     AuditRequest,
     IntakeResult,
@@ -26,6 +27,7 @@ from ..models import (
 async def run_intake_phase(
     audit_request: AuditRequest,
     llm_client: Optional[Any] = None,
+    message_bus: Optional[MessageBus] = None,
 ) -> IntakeResult:
     """
     Run the intake phase to create an audit plan.
@@ -38,8 +40,8 @@ async def run_intake_phase(
         IntakeResult with audit plan, coverage matrix, and test config
     """
     # Initialize agents
-    apl = AccessibilityProgramLead(llm_client)
-    slms = StandardsMappingSpecialist(llm_client)
+    apl = AccessibilityProgramLead(llm_client, message_bus=message_bus)
+    slms = StandardsMappingSpecialist(llm_client, message_bus=message_bus)
 
     # APL creates the audit plan
     apl_context = {

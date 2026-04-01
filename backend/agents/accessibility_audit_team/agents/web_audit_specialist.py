@@ -5,18 +5,14 @@ Owns: Manual web testing + scan orchestration + web-specific evidence
 Outputs: Web findings with proof and fix guidance drafts
 """
 
-import uuid
 from typing import Any, Dict, List
 
 from ..models import (
     Finding,
-    FindingState,
     IssueType,
     Phase,
-    Scope,
     Severity,
     Surface,
-    WCAGMapping,
 )
 from ..tools.web import (
     check_reflow_zoom,
@@ -62,7 +58,6 @@ class WebAuditSpecialist(BaseSpecialistAgent):
         - DISCOVERY: Run scans, perform manual sweep, draft findings
         """
         phase = context.get("phase", Phase.DISCOVERY)
-        context.get("audit_id", "")
 
         if phase == Phase.DISCOVERY:
             return await self._handle_discovery(context)
@@ -110,9 +105,10 @@ class WebAuditSpecialist(BaseSpecialistAgent):
             # Check keyboard issues
             if keyboard_output.keyboard_traps_found:
                 for trap in keyboard_output.keyboard_traps_found:
-                    finding = self._create_finding(
+                    finding = self.create_finding(
                         audit_id=audit_id,
                         target=url,
+                        surface=Surface.WEB,
                         issue_type=IssueType.KEYBOARD,
                         severity=Severity.CRITICAL,
                         title="Keyboard trap detected",
@@ -127,9 +123,10 @@ class WebAuditSpecialist(BaseSpecialistAgent):
             # Check for focus visibility issues
             for step in keyboard_output.focus_trace:
                 if not step.visible_focus:
-                    finding = self._create_finding(
+                    finding = self.create_finding(
                         audit_id=audit_id,
                         target=url,
+                        surface=Surface.WEB,
                         issue_type=IssueType.FOCUS,
                         severity=Severity.HIGH,
                         title="Focus indicator not visible",
@@ -150,9 +147,10 @@ class WebAuditSpecialist(BaseSpecialistAgent):
             reflow_output = await check_reflow_zoom(reflow_input)
 
             for issue in reflow_output.issues:
-                finding = self._create_finding(
+                finding = self.create_finding(
                     audit_id=audit_id,
                     target=url,
+                    surface=Surface.WEB,
                     issue_type=IssueType.RESIZING_REFLOW,
                     severity=Severity.HIGH,
                     title=f"Reflow issue at {issue.mode}",
@@ -175,9 +173,10 @@ class WebAuditSpecialist(BaseSpecialistAgent):
 
             for result in contrast_output.contrast_results:
                 if not result.meets_aa_normal and not result.is_large_text:
-                    finding = self._create_finding(
+                    finding = self.create_finding(
                         audit_id=audit_id,
                         target=url,
+                        surface=Surface.WEB,
                         issue_type=IssueType.CONTRAST,
                         severity=Severity.HIGH,
                         title="Insufficient text contrast",
@@ -221,37 +220,3 @@ class WebAuditSpecialist(BaseSpecialistAgent):
             "urls_tested": len(urls),
         }
 
-    def _create_finding(
-        self,
-        audit_id: str,
-        target: str,
-        issue_type: IssueType,
-        severity: Severity,
-        title: str,
-        summary: str,
-        expected: str,
-        actual: str,
-        user_impact: str,
-        wcag_scs: List[str],
-    ) -> Finding:
-        """Create a draft finding."""
-        return Finding(
-            id=f"finding_{uuid.uuid4().hex[:8]}",
-            state=FindingState.DRAFT,
-            surface=Surface.WEB,
-            target=target,
-            issue_type=issue_type,
-            severity=severity,
-            scope=Scope.LOCALIZED,
-            confidence=0.7,
-            title=title,
-            summary=summary,
-            repro_steps=[],  # To be filled during verification
-            expected=expected,
-            actual=actual,
-            user_impact=user_impact,
-            wcag_mappings=[
-                WCAGMapping(sc=sc, name="", confidence=0.8, rationale="") for sc in wcag_scs
-            ],
-            created_by="WAS",
-        )

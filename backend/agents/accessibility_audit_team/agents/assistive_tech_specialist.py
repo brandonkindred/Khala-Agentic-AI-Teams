@@ -43,7 +43,6 @@ class AssistiveTechSpecialist(BaseSpecialistAgent):
         - VERIFICATION: Verify findings with AT testing
         """
         phase = context.get("phase", Phase.VERIFICATION)
-        context.get("audit_id", "")
 
         if phase == Phase.VERIFICATION:
             return await self._handle_verification(context)

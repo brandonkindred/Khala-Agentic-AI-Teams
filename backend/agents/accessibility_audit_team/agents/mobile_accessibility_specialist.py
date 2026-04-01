@@ -5,18 +5,14 @@ Owns: iOS/Android testing, platform-specific issues, device repro steps
 Outputs: Mobile findings with platform remediation and verification
 """
 
-import uuid
 from typing import Any, Dict, List
 
 from ..models import (
     Finding,
-    FindingState,
     IssueType,
     Phase,
-    Scope,
     Severity,
     Surface,
-    WCAGMapping,
 )
 from ..tools.mobile import (
     check_font_scaling,
@@ -60,7 +56,6 @@ class MobileAccessibilitySpecialist(BaseSpecialistAgent):
         - DISCOVERY: Test mobile apps, draft findings
         """
         phase = context.get("phase", Phase.DISCOVERY)
-        context.get("audit_id", "")
 
         if phase == Phase.DISCOVERY:
             return await self._handle_discovery(context)
@@ -110,7 +105,7 @@ class MobileAccessibilitySpecialist(BaseSpecialistAgent):
             # Create findings for failed announcements
             for announcement in sr_output.announcements:
                 if not announcement.passed:
-                    finding = self._create_finding(
+                    finding = self.create_finding(
                         audit_id=audit_id,
                         target=f"{app_name} - {announcement.element}",
                         surface=surface,
@@ -127,7 +122,7 @@ class MobileAccessibilitySpecialist(BaseSpecialistAgent):
 
             # Create findings for missing labels
             for missing in sr_output.missing_labels:
-                finding = self._create_finding(
+                finding = self.create_finding(
                     audit_id=audit_id,
                     target=f"{app_name} - {missing}",
                     surface=surface,
@@ -152,7 +147,7 @@ class MobileAccessibilitySpecialist(BaseSpecialistAgent):
             tt_output = await check_touch_targets(tt_input)
 
             for violation in tt_output.violations:
-                finding = self._create_finding(
+                finding = self.create_finding(
                     audit_id=audit_id,
                     target=f"{app_name} - {violation.element}",
                     surface=surface,
@@ -178,7 +173,7 @@ class MobileAccessibilitySpecialist(BaseSpecialistAgent):
             fs_output = await check_font_scaling(fs_input)
 
             for issue in fs_output.issues:
-                finding = self._create_finding(
+                finding = self.create_finding(
                     audit_id=audit_id,
                     target=f"{app_name} - {issue.screen}",
                     surface=surface,
@@ -227,38 +222,3 @@ class MobileAccessibilitySpecialist(BaseSpecialistAgent):
             "screens_tested": screens_tested,
         }
 
-    def _create_finding(
-        self,
-        audit_id: str,
-        target: str,
-        surface: Surface,
-        issue_type: IssueType,
-        severity: Severity,
-        title: str,
-        summary: str,
-        expected: str,
-        actual: str,
-        user_impact: str,
-        wcag_scs: List[str],
-    ) -> Finding:
-        """Create a draft finding."""
-        return Finding(
-            id=f"finding_{uuid.uuid4().hex[:8]}",
-            state=FindingState.DRAFT,
-            surface=surface,
-            target=target,
-            issue_type=issue_type,
-            severity=severity,
-            scope=Scope.LOCALIZED,
-            confidence=0.7,
-            title=title,
-            summary=summary,
-            repro_steps=[],
-            expected=expected,
-            actual=actual,
-            user_impact=user_impact,
-            wcag_mappings=[
-                WCAGMapping(sc=sc, name="", confidence=0.8, rationale="") for sc in wcag_scs
-            ],
-            created_by="MAS",
-        )

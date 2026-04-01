@@ -5,7 +5,7 @@ Defines phases, taxonomy enums, findings, audit plans, evidence packs,
 and all result types for the accessibility audit workflow.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
@@ -136,7 +136,7 @@ class EvidencePack(BaseModel):
     finding_id: str = Field(..., description="ID of the associated finding")
     artifacts: List[EvidenceArtifact] = Field(default_factory=list)
     environment: EnvironmentInfo
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     notes: str = Field(default="", description="Additional context or notes")
 
 
@@ -212,8 +212,8 @@ class Finding(BaseModel):
     duplicate_of: Optional[str] = Field(default=None, description="ID of finding this duplicates")
 
     # Metadata
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     created_by: str = Field(default="", description="Agent that created this finding")
     verified_by: Optional[str] = Field(default=None, description="Agent that verified this finding")
 
@@ -295,7 +295,7 @@ class AuditPlan(BaseModel):
     inventory_ref: Optional[str] = Field(default=None)
 
     # Metadata
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     created_by: str = Field(default="APL", description="Agent that created this plan")
 
 
@@ -327,8 +327,8 @@ class CoverageMatrix(BaseModel):
     audit_id: str
     wcag_version: str = Field(default="2.2")
     rows: List[CoverageRow] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -476,8 +476,55 @@ class AccessibilityAuditResult(BaseModel):
     # Metadata
     summary: str = Field(default="")
     failure_reason: str = Field(default="")
-    started_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
+
+
+# ---------------------------------------------------------------------------
+# Typed Phase Contexts
+# ---------------------------------------------------------------------------
+
+
+class IntakeContext(BaseModel):
+    """Typed context for the Intake phase."""
+
+    phase: Phase = Phase.INTAKE
+    audit_request: Optional["AuditRequest"] = None
+
+
+class DiscoveryContext(BaseModel):
+    """Typed context for the Discovery phase."""
+
+    phase: Phase = Phase.DISCOVERY
+    audit_id: str = ""
+    urls: List[str] = Field(default_factory=list)
+    apps: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class VerificationContext(BaseModel):
+    """Typed context for the Verification phase."""
+
+    phase: Phase = Phase.VERIFICATION
+    audit_id: str = ""
+    findings: List[Finding] = Field(default_factory=list)
+    stack: Dict[str, str] = Field(default_factory=dict)
+
+
+class ReportPackagingContext(BaseModel):
+    """Typed context for the Report Packaging phase."""
+
+    phase: Phase = Phase.REPORT_PACKAGING
+    audit_id: str = ""
+    findings: List[Finding] = Field(default_factory=list)
+    patterns: List[PatternCluster] = Field(default_factory=list)
+
+
+class RetestContext(BaseModel):
+    """Typed context for the Retest phase."""
+
+    phase: Phase = Phase.RETEST
+    audit_id: str = ""
+    findings: List[Finding] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +581,9 @@ class FindingsListResponse(BaseModel):
     findings: List[Finding] = Field(default_factory=list)
     by_severity: Dict[str, int] = Field(default_factory=dict)
     by_issue_type: Dict[str, int] = Field(default_factory=dict)
+    offset: int = Field(default=0)
+    limit: int = Field(default=50)
+    has_more: bool = Field(default=False)
 
 
 class BacklogExportResponse(BaseModel):
@@ -558,7 +608,7 @@ class MonitoringBaseline(BaseModel):
     env: Literal["stage", "prod"]
     targets: List[Dict[str, str]] = Field(default_factory=list)
     checks: List[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     snapshot_refs: List[str] = Field(default_factory=list)
 
 
@@ -570,7 +620,7 @@ class MonitoringRunResult(BaseModel):
     env: str
     results_ref: str
     findings: List[Dict[str, Any]] = Field(default_factory=list)
-    completed_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class MonitoringDiff(BaseModel):
@@ -596,7 +646,7 @@ class ComponentInventory(BaseModel):
     system_name: str
     source: Literal["storybook", "repo", "manual"]
     components: List[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class A11yContract(BaseModel):
@@ -609,7 +659,7 @@ class A11yContract(BaseModel):
     requirements: Dict[str, Any] = Field(default_factory=dict)
     test_harness_plan: Dict[str, Any] = Field(default_factory=dict)
     linked_patterns: List[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -635,4 +685,4 @@ class TrainingBundle(BaseModel):
     audit_id: str
     modules: List[TrainingModule] = Field(default_factory=list)
     publish_ref: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

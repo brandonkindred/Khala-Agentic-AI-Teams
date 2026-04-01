@@ -13,6 +13,7 @@ from ..agents import (
     MobileAccessibilitySpecialist,
     WebAuditSpecialist,
 )
+from ..agents.base import MessageBus
 from ..models import (
     Finding,
     FindingState,
@@ -26,6 +27,7 @@ async def run_retest_phase(
     audit_id: str,
     findings_to_retest: List[Finding],
     llm_client: Optional[Any] = None,
+    message_bus: Optional[MessageBus] = None,
 ) -> RetestResult:
     """
     Run the retest phase to verify fixes.
@@ -54,10 +56,10 @@ async def run_retest_phase(
         )
 
     # Initialize agents
-    was = WebAuditSpecialist(llm_client)
-    mas = MobileAccessibilitySpecialist(llm_client)
-    ats = AssistiveTechSpecialist(llm_client)
-    ree = EvidenceEngineer(llm_client)
+    was = WebAuditSpecialist(llm_client, message_bus=message_bus)
+    mas = MobileAccessibilitySpecialist(llm_client, message_bus=message_bus)
+    ats = AssistiveTechSpecialist(llm_client, message_bus=message_bus)
+    ree = EvidenceEngineer(llm_client, message_bus=message_bus)
 
     updated_findings: List[Finding] = []
     closed_count = 0
@@ -78,7 +80,7 @@ async def run_retest_phase(
                 "audit_id": audit_id,
                 "findings": [finding],
             }
-            await ree.process(ree_context)
+            await ree.safe_process(ree_context)
         else:
             # Finding still exists
             still_open_count += 1

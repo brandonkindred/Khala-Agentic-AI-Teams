@@ -52,7 +52,6 @@ class AccessibilityProgramLead(BaseSpecialistAgent):
         - REPORT_PACKAGING: Produce final report and export backlog
         """
         phase = context.get("phase", Phase.INTAKE)
-        context.get("audit_id", "")
 
         if phase == Phase.INTAKE:
             return await self._handle_intake(context)

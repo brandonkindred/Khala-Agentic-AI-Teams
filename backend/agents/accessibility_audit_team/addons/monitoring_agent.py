@@ -156,9 +156,9 @@ class AccessibilityMonitoringAgent:
                 baseline_ref=baseline_ref,
             )
 
-        self._baselines[baseline_ref]
+        _baseline = self._baselines[baseline_ref]  # noqa: F841
 
-        # In production, would compare actual results
+        # In production, would compare actual results against _baseline
         new_issues = []
         resolved_issues = []
         unchanged_issues = []

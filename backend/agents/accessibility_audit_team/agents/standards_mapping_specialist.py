@@ -41,7 +41,6 @@ class StandardsMappingSpecialist(BaseSpecialistAgent):
         - INTAKE: Set mapping taxonomy and guardrails
         """
         phase = context.get("phase", Phase.VERIFICATION)
-        context.get("audit_id", "")
 
         if phase == Phase.VERIFICATION:
             return await self._handle_verification(context)
@@ -54,8 +53,6 @@ class StandardsMappingSpecialist(BaseSpecialistAgent):
         """
         Set up mapping taxonomy and guardrails for the audit.
         """
-        context.get("audit_id", "")
-
         # Define mapping guardrails - common mis-maps to avoid
         guardrails = {
             "common_mismaps": [
@@ -153,7 +150,7 @@ class StandardsMappingSpecialist(BaseSpecialistAgent):
             else:
                 # Mark as ready for remediation if verified
                 if finding.state == FindingState.VERIFIED:
-                    finding.state = FindingState.VERIFIED
+                    finding.state = FindingState.READY_FOR_REPORT
 
             mapped_findings.append(finding)
 

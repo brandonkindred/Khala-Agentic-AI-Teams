@@ -5,6 +5,7 @@ Owns: Quality bar enforcement + dedupe + consistency
 Outputs: Approved backlog + report readiness
 """
 
+import asyncio
 from typing import Any, Dict, List
 
 from ..models import Finding, FindingState, Phase, Severity
@@ -41,7 +42,6 @@ class QAConsistencyReviewer(BaseSpecialistAgent):
         - REPORT_PACKAGING: Final quality gate
         """
         phase = context.get("phase", Phase.REPORT_PACKAGING)
-        context.get("audit_id", "")
 
         if phase == Phase.DISCOVERY:
             return await self._handle_early_qa(context)
@@ -102,16 +102,16 @@ class QAConsistencyReviewer(BaseSpecialistAgent):
         rejected_findings: List[Finding] = []
         issues_by_finding: Dict[str, List[dict]] = {}
 
-        for finding in findings:
-            # Validate each finding
-            validate_input = ValidateFindingInput(
-                audit_id=audit_id,
-                finding=finding,
-                ruleset="strict",
-            )
+        # Validate all findings concurrently
+        validate_inputs = [
+            ValidateFindingInput(audit_id=audit_id, finding=f, ruleset="strict")
+            for f in findings
+        ]
+        validate_outputs = await asyncio.gather(
+            *(validate_finding(vi) for vi in validate_inputs)
+        )
 
-            validate_output = await validate_finding(validate_input)
-
+        for finding, validate_output in zip(findings, validate_outputs):
             if validate_output.passed:
                 # Normalize severity if needed
                 if validate_output.normalized_severity:
@@ -297,8 +297,8 @@ class QAConsistencyReviewer(BaseSpecialistAgent):
                         # Only normalize down, not up
                         current_idx = severity_order.index(f.severity)
                         target_idx = severity_order.index(most_common)
-                        if current_idx < target_idx:
-                            # Would normalize down - keep original
+                        if current_idx > target_idx:
+                            # Would normalize up - keep original
                             pass
                         else:
                             f.severity = most_common

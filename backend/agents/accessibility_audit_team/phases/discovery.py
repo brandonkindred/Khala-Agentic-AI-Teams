@@ -11,6 +11,7 @@ QCR dedupes early and identifies systemic patterns.
 Outputs: FindingDraft[], SignalScanResults, InitialPatternClusters
 """
 
+import asyncio
 from typing import Any, List, Optional
 
 from ..agents import (
@@ -19,6 +20,7 @@ from ..agents import (
     QAConsistencyReviewer,
     WebAuditSpecialist,
 )
+from ..agents.base import MessageBus
 from ..models import (
     AuditPlan,
     DiscoveryResult,
@@ -32,19 +34,18 @@ from ..models import (
 async def run_discovery_phase(
     audit_plan: AuditPlan,
     llm_client: Optional[Any] = None,
+    message_bus: Optional[MessageBus] = None,
 ) -> DiscoveryResult:
     """
     Run the discovery phase for wide coverage testing.
 
-    This phase performs:
-    1. Automated scans (signal only, not confirmed issues)
-    2. Fast manual sweep on critical flows
-    3. Early evidence capture
-    4. Pattern identification and deduplication
+    WAS and MAS run concurrently when both web URLs and mobile apps are
+    present.  REE and QCR run sequentially after discovery agents finish.
 
     Args:
         audit_plan: The audit plan from intake phase
         llm_client: Optional LLM client for agent processing
+        message_bus: Optional shared message bus
 
     Returns:
         DiscoveryResult with draft findings and patterns
@@ -54,48 +55,54 @@ async def run_discovery_phase(
     all_scan_results: List[ScanResult] = []
 
     # Initialize agents
-    was = WebAuditSpecialist(llm_client)
-    mas = MobileAccessibilitySpecialist(llm_client)
-    ree = EvidenceEngineer(llm_client)
-    qcr = QAConsistencyReviewer(llm_client)
+    was = WebAuditSpecialist(llm_client, message_bus=message_bus)
+    mas = MobileAccessibilitySpecialist(llm_client, message_bus=message_bus)
+    ree = EvidenceEngineer(llm_client, message_bus=message_bus)
+    qcr = QAConsistencyReviewer(llm_client, message_bus=message_bus)
 
-    # Run web discovery if web URLs present
+    # ---- Run WAS and MAS concurrently ----
+    discovery_tasks = []
+
     if audit_plan.targets.web_urls:
         was_context = {
             "phase": Phase.DISCOVERY,
             "audit_id": audit_id,
             "urls": audit_plan.targets.web_urls,
         }
+        discovery_tasks.append(("web", was.safe_process(was_context)))
 
-        was_result = await was.process(was_context)
-
-        if was_result.get("success"):
-            all_findings.extend(was_result.get("findings", []))
-            # scan_results would come from tool outputs
-            for sr in was_result.get("scan_results", []):
-                all_scan_results.append(
-                    ScanResult(
-                        tool="axe",
-                        url=sr.url,
-                        violations=[v.model_dump() for v in sr.tool_results[0].violations]
-                        if sr.tool_results
-                        else [],
-                        raw_ref=sr.raw_ref,
-                    )
-                )
-
-    # Run mobile discovery if mobile apps present
     if audit_plan.targets.mobile_apps:
         mas_context = {
             "phase": Phase.DISCOVERY,
             "audit_id": audit_id,
             "apps": [app.model_dump() for app in audit_plan.targets.mobile_apps],
         }
+        discovery_tasks.append(("mobile", mas.safe_process(mas_context)))
 
-        mas_result = await mas.process(mas_context)
+    if discovery_tasks:
+        labels, coros = zip(*discovery_tasks)
+        results = await asyncio.gather(*coros, return_exceptions=True)
 
-        if mas_result.get("success"):
-            all_findings.extend(mas_result.get("findings", []))
+        for label, result in zip(labels, results):
+            if isinstance(result, Exception):
+                continue
+            if not result.get("success"):
+                continue
+
+            all_findings.extend(result.get("findings", []))
+
+            if label == "web":
+                for sr in result.get("scan_results", []):
+                    all_scan_results.append(
+                        ScanResult(
+                            tool="axe",
+                            url=sr.url,
+                            violations=[v.model_dump() for v in sr.tool_results[0].violations]
+                            if sr.tool_results
+                            else [],
+                            raw_ref=sr.raw_ref,
+                        )
+                    )
 
     # REE captures evidence for findings
     if all_findings:
@@ -104,12 +111,7 @@ async def run_discovery_phase(
             "audit_id": audit_id,
             "findings": all_findings,
         }
-
-        ree_result = await ree.process(ree_context)
-
-        if ree_result.get("success"):
-            # Evidence refs are updated in the findings
-            pass
+        await ree.safe_process(ree_context)
 
     # QCR performs early deduplication and pattern identification
     qcr_context = {
@@ -118,7 +120,7 @@ async def run_discovery_phase(
         "findings": all_findings,
     }
 
-    qcr_result = await qcr.process(qcr_context)
+    qcr_result = await qcr.safe_process(qcr_context)
 
     patterns: List[PatternCluster] = []
     if qcr_result.get("success"):

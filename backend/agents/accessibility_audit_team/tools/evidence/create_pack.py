@@ -5,7 +5,7 @@ Create an evidence bundle with stable refs.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -71,7 +71,7 @@ async def create_pack(input_data: CreatePackInput) -> CreatePackOutput:
             artifact_type=a.artifact_type,
             ref=a.content_ref or f"{pack_ref}_{i}",
             description=a.description,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
         for i, a in enumerate(input_data.artifacts)
     ]

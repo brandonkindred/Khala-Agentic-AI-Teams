@@ -45,7 +45,6 @@ class EvidenceEngineer(BaseSpecialistAgent):
         - VERIFICATION: Supplement evidence for verified findings
         """
         phase = context.get("phase", Phase.DISCOVERY)
-        context.get("audit_id", "")
 
         if phase in [Phase.DISCOVERY, Phase.VERIFICATION]:
             return await self._handle_evidence_capture(context)

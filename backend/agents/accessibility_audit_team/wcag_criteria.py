@@ -5,6 +5,7 @@ Provides structured access to all WCAG 2.2 Level A, AA, and AAA
 success criteria for accessibility auditing.
 """
 
+import functools
 from enum import Enum
 from typing import Dict, List, Optional
 
@@ -761,26 +762,31 @@ def get_criterion(sc: str) -> Optional[SuccessCriterion]:
     return WCAG_22_CRITERIA.get(sc)
 
 
+@functools.lru_cache(maxsize=8)
 def get_criteria_by_level(level: WCAGLevel) -> List[SuccessCriterion]:
     """Get all success criteria for a given conformance level."""
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.level == level]
 
 
+@functools.lru_cache(maxsize=8)
 def get_criteria_by_principle(principle: WCAGPrinciple) -> List[SuccessCriterion]:
     """Get all success criteria for a given principle."""
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.principle == principle]
 
 
+@functools.lru_cache(maxsize=1)
 def get_level_a_aa_criteria() -> List[SuccessCriterion]:
     """Get all Level A and AA success criteria (typical conformance target)."""
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.level in (WCAGLevel.A, WCAGLevel.AA)]
 
 
+@functools.lru_cache(maxsize=1)
 def get_new_in_22_criteria() -> List[SuccessCriterion]:
     """Get all success criteria new in WCAG 2.2."""
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.new_in_22]
 
 
+@functools.lru_cache(maxsize=1)
 def get_new_in_21_criteria() -> List[SuccessCriterion]:
     """Get all success criteria new in WCAG 2.1."""
     return [sc for sc in WCAG_22_CRITERIA.values() if sc.new_in_21]

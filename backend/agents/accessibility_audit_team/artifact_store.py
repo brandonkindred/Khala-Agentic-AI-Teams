@@ -13,7 +13,7 @@ Uses S3-style references with hashing and retention policies.
 import hashlib
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -37,6 +37,7 @@ class ArtifactType(str, Enum):
     REPORT = "report"
     BACKLOG_EXPORT = "backlog_export"
     CONTRACT = "contract"
+    AUDIT_STATE = "audit_state"
 
 
 class RetentionPolicy(str, Enum):
@@ -68,7 +69,7 @@ class ArtifactMetadata(BaseModel):
     size_bytes: int = Field(default=0)
     mime_type: str = Field(default="application/octet-stream")
     retention_policy: RetentionPolicy = Field(default=RetentionPolicy.STANDARD)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: Optional[datetime] = Field(default=None)
     tags: Dict[str, str] = Field(default_factory=dict)
 
@@ -154,7 +155,7 @@ class FileSystemBackend(StorageBackend):
         # Calculate expiration
         if metadata.retention_policy != RetentionPolicy.PERMANENT:
             retention_days = RETENTION_DAYS.get(metadata.retention_policy, 365)
-            metadata.expires_at = datetime.utcnow() + timedelta(days=retention_days)
+            metadata.expires_at = datetime.now(timezone.utc) + timedelta(days=retention_days)
 
         # Write content
         artifact_path.write_bytes(content)
@@ -425,7 +426,7 @@ class ArtifactStore:
         """
         all_artifacts = await self.backend.list_artifacts()
         deleted = 0
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         for artifact in all_artifacts:
             if artifact.expires_at and artifact.expires_at < now:

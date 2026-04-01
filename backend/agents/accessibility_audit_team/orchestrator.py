@@ -15,6 +15,7 @@ Two-Lane Execution Model:
 QCR ensures Lane A doesn't dump garbage into Lane B.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,7 @@ from .agents import (
     StandardsMappingSpecialist,
     WebAuditSpecialist,
 )
+from .agents.base import MessageBus
 from .models import (
     AccessibilityAuditResult,
     AuditRequest,
@@ -57,26 +59,44 @@ class AccessibilityAuditOrchestrator:
     the specialist agents.
     """
 
-    def __init__(self, llm_client: Optional[Any] = None):
+    def __init__(self, llm_client: Optional[Any] = None, enable_addons: bool = False):
         """
         Initialize the orchestrator.
 
         Args:
             llm_client: Optional LLM client for agent processing
+            enable_addons: Enable optional addon agents (ARM, ADSE, AET)
         """
         self.llm_client = llm_client
+        self.enable_addons = enable_addons
 
-        # Initialize all specialist agents
-        self.apl = AccessibilityProgramLead(llm_client)
-        self.was = WebAuditSpecialist(llm_client)
-        self.mas = MobileAccessibilitySpecialist(llm_client)
-        self.ats = AssistiveTechSpecialist(llm_client)
-        self.slms = StandardsMappingSpecialist(llm_client)
-        self.ree = EvidenceEngineer(llm_client)
-        self.ra = RemediationAdvisor(llm_client)
-        self.qcr = QAConsistencyReviewer(llm_client)
+        # Shared message bus for inter-agent communication
+        self.message_bus = MessageBus()
 
-        # Store for in-progress audits
+        # Initialize all specialist agents with shared bus
+        self.apl = AccessibilityProgramLead(llm_client, message_bus=self.message_bus)
+        self.was = WebAuditSpecialist(llm_client, message_bus=self.message_bus)
+        self.mas = MobileAccessibilitySpecialist(llm_client, message_bus=self.message_bus)
+        self.ats = AssistiveTechSpecialist(llm_client, message_bus=self.message_bus)
+        self.slms = StandardsMappingSpecialist(llm_client, message_bus=self.message_bus)
+        self.ree = EvidenceEngineer(llm_client, message_bus=self.message_bus)
+        self.ra = RemediationAdvisor(llm_client, message_bus=self.message_bus)
+        self.qcr = QAConsistencyReviewer(llm_client, message_bus=self.message_bus)
+
+        # Optional addon agents
+        self.arm = None
+        self.adse = None
+        self.aet = None
+        if enable_addons:
+            from .addons.design_system_agent import AccessibleDesignSystemAgent
+            from .addons.monitoring_agent import AccessibilityMonitoringAgent
+            from .addons.training_agent import AccessibilityTrainingAgent
+
+            self.arm = AccessibilityMonitoringAgent(llm_client)
+            self.adse = AccessibleDesignSystemAgent(llm_client)
+            self.aet = AccessibilityTrainingAgent(llm_client)
+
+        # Store for in-progress audits (also persisted via artifact store)
         self._audits: Dict[str, AccessibilityAuditResult] = {}
 
     async def run_audit(
@@ -87,133 +107,244 @@ class AccessibilityAuditOrchestrator:
         """
         Run a complete accessibility audit.
 
-        Executes all phases:
-        1. Intake - Create audit plan
-        2. Discovery - Scan and manual testing
-        3. Verification - AT verification and enrichment
-        4. Report Packaging - Final QA and report
-
-        Args:
-            audit_request: The audit request with targets and constraints
-            tech_stack: Optional tech stack info for remediation guidance
-
-        Returns:
-            AccessibilityAuditResult with all findings and report
+        Enforces ``timebox_hours`` from the audit request as an overall
+        timeout.  State is persisted to the artifact store after each phase
+        so progress survives restarts.
         """
         tech_stack = tech_stack or {"web": "other", "mobile": "other"}
 
-        # Initialize result
+        timeout_seconds: Optional[float] = None
+        if audit_request.timebox_hours:
+            timeout_seconds = audit_request.timebox_hours * 3600
+
         result = AccessibilityAuditResult(
             audit_id=audit_request.audit_id or "audit_temp",
             current_phase=Phase.INTAKE,
         )
 
         try:
-            # Phase 0: Intake
-            logger.info("Starting intake phase for audit")
-            result.current_phase = Phase.INTAKE
-
-            intake_result = await run_intake_phase(
-                audit_request=audit_request,
-                llm_client=self.llm_client,
+            if timeout_seconds:
+                result = await asyncio.wait_for(
+                    self._run_audit_phases(audit_request, tech_stack, result),
+                    timeout=timeout_seconds,
+                )
+            else:
+                result = await self._run_audit_phases(audit_request, tech_stack, result)
+        except asyncio.TimeoutError:
+            logger.warning("Audit %s timed out after %s hours", result.audit_id, audit_request.timebox_hours)
+            result.success = False
+            result.failure_reason = (
+                f"Audit timed out after {audit_request.timebox_hours} hour(s). "
+                f"Completed phases: {[p.value for p in result.completed_phases]}"
             )
-
-            if not intake_result.success:
-                result.failure_reason = intake_result.error or "Intake failed"
-                return result
-
-            result.intake_result = intake_result
-            result.audit_id = intake_result.audit_plan.audit_id
-            result.completed_phases.append(Phase.INTAKE)
-
-            # Store audit
-            self._audits[result.audit_id] = result
-
-            # Phase 1: Discovery
-            logger.info(f"Starting discovery phase for audit {result.audit_id}")
-            result.current_phase = Phase.DISCOVERY
-
-            discovery_result = await run_discovery_phase(
-                audit_plan=intake_result.audit_plan,
-                llm_client=self.llm_client,
-            )
-
-            if not discovery_result.success:
-                result.failure_reason = discovery_result.error or "Discovery failed"
-                return result
-
-            result.discovery_result = discovery_result
-            result.completed_phases.append(Phase.DISCOVERY)
-
-            # Phase 2: Verification
-            logger.info(f"Starting verification phase for audit {result.audit_id}")
-            result.current_phase = Phase.VERIFICATION
-
-            verification_result = await run_verification_phase(
-                audit_id=result.audit_id,
-                draft_findings=discovery_result.draft_findings,
-                stack=tech_stack,
-                llm_client=self.llm_client,
-            )
-
-            if not verification_result.success:
-                result.failure_reason = verification_result.error or "Verification failed"
-                return result
-
-            result.verification_result = verification_result
-            result.completed_phases.append(Phase.VERIFICATION)
-
-            # Phase 3: Report Packaging
-            logger.info(f"Starting report packaging phase for audit {result.audit_id}")
-            result.current_phase = Phase.REPORT_PACKAGING
-
-            report_result = await run_report_packaging_phase(
-                audit_id=result.audit_id,
-                verified_findings=verification_result.verified_findings,
-                coverage_matrix=intake_result.coverage_matrix,
-                llm_client=self.llm_client,
-            )
-
-            if not report_result.success:
-                result.failure_reason = report_result.error or "Report packaging failed"
-                return result
-
-            result.report_packaging_result = report_result
-            result.completed_phases.append(Phase.REPORT_PACKAGING)
-
-            # Finalize result
-            result.success = True
-            result.final_findings = report_result.final_backlog
-            result.final_patterns = report_result.patterns
-            result.coverage_matrix = report_result.coverage_matrix
-
-            # Count by severity
-            result.total_findings = len(result.final_findings)
-            result.critical_count = sum(
-                1 for f in result.final_findings if f.severity == Severity.CRITICAL
-            )
-            result.high_count = sum(1 for f in result.final_findings if f.severity == Severity.HIGH)
-            result.medium_count = sum(
-                1 for f in result.final_findings if f.severity == Severity.MEDIUM
-            )
-            result.low_count = sum(1 for f in result.final_findings if f.severity == Severity.LOW)
-
-            result.summary = (
-                f"Audit complete. {result.total_findings} findings "
-                f"({result.critical_count} critical, {result.high_count} high, "
-                f"{result.medium_count} medium, {result.low_count} low). "
-                f"{len(result.final_patterns)} patterns identified."
-            )
-
-            logger.info(f"Audit {result.audit_id} complete: {result.summary}")
-
-            return result
-
+            await self._persist_audit(result)
         except Exception as e:
-            logger.exception(f"Audit failed: {e}")
+            logger.exception("Audit failed: %s", e)
             result.success = False
             result.failure_reason = str(e)
+            await self._persist_audit(result)
+
+        return result
+
+    async def _run_audit_phases(
+        self,
+        audit_request: AuditRequest,
+        tech_stack: Dict[str, str],
+        result: AccessibilityAuditResult,
+    ) -> AccessibilityAuditResult:
+        """Execute all audit phases sequentially, persisting after each."""
+
+        # Phase 0: Intake
+        logger.info("Starting intake phase for audit")
+        result.current_phase = Phase.INTAKE
+
+        intake_result = await run_intake_phase(
+            audit_request=audit_request,
+            llm_client=self.llm_client,
+            message_bus=self.message_bus,
+        )
+
+        if not intake_result.success:
+            result.failure_reason = intake_result.error or "Intake failed"
             return result
+
+        result.intake_result = intake_result
+        result.audit_id = intake_result.audit_plan.audit_id
+        result.completed_phases.append(Phase.INTAKE)
+        self._audits[result.audit_id] = result
+        await self._persist_audit(result)
+
+        # Phase 1: Discovery
+        logger.info("Starting discovery phase for audit %s", result.audit_id)
+        result.current_phase = Phase.DISCOVERY
+
+        discovery_result = await run_discovery_phase(
+            audit_plan=intake_result.audit_plan,
+            llm_client=self.llm_client,
+            message_bus=self.message_bus,
+        )
+
+        if not discovery_result.success:
+            result.failure_reason = discovery_result.error or "Discovery failed"
+            return result
+
+        result.discovery_result = discovery_result
+        result.completed_phases.append(Phase.DISCOVERY)
+        await self._persist_audit(result)
+
+        # Phase 2: Verification
+        logger.info("Starting verification phase for audit %s", result.audit_id)
+        result.current_phase = Phase.VERIFICATION
+
+        verification_result = await run_verification_phase(
+            audit_id=result.audit_id,
+            draft_findings=discovery_result.draft_findings,
+            stack=tech_stack,
+            llm_client=self.llm_client,
+            message_bus=self.message_bus,
+        )
+
+        if not verification_result.success:
+            result.failure_reason = verification_result.error or "Verification failed"
+            return result
+
+        result.verification_result = verification_result
+        result.completed_phases.append(Phase.VERIFICATION)
+        await self._persist_audit(result)
+
+        # Phase 3: Report Packaging
+        logger.info("Starting report packaging phase for audit %s", result.audit_id)
+        result.current_phase = Phase.REPORT_PACKAGING
+
+        report_result = await run_report_packaging_phase(
+            audit_id=result.audit_id,
+            verified_findings=verification_result.verified_findings,
+            coverage_matrix=intake_result.coverage_matrix,
+            llm_client=self.llm_client,
+            message_bus=self.message_bus,
+        )
+
+        if not report_result.success:
+            result.failure_reason = report_result.error or "Report packaging failed"
+            return result
+
+        result.report_packaging_result = report_result
+        result.completed_phases.append(Phase.REPORT_PACKAGING)
+
+        # Finalize result
+        result.success = True
+        result.final_findings = report_result.final_backlog
+        result.final_patterns = report_result.patterns
+        result.coverage_matrix = report_result.coverage_matrix
+
+        # Count by severity
+        result.total_findings = len(result.final_findings)
+        result.critical_count = sum(
+            1 for f in result.final_findings if f.severity == Severity.CRITICAL
+        )
+        result.high_count = sum(1 for f in result.final_findings if f.severity == Severity.HIGH)
+        result.medium_count = sum(
+            1 for f in result.final_findings if f.severity == Severity.MEDIUM
+        )
+        result.low_count = sum(1 for f in result.final_findings if f.severity == Severity.LOW)
+
+        result.summary = (
+            f"Audit complete. {result.total_findings} findings "
+            f"({result.critical_count} critical, {result.high_count} high, "
+            f"{result.medium_count} medium, {result.low_count} low). "
+            f"{len(result.final_patterns)} patterns identified."
+        )
+
+        logger.info("Audit %s complete: %s", result.audit_id, result.summary)
+
+        # Run optional addon agents after successful audit
+        if self.enable_addons:
+            await self._run_addons(result)
+
+        await self._persist_audit(result)
+
+        return result
+
+    async def _run_addons(self, result: AccessibilityAuditResult) -> None:
+        """Run optional addon agents after a successful audit."""
+        audit_id = result.audit_id
+        try:
+            # ARM: Create monitoring baseline from final findings
+            if self.arm and result.final_findings:
+                web_targets = [
+                    {"url": f.target, "journey": "audit"}
+                    for f in result.final_findings
+                    if f.surface.value == "web"
+                ]
+                if web_targets:
+                    await self.arm.create_baseline(
+                        audit_id=audit_id,
+                        env="prod",
+                        targets=web_targets[:20],
+                    )
+                    logger.info("ARM created monitoring baseline for audit %s", audit_id)
+
+            # AET: Generate training modules from patterns
+            if self.aet and result.final_patterns:
+                await self.aet.mine_patterns(
+                    audit_id=audit_id,
+                    patterns=result.final_patterns,
+                )
+                logger.info("AET generated training modules for audit %s", audit_id)
+
+        except Exception as e:
+            logger.warning("Addon execution failed (non-fatal): %s", e)
+
+    # ------------------------------------------------------------------
+    # Persistence helpers
+    # ------------------------------------------------------------------
+
+    async def _persist_audit(self, result: AccessibilityAuditResult) -> None:
+        """Persist audit state to the artifact store for crash recovery."""
+        try:
+            from .artifact_store import (
+                ArtifactMetadata,
+                ArtifactType,
+                RetentionPolicy,
+                get_artifact_store,
+            )
+
+            store = get_artifact_store()
+            ref = f"audit_state_{result.audit_id}"
+            content = result.model_dump_json().encode()
+            metadata = ArtifactMetadata(
+                artifact_ref=ref,
+                artifact_type=ArtifactType.AUDIT_STATE,
+                audit_id=result.audit_id,
+                mime_type="application/json",
+                retention_policy=RetentionPolicy.STANDARD,
+            )
+            await store.backend.store(ref, content, metadata)
+        except Exception as e:
+            logger.warning("Failed to persist audit state: %s", e)
+
+    async def _load_audit(self, audit_id: str) -> Optional[AccessibilityAuditResult]:
+        """Load audit state from the artifact store."""
+        try:
+            from .artifact_store import get_artifact_store
+
+            store = get_artifact_store()
+            ref = f"audit_state_{audit_id}"
+            content = await store.retrieve(ref)
+            if content:
+                return AccessibilityAuditResult.model_validate_json(content)
+        except Exception as e:
+            logger.warning("Failed to load audit state: %s", e)
+        return None
+
+    async def _ensure_loaded(self, audit_id: str) -> Optional[AccessibilityAuditResult]:
+        """Return the audit from cache or load from persistent store."""
+        if audit_id in self._audits:
+            return self._audits[audit_id]
+        loaded = await self._load_audit(audit_id)
+        if loaded:
+            self._audits[audit_id] = loaded
+        return loaded
 
     async def run_retest(
         self,
@@ -230,15 +361,13 @@ class AccessibilityAuditOrchestrator:
         Returns:
             Updated AccessibilityAuditResult
         """
-        if audit_id not in self._audits:
-            result = AccessibilityAuditResult(
+        result = await self._ensure_loaded(audit_id)
+        if not result:
+            return AccessibilityAuditResult(
                 audit_id=audit_id,
                 success=False,
                 failure_reason=f"Audit {audit_id} not found",
             )
-            return result
-
-        result = self._audits[audit_id]
 
         # Get findings to retest
         if finding_ids:
@@ -258,6 +387,7 @@ class AccessibilityAuditOrchestrator:
             audit_id=audit_id,
             findings_to_retest=findings_to_retest,
             llm_client=self.llm_client,
+            message_bus=self.message_bus,
         )
 
         result.retest_result = retest_result

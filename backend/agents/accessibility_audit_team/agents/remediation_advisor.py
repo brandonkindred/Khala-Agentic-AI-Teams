@@ -45,7 +45,6 @@ class RemediationAdvisor(BaseSpecialistAgent):
         - VERIFICATION: Add remediation guidance to verified findings
         """
         phase = context.get("phase", Phase.VERIFICATION)
-        context.get("audit_id", "")
 
         if phase == Phase.VERIFICATION:
             return await self._handle_remediation(context)

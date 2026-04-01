@@ -19,6 +19,7 @@ from ..agents import (
     RemediationAdvisor,
     StandardsMappingSpecialist,
 )
+from ..agents.base import MessageBus
 from ..models import (
     Finding,
     FindingState,
@@ -33,6 +34,7 @@ async def run_verification_phase(
     draft_findings: List[Finding],
     stack: Dict[str, str] = None,
     llm_client: Optional[Any] = None,
+    message_bus: Optional[MessageBus] = None,
 ) -> VerificationResult:
     """
     Run the verification phase for deep AT verification.
@@ -62,10 +64,10 @@ async def run_verification_phase(
     stack = stack or {"web": "other", "mobile": "other"}
 
     # Initialize agents
-    ats = AssistiveTechSpecialist(llm_client)
-    slms = StandardsMappingSpecialist(llm_client)
-    ra = RemediationAdvisor(llm_client)
-    ree = EvidenceEngineer(llm_client)
+    ats = AssistiveTechSpecialist(llm_client, message_bus=message_bus)
+    slms = StandardsMappingSpecialist(llm_client, message_bus=message_bus)
+    ra = RemediationAdvisor(llm_client, message_bus=message_bus)
+    ree = EvidenceEngineer(llm_client, message_bus=message_bus)
 
     # Prioritize high-impact findings for AT verification
     high_impact = [f for f in draft_findings if f.severity in [Severity.CRITICAL, Severity.HIGH]]
@@ -84,7 +86,7 @@ async def run_verification_phase(
             "findings": high_impact,
         }
 
-        ats_result = await ats.process(ats_context)
+        ats_result = await ats.safe_process(ats_context)
 
         if ats_result.get("success"):
             verified_findings.extend(ats_result.get("verified_findings", []))
@@ -110,7 +112,7 @@ async def run_verification_phase(
             "findings": verified_findings,
         }
 
-        slms_result = await slms.process(slms_context)
+        slms_result = await slms.safe_process(slms_context)
 
         if slms_result.get("success"):
             verified_findings = slms_result.get("mapped_findings", verified_findings)
@@ -124,7 +126,7 @@ async def run_verification_phase(
             "stack": stack,
         }
 
-        ra_result = await ra.process(ra_context)
+        ra_result = await ra.safe_process(ra_context)
 
         if ra_result.get("success"):
             verified_findings = ra_result.get("remediated_findings", verified_findings)
@@ -139,7 +141,7 @@ async def run_verification_phase(
             "findings": needs_more_evidence,
         }
 
-        await ree.process(ree_context)
+        await ree.safe_process(ree_context)
 
     return VerificationResult(
         success=True,

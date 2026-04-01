@@ -15,6 +15,7 @@ from ..agents import (
     AccessibilityProgramLead,
     QAConsistencyReviewer,
 )
+from ..agents.base import MessageBus
 from ..models import (
     CoverageMatrix,
     Finding,
@@ -29,6 +30,7 @@ async def run_report_packaging_phase(
     verified_findings: List[Finding],
     coverage_matrix: Optional[CoverageMatrix] = None,
     llm_client: Optional[Any] = None,
+    message_bus: Optional[MessageBus] = None,
 ) -> ReportPackagingResult:
     """
     Run the report packaging phase for final QA and report generation.
@@ -61,8 +63,8 @@ async def run_report_packaging_phase(
         )
 
     # Initialize agents
-    qcr = QAConsistencyReviewer(llm_client)
-    apl = AccessibilityProgramLead(llm_client)
+    qcr = QAConsistencyReviewer(llm_client, message_bus=message_bus)
+    apl = AccessibilityProgramLead(llm_client, message_bus=message_bus)
 
     # QCR final quality gate
     qcr_context = {
@@ -71,7 +73,7 @@ async def run_report_packaging_phase(
         "findings": verified_findings,
     }
 
-    qcr_result = await qcr.process(qcr_context)
+    qcr_result = await qcr.safe_process(qcr_context)
 
     approved_findings: List[Finding] = []
     patterns: List[PatternCluster] = []
@@ -90,7 +92,7 @@ async def run_report_packaging_phase(
         "patterns": patterns,
     }
 
-    apl_result = await apl.process(apl_context)
+    apl_result = await apl.safe_process(apl_context)
 
     if apl_result.get("success"):
         report_result: ReportPackagingResult = apl_result.get("report_packaging_result")
@@ -121,7 +123,7 @@ async def export_final_report(
     audit_id: str,
     findings: List[Finding],
     patterns: List[PatternCluster],
-    format: str = "json",
+    export_format: str = "json",
     include_evidence: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -131,7 +133,7 @@ async def export_final_report(
         audit_id: The audit identifier
         findings: Final approved findings
         patterns: Pattern clusters
-        format: Export format (json, csv)
+        export_format: Export format (json, csv)
         include_evidence: Whether to include evidence refs
 
     Returns:
@@ -144,7 +146,7 @@ async def export_final_report(
         audit_id=audit_id,
         findings=findings,
         patterns=patterns,
-        format=format,
+        format=export_format,
         include_evidence_refs=include_evidence,
         include_patterns=True,
     )
