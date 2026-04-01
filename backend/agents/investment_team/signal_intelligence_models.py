@@ -17,7 +17,9 @@ class SignalIntelligenceBriefV1(BaseModel):
     micro_themes: List[str] = Field(default_factory=list)
     high_value_signal_hypotheses: List[str] = Field(default_factory=list)
     trade_structures_benefiting: List[str] = Field(default_factory=list)
-    pairing_guidance: str = Field(default="", description="How to combine signals / asset classes for this window")
+    pairing_guidance: str = Field(
+        default="", description="How to combine signals / asset classes for this window"
+    )
     evidence_from_priors: str = Field(
         default="",
         description="References to prior lab indices or 'none / first run'",

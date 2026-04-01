@@ -21,16 +21,26 @@ class MarketLabContext(BaseModel):
     """
 
     fetched_at: str = Field(..., description="ISO UTC when snapshot was assembled")
-    degraded: bool = Field(default=False, description="True if one or more sources failed or timed out")
-    degraded_reason: Optional[str] = Field(default=None, description="Human-readable reason when degraded")
-    sources_used: List[str] = Field(default_factory=list, description="Provider ids included in this snapshot")
+    degraded: bool = Field(
+        default=False, description="True if one or more sources failed or timed out"
+    )
+    degraded_reason: Optional[str] = Field(
+        default=None, description="Human-readable reason when degraded"
+    )
+    sources_used: List[str] = Field(
+        default_factory=list, description="Provider ids included in this snapshot"
+    )
 
     fx_rates: dict[str, float] = Field(
         default_factory=dict,
         description="Sample FX vs USD (e.g. EUR, GBP, JPY keys with USD quote interpretation)",
     )
-    macro_snippets: List[str] = Field(default_factory=list, description="Short macro lines, e.g. DGS10")
-    crypto_snapshot: Optional[str] = Field(default=None, description="Optional crypto headline price line")
+    macro_snippets: List[str] = Field(
+        default_factory=list, description="Short macro lines, e.g. DGS10"
+    )
+    crypto_snapshot: Optional[str] = Field(
+        default=None, description="Optional crypto headline price line"
+    )
     social_sentiment: Optional[str] = Field(
         default=None,
         description="Optional social/sentiment line; often empty on free tier without dedicated API",
