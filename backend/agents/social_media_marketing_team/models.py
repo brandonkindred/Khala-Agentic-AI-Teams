@@ -26,8 +26,8 @@ class BrandGoals(BaseModel):
     target_audience: str
     goals: List[str] = Field(default_factory=list)
     voice_and_tone: str = "professional, clear, and human"
-    cadence_posts_per_day: int = 2
-    duration_days: int = 14
+    cadence_posts_per_day: int = Field(default=2, ge=1, le=24)
+    duration_days: int = Field(default=14, ge=1, le=365)
     brand_guidelines_path: Optional[str] = None
     brand_objectives_path: Optional[str] = None
     brand_guidelines: str = ""
