@@ -473,7 +473,7 @@ class RiskComplianceAgent:
         if goals.brand_guidelines:
             guidelines_lower = goals.brand_guidelines.lower()
             if "do not mention competitors" in guidelines_lower and re.search(
-                _word_boundary_pattern("competitor"), lowered
+                r"(?<!\w)competitors?(?!\w)", lowered
             ):
                 risk_reasons.append(
                     "Mentions competitors despite guidelines (brand_guideline_violation)"
