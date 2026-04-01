@@ -20,8 +20,12 @@ _CANONICAL_ASSET_CLASSES: tuple[str, ...] = (
 )
 
 
-def normalize_asset_class(ac: str) -> str:
-    x = (ac or "").lower().strip()
+def normalize_asset_class(ac: object) -> str:
+    """Map any asset-class string variant to one of the canonical labels.
+
+    Accepts ``object`` so callers can pass raw LLM output without casting.
+    """
+    x = str(ac or "stocks").lower().strip()
     if x in ("equities", "equity", "stock"):
         return "stocks"
     if x in ("fx",):
@@ -88,9 +92,7 @@ def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) ->
 
     parts: List[str] = [
         "Recent asset-class counts (last "
-        f"{n_sample} strategies): "
-        + ", ".join(f"{k}={v}" for k, v in counts.items())
-        + "."
+        f"{n_sample} strategies): " + ", ".join(f"{k}={v}" for k, v in counts.items()) + "."
     ]
     if stock_share > 0.35 and n_sample >= 2:
         parts.append(

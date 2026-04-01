@@ -12,51 +12,17 @@ import httpx
 from pydantic import BaseModel
 
 from .models import StrategySpec
+from .strategy_lab_context import normalize_asset_class
+from .symbols import (
+    COINGECKO_IDS,
+    COMMODITY_SYMBOLS,
+    CRYPTO_SYMBOLS,
+    FOREX_SYMBOLS,
+    FUTURES_SYMBOLS,
+    STOCK_SYMBOLS,
+)
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Symbol mapping: internal symbol -> CoinGecko API id
-# ---------------------------------------------------------------------------
-
-_COINGECKO_IDS = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "SOL": "solana",
-    "BNB": "binancecoin",
-    "XRP": "ripple",
-    "MATIC": "matic-network",
-    "AVAX": "avalanche-2",
-    "LINK": "chainlink",
-    "ADA": "cardano",
-    "DOT": "polkadot",
-}
-
-# ---------------------------------------------------------------------------
-# Symbol lists by asset class
-# ---------------------------------------------------------------------------
-
-_STOCK_SYMBOLS = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOGL", "JPM", "AMD", "SPY"]
-_CRYPTO_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "XRP", "MATIC", "AVAX", "LINK", "ADA", "DOT"]
-# Forex pairs use yfinance's =X suffix
-_FOREX_SYMBOLS = [
-    "EURUSD=X",
-    "GBPUSD=X",
-    "USDJPY=X",
-    "AUDUSD=X",
-    "USDCAD=X",
-    "NZDUSD=X",
-    "USDCHF=X",
-    "EURGBP=X",
-    "EURJPY=X",
-    "GBPJPY=X",
-]
-# Futures use yfinance's =F suffix
-_FUTURES_SYMBOLS = ["ES=F", "NQ=F", "CL=F", "GC=F", "SI=F", "ZB=F", "NG=F"]
-# Commodity ETFs (liquid proxies for commodities via yfinance)
-_COMMODITY_SYMBOLS = ["GLD", "USO", "SLV", "DBA", "UNG", "PDBC", "DBC"]
-# Broad ETFs used as a fallback
-_OTHER_SYMBOLS = ["GLD", "USO", "TLT", "QQQ", "IWM", "EEM", "GDX", "XLE", "XLF"]
 
 
 class OHLCVBar(BaseModel):
@@ -94,8 +60,7 @@ class MarketDataService:
         self, symbol: str, asset_class: str, start_date: str, end_date: str
     ) -> List[OHLCVBar]:
         """Fetch OHLCV data for an explicit date range. Routes by asset class."""
-        asset = asset_class.lower()
-        if asset == "crypto":
+        if normalize_asset_class(asset_class) == "crypto":
             return self._fetch_crypto(symbol, start_date, end_date)
         # All non-crypto assets are fetched via yfinance (stocks, forex, futures,
         # commodities, options).  yfinance supports =X (forex) and =F (futures)
@@ -104,18 +69,16 @@ class MarketDataService:
 
     def get_symbols_for_strategy(self, strategy: StrategySpec) -> List[str]:
         """Return relevant symbols based on the strategy's asset class."""
-        asset = strategy.asset_class.lower()
-        if asset == "crypto":
-            return list(_CRYPTO_SYMBOLS)
-        if asset in ("stocks", "equities", "options"):
-            return list(_STOCK_SYMBOLS)
-        if asset in ("forex", "fx"):
-            return list(_FOREX_SYMBOLS)
-        if asset == "futures":
-            return list(_FUTURES_SYMBOLS)
-        if asset in ("commodities", "commodity"):
-            return list(_COMMODITY_SYMBOLS)
-        return list(_STOCK_SYMBOLS)
+        asset = normalize_asset_class(strategy.asset_class)
+        symbol_map = {
+            "crypto": CRYPTO_SYMBOLS,
+            "stocks": STOCK_SYMBOLS,
+            "options": STOCK_SYMBOLS,
+            "forex": FOREX_SYMBOLS,
+            "futures": FUTURES_SYMBOLS,
+            "commodities": COMMODITY_SYMBOLS,
+        }
+        return list(symbol_map.get(asset, STOCK_SYMBOLS))
 
     def fetch_multi_symbol(
         self, symbols: List[str], asset_class: str, days: int = 365
@@ -155,39 +118,74 @@ class MarketDataService:
     # Internal: Yahoo Finance (stocks, forex, futures, commodities)
     # ------------------------------------------------------------------
 
-    def _fetch_stock(self, symbol: str, start_date: str, end_date: str) -> List[OHLCVBar]:
-        """Fetch stock/ETF/forex/futures OHLCV data via yfinance for an arbitrary date range."""
+    def _fetch_stock(
+        self, symbol: str, start_date: str, end_date: str, max_retries: int = 3
+    ) -> List[OHLCVBar]:
+        """Fetch stock/ETF/forex/futures OHLCV data via yfinance for an arbitrary date range.
+
+        Retries with exponential backoff on transient failures, matching the
+        CoinGecko retry pattern.
+        """
         try:
             import yfinance as yf
         except ImportError:
             logger.warning("yfinance not installed — falling back to empty data for %s", symbol)
             return []
 
-        try:
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(start=start_date, end=end_date, interval="1d")
-        except Exception as exc:
-            logger.error("yfinance fetch failed for %s: %s", symbol, exc)
-            return []
-
-        if df is None or df.empty:
-            logger.warning("No data returned from yfinance for %s", symbol)
-            return []
-
-        bars: List[OHLCVBar] = []
-        for idx, row in df.iterrows():
-            bar_date = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
-            bars.append(
-                OHLCVBar(
-                    date=bar_date,
-                    open=round(float(row["Open"]), 4),
-                    high=round(float(row["High"]), 4),
-                    low=round(float(row["Low"]), 4),
-                    close=round(float(row["Close"]), 4),
-                    volume=float(row.get("Volume", 0)),
+        for attempt in range(max_retries):
+            try:
+                ticker = yf.Ticker(symbol)
+                df = ticker.history(start=start_date, end=end_date, interval="1d")
+            except Exception as exc:
+                if attempt < max_retries - 1:
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(
+                        "yfinance fetch failed for %s, retrying in %ds (attempt %d): %s",
+                        symbol,
+                        wait,
+                        attempt + 1,
+                        exc,
+                    )
+                    time.sleep(wait)
+                    continue
+                logger.error(
+                    "yfinance fetch failed for %s after %d attempts: %s", symbol, max_retries, exc
                 )
-            )
-        return bars
+                return []
+
+            if df is not None and not df.empty:
+                bars: List[OHLCVBar] = []
+                for idx, row in df.iterrows():
+                    bar_date = (
+                        idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+                    )
+                    bars.append(
+                        OHLCVBar(
+                            date=bar_date,
+                            open=round(float(row["Open"]), 4),
+                            high=round(float(row["High"]), 4),
+                            low=round(float(row["Low"]), 4),
+                            close=round(float(row["Close"]), 4),
+                            volume=float(row.get("Volume", 0)),
+                        )
+                    )
+                return bars
+
+            if attempt < max_retries - 1:
+                wait = 2 ** (attempt + 1)
+                logger.warning(
+                    "No data from yfinance for %s, retrying in %ds (attempt %d)",
+                    symbol,
+                    wait,
+                    attempt + 1,
+                )
+                time.sleep(wait)
+            else:
+                logger.warning(
+                    "No data returned from yfinance for %s after %d attempts", symbol, max_retries
+                )
+
+        return []
 
     # ------------------------------------------------------------------
     # Internal: CoinGecko (crypto)
@@ -199,7 +197,7 @@ class MarketDataService:
         Uses Unix timestamps so arbitrary historical windows work correctly.
         Includes retry with exponential backoff for rate-limit (429) responses.
         """
-        coin_id = _COINGECKO_IDS.get(symbol.upper())
+        coin_id = COINGECKO_IDS.get(symbol.upper())
         if not coin_id:
             logger.warning("Unknown crypto symbol %s — no CoinGecko mapping", symbol)
             return []

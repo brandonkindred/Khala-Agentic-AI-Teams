@@ -1,4 +1,11 @@
-"""Codex-friendly implementation models for the multi-asset investment organization spec."""
+"""Codex-friendly implementation models for the multi-asset investment organization spec.
+
+.. deprecated::
+    This module provides V1 spec-level Pydantic models that parallel the runtime
+    models in ``models.py``.  New features (e.g. paper trading, advisor sessions)
+    should **not** add V1 mirrors here.  Prefer ``models.py`` for all new work.
+    These types are retained for backward compatibility only.
+"""
 
 from __future__ import annotations
 

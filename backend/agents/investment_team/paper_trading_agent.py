@@ -30,7 +30,7 @@ from .trade_simulator import (
     OpenPosition,
     TradeSimulationEngine,
     compute_metrics,
-    format_bars_table,
+    evaluate_bar,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,43 +44,6 @@ _EVALUATE_SYSTEM = (
     "You evaluate daily price bars against the strategy's entry and exit rules to decide whether to trade. "
     "Be disciplined — only trade when the rules are clearly met by the price data."
 )
-
-_EVALUATE_PROMPT = """\
-Evaluate whether the trading strategy's rules are triggered for this market data.
-
-## Strategy
-Asset class: {asset_class}
-Hypothesis: {hypothesis}
-Signal: {signal_definition}
-Entry rules: {entry_rules}
-Exit rules: {exit_rules}
-Sizing rules: {sizing_rules}
-Risk limits: {risk_limits}
-
-## Current Position
-{position_status}
-
-## Available Capital
-${capital:,.2f}
-
-## Current Bar ({symbol}, {current_date})
-Open: {open}  High: {high}  Low: {low}  Close: {close}  Volume: {volume}
-
-## Recent Price History ({symbol}, last {n_bars} bars)
-{recent_bars_text}
-
-## Instructions
-Based on the strategy rules and market data above, decide your action.
-If you have NO open position, evaluate ENTRY rules. If you HAVE an open position, evaluate EXIT rules.
-Be conservative — only enter when signals are clearly met, and respect risk limits.
-
-Return ONLY a JSON object with no markdown:
-{{"action": "enter_long" or "enter_short" or "exit" or "hold", "confidence": 0.0 to 1.0, \
-"shares": number_of_shares_or_0, "reasoning": "brief explanation"}}
-
-For "hold", set shares to 0. For entries, calculate shares based on sizing rules and available capital.
-For exits, set shares to 0 (will close full position).
-"""
 
 _DIVERGENCE_SYSTEM = (
     "You are a quantitative trading analyst specializing in strategy validation. "
@@ -276,49 +239,16 @@ class PaperTradingAgent:
         capital: float,
     ) -> Dict[str, Any]:
         """Ask LLM to evaluate whether entry/exit rules are met for this bar."""
-        if open_position:
-            pos_status = (
-                f"OPEN {open_position.side.upper()} position in {symbol}: "
-                f"{open_position.shares} shares @ ${open_position.entry_price:.2f} "
-                f"(entered {open_position.entry_date})"
-            )
-        else:
-            pos_status = "No open position — looking for entry signals."
-
-        prompt = _EVALUATE_PROMPT.format(
-            asset_class=strategy.asset_class,
-            hypothesis=strategy.hypothesis,
-            signal_definition=strategy.signal_definition,
-            entry_rules="; ".join(strategy.entry_rules),
-            exit_rules="; ".join(strategy.exit_rules),
-            sizing_rules="; ".join(strategy.sizing_rules),
-            risk_limits=strategy.risk_limits,
-            position_status=pos_status,
-            capital=capital,
-            symbol=symbol,
-            current_date=current_bar.date,
-            open=current_bar.open,
-            high=current_bar.high,
-            low=current_bar.low,
-            close=current_bar.close,
-            volume=current_bar.volume,
-            n_bars=len(recent_bars),
-            recent_bars_text=format_bars_table(recent_bars),
+        return evaluate_bar(
+            self.llm.complete_json,
+            strategy,
+            _EVALUATE_SYSTEM,
+            symbol,
+            current_bar,
+            recent_bars,
+            open_position,
+            capital,
         )
-
-        data = self.llm.complete_json(
-            prompt,
-            temperature=0.2,
-            system_prompt=_EVALUATE_SYSTEM,
-            think=True,
-        )
-
-        return {
-            "action": str(data.get("action", "hold")),
-            "confidence": float(data.get("confidence", 0.0)),
-            "shares": float(data.get("shares", 0)),
-            "reasoning": str(data.get("reasoning", "")),
-        }
 
     @staticmethod
     def compare_performance(

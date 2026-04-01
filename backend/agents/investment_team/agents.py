@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -130,6 +131,8 @@ class ValidationAgent:
 class PromotionGateAgent:
     """Applies universal promotion checklist and enforces separation-of-duties gates."""
 
+    _validator = ValidationAgent()
+
     def decide(
         self,
         strategy: StrategySpec,
@@ -204,8 +207,7 @@ class PromotionGateAgent:
             )
         )
 
-        validator = ValidationAgent()
-        failures = validator.checklist_failures(validation)
+        failures = self._validator.checklist_failures(validation)
         if validation.strategy_id != strategy.strategy_id:
             failures.append("Validation report strategy_id does not match strategy spec.")
         if failures:
@@ -608,7 +610,7 @@ class FinancialAdvisorAgent:
             "correct",
             "y",
         }
-        return any(c in lowered for c in confirms)
+        return any(re.search(rf"\b{re.escape(c)}\b", lowered) for c in confirms)
 
     def _extract_topic_data(self, session: AdvisorSession, text: str) -> None:  # noqa: C901
         """Parse the user reply and populate the relevant collected fields."""
@@ -827,8 +829,6 @@ class FinancialAdvisorAgent:
                 c.max_single_position_pct = 10.0
 
             # Parse asset class caps like "60% equities, 10% crypto"
-            import re
-
             cap_pattern = re.compile(
                 r"(\d+)%?\s*(equit|stock|bond|crypto|option|real.?estate|fx|commodit)", re.I
             )
@@ -882,22 +882,12 @@ class FinancialAdvisorAgent:
     @staticmethod
     def _extract_number(text: str) -> Optional[float]:
         """Extract the first number from text, handling k/m/b suffixes and commas."""
-        import re
-
-        text = text.replace(",", "").replace("$", "")
-        match = re.search(r"(\d+(?:\.\d+)?)\s*([kmb])?", text, re.I)
-        if not match:
-            return None
-        value = float(match.group(1))
-        suffix = (match.group(2) or "").lower()
-        multipliers = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}
-        return value * multipliers.get(suffix, 1)
+        nums = FinancialAdvisorAgent._extract_all_numbers(text)
+        return nums[0] if nums else None
 
     @staticmethod
     def _extract_all_numbers(text: str) -> List[float]:
         """Extract all numbers from text, handling k/m/b suffixes and commas."""
-        import re
-
         text = text.replace(",", "").replace("$", "")
         results: List[float] = []
         for match in re.finditer(r"(\d+(?:\.\d+)?)\s*([kmb])?", text, re.I):

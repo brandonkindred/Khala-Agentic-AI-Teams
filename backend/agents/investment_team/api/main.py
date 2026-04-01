@@ -135,6 +135,9 @@ _paper_trading_sessions: _PersistentDict = _PersistentDict("paper_trading_sessio
 _advisor_sessions: _PersistentDict = _PersistentDict("advisor_sessions")
 
 _advisor_agent = FinancialAdvisorAgent()
+_policy_guardian = PolicyGuardianAgent()
+_orchestrator = InvestmentTeamOrchestrator()
+_committee_agent = InvestmentCommitteeAgent()
 
 
 def _now() -> str:
@@ -474,8 +477,7 @@ def validate_proposal(
     if not ips:
         raise HTTPException(status_code=404, detail=f"No IPS found for user {request.user_id}")
 
-    guardian = PolicyGuardianAgent()
-    violations = guardian.check_portfolio(ips, proposal)
+    violations = _policy_guardian.check_portfolio(ips, proposal)
 
     return ValidateProposalResponse(
         proposal_id=proposal_id,
@@ -663,14 +665,13 @@ def promotion_decision(request: PromotionDecisionRequest) -> PromotionDecisionRe
     if not ips:
         raise HTTPException(status_code=404, detail=f"No IPS found for user {request.user_id}")
 
-    orchestrator = InvestmentTeamOrchestrator()
     approver = AgentIdentity(
         agent_id=request.approver_agent_id,
         role=request.approver_role,
         version=request.approver_version,
     )
 
-    decision = orchestrator.promotion_decision(
+    decision = _orchestrator.promotion_decision(
         state=_workflow_state,
         strategy=strategy,
         validation=validation,
@@ -714,8 +715,7 @@ def workflow_queues() -> QueuesResponse:
 @app.post("/memos", response_model=CreateMemoResponse)
 def create_memo(request: CreateMemoRequest) -> CreateMemoResponse:
     """Generate an investment committee memo."""
-    committee_agent = InvestmentCommitteeAgent()
-    memo = committee_agent.draft_memo(
+    memo = _committee_agent.draft_memo(
         user_id=request.user_id,
         recommendation=request.recommendation,
         rationale=request.rationale,
@@ -808,17 +808,9 @@ class StrategyLabResultsResponse(BaseModel):
 
 def _normalize_strategy_lab_asset_class(raw: object) -> str:
     """Map LLM output to canonical labels used by the simulated ledger."""
-    x = str(raw or "stocks").lower().strip()
-    if x in ("equities", "equity", "stock"):
-        return "stocks"
-    if x in ("fx",):
-        return "forex"
-    if x in ("commodity", "metal", "energy"):
-        return "commodities"
-    allowed = frozenset({"stocks", "crypto", "forex", "options", "futures", "commodities"})
-    if x in allowed:
-        return x
-    return "stocks"
+    from investment_team.strategy_lab_context import normalize_asset_class
+
+    return normalize_asset_class(raw)
 
 
 def _run_one_strategy_lab_cycle(

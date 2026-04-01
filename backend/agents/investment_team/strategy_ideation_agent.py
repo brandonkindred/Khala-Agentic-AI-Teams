@@ -175,7 +175,9 @@ Return ONLY JSON with no markdown:
 """
 
 
-def _format_simulated_trades_summary(trades: List[TradeRecord], *, max_sample_rows: int = 14) -> str:
+def _format_simulated_trades_summary(
+    trades: List[TradeRecord], *, max_sample_rows: int = 14
+) -> str:
     """Compact evidence string from the simulated ledger for analysis + self-review."""
     if not trades:
         return "No simulated trades in ledger."
@@ -388,8 +390,5 @@ class StrategyIdeationAgent:
             revised = draft_narrative
 
         if verification:
-            return (
-                f"{revised}\n\n"
-                f"[Self-review: {verification}]"
-            )
+            return f"{revised}\n\n[Self-review: {verification}]"
         return revised
