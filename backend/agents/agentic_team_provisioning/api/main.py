@@ -255,7 +255,10 @@ def recommend_agents_for_step(process_id: str, step_id: str):
                     source="registry",
                     role=agent.get("description", "")[:120],
                     skills=agent.get("skills", []),
-                    tools=agent.get("resources", []),
+                    tools=[
+                        r.get("name", str(r)) if isinstance(r, dict) else str(r)
+                        for r in agent.get("resources", [])
+                    ],
                     keywords=agent.get("match", {}).get("keywords", []),
                     match_score=float(agent.get("score", 0)),
                 )
