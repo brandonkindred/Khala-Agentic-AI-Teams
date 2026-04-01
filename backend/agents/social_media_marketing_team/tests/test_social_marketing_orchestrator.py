@@ -11,9 +11,11 @@ from social_media_marketing_team.models import (
     PostPerformanceObservation,
 )
 
+from .conftest import make_goals
+
 
 def _goals() -> BrandGoals:
-    return BrandGoals(
+    return make_goals(
         brand_name="Northstar Labs",
         target_audience="startup founders and marketing operators",
         goals=["engagement", "follower growth", "qualified leads"],

@@ -12,15 +12,11 @@ from social_media_marketing_team.models import (
 )
 from social_media_marketing_team.orchestrator import SocialMediaMarketingOrchestrator
 
+from .conftest import make_goals
+
 
 def _goals() -> BrandGoals:
-    return BrandGoals(
-        brand_name="Northstar",
-        target_audience="growth leaders",
-        goals=["engagement", "followers"],
-        cadence_posts_per_day=1,
-        duration_days=3,
-    )
+    return make_goals(cadence_posts_per_day=1, duration_days=3)
 
 
 def test_default_feedback_messages() -> None:

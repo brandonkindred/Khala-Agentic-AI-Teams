@@ -9,15 +9,16 @@ from social_media_marketing_team.agents import (
     RiskComplianceAgent,
 )
 from social_media_marketing_team.models import (
-    BrandGoals,
     CampaignProposal,
     ConceptIdea,
     Platform,
 )
 
+from .conftest import make_goals
 
-def _goals() -> BrandGoals:
-    return BrandGoals(
+
+def _goals():
+    return make_goals(
         brand_name="Acme",
         target_audience="B2B marketers",
         goals=["engagement", "follower growth"],

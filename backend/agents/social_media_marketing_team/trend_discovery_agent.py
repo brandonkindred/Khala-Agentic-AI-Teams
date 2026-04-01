@@ -158,7 +158,7 @@ class TrendDiscoveryAgent:
         topics: List[TrendingTopic] = []
         try:
             data = self.llm.complete_json(prompt, temperature=0.2)
-            raw_topics = data.get("topics") or [] if isinstance(data, dict) else []
+            raw_topics = data.get("topics", []) if isinstance(data, dict) else []
             for item in raw_topics[:3]:
                 if not isinstance(item, dict):
                     continue

@@ -10,14 +10,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
-import pytz
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
-from blog_research_agent.tools.web_search import OllamaWebSearch
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
 
 from job_service_client import (
     JOB_STATUS_COMPLETED,
@@ -27,20 +22,32 @@ from job_service_client import (
     JobServiceClient,
     start_stale_job_monitor,
 )
-from llm_service import get_client
 from social_media_marketing_team.models import (
     BrandGoals,
     CampaignPerformanceSnapshot,
     HumanReview,
-    PostPerformanceObservation,
-    TeamOutput,
 )
 from social_media_marketing_team.orchestrator import SocialMediaMarketingOrchestrator
-from social_media_marketing_team.trend_discovery_agent import TrendDiscoveryAgent
-from social_media_marketing_team.trend_models import TrendDigest
 
+from .request_models import (
+    CancelMarketingJobResponse,
+    DeleteMarketingJobResponse,
+    MarketingJobListItem,
+    MarketingJobStatusResponse,
+    PerformanceIngestRequest,
+    PerformanceIngestResponse,
+    ReviseMarketingTeamRequest,
+    RunMarketingTeamRequest,
+    RunMarketingTeamResponse,
+    TrendLatestResponse,
+    TrendRunResponse,
+)
+from .trend_scheduler import get_latest_digest, run_trend_job, start_scheduler, stop_scheduler
+
+# ---------------------------------------------------------------------------
 # Allowed base directories for brand document file reads.  Paths outside these
 # roots will be rejected to prevent path-traversal attacks.
+# ---------------------------------------------------------------------------
 _ALLOWED_FILE_ROOTS: List[Path] = []
 _agent_cache = os.getenv("AGENT_CACHE", "")
 if _agent_cache:
@@ -52,7 +59,19 @@ _tmp_dir = Path("/tmp")
 if _tmp_dir.is_dir():
     _ALLOWED_FILE_ROOTS.append(_tmp_dir.resolve())
 
-app = FastAPI(title="Social Media Marketing Team API", version="1.0.0")
+# ---------------------------------------------------------------------------
+# App & lifecycle
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _lifespan(_application: FastAPI) -> AsyncIterator[None]:
+    start_scheduler()
+    yield
+    stop_scheduler()
+
+
+app = FastAPI(title="Social Media Marketing Team API", version="1.0.0", lifespan=_lifespan)
 
 logger = logging.getLogger(__name__)
 try:
@@ -68,92 +87,41 @@ except Exception as _init_err:
     _job_manager = None  # type: ignore[assignment]
     _stale_monitor_stop = None
 
-# Latest trend digest — updated by the daily cron and the manual trigger endpoint.
-# Each worker process maintains its own copy; for multi-worker deployments the last
-# worker to complete will serve the most recent digest.
-_latest_digest: Optional[TrendDigest] = None
-_digest_lock = threading.Lock()
-_scheduler: Optional[BackgroundScheduler] = None
-
-
-class RunMarketingTeamRequest(BaseModel):
-    brand_guidelines_path: str = Field(
-        ..., max_length=4096, description="Path to brand guidelines document"
-    )
-    brand_objectives_path: str = Field(
-        ..., max_length=4096, description="Path to brand objectives document"
-    )
-    llm_model_name: str = Field(..., max_length=256, description="Name of local LLM model to use")
-    brand_name: str = Field(default="Brand", max_length=256)
-    target_audience: str = Field(default="general audience", max_length=5000)
-    goals: List[str] = Field(default_factory=lambda: ["engagement", "follower growth"])
-    voice_and_tone: str = Field(default="professional, clear, and human", max_length=5000)
-    cadence_posts_per_day: int = Field(default=2, ge=1, le=24)
-    duration_days: int = Field(default=14, ge=1, le=365)
-    human_approved_for_testing: bool = Field(default=False)
-    human_feedback: str = Field(default="", max_length=50_000)
-
-
-class ReviseMarketingTeamRequest(BaseModel):
-    feedback: str = Field(..., min_length=3)
-    approved_for_testing: bool = Field(default=False)
-
-
-class RunMarketingTeamResponse(BaseModel):
-    job_id: str
-    status: str
-    message: str
-
-
-class MarketingJobStatusResponse(BaseModel):
-    job_id: str
-    status: str
-    current_stage: str
-    progress: int
-    llm_model_name: str
-    brand_guidelines_path: str
-    brand_objectives_path: str
-    last_updated_at: str
-    eta_hint: Optional[str] = None
-    error: Optional[str] = None
-    result: Optional[TeamOutput] = None
-
-
-class MarketingJobListItem(BaseModel):
-    job_id: str
-    status: str
-    current_stage: str
-    progress: int
-    created_at: Optional[str] = None
-    last_updated_at: Optional[str] = None
-
-
-class PerformanceIngestRequest(BaseModel):
-    observations: List[PostPerformanceObservation] = Field(default_factory=list)
-
-
-class PerformanceIngestResponse(BaseModel):
-    job_id: str
-    campaign_name: Optional[str] = None
-    observations_ingested: int
-    message: str
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
-def _read_text_file(path: str) -> str:
+def _validate_file_path(path: str) -> Path:
+    """Resolve *path* and ensure it exists inside an allowed root directory.
+
+    Raises ``ValueError`` when the path does not exist, or lies outside every
+    configured allowed root.  When no roots are configured, **all** reads are
+    denied to prevent silent bypass of the protection in environments that
+    forgot to set ``AGENT_CACHE``.
+    """
     fp = Path(path).expanduser().resolve()
     if not fp.is_file():
         raise ValueError(f"File not found: {path}")
-    if _ALLOWED_FILE_ROOTS and not any(
-        fp == root or root in fp.parents for root in _ALLOWED_FILE_ROOTS
-    ):
+    if not _ALLOWED_FILE_ROOTS:
+        raise ValueError(
+            f"Access denied: no allowed file roots configured (set AGENT_CACHE or place files under /data or /tmp). "
+            f"Requested path: {path}"
+        )
+    if not any(fp == root or root in fp.parents for root in _ALLOWED_FILE_ROOTS):
         raise ValueError(
             f"Access denied: {path} is outside allowed directories. "
             f"Allowed roots: {[str(r) for r in _ALLOWED_FILE_ROOTS]}"
         )
+    return fp
+
+
+def _read_text_file(path: str) -> str:
+    fp = _validate_file_path(path)
     return fp.read_text(encoding="utf-8", errors="replace")
 
 
@@ -161,29 +129,14 @@ def _update_job(job_id: str, **fields) -> None:
     _job_manager.update_job(job_id, **fields)
 
 
-def _dispatch_job(job_id: str, request: RunMarketingTeamRequest) -> str:
-    """Start a job via Temporal if enabled, otherwise in a daemon thread.
-
-    Returns a human-readable message describing how the job was dispatched.
-    """
-    try:
-        from social_media_marketing_team.temporal.client import is_temporal_enabled
-        from social_media_marketing_team.temporal.start_workflow import start_team_job_workflow
-
-        if is_temporal_enabled():
-            start_team_job_workflow(job_id, request.model_dump())
-            return f"(Temporal). Poll GET /social-marketing/status/{job_id} for updates."
-    except ImportError:
-        pass
-
-    thread = threading.Thread(target=_run_team_job, args=(job_id, request), daemon=True)
-    thread.start()
-    return f"Poll GET /social-marketing/status/{job_id} for updates."
-
-
 def mark_all_running_jobs_failed(reason: str) -> None:
     """Mark all pending or running marketing jobs as failed (e.g. on server shutdown)."""
     _job_manager.mark_stale_active_jobs_failed(stale_after_seconds=0, reason=reason)
+
+
+# ---------------------------------------------------------------------------
+# Background job execution
+# ---------------------------------------------------------------------------
 
 
 def _run_team_job(job_id: str, request: RunMarketingTeamRequest) -> None:
@@ -243,16 +196,48 @@ def _run_team_job(job_id: str, request: RunMarketingTeamRequest) -> None:
             result=result.model_dump(),
         )
     except Exception as exc:
+        logger.exception("Social marketing team job %s failed", job_id)
         _update_job(
-            job_id, status=JOB_STATUS_FAILED, current_stage="failed", error=str(exc), eta_hint=None
+            job_id,
+            status=JOB_STATUS_FAILED,
+            current_stage="failed",
+            error=f"{type(exc).__name__}: {exc}",
+            eta_hint=None,
         )
+
+
+def _dispatch_job(job_id: str, request: RunMarketingTeamRequest) -> str:
+    """Start a job via Temporal if enabled, otherwise in a daemon thread.
+
+    Returns a human-readable message describing how the job was dispatched.
+    """
+    try:
+        from social_media_marketing_team.temporal.client import is_temporal_enabled
+        from social_media_marketing_team.temporal.start_workflow import start_team_job_workflow
+
+        if is_temporal_enabled():
+            start_team_job_workflow(job_id, request.model_dump())
+            return f"(Temporal). Poll GET /social-marketing/status/{job_id} for updates."
+    except ImportError:
+        pass
+
+    thread = threading.Thread(target=_run_team_job, args=(job_id, request), daemon=True)
+    thread.start()
+    return f"Poll GET /social-marketing/status/{job_id} for updates."
+
+
+# ---------------------------------------------------------------------------
+# Routes — campaign jobs
+# ---------------------------------------------------------------------------
 
 
 @app.post("/social-marketing/run", response_model=RunMarketingTeamResponse)
 def run_marketing_team(request: RunMarketingTeamRequest) -> RunMarketingTeamResponse:
     for p in (request.brand_guidelines_path, request.brand_objectives_path):
-        if not Path(p).expanduser().resolve().is_file():
-            raise HTTPException(status_code=400, detail=f"File not found: {p}")
+        try:
+            _validate_file_path(p)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     job_id = str(uuid.uuid4())
     now = _now()
@@ -382,17 +367,6 @@ def get_marketing_job_status(job_id: str) -> MarketingJobStatusResponse:
     )
 
 
-class CancelMarketingJobResponse(BaseModel):
-    job_id: str
-    status: str = "cancelled"
-    message: str = "Job cancellation requested."
-
-
-class DeleteMarketingJobResponse(BaseModel):
-    job_id: str
-    message: str = "Job deleted."
-
-
 @app.post("/social-marketing/job/{job_id}/cancel", response_model=CancelMarketingJobResponse)
 def cancel_marketing_job(job_id: str) -> CancelMarketingJobResponse:
     """Cancel a pending or running marketing job."""
@@ -420,69 +394,15 @@ def delete_marketing_job(job_id: str) -> DeleteMarketingJobResponse:
     return DeleteMarketingJobResponse(job_id=job_id, message="Job deleted.")
 
 
-def _run_trend_job() -> None:
-    """Run trend discovery and update _latest_digest. Safe to call from any thread."""
-    global _latest_digest
-    logger.info("TrendDiscovery: starting run")
-    try:
-        llm = get_client("trend_discovery")
-        searcher = OllamaWebSearch()
-        agent = TrendDiscoveryAgent(llm_client=llm, web_search=searcher)
-        digest = agent.run()
-        with _digest_lock:
-            _latest_digest = digest
-        logger.info(
-            "TrendDiscovery: completed — %d topics, generated_at=%s",
-            len(digest.topics),
-            digest.generated_at,
-        )
-    except Exception as exc:
-        logger.error("TrendDiscovery: run failed: %s", exc, exc_info=True)
-
-
-def _start_scheduler() -> None:
-    global _scheduler
-    et = pytz.timezone("America/New_York")
-    _scheduler = BackgroundScheduler(timezone=et)
-    _scheduler.add_job(
-        _run_trend_job,
-        CronTrigger(hour=8, minute=0, timezone=et),
-        id="trend_discovery_daily",
-        name="Daily social media trend discovery",
-        replace_existing=True,
-    )
-    _scheduler.start()
-    logger.info("TrendDiscovery: scheduler started — daily job at 08:00 America/New_York")
-
-
-def _stop_scheduler() -> None:
-    if _scheduler and _scheduler.running:
-        _scheduler.shutdown(wait=False)
-        logger.info("TrendDiscovery: scheduler stopped")
-
-
-@asynccontextmanager
-async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
-    _start_scheduler()
-    yield
-    _stop_scheduler()
-
-
-app.router.lifespan_context = _lifespan
-
-
-class TrendRunResponse(BaseModel):
-    message: str
-
-
-class TrendLatestResponse(BaseModel):
-    digest: TrendDigest
+# ---------------------------------------------------------------------------
+# Routes — trend discovery
+# ---------------------------------------------------------------------------
 
 
 @app.post("/social-marketing/trends/run", response_model=TrendRunResponse)
 def run_trend_discovery() -> TrendRunResponse:
     """Trigger trend discovery immediately (runs in background, returns at once)."""
-    thread = threading.Thread(target=_run_trend_job, daemon=True, name="trend_discovery_manual")
+    thread = threading.Thread(target=run_trend_job, daemon=True, name="trend_discovery_manual")
     thread.start()
     return TrendRunResponse(
         message="Trend discovery started. Poll GET /social-marketing/trends/latest for results."
@@ -492,8 +412,7 @@ def run_trend_discovery() -> TrendRunResponse:
 @app.get("/social-marketing/trends/latest", response_model=TrendLatestResponse)
 def get_latest_trends() -> TrendLatestResponse:
     """Return the most recent trend digest. 404 if the job has not run yet."""
-    with _digest_lock:
-        digest = _latest_digest
+    digest = get_latest_digest()
     if digest is None:
         raise HTTPException(
             status_code=404,

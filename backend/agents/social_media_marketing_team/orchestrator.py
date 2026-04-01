@@ -119,8 +119,6 @@ class SocialMediaMarketingOrchestrator:
 
     def _reach_consensus(self, proposal: CampaignProposal) -> CampaignProposal:
         round_number = 0
-        best_proposal = proposal
-        best_score = 0.0
         while round_number < self.MAX_COLLAB_ROUNDS:
             round_number += 1
             scores: List[float] = []
@@ -132,9 +130,6 @@ class SocialMediaMarketingOrchestrator:
                 proposal.communication_log.append(note)
 
             proposal.consensus_score = sum(scores) / len(scores)
-            if proposal.consensus_score > best_score:
-                best_score = proposal.consensus_score
-                best_proposal = proposal
             proposal.communication_log.append(
                 f"Orchestrator round {round_number}: average consensus score {proposal.consensus_score:.2f}."
             )
@@ -154,11 +149,11 @@ class SocialMediaMarketingOrchestrator:
             )
             proposal.success_metrics.append(f"Refined metric checkpoint round {round_number}")
 
-        best_proposal.communication_log.append(
-            f"Max collaboration rounds ({self.MAX_COLLAB_ROUNDS}) reached; proceeding with best proposal "
-            f"(score={best_score:.2f})."
+        proposal.communication_log.append(
+            f"Max collaboration rounds ({self.MAX_COLLAB_ROUNDS}) reached; proceeding with current proposal "
+            f"(score={proposal.consensus_score:.2f})."
         )
-        return best_proposal
+        return proposal
 
     @staticmethod
     def _calibrate_probabilities(

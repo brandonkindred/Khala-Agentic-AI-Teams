@@ -68,11 +68,6 @@ class ConceptIdea(BaseModel):
     risk_reasons: List[str] = Field(default_factory=list)
 
 
-class RiskReason(BaseModel):
-    category: str  # e.g. overclaim, regulatory, brand_guideline_violation, sensitivity
-    message: str
-
-
 class ContentPlan(BaseModel):
     campaign_name: str
     cadence_posts_per_day: int
