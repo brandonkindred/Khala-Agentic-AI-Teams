@@ -17,6 +17,8 @@ import { Observable, Subscription, interval, switchMap, takeWhile } from 'rxjs';
 import { AgentProvisioningApiService } from '../../services/agent-provisioning-api.service';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
+import { AgentRegistryComponent } from '../agent-registry/agent-registry.component';
+import { AgentFinderComponent } from '../agent-finder/agent-finder.component';
 import type {
   ProvisionRequest,
   ProvisionStatusResponse,
@@ -47,6 +49,8 @@ type DashboardTab = 'provision' | 'jobs' | 'environments';
     MatTooltipModule,
     HealthIndicatorComponent,
     TeamAssistantChatComponent,
+    AgentRegistryComponent,
+    AgentFinderComponent,
   ],
   templateUrl: './agent-provisioning-dashboard.component.html',
   styleUrl: './agent-provisioning-dashboard.component.scss',

@@ -16,7 +16,7 @@ import { ErrorMessageComponent } from '../../shared/error-message/error-message.
 import type { FindAgentsResponse, AgentInfo } from '../../models';
 
 @Component({
-  selector: 'app-studio-grid-agent-finder',
+  selector: 'app-agent-finder',
   standalone: true,
   imports: [
     CommonModule,
@@ -33,10 +33,10 @@ import type { FindAgentsResponse, AgentInfo } from '../../models';
     LoadingSpinnerComponent,
     ErrorMessageComponent,
   ],
-  templateUrl: './studio-grid-agent-finder.component.html',
-  styleUrl: './studio-grid-agent-finder.component.scss',
+  templateUrl: './agent-finder.component.html',
+  styleUrl: './agent-finder.component.scss',
 })
-export class StudioGridAgentFinderComponent {
+export class AgentFinderComponent {
   private readonly api = inject(StudioGridApiService);
 
   // Form state

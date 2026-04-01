@@ -14,7 +14,7 @@ import { ErrorMessageComponent } from '../../shared/error-message/error-message.
 import type { AgentInfo } from '../../models';
 
 @Component({
-  selector: 'app-studio-grid-agents-registry',
+  selector: 'app-agent-registry',
   standalone: true,
   imports: [
     CommonModule,
@@ -29,10 +29,10 @@ import type { AgentInfo } from '../../models';
     MatTooltipModule,
     ErrorMessageComponent,
   ],
-  templateUrl: './studio-grid-agents-registry.component.html',
-  styleUrl: './studio-grid-agents-registry.component.scss',
+  templateUrl: './agent-registry.component.html',
+  styleUrl: './agent-registry.component.scss',
 })
-export class StudioGridAgentsRegistryComponent implements OnInit {
+export class AgentRegistryComponent implements OnInit {
   private readonly api = inject(StudioGridApiService);
 
   agents: AgentInfo[] = [];

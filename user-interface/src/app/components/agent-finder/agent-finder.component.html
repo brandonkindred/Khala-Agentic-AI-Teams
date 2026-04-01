@@ -8,22 +8,22 @@
         </div>
         <div>
           <mat-card-title>Find Matching Agents</mat-card-title>
-          <mat-card-subtitle>Describe a design problem and required skills to discover the best agents</mat-card-subtitle>
+          <mat-card-subtitle>Describe a problem and required skills to discover the best agents</mat-card-subtitle>
         </div>
       </div>
     </mat-card-header>
 
     <mat-card-content>
       <mat-form-field appearance="outline" class="full-width">
-        <mat-label>Design Problem</mat-label>
+        <mat-label>Problem</mat-label>
         <textarea
           matInput
           [(ngModel)]="problem"
           rows="3"
-          placeholder="e.g. Create a responsive navigation component with dark mode support…"
+          placeholder="Describe the challenge you need help with…"
         ></textarea>
         <mat-icon matPrefix>lightbulb</mat-icon>
-        <mat-hint>Describe the design challenge you need help with</mat-hint>
+        <mat-hint>Describe the challenge you need help with</mat-hint>
       </mat-form-field>
 
       <!-- Skills Input -->
@@ -40,7 +40,7 @@
               matInput
               [(ngModel)]="newSkill"
               (keydown)="onSkillKeydown($event)"
-              placeholder="e.g. typography, accessibility, Figma…"
+              placeholder="e.g. planning, orchestration, code review…"
             />
           </mat-form-field>
           <button mat-stroked-button (click)="addSkill()" [disabled]="!newSkill.trim()">

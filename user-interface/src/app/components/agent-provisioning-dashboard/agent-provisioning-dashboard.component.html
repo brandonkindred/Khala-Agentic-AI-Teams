@@ -10,14 +10,44 @@
     <app-health-indicator [healthCheck]="healthCheck" label="Agent Provisioning API" />
   </header>
 
-  <app-team-assistant-chat
-    [teamApiUrl]="'/api/agent-provisioning/assistant'"
-    [teamName]="'Agent Provisioning'"
-    [teamDescription]="'Provision agent environments with infrastructure'"
-    [fields]="[
-      {key: 'agent_id', label: 'Agent ID', placeholder: 'Identifier of the agent to provision', required: true},
-      {key: 'manifest_path', label: 'Manifest path', placeholder: 'Path to provisioning manifest'},
-      {key: 'access_tier', label: 'Access tier', placeholder: 'basic, standard, or premium'}
-    ]"
-  />
+  <mat-tab-group animationDuration="200ms" class="dashboard-tabs" (selectedIndexChange)="onTabChange($event)" [selectedIndex]="selectedTabIndex">
+    <mat-tab>
+      <ng-template mat-tab-label>
+        <mat-icon class="tab-icon">cloud_queue</mat-icon>
+        Provision
+      </ng-template>
+      <div class="tab-content">
+        <app-team-assistant-chat
+          [teamApiUrl]="'/api/agent-provisioning/assistant'"
+          [teamName]="'Agent Provisioning'"
+          [teamDescription]="'Provision agent environments with infrastructure'"
+          [fields]="[
+            {key: 'agent_id', label: 'Agent ID', placeholder: 'Identifier of the agent to provision', required: true},
+            {key: 'manifest_path', label: 'Manifest path', placeholder: 'Path to provisioning manifest'},
+            {key: 'access_tier', label: 'Access tier', placeholder: 'basic, standard, or premium'}
+          ]"
+        />
+      </div>
+    </mat-tab>
+
+    <mat-tab>
+      <ng-template mat-tab-label>
+        <mat-icon class="tab-icon">hub</mat-icon>
+        Agent Registry
+      </ng-template>
+      <div class="tab-content">
+        <app-agent-registry />
+      </div>
+    </mat-tab>
+
+    <mat-tab>
+      <ng-template mat-tab-label>
+        <mat-icon class="tab-icon">manage_search</mat-icon>
+        Find Agents
+      </ng-template>
+      <div class="tab-content">
+        <app-agent-finder />
+      </div>
+    </mat-tab>
+  </mat-tab-group>
 </div>
