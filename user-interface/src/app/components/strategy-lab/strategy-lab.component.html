@@ -9,20 +9,39 @@
         <p class="lab-subtitle">Autonomous swing trading strategy ideation, backtesting, and analysis</p>
       </div>
     </div>
-    <button
-      mat-raised-button
-      color="primary"
-      class="run-btn"
-      (click)="runNewStrategy()"
-      [disabled]="running || loading"
-    >
-      @if (running) {
-        <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
-      } @else {
-        <mat-icon>auto_awesome</mat-icon>
+    <div class="lab-header-actions">
+      @if (totalCount > 0) {
+        <button
+          mat-stroked-button
+          color="warn"
+          type="button"
+          class="clear-all-btn"
+          (click)="clearAllLabData()"
+          [disabled]="running || loading || clearingAll || deletingLabRecordId !== null"
+        >
+          @if (clearingAll) {
+            <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
+          } @else {
+            <mat-icon>delete_sweep</mat-icon>
+          }
+          <span>{{ clearingAll ? 'Clearing…' : 'Clear all' }}</span>
+        </button>
       }
-      <span>{{ running ? 'Ideating…' : 'Run New Strategies (10)' }}</span>
-    </button>
+      <button
+        mat-raised-button
+        color="primary"
+        class="run-btn"
+        (click)="runNewStrategy()"
+        [disabled]="running || loading || clearingAll"
+      >
+        @if (running) {
+          <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
+        } @else {
+          <mat-icon>auto_awesome</mat-icon>
+        }
+        <span>{{ running ? 'Ideating…' : 'Run New Strategies (10)' }}</span>
+      </button>
+    </div>
   </div>
 
   <!-- Error banner -->
@@ -102,16 +121,33 @@
         <mat-card class="strategy-card" [class.is-winning]="record.is_winning" [class.is-losing]="!record.is_winning">
 
           <!-- Card header -->
-          <mat-card-header>
+          <mat-card-header class="strategy-card-header-row">
             <div mat-card-avatar class="strategy-avatar" [class.winning-avatar]="record.is_winning" [class.losing-avatar]="!record.is_winning">
               <mat-icon>{{ record.is_winning ? 'trending_up' : 'trending_down' }}</mat-icon>
             </div>
-            <mat-card-title>
-              {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
-            </mat-card-title>
-            <mat-card-subtitle>
-              {{ record.created_at | date:'MMM d, y, h:mm a' }} &bull; {{ record.strategy.strategy_id }}
-            </mat-card-subtitle>
+            <div class="strategy-card-header-text">
+              <mat-card-title>
+                {{ record.strategy.asset_class | titlecase }} — {{ record.strategy.hypothesis | slice:0:70 }}{{ record.strategy.hypothesis.length > 70 ? '…' : '' }}
+              </mat-card-title>
+              <mat-card-subtitle>
+                {{ record.created_at | date:'MMM d, y, h:mm a' }} &bull; {{ record.strategy.strategy_id }}
+              </mat-card-subtitle>
+            </div>
+            <button
+              mat-icon-button
+              type="button"
+              class="delete-strategy-btn"
+              aria-label="Delete this strategy lab run"
+              matTooltip="Delete this run"
+              (click)="deleteRecord(record); $event.stopPropagation()"
+              [disabled]="deletingLabRecordId !== null || clearingAll || running"
+            >
+              @if (deletingLabRecordId === record.lab_record_id) {
+                <mat-spinner diameter="22"></mat-spinner>
+              } @else {
+                <mat-icon>delete_outline</mat-icon>
+              }
+            </button>
           </mat-card-header>
 
           <mat-card-content>

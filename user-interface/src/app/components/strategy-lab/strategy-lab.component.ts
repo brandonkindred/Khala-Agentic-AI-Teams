@@ -48,7 +48,10 @@ export class StrategyLabComponent implements OnInit {
 
   running = false;
   loading = false;
+  clearingAll = false;
   error: string | null = null;
+  /** Lab record id currently being deleted (disables actions on that card). */
+  deletingLabRecordId: string | null = null;
 
   filter: FilterMode = 'all';
   results: StrategyLabResultsResponse | null = null;
@@ -170,5 +173,51 @@ export class StrategyLabComponent implements OnInit {
 
   hasSignalBrief(record: StrategyLabRecord): boolean {
     return record.signal_intelligence_brief != null && Object.keys(record.signal_intelligence_brief).length > 0;
+  }
+
+  deleteRecord(record: StrategyLabRecord): void {
+    const id = record.lab_record_id;
+    const shortHyp = record.strategy.hypothesis.slice(0, 60) + (record.strategy.hypothesis.length > 60 ? '…' : '');
+    if (
+      !confirm(
+        `Delete this strategy lab run?\n\n${shortHyp}\n\nThis removes the record, its backtest, and any paper-trading sessions for it. This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    this.error = null;
+    this.deletingLabRecordId = id;
+    this.api.deleteStrategyLabRecord(id).subscribe({
+      next: () => {
+        this.deletingLabRecordId = null;
+        this.loadResults();
+      },
+      error: (err) => {
+        this.deletingLabRecordId = null;
+        this.error = err?.error?.detail || err?.message || 'Failed to delete strategy.';
+      },
+    });
+  }
+
+  clearAllLabData(): void {
+    if (
+      !confirm(
+        'Delete ALL strategy lab runs, lab strategies/backtests, and paper-trading sessions?\n\nThis cannot be undone.'
+      )
+    ) {
+      return;
+    }
+    this.error = null;
+    this.clearingAll = true;
+    this.api.clearStrategyLabStorage().subscribe({
+      next: () => {
+        this.clearingAll = false;
+        this.loadResults();
+      },
+      error: (err) => {
+        this.clearingAll = false;
+        this.error = err?.error?.detail || err?.message || 'Failed to clear strategy lab data.';
+      },
+    });
   }
 }

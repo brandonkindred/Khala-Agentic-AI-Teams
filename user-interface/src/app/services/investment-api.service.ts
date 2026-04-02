@@ -25,6 +25,8 @@ import type {
   RunStrategyLabRequest,
   StrategyLabRunResponse,
   StrategyLabResultsResponse,
+  DeleteStrategyLabRecordResponse,
+  ClearStrategyLabStorageResponse,
   StartAdvisorSessionRequest,
   SendAdvisorMessageRequest,
   AdvisorSessionResponse,
@@ -171,6 +173,18 @@ export class InvestmentApiService {
     return this.http.get<StrategyLabResultsResponse>(
       `${this.baseUrl}/strategy-lab/results`,
       { params }
+    );
+  }
+
+  deleteStrategyLabRecord(labRecordId: string): Observable<DeleteStrategyLabRecordResponse> {
+    return this.http.delete<DeleteStrategyLabRecordResponse>(
+      `${this.baseUrl}/strategy-lab/records/${encodeURIComponent(labRecordId)}`
+    );
+  }
+
+  clearStrategyLabStorage(): Observable<ClearStrategyLabStorageResponse> {
+    return this.http.delete<ClearStrategyLabStorageResponse>(
+      `${this.baseUrl}/strategy-lab/storage`
     );
   }
 

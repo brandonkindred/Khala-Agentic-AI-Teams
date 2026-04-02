@@ -70,6 +70,7 @@ flowchart LR
 - `POST /strategies`, `POST /strategies/{strategy_id}/validate`
 - `POST /backtests`, `GET /backtests`
 - `POST /strategy-lab/run`, `GET /strategy-lab/results`
+- `DELETE /strategy-lab/records/{lab_record_id}` — remove one lab run (record, linked `strat-lab-*` / `bt-lab-*` jobs, paper sessions for that lab id)
 - `DELETE /strategy-lab/storage` — purge strategy lab rows from the job service (lab records, `strat-lab-*` / `bt-lab-*` strategies and backtests, and all paper-trading sessions)
 - `GET /workflow/status`, `GET /workflow/queues`
 

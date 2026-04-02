@@ -1063,6 +1063,33 @@ class ClearStrategyLabStorageResponse(BaseModel):
     message: str = "Strategy lab and paper-trading session storage cleared."
 
 
+class DeleteStrategyLabRecordResponse(BaseModel):
+    lab_record_id: str
+    deleted_strategy_id: str
+    deleted_backtest_id: str
+    deleted_paper_trading_sessions: int = 0
+
+
+def _delete_paper_sessions_for_lab_record(lab_record_id: str) -> int:
+    """Remove paper trading jobs whose payload references this lab record."""
+    from job_service_client import JobServiceClient
+
+    client = JobServiceClient(team="investment_paper_trading_sessions")
+    deleted = 0
+    for job in client.list_jobs() or []:
+        jid = job.get("job_id")
+        if not jid:
+            continue
+        payload = job.get("data")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("lab_record_id") != lab_record_id:
+            continue
+        if client.delete_job(str(jid)):
+            deleted += 1
+    return deleted
+
+
 def _purge_strategy_lab_job_storage() -> dict[str, int]:
     """Delete strategy lab jobs plus all paper-trading session jobs for this team."""
     from job_service_client import JobServiceClient
@@ -1102,6 +1129,46 @@ def _purge_strategy_lab_job_storage() -> dict[str, int]:
         "deleted_lab_backtests": deleted_lab_backtests,
         "deleted_paper_trading_sessions": deleted_paper_trading_sessions,
     }
+
+
+@app.delete(
+    "/strategy-lab/records/{lab_record_id}",
+    response_model=DeleteStrategyLabRecordResponse,
+)
+def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordResponse:
+    """
+    Delete one strategy lab run: lab card, linked lab strategy/backtest jobs, and any paper-trading
+    sessions that reference this ``lab_record_id``.
+    """
+    with _lock:
+        raw = _strategy_lab_records.get(lab_record_id)
+        if raw is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Strategy lab record '{lab_record_id}' not found.",
+            )
+        record = StrategyLabRecord(**raw) if isinstance(raw, dict) else raw
+        strategy_id = record.strategy.strategy_id
+        backtest_id = record.backtest.backtest_id
+
+        del _strategy_lab_records[lab_record_id]
+        try:
+            del _strategies[strategy_id]
+        except KeyError:
+            pass
+        try:
+            del _backtests[backtest_id]
+        except KeyError:
+            pass
+
+    paper_deleted = _delete_paper_sessions_for_lab_record(lab_record_id)
+
+    return DeleteStrategyLabRecordResponse(
+        lab_record_id=lab_record_id,
+        deleted_strategy_id=strategy_id,
+        deleted_backtest_id=backtest_id,
+        deleted_paper_trading_sessions=paper_deleted,
+    )
 
 
 @app.delete("/strategy-lab/storage", response_model=ClearStrategyLabStorageResponse)

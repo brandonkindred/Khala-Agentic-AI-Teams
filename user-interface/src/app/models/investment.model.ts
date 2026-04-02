@@ -511,6 +511,21 @@ export interface StrategyLabResultsResponse {
   losing_count: number;
 }
 
+export interface DeleteStrategyLabRecordResponse {
+  lab_record_id: string;
+  deleted_strategy_id: string;
+  deleted_backtest_id: string;
+  deleted_paper_trading_sessions: number;
+}
+
+export interface ClearStrategyLabStorageResponse {
+  deleted_lab_records: number;
+  deleted_lab_strategies: number;
+  deleted_lab_backtests: number;
+  deleted_paper_trading_sessions: number;
+  message: string;
+}
+
 // ---------------------------------------------------------------------------
 // Financial Advisor (Chat) Models
 // ---------------------------------------------------------------------------

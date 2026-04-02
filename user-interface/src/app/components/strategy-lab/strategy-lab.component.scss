@@ -38,6 +38,21 @@
   font-size: 0.875rem;
 }
 
+.lab-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.clear-all-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  height: 40px;
+}
+
 .run-btn {
   display: flex;
   align-items: center;
@@ -195,6 +210,29 @@
 
   &:hover {
     box-shadow: 0 4px 16px rgba(0, 0, 0, .12);
+  }
+
+  // Keep avatar + title block + delete button on one row (MDC card header defaults to column).
+  ::ng-deep .mat-mdc-card-header {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 0.25rem;
+  }
+}
+
+.strategy-card-header-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.delete-strategy-btn {
+  flex-shrink: 0;
+  margin: -4px -4px 0 0;
+  color: rgba(0, 0, 0, 0.45);
+
+  &:hover:not(:disabled) {
+    color: #c62828;
   }
 }
 
