@@ -9,10 +9,10 @@ _agents = Path(__file__).resolve().parent.parent.parent
 if str(_agents) not in sys.path:
     sys.path.insert(0, str(_agents))
 
-import pytest
+import pytest  # noqa: E402
 
-from agent_git_tools import GIT_TOOL_DEFINITIONS
-from agent_llm_tools_service import LlmToolNotFoundError, LlmToolsService
+from agent_git_tools import GIT_TOOL_DEFINITIONS  # noqa: E402
+from agent_llm_tools_service import LlmToolNotFoundError, LlmToolsService  # noqa: E402
 
 
 def test_list_tools_includes_git() -> None:

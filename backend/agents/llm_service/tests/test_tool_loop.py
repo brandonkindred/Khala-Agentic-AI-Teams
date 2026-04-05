@@ -8,7 +8,7 @@ import pytest
 
 from llm_service.clients.dummy import DummyLLMClient
 from llm_service.interface import LLMPermanentError
-from llm_service.tool_loop import complete_json_with_tool_loop, _normalize_tool_calls_for_api
+from llm_service.tool_loop import _normalize_tool_calls_for_api, complete_json_with_tool_loop
 
 
 def test_normalize_tool_calls_serializes_dict_arguments() -> None:

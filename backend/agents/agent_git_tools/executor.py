@@ -9,12 +9,12 @@ from typing import Any, Callable, Dict
 
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
+    _run_git,
     checkout_branch,
     commit_working_tree,
     create_feature_branch,
     merge_branch,
     write_files_and_commit,
-    _run_git,
 )
 
 from .context import GitToolContext
