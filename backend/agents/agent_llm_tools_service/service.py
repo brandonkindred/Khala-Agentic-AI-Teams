@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from agent_llm_tools_service.adapters.base import LlmToolAdapter
-from agent_llm_tools_service.models import OperationDetail, ToolDetail, ToolDocumentation, ToolSummary
+from agent_llm_tools_service.models import (
+    OperationDetail,
+    ToolDetail,
+    ToolDocumentation,
+    ToolSummary,
+)
 from agent_llm_tools_service.registry import get_default_registry
 
 

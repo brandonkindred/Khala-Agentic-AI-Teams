@@ -174,6 +174,7 @@ def get_slack_config() -> dict[str, Any]:
         # Sensitive: from encrypted DB
         "client_id": get_credential(_SLACK_SERVICE, "client_id"),
         "client_secret": get_credential(_SLACK_SERVICE, "client_secret"),
+        "signing_secret": get_credential(_SLACK_SERVICE, "signing_secret"),
         # Non-sensitive: from JSON
         "webhook_url": str(slack.get("webhook_url", "")).strip(),
         "bot_token": str(slack.get("bot_token", "")).strip(),
@@ -194,6 +195,7 @@ def set_slack_config(
     mode: str = "webhook",
     client_id: str = "",
     client_secret: str = "",
+    signing_secret: str = "",
     bot_token: str = "",
     default_channel: str = "",
     channel_display_name: str = "",
@@ -215,6 +217,8 @@ def set_slack_config(
         set_credential(_SLACK_SERVICE, "client_id", client_id.strip())
     if client_secret.strip():
         set_credential(_SLACK_SERVICE, "client_secret", client_secret.strip())
+    if signing_secret.strip():
+        set_credential(_SLACK_SERVICE, "signing_secret", signing_secret.strip())
 
     with _LOCK:
         data = _read_raw()

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any, List, Protocol
 
-from agent_llm_tools_service.models import OperationDetail, ToolDetail, ToolDocumentation, ToolSummary
+from agent_llm_tools_service.models import (
+    OperationDetail,
+    ToolDetail,
+    ToolDocumentation,
+    ToolSummary,
+)
 
 
 class LlmToolAdapter(Protocol):

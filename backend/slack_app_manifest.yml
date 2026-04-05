@@ -1,0 +1,100 @@
+# Slack App Manifest for Strands Assistant
+# ==========================================
+#
+# How to use:
+#   1. Go to https://api.slack.com/apps
+#   2. Click "Create New App" → "From a manifest"
+#   3. Select your workspace
+#   4. Choose YAML tab and paste this file's contents
+#   5. Replace {YOUR_DOMAIN} with your actual public domain (e.g. strands.example.com)
+#   6. Click "Create"
+#
+# After creating:
+#   1. Go to "Basic Information" → copy the **Signing Secret**
+#   2. Go to "OAuth & Permissions" → "Install to Workspace" → authorize
+#   3. Copy the **Bot User OAuth Token** (xoxb-...)
+#   4. Save both in Strands:
+#      PUT /api/integrations/slack
+#      {
+#        "enabled": true,
+#        "mode": "bot",
+#        "signing_secret": "<your-signing-secret>",
+#        "client_id": "<your-client-id>",
+#        "client_secret": "<your-client-secret>",
+#        "bot_token": "<xoxb-token>",
+#        "default_channel": "#general"
+#      }
+#
+#   Or use the OAuth flow:
+#      - Save client_id, client_secret, and signing_secret via PUT /api/integrations/slack
+#      - GET /api/integrations/slack/oauth/connect → open returned URL → authorize
+#      - Bot token is stored automatically on callback
+#
+# The app will then respond to:
+#   - DMs (message the bot directly)
+#   - @mentions (mention the bot in any channel it's in)
+#   - /strands slash command (team switching, help, messages)
+
+display_information:
+  name: Strands Assistant
+  description: AI-powered multi-team assistant — chat with any specialist team (SE, blogging, market research, and more)
+  background_color: "#1a1a2e"
+  long_description: |
+    Strands Assistant connects your Slack workspace to the Strands Agents platform,
+    giving you access to 13+ specialist AI team assistants directly from Slack.
+
+    Available teams:
+    • Personal Assistant — email, calendar, tasks, deals, reservations
+    • Software Engineering — full dev team: architecture, planning, coding, review
+    • Blogging — content pipeline: research, plan, draft, edit, quality gates
+    • Market Research — user discovery and product viability
+    • SOC2 Compliance — security audit for code repositories
+    • Social Marketing — cross-platform campaign planning
+    • Road Trip Planning — multi-agent itinerary planner
+    • Accessibility Audit — WCAG 2.2 & Section 508 compliance
+    • Coding Team — Tech Lead + Senior Engineers with task graph
+    • Planning V3 — discovery & requirements → PRD + dev handoff
+    • AI Systems — spec-driven AI agent system factory
+    • Agent Provisioning — set up agent environments
+    • Sales Team — full B2B sales pod
+
+    Switch teams anytime with /strands team <name> or just DM the bot.
+
+features:
+  bot_user:
+    display_name: Strands Assistant
+    always_online: true
+  slash_commands:
+    - command: /strands
+      url: https://{YOUR_DOMAIN}/api/integrations/slack/commands
+      description: Interact with Strands agent teams
+      usage_hint: "[message] or team [name] or help or reset or status"
+      should_escape: false
+
+oauth_config:
+  scopes:
+    bot:
+      - chat:write              # Post messages
+      - chat:write.public       # Post to public channels without joining
+      - channels:read           # List channels
+      - app_mentions:read       # Receive @mention events
+      - im:history              # Read DM history (required for message.im events)
+      - im:read                 # View DM metadata
+      - im:write                # Open DMs with users
+      - commands                # Receive slash commands
+      - users:read              # Look up user info
+  redirect_urls:
+    - https://{YOUR_DOMAIN}/api/integrations/slack/oauth/callback
+
+settings:
+  event_subscriptions:
+    request_url: https://{YOUR_DOMAIN}/api/integrations/slack/events
+    bot_events:
+      - app_mention             # Bot @mentioned in a channel
+      - message.im              # DM sent to the bot
+  interactivity:
+    is_enabled: true
+    request_url: https://{YOUR_DOMAIN}/api/integrations/slack/interactive
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

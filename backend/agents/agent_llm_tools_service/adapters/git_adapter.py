@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from agent_git_tools import GIT_TOOL_DEFINITIONS
-
 from agent_llm_tools_service.models import (
     ExecutionHints,
     OperationDetail,
