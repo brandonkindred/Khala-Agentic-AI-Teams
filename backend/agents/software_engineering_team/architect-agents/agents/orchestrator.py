@@ -18,9 +18,13 @@ from tools import (  # noqa: E402
     web_search_tool,
 )
 
+from agents.api_design import api_design_architect  # noqa: E402
 from agents.application import application_architect  # noqa: E402
+from agents.architecture_scrutineer import architecture_scrutineer  # noqa: E402
 from agents.cloud_infra import cloud_infrastructure_architect  # noqa: E402
 from agents.data import data_architect  # noqa: E402
+from agents.data_streaming import data_streaming_architect  # noqa: E402
+from agents.devops import devops_architect  # noqa: E402
 from agents.observability import observability_architect  # noqa: E402
 from agents.security import security_architect  # noqa: E402
 
@@ -47,11 +51,20 @@ def create_orchestrator(session_manager=None):
         aws_pricing_tool,
         web_search_tool,
         document_writer_tool,
+        # Phase 1: Security first
+        security_architect,
+        # Phase 2: Core design (parallel)
         application_architect,
         data_architect,
+        api_design_architect,
+        # Phase 3: Infrastructure & streaming (parallel)
         cloud_infrastructure_architect,
-        security_architect,
+        data_streaming_architect,
+        devops_architect,
+        # Phase 4: Observability
         observability_architect,
+        # Phase 5: Cross-review
+        architecture_scrutineer,
     ]
     kwargs = {
         "model": model,

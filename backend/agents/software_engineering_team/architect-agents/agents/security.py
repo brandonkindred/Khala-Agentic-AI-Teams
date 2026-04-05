@@ -18,23 +18,31 @@ _PROMPT_PATH = _root / "prompts" / "security.md"
 @tool
 def security_architect(
     spec_summary: str,
-    app_output: str,
-    data_output: str,
+    app_output: str = "",
+    data_output: str = "",
     constraints: str = "",
+    all_specialist_outputs: str = "",
+    mode: str = "initial",
 ) -> str:
-    """Design security: STRIDE-lite, OAuth2/OIDC, RBAC, encryption, compliance.
+    """Design security architecture: STRIDE, OAuth2/OIDC, RBAC, encryption, compliance, threat modeling.
 
-    Call this in Phase 2 (parallel with cloud_infrastructure_architect), after
-    application_architect and data_architect have run.
+    This specialist runs in TWO modes:
+    - **Phase 1 (mode='initial'):** Runs FIRST before all other specialists. Produces
+      security constraints that are mandatory for all subsequent phases.
+    - **Phase 5 (mode='final_gate'):** Runs LAST after all specialists and scrutineer.
+      Reviews all outputs and either approves or vetoes the architecture.
 
     Args:
         spec_summary: High-level summary of the product/spec requirements.
-        app_output: Output from the Application Architect.
-        data_output: Output from the Data Architect.
-        constraints: Compliance requirements (SOC2, HIPAA, PCI), existing auth.
+        app_output: Output from the Application Architect (empty in Phase 1).
+        data_output: Output from the Data Architect (empty in Phase 1).
+        constraints: Compliance requirements (SOC2, HIPAA, PCI, GDPR), existing auth.
+        all_specialist_outputs: Concatenated outputs from ALL specialists (Phase 5 only).
+        mode: 'initial' for Phase 1 threat assessment, 'final_gate' for Phase 5 review.
 
     Returns:
-        Security requirements matrix, auth flow design, encryption decisions, compliance notes.
+        Phase 1: Security constraints, threat model, compliance checklist, auth recommendation.
+        Phase 5: Security review, APPROVE/VETO decision, unresolved issues.
     """
     prompt = _PROMPT_PATH.read_text(encoding="utf-8")
     agent = Agent(
@@ -43,19 +51,37 @@ def security_architect(
         tools=[file_read_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )
-    context = f"""## Spec Summary
+    if mode == "final_gate":
+        context = f"""## Mode: FINAL SECURITY GATE (Phase 5)
+
+## Spec Summary
 {spec_summary}
 
-## Application Architecture Output
-{app_output}
-
-## Data Architecture Output
-{data_output}
+## All Specialist Architecture Outputs
+{all_specialist_outputs}
 
 ## Constraints
 {constraints or "None specified"}
 
-Design the security architecture. Produce security requirements, auth flow, encryption, and compliance notes."""
+Review ALL specialist outputs as the final security gate. Produce a security review with APPROVE or VETO decision. \
+Flag any unresolved CRITICAL security issues that block delivery."""
+    else:
+        context = f"""## Mode: INITIAL SECURITY ASSESSMENT (Phase 1)
+
+## Spec Summary
+{spec_summary}
+
+## Application Architecture Output
+{app_output or "Not yet available — this is the initial assessment before other specialists run."}
+
+## Data Architecture Output
+{data_output or "Not yet available — this is the initial assessment before other specialists run."}
+
+## Constraints
+{constraints or "None specified"}
+
+Produce the initial security assessment: threat model, security constraints for all other specialists, \
+compliance checklist, and auth architecture recommendation."""
     result = agent(context)
     return str(result)
 
