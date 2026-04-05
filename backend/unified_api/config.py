@@ -178,6 +178,12 @@ TEAM_CONFIGS: dict[str, TeamConfig] = {
         description="Autonomous startup founder agent that drives the SE team to build a task management service",
         tags=["user-agent", "founder", "simulation"],
     ),
+    "deepthought": TeamConfig(
+        name="Deepthought",
+        prefix="/api/deepthought",
+        description="Recursive self-organising agent that dynamically creates specialist sub-agents to answer complex questions",
+        tags=["deepthought", "recursive", "multi-agent"],
+    ),
 }
 
 

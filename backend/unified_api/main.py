@@ -104,6 +104,7 @@ TEAM_SERVICE_URL_ENVS: dict[str, str] = {
     "agentic_team_provisioning": "AGENTIC_TEAM_PROVISIONING_SERVICE_URL",
     "startup_advisor": "STARTUP_ADVISOR_SERVICE_URL",
     "user_agent_founder": "USER_AGENT_FOUNDER_SERVICE_URL",
+    "deepthought": "DEEPTHOUGHT_SERVICE_URL",
 }
 
 # Track which teams were successfully registered (for health endpoint).

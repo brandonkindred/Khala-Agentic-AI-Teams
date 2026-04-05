@@ -399,6 +399,33 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
         ],
     ),
     # -----------------------------------------------------------------------
+    "deepthought": TeamAssistantConfig(
+        team_key="deepthought",
+        team_name="Deepthought",
+        system_prompt_context=(
+            "A recursive, self-organising agent system that analyses complex questions, "
+            "identifies what specialist knowledge is needed, and dynamically creates "
+            "expert sub-agents to provide comprehensive answers. Each sub-agent can "
+            "further decompose its task up to 10 levels deep."
+        ),
+        required_fields=[],
+        optional_fields=[
+            {"key": "max_depth", "description": "Maximum recursion depth (1-10, default 10)"},
+        ],
+        welcome_message=(
+            "Welcome to Deepthought! I'm a recursive multi-agent system that breaks down "
+            "complex questions into specialist perspectives.\n\n"
+            "Ask me anything — I'll analyse your question, identify what expertise is needed, "
+            "and dynamically assemble a team of specialist agents to provide a comprehensive answer."
+        ),
+        default_suggested_questions=[
+            "What are the economic implications of universal basic income?",
+            "Explain how mRNA vaccines work and their future applications.",
+            "What would it take to establish a self-sustaining Mars colony?",
+        ],
+        llm_agent_key="deepthought",
+    ),
+    # -----------------------------------------------------------------------
     "sales_team": TeamAssistantConfig(
         team_key="sales_team",
         team_name="AI Sales Team",

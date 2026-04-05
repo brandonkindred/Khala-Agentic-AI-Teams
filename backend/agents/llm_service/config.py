@@ -85,6 +85,7 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     "accessibility_audit": "llama3.1",
     "strategy_ideation": "qwen3.5:397b-cloud",
     "signal_intelligence": "qwen3.5:397b-cloud",
+    "deepthought": "qwen3.5:397b-cloud",
 }
 
 DEFAULT_FALLBACK_MODEL = "qwen3.5:397b-cloud"
