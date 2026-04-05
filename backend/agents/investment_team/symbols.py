@@ -6,18 +6,18 @@ engine (synthetic trade generation), and any future consumer that routes by asse
 
 from __future__ import annotations
 
-# CoinGecko API ID mapping for crypto symbols
-COINGECKO_IDS: dict[str, str] = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "SOL": "solana",
-    "BNB": "binancecoin",
-    "XRP": "ripple",
-    "MATIC": "matic-network",
-    "AVAX": "avalanche-2",
-    "LINK": "chainlink",
-    "ADA": "cardano",
-    "DOT": "polkadot",
+# Yahoo Finance ticker mapping for crypto symbols (symbol → yfinance ticker)
+YAHOO_CRYPTO_TICKERS: dict[str, str] = {
+    "BTC": "BTC-USD",
+    "ETH": "ETH-USD",
+    "SOL": "SOL-USD",
+    "BNB": "BNB-USD",
+    "XRP": "XRP-USD",
+    "MATIC": "MATIC-USD",
+    "AVAX": "AVAX-USD",
+    "LINK": "LINK-USD",
+    "ADA": "ADA-USD",
+    "DOT": "DOT-USD",
 }
 
 STOCK_SYMBOLS: list[str] = [

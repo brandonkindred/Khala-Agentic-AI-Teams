@@ -1,5 +1,5 @@
 """
-Free-tier market data: Frankfurter (FX), optional FRED macro, CoinGecko (crypto).
+Free-tier market data: Frankfurter (FX), optional FRED macro, Yahoo Finance (crypto).
 
 Uses httpx with short TTL cache and a wall-clock budget per fetch.
 """
@@ -125,32 +125,31 @@ class FreeTierMarketDataProvider:
                 degraded = True
                 reasons.append("fred_failed")
 
-        # 3) CoinGecko simple price — no key, strict rate limits
+        # 3) Yahoo Finance crypto spot prices
         if time.monotonic() < deadline:
             try:
-                r3 = self._client.get(
-                    "https://api.coingecko.com/api/v3/simple/price",
-                    params={"ids": "bitcoin,ethereum", "vs_currencies": "usd"},
-                )
-                r3.raise_for_status()
-                cg = r3.json()
+                import yfinance as yf
+
                 parts = []
-                if isinstance(cg, dict):
-                    btc_obj = cg.get("bitcoin")
-                    eth_obj = cg.get("ethereum")
-                    btc = btc_obj.get("usd") if isinstance(btc_obj, dict) else None
-                    eth = eth_obj.get("usd") if isinstance(eth_obj, dict) else None
-                    if btc is not None:
-                        parts.append(f"BTC/USD ~ {btc:,.0f}")
-                    if eth is not None:
-                        parts.append(f"ETH/USD ~ {eth:,.0f}")
+                for sym, ticker in [("BTC", "BTC-USD"), ("ETH", "ETH-USD")]:
+                    try:
+                        info = yf.Ticker(ticker).fast_info
+                        price = getattr(info, "last_price", None)
+                        if price is not None:
+                            parts.append(f"{sym}/USD ~ {price:,.0f}")
+                    except Exception:
+                        pass
                 if parts:
                     crypto_snapshot = " | ".join(parts)
-                sources.append("coingecko_simple")
-            except Exception as exc:
-                logger.warning("CoinGecko fetch failed: %s", exc)
+                sources.append("yahoo_crypto")
+            except ImportError:
+                logger.warning("yfinance not installed — crypto snapshot unavailable")
                 degraded = True
-                reasons.append("coingecko_failed")
+                reasons.append("yfinance_missing")
+            except Exception as exc:
+                logger.warning("Yahoo Finance crypto fetch failed: %s", exc)
+                degraded = True
+                reasons.append("yahoo_crypto_failed")
 
         ctx = MarketLabContext(
             fetched_at=_utc_now_iso(),

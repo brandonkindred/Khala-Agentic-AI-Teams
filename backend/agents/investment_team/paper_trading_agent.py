@@ -150,9 +150,7 @@ class PaperTradingAgent:
         data_start = all_dates[0] if all_dates else ""
         data_end = all_dates[-1] if all_dates else ""
 
-        # Determine data source from asset class
-        asset = strategy.asset_class.lower()
-        data_source = "coingecko" if asset == "crypto" else "yahoo_finance"
+        data_source = "yahoo_finance"
 
         # Count total available bars to warn if min_trades may not be reachable
         total_bars = sum(len(bars) for bars in market_data.values())

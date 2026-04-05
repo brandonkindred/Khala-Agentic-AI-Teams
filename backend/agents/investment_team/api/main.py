@@ -737,7 +737,7 @@ def _run_real_data_backtest(
     """
     Run a backtest using real historical market data and LLM-driven trade decisions.
 
-    Fetches OHLCV data from Yahoo Finance (stocks/ETFs) or CoinGecko (crypto)
+    Fetches OHLCV data from Yahoo Finance (all asset classes including crypto)
     for the backtest period, then walks through bars chronologically with the LLM
     interpreting the strategy's entry/exit rules to decide trades.
 
