@@ -431,6 +431,7 @@ def mark_stale_active_jobs_failed(
                   AND COALESCE((data->>%s)::boolean, false) = false
                   AND COALESCE((data->>'waiting_for_title_selection')::boolean, false) = false
                   AND COALESCE((data->>'waiting_for_story_input')::boolean, false) = false
+                  AND COALESCE((data->>'waiting_for_draft_feedback')::boolean, false) = false
                   AND last_heartbeat_at < %s
                 RETURNING job_id
                 """,
@@ -465,6 +466,7 @@ def mark_all_active_jobs_failed(team: str, reason: str) -> list[str]:
                   AND COALESCE((data->>'waiting_for_answers')::boolean, false) = false
                   AND COALESCE((data->>'waiting_for_title_selection')::boolean, false) = false
                   AND COALESCE((data->>'waiting_for_story_input')::boolean, false) = false
+                  AND COALESCE((data->>'waiting_for_draft_feedback')::boolean, false) = false
                 RETURNING job_id
                 """,
             (json.dumps({"error": reason}), now, team),
@@ -489,6 +491,7 @@ def mark_all_active_jobs_interrupted(team: str, reason: str) -> list[str]:
                   AND COALESCE((data->>'waiting_for_answers')::boolean, false) = false
                   AND COALESCE((data->>'waiting_for_title_selection')::boolean, false) = false
                   AND COALESCE((data->>'waiting_for_story_input')::boolean, false) = false
+                  AND COALESCE((data->>'waiting_for_draft_feedback')::boolean, false) = false
                 RETURNING job_id
                 """,
             (json.dumps({"error": reason}), now, team),
