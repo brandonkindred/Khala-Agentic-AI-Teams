@@ -120,7 +120,13 @@ export class DeepthoughtDashboardComponent implements AfterViewChecked, OnDestro
     this.error = null;
     this.lastFailedMessage = null;
 
-    // Push user message
+    // Capture history *before* appending the current turn — the backend
+    // receives the active question via the top-level `message` field, so
+    // including it in `conversation_history` too would duplicate it in the
+    // model context, wasting tokens and skewing decomposition decisions.
+    const priorHistory = [...this.conversationHistory];
+
+    // Push user message to UI and history
     this.messages = [
       ...this.messages,
       { role: 'user', content: message, timestamp: new Date().toISOString() },
@@ -141,7 +147,7 @@ export class DeepthoughtDashboardComponent implements AfterViewChecked, OnDestro
       .askStream({
         message,
         max_depth: this.maxDepth,
-        conversation_history: this.conversationHistory,
+        conversation_history: priorHistory,
         decomposition_strategy: this.decompositionStrategy,
       })
       .subscribe({
