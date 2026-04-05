@@ -2,9 +2,75 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+# ---------------------------------------------------------------------------
+# Decomposition strategies
+# ---------------------------------------------------------------------------
+
+
+class DecompositionStrategy(str, Enum):
+    """How to break a question into sub-agent tasks."""
+
+    AUTO = "auto"
+    BY_DISCIPLINE = "by_discipline"  # factual: decompose by knowledge domain
+    BY_CONCERN = "by_concern"  # design: decompose by feasibility, cost, risk, etc.
+    BY_OPTION = "by_option"  # comparison: decompose by each option to evaluate
+    BY_PERSPECTIVE = "by_perspective"  # opinion/policy: decompose by stakeholder viewpoint
+    NONE = "none"  # force direct answer, no decomposition
+
+
+# ---------------------------------------------------------------------------
+# Streaming events
+# ---------------------------------------------------------------------------
+
+
+class AgentEventType(str, Enum):
+    """Types of events emitted during recursive execution."""
+
+    AGENT_SPAWNED = "agent_spawned"
+    AGENT_ANALYSING = "agent_analysing"
+    AGENT_ANSWERING = "agent_answering"
+    AGENT_DECOMPOSING = "agent_decomposing"
+    AGENT_DELIBERATING = "agent_deliberating"
+    AGENT_SYNTHESISING = "agent_synthesising"
+    AGENT_COMPLETE = "agent_complete"
+    BUDGET_WARNING = "budget_warning"
+    KNOWLEDGE_REUSED = "knowledge_reused"
+
+
+class AgentEvent(BaseModel):
+    """A single event emitted during agent execution, for SSE streaming."""
+
+    event_type: AgentEventType
+    agent_id: str
+    agent_name: str
+    depth: int
+    detail: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Shared knowledge base
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeEntry(BaseModel):
+    """A single finding stored in the shared knowledge base."""
+
+    agent_id: str
+    agent_name: str
+    focus_question: str
+    finding: str
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    tags: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Core agent models
+# ---------------------------------------------------------------------------
 
 
 class SkillRequirement(BaseModel):
@@ -61,10 +127,21 @@ class AgentResult(BaseModel):
         default_factory=list, description="Results from sub-agents"
     )
     was_decomposed: bool = Field(default=False, description="Whether this agent spawned children")
+    deliberation_notes: str | None = Field(
+        None, description="Notes from the deliberation phase (contradiction resolution, follow-ups)"
+    )
+    reused_from_cache: bool = Field(
+        default=False, description="True if this result was served from the knowledge cache"
+    )
 
 
 # Allow recursive reference resolution
 AgentResult.model_rebuild()
+
+
+# ---------------------------------------------------------------------------
+# Request / Response
+# ---------------------------------------------------------------------------
 
 
 class DeepthoughtRequest(BaseModel):
@@ -76,6 +153,10 @@ class DeepthoughtRequest(BaseModel):
         default_factory=list,
         description="Prior conversation turns as [{role, content}, ...]",
     )
+    decomposition_strategy: DecompositionStrategy = Field(
+        default=DecompositionStrategy.AUTO,
+        description="Strategy for decomposing the question into sub-agents",
+    )
 
 
 class DeepthoughtResponse(BaseModel):
@@ -85,3 +166,9 @@ class DeepthoughtResponse(BaseModel):
     agent_tree: AgentResult = Field(..., description="Full tree of agent decomposition")
     total_agents_spawned: int = Field(default=0, description="Number of agents created")
     max_depth_reached: int = Field(default=0, description="Deepest recursion level used")
+    knowledge_entries: list[KnowledgeEntry] = Field(
+        default_factory=list, description="All findings stored in the shared knowledge base"
+    )
+    events: list[AgentEvent] = Field(
+        default_factory=list, description="Chronological log of agent activity events"
+    )

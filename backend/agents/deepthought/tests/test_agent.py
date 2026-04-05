@@ -7,7 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from deepthought.agent import MAX_CHILDREN_PER_AGENT, DeepthoughtAgent
-from deepthought.models import AgentSpec
+from deepthought.knowledge_base import SharedKnowledgeBase
+from deepthought.models import AgentEvent, AgentSpec
+from deepthought.result_cache import ResultCache
 
 
 @pytest.fixture()
@@ -27,8 +29,21 @@ def mock_llm():
     return MagicMock()
 
 
-def _make_agent(spec, llm, on_spawned=None):
-    return DeepthoughtAgent(spec=spec, llm=llm, on_agent_spawned=on_spawned)
+@pytest.fixture()
+def knowledge_base():
+    return SharedKnowledgeBase()
+
+
+def _make_agent(spec, llm, on_spawned=None, kb=None, cache=None, on_event=None, **kwargs):
+    return DeepthoughtAgent(
+        spec=spec,
+        llm=llm,
+        knowledge_base=kb or SharedKnowledgeBase(),
+        result_cache=cache,
+        on_agent_spawned=on_spawned,
+        on_event=on_event,
+        **kwargs,
+    )
 
 
 # ------------------------------------------------------------------
@@ -51,9 +66,30 @@ def test_direct_answer(root_spec, mock_llm):
 
     assert not result.was_decomposed
     assert result.answer == "42"
-    assert result.confidence == 0.95
     assert result.child_results == []
     mock_llm.complete_json.assert_called_once()
+
+
+# ------------------------------------------------------------------
+# Structural confidence
+# ------------------------------------------------------------------
+
+
+def test_structural_confidence_direct(root_spec, mock_llm):
+    """Direct answers use blended structural confidence, not raw self-assessment."""
+    mock_llm.complete_json.return_value = {
+        "summary": "Q",
+        "can_answer_directly": True,
+        "direct_answer": "Answer",
+        "confidence": 0.9,
+        "skill_requirements": [],
+    }
+
+    agent = _make_agent(root_spec, mock_llm)
+    result = agent.execute(max_depth=10)
+
+    # 0.4 + 0.6 * min(0.9, 0.95) = 0.4 + 0.54 = 0.94
+    assert result.confidence == 0.94
 
 
 # ------------------------------------------------------------------
@@ -71,7 +107,6 @@ def test_depth_limit_forces_direct(mock_llm):
         depth=5,
         parent_id="parent-1",
     )
-    # LLM analysis says decompose, but depth is at max
     mock_llm.complete_json.return_value = {
         "summary": "Sub-question",
         "can_answer_directly": False,
@@ -97,13 +132,12 @@ def test_depth_limit_forces_direct(mock_llm):
 
 
 # ------------------------------------------------------------------
-# Decomposition path
+# Decomposition with deliberation
 # ------------------------------------------------------------------
 
 
-def test_single_level_decomposition(root_spec, mock_llm):
-    """Agent decomposes into children, each answers directly, then synthesises."""
-    # Root analysis: needs 2 specialists
+def test_decomposition_with_deliberation(root_spec, mock_llm):
+    """Agent decomposes, deliberates, then synthesises."""
     mock_llm.complete_json.side_effect = [
         # Root analysis
         {
@@ -143,7 +177,12 @@ def test_single_level_decomposition(root_spec, mock_llm):
             "skill_requirements": [],
         },
     ]
-    mock_llm.complete.return_value = "Synthesised: both say 42"
+    # First complete call = deliberation, second = synthesis
+    mock_llm.complete.side_effect = [
+        '{"contradictions": [], "gaps": [], "agreements": ["Both say 42"], '
+        '"quality_flags": [], "synthesis_guidance": "Straightforward agreement"}',
+        "Synthesised: both say 42",
+    ]
 
     spawned = []
 
@@ -157,7 +196,201 @@ def test_single_level_decomposition(root_spec, mock_llm):
     assert result.was_decomposed
     assert len(result.child_results) == 2
     assert result.answer == "Synthesised: both say 42"
+    assert result.deliberation_notes is not None
     assert len(spawned) == 2
+
+
+# ------------------------------------------------------------------
+# Knowledge base deduplication
+# ------------------------------------------------------------------
+
+
+def test_knowledge_base_deduplication(mock_llm, knowledge_base):
+    """When a similar question already has a finding, the agent reuses it."""
+    from deepthought.models import KnowledgeEntry
+
+    # Pre-populate knowledge base with a finding for a similar question
+    knowledge_base.add(
+        KnowledgeEntry(
+            agent_id="prior-1",
+            agent_name="prior_expert",
+            focus_question="What is the meaning of life?",
+            finding="The meaning is 42",
+            confidence=0.9,
+            tags=["meaning", "life"],
+        )
+    )
+
+    spec = AgentSpec(
+        agent_id="dup-1",
+        name="duplicate_analyst",
+        role_description="Analyst",
+        focus_question="What is the meaning of life?",
+        depth=1,  # depth > 0 enables dedup
+        parent_id="root-1",
+    )
+
+    agent = _make_agent(spec, mock_llm, kb=knowledge_base)
+    result = agent.execute(max_depth=10)
+
+    assert result.reused_from_cache
+    assert result.answer == "The meaning is 42"
+    # LLM should not have been called
+    mock_llm.complete_json.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# Result cache
+# ------------------------------------------------------------------
+
+
+def test_result_cache_hit(mock_llm):
+    """Cached results are returned without LLM calls."""
+    from deepthought.models import AgentResult
+
+    cache = ResultCache()
+    cached_result = AgentResult(
+        agent_id="old-1",
+        agent_name="old_agent",
+        depth=0,
+        focus_question="cached question",
+        answer="cached answer",
+        confidence=0.85,
+    )
+    cache.put("cached question", cached_result)
+
+    spec = AgentSpec(
+        agent_id="new-1",
+        name="new_agent",
+        role_description="Agent",
+        focus_question="cached question",
+        depth=0,
+        parent_id=None,
+    )
+
+    agent = _make_agent(spec, mock_llm, cache=cache)
+    result = agent.execute(max_depth=10)
+
+    assert result.reused_from_cache
+    assert result.answer == "cached answer"
+    assert result.agent_id == "new-1"  # ID should be updated
+    mock_llm.complete_json.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# Event emission
+# ------------------------------------------------------------------
+
+
+def test_events_emitted(root_spec, mock_llm):
+    """Agent emits events during execution."""
+    mock_llm.complete_json.return_value = {
+        "summary": "Q",
+        "can_answer_directly": True,
+        "direct_answer": "A",
+        "confidence": 0.9,
+        "skill_requirements": [],
+    }
+
+    events: list[AgentEvent] = []
+
+    agent = _make_agent(root_spec, mock_llm, on_event=events.append)
+    agent.execute(max_depth=10)
+
+    event_types = [e.event_type for e in events]
+    assert AgentEvent.model_fields  # sanity check
+    assert len(events) >= 2
+    # Should have at least ANALYSING and COMPLETE
+    from deepthought.models import AgentEventType
+
+    assert AgentEventType.AGENT_ANALYSING in event_types
+    assert AgentEventType.AGENT_COMPLETE in event_types
+
+
+# ------------------------------------------------------------------
+# Original query threading
+# ------------------------------------------------------------------
+
+
+def test_original_query_threaded_to_children(root_spec, mock_llm):
+    """Children receive the original_query from the root."""
+    original_msg = "Top-level user question about everything"
+
+    mock_llm.complete_json.side_effect = [
+        {
+            "summary": "Big Q",
+            "can_answer_directly": False,
+            "direct_answer": None,
+            "confidence": 0.0,
+            "skill_requirements": [
+                {
+                    "name": "child_expert",
+                    "description": "Child",
+                    "focus_question": "Sub Q?",
+                    "reasoning": "needed",
+                }
+            ],
+        },
+        {
+            "summary": "Sub Q",
+            "can_answer_directly": True,
+            "direct_answer": "Sub answer",
+            "confidence": 0.8,
+            "skill_requirements": [],
+        },
+    ]
+    mock_llm.complete.side_effect = [
+        "deliberation",
+        "synthesis",
+    ]
+
+    spawned_agents = []
+
+    def track(spec):
+        spawned_agents.append(spec)
+        return True
+
+    agent = _make_agent(
+        root_spec,
+        mock_llm,
+        on_spawned=track,
+        original_query=original_msg,
+    )
+    agent.execute(max_depth=10)
+
+    # Verify the original_query appears in the analysis system prompt
+    # by checking the LLM calls
+    first_call_kwargs = mock_llm.complete_json.call_args_list[0]
+    system_prompt = first_call_kwargs.kwargs.get("system_prompt", "")
+    assert original_msg in system_prompt
+
+
+# ------------------------------------------------------------------
+# Conversation history threading
+# ------------------------------------------------------------------
+
+
+def test_conversation_history_in_prompt(root_spec, mock_llm):
+    """Conversation history is included in the analysis prompt."""
+    history = [
+        {"role": "user", "content": "Tell me about Mars"},
+        {"role": "assistant", "content": "Mars is the 4th planet."},
+    ]
+    mock_llm.complete_json.return_value = {
+        "summary": "Q",
+        "can_answer_directly": True,
+        "direct_answer": "Follow-up answer",
+        "confidence": 0.9,
+        "skill_requirements": [],
+    }
+
+    agent = _make_agent(root_spec, mock_llm, conversation_history=history)
+    agent.execute(max_depth=10)
+
+    # The user prompt should contain the conversation history
+    first_call_args = mock_llm.complete_json.call_args_list[0]
+    user_prompt = first_call_args.args[0] if first_call_args.args else ""
+    assert "Mars" in user_prompt
 
 
 # ------------------------------------------------------------------
@@ -181,7 +414,7 @@ def test_budget_exceeded_vetoes_children(root_spec, mock_llm):
             }
         ],
     }
-    mock_llm.complete.return_value = "Synthesised from truncated"
+    mock_llm.complete.side_effect = ["deliberation", "Synthesised from truncated"]
 
     def deny_spawn(_spec):
         return False
@@ -211,7 +444,6 @@ def test_max_children_capped(root_spec, mock_llm):
         for i in range(8)
     ]
 
-    # Root returns 8 skills
     analysis_responses = [
         {
             "summary": "Big question",
@@ -221,7 +453,6 @@ def test_max_children_capped(root_spec, mock_llm):
             "skill_requirements": skills,
         }
     ]
-    # Each child answers directly
     for i in range(MAX_CHILDREN_PER_AGENT):
         analysis_responses.append(
             {
@@ -234,7 +465,7 @@ def test_max_children_capped(root_spec, mock_llm):
         )
 
     mock_llm.complete_json.side_effect = analysis_responses
-    mock_llm.complete.return_value = "Synthesised"
+    mock_llm.complete.side_effect = ["deliberation notes", "Synthesised"]
 
     spawned = []
 
@@ -265,3 +496,27 @@ def test_analysis_llm_error_fallback(root_spec, mock_llm):
 
     assert not result.was_decomposed
     assert result.answer == "Fallback answer"
+
+
+# ------------------------------------------------------------------
+# Knowledge base population
+# ------------------------------------------------------------------
+
+
+def test_findings_stored_in_knowledge_base(root_spec, mock_llm, knowledge_base):
+    """After answering, the agent stores its finding in the knowledge base."""
+    mock_llm.complete_json.return_value = {
+        "summary": "Q",
+        "can_answer_directly": True,
+        "direct_answer": "The answer",
+        "confidence": 0.9,
+        "skill_requirements": [],
+    }
+
+    agent = _make_agent(root_spec, mock_llm, kb=knowledge_base)
+    agent.execute(max_depth=10)
+
+    entries = knowledge_base.all_entries()
+    assert len(entries) == 1
+    assert entries[0].finding == "The answer"
+    assert entries[0].agent_name == "general_analyst"
