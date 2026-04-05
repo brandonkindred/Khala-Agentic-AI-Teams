@@ -60,7 +60,9 @@ _SLACK_AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
 _SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 # Minimum scopes: post messages (chat:write) + post to public channels without
 # needing to join them first (chat:write.public) + list channels (channels:read)
-_SLACK_SCOPES = "chat:write,chat:write.public,channels:read"
+_SLACK_SCOPES = (
+    "chat:write,chat:write.public,channels:read,app_mentions:read,im:history,im:read,im:write,commands,users:read"
+)
 
 _GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -83,6 +85,10 @@ class SlackConfigUpdate(BaseModel):
     )
     client_id: str = Field("", description="Slack app Client ID (required for OAuth).")
     client_secret: str = Field("", description="Slack app Client Secret (required for OAuth).")
+    signing_secret: str = Field(
+        "",
+        description="Slack app Signing Secret (from Basic Information page — required for receiving events and commands).",
+    )
     webhook_url: str = Field("", description="Slack Incoming Webhook URL (https://hooks.slack.com/...).")
     bot_token: str = Field("", description="Slack bot token (xoxb-...) used with chat.postMessage.")
     default_channel: str = Field("", description="Default target channel for bot mode (e.g. #eng or C123...).")
@@ -97,6 +103,9 @@ class SlackConfigResponse(BaseModel):
     enabled: bool
     mode: Literal["webhook", "bot"] = "webhook"
     client_id_configured: bool = Field(False, description="True if a Slack app Client ID is stored.")
+    signing_secret_configured: bool = Field(
+        False, description="True if signing secret is stored (required for events)."
+    )
     webhook_url: str | None = None
     webhook_configured: bool = Field(description="True if webhook URL is stored.")
     bot_token_configured: bool = Field(False, description="True if a bot token is configured.")
@@ -108,6 +117,9 @@ class SlackConfigResponse(BaseModel):
     oauth_connected: bool = Field(False, description="True when a bot token was obtained via OAuth.")
     team_name: str | None = Field(None, description="Slack workspace name (populated after OAuth).")
     team_id: str | None = Field(None, description="Slack team/workspace ID.")
+    # Event subscription URLs (for display — paste these into Slack app config)
+    events_url: str = Field("", description="URL for Slack Event Subscriptions Request URL.")
+    commands_url: str = Field("", description="URL for Slack Slash Commands Request URL.")
 
 
 class SlackOAuthConnectResponse(BaseModel):
@@ -188,10 +200,15 @@ class GoogleBrowserLoginStatusResponse(BaseModel):
 
 
 def _build_slack_config_response(cfg: dict) -> SlackConfigResponse:
+    base = os.getenv("SLACK_PUBLIC_URL", "").strip() or os.getenv("UI_BASE_URL", "http://localhost:8080").rstrip("/")
+    # If UI_BASE_URL points to frontend (4200), use the API port instead
+    if ":4200" in base:
+        base = base.replace(":4200", ":8080")
     return SlackConfigResponse(
         enabled=cfg["enabled"],
         mode=cfg.get("mode", "webhook"),
         client_id_configured=bool(cfg.get("client_id")),
+        signing_secret_configured=bool(cfg.get("signing_secret")),
         webhook_url=None,  # never expose raw URL
         webhook_configured=bool(cfg.get("webhook_url")),
         bot_token_configured=bool(cfg.get("bot_token")),
@@ -202,6 +219,8 @@ def _build_slack_config_response(cfg: dict) -> SlackConfigResponse:
         oauth_connected=bool(cfg.get("team_id")),
         team_name=cfg.get("team_name") or None,
         team_id=cfg.get("team_id") or None,
+        events_url=f"{base}/api/integrations/slack/events",
+        commands_url=f"{base}/api/integrations/slack/commands",
     )
 
 
@@ -364,6 +383,7 @@ async def update_slack(body: SlackConfigUpdate) -> SlackConfigResponse:
         mode=body.mode,
         client_id=(body.client_id or "").strip(),
         client_secret=(body.client_secret or "").strip(),
+        signing_secret=(body.signing_secret or "").strip(),
         webhook_url=webhook_url,
         bot_token=bot_token,
         default_channel=default_channel,
@@ -500,7 +520,119 @@ async def slack_oauth_disconnect() -> SlackConfigResponse:
 
 
 # ---------------------------------------------------------------------------
-# Shared Google / Gmail credentials for Playwright (any integration using “Sign in with Google”)
+# Slack Events API, Slash Commands, and Interactive Components
+# ---------------------------------------------------------------------------
+
+
+@router.post("/slack/events")
+async def slack_events(request: Request) -> Any:
+    """
+    Receive Slack Events API payloads.
+
+    Handles:
+    - url_verification: echo back the challenge token (required for Slack app setup)
+    - event_callback: app_mention and message.im events → routed to team assistants
+
+    Slack requires a 200 response within 3 seconds, so event processing runs async.
+    All requests are verified using the Slack signing secret (HMAC-SHA256).
+    """
+    from unified_api.slack_events_handler import (
+        dispatch_event,
+        handle_url_verification,
+        verify_slack_request,
+    )
+
+    body = await request.body()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+
+    # Get signing secret
+    cfg = get_slack_config()
+    signing_secret = str(cfg.get("signing_secret") or "").strip()
+
+    # Verify signature (skip only for url_verification if no secret configured yet)
+    if signing_secret:
+        if not verify_slack_request(signing_secret, body, timestamp, signature):
+            raise HTTPException(status_code=401, detail="Invalid Slack signature")
+    else:
+        logger.warning("Slack signing secret not configured — skipping signature verification")
+
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
+
+    event_type = str(payload.get("type", "")).strip()
+
+    # URL verification challenge (Slack sends this when you set the Request URL)
+    if event_type == "url_verification":
+        return handle_url_verification(payload)
+
+    # Event callback — respond immediately, process async
+    if event_type == "event_callback":
+        dispatch_event(payload)
+        return {"ok": True}
+
+    return {"ok": True}
+
+
+@router.post("/slack/commands")
+async def slack_commands(request: Request) -> Any:
+    """
+    Receive Slack slash command payloads (/strands).
+
+    Returns an immediate acknowledgment, then processes the command in a
+    background thread and posts the result to response_url.
+    """
+    from unified_api.slack_events_handler import (
+        process_slash_command,
+        verify_slack_request,
+    )
+
+    body = await request.body()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+
+    cfg = get_slack_config()
+    signing_secret = str(cfg.get("signing_secret") or "").strip()
+
+    if signing_secret and not verify_slack_request(signing_secret, body, timestamp, signature):
+        raise HTTPException(status_code=401, detail="Invalid Slack signature")
+
+    # Parse form-encoded body
+    form_data: dict[str, str] = {}
+    for pair in body.decode("utf-8").split("&"):
+        if "=" in pair:
+            key, value = pair.split("=", 1)
+            form_data[urllib.parse.unquote_plus(key)] = urllib.parse.unquote_plus(value)
+
+    return process_slash_command(form_data)
+
+
+@router.post("/slack/interactive")
+async def slack_interactive(request: Request) -> Any:
+    """
+    Receive Slack interactive component payloads (button clicks, menus, etc.).
+
+    Placeholder for future interactive component handling.
+    """
+    from unified_api.slack_events_handler import verify_slack_request
+
+    body = await request.body()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+
+    cfg = get_slack_config()
+    signing_secret = str(cfg.get("signing_secret") or "").strip()
+
+    if signing_secret and not verify_slack_request(signing_secret, body, timestamp, signature):
+        raise HTTPException(status_code=401, detail="Invalid Slack signature")
+
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Shared Google / Gmail credentials for Playwright (any integration using "Sign in with Google")
 # ---------------------------------------------------------------------------
 
 

@@ -171,6 +171,36 @@ def notify_open_questions(
     _run_in_background(_send)
 
 
+def post_threaded_message(
+    token: str,
+    channel: str,
+    thread_ts: str | None,
+    text: str,
+    blocks: list[dict[str, Any]] | None = None,
+) -> None:
+    """Post a message to a specific channel and thread using bot token.
+
+    This is a synchronous helper used by the Slack events handler to respond
+    in the same thread where a message was received.
+    """
+    if not token or not channel:
+        return
+    try:
+        from slack_sdk import WebClient
+
+        client = WebClient(token=token)
+        kwargs: dict[str, Any] = {"channel": channel, "text": text}
+        if blocks:
+            kwargs["blocks"] = blocks
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        response = client.chat_postMessage(**kwargs)
+        if not bool(response.get("ok", False)):
+            logger.warning("Slack threaded post failed: %s", response)
+    except Exception as e:
+        logger.warning("Slack threaded post failed: %s", e)
+
+
 def notify_pa_response(
     user_id: str,
     user_message: str,
