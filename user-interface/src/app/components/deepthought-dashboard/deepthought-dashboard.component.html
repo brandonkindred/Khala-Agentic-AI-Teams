@@ -1,0 +1,300 @@
+@if (error) {
+  <div class="error-banner">
+    <p class="error-text">{{ error }}</p>
+    @if (lastFailedMessage) {
+      <button mat-stroked-button (click)="retryLastMessage()" [disabled]="isProcessing">Retry</button>
+    }
+  </div>
+}
+
+<div class="deepthought-layout"
+     [class.mobile]="isMobile"
+     [class.show-chat]="mobileTab === 'chat'"
+     [class.show-tree]="mobileTab === 'tree'">
+
+  <!-- ================================================================== -->
+  <!-- LEFT: Chat Panel                                                    -->
+  <!-- ================================================================== -->
+  <section class="chat-panel">
+    <div class="panel-header">
+      <mat-icon>psychology</mat-icon>
+      <span class="panel-title">Deepthought</span>
+      <span class="spacer"></span>
+      <div class="header-actions">
+        <button mat-icon-button (click)="toggleSettings()" matTooltip="Settings"
+                [class.active]="showSettings">
+          <mat-icon>tune</mat-icon>
+        </button>
+        <button mat-icon-button (click)="newConversation()" matTooltip="New conversation">
+          <mat-icon>add_comment</mat-icon>
+        </button>
+      </div>
+    </div>
+
+    <!-- Collapsible settings -->
+    @if (showSettings) {
+      <div class="settings-bar">
+        <div class="setting-group">
+          <span class="setting-label" id="depth-label">Max Depth</span>
+          <mat-slider min="1" max="10" step="1" discrete showTickMarks class="depth-slider">
+            <input matSliderThumb [(ngModel)]="maxDepth" aria-labelledby="depth-label" />
+          </mat-slider>
+          <span class="setting-value">{{ maxDepth }}</span>
+        </div>
+        <div class="setting-group">
+          <span class="setting-label" id="strategy-label">Strategy</span>
+          <mat-select [(ngModel)]="decompositionStrategy" class="strategy-select" aria-labelledby="strategy-label">
+            @for (s of strategies; track s.value) {
+              <mat-option [value]="s.value" [matTooltip]="s.description">{{ s.label }}</mat-option>
+            }
+          </mat-select>
+        </div>
+      </div>
+    }
+
+    <!-- Messages -->
+    <div class="messages-container" #messagesContainer>
+      <!-- Welcome empty state -->
+      @if (messages.length === 0 && !isProcessing) {
+        <div class="welcome-state">
+          <div class="welcome-icon-container">
+            <mat-icon class="welcome-icon">psychology</mat-icon>
+          </div>
+          <h2 class="welcome-title">Ask Deepthought</h2>
+          <p class="welcome-description">
+            I dynamically create specialist agents to analyze your question from multiple angles,
+            then synthesize their findings into a comprehensive answer.
+          </p>
+          <div class="example-questions">
+            @for (q of exampleQuestions; track q) {
+              <button class="example-chip" (click)="sendMessage(q)">
+                <mat-icon>arrow_forward</mat-icon>
+                {{ q }}
+              </button>
+            }
+          </div>
+        </div>
+      }
+
+      <!-- Message list -->
+      @for (msg of messages; track msg.timestamp + msg.role) {
+        <div class="message"
+             [class.user]="msg.role === 'user'"
+             [class.assistant]="msg.role === 'assistant'"
+             [class.selected]="msg.agentTree && selectedTreeSnapshot === msg.agentTree">
+          @if (msg.role === 'assistant') {
+            <div class="message-content markdown-body" [innerHTML]="renderMarkdown(msg.content)"></div>
+          } @else {
+            <div class="message-content">{{ msg.content }}</div>
+          }
+          <div class="message-meta">
+            <span class="message-time">{{ formatTime(msg.timestamp) }}</span>
+            @if (msg.agentTree) {
+              <button class="tree-link" (click)="selectTree(msg.agentTree!); $event.stopPropagation()">
+                <mat-icon>account_tree</mat-icon>
+                <span>{{ msg.totalAgents }} agents</span>
+              </button>
+            }
+          </div>
+        </div>
+      }
+
+      <!-- Processing indicator -->
+      @if (isProcessing) {
+        <div class="message assistant processing">
+          <div class="processing-status">
+            <div class="typing-indicator"><span></span><span></span><span></span></div>
+            <span class="processing-text">
+              @if (activeAgentCount > 0) {
+                {{ activeAgentCount }} agent{{ activeAgentCount !== 1 ? 's' : '' }} working...
+              } @else {
+                Thinking...
+              }
+            </span>
+          </div>
+        </div>
+      }
+    </div>
+
+    <!-- Input form -->
+    <form class="input-form" (ngSubmit)="onSubmit()">
+      <mat-form-field appearance="outline" class="message-input">
+        <textarea matInput
+                  [formControl]="messageControl"
+                  placeholder="Ask a complex question..."
+                  rows="1"
+                  cdkTextareaAutosize
+                  cdkAutosizeMinRows="1"
+                  cdkAutosizeMaxRows="4"
+                  (keydown.enter)="$event.preventDefault(); onSubmit()">
+        </textarea>
+      </mat-form-field>
+      <button mat-fab color="primary" type="submit"
+              [disabled]="messageControl.invalid || isProcessing"
+              aria-label="Send message">
+        <mat-icon>send</mat-icon>
+      </button>
+    </form>
+  </section>
+
+  <!-- ================================================================== -->
+  <!-- RIGHT: Agent Hierarchy Panel                                        -->
+  <!-- ================================================================== -->
+  <section class="hierarchy-panel">
+    <div class="panel-header">
+      <mat-icon>account_tree</mat-icon>
+      <span class="panel-title">Agent Hierarchy</span>
+      <span class="spacer"></span>
+      @if (isProcessing && activeAgentCount > 0) {
+        <span class="stats-badge live">
+          <span class="live-dot"></span>
+          {{ activeAgentCount }} agents
+        </span>
+      } @else if (selectedTreeSnapshot) {
+        <span class="stats-badge">
+          {{ countAgents(selectedTreeSnapshot) }} agents · depth {{ getMaxDepth(selectedTreeSnapshot) }}
+        </span>
+      }
+    </div>
+
+    <div class="tree-container">
+      <!-- Live processing tree -->
+      @if (isProcessing && liveAgentNodes.size > 0) {
+        <div class="live-tree">
+          @for (node of liveAgentNodesArray; track node.agent_id) {
+            <div class="tree-node"
+                 [class]="'status-' + node.status"
+                 [style.padding-left.px]="node.depth * 24 + 16">
+              <div class="node-connector" [style.left.px]="node.depth * 24 + 4"></div>
+              <div class="node-status-dot"></div>
+              <div class="node-content">
+                <span class="node-name">{{ formatAgentName(node.agent_name) }}</span>
+                <span class="node-detail">{{ node.detail || node.status }}</span>
+              </div>
+            </div>
+          }
+        </div>
+      }
+
+      <!-- Completed result tree -->
+      @else if (selectedTreeSnapshot) {
+        <div class="result-tree">
+          <ng-container *ngTemplateOutlet="agentNodeTpl; context: { $implicit: selectedTreeSnapshot }"></ng-container>
+        </div>
+      }
+
+      <!-- Empty state -->
+      @else {
+        <div class="tree-empty-state">
+          <mat-icon>device_hub</mat-icon>
+          <p>Agent activity will appear here as Deepthought processes your question.</p>
+        </div>
+      }
+    </div>
+
+    <!-- Knowledge base -->
+    @if (selectedKnowledge.length > 0) {
+      <div class="knowledge-section">
+        <button class="knowledge-toggle" (click)="showKnowledge = !showKnowledge">
+          <mat-icon>{{ showKnowledge ? 'expand_more' : 'chevron_right' }}</mat-icon>
+          <span>Knowledge Base ({{ selectedKnowledge.length }} entries)</span>
+        </button>
+        @if (showKnowledge) {
+          <div class="knowledge-entries">
+            @for (entry of selectedKnowledge; track entry.agent_id + entry.focus_question) {
+              <div class="knowledge-entry">
+                <span class="ke-agent">{{ formatAgentName(entry.agent_name) }}</span>
+                <span class="ke-finding">{{ entry.finding }}</span>
+                <div class="ke-meta">
+                  <span class="ke-confidence" [matTooltip]="'Confidence: ' + (entry.confidence * 100).toFixed(0) + '%'">
+                    {{ (entry.confidence * 100).toFixed(0) }}%
+                  </span>
+                  @for (tag of entry.tags; track tag) {
+                    <span class="ke-tag">{{ tag }}</span>
+                  }
+                </div>
+              </div>
+            }
+          </div>
+        }
+      </div>
+    }
+  </section>
+</div>
+
+<!-- ================================================================== -->
+<!-- Recursive template for completed tree nodes                         -->
+<!-- ================================================================== -->
+<ng-template #agentNodeTpl let-node>
+  <div class="result-node"
+       [class.expanded]="expandedNodes.has(node.agent_id)"
+       [class.cached]="node.reused_from_cache"
+       [class.has-children]="node.child_results?.length > 0">
+
+    <div class="node-row" role="button" tabindex="0"
+         (click)="toggleNode(node.agent_id)"
+         (keydown.enter)="toggleNode(node.agent_id)"
+         (keydown.space)="toggleNode(node.agent_id); $event.preventDefault()">
+      <div class="node-status-dot complete"></div>
+      @if (node.child_results?.length) {
+        <mat-icon class="expand-icon">
+          {{ expandedNodes.has(node.agent_id) ? 'expand_more' : 'chevron_right' }}
+        </mat-icon>
+      } @else {
+        <span class="expand-spacer"></span>
+      }
+      <div class="node-info">
+        <div class="node-header">
+          <span class="node-name">{{ formatAgentName(node.agent_name) }}</span>
+          @if (node.reused_from_cache) {
+            <span class="cache-badge" matTooltip="Result from knowledge cache">cached</span>
+          }
+        </div>
+        <div class="node-question">{{ node.focus_question }}</div>
+        <div class="confidence-bar">
+          <div class="confidence-fill" [style.width.%]="node.confidence * 100"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Expanded detail -->
+    @if (expandedNodes.has(node.agent_id)) {
+      <div class="node-detail-panel">
+        <div class="node-answer markdown-body" [innerHTML]="renderMarkdown(node.answer)"></div>
+        @if (node.deliberation_notes) {
+          <div class="node-deliberation">
+            <mat-icon>lightbulb</mat-icon>
+            <span>{{ node.deliberation_notes }}</span>
+          </div>
+        }
+      </div>
+
+      <!-- Children -->
+      @if (node.child_results?.length) {
+        <div class="node-children">
+          @for (child of node.child_results; track child.agent_id) {
+            <ng-container *ngTemplateOutlet="agentNodeTpl; context: { $implicit: child }"></ng-container>
+          }
+        </div>
+      }
+    }
+  </div>
+</ng-template>
+
+<!-- Mobile tab bar -->
+@if (isMobile) {
+  <div class="mobile-tab-bar">
+    <button [class.active]="mobileTab === 'chat'" (click)="mobileTab = 'chat'">
+      <mat-icon>chat</mat-icon>
+      <span>Chat</span>
+    </button>
+    <button [class.active]="mobileTab === 'tree'" (click)="mobileTab = 'tree'"
+            [class.has-activity]="isProcessing">
+      <mat-icon>account_tree</mat-icon>
+      <span>Agents</span>
+      @if (isProcessing && activeAgentCount > 0) {
+        <span class="activity-badge">{{ activeAgentCount }}</span>
+      }
+    </button>
+  </div>
+}

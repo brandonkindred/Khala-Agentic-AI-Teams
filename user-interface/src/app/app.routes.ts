@@ -26,6 +26,7 @@ import { AgenticTeamDashboardComponent } from './components/agentic-team-dashboa
 import { PlanningArtifactDetailComponent } from './components/planning-artifact-detail/planning-artifact-detail.component';
 import { PersonaTestingDashboardComponent } from './components/persona-testing-dashboard/persona-testing-dashboard.component';
 import { PersonaTestAuditPanelComponent } from './components/persona-test-audit-panel/persona-test-audit-panel.component';
+import { DeepthoughtDashboardComponent } from './components/deepthought-dashboard/deepthought-dashboard.component';
 
 export const routes: Routes = [
   {
@@ -64,6 +65,7 @@ export const routes: Routes = [
       { path: 'startup-advisor', component: StartupAdvisorDashboardComponent },
       { path: 'persona-testing', component: PersonaTestingDashboardComponent },
       { path: 'persona-testing/audit/:runId', component: PersonaTestAuditPanelComponent },
+      { path: 'deepthought', component: DeepthoughtDashboardComponent },
     ],
   },
   { path: '**', redirectTo: '/dashboard' },
