@@ -1225,6 +1225,9 @@ def skip_story_gap(job_id: str) -> BlogJobStatusResponse:
     job = get_blog_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    gap_idx = job.get("current_story_gap_index", 0)
+    total_gaps = len(job.get("story_gaps", []))
+    logger.info("Skipping story gap %s/%s for job %s", gap_idx + 1, total_gaps, job_id)
     skip_current_story_gap(job_id)
     updated = get_blog_job(job_id)
     if updated is None:

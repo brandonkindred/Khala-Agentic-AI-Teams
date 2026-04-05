@@ -778,14 +778,19 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   skipStoryGap(): void {
     const jobId = this.selectedBlogJob?.job_id;
     if (!jobId) return;
+    this.storySubmitting = true;
     this.collaborationError = null;
     this.api.skipStoryGap(jobId).subscribe({
-      next: (status) => {
-        this.selectedJobStatus = status;
+      next: () => {
+        // Don't replace selectedJobStatus — the pipeline will present the
+        // next story gap (setting waiting_for_story_input back to true) and
+        // SSE/polling will deliver the updated state with the new gap.
         this.storyResponseText = '';
+        this.storySubmitting = false;
       },
       error: (err) => {
         this.collaborationError = err?.error?.detail ?? err?.message ?? 'Failed to skip story gap';
+        this.storySubmitting = false;
       },
     });
   }
