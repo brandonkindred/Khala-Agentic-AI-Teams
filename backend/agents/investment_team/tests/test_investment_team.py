@@ -1105,25 +1105,29 @@ def test_market_data_service_get_symbols_for_commodities() -> None:
 
 
 def test_market_data_service_fetch_ohlcv_range_routes_by_asset_class() -> None:
-    """Verify fetch_ohlcv_range dispatches to the right internal method based on asset class."""
+    """Verify fetch_ohlcv_range tries Yahoo first for all asset classes via the provider chain."""
     from unittest.mock import patch
 
     from agents.investment_team.market_data_service import MarketDataService
 
     service = MarketDataService()
 
-    with patch.object(service, "_fetch_stock", return_value=[]) as mock_stock:
+    # Stocks: Yahoo is the first provider in the chain
+    with patch.object(service, "_fetch_yahoo", return_value=[]) as mock_yahoo:
         service.fetch_ohlcv_range("AAPL", "stocks", "2023-01-01", "2023-12-31")
-        mock_stock.assert_called_once_with("AAPL", "2023-01-01", "2023-12-31")
+        mock_yahoo.assert_called_once_with("AAPL", "stocks", "2023-01-01", "2023-12-31")
 
-    with patch.object(service, "_fetch_crypto", return_value=[]) as mock_crypto:
-        service.fetch_ohlcv_range("BTC", "crypto", "2023-01-01", "2023-12-31")
-        mock_crypto.assert_called_once_with("BTC", "2023-01-01", "2023-12-31")
+    # Crypto: Yahoo is also the first provider, followed by Twelve Data, then CoinGecko
+    with patch.object(service, "_fetch_yahoo", return_value=[]) as mock_yahoo:
+        with patch.object(service, "_fetch_twelve_data", return_value=[]):
+            with patch.object(service, "_fetch_coingecko", return_value=[]):
+                service.fetch_ohlcv_range("BTC", "crypto", "2023-01-01", "2023-12-31")
+                mock_yahoo.assert_called_once_with("BTC", "crypto", "2023-01-01", "2023-12-31")
 
-    # Forex routes through _fetch_stock (yfinance)
-    with patch.object(service, "_fetch_stock", return_value=[]) as mock_stock:
+    # Forex: Yahoo first in chain
+    with patch.object(service, "_fetch_yahoo", return_value=[]) as mock_yahoo:
         service.fetch_ohlcv_range("EURUSD=X", "forex", "2023-01-01", "2023-12-31")
-        mock_stock.assert_called_once_with("EURUSD=X", "2023-01-01", "2023-12-31")
+        mock_yahoo.assert_called_once_with("EURUSD=X", "forex", "2023-01-01", "2023-12-31")
 
 
 def test_market_data_service_fetch_multi_symbol_range() -> None:

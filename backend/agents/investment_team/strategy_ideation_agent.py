@@ -249,12 +249,17 @@ class StrategyIdeationAgent:
         prior_results: Optional[List[StrategyLabRecord]] = None,
         *,
         precomputed_signal_brief: Optional[SignalIntelligenceBriefV1] = None,
+        exclude_asset_classes: Optional[List[str]] = None,
     ) -> Tuple[Dict[str, Any], str]:
         """
         Generate a new strategy spec dict and rationale.
 
         When ``precomputed_signal_brief`` is set (Policy B: one brief per batch), it is injected
         into the ideation prompt inside guarded delimiters.
+
+        Args:
+            exclude_asset_classes: Asset classes to avoid (e.g. because historical data was
+                unavailable). Appended as a hard constraint to the mix hint.
 
         Returns:
             (strategy_dict, rationale) — strategy_dict matches StrategySpec fields,
@@ -263,6 +268,13 @@ class StrategyIdeationAgent:
         prior_results = prior_results or []
         prior_text = format_prior_results(prior_results)
         mix_hint = asset_class_mix_hint(prior_results)
+
+        if exclude_asset_classes:
+            excluded = ", ".join(exclude_asset_classes)
+            mix_hint += (
+                f"\n\n**HARD CONSTRAINT**: Do NOT use these asset classes (historical data is "
+                f"currently unavailable): {excluded}. Pick a different asset class."
+            )
 
         if precomputed_signal_brief is not None:
             inner = brief_to_prompt_block(precomputed_signal_brief)

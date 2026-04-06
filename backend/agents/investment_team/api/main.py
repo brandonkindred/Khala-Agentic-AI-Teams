@@ -813,6 +813,24 @@ def _normalize_strategy_lab_asset_class(raw: object) -> str:
     return normalize_asset_class(raw)
 
 
+def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[StrategySpec, str]:
+    """Build a StrategySpec + strategy_id from raw ideation output."""
+    strategy_id = f"strat-lab-{uuid.uuid4().hex[:8]}"
+    strategy = StrategySpec(
+        strategy_id=strategy_id,
+        authored_by="strategy_ideation_agent",
+        asset_class=_normalize_strategy_lab_asset_class(strategy_data.get("asset_class")),
+        hypothesis=str(strategy_data.get("hypothesis", "")),
+        signal_definition=str(strategy_data.get("signal_definition", "")),
+        entry_rules=[str(r) for r in (strategy_data.get("entry_rules") or [])],
+        exit_rules=[str(r) for r in (strategy_data.get("exit_rules") or [])],
+        sizing_rules=[str(r) for r in (strategy_data.get("sizing_rules") or [])],
+        risk_limits=strategy_data.get("risk_limits") or {},
+        speculative=bool(strategy_data.get("speculative", False)),
+    )
+    return strategy, strategy_id
+
+
 def _run_one_strategy_lab_cycle(
     agent: StrategyIdeationAgent,
     config: BacktestConfig,
@@ -820,7 +838,11 @@ def _run_one_strategy_lab_cycle(
     precomputed_signal_brief: Optional[SignalIntelligenceBriefV1] = None,
     signal_brief_storage: Optional[Dict[str, Any]] = None,
 ) -> StrategyLabRecord:
-    """Single ideation → backtest → analysis; persists to store so the next cycle sees full history."""
+    """Single ideation → backtest → analysis; persists to store so the next cycle sees full history.
+
+    If all data providers fail for the ideated asset class, re-ideates for a different
+    asset class (up to one retry) rather than aborting the entire batch.
+    """
     with _lock:
         raw_prior = list(_strategy_lab_records.values())
 
@@ -836,21 +858,33 @@ def _run_one_strategy_lab_cycle(
         logger.error("Strategy ideation failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Strategy ideation failed: {exc}") from exc
 
-    strategy_id = f"strat-lab-{uuid.uuid4().hex[:8]}"
-    strategy = StrategySpec(
-        strategy_id=strategy_id,
-        authored_by="strategy_ideation_agent",
-        asset_class=_normalize_strategy_lab_asset_class(strategy_data.get("asset_class")),
-        hypothesis=str(strategy_data.get("hypothesis", "")),
-        signal_definition=str(strategy_data.get("signal_definition", "")),
-        entry_rules=[str(r) for r in (strategy_data.get("entry_rules") or [])],
-        exit_rules=[str(r) for r in (strategy_data.get("exit_rules") or [])],
-        sizing_rules=[str(r) for r in (strategy_data.get("sizing_rules") or [])],
-        risk_limits=strategy_data.get("risk_limits") or {},
-        speculative=bool(strategy_data.get("speculative", False)),
-    )
+    strategy, strategy_id = _build_strategy_from_ideation(strategy_data)
 
-    result, trades = _run_real_data_backtest(strategy, config)
+    try:
+        result, trades = _run_real_data_backtest(strategy, config)
+    except HTTPException as exc:
+        if exc.status_code != 502:
+            raise
+        # All data providers failed for this asset class — re-ideate for a different one
+        failed_ac = strategy.asset_class
+        logger.warning(
+            "No market data for asset class %s (all providers failed); re-ideating with exclusion",
+            failed_ac,
+        )
+        try:
+            strategy_data, rationale = agent.ideate_strategy(
+                prior_results=prior_records,
+                precomputed_signal_brief=precomputed_signal_brief,
+                exclude_asset_classes=[failed_ac],
+            )
+        except Exception as exc2:
+            raise HTTPException(
+                status_code=500, detail=f"Re-ideation after data failure failed: {exc2}"
+            ) from exc2
+
+        strategy, strategy_id = _build_strategy_from_ideation(strategy_data)
+        # Second attempt — if this also fails, let the 502 propagate
+        result, trades = _run_real_data_backtest(strategy, config)
 
     now = _now()
     backtest_id = f"bt-lab-{uuid.uuid4().hex[:8]}"
@@ -1002,6 +1036,7 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunResponse:
         }
 
     records: List[StrategyLabRecord] = []
+    skipped = 0
     for i in range(request.batch_size):
         try:
             record = _run_one_strategy_lab_cycle(
@@ -1010,7 +1045,15 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunResponse:
                 precomputed_signal_brief=precomputed_brief,
                 signal_brief_storage=signal_brief_storage,
             )
-        except HTTPException:
+        except HTTPException as exc:
+            if exc.status_code == 502:
+                # Data unavailable even after re-ideation — skip this cycle, continue batch
+                logger.warning(
+                    "Strategy lab cycle %d/%d skipped (no market data available after fallback)",
+                    i + 1, request.batch_size,
+                )
+                skipped += 1
+                continue
             raise
         except Exception as exc:
             logger.exception("Strategy lab cycle %d/%d failed", i + 1, request.batch_size)
@@ -1020,10 +1063,20 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunResponse:
             ) from exc
         records.append(record)
 
+    if not records:
+        raise HTTPException(
+            status_code=502,
+            detail="All strategy lab cycles failed — no market data available from any provider.",
+        )
+
+    msg = f"Completed {len(records)} strategy lab cycle(s)."
+    if skipped:
+        msg += f" ({skipped} skipped due to unavailable market data)"
+
     return StrategyLabRunResponse(
         records=records,
         count=len(records),
-        message=f"Completed {len(records)} strategy lab cycle(s).",
+        message=msg,
     )
 
 

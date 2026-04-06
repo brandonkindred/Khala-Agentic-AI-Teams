@@ -20,6 +20,20 @@ YAHOO_CRYPTO_TICKERS: dict[str, str] = {
     "DOT": "DOT-USD",
 }
 
+# CoinGecko API ID mapping for crypto symbols (fallback provider)
+COINGECKO_IDS: dict[str, str] = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "SOL": "solana",
+    "BNB": "binancecoin",
+    "XRP": "ripple",
+    "MATIC": "matic-network",
+    "AVAX": "avalanche-2",
+    "LINK": "chainlink",
+    "ADA": "cardano",
+    "DOT": "polkadot",
+}
+
 STOCK_SYMBOLS: list[str] = [
     "AAPL",
     "MSFT",
