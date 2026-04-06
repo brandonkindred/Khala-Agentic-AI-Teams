@@ -721,6 +721,35 @@ services:
       timeout: 5s
       retries: 5
 
+  deepthought-service:
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8110" }
+    image: strands-deepthought-service
+    container_name: strands-deepthought-service
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-service: { condition: service_healthy }
+    environment:
+      <<: *team-env-base
+      TEAM_MODULE: deepthought.api.main
+      TEAM_NAME: deepthought
+      TEAM_PORT: "8110"
+      TEAM_TEMPORAL_WORKER_MODULE: ""
+      TEAM_TEMPORAL_WORKER_FUNC: ""
+    volumes: *team-volumes
+    extra_hosts: *team-extra-hosts
+    ports: ["8110:8110"]
+    networks:
+      stack: { ipv4_address: 172.28.0.28, aliases: [deepthought-service] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8110/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
   # ── Unified API (router/proxy) ──────────────────────────────────────────────
 
   strands-agents:
@@ -753,6 +782,7 @@ services:
       startup-advisor-service: { condition: service_healthy }
       agentic-team-provisioning-service: { condition: service_healthy }
       user-agent-founder-service: { condition: service_healthy }
+      deepthought-service: { condition: service_healthy }
     volumes:
       - agents_workspace:/workspace
       - agents_data:/data/agents
@@ -799,6 +829,7 @@ services:
       STARTUP_ADVISOR_SERVICE_URL: http://startup-advisor-service:8107
       AGENTIC_TEAM_PROVISIONING_SERVICE_URL: http://agentic-team-provisioning-service:8108
       USER_AGENT_FOUNDER_SERVICE_URL: http://user-agent-founder-service:8109
+      DEEPTHOUGHT_SERVICE_URL: http://deepthought-service:8110
     extra_hosts:
       - "postgres:172.28.0.2"
       - "temporal:172.28.0.3"
@@ -823,6 +854,7 @@ services:
       - "startup-advisor-service:172.28.0.25"
       - "agentic-team-provisioning-service:172.28.0.26"
       - "user-agent-founder-service:172.28.0.27"
+      - "deepthought-service:172.28.0.28"
     networks:
       stack:
         ipv4_address: 172.28.0.6
