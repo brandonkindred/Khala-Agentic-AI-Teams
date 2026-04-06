@@ -1,3 +1,4 @@
+from ..models.phase_result import Sec508MappingResult
 from ..tools import persist_artifact
 from .base import ToolContext, tool
 
@@ -12,4 +13,4 @@ def run_508_mapping(engagement_id: str, tool_context: ToolContext) -> dict:
     artifact = persist_artifact(
         f"{tool_context.invocation_state['artifact_root']}/sec508.json", output
     )
-    return {"phase": "sec508_mapping", "artifact": artifact}
+    return Sec508MappingResult(artifact=artifact).model_dump()

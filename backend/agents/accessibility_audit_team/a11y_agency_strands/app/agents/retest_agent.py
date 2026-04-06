@@ -1,3 +1,4 @@
+from ..models.phase_result import RetestResult
 from ..tools import persist_artifact
 from .base import ToolContext, tool
 
@@ -13,4 +14,4 @@ def run_retest_cycle(engagement_id: str, tool_context: ToolContext) -> dict:
     artifact = persist_artifact(
         f"{tool_context.invocation_state['artifact_root']}/retest.json", output
     )
-    return {"phase": "retest", "artifact": artifact}
+    return RetestResult(artifact=artifact).model_dump()

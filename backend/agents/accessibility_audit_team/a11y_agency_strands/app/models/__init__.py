@@ -9,6 +9,8 @@ from .architecture import (
 from .deliverables import CaseStudy, DeliveryResult, ReportPackage
 from .discovery import ClientProfile, SamplingPlan, ScopeDefinition
 from .findings import CoverageSummary, EvidenceBundle, Finding, TraceabilityLink
+from .grading import GradingScale
+from .phase_result import PhaseResult
 from .scorecards import Scorecard
 
 __all__ = [
@@ -26,6 +28,8 @@ __all__ = [
     "Finding",
     "ReportPackage",
     "SamplingPlan",
+    "GradingScale",
+    "PhaseResult",
     "Scorecard",
     "ScopeDefinition",
     "TraceabilityLink",

@@ -1,4 +1,5 @@
 from ..models import CaseStudy, ReportPackage
+from ..models.phase_result import ReportingResult
 from ..tools import (
     export_backlog_csv,
     persist_artifact,
@@ -13,7 +14,6 @@ from .base import ToolContext, tool
 def run_reporting(engagement_id: str, findings: list[dict], tool_context: ToolContext) -> dict:
     backlog = export_backlog_csv(findings)
 
-    # Determine case study template based on engagement context
     client_context = tool_context.invocation_state.get("client_context", {})
     template_key = client_context.get("service_tier", "comprehensive")
     industry = client_context.get("industry")
@@ -41,7 +41,6 @@ def run_reporting(engagement_id: str, findings: list[dict], tool_context: ToolCo
     )
     pdf_path = render_pdf(report.technical_report)
 
-    # Persist the case study artifact separately for easy retrieval
     case_study_artifact = persist_artifact(
         f"{tool_context.invocation_state['artifact_root']}/case_study_{engagement_id}.json",
         case_study.model_dump(),
@@ -55,4 +54,4 @@ def run_reporting(engagement_id: str, findings: list[dict], tool_context: ToolCo
             "case_study_artifact": case_study_artifact,
         },
     )
-    return {"phase": "reporting", "artifact": artifact}
+    return ReportingResult(artifact=artifact).model_dump()

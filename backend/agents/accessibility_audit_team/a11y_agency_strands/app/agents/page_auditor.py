@@ -1,3 +1,4 @@
+from ..models.phase_result import PageAuditResult
 from ..tools import build_page_inventory, persist_artifact, run_lighthouse_accessibility
 from .base import ToolContext, tool
 
@@ -10,4 +11,4 @@ def run_page_audit(page_id: str, tool_context: ToolContext) -> dict:
     artifact = persist_artifact(
         f"{tool_context.invocation_state['artifact_root']}/page_{page_id}.json", record
     )
-    return {"phase": "page_audit", "artifact": artifact, "page": page_id}
+    return PageAuditResult(artifact=artifact, page=page_id).model_dump()

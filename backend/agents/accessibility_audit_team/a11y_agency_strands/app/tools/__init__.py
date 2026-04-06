@@ -5,6 +5,7 @@ from .architecture_tools import (
     pct_to_grade,
     score_architecture_section,
 )
+from .asset_registry import AssetRegistry
 from .browser_tools import capture_dom_snippet, capture_screenshot
 from .checklist_tools import (
     build_component_inventory,
@@ -29,6 +30,7 @@ from .reporting_tools import (
 )
 from .scan_tools import crawl_targets, run_axe_scan, run_lighthouse_accessibility
 from .storage_tools import load_artifact, persist_artifact
+from .template_audit_engine import TemplateAuditEngine, flatten_checklist_items
 
 __all__ = [
     "request_human_approval",
@@ -56,6 +58,9 @@ __all__ = [
     "load_architecture_audit_template",
     "pct_to_grade",
     "score_architecture_section",
+    "AssetRegistry",
+    "TemplateAuditEngine",
+    "flatten_checklist_items",
     "load_artifact",
     "persist_artifact",
 ]

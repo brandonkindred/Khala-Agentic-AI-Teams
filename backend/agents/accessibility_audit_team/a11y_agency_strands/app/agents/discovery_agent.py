@@ -1,4 +1,5 @@
 from ..models import ClientProfile, SamplingPlan, ScopeDefinition
+from ..models.phase_result import DiscoveryResult
 from ..tools import collect_client_discovery, persist_artifact
 from .base import StubAgent, ToolContext, tool
 
@@ -37,8 +38,7 @@ def run_discovery(raw_answers: dict, tool_context: ToolContext) -> dict:
             "sampling_plan": sampling.model_dump(),
         },
     )
-    return {
-        "phase": "discovery",
-        "artifact": artifact,
-        "tier1_count": len(sampling.tier1_pages),
-    }
+    return DiscoveryResult(
+        artifact=artifact,
+        tier1_count=len(sampling.tier1_pages),
+    ).model_dump()

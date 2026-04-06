@@ -1,3 +1,4 @@
+from ..models.phase_result import RemediationResult
 from ..tools import create_jira_issues, persist_artifact
 from .base import ToolContext, tool
 
@@ -14,4 +15,4 @@ def run_remediation_planning(findings: list[dict], tool_context: ToolContext) ->
         f"{tool_context.invocation_state['artifact_root']}/remediation_plan.json",
         {"tickets": tickets, "roadmap": roadmap},
     )
-    return {"phase": "remediation", "artifact": artifact, "tickets": tickets}
+    return RemediationResult(artifact=artifact, tickets=tickets).model_dump()

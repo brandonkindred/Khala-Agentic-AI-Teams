@@ -1,6 +1,4 @@
-from pathlib import Path
-
-import yaml
+from .asset_registry import AssetRegistry
 
 
 def write_docx_from_template(template: str, context: dict) -> str:
@@ -23,18 +21,9 @@ def create_jira_issues(findings: list[dict]) -> list[str]:
 # Case study template helpers
 # ---------------------------------------------------------------------------
 
-_ASSETS_DIR = Path(__file__).resolve().parent.parent.parent / "assets"
-_TEMPLATES_CACHE: dict | None = None
-
-
 def _load_case_study_templates() -> dict:
     """Load and cache the case study templates YAML asset."""
-    global _TEMPLATES_CACHE
-    if _TEMPLATES_CACHE is None:
-        templates_path = _ASSETS_DIR / "case_study_templates.yaml"
-        with open(templates_path) as fh:
-            _TEMPLATES_CACHE = yaml.safe_load(fh)
-    return _TEMPLATES_CACHE
+    return AssetRegistry.load("case_study_templates.yaml")
 
 
 def get_case_study_template(

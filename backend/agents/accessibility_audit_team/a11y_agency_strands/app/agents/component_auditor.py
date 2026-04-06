@@ -1,4 +1,5 @@
 from ..models import Finding
+from ..models.phase_result import ComponentAuditResult
 from ..tools import build_component_inventory, persist_artifact, run_axe_scan
 from .base import StubAgent, ToolContext, tool
 
@@ -26,8 +27,7 @@ def run_component_audit(component_id: str, tool_context: ToolContext) -> dict:
             "finding": finding.model_dump(),
         },
     )
-    return {
-        "phase": "component_audit",
-        "artifact": artifact,
-        "finding_id": finding.finding_id,
-    }
+    return ComponentAuditResult(
+        artifact=artifact,
+        finding_id=finding.finding_id,
+    ).model_dump()

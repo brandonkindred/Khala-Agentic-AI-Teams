@@ -32,8 +32,27 @@ class OrchestratorState:
     approval_granted: bool = False
 
 
+# ---------------------------------------------------------------------------
+# Phase registry — maps phase name → (handler, phase_name_for_mark_complete)
+# Simple phases that just forward (target/id, context) and mark complete.
+# ---------------------------------------------------------------------------
+
+_SIMPLE_PHASES = {
+    "architecture_audit": run_architecture_audit,
+    "infrastructure_audit": run_infrastructure_audit,
+    "sec508_mapping": run_508_mapping,
+    "scoring_prioritization": run_scoring_and_prioritization,
+    "retest": run_retest_cycle,
+}
+
+
 class EngagementOrchestrator:
-    """Deterministic control plane for the accessibility agency workflow."""
+    """Deterministic control plane for the accessibility agency workflow.
+
+    Simple pass-through phases use :meth:`run_phase` backed by the
+    ``_SIMPLE_PHASES`` registry. Phases with pre/post logic retain
+    dedicated methods.
+    """
 
     def __init__(self, invocation_state: dict):
         self.context = ToolContext(invocation_state=invocation_state)
@@ -43,6 +62,17 @@ class EngagementOrchestrator:
     def _mark_complete(self, phase: str) -> None:
         self.state.current_phase = phase
         self.state.completed_tasks.append(phase)
+
+    # -- generic phase runner ----------------------------------------------
+
+    def run_phase(self, phase: str, *args: object) -> dict:
+        """Run a registered simple phase by name."""
+        handler = _SIMPLE_PHASES[phase]
+        result = handler(*args, self.context)
+        self._mark_complete(phase)
+        return result
+
+    # -- phases with custom pre/post logic ---------------------------------
 
     def run_discovery(self, raw_answers: dict) -> dict:
         result = run_discovery(raw_answers, self.context)
@@ -72,14 +102,10 @@ class EngagementOrchestrator:
         return result
 
     def run_architecture_audit(self, target: str) -> dict:
-        result = run_architecture_audit(target, self.context)
-        self._mark_complete("architecture_audit")
-        return result
+        return self.run_phase("architecture_audit", target)
 
     def run_infrastructure_audit(self, target: str) -> dict:
-        result = run_infrastructure_audit(target, self.context)
-        self._mark_complete("infrastructure_audit")
-        return result
+        return self.run_phase("infrastructure_audit", target)
 
     def run_wcag_coverage(self, engagement_id: str) -> dict:
         result = run_wcag_coverage(engagement_id, self.context)
@@ -88,14 +114,10 @@ class EngagementOrchestrator:
         return result
 
     def run_508_mapping(self, engagement_id: str) -> dict:
-        result = run_508_mapping(engagement_id, self.context)
-        self._mark_complete("sec508_mapping")
-        return result
+        return self.run_phase("sec508_mapping", engagement_id)
 
     def run_scoring_and_prioritization(self, engagement_id: str) -> dict:
-        result = run_scoring_and_prioritization(engagement_id, self.context)
-        self._mark_complete("scoring_prioritization")
-        return result
+        return self.run_phase("scoring_prioritization", engagement_id)
 
     def run_reporting(self, engagement_id: str) -> dict:
         self._enforce_reporting_gate()
@@ -135,15 +157,15 @@ class EngagementOrchestrator:
         return {"phase": "delivery", "status": "ready"}
 
     def run_retest_cycle(self, engagement_id: str) -> dict:
-        result = run_retest_cycle(engagement_id, self.context)
-        self._mark_complete("retest")
-        return result
+        return self.run_phase("retest", engagement_id)
 
     def run_remediation_planning(self) -> dict:
         findings = [{"finding_id": fid} for fid in self.state.findings_index]
         result = run_remediation_planning(findings, self.context)
         self._mark_complete("remediation")
         return result
+
+    # -- gates -------------------------------------------------------------
 
     def _enforce_reporting_gate(self) -> None:
         required = {

@@ -1,4 +1,5 @@
 from ..models import CoverageSummary
+from ..models.phase_result import WCAGCoverageResult
 from ..tools import persist_artifact, update_wcag_checklist_xlsx
 from .base import ToolContext, tool
 
@@ -17,8 +18,7 @@ def run_wcag_coverage(engagement_id: str, tool_context: ToolContext) -> dict:
         f"{tool_context.invocation_state['artifact_root']}/coverage.json",
         summary.model_dump(),
     )
-    return {
-        "phase": "wcag_coverage",
-        "artifact": artifact,
-        "overall_coverage": summary.overall_coverage,
-    }
+    return WCAGCoverageResult(
+        artifact=artifact,
+        overall_coverage=summary.overall_coverage,
+    ).model_dump()

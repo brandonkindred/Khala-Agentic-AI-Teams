@@ -2,10 +2,8 @@
 Tool: web.evaluate_site_architecture
 
 Evaluate site architecture and navigation for accessibility using the
-structured audit template.
-
-Delegates scoring and grading to the shared architecture tools in the
-strands implementation — no logic is duplicated here.
+structured audit template.  Delegates all scoring to
+:class:`TemplateAuditEngine` — no logic is duplicated here.
 """
 
 from __future__ import annotations
@@ -18,11 +16,9 @@ from ...a11y_agency_strands.app.models.architecture import (
     ArchitectureSectionResult,
     WCAGCriterionStatus,
 )
-from ...a11y_agency_strands.app.tools.architecture_tools import (
-    build_architecture_audit_report,
-    load_architecture_audit_template,
-    score_architecture_section,
-)
+from ...a11y_agency_strands.app.tools.template_audit_engine import TemplateAuditEngine
+
+_TEMPLATE_NAME = "site_architecture_audit_template.yaml"
 
 # ---------------------------------------------------------------------------
 # I/O models (thin wrappers specific to the async web-tool interface)
@@ -108,57 +104,17 @@ class EvaluateSiteArchitectureOutput(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _flatten_items(section_def: dict) -> list[dict]:
-    items: list[dict] = []
-    for sub in section_def.get("subsections", []):
-        for item in sub.get("checklist_items", []):
-            items.append(item)
-    return items
-
-
 async def evaluate_site_architecture(
     input_data: EvaluateSiteArchitectureInput,
 ) -> EvaluateSiteArchitectureOutput:
     """Evaluate site architecture and navigation accessibility.
 
-    Loads the structured audit template, applies any checklist result
-    overrides from ``input_data``, delegates scoring to the shared
-    architecture tools, and returns an overall assessment with WCAG
-    compliance mapping.
-
-    This tool is typically called by the Web Audit Specialist (WAS)
-    or a dedicated Architecture Auditor during the architecture_audit phase.
+    Delegates entirely to :class:`TemplateAuditEngine` for template loading,
+    section scoring, and report assembly.
     """
-    template = load_architecture_audit_template()
-    overrides = input_data.checklist_overrides
-
-    section_results: list[ArchitectureSectionResult] = []
-    for section_def in template.get("sections", []):
-        section_id = section_def["id"]
-        section_name = section_def["name"]
-        template_items = _flatten_items(section_def)
-
-        evaluated: list[dict] = []
-        for item in template_items:
-            item_id = item["id"]
-            override = overrides.get(item_id, {})
-            evaluated.append(
-                {
-                    "id": item_id,
-                    "label": item.get("label", ""),
-                    "passed": override.get("passed"),
-                    "notes": override.get("notes", ""),
-                    "wcag_ref": item.get("wcag_ref"),
-                    "wcag_level": item.get("wcag_level"),
-                    "test_method": item.get("test_method", ""),
-                }
-            )
-
-        scored = score_architecture_section(section_id, section_name, evaluated, template)
-        section_results.append(scored)
-
-    report = build_architecture_audit_report(
-        input_data.url, section_results, input_data.recommendations, template
+    engine = TemplateAuditEngine(_TEMPLATE_NAME)
+    report = engine.evaluate(
+        input_data.url, input_data.checklist_overrides, input_data.recommendations
     )
 
     return EvaluateSiteArchitectureOutput(

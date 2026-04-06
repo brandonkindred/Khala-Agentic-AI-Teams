@@ -1,3 +1,4 @@
+from ..models.phase_result import JourneyAssessmentResult
 from ..tools import (
     log_keyboard_test,
     log_mobile_accessibility_test,
@@ -18,4 +19,4 @@ def run_journey_assessment(journey_id: str, tool_context: ToolContext) -> dict:
         f"{tool_context.invocation_state['artifact_root']}/journey_{journey_id}.json",
         results,
     )
-    return {"phase": "journey_assessment", "artifact": artifact, "journey": journey_id}
+    return JourneyAssessmentResult(artifact=artifact, journey=journey_id).model_dump()

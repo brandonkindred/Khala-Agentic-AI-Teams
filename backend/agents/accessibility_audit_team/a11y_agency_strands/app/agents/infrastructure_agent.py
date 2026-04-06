@@ -1,3 +1,4 @@
+from ..models.phase_result import InfrastructureAuditResult
 from ..tools import persist_artifact
 from .base import ToolContext, tool
 
@@ -13,4 +14,4 @@ def run_infrastructure_audit(target: str, tool_context: ToolContext) -> dict:
     artifact = persist_artifact(
         f"{tool_context.invocation_state['artifact_root']}/infrastructure.json", output
     )
-    return {"phase": "infrastructure_audit", "artifact": artifact}
+    return InfrastructureAuditResult(artifact=artifact).model_dump()
