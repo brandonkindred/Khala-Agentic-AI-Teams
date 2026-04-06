@@ -452,6 +452,9 @@ class BlogJobStatusResponse(BaseModel):
     current_story_gap_index: int = Field(
         0, description="Index of the story gap currently being elicited"
     )
+    current_gap_round: int = Field(
+        0, description="Round counter for story gap iteration — frontend filters chat by this"
+    )
     story_chat_history: List[Dict[str, Any]] = Field(
         default_factory=list, description="Multi-turn conversation between ghost writer and author"
     )
@@ -539,6 +542,7 @@ def _blog_job_dict_to_status_response(
         waiting_for_story_input=bool(job.get("waiting_for_story_input", False)),
         story_gaps=job.get("story_gaps", []),
         current_story_gap_index=job.get("current_story_gap_index", 0),
+        current_gap_round=job.get("current_gap_round", 0),
         story_chat_history=job.get("story_chat_history", []),
         elicited_stories=job.get("elicited_stories", []),
         pending_questions=job.get("pending_questions", []),
@@ -1203,6 +1207,13 @@ def story_response(job_id: str, request: StoryResponseRequest) -> BlogJobStatusR
     if not request.message.strip():
         raise HTTPException(status_code=422, detail="message must not be empty")
     submit_story_user_message(job_id, request.message.strip())
+    # Notify the ghost writer's event subscription so it wakes immediately
+    try:
+        from shared.job_event_bus import publish
+
+        publish(job_id, {"story_response_received": True}, event_type="story_update")
+    except Exception:
+        pass  # event bus is optional — polling fallback still works
     updated = get_blog_job(job_id)
     if updated is None:
         raise HTTPException(status_code=500, detail="Job not found after story response")
@@ -1225,10 +1236,15 @@ def skip_story_gap(job_id: str) -> BlogJobStatusResponse:
     job = get_blog_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    gap_idx = job.get("current_story_gap_index", 0)
-    total_gaps = len(job.get("story_gaps", []))
-    logger.info("Skipping story gap %s/%s for job %s", gap_idx + 1, total_gaps, job_id)
+    logger.info("Skipping current story gap for job %s", job_id)
     skip_current_story_gap(job_id)
+    # Notify the ghost writer's event subscription so it wakes immediately
+    try:
+        from shared.job_event_bus import publish
+
+        publish(job_id, {"story_gap_skipped": True}, event_type="story_update")
+    except Exception:
+        pass  # event bus is optional — polling fallback still works
     updated = get_blog_job(job_id)
     if updated is None:
         raise HTTPException(status_code=500, detail="Job not found after skip")

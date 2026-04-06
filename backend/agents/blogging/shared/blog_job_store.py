@@ -117,6 +117,7 @@ def create_blog_job(
         "waiting_for_story_input": False,
         "story_gaps": [],
         "current_story_gap_index": 0,
+        "current_gap_round": 0,
         "story_chat_history": [],
         "elicited_stories": [],
         # General Q&A (mirrors SE team pattern)
@@ -394,11 +395,16 @@ def add_story_agent_message(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Append a ghost-writer agent message to the story chat history and pause for user input."""
+    # Read current gap_round so the message can be tagged for filtering
+    job = _client(cache_dir).get_job(job_id)
+    gap_round = (job or {}).get("current_gap_round", 0)
     _client(cache_dir).atomic_update(
         job_id,
         merge_fields={"waiting_for_story_input": True},
         append_to={
-            "story_chat_history": [{"role": "agent", "content": content, "gap_index": gap_index}]
+            "story_chat_history": [
+                {"role": "agent", "content": content, "gap_index": gap_index, "gap_round": gap_round}
+            ]
         },
     )
 
@@ -409,10 +415,17 @@ def submit_story_user_message(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> None:
     """Append a user message to the story chat history and resume the pipeline."""
+    # Read current gap_round so the message can be tagged for filtering
+    job = _client(cache_dir).get_job(job_id)
+    gap_round = (job or {}).get("current_gap_round", 0)
     _client(cache_dir).atomic_update(
         job_id,
         merge_fields={"waiting_for_story_input": False},
-        append_to={"story_chat_history": [{"role": "user", "content": message}]},
+        append_to={
+            "story_chat_history": [
+                {"role": "user", "content": message, "gap_index": 0, "gap_round": gap_round}
+            ]
+        },
     )
 
 

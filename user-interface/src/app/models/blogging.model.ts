@@ -95,6 +95,7 @@ export interface BlogStoryChatMessage {
   role: 'agent' | 'user';
   content: string;
   gap_index?: number;
+  gap_round?: number;
 }
 
 /** A pending question from a pipeline agent waiting for author input. */
@@ -143,6 +144,7 @@ export interface BlogJobStatusResponse {
   waiting_for_story_input?: boolean;
   story_gaps?: BlogStoryGap[];
   current_story_gap_index?: number;
+  current_gap_round?: number;
   story_chat_history?: BlogStoryChatMessage[];
   elicited_stories?: string[];
   // General Q&A

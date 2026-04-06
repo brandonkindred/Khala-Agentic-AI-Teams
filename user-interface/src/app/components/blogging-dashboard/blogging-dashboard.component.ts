@@ -804,9 +804,9 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
 
   getStoryAgentMessages() {
     const status = this.selectedJobStatus;
-    const idx = status?.current_story_gap_index ?? 0;
+    const round = status?.current_gap_round ?? 0;
     return (status?.story_chat_history ?? []).filter(
-      (m) => m.gap_index === idx || m.gap_index === undefined
+      (m) => m.gap_round === round || m.gap_round === undefined
     );
   }
 

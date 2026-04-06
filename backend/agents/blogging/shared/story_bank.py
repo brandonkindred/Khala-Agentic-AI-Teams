@@ -2,8 +2,8 @@
 Persistent story bank for author narratives.
 
 Stores first-person stories elicited by the ghost writer so they can be reused
-across future blog posts.  Each story is tagged with keywords and the section
-context it was originally written for, enabling relevance-based retrieval.
+across future blog posts.  Each story is tagged with keywords, a one-sentence
+semantic summary, and the section context it was originally written for.
 
 Storage: SQLite database at ``{AGENT_CACHE}/blogging_team/story_bank.db``.
 """
@@ -62,6 +62,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ON stories (keywords)
         """
     )
+    # Migration: add summary column (safe if already exists)
+    try:
+        conn.execute("ALTER TABLE stories ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
 
 
@@ -85,25 +90,45 @@ def save_story(
     section_context: str = "",
     keywords: Optional[List[str]] = None,
     source_job_id: Optional[str] = None,
+    llm_client: Any = None,
 ) -> str:
-    """Persist a story narrative and return its ID."""
+    """Persist a story narrative and return its ID.
+
+    If *llm_client* is provided, generates a one-sentence semantic summary
+    for improved retrieval relevance.
+    """
     story_id = uuid.uuid4().hex[:12]
     now = datetime.now(timezone.utc).isoformat()
     kw_json = json.dumps(keywords or [], ensure_ascii=False)
 
+    # Generate semantic summary if LLM is available
+    summary = ""
+    if llm_client is not None:
+        try:
+            summary = (
+                llm_client.complete(
+                    f"Summarize this story in one sentence:\n\n{narrative}",
+                    system_prompt="Write a single sentence summary. No preamble, no quotes.",
+                )
+                or ""
+            ).strip()
+        except Exception as e:
+            logger.warning("Story bank: summary generation failed (non-fatal): %s", e)
+
     conn = _conn()
     try:
         conn.execute(
-            "INSERT INTO stories (id, narrative, section_title, section_context, keywords, source_job_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (story_id, narrative, section_title, section_context, kw_json, source_job_id, now),
+            "INSERT INTO stories (id, narrative, section_title, section_context, keywords, source_job_id, created_at, summary) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (story_id, narrative, section_title, section_context, kw_json, source_job_id, now, summary),
         )
         conn.commit()
         logger.info(
-            "Story bank: saved story %s (section=%s, keywords=%s)",
+            "Story bank: saved story %s (section=%s, keywords=%s, has_summary=%s)",
             story_id,
             section_title,
             keywords,
+            bool(summary),
         )
         return story_id
     finally:
@@ -113,18 +138,44 @@ def save_story(
 def find_relevant_stories(
     query_keywords: List[str],
     limit: int = 5,
+    story_opportunity: Optional[str] = None,
+    llm_client: Any = None,
 ) -> List[Dict[str, Any]]:
-    """Return stories whose keywords overlap with *query_keywords*, ranked by overlap count.
+    """Return stories relevant to *query_keywords*, ranked by relevance.
 
-    Each result is a dict with keys: id, narrative, section_title, section_context, keywords, created_at.
+    Uses a two-stage approach:
+    1. **Fast path**: keyword overlap scoring (set intersection) to get top candidates.
+    2. **Slow path** (if *story_opportunity* and *llm_client* are provided): LLM-scored
+       reranking of candidates with summaries for better semantic relevance.
+
+    Each result is a dict with keys: id, narrative, section_title, section_context,
+    keywords, summary, created_at.
     """
     if not query_keywords:
         return []
 
+    # Stage 1: keyword-based candidate retrieval
+    candidates = _keyword_scored_candidates(query_keywords, limit=max(limit, 10))
+
+    if not candidates:
+        return []
+
+    # Stage 2: LLM reranking (optional, when we have summaries and an opportunity description)
+    candidates_with_summaries = [c for c in candidates if c.get("summary")]
+    if story_opportunity and llm_client and len(candidates_with_summaries) > limit:
+        reranked = _llm_rerank(candidates_with_summaries, story_opportunity, llm_client, limit)
+        if reranked:
+            return reranked
+
+    return candidates[:limit]
+
+
+def _keyword_scored_candidates(query_keywords: List[str], limit: int = 10) -> List[Dict[str, Any]]:
+    """Retrieve stories ranked by keyword overlap count."""
     conn = _conn()
     try:
         rows = conn.execute(
-            "SELECT id, narrative, section_title, section_context, keywords, created_at FROM stories"
+            "SELECT id, narrative, section_title, section_context, keywords, summary, created_at FROM stories"
         ).fetchall()
     finally:
         conn.close()
@@ -153,12 +204,48 @@ def find_relevant_stories(
     return results
 
 
+def _llm_rerank(
+    candidates: List[Dict[str, Any]],
+    story_opportunity: str,
+    llm_client: Any,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """Use LLM to rerank candidates by semantic relevance to the story opportunity."""
+    summaries = "\n".join(
+        f"{i + 1}. {c['summary']}" for i, c in enumerate(candidates)
+    )
+    prompt = (
+        f"Story needed: {story_opportunity}\n\n"
+        f"Candidate stories (by summary):\n{summaries}\n\n"
+        f"Return a JSON array of the top {limit} indices (1-based) ranked by relevance "
+        f"to the story needed. Most relevant first."
+    )
+    try:
+        data = llm_client.complete_json(
+            prompt,
+            system_prompt="Return a JSON array of integers only. No other text.",
+        )
+        # Handle various return formats
+        indices = data if isinstance(data, list) else data.get("indices", data.get("text", []))
+        if isinstance(indices, list):
+            reranked = []
+            for idx in indices[:limit]:
+                i = int(idx) - 1  # 1-based to 0-based
+                if 0 <= i < len(candidates):
+                    reranked.append(candidates[i])
+            if reranked:
+                return reranked
+    except Exception as e:
+        logger.warning("Story bank LLM reranking failed (falling back to keyword scoring): %s", e)
+    return []
+
+
 def list_stories(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
     """Return all stories, newest first."""
     conn = _conn()
     try:
         rows = conn.execute(
-            "SELECT id, narrative, section_title, section_context, keywords, created_at "
+            "SELECT id, narrative, section_title, section_context, keywords, summary, created_at "
             "FROM stories ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
@@ -181,7 +268,8 @@ def get_story(story_id: str) -> Optional[Dict[str, Any]]:
     conn = _conn()
     try:
         row = conn.execute(
-            "SELECT id, narrative, section_title, section_context, keywords, created_at FROM stories WHERE id = ?",
+            "SELECT id, narrative, section_title, section_context, keywords, summary, created_at "
+            "FROM stories WHERE id = ?",
             (story_id,),
         ).fetchone()
     finally:

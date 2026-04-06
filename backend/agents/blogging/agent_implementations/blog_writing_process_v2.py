@@ -310,13 +310,13 @@ def _fill_story_placeholders(
             break
 
         # Expose only the current gap — one at a time.
-        # Clear chat history so prior gap conversations don't bleed through.
+        # Use gap_round tagging so the frontend filters by round.
         update_blog_job(
             job_id,
             story_gaps=[gap.model_dump()],
             current_story_gap_index=0,
+            current_gap_round=idx,
             waiting_for_story_input=False,
-            story_chat_history=[],
         )
         job_updater(
             phase="story_elicitation",
@@ -351,6 +351,7 @@ def _fill_story_placeholders(
                     section_context=gap.section_context,
                     keywords=_extract_plan_keywords(plan),
                     source_job_id=job_id,
+                    llm_client=llm_client,
                 )
             except Exception as e:
                 logger.warning("Story bank save failed (non-fatal): %s", e)
@@ -691,12 +692,13 @@ def run_pipeline(
                         break
 
                     # Expose only the current gap — don't reveal how many stories are needed.
-                    # Clear chat history so prior gap conversations don't bleed through.
+                    # Use gap_round tagging so the frontend filters by round, not gap_index.
+                    # Full chat history is preserved for cross-gap LLM context.
                     update_blog_job(
                         job_id,
                         story_gaps=[gap.model_dump()],
                         current_story_gap_index=0,
-                        story_chat_history=[],
+                        current_gap_round=idx,
                     )
                     job_updater(
                         phase="story_elicitation",
@@ -739,6 +741,7 @@ def run_pipeline(
                                         section_context=gap2.section_context,
                                         keywords=topic_keywords,
                                         source_job_id=job_id,
+                                        llm_client=llm_client,
                                     )
                     except Exception as e:
                         logger.warning("Story bank save failed (non-fatal): %s", e)
