@@ -234,6 +234,8 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
     except CancelledError:
         raise
     except PlanningError as e:
+        if _is_external_cancellation(e):
+            raise
         logger.exception("Planning failed for job %s", job_id)
         _fail_job(
             job_id,
@@ -243,6 +245,8 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
         )
         _publish_terminal(job_id, "error", error=str(e), failed_phase="planning")
     except BloggingError as e:
+        if _is_external_cancellation(e):
+            raise
         logger.exception("Pipeline failed for job %s", job_id)
         _fail_job(job_id, str(e), failed_phase=getattr(e, "phase", None))
         _publish_terminal(job_id, "error", error=str(e), failed_phase=getattr(e, "phase", None))
