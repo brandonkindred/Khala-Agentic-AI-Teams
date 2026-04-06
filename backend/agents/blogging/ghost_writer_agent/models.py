@@ -34,3 +34,7 @@ class StoryElicitationResult(BaseModel):
     )
     skipped: bool = Field(False, description="True if the user explicitly skipped this gap")
     rounds_used: int = Field(0, description="Number of conversation turns used")
+    story_context: Optional[str] = Field(
+        None,
+        description="Context of the story: 'personal', 'client', or 'employer' — detected from conversation",
+    )

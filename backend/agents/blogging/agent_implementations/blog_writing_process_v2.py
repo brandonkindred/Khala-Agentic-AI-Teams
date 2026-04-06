@@ -297,46 +297,41 @@ def _fill_story_placeholders(
                 section_title=topic[:80],
                 section_context=f"The draft needs a personal story about: {topic}",
                 seed_question=(
-                    f"The blog post needs a personal story about: {topic}\n\n"
-                    "Walk me through a specific time you experienced this. "
-                    "I'll ask follow-up questions until we have a complete story "
-                    "with real numbers.\n\n"
-                    "If you don't have any relevant experience with this topic, "
-                    'just reply "skip" or "no experience" and we\'ll rewrite that '
-                    "section without a personal story."
+                    f"Hey, there's a spot in the post where a personal story about {topic} "
+                    f"would really bring it to life. Have you ever had a moment like that? "
+                    f"I'd love to hear about it."
                 ),
             )
         )
-
-    # Store gaps in the job and run interviews
-    gap_dicts = [g.model_dump() for g in gaps]
-    update_blog_job(
-        job_id,
-        story_gaps=gap_dicts,
-        current_story_gap_index=0,
-        waiting_for_story_input=False,
-    )
 
     for idx, gap in enumerate(gaps):
         job_data = get_blog_job(job_id)
         if job_data and job_data.get("status") in ("failed", "cancelled"):
             break
 
+        # Expose only the current gap — one at a time.
+        # Use gap_round tagging so the frontend filters by round.
+        update_blog_job(
+            job_id,
+            story_gaps=[gap.model_dump()],
+            current_story_gap_index=0,
+            current_gap_round=idx,
+            waiting_for_story_input=False,
+        )
         job_updater(
             phase="story_elicitation",
             progress=35 + idx,
-            status_text=f"Waiting for your story {idx + 1}/{len(gaps)}: {gap.section_title}",
+            status_text=f"Chatting about your experience with: {gap.section_title}",
         )
-        update_blog_job(job_id, current_story_gap_index=idx)
 
         # Post seed question — pipeline pauses here until user responds
-        add_story_agent_message(job_id, gap.seed_question, idx)
+        add_story_agent_message(job_id, gap.seed_question, 0)
 
         # conduct_interview waits indefinitely for each user response
         result = ghost_agent.conduct_interview(
             gap=gap,
             job_id=job_id,
-            gap_index=idx,
+            gap_index=0,
             job_updater=job_updater,
             max_rounds=MAX_ROUNDS_POST_DRAFT,
         )
@@ -356,6 +351,7 @@ def _fill_story_placeholders(
                     section_context=gap.section_context,
                     keywords=_extract_plan_keywords(plan),
                     source_job_id=job_id,
+                    llm_client=llm_client,
                 )
             except Exception as e:
                 logger.warning("Story bank save failed (non-fatal): %s", e)
@@ -366,7 +362,8 @@ def _fill_story_placeholders(
     update_blog_job(
         job_id,
         waiting_for_story_input=False,
-        current_story_gap_index=len(gaps),
+        story_gaps=[],
+        current_story_gap_index=0,
     )
 
     if not new_narratives and not skipped_topics:
@@ -687,8 +684,6 @@ def run_pipeline(
             story_gaps = ghost_agent.find_story_gaps(plan)
 
             if story_gaps:
-                gap_dicts = [g.model_dump() for g in story_gaps]
-                update_blog_job(job_id, story_gaps=gap_dicts, current_story_gap_index=0)
                 collected_narratives: list[str] = []
 
                 for idx, gap in enumerate(story_gaps):
@@ -696,20 +691,29 @@ def run_pipeline(
                     if job_data and job_data.get("status") in ("failed", "cancelled"):
                         break
 
+                    # Expose only the current gap — don't reveal how many stories are needed.
+                    # Use gap_round tagging so the frontend filters by round, not gap_index.
+                    # Full chat history is preserved for cross-gap LLM context.
+                    update_blog_job(
+                        job_id,
+                        story_gaps=[gap.model_dump()],
+                        current_story_gap_index=0,
+                        current_gap_round=idx,
+                    )
                     job_updater(
                         phase="story_elicitation",
                         progress=27 + idx,
-                        status_text=f"Gathering story for section: {gap.section_title} ({idx + 1}/{len(story_gaps)})",
+                        status_text=f"Chatting about your experience with: {gap.section_title}",
                     )
-                    update_blog_job(job_id, current_story_gap_index=idx)
 
                     # Post seed question and wait for first user response
-                    add_story_agent_message(job_id, gap.seed_question, idx)
+                    # gap_index is always 0 since we expose one gap at a time
+                    add_story_agent_message(job_id, gap.seed_question, 0)
 
                     result = ghost_agent.conduct_interview(
                         gap=gap,
                         job_id=job_id,
-                        gap_index=idx,
+                        gap_index=0,
                         job_updater=job_updater,
                     )
                     if result.narrative:
@@ -737,6 +741,7 @@ def run_pipeline(
                                         section_context=gap2.section_context,
                                         keywords=topic_keywords,
                                         source_job_id=job_id,
+                                        llm_client=llm_client,
                                     )
                     except Exception as e:
                         logger.warning("Story bank save failed (non-fatal): %s", e)
@@ -744,15 +749,16 @@ def run_pipeline(
                 update_blog_job(
                     job_id,
                     waiting_for_story_input=False,
-                    current_story_gap_index=len(story_gaps),
+                    story_gaps=[],
+                    current_story_gap_index=0,
                 )
                 job_updater(
                     phase="story_elicitation",
                     progress=30,
                     status_text=(
-                        f"Story gathering complete: {len(collected_narratives)} narrative(s) collected"
+                        f"Story gathering complete — {len(collected_narratives)} story(ies) collected"
                         if collected_narratives
-                        else "Story gathering complete (no stories collected)"
+                        else "Story gathering complete"
                     ),
                 )
             else:
