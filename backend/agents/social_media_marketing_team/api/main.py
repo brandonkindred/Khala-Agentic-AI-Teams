@@ -24,13 +24,10 @@ from social_media_marketing_team.adapters.branding import (
     BrandContext,
     BrandIncompleteError,
     BrandNotFoundError,
-    build_brand_incomplete_error,
-    build_brand_not_found_error,
     fetch_brand,
     validate_brand_for_social_marketing,
 )
 from social_media_marketing_team.models import (
-    BrandGoals,
     CampaignPerformanceSnapshot,
     HumanReview,
 )
@@ -112,18 +109,10 @@ def _run_team_job(job_id: str, request: RunMarketingTeamRequest, brand_ctx: Bran
             eta_hint="~1 minute",
         )
         orchestrator = SocialMediaMarketingOrchestrator(llm_model_name=request.llm_model_name)
-        goals = BrandGoals(
-            brand_name=brand_ctx.brand_name,
-            target_audience=brand_ctx.target_audience,
+        goals = brand_ctx.to_brand_goals(
             goals=request.goals,
-            voice_and_tone=brand_ctx.voice_and_tone,
             cadence_posts_per_day=request.cadence_posts_per_day,
             duration_days=request.duration_days,
-            brand_guidelines=brand_ctx.brand_guidelines,
-            brand_objectives=brand_ctx.brand_objectives,
-            messaging_pillars=brand_ctx.messaging_pillars,
-            brand_story=brand_ctx.brand_story,
-            tagline=brand_ctx.tagline,
         )
 
         _update_job(
@@ -191,15 +180,67 @@ def _dispatch_job(job_id: str, request: RunMarketingTeamRequest, brand_ctx: Bran
 
 def _build_brand_summary(brand_ctx: BrandContext) -> str:
     """Build a brief human-readable brand summary for the happy-path response."""
-    parts = [f"Using brand '{brand_ctx.brand_name}'"]
+    header = f"Using brand '{brand_ctx.brand_name}'"
     if brand_ctx.tagline:
-        parts.append(f"-- '{brand_ctx.tagline}'")
+        header += f" -- '{brand_ctx.tagline}'"
+    detail_parts = []
     if brand_ctx.voice_and_tone:
-        parts.append(f"Voice: {brand_ctx.voice_and_tone[:80]}")
+        detail_parts.append(f"Voice: {brand_ctx.voice_and_tone[:80]}")
     if brand_ctx.target_audience:
-        audience_short = brand_ctx.target_audience[:100]
-        parts.append(f"Audience: {audience_short}")
-    return ". ".join(parts) + "."
+        detail_parts.append(f"Audience: {brand_ctx.target_audience[:100]}")
+    if detail_parts:
+        return f"{header}. {'. '.join(detail_parts)}."
+    return f"{header}."
+
+
+_PHASE_DISPLAY_NAMES = {
+    "strategic_core": "Strategic Core (your positioning, values, and audience)",
+    "narrative_messaging": "Narrative & Messaging (your brand story, voice, and key messages)",
+}
+
+_REQUIRED_PHASES = ["strategic_core", "narrative_messaging"]
+
+
+def _build_brand_not_found_error(client_id: str, brand_id: str) -> dict:
+    """Build a structured error response for a missing brand."""
+    return {
+        "error": "brand_not_found",
+        "message": f"Brand '{brand_id}' was not found for client '{client_id}'.",
+        "user_message": (
+            "Before we can create campaigns for you, we need to understand your brand. "
+            "Here's how to get started:\n\n"
+            f"1. Create a client (if you haven't): POST /api/branding/clients\n"
+            f"2. Create a brand: POST /api/branding/clients/{client_id}/brands\n"
+            f"3. Run the branding pipeline: POST /api/branding/clients/{client_id}"
+            f"/brands/{{brand_id}}/run\n\n"
+            "The branding process covers your strategic positioning and messaging -- "
+            "it takes about 15-20 minutes and ensures your campaigns authentically "
+            "represent who you are."
+        ),
+        "branding_api_base": "/api/branding",
+    }
+
+
+def _build_brand_incomplete_error(exc: BrandIncompleteError) -> dict:
+    """Build a structured error response for an incomplete brand."""
+    missing_display = "\n".join(f"- {_PHASE_DISPLAY_NAMES.get(p, p)}" for p in exc.missing_phases)
+    return {
+        "error": "brand_incomplete",
+        "message": f"Brand '{exc.brand_id}' needs more development before campaigns can be created.",
+        "user_message": (
+            "Your brand is off to a great start, but needs a bit more work before we can build "
+            "campaigns. Here's what's remaining:\n\n"
+            f"{missing_display}\n\n"
+            "This ensures your campaign content sounds authentically like your brand. "
+            f"Continue building your brand: POST /api/branding/clients/{exc.client_id}"
+            f"/brands/{exc.brand_id}/run\n\n"
+            "Once done, come back and we'll build campaigns that bring your brand to life."
+        ),
+        "required_phases": list(_REQUIRED_PHASES),
+        "missing_phases": exc.missing_phases,
+        "current_phase": exc.current_phase,
+        "branding_api_base": "/api/branding",
+    }
 
 
 def _fetch_and_validate_brand(client_id: str, brand_id: str) -> BrandContext:
@@ -209,17 +250,17 @@ def _fetch_and_validate_brand(client_id: str, brand_id: str) -> BrandContext:
     """
     try:
         brand_data = fetch_brand(client_id, brand_id)
-    except BrandNotFoundError:
+    except BrandNotFoundError as exc:
         raise HTTPException(
-            status_code=422, detail=build_brand_not_found_error(client_id, brand_id)
-        )
+            status_code=422, detail=_build_brand_not_found_error(client_id, brand_id)
+        ) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     try:
         return validate_brand_for_social_marketing(brand_data, client_id, brand_id)
     except BrandIncompleteError as exc:
-        raise HTTPException(status_code=422, detail=build_brand_incomplete_error(exc))
+        raise HTTPException(status_code=422, detail=_build_brand_incomplete_error(exc)) from exc
 
 
 @app.post("/social-marketing/run", response_model=RunMarketingTeamResponse)

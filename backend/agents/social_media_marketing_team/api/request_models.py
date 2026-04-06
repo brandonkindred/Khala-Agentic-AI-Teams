@@ -9,13 +9,24 @@ from pydantic import BaseModel, Field
 from social_media_marketing_team.models import PostPerformanceObservation, TeamOutput
 from social_media_marketing_team.trend_models import TrendDigest
 
+# Only allow alphanumeric, hyphens, and underscores in identifiers.
+# Prevents path-traversal (../) and query-string injection (?/#) when
+# the values are interpolated into URLs or error messages.
+_SAFE_ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
+
 
 class RunMarketingTeamRequest(BaseModel):
     client_id: str = Field(
-        ..., max_length=256, description="Client identifier from the branding team"
+        ...,
+        max_length=256,
+        pattern=_SAFE_ID_PATTERN,
+        description="Client identifier from the branding team",
     )
     brand_id: str = Field(
-        ..., max_length=256, description="Brand identifier from the branding team"
+        ...,
+        max_length=256,
+        pattern=_SAFE_ID_PATTERN,
+        description="Brand identifier from the branding team",
     )
     llm_model_name: str = Field(..., max_length=256, description="Name of local LLM model to use")
     goals: List[str] = Field(default_factory=lambda: ["engagement", "follower growth"])

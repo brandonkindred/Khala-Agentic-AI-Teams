@@ -59,15 +59,30 @@ class BrandContext(BaseModel):
     brand_story: str = ""
     tagline: str = ""
 
+    def to_brand_goals(
+        self, *, goals: List[str], cadence_posts_per_day: int, duration_days: int
+    ) -> BrandGoals:  # noqa: F821
+        """Convert to a ``BrandGoals`` instance, merging campaign-specific fields."""
+        from social_media_marketing_team.models import BrandGoals
+
+        return BrandGoals(
+            brand_name=self.brand_name,
+            target_audience=self.target_audience,
+            voice_and_tone=self.voice_and_tone,
+            brand_guidelines=self.brand_guidelines,
+            brand_objectives=self.brand_objectives,
+            messaging_pillars=self.messaging_pillars,
+            brand_story=self.brand_story,
+            tagline=self.tagline,
+            goals=goals,
+            cadence_posts_per_day=cadence_posts_per_day,
+            duration_days=duration_days,
+        )
+
 
 # ---------------------------------------------------------------------------
 # HTTP fetch
 # ---------------------------------------------------------------------------
-
-_PHASE_DISPLAY_NAMES = {
-    "strategic_core": "Strategic Core (your positioning, values, and audience)",
-    "narrative_messaging": "Narrative & Messaging (your brand story, voice, and key messages)",
-}
 
 _REQUIRED_PHASES = ["strategic_core", "narrative_messaging"]
 
@@ -119,7 +134,9 @@ def validate_brand_for_social_marketing(
             client_id, brand_id, missing_phases=list(_REQUIRED_PHASES), current_phase="draft"
         )
 
-    missing = [phase for phase in _REQUIRED_PHASES if not latest_output.get(phase)]
+    missing = [
+        phase for phase in _REQUIRED_PHASES if not isinstance(latest_output.get(phase), dict)
+    ]
     if missing:
         current_phase = brand_data.get("current_phase", "unknown")
         raise BrandIncompleteError(
@@ -207,50 +224,3 @@ def _extract_brand_context(
         brand_story=narrative.get("brand_story", ""),
         tagline=narrative.get("tagline", ""),
     )
-
-
-# ---------------------------------------------------------------------------
-# Error response builders (two-tier: structured API + warm user_message)
-# ---------------------------------------------------------------------------
-
-
-def build_brand_not_found_error(client_id: str, brand_id: str) -> dict:
-    """Build a structured error response for a missing brand."""
-    return {
-        "error": "brand_not_found",
-        "message": f"Brand '{brand_id}' was not found for client '{client_id}'.",
-        "user_message": (
-            "Before we can create campaigns for you, we need to understand your brand. "
-            "Here's how to get started:\n\n"
-            f"1. Create a client (if you haven't): POST /api/branding/clients\n"
-            f"2. Create a brand: POST /api/branding/clients/{client_id}/brands\n"
-            f"3. Run the branding pipeline: POST /api/branding/clients/{client_id}"
-            f"/brands/{{brand_id}}/run\n\n"
-            "The branding process covers your strategic positioning and messaging -- "
-            "it takes about 15-20 minutes and ensures your campaigns authentically "
-            "represent who you are."
-        ),
-        "branding_api_base": "/api/branding",
-    }
-
-
-def build_brand_incomplete_error(exc: BrandIncompleteError) -> dict:
-    """Build a structured error response for an incomplete brand."""
-    missing_display = "\n".join(f"- {_PHASE_DISPLAY_NAMES.get(p, p)}" for p in exc.missing_phases)
-    return {
-        "error": "brand_incomplete",
-        "message": f"Brand '{exc.brand_id}' needs more development before campaigns can be created.",
-        "user_message": (
-            "Your brand is off to a great start, but needs a bit more work before we can build "
-            "campaigns. Here's what's remaining:\n\n"
-            f"{missing_display}\n\n"
-            "This ensures your campaign content sounds authentically like your brand. "
-            f"Continue building your brand: POST /api/branding/clients/{exc.client_id}"
-            f"/brands/{exc.brand_id}/run\n\n"
-            "Once done, come back and we'll build campaigns that bring your brand to life."
-        ),
-        "required_phases": list(_REQUIRED_PHASES),
-        "missing_phases": exc.missing_phases,
-        "current_phase": exc.current_phase,
-        "branding_api_base": "/api/branding",
-    }
