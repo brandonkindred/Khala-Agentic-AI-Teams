@@ -1,33 +1,27 @@
-<div class="nutrition-chat-page">
-  <!-- Header with phase progress -->
-  <header class="chat-header">
-    <div class="header-top">
-      <div class="title-area">
-        <mat-icon class="title-icon">restaurant</mat-icon>
-        <div>
-          <h1>Nutritionist</h1>
-          <p class="subtitle">Your personal meal planning assistant</p>
-        </div>
-      </div>
-      <div class="header-controls">
-        <mat-button-toggle-group [(value)]="viewMode" class="view-toggle" aria-label="Interaction mode">
-          <mat-button-toggle value="chat" matTooltip="Chat with your nutritionist">
-            <mat-icon>chat</mat-icon>
-            <span class="toggle-label">Chat</span>
-          </mat-button-toggle>
-          <mat-button-toggle value="forms" matTooltip="Manage profile and plans using forms">
-            <mat-icon>dashboard</mat-icon>
-            <span class="toggle-label">Forms</span>
-          </mat-button-toggle>
-        </mat-button-toggle-group>
-        <span class="health-chip" [class]="healthStatus">
-          @if (healthStatus === 'healthy') { Online }
-          @if (healthStatus === 'checking') { Connecting… }
-          @if (healthStatus === 'unhealthy') { Offline }
-        </span>
-      </div>
-    </div>
+<app-dashboard-shell
+  title="Nutritionist"
+  subtitle="Your personal meal planning assistant"
+  icon="restaurant"
+>
+  <ng-container dashboardActions>
+    <mat-button-toggle-group [(value)]="viewMode" class="view-toggle" aria-label="Interaction mode">
+      <mat-button-toggle value="chat" matTooltip="Chat with your nutritionist">
+        <mat-icon>chat</mat-icon>
+        <span class="toggle-label">Chat</span>
+      </mat-button-toggle>
+      <mat-button-toggle value="forms" matTooltip="Manage profile and plans using forms">
+        <mat-icon>dashboard</mat-icon>
+        <span class="toggle-label">Forms</span>
+      </mat-button-toggle>
+    </mat-button-toggle-group>
+    <span class="health-chip" [class]="healthStatus">
+      @if (healthStatus === 'healthy') { Online }
+      @if (healthStatus === 'checking') { Connecting... }
+      @if (healthStatus === 'unhealthy') { Offline }
+    </span>
+  </ng-container>
 
+<div class="nutrition-chat-page">
     @if (viewMode === 'chat' && clientIdConfirmed) {
       <div class="phase-progress">
         @for (p of phases; track p.key; let i = $index) {
@@ -51,7 +45,6 @@
         }
       </div>
     }
-  </header>
 
   <!-- Forms View -->
   @if (viewMode === 'forms') {
@@ -300,3 +293,4 @@
     </div>
   }
 </div>
+</app-dashboard-shell>

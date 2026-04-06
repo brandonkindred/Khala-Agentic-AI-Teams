@@ -1,15 +1,10 @@
-<div class="dashboard-container">
-  <header class="dashboard-header">
-    <div class="title-section">
-      <mat-icon class="team-icon">cloud_queue</mat-icon>
-      <div>
-        <h1>Agent Provisioning</h1>
-        <p class="subtitle">Provision sandboxed environments for AI agents</p>
-      </div>
-    </div>
-    <app-health-indicator [healthCheck]="healthCheck" label="Agent Provisioning API" />
-  </header>
-
+<app-dashboard-shell
+  title="Agent Provisioning"
+  subtitle="Provision sandboxed environments for AI agents"
+  icon="cloud_queue"
+  [healthCheck]="healthCheck"
+  healthLabel="Agent Provisioning API"
+>
   <mat-tab-group animationDuration="200ms" class="dashboard-tabs" (selectedIndexChange)="onTabChange($event)" [selectedIndex]="selectedTabIndex">
     <mat-tab>
       <ng-template mat-tab-label>
@@ -50,4 +45,4 @@
       </div>
     </mat-tab>
   </mat-tab-group>
-</div>
+</app-dashboard-shell>

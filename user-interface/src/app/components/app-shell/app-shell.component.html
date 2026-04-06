@@ -18,150 +18,86 @@
       </div>
     </div>
 
-    <nav class="nav-section" [attr.aria-label]="'Agent features'">
-      <a routerLink="/dashboard" routerLinkActive="active" class="nav-link nav-link-primary">
+    <nav class="nav-section" aria-label="Agent features">
+      <!-- Jobs Dashboard — always visible at top -->
+      <a #navFocusable routerLink="/dashboard" routerLinkActive="active" class="nav-link nav-link-primary"
+         [attr.aria-current]="isActive('/dashboard') ? 'page' : null">
         <mat-icon>dashboard</mat-icon>
         <span>Jobs Dashboard</span>
       </a>
 
-      <div class="nav-group">
-        <div class="nav-group-label">Content</div>
-        <a routerLink="/blogging" routerLinkActive="active" [routerLinkActiveOptions]="{exact: true}" class="nav-link">
-          <mat-icon>article</mat-icon>
-          <span>Blogging</span>
-        </a>
-        <a routerLink="/blogging/dashboard" routerLinkActive="active" class="nav-link nav-link-nested">
-          <mat-icon>space_dashboard</mat-icon>
-          <span>Pipeline Dashboard</span>
-        </a>
-        <a routerLink="/branding" routerLinkActive="active" class="nav-link">
-          <mat-icon>palette</mat-icon>
-          <span>Branding</span>
-        </a>
-        <a routerLink="/social-marketing" routerLinkActive="active" class="nav-link">
-          <mat-icon>campaign</mat-icon>
-          <span>Social Marketing</span>
-        </a>
-        <a routerLink="/studio-grid" routerLinkActive="active" class="nav-link">
-          <mat-icon>design_services</mat-icon>
-          <span>StudioGrid</span>
-        </a>
-      </div>
+      <!-- Favorites section -->
+      @if (navState.favoriteItems().length > 0) {
+        <div class="nav-favorites">
+          <h2 class="visually-hidden">Favorites</h2>
+          <div class="nav-group-label">Favorites</div>
+          @for (item of navState.favoriteItems(); track item.id) {
+            <a #navFocusable
+               [routerLink]="item.route"
+               routerLinkActive="active"
+               [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
+               class="nav-link nav-link-favorite"
+               [attr.aria-current]="isActive(item.route) ? 'page' : null">
+              <mat-icon>star</mat-icon>
+              <span>{{ item.label }}</span>
+            </a>
+          }
+        </div>
+      }
 
-      <div class="nav-group">
-        <div class="nav-group-label">Development</div>
-        <a routerLink="/software-engineering" routerLinkActive="active" [routerLinkActiveOptions]="{exact: true}" class="nav-link">
-          <mat-icon>terminal</mat-icon>
-          <span>Software Engineering</span>
-        </a>
-        <a routerLink="/software-engineering/planning-v3" routerLinkActive="active" class="nav-link nav-link-nested">
-          <mat-icon>description</mat-icon>
-          <span>Planning</span>
-        </a>
-        <a routerLink="/software-engineering/coding-team" routerLinkActive="active" class="nav-link nav-link-nested">
-          <mat-icon>code</mat-icon>
-          <span>Coding Team</span>
-        </a>
-        <a routerLink="/persona-testing" routerLinkActive="active" class="nav-link nav-link-nested">
-          <mat-icon>science</mat-icon>
-          <span>Persona Testing</span>
-        </a>
-      </div>
+      <!-- Collapsible nav groups -->
+      @for (group of navGroups; track trackByGroupKey($index, group)) {
+        <div class="nav-group">
+          <div class="nav-group-header"
+               #navFocusable
+               role="button"
+               tabindex="0"
+               [attr.aria-expanded]="!navState.isCollapsed(group.key)"
+               [attr.aria-controls]="'nav-group-' + group.key"
+               (click)="navState.toggleGroup(group.key)"
+               (keydown.enter)="navState.toggleGroup(group.key)"
+               (keydown.space)="navState.toggleGroup(group.key); $event.preventDefault()">
+            <span class="nav-group-label">{{ group.label }}</span>
+            <mat-icon class="nav-group-chevron" [class.collapsed]="navState.isCollapsed(group.key)" aria-hidden="true">
+              expand_more
+            </mat-icon>
+          </div>
 
-      <div class="nav-group">
-        <div class="nav-group-label">Research & Compliance</div>
-        <a routerLink="/market-research" routerLinkActive="active" class="nav-link">
-          <mat-icon>insights</mat-icon>
-          <span>Market Research</span>
-        </a>
-        <a routerLink="/soc2-compliance" routerLinkActive="active" class="nav-link">
-          <mat-icon>verified_user</mat-icon>
-          <span>SOC2 Compliance</span>
-        </a>
-        <a routerLink="/accessibility" routerLinkActive="active" class="nav-link">
-          <mat-icon>accessibility_new</mat-icon>
-          <span>Accessibility Audit</span>
-        </a>
-      </div>
-
-      <div class="nav-group">
-        <div class="nav-group-label">Finance</div>
-        <a
-          routerLink="/investment"
-          routerLinkActive="active"
-          [routerLinkActiveOptions]="{ exact: true }"
-          class="nav-link"
-        >
-          <mat-icon>account_balance</mat-icon>
-          <span>Investment</span>
-        </a>
-        <a routerLink="/investment/advisor" routerLinkActive="active" class="nav-link nav-link-nested">
-          <mat-icon>support_agent</mat-icon>
-          <span>Advisor & IPS</span>
-        </a>
-        <a routerLink="/investment/strategy-lab" routerLinkActive="active" class="nav-link nav-link-nested">
-          <mat-icon>science</mat-icon>
-          <span>Strategy Lab</span>
-        </a>
-        <a routerLink="/startup-advisor" routerLinkActive="active" class="nav-link">
-          <mat-icon>rocket_launch</mat-icon>
-          <span>Startup Advisor</span>
-        </a>
-      </div>
-
-      <div class="nav-group">
-        <div class="nav-group-label">Revenue</div>
-        <a routerLink="/sales" routerLinkActive="active" class="nav-link">
-          <mat-icon>trending_up</mat-icon>
-          <span>Sales</span>
-        </a>
-      </div>
-
-      <div class="nav-group">
-        <div class="nav-group-label">Personal</div>
-        <a routerLink="/personal-assistant" routerLinkActive="active" class="nav-link">
-          <mat-icon>smart_toy</mat-icon>
-          <span>Personal Assistant</span>
-        </a>
-        <a routerLink="/nutrition" routerLinkActive="active" class="nav-link">
-          <mat-icon>restaurant_menu</mat-icon>
-          <span>Nutritionist</span>
-        </a>
-      </div>
-
-      <div class="nav-group">
-        <div class="nav-group-label">Agentic AI</div>
-        <a routerLink="/ai-systems" routerLinkActive="active" class="nav-link">
-          <mat-icon>psychology</mat-icon>
-          <span>AI Systems</span>
-        </a>
-        <a routerLink="/agent-provisioning" routerLinkActive="active" class="nav-link">
-          <mat-icon>cloud_queue</mat-icon>
-          <span>Agent Provisioning</span>
-        </a>
-        <a routerLink="/agentic-teams" routerLinkActive="active" class="nav-link">
-          <mat-icon>groups</mat-icon>
-          <span>Agentic Teams</span>
-        </a>
-        <a routerLink="/deepthought" routerLinkActive="active" class="nav-link">
-          <mat-icon>psychology</mat-icon>
-          <span>Deepthought</span>
-        </a>
-      </div>
-
-      <div class="nav-group">
-        <div class="nav-group-label">Settings</div>
-        <a routerLink="/integrations" routerLinkActive="active" class="nav-link">
-          <mat-icon>integration_instructions</mat-icon>
-          <span>Integrations</span>
-        </a>
-      </div>
+          <div [id]="'nav-group-' + group.key"
+               role="group"
+               [attr.aria-label]="group.label"
+               [@collapse]="navState.isCollapsed(group.key) ? 'closed' : 'open'">
+            @for (item of group.items; track trackByItemId($index, item)) {
+              <div class="nav-link-row">
+                <a #navFocusable
+                   [routerLink]="item.route"
+                   routerLinkActive="active"
+                   [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
+                   class="nav-link"
+                   [class.nav-link-nested]="item.nested"
+                   [attr.aria-current]="isActive(item.route) ? 'page' : null">
+                  <mat-icon>{{ item.icon }}</mat-icon>
+                  <span>{{ item.label }}</span>
+                </a>
+                @if (!item.nested) {
+                  <button mat-icon-button
+                          class="nav-link-star"
+                          (click)="navState.toggleFavorite(item.id); $event.stopPropagation(); $event.preventDefault()"
+                          [attr.aria-label]="navState.isFavorite(item.id) ? 'Unpin ' + item.label + ' from favorites' : 'Pin ' + item.label + ' to favorites'"
+                          [attr.aria-pressed]="navState.isFavorite(item.id)">
+                    <mat-icon>{{ navState.isFavorite(item.id) ? 'star' : 'star_border' }}</mat-icon>
+                  </button>
+                }
+              </div>
+            }
+          </div>
+        </div>
+      }
     </nav>
 
     <div class="sidenav-footer">
       <div class="footer-content">
-        <mat-icon>auto_awesome</mat-icon>
-        <span>Powered by AI</span>
+        <app-api-status-widget />
       </div>
     </div>
   </mat-sidenav>
@@ -173,8 +109,8 @@
       </button>
       <span class="toolbar-title">Khala Agents</span>
       <span class="spacer"></span>
-      <app-api-status-widget />
     </mat-toolbar>
+    <app-breadcrumb />
     <main class="content" id="main-content" role="main" tabindex="-1">
       <router-outlet />
     </main>

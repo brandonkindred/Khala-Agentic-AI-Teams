@@ -21,6 +21,7 @@ import { Subscription } from 'rxjs';
 import { marked } from 'marked';
 
 import { DeepthoughtApiService, StreamEvent } from '../../services/deepthought-api.service';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import type {
   AgentResult,
   ChatMessage,
@@ -46,6 +47,7 @@ import { DECOMPOSITION_STRATEGIES } from '../../models/deepthought.model';
     MatTooltipModule,
     MatSliderModule,
     MatSelectModule,
+    DashboardShellComponent,
   ],
   templateUrl: './deepthought-dashboard.component.html',
   styleUrl: './deepthought-dashboard.component.scss',

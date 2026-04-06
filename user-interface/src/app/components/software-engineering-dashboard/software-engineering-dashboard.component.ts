@@ -8,6 +8,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import type { RunningJobSummary } from '../../models';
 
 const POLL_JOBS_MS = 30_000;
@@ -23,6 +24,7 @@ const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled', 'stopped'];
     MatIconModule,
     MatProgressBarModule,
     TeamAssistantChatComponent,
+    DashboardShellComponent,
   ],
   templateUrl: './software-engineering-dashboard.component.html',
   styleUrl: './software-engineering-dashboard.component.scss',

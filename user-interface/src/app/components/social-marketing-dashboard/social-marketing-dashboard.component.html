@@ -1,16 +1,19 @@
-<h1>Social Media Marketing API</h1>
-<p>Campaign planning, performance ingestion, revision.</p>
-
-<app-team-assistant-chat
-  [teamApiUrl]="'/api/social-marketing/assistant'"
-  [teamName]="'Social Media Marketing'"
-  [teamDescription]="'Plan a social media campaign for your brand'"
-  [fields]="[
-    {key: 'brand_name', label: 'Brand name', placeholder: 'Name of your brand', required: true},
-    {key: 'target_audience', label: 'Target audience', placeholder: 'Who are you targeting?', required: true},
-    {key: 'goals', label: 'Campaign goals', placeholder: 'e.g. engagement, follower growth'},
-    {key: 'voice_and_tone', label: 'Voice and tone', placeholder: 'e.g. professional, playful'},
-    {key: 'cadence_posts_per_day', label: 'Posts per day', placeholder: 'Number of posts per day'},
-    {key: 'duration_days', label: 'Duration (days)', placeholder: 'Campaign length in days'}
-  ]"
-/>
+<app-dashboard-shell
+  title="Social Media Marketing"
+  subtitle="Campaign planning, performance ingestion, revision."
+  icon="campaign"
+>
+  <app-team-assistant-chat
+    [teamApiUrl]="'/api/social-marketing/assistant'"
+    [teamName]="'Social Media Marketing'"
+    [teamDescription]="'Plan a social media campaign for your brand'"
+    [fields]="[
+      {key: 'brand_name', label: 'Brand name', placeholder: 'Name of your brand', required: true},
+      {key: 'target_audience', label: 'Target audience', placeholder: 'Who are you targeting?', required: true},
+      {key: 'goals', label: 'Campaign goals', placeholder: 'e.g. engagement, follower growth'},
+      {key: 'voice_and_tone', label: 'Voice and tone', placeholder: 'e.g. professional, playful'},
+      {key: 'cadence_posts_per_day', label: 'Posts per day', placeholder: 'Number of posts per day'},
+      {key: 'duration_days', label: 'Duration (days)', placeholder: 'Campaign length in days'}
+    ]"
+  />
+</app-dashboard-shell>

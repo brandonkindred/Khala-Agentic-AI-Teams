@@ -1,15 +1,16 @@
-<h1>Personal Assistant</h1>
-<p>Your AI-powered personal assistant for tasks, scheduling, deals, and more.</p>
-
-<div class="header-row">
-  <app-health-indicator [healthCheck]="healthCheck" label="Personal Assistant API" />
-</div>
-
-<app-team-assistant-chat
-  [teamApiUrl]="'/api/personal-assistant/assistant'"
-  [teamName]="'Personal Assistant'"
-  [teamDescription]="'Manage your email, calendar, tasks, deals, and reservations'"
-  [fields]="[
-    {key: 'user_id', label: 'User ID', placeholder: 'Your user identifier', required: true}
-  ]"
-/>
+<app-dashboard-shell
+  title="Personal Assistant"
+  subtitle="Your AI-powered personal assistant for tasks, scheduling, deals, and more."
+  icon="smart_toy"
+  [healthCheck]="healthCheck"
+  healthLabel="Personal Assistant API"
+>
+  <app-team-assistant-chat
+    [teamApiUrl]="'/api/personal-assistant/assistant'"
+    [teamName]="'Personal Assistant'"
+    [teamDescription]="'Manage your email, calendar, tasks, deals, and reservations'"
+    [fields]="[
+      {key: 'user_id', label: 'User ID', placeholder: 'Your user identifier', required: true}
+    ]"
+  />
+</app-dashboard-shell>
