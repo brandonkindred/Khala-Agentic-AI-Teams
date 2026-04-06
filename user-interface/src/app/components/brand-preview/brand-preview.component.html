@@ -249,7 +249,14 @@
           <span>Summary</span>
         </ng-template>
         <div class="tab-body">
-          <p class="summary-text">{{ latestOutput!.mission_summary }}</p>
+          @if (latestOutput?.mission_summary) {
+            <p class="summary-text">{{ latestOutput!.mission_summary }}</p>
+          } @else {
+            <div class="empty-tab">
+              <mat-icon>summarize</mat-icon>
+              <p>Your brand summary will be created during the strategic core phase, where your mission, positioning, and brand promise are defined.</p>
+            </div>
+          }
         </div>
       </mat-tab>
 
@@ -275,6 +282,13 @@
                   <li>{{ p }}</li>
                 }
               </ul>
+            </div>
+          </div>
+        } @else {
+          <div class="tab-body">
+            <div class="empty-tab">
+              <mat-icon>hub</mat-icon>
+              <p>Brand codification — positioning, promise, and narrative pillars — will be generated during the strategic core phase.</p>
             </div>
           </div>
         }
@@ -322,7 +336,7 @@
           } @else {
             <div class="empty-tab">
               <mat-icon>dashboard</mat-icon>
-              <p>Moodboards will appear after the branding team runs.</p>
+              <p>Moodboards with visual direction, color stories, and typography guidance will be created during the visual identity phase.</p>
             </div>
           }
         </div>
@@ -365,7 +379,7 @@
           } @else if (!selectedPalette) {
             <div class="empty-tab">
               <mat-icon>palette</mat-icon>
-              <p>Colors will emerge from moodboards and the design system.</p>
+              <p>Your color palette and color stories will be generated during the visual identity phase, alongside moodboards and typography.</p>
             </div>
           }
         </div>
@@ -411,6 +425,13 @@
               </div>
             </div>
           </div>
+        } @else {
+          <div class="tab-body">
+            <div class="empty-tab">
+              <mat-icon>edit_note</mat-icon>
+              <p>Voice principles and writing style guidelines will be crafted during the narrative and messaging phase.</p>
+            </div>
+          </div>
         }
       </mat-tab>
 
@@ -446,6 +467,13 @@
               </ul>
             </div>
           </div>
+        } @else {
+          <div class="tab-body">
+            <div class="empty-tab">
+              <mat-icon>design_services</mat-icon>
+              <p>Design principles, tokens, and component standards will be defined during the visual identity phase.</p>
+            </div>
+          </div>
         }
       </mat-tab>
 
@@ -464,7 +492,7 @@
           } @else {
             <div class="empty-tab">
               <mat-icon>menu_book</mat-icon>
-              <p>Brand guidelines will appear after orchestration.</p>
+              <p>Brand guidelines covering usage rules and approval workflows will be produced during the governance phase.</p>
             </div>
           }
         </div>
@@ -483,7 +511,7 @@
           <div class="tab-body">
             <div class="empty-tab">
               <mat-icon>auto_stories</mat-icon>
-              <p>No brand book content yet.</p>
+              <p>The complete brand book will be compiled during the governance phase, bringing together all elements of your brand identity.</p>
             </div>
           </div>
         }
