@@ -197,6 +197,22 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
         )
         hb_thread.start()
 
+    def _mark_cancelled() -> bool:
+        """Mark job as cancelled and return True, for use in except handlers."""
+        logger.info("Pipeline cancelled for job %s", job_id)
+        if update_blog_job is not None:
+            try:
+                update_blog_job(
+                    job_id,
+                    status=JOB_STATUS_CANCELLED,
+                    status_text="Pipeline cancelled",
+                    error="Cancelled",
+                )
+            except Exception:
+                pass
+        _publish_terminal(job_id, "cancelled")
+        return True
+
     try:
         length_policy = resolve_length_policy_from_request_dict(request_dict)
         planning_phase_result, draft_result, status = run_pipeline(
@@ -234,6 +250,9 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
     except CancelledError:
         raise
     except PlanningError as e:
+        if _is_external_cancellation(e):
+            _mark_cancelled()
+            return
         logger.exception("Planning failed for job %s", job_id)
         _fail_job(
             job_id,
@@ -243,23 +262,15 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
         )
         _publish_terminal(job_id, "error", error=str(e), failed_phase="planning")
     except BloggingError as e:
+        if _is_external_cancellation(e):
+            _mark_cancelled()
+            return
         logger.exception("Pipeline failed for job %s", job_id)
         _fail_job(job_id, str(e), failed_phase=getattr(e, "phase", None))
         _publish_terminal(job_id, "error", error=str(e), failed_phase=getattr(e, "phase", None))
     except Exception as e:
         if _is_external_cancellation(e):
-            logger.info("Pipeline cancelled for job %s", job_id)
-            if update_blog_job is not None:
-                try:
-                    update_blog_job(
-                        job_id,
-                        status=JOB_STATUS_CANCELLED,
-                        status_text="Pipeline cancelled",
-                        error="Cancelled",
-                    )
-                except Exception:
-                    pass
-            _publish_terminal(job_id, "cancelled")
+            _mark_cancelled()
             return
         logger.exception("Unexpected error in pipeline for job %s", job_id)
         _fail_job(job_id, str(e))

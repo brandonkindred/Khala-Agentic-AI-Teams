@@ -58,15 +58,13 @@ async def proxy_request(request: Request, target_base_url: str, path: str) -> Re
     try:
         req = client.build_request(method=request.method, url=url, headers=headers, content=body)
         resp = await client.send(req, stream=True)
-    except httpx.ConnectError as exc:
-        logger.error("Proxy connect error: %s %s -> %s", request.method, request.url.path, url)
-        raise exc
-    except httpx.ConnectTimeout as exc:
-        logger.error("Proxy connect timeout: %s %s -> %s", request.method, request.url.path, url)
-        raise exc
     except httpx.HTTPError as exc:
-        logger.error("Proxy HTTP error: %s %s -> %s: %s", request.method, request.url.path, url, exc)
-        raise exc
+        logger.error("Proxy error: %s %s -> %s: %s", request.method, request.url.path, url, exc)
+        return Response(
+            content=f"Bad Gateway: upstream service unavailable ({type(exc).__name__})",
+            status_code=502,
+            media_type="text/plain",
+        )
 
     resp_headers = {k: v for k, v in resp.headers.items() if k.lower() not in _HOP_BY_HOP_RESPONSE}
     content_type = resp.headers.get("content-type", "")
@@ -78,6 +76,11 @@ async def proxy_request(request: Request, target_base_url: str, path: str) -> Re
             try:
                 async for chunk in resp.aiter_bytes():
                     yield chunk
+            except httpx.HTTPError as exc:
+                logger.error(
+                    "Proxy upstream disconnected mid-stream: %s %s -> %s: %s",
+                    request.method, request.url.path, url, exc,
+                )
             finally:
                 await resp.aclose()
 

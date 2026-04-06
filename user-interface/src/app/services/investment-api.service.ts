@@ -220,7 +220,7 @@ export class InvestmentApiService {
     );
   }
 
-  listStrategyLabJobs(runningOnly: boolean = false): Observable<InvestmentJobsListResponse> {
+  listStrategyLabJobs(runningOnly = false): Observable<InvestmentJobsListResponse> {
     return this.http.get<InvestmentJobsListResponse>(
       `${this.baseUrl}/strategy-lab/jobs`,
       { params: runningOnly ? { running_only: 'true' } : {} }

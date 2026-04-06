@@ -51,6 +51,7 @@ def stop_blog_stale_monitor() -> None:
 
 # Job status constants — common ones from shared client, plus blogging-specific
 from job_service_client import (  # noqa: E402
+    JOB_STATUS_CANCELLED,  # noqa: F401 — re-exported for run_pipeline_job
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,

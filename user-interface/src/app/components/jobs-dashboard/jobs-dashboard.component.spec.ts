@@ -7,6 +7,7 @@ import { BloggingApiService } from '../../services/blogging-api.service';
 import { AISystemsApiService } from '../../services/ai-systems-api.service';
 import { AgentProvisioningApiService } from '../../services/agent-provisioning-api.service';
 import { SocialMarketingApiService } from '../../services/social-marketing-api.service';
+import { InvestmentApiService } from '../../services/investment-api.service';
 import { JobsDashboardComponent } from './jobs-dashboard.component';
 
 describe('JobsDashboardComponent', () => {
@@ -44,6 +45,9 @@ describe('JobsDashboardComponent', () => {
       cancelJob: vi.fn().mockReturnValue(of({ job_id: 'j1', status: 'cancelled', message: 'Ok' })),
       deleteJob: vi.fn().mockReturnValue(of({ job_id: 'j1', message: 'Deleted' })),
     };
+    const investmentApi = {
+      listStrategyLabJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
+    };
 
     await TestBed.configureTestingModule({
       imports: [JobsDashboardComponent],
@@ -53,6 +57,7 @@ describe('JobsDashboardComponent', () => {
         { provide: AISystemsApiService, useValue: aiApi },
         { provide: AgentProvisioningApiService, useValue: provApi },
         { provide: SocialMarketingApiService, useValue: socialApi },
+        { provide: InvestmentApiService, useValue: investmentApi },
         { provide: Router, useValue: routerSpy },
       ],
     }).compileComponents();
@@ -115,8 +120,8 @@ describe('JobsDashboardComponent', () => {
     it('returns true for failed status', () => {
       expect(component.canResumeJob(seJob('failed'))).toBe(true);
     });
-    it('returns true for cancelled status', () => {
-      expect(component.canResumeJob(seJob('cancelled'))).toBe(true);
+    it('returns false for cancelled status', () => {
+      expect(component.canResumeJob(seJob('cancelled'))).toBe(false);
     });
     it('returns true for agent_crash status', () => {
       expect(component.canResumeJob(seJob('agent_crash'))).toBe(true);
@@ -130,8 +135,8 @@ describe('JobsDashboardComponent', () => {
     it('returns false for completed status', () => {
       expect(component.canResumeJob(seJob('completed'))).toBe(false);
     });
-    it('returns false for non-software_engineering source', () => {
-      const job = { unified: { source: 'blogging', jobId: 'j1', status: 'failed' }, seDetail: null } as any;
+    it('returns false for non-resumable source', () => {
+      const job = { unified: { source: 'market_research', jobId: 'j1', status: 'failed' }, seDetail: null } as any;
       expect(component.canResumeJob(job)).toBe(false);
     });
   });
