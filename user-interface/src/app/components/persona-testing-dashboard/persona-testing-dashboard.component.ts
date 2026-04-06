@@ -8,6 +8,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatCardModule } from '@angular/material/card';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import type { PersonaInfo, PersonaTestRun } from '../../models';
 
 const POLL_RUNS_MS = 15_000;
@@ -22,6 +23,7 @@ const TERMINAL_STATUSES = ['completed', 'failed'];
     MatIconModule,
     MatCardModule,
     MatProgressBarModule,
+    DashboardShellComponent,
   ],
   templateUrl: './persona-testing-dashboard.component.html',
   styleUrl: './persona-testing-dashboard.component.scss',

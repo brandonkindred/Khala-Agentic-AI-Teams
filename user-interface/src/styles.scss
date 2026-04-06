@@ -2,6 +2,47 @@
 // Khala Global Styles — Premium Dark + Amber
 // ============================================================================
 
+// ============================================================================
+// Accessibility Foundations
+// ============================================================================
+
+// Respect user motion preferences (WCAG 2.3.3)
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+// Screen-reader-only content — visually hidden but announced by assistive tech
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+// Global focus indicator — visible amber ring on all interactive elements
+:focus-visible {
+  outline: 2px solid var(--kh-accent);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+// ============================================================================
+// Base
+// ============================================================================
+
 html, body {
   height: 100%;
   margin: 0;
@@ -412,6 +453,46 @@ a {
   &:hover {
     background: rgba(255, 255, 255, 0.14);
   }
+}
+
+// ============================================================================
+// Utility Classes
+// ============================================================================
+
+.text-error    { color: var(--kh-error); }
+.text-success  { color: var(--kh-success); }
+.text-warning  { color: var(--kh-warning); }
+.text-muted    { color: var(--kh-text-muted); }
+.text-tertiary { color: var(--kh-text-tertiary); }
+.text-sm       { font-size: var(--kh-text-sm); }
+.text-xs       { font-size: var(--kh-text-xs); }
+
+@for $i from 1 through 6 {
+  .mt-#{$i} { margin-top: var(--kh-space-#{$i}); }
+  .mb-#{$i} { margin-bottom: var(--kh-space-#{$i}); }
+  .ml-#{$i} { margin-left: var(--kh-space-#{$i}); }
+  .mr-#{$i} { margin-right: var(--kh-space-#{$i}); }
+  .p-#{$i}  { padding: var(--kh-space-#{$i}); }
+}
+
+.d-flex { display: flex; }
+.gap-2  { gap: var(--kh-space-2); }
+.gap-3  { gap: var(--kh-space-3); }
+
+// ============================================================================
+// Snackbar Notification Variants
+// ============================================================================
+
+.kh-snack-success .mdc-snackbar__surface {
+  border-left: 3px solid var(--kh-success) !important;
+}
+
+.kh-snack-error .mdc-snackbar__surface {
+  border-left: 3px solid var(--kh-error) !important;
+}
+
+.kh-snack-info .mdc-snackbar__surface {
+  border-left: 3px solid var(--kh-info) !important;
 }
 
 // ============================================================================

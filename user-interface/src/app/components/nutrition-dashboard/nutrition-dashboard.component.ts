@@ -14,6 +14,7 @@ import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { NutritionApiService } from '../../services/nutrition-api.service';
 import { NutritionFormsComponent } from '../nutrition-forms/nutrition-forms.component';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import type {
   ClientProfile,
   MealRecommendation,
@@ -49,6 +50,7 @@ const PHASES = [
     MatSlideToggleModule,
     MatButtonToggleModule,
     NutritionFormsComponent,
+    DashboardShellComponent,
   ],
   templateUrl: './nutrition-dashboard.component.html',
   styleUrl: './nutrition-dashboard.component.scss',
@@ -152,7 +154,7 @@ export class NutritionDashboardComponent implements OnInit, AfterViewChecked {
           // Load profile alongside restored history
           this.api.getProfile(id).subscribe({
             next: (profile) => { this.profile = profile; },
-            error: () => { /* profile fetch is non-critical */ },
+            error: () => undefined, // profile fetch is non-critical
           });
         } else {
           this.addWelcomeMessages(id);
@@ -191,7 +193,7 @@ export class NutritionDashboardComponent implements OnInit, AfterViewChecked {
           profile,
         });
       },
-      error: () => { /* No existing profile */ },
+      error: () => undefined, // No existing profile — that's fine
     });
   }
 

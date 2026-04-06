@@ -1,0 +1,21 @@
+<div class="kh-empty-state" role="status">
+  <mat-icon class="kh-empty-icon" aria-hidden="true">{{ icon }}</mat-icon>
+  <h2 class="kh-empty-title">{{ title }}</h2>
+  @if (description) {
+    <p class="kh-empty-message">{{ description }}</p>
+  }
+  @if (examples.length) {
+    <div class="kh-empty-examples">
+      <span class="kh-empty-examples-label">Try one of these:</span>
+      @for (example of examples; track example) {
+        <button class="kh-empty-example-btn"
+                (click)="exampleClick.emit(example)"
+                [attr.aria-label]="'Start with: ' + example">
+          <mat-icon aria-hidden="true">arrow_forward</mat-icon>
+          <span>{{ example }}</span>
+        </button>
+      }
+    </div>
+  }
+  <ng-content />
+</div>

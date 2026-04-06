@@ -1,16 +1,8 @@
-<div class="sales-layout">
-
-  <!-- Page header -->
-  <div class="page-header">
-    <div class="page-title-row">
-      <mat-icon class="page-icon">trending_up</mat-icon>
-      <div>
-        <h1 class="page-title">AI Sales Team</h1>
-        <p class="page-subtitle">Autonomous B2B sales pipeline — prospect, qualify, propose, and close</p>
-      </div>
-    </div>
-  </div>
-
+<app-dashboard-shell
+  title="AI Sales Team"
+  subtitle="Autonomous B2B sales pipeline — prospect, qualify, propose, and close"
+  icon="trending_up"
+>
   <app-team-assistant-chat
     [teamApiUrl]="'/api/sales/assistant'"
     [teamName]="'AI Sales Team'"
@@ -23,4 +15,4 @@
       {key: 'timeline', label: 'Timeline', placeholder: 'Campaign timeline or deadline'}
     ]"
   />
-</div>
+</app-dashboard-shell>

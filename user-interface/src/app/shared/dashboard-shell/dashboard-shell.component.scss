@@ -1,0 +1,92 @@
+// ============================================================================
+// Dashboard Shell — Unified Layout
+// ============================================================================
+
+.dashboard-shell {
+  max-width: 1400px;
+}
+
+// ── Header ──────────────────────────────────────────────────────────────────
+
+.dashboard-shell-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--kh-space-4);
+  margin-bottom: var(--kh-space-6);
+}
+
+.dashboard-shell-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-3);
+}
+
+.dashboard-shell-icon {
+  font-size: 28px;
+  width: 28px;
+  height: 28px;
+  color: var(--kh-accent);
+  flex-shrink: 0;
+}
+
+.dashboard-shell-title-text {
+  h1 {
+    margin: 0;
+    font-size: var(--kh-text-2xl);
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    color: var(--kh-text-primary);
+  }
+}
+
+.dashboard-shell-subtitle {
+  margin: var(--kh-space-1) 0 0;
+  font-size: var(--kh-text-md);
+  color: var(--kh-text-tertiary);
+  max-width: 600px;
+  line-height: 1.5;
+}
+
+.dashboard-shell-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-3);
+  flex-wrap: wrap;
+}
+
+// ── Sub-teams ───────────────────────────────────────────────────────────────
+
+.dashboard-shell-sub-teams {
+  margin-bottom: var(--kh-space-6);
+  font-size: var(--kh-text-sm);
+  color: var(--kh-text-tertiary);
+
+  .sub-teams-label {
+    font-weight: 600;
+    margin-right: var(--kh-space-2);
+  }
+
+  a {
+    color: var(--kh-accent-text);
+    text-decoration: none;
+    transition: color var(--kh-transition);
+
+    &:hover {
+      color: var(--kh-accent-hover);
+      text-decoration: underline;
+    }
+  }
+
+  .sep {
+    margin: 0 var(--kh-space-2);
+    color: var(--kh-text-muted);
+  }
+}
+
+// ── Body ────────────────────────────────────────────────────────────────────
+
+.dashboard-shell-body {
+  // Minimal wrapper — content fills naturally
+}

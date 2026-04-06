@@ -10,6 +10,7 @@ import { MatListModule } from '@angular/material/list';
 import { MatChipsModule } from '@angular/material/chips';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { ProcessDesignerChatComponent } from '../process-designer-chat/process-designer-chat.component';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import type { AgenticTeamSummary, AgenticTeam } from '../../models';
 
 @Component({
@@ -26,6 +27,7 @@ import type { AgenticTeamSummary, AgenticTeam } from '../../models';
     MatListModule,
     MatChipsModule,
     ProcessDesignerChatComponent,
+    DashboardShellComponent,
   ],
   templateUrl: './agentic-team-dashboard.component.html',
   styleUrl: './agentic-team-dashboard.component.scss',

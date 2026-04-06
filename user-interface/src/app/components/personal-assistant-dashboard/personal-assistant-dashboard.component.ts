@@ -3,7 +3,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { PersonalAssistantApiService } from '../../services/personal-assistant-api.service';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
-import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 
 /**
  * Personal Assistant Dashboard - main container with tabbed interface.
@@ -14,7 +14,7 @@ import { HealthIndicatorComponent } from '../health-indicator/health-indicator.c
   imports: [
     MatIconModule,
     MatButtonModule,
-    HealthIndicatorComponent,
+    DashboardShellComponent,
     TeamAssistantChatComponent,
   ],
   templateUrl: './personal-assistant-dashboard.component.html',

@@ -1,7 +1,13 @@
-<div class="page-header">
-  <h1>Software Engineering</h1>
-  <p class="page-subtitle">Full-stack development pipeline: planning, coding, review, and deployment.</p>
-  <div class="page-header-actions">
+<app-dashboard-shell
+  title="Software Engineering"
+  subtitle="Full-stack development pipeline: planning, coding, review, and deployment."
+  icon="code"
+  [subTeams]="[
+    {label: 'Planning (V3)', route: '/software-engineering/planning-v3'},
+    {label: 'Coding Team', route: '/software-engineering/coding-team'}
+  ]"
+>
+  <ng-container dashboardActions>
     <button mat-raised-button color="primary" (click)="showNewProject()">
       <mat-icon>add</mat-icon> New Project
     </button>
@@ -10,15 +16,7 @@
         <mat-icon>list</mat-icon> Jobs ({{ allJobs.length }})
       </button>
     }
-  </div>
-
-  <p class="sub-teams">
-    <span class="sub-teams-label">Sub-teams:</span>
-    <a routerLink="/software-engineering/planning-v3">Planning (V3)</a>
-    <span class="sep">·</span>
-    <a routerLink="/software-engineering/coding-team">Coding Team</a>
-  </p>
-</div>
+  </ng-container>
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->
 <!-- Empty State — no projects yet                                          -->
@@ -109,3 +107,4 @@
     }
   </div>
 }
+</app-dashboard-shell>

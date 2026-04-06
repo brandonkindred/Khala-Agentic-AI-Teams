@@ -15,8 +15,8 @@ import { MatTableModule } from '@angular/material/table';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Observable, Subscription, interval, switchMap, takeWhile } from 'rxjs';
 import { AgentProvisioningApiService } from '../../services/agent-provisioning-api.service';
-import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import { AgentRegistryComponent } from '../agent-registry/agent-registry.component';
 import { AgentFinderComponent } from '../agent-finder/agent-finder.component';
 import type {
@@ -47,8 +47,8 @@ type DashboardTab = 'provision' | 'jobs' | 'environments';
     MatChipsModule,
     MatTableModule,
     MatTooltipModule,
-    HealthIndicatorComponent,
     TeamAssistantChatComponent,
+    DashboardShellComponent,
     AgentRegistryComponent,
     AgentFinderComponent,
   ],

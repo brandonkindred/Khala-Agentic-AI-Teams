@@ -1,39 +1,18 @@
-<div class="dashboard-container">
-  <!-- Dashboard Header -->
-  <div class="dashboard-header">
-    <div class="header-content">
-      <h1>
-        <mat-icon>accessibility_new</mat-icon>
-        Accessibility Audit Dashboard
-      </h1>
-      <p class="subtitle">
-        Comprehensive accessibility testing for web pages, websites, SPAs, and mobile applications
-      </p>
-    </div>
-
-    <div class="header-actions">
-      <!-- Health Indicator -->
-      <div class="health-indicator" [class.healthy]="healthStatus?.status === 'ok'" [class.error]="healthError">
-        <mat-icon>{{ healthStatus?.status === 'ok' ? 'check_circle' : 'error' }}</mat-icon>
-        <span>
-          @if (healthLoading) {
-            Checking API...
-          } @else if (healthError) {
-            API Offline
-          } @else {
-            API Online
-          }
-        </span>
-      </div>
-
-      @if (hasActiveJob || hasCompletedAudit) {
-        <button mat-stroked-button (click)="startNewAudit()">
-          <mat-icon>add</mat-icon>
-          New Audit
-        </button>
-      }
-    </div>
-  </div>
+<app-dashboard-shell
+  title="Accessibility Audit Dashboard"
+  subtitle="Comprehensive accessibility testing for web pages, websites, SPAs, and mobile applications"
+  icon="accessibility_new"
+  [healthCheck]="healthCheckFn"
+  healthLabel="Accessibility API"
+>
+  <ng-container dashboardActions>
+    @if (hasActiveJob || hasCompletedAudit) {
+      <button mat-stroked-button (click)="startNewAudit()">
+        <mat-icon>add</mat-icon>
+        New Audit
+      </button>
+    }
+  </ng-container>
 
   <app-team-assistant-chat
     [teamApiUrl]="'/api/accessibility-audit/assistant'"
@@ -155,4 +134,4 @@
       </div>
     </mat-tab>
   </mat-tab-group>
-</div>
+</app-dashboard-shell>

@@ -1,0 +1,38 @@
+<section class="dashboard-shell" [attr.aria-labelledby]="'dash-title'">
+  <header class="dashboard-shell-header">
+    <div class="dashboard-shell-title-row">
+      @if (icon) {
+        <mat-icon class="dashboard-shell-icon" aria-hidden="true">{{ icon }}</mat-icon>
+      }
+      <div class="dashboard-shell-title-text">
+        <h1 id="dash-title">{{ title }}</h1>
+        @if (subtitle) {
+          <p class="dashboard-shell-subtitle">{{ subtitle }}</p>
+        }
+      </div>
+    </div>
+    <div class="dashboard-shell-header-right">
+      @if (healthCheck) {
+        <div aria-live="polite">
+          <app-health-indicator [healthCheck]="healthCheck" [label]="healthLabel" />
+        </div>
+      }
+      <ng-content select="[dashboardActions]" />
+    </div>
+  </header>
+
+  @if (subTeams.length) {
+    <nav class="dashboard-shell-sub-teams" aria-label="Sub-teams">
+      <span class="sub-teams-label">Sub-teams:</span>
+      @for (team of subTeams; track team.route; let last = $last) {
+        <a [routerLink]="team.route">{{ team.label }}</a>
+        @if (!last) { <span class="sep" aria-hidden="true">·</span> }
+      }
+    </nav>
+  }
+
+  <div class="dashboard-shell-body">
+    <ng-content select="[dashboardEmpty]" />
+    <ng-content />
+  </div>
+</section>
