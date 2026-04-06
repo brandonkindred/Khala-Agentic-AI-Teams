@@ -1,15 +1,15 @@
 import { Component, inject } from '@angular/core';
 import { MarketResearchApiService } from '../../services/market-research-api.service';
-import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 
 @Component({
   selector: 'app-market-research-dashboard',
   standalone: true,
   imports: [
-    HealthIndicatorComponent,
+    DashboardShellComponent,
     MatButtonModule,
     MatIconModule,
     TeamAssistantChatComponent,

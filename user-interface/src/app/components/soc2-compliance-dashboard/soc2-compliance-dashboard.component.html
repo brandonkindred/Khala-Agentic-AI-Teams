@@ -1,16 +1,17 @@
-<h1>SOC2 Compliance API</h1>
-<p>Compliance audit on code repositories.</p>
-
-<div class="header-row">
-  <app-health-indicator [healthCheck]="healthCheck" label="SOC2 Compliance API" />
-</div>
-
-<app-team-assistant-chat
-  [teamApiUrl]="'/api/soc2-compliance/assistant'"
-  [teamName]="'SOC2 Compliance'"
-  [teamDescription]="'Set up a SOC2 compliance audit for your repository'"
-  [fields]="[
-    {key: 'repo_path', label: 'Repository path', placeholder: 'Path to repository to audit', required: true},
-    {key: 'compliance_scope', label: 'Compliance scope', placeholder: 'Specific trust service categories to focus on'}
-  ]"
-/>
+<app-dashboard-shell
+  title="SOC2 Compliance"
+  subtitle="Compliance audit on code repositories."
+  icon="verified_user"
+  [healthCheck]="healthCheck"
+  healthLabel="SOC2 Compliance API"
+>
+  <app-team-assistant-chat
+    [teamApiUrl]="'/api/soc2-compliance/assistant'"
+    [teamName]="'SOC2 Compliance'"
+    [teamDescription]="'Set up a SOC2 compliance audit for your repository'"
+    [fields]="[
+      {key: 'repo_path', label: 'Repository path', placeholder: 'Path to repository to audit', required: true},
+      {key: 'compliance_scope', label: 'Compliance scope', placeholder: 'Specific trust service categories to focus on'}
+    ]"
+  />
+</app-dashboard-shell>

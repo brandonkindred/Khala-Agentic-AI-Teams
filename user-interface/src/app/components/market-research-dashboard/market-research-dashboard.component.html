@@ -1,19 +1,20 @@
-<h1>Market Research API</h1>
-<p>Product concept viability, user discovery, research scripts.</p>
-
-<div class="header-row">
-  <app-health-indicator [healthCheck]="healthCheck" label="Market Research API" />
-</div>
-
-<app-team-assistant-chat
-  [teamApiUrl]="'/api/market-research/assistant'"
-  [teamName]="'Market Research'"
-  [teamDescription]="'Describe your product concept and the team will conduct market research'"
-  [fields]="[
-    {key: 'product_concept', label: 'Product concept', placeholder: 'Describe your product or service', required: true},
-    {key: 'target_users', label: 'Target users', placeholder: 'Who is this product for?', required: true},
-    {key: 'business_goal', label: 'Business goal', placeholder: 'What do you want to learn or validate?', required: true},
-    {key: 'topology', label: 'Research topology', placeholder: 'unified or split'},
-    {key: 'transcripts', label: 'Interview transcripts', placeholder: 'Paste or describe user interview data'}
-  ]"
-/>
+<app-dashboard-shell
+  title="Market Research"
+  subtitle="Product concept viability, user discovery, research scripts."
+  icon="insights"
+  [healthCheck]="healthCheck"
+  healthLabel="Market Research API"
+>
+  <app-team-assistant-chat
+    [teamApiUrl]="'/api/market-research/assistant'"
+    [teamName]="'Market Research'"
+    [teamDescription]="'Describe your product concept and the team will conduct market research'"
+    [fields]="[
+      {key: 'product_concept', label: 'Product concept', placeholder: 'Describe your product or service', required: true},
+      {key: 'target_users', label: 'Target users', placeholder: 'Who is this product for?', required: true},
+      {key: 'business_goal', label: 'Business goal', placeholder: 'What do you want to learn or validate?', required: true},
+      {key: 'topology', label: 'Research topology', placeholder: 'unified or split'},
+      {key: 'transcripts', label: 'Interview transcripts', placeholder: 'Paste or describe user interview data'}
+    ]"
+  />
+</app-dashboard-shell>

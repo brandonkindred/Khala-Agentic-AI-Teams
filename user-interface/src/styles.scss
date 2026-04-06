@@ -2,6 +2,47 @@
 // Khala Global Styles — Premium Dark + Amber
 // ============================================================================
 
+// ============================================================================
+// Accessibility Foundations
+// ============================================================================
+
+// Respect user motion preferences (WCAG 2.3.3)
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+// Screen-reader-only content — visually hidden but announced by assistive tech
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+// Global focus indicator — visible amber ring on all interactive elements
+:focus-visible {
+  outline: 2px solid var(--kh-accent);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+// ============================================================================
+// Base
+// ============================================================================
+
 html, body {
   height: 100%;
   margin: 0;

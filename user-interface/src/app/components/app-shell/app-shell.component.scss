@@ -80,30 +80,93 @@
   padding: 12px;
 }
 
+// ── Nav Groups (collapsible) ────────────────────────────────────────────────
+
 .nav-group {
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 
   &:last-child {
     margin-bottom: 0;
   }
 }
 
-.nav-group-label {
-  padding: 0 10px 8px;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+.nav-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 10px;
+  min-height: 44px; // WCAG 2.5.8 touch target
+  cursor: pointer;
+  border-radius: var(--kh-radius-md);
+  transition: background var(--kh-transition);
+  user-select: none;
+
+  &:hover {
+    background: var(--kh-glass);
+  }
+
+  .nav-group-label {
+    padding: 0;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--kh-text-muted);
+  }
+}
+
+.nav-group-chevron {
+  font-size: 16px;
+  width: 16px;
+  height: 16px;
   color: var(--kh-text-muted);
+  transition: transform 200ms ease;
+
+  &.collapsed {
+    transform: rotate(-90deg);
+  }
+}
+
+// ── Favorites ───────────────────────────────────────────────────────────────
+
+.nav-favorites {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--kh-border-subtle);
+
+  .nav-group-label {
+    padding: 0 10px 8px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--kh-text-muted);
+  }
+}
+
+.nav-link-favorite {
+  mat-icon {
+    color: var(--kh-accent) !important;
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
 }
 
 // ── Navigation Links ────────────────────────────────────────────────────────
+
+.nav-link-row {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
 
 .nav-link {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
+  padding: 12px 10px; // Increased from 8px for 44px+ touch target
+  min-height: 44px;   // WCAG 2.5.8 touch target minimum
   margin-bottom: 1px;
   border-radius: var(--kh-radius-md);
   text-decoration: none;
@@ -113,6 +176,8 @@
   font-family: var(--kh-font-sans);
   transition: all var(--kh-transition);
   position: relative;
+  flex: 1;
+  min-width: 0;
 
   mat-icon {
     font-size: 18px;
@@ -173,7 +238,8 @@
 
 .nav-link-primary {
   margin-bottom: 12px;
-  padding: 10px 12px;
+  padding: 12px 12px;
+  min-height: 44px;
   background: var(--kh-accent-muted);
   border: 1px solid rgba(251, 191, 36, 0.25);
   font-weight: 500;
@@ -197,6 +263,43 @@
   }
 }
 
+// ── Favorite Star Button ────────────────────────────────────────────────────
+
+.nav-link-star {
+  // Always in DOM for keyboard/screen reader access, but subtle when inactive
+  opacity: 0.3;
+  transition: opacity var(--kh-transition);
+  min-width: 36px;
+  min-height: 36px;
+  flex-shrink: 0;
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+    color: var(--kh-text-muted);
+  }
+
+  &:hover,
+  &:focus-visible {
+    opacity: 1;
+  }
+
+  // When pinned, always fully visible with accent color
+  &[aria-pressed="true"] {
+    opacity: 1;
+
+    mat-icon {
+      color: var(--kh-accent);
+    }
+  }
+}
+
+// Show star at full opacity when the row is hovered
+.nav-link-row:hover .nav-link-star {
+  opacity: 0.7;
+}
+
 // ── Sidebar Footer ──────────────────────────────────────────────────────────
 
 .sidenav-footer {
@@ -209,22 +312,7 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 14px;
-
-  mat-icon {
-    font-size: 13px;
-    width: 13px;
-    height: 13px;
-    color: var(--kh-accent);
-    opacity: 0.6;
-  }
-
-  span {
-    font-size: 0.6875rem;
-    color: var(--kh-text-muted);
-    letter-spacing: 0.02em;
-    font-weight: 500;
-  }
+  padding: 10px 14px;
 }
 
 // ============================================================================
