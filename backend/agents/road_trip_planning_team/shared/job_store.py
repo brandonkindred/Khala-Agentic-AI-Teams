@@ -8,9 +8,21 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from job_service_client import (
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
     JobServiceClient,
 )
+
+__all__ = [
+    "JOB_STATUS_CANCELLED",
+    "JOB_STATUS_COMPLETED",
+    "JOB_STATUS_FAILED",
+    "JOB_STATUS_PENDING",
+    "JOB_STATUS_RUNNING",
+]
 
 logger = logging.getLogger(__name__)
 
