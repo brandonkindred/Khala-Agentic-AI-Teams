@@ -1552,8 +1552,9 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
         "and a terminal 'complete' or 'error' event."
     ),
 )
-def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
-    """SSE endpoint mirroring the blogging team's pattern."""
+async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
+    """SSE endpoint — async generator so it doesn't block Uvicorn worker threads."""
+    import asyncio
     import json as json_module
     import time as time_mod
 
@@ -1571,12 +1572,12 @@ def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
     # If the run is already terminal, send snapshot + done immediately.
     if state.get("status") in ("completed", "failed"):
-        def _terminal_gen():
+        async def _terminal_gen():
             yield _sse_line({"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")})
             yield _sse_line({"type": "done"})
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
-    def event_generator():
+    async def event_generator():
         sub = subscribe(run_id)
         try:
             # Initial snapshot
@@ -1598,8 +1599,8 @@ def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
                     return
 
                 yield ": keepalive\n\n"
-                sub.notify.wait(timeout=1.0)
-                sub.notify.clear()
+                # Non-blocking wait — yields control back to the event loop
+                await asyncio.sleep(1.0)
         finally:
             unsubscribe(run_id, sub)
 

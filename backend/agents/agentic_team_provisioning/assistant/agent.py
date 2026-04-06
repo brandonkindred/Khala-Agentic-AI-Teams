@@ -320,8 +320,22 @@ class ProcessDesignerAgent:
             conversation_history, current_process, current_agents, user_message
         )
 
+        # Extract system prompt and format conversation as a single prompt string.
+        # The LLM client's complete() expects (prompt: str, system_prompt: str),
+        # not a raw messages list.
+        system_parts = [m["content"] for m in messages if m["role"] == "system"]
+        system_prompt = "\n\n".join(system_parts) if system_parts else None
+
+        conversation_parts: list[str] = []
+        for m in messages:
+            if m["role"] == "system":
+                continue
+            prefix = "User" if m["role"] == "user" else "Assistant"
+            conversation_parts.append(f"{prefix}: {m['content']}")
+        prompt = "\n\n".join(conversation_parts)
+
         client = get_client(agent_key="agentic_team_provisioning")
-        response = client.complete(messages)
+        response = client.complete(prompt, system_prompt=system_prompt)
 
         raw_text: str = response if isinstance(response, str) else response.get("content", "")
 
