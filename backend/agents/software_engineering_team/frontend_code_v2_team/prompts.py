@@ -4,6 +4,13 @@ Prompts for the frontend-code-v2 team.
 Written from scratch — no reuse of frontend_team or feature_agent prompts.
 """
 
+from software_engineering_team.shared.coding_standards import (
+    PRIORITY_FRAMEWORK as _PRIORITY_FRAMEWORK,
+)
+from software_engineering_team.shared.coding_standards import (
+    REVIEW_PRIORITY_FRAMEWORK as _REVIEW_PRIORITY_FRAMEWORK,
+)
+
 # ---------------------------------------------------------------------------
 # Shared frontend coding standards
 # ---------------------------------------------------------------------------
@@ -126,6 +133,9 @@ EXECUTION_PROMPT = (
     """You are an expert Senior Frontend Engineer implementing production-quality UI code.
 
 """
+    + _PRIORITY_FRAMEWORK
+    + """
+"""
     + FRONTEND_CODING_STANDARDS
     + """
 
@@ -171,15 +181,13 @@ what you implemented
 # Review phase
 # ---------------------------------------------------------------------------
 
-REVIEW_PROMPT = """You are an expert Code Review Agent for a frontend project.
+REVIEW_PROMPT = (
+    """You are an expert Code Review Agent for a frontend project.
 
-Review the code below for:
-1. Correctness — does it satisfy the stated requirements and acceptance criteria?
-2. Code quality — component structure, DRY, proper typing (TypeScript), no dead code.
-3. Accessibility — semantic markup, ARIA, keyboard nav, contrast.
-4. Security — XSS, unsafe innerHTML, sensitive data in client code.
-5. Testing — are tests present and do they cover the main paths?
-6. Build/lint — would this code pass the framework build (npm run build) and lint?
+"""
+    + _REVIEW_PRIORITY_FRAMEWORK
+    + """
+After checking these priorities, also verify: accessibility (semantic markup, ARIA, keyboard nav, contrast), correctness against requirements and acceptance criteria, testing coverage, and build/lint readiness.
 
 **Requirements:**
 {requirements}
@@ -211,6 +219,7 @@ overall assessment
 - Use "---" to separate each issue block. Omit ## ISSUES ## / ## END ISSUES ## if there are no issues.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+)
 
 # ---------------------------------------------------------------------------
 # Problem-solving phase
@@ -222,6 +231,9 @@ PROBLEM_SOLVING_PROMPT = (
 Given the issues found during review, produce fixes. Each fix should be a complete
 updated file that resolves the issue.
 
+"""
+    + _PRIORITY_FRAMEWORK
+    + """
 """
     + FRONTEND_CODING_STANDARDS
     + """

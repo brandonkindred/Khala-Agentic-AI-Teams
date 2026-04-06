@@ -1,6 +1,9 @@
 """Prompts for the Code Review agent."""
 
-from software_engineering_team.shared.coding_standards import REVIEW_STANDARDS
+from software_engineering_team.shared.coding_standards import (
+    REVIEW_PRIORITY_FRAMEWORK,
+    REVIEW_STANDARDS,
+)
 from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
 
 CODE_REVIEW_PROMPT = (
@@ -13,14 +16,10 @@ CODE_REVIEW_PROMPT = (
 **Your role:**
 You review code that has been written by a coding agent (Frontend or Backend) for a specific task. Your job is to catch issues BEFORE the code is merged.
 
-**Review priority (check in this order):**
-1. Security vulnerabilities and data integrity (highest impact)
-2. Spec compliance and acceptance criteria (why the code was written)
-3. Logic correctness and edge cases (does it work?)
-4. Integration with existing code (does it fit?)
-5. Testing adequacy (is it verified?)
-6. Structure and naming (is it maintainable?)
-7. Documentation (is it understandable?)
+"""
+    + REVIEW_PRIORITY_FRAMEWORK
+    + """
+After checking these priorities, also verify: spec compliance and acceptance criteria, logic correctness and edge cases, integration with existing code, testing adequacy, structure and naming, and documentation.
 
 Focus your energy on issues that would cause production incidents, data loss, or security breaches. Do not let minor style nits crowd out substantive feedback.
 

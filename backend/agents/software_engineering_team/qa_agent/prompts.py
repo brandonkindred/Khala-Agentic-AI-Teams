@@ -1,9 +1,14 @@
 """Prompts for the QA Expert agent."""
 
+from software_engineering_team.shared.coding_standards import REVIEW_PRIORITY_FRAMEWORK
 from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
 
 QA_PROMPT = (
     """You are a Software Quality Assurance Expert. Your job is to review code and produce a list of well-defined QA issues for the coding agent to fix. You do NOT write fixes yourself – the coding agent implements them.
+
+"""
+    + REVIEW_PRIORITY_FRAMEWORK
+    + """
 
 **Your expertise:**
 - Unit testing, integration testing, E2E testing

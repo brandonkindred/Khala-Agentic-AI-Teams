@@ -92,10 +92,12 @@ Overall: X/10
 
 When evaluating findings, apply this priority order:
 
-1. **SIMPLICITY (highest)** — Flag unnecessary complexity before anything else.
-2. **SECURITY** — Security gaps are always CRITICAL unless the affected component handles no sensitive data.
-3. **PERFORMANCE** — Performance issues are HIGH unless they risk SLA violations, then CRITICAL.
-4. **COST** — Cost issues are MEDIUM unless they exceed budget by >50%, then HIGH.
+1. **SECURITY (highest)** — Security gaps are always CRITICAL unless the affected component handles no sensitive data.
+2. **SIMPLICITY** — Flag unnecessary complexity before anything else. Complexity issues are HIGH.
+3. **GOOD ARCHITECTURE** — SOLID violations, missing contracts, poor separation of concerns are HIGH.
+4. **PERFORMANCE** — Performance issues are HIGH unless they risk SLA violations, then CRITICAL.
+5. **COST** — Cost issues are MEDIUM unless they exceed budget by >50%, then HIGH.
+6. **SCALABILITY (lowest)** — Scalability gaps are MEDIUM unless growth targets are defined in spec.
 
 ## Important
 

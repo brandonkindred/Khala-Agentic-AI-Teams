@@ -7,6 +7,26 @@ Security, and QA agents.
 
 from typing import Optional
 
+PRIORITY_FRAMEWORK = """
+**Decision Priority Framework — follow this order; never sacrifice a higher priority for a lower one:**
+1. SECURITY (highest) — Every decision must be evaluated for security impact. Apply defense-in-depth, zero-trust, least privilege by default. Security is never compromised.
+2. SIMPLICITY — Prefer the simplest solution that meets requirements. Avoid unnecessary complexity. A monolith that works beats a distributed system that's hard to operate.
+3. GOOD ARCHITECTURE — SOLID principles, Design by Contract, clean interfaces, proper separation of concerns. Structure the system for maintainability.
+4. PERFORMANCE — After security, simplicity, and architecture are satisfied, optimize for performance and reliability targets.
+5. COST — Minimize operational and development cost without sacrificing higher priorities. Favor managed services when savings exceed premium.
+6. SCALABILITY (lowest) — Design for growth, but not at the expense of higher priorities. Avoid premature scaling.
+"""
+
+REVIEW_PRIORITY_FRAMEWORK = """
+**Review Priority — check in this order; focus energy on higher priorities:**
+1. Security vulnerabilities and data protection (highest impact — never compromise)
+2. Simplicity — is this the simplest correct solution? Flag unnecessary complexity.
+3. Architecture quality — SOLID, Design by Contract, clean interfaces, separation of concerns.
+4. Performance — efficiency, resource usage, latency.
+5. Cost implications — operational overhead, unnecessary dependencies.
+6. Scalability — growth readiness (lowest priority; only flag if egregiously absent).
+"""
+
 _coding_standards_cache: Optional[str] = None
 
 
@@ -70,7 +90,10 @@ CODING_STANDARDS = """
    - Examples: `feat(auth): add JWT refresh endpoint`, `fix(api): handle null user in login`
    - Breaking changes: append `!` after type or add `BREAKING CHANGE:` in footer
 
-8. **Naming Conventions** – All names (files, folders, classes, functions, variables) must follow professional standards:
+8. **Priority Framework** – When standards conflict, resolve using the Decision Priority Framework (never sacrifice a higher priority for a lower one):
+   Security > Simplicity > Good Architecture > Performance > Cost > Scalability
+
+9. **Naming Conventions** – All names (files, folders, classes, functions, variables) must follow professional standards:
 
    **General rules (ALL languages):**
    - Names describe WHAT the thing IS or DOES – never derived from a task description

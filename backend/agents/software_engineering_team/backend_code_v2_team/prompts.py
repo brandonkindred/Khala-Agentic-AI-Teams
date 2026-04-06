@@ -4,6 +4,13 @@ Prompts for the backend-code-v2 team.
 Written from scratch — no reuse of ``backend_agent`` prompts.
 """
 
+from software_engineering_team.shared.coding_standards import (
+    PRIORITY_FRAMEWORK as _PRIORITY_FRAMEWORK,
+)
+from software_engineering_team.shared.coding_standards import (
+    REVIEW_PRIORITY_FRAMEWORK as _REVIEW_PRIORITY_FRAMEWORK,
+)
+
 # ---------------------------------------------------------------------------
 # Shared coding standards (injected into Execution and Problem-solving)
 # ---------------------------------------------------------------------------
@@ -132,6 +139,9 @@ EXECUTION_PROMPT = (
     """You are an expert Senior Backend Software Engineer implementing production-quality code.
 
 """
+    + _PRIORITY_FRAMEWORK
+    + """
+"""
     + CODING_STANDARDS
     + """
 
@@ -179,14 +189,13 @@ what you implemented
 # Review phase
 # ---------------------------------------------------------------------------
 
-REVIEW_PROMPT = """You are an expert Code Review Agent for a backend project.
+REVIEW_PROMPT = (
+    """You are an expert Code Review Agent for a backend project.
 
-Review the code below for:
-1. Correctness — does it satisfy the stated requirements and acceptance criteria?
-2. Code quality — SOLID, DRY, proper error handling, no dead code.
-3. Security — injection, auth bypass, secrets in code, insecure defaults.
-4. Testing — are tests present and do they cover the main paths?
-5. Build/lint — would this code pass a build and lint check?
+"""
+    + _REVIEW_PRIORITY_FRAMEWORK
+    + """
+After checking these priorities, also verify: correctness against requirements and acceptance criteria, testing coverage, and build/lint readiness.
 
 **Requirements:**
 {requirements}
@@ -218,6 +227,7 @@ overall assessment
 - Use "---" to separate each issue block. Omit ## ISSUES ## / ## END ISSUES ## if there are no issues.
 - Do not use JSON. Use only the template above. No explanatory text before or after.
 """
+)
 
 # ---------------------------------------------------------------------------
 # Problem-solving phase
@@ -229,6 +239,9 @@ PROBLEM_SOLVING_PROMPT = (
 Given the issues found during review, produce fixes. Each fix should be a complete
 updated file that resolves the issue.
 
+"""
+    + _PRIORITY_FRAMEWORK
+    + """
 """
     + CODING_STANDARDS
     + """
