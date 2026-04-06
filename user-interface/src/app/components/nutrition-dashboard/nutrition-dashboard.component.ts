@@ -132,7 +132,40 @@ export class NutritionDashboardComponent implements OnInit, AfterViewChecked {
     localStorage.setItem(CLIENT_ID_STORAGE_KEY, id);
     this.clientIdConfirmed = true;
 
-    // Welcome message
+    // Try to load persisted conversation history first
+    this.api.getChatHistory(id).subscribe({
+      next: (res) => {
+        if (res.messages?.length) {
+          // Restore persisted messages
+          this.messages = res.messages.map((m) => ({
+            role: m.role,
+            content: m.content,
+            timestamp: m.timestamp,
+            phase: m.phase,
+            action: m.action,
+          }));
+          // Update phase from the last assistant message
+          const lastAssistant = [...res.messages].reverse().find((m) => m.role === 'assistant');
+          if (lastAssistant?.phase) {
+            this.currentPhase = lastAssistant.phase;
+          }
+          // Load profile alongside restored history
+          this.api.getProfile(id).subscribe({
+            next: (profile) => { this.profile = profile; },
+            error: () => {},
+          });
+        } else {
+          this.addWelcomeMessages(id);
+        }
+      },
+      error: () => {
+        // History endpoint unavailable — show welcome messages
+        this.addWelcomeMessages(id);
+      },
+    });
+  }
+
+  private addWelcomeMessages(clientId: string): void {
     this.messages.push({
       role: 'assistant',
       content:
@@ -144,8 +177,8 @@ export class NutritionDashboardComponent implements OnInit, AfterViewChecked {
       phase: 'intake',
     });
 
-    // Try to load existing profile
-    this.api.getProfile(id).subscribe({
+    // Check for existing profile to show welcome-back message
+    this.api.getProfile(clientId).subscribe({
       next: (profile) => {
         this.profile = profile;
         this.messages.push({
@@ -158,9 +191,7 @@ export class NutritionDashboardComponent implements OnInit, AfterViewChecked {
           profile,
         });
       },
-      error: () => {
-        // No existing profile — that's fine
-      },
+      error: () => { /* No existing profile */ },
     });
   }
 

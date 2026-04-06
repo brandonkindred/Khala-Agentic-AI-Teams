@@ -91,10 +91,45 @@ def health_ready():
 @app.post("/chat", response_model=ChatResponse)
 def post_chat_route(body: ChatRequest):
     """Conversational chat endpoint.  Drives the full nutrition workflow through natural dialogue."""
+    from ..shared.conversation_store import append_message
+
     client_id = body.client_id.strip()
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id is required")
-    return orchestrator.handle_chat(body)
+
+    # Persist the user message
+    append_message(client_id, "user", body.message)
+
+    response = orchestrator.handle_chat(body)
+
+    # Persist the assistant response
+    append_message(
+        client_id, "assistant", response.message,
+        phase=response.phase, action=response.action,
+    )
+
+    return response
+
+
+@app.get(
+    "/chat/history/{client_id}",
+    summary="Get conversation history for a client",
+    description="Returns the full persisted conversation history. Empty list if no history.",
+)
+def get_chat_history(client_id: str):
+    """Retrieve persisted conversation history."""
+    from ..shared.conversation_store import get_conversation
+
+    return {"client_id": client_id, "messages": get_conversation(client_id.strip())}
+
+
+@app.delete("/chat/history/{client_id}", summary="Clear conversation history")
+def clear_chat_history(client_id: str):
+    """Delete all conversation history for a client."""
+    from ..shared.conversation_store import clear_conversation
+
+    clear_conversation(client_id.strip())
+    return {"client_id": client_id, "message": "Conversation history cleared."}
 
 
 @app.get("/profile/{client_id}", response_model=ClientProfile)

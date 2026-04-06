@@ -11,9 +11,21 @@ from typing import Any, Dict, List, Optional
 
 from job_service_client import (
     JOB_STATUS_CANCELLED,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
     JobServiceClient,
 )
+
+# Re-export so other modules (api/main.py, temporal/activities.py) can import from here.
+__all__ = [
+    "JOB_STATUS_CANCELLED",
+    "JOB_STATUS_COMPLETED",
+    "JOB_STATUS_FAILED",
+    "JOB_STATUS_PENDING",
+    "JOB_STATUS_RUNNING",
+]
 
 logger = logging.getLogger(__name__)
 
