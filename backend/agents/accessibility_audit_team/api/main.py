@@ -451,6 +451,81 @@ async def export_backlog(
 
 
 # ---------------------------------------------------------------------------
+# Case Study Endpoints
+# ---------------------------------------------------------------------------
+
+
+class CaseStudyRequest(BaseModel):
+    """Request body for case study generation."""
+
+    template_key: str = Field(
+        default="comprehensive",
+        description="Template variant: comprehensive, basic_audit, premium_assessment, "
+        "enterprise_analysis, executive_summary, or video_script",
+    )
+    industry: Optional[str] = Field(
+        default=None,
+        description="Industry-specific template: ecommerce, saas, or healthcare",
+    )
+    client_context: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Client-provided data for template placeholders",
+    )
+
+
+@router.post("/audit/{audit_id}/case-study")
+async def generate_audit_case_study(
+    audit_id: str,
+    request: CaseStudyRequest,
+) -> Dict[str, Any]:
+    """
+    Generate a case study document from audit findings using the case study templates.
+    """
+    from ..tools.audit.generate_case_study import (
+        GenerateCaseStudyInput,
+        generate_case_study,
+    )
+
+    orchestrator = get_orchestrator()
+    status = orchestrator.get_audit_status(audit_id)
+
+    if status.get("status") == "not_found":
+        raise HTTPException(status_code=404, detail=f"Audit {audit_id} not found")
+
+    findings = orchestrator.get_findings(audit_id)
+
+    input_data = GenerateCaseStudyInput(
+        audit_id=audit_id,
+        findings=findings,
+        client_context=request.client_context,
+        template_key=request.template_key,
+        industry=request.industry,
+    )
+
+    result = await generate_case_study(input_data)
+
+    return {
+        "audit_id": audit_id,
+        "artifact_ref": result.artifact_ref,
+        "template_used": result.template_used,
+        "template_key": result.template_key,
+        "industry": result.industry,
+        "sections": result.sections,
+        "metrics": result.metrics,
+    }
+
+
+@router.get("/case-study-templates")
+async def list_case_study_templates() -> Dict[str, Any]:
+    """
+    List all available case study templates and their descriptions.
+    """
+    from ..tools.audit.generate_case_study import list_available_templates
+
+    return await list_available_templates()
+
+
+# ---------------------------------------------------------------------------
 # Monitoring Endpoints (ARM Add-on)
 # ---------------------------------------------------------------------------
 

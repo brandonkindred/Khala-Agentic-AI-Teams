@@ -408,6 +408,17 @@ class VerificationResult(BaseModel):
     error: Optional[str] = None
 
 
+class CaseStudyResult(BaseModel):
+    """Rendered case study artifact generated from audit findings."""
+
+    artifact_ref: str = Field(default="", description="Reference path to the case study artifact")
+    template_used: str = Field(default="", description="Name of the template applied")
+    template_key: str = Field(default="", description="Key of the template applied")
+    industry: Optional[str] = Field(default=None, description="Industry template used, if any")
+    sections: List[Dict[str, Any]] = Field(default_factory=list, description="Populated sections")
+    metrics: Dict[str, Any] = Field(default_factory=dict, description="Summary metrics from findings")
+
+
 class ReportPackagingResult(BaseModel):
     """Output of the Report Packaging phase (Phase 3)."""
 
@@ -417,6 +428,9 @@ class ReportPackagingResult(BaseModel):
     executive_summary: str = Field(default="")
     roadmap: List[str] = Field(default_factory=list)
     coverage_matrix: Optional[CoverageMatrix] = None
+    case_study: Optional[CaseStudyResult] = Field(
+        default=None, description="Generated case study artifact from templates"
+    )
     export_refs: Dict[str, str] = Field(
         default_factory=dict, description="References to exported artifacts"
     )

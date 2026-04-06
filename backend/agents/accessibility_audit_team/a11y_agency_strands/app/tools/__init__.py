@@ -15,6 +15,9 @@ from .evidence_tools import (
 from .reporting_tools import (
     create_jira_issues,
     export_backlog_csv,
+    get_case_study_template,
+    list_case_study_templates,
+    render_case_study,
     render_pdf,
     write_docx_from_template,
 )
@@ -35,6 +38,9 @@ __all__ = [
     "log_screen_reader_test",
     "create_jira_issues",
     "export_backlog_csv",
+    "get_case_study_template",
+    "list_case_study_templates",
+    "render_case_study",
     "render_pdf",
     "write_docx_from_template",
     "crawl_targets",

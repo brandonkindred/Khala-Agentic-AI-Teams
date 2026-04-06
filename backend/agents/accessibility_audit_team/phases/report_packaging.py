@@ -17,6 +17,7 @@ from ..agents import (
 )
 from ..agents.base import MessageBus
 from ..models import (
+    CaseStudyResult,
     CoverageMatrix,
     Finding,
     PatternCluster,
@@ -31,6 +32,7 @@ async def run_report_packaging_phase(
     coverage_matrix: Optional[CoverageMatrix] = None,
     llm_client: Optional[Any] = None,
     message_bus: Optional[MessageBus] = None,
+    client_context: Optional[Dict[str, Any]] = None,
 ) -> ReportPackagingResult:
     """
     Run the report packaging phase for final QA and report generation.
@@ -94,12 +96,20 @@ async def run_report_packaging_phase(
 
     apl_result = await apl.safe_process(apl_context)
 
+    # Generate case study from templates
+    case_study = await _generate_case_study(
+        audit_id, approved_findings, client_context or {}
+    )
+
     if apl_result.get("success"):
         report_result: ReportPackagingResult = apl_result.get("report_packaging_result")
 
         # Add coverage matrix if provided
         if coverage_matrix:
             report_result.coverage_matrix = coverage_matrix
+
+        # Attach case study
+        report_result.case_study = case_study
 
         # Add rejected findings info to summary
         if rejected_findings:
@@ -115,8 +125,46 @@ async def run_report_packaging_phase(
         executive_summary="Report generation incomplete.",
         roadmap=["Review findings and create remediation plan."],
         coverage_matrix=coverage_matrix,
+        case_study=case_study,
         summary=f"Packaged {len(approved_findings)} findings (APL processing failed)",
     )
+
+
+async def _generate_case_study(
+    audit_id: str,
+    findings: List[Finding],
+    client_context: Dict[str, Any],
+) -> Optional[CaseStudyResult]:
+    """Generate a case study using the case study templates asset."""
+    try:
+        from ..tools.audit.generate_case_study import (
+            GenerateCaseStudyInput,
+            generate_case_study,
+        )
+
+        template_key = client_context.get("service_tier", "comprehensive")
+        industry = client_context.get("industry")
+
+        input_data = GenerateCaseStudyInput(
+            audit_id=audit_id,
+            findings=findings,
+            client_context=client_context,
+            template_key=template_key,
+            industry=industry,
+        )
+        output = await generate_case_study(input_data)
+
+        return CaseStudyResult(
+            artifact_ref=output.artifact_ref,
+            template_used=output.template_used,
+            template_key=output.template_key,
+            industry=output.industry,
+            sections=output.sections,
+            metrics=output.metrics,
+        )
+    except Exception:
+        # Case study generation is non-critical; don't block report packaging
+        return None
 
 
 async def export_final_report(

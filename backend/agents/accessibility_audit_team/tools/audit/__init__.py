@@ -7,6 +7,12 @@ from .build_coverage_matrix import (
 )
 from .create_plan import CreatePlanInput, CreatePlanOutput, create_plan
 from .export_backlog import ExportBacklogInput, ExportBacklogOutput, export_backlog
+from .generate_case_study import (
+    GenerateCaseStudyInput,
+    GenerateCaseStudyOutput,
+    generate_case_study,
+    list_available_templates,
+)
 
 __all__ = [
     "create_plan",
@@ -18,4 +24,8 @@ __all__ = [
     "export_backlog",
     "ExportBacklogInput",
     "ExportBacklogOutput",
+    "generate_case_study",
+    "GenerateCaseStudyInput",
+    "GenerateCaseStudyOutput",
+    "list_available_templates",
 ]

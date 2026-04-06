@@ -3,6 +3,14 @@ frameworks:
     version: "2.2"
   - name: Section 508
     version: "2017 refresh"
+assets:
+  - name: Case Study Templates
+    file: case_study_templates.yaml
+    description: >
+      Structured templates for generating accessibility audit case studies.
+      Includes comprehensive, basic audit, premium assessment, enterprise
+      analysis, executive summary, and video script templates plus
+      industry-specific variants for e-commerce, SaaS, and healthcare.
 workflow_phases:
   - discovery
   - inventory_setup

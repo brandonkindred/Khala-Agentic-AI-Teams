@@ -1,6 +1,18 @@
 from pydantic import BaseModel
 
 
+class CaseStudy(BaseModel):
+    """Rendered case study artifact from the case study templates."""
+
+    template_used: str = ""
+    template_key: str = ""
+    industry: str | None = None
+    engagement_id: str = ""
+    artifact: str = ""
+    sections: list[dict] = []
+    metrics: dict = {}
+
+
 class ReportPackage(BaseModel):
     executive_summary: str
     technical_report: str
@@ -9,6 +21,7 @@ class ReportPackage(BaseModel):
     wcag_scorecard: str
     sec508_addendum: str | None = None
     backlog_export: str
+    case_study: CaseStudy | None = None
 
 
 class DeliveryResult(BaseModel):

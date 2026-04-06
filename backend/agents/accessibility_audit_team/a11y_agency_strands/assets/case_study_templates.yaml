@@ -1,0 +1,460 @@
+# Accessibility Audit Case Study Templates
+#
+# These templates are used by the reporting pipeline to generate
+# structured case study documents from audit findings and client data.
+# Agents select the appropriate template based on service tier and
+# industry, then populate placeholders with engagement-specific data.
+
+templates:
+  comprehensive:
+    name: "Comprehensive Case Study"
+    description: "Detailed success story for website and proposal use"
+    sections:
+      - header:
+          fields:
+            - client_company_name
+            - compelling_headline
+            - industry_sector
+            - employee_count
+            - service_tier
+            - timeline
+            - key_metric_improvement
+      - executive_summary:
+          fields:
+            - primary_objective
+            - key_results_summary
+            - additional_benefits
+          key_results:
+            count: 3
+            fields_per_result:
+              - metric_name
+              - improvement_percentage
+              - specific_area
+              - timeframe
+      - challenge:
+          subsections:
+            - business_context:
+                fields:
+                  - business_situation
+                  - strategic_objective
+                  - company_description
+                  - target_audience
+                  - competitive_landscape
+            - accessibility_challenges:
+                count: 3
+                fields_per_challenge:
+                  - challenge_name
+                  - detailed_description_with_impact
+            - business_impact:
+                categories:
+                  - user_experience_issues
+                  - business_consequences
+                  - compliance_concerns
+                  - competitive_disadvantages
+            - previous_attempts:
+                fields:
+                  - previous_attempts_description
+                  - limitations_of_previous_approaches
+                  - desired_outcome
+      - solution:
+          subsections:
+            - differentiators:
+                count: 3
+                fields_per_item:
+                  - differentiator_name
+                  - specific_advantage
+            - phases:
+                count: 3
+                fields_per_phase:
+                  - phase_name
+                  - duration
+                  - activities
+            - methodology_benefits:
+                count: 3
+                fields_per_item:
+                  - benefit_name
+                  - specific_advantage
+      - implementation:
+          subsections:
+            - team_collaboration:
+                count: 3
+                fields_per_stakeholder:
+                  - stakeholder_role
+                  - contribution
+            - highlights:
+                count: 3
+                fields_per_item:
+                  - highlight_name
+                  - description_and_impact
+            - challenges_overcome:
+                fields:
+                  - obstacle_encountered
+                  - how_addressed
+                  - positive_outcome
+            - client_testimonial:
+                fields:
+                  - quote
+                  - client_name
+                  - client_title
+      - results:
+          subsections:
+            - user_experience:
+                metrics:
+                  - task_completion_rate_before
+                  - task_completion_rate_after
+                  - user_satisfaction_before
+                  - user_satisfaction_after
+                  - support_ticket_reduction_pct
+            - business_performance:
+                metrics:
+                  - conversion_rate_improvement_pct
+                  - revenue_impact_amount
+                  - market_expansion_pct
+            - technical_excellence:
+                metrics:
+                  - wcag_compliance_before_pct
+                  - wcag_compliance_after_pct
+                  - performance_improvement
+                  - dev_efficiency_reduction_pct
+            - risk_mitigation:
+                fields:
+                  - legal_risk_reduction
+                  - brand_protection
+                  - regulatory_compliance
+            - strategic_benefits:
+                fields:
+                  - competitive_advantage
+                  - innovation_catalyst
+                  - team_capability
+      - long_term_impact:
+          subsections:
+            - ongoing_success:
+                count: 3
+                fields_per_metric:
+                  - metric_name
+                  - sustained_performance
+            - continued_partnership:
+                fields:
+                  - follow_up_engagements
+                  - referral_activity
+            - results_testimonial:
+                fields:
+                  - quote
+                  - client_name
+                  - client_title
+      - key_takeaways:
+          subsections:
+            - lessons:
+                count: 3
+                fields_per_lesson:
+                  - lesson_name
+                  - insight
+            - success_factors:
+                fields:
+                  - executive_sponsorship
+                  - cross_functional_collaboration
+                  - systematic_approach
+            - recommendations:
+                count: 3
+                fields_per_item:
+                  - recommendation
+                  - action_guidance
+
+  basic_audit:
+    name: "Basic Audit Case Study"
+    description: "Efficient accessibility compliance achievement"
+    sections:
+      - situation:
+          fields:
+            - client_company_name
+            - company_size
+            - industry
+            - business_reason
+      - solution:
+          items:
+            - "Strategic Planning: Business-aligned audit scope and prioritization"
+            - "Component Analysis: Systematic evaluation of 12 key UI patterns"
+            - "WCAG Assessment: Comprehensive Level A and AA compliance review"
+            - "Implementation Roadmap: Clear 30/60/90-day action plan"
+      - results:
+          metrics:
+            - wcag_compliance_before_pct
+            - wcag_compliance_after_pct
+            - component_fix_coverage_pct
+            - cost_savings_amount
+      - client_impact:
+          fields:
+            - testimonial_quote
+            - client_name
+            - client_title
+      - investment:
+          fields:
+            - duration
+            - investment_amount
+            - payback_period
+
+  premium_assessment:
+    name: "Premium Assessment Case Study"
+    description: "Complete user experience transformation"
+    sections:
+      - challenge:
+          fields:
+            - client_company_name
+            - transformation_goal
+            - comprehensive_assessment_need
+      - approach:
+          items:
+            - "User Journey Testing: End-to-end workflow evaluation with assistive technologies"
+            - "Navigation Architecture: Complete information architecture optimization"
+            - "Component Excellence: Advanced design system accessibility integration"
+            - "Cross-Platform Optimization: Mobile and responsive accessibility enhancement"
+      - results:
+          metrics:
+            - task_completion_improvement_pct
+            - customer_satisfaction_before
+            - customer_satisfaction_after
+            - conversion_rate_improvement_pct
+            - user_base_increase_pct
+      - strategic_benefits:
+          fields:
+            - competitive_advantage
+            - brand_enhancement
+            - innovation_catalyst
+            - team_development
+      - client_testimonial:
+          fields:
+            - quote
+            - client_name
+            - client_title
+
+  enterprise_analysis:
+    name: "Enterprise Analysis Case Study"
+    description: "Strategic accessibility leadership and organizational transformation"
+    sections:
+      - executive_summary:
+          fields:
+            - client_company_name
+            - company_size
+            - industry
+            - engagement_scope
+      - strategic_objectives:
+          items:
+            - "Establish accessibility as competitive differentiator"
+            - "Create sustainable organizational accessibility capabilities"
+            - "Quantify business impact and ROI of accessibility investments"
+            - "Develop multi-year strategic roadmap for accessibility excellence"
+      - approach:
+          items:
+            - "Executive Alignment: C-suite strategic planning and vision development"
+            - "Technical Transformation: Complete infrastructure optimization and automation"
+            - "Business Impact Analysis: Quantified ROI modeling using actual business metrics"
+            - "Organizational Development: Capability building and governance framework"
+      - financial_impact:
+          metrics:
+            - revenue_growth_amount
+            - roi_multiplier
+            - annual_cost_savings
+            - legal_liability_reduction
+      - organizational_transformation:
+          metrics:
+            - accessibility_maturity_before
+            - accessibility_maturity_after
+            - team_competency_pct
+            - release_testing_coverage_pct
+          fields:
+            - industry_recognition
+      - market_leadership:
+          metrics:
+            - market_share_increase_pct
+            - customer_satisfaction_improvement
+          fields:
+            - thought_leadership
+      - executive_testimonial:
+          fields:
+            - quote
+            - executive_name
+            - executive_title
+
+  executive_summary:
+    name: "One-Page Executive Summary"
+    description: "Quick stakeholder consumption format"
+    sections:
+      - header:
+          fields:
+            - client_company_name
+            - industry
+            - company_size
+            - service_tier
+            - timeline
+      - challenge:
+          fields:
+            - primary_challenge
+            - business_impact
+            - solution_requirement
+            - desired_outcome
+      - solution:
+          fields:
+            - key_solution_elements
+            - methodology_advantage
+      - results:
+          count: 3
+          fields_per_result:
+            - metric_name
+            - improvement_value
+      - client_quote:
+          fields:
+            - testimonial
+            - client_name
+            - client_title
+      - call_to_action:
+          fields:
+            - industry_benefit
+            - action_statement
+
+  video_script:
+    name: "Video Case Study Script"
+    description: "Client interview script template for testimonial videos"
+    duration_minutes: 15
+    segments:
+      - opening_context:
+          duration_minutes: 2
+          questions:
+            - "Tell me about your company and your role there."
+            - "What was happening in your business that made accessibility a priority?"
+      - challenge_exploration:
+          duration_minutes: 3
+          questions:
+            - "What specific accessibility challenges were you facing?"
+            - "How were these challenges affecting your business or users?"
+            - "What had you tried before working with us?"
+      - solution_experience:
+          duration_minutes: 4
+          questions:
+            - "What attracted you to our approach over other options?"
+            - "Can you walk me through what the engagement process was like?"
+            - "What surprised you most about our methodology?"
+      - results_discussion:
+          duration_minutes: 4
+          questions:
+            - "What specific results have you seen since implementation?"
+            - "How have these changes affected your business?"
+            - "What has the user feedback been like?"
+      - closing_recommendations:
+          duration_minutes: 2
+          questions:
+            - "What would you tell other companies considering accessibility improvements?"
+            - "Would you recommend us to other organizations?"
+    key_soundbites:
+      - "Problem Statement: Clear articulation of business challenge"
+      - "Solution Value: What made our approach different/better"
+      - "Quantified Results: Specific metrics and business impact"
+      - "Emotional Impact: How it felt to achieve the results"
+      - "Peer Recommendation: Advice for similar organizations"
+
+industry_templates:
+  ecommerce:
+    name: "E-commerce Case Study"
+    description: "Accessibility-driven conversion optimization"
+    context_fields:
+      - product_category
+      - customer_base
+      - annual_revenue
+    challenge_areas:
+      - "Cart abandonment during checkout process"
+      - "Product discovery difficulties for users with disabilities"
+      - "Mobile accessibility gaps"
+    solution_focus:
+      - "Shopping Journey Optimization: Complete purchase workflow accessibility"
+      - "Product Discovery Enhancement: Search, filtering, and navigation improvements"
+      - "Checkout Process Excellence: Payment and form accessibility optimization"
+      - "Mobile Commerce Accessibility: Touch interface and responsive design optimization"
+    result_metrics:
+      - conversion_rate_improvement_pct
+      - average_order_value_increase
+      - mobile_conversion_improvement_pct
+      - new_customer_conversion_increase_pct
+
+  saas:
+    name: "SaaS Platform Case Study"
+    description: "Enterprise software accessibility and market expansion"
+    context_fields:
+      - software_category
+      - target_market
+      - active_user_count
+      - annual_recurring_revenue
+    challenge_areas:
+      - "Large clients required WCAG compliance for procurement"
+      - "User onboarding had accessibility barriers"
+      - "Administrative interfaces not accessible to all users"
+    solution_focus:
+      - "User Interface Accessibility: Complete application accessibility audit"
+      - "Onboarding Optimization: New user experience accessibility enhancement"
+      - "Administrative Access: Backend interface accessibility for all user roles"
+      - "Documentation & Support: Accessible help system and user documentation"
+    result_metrics:
+      - enterprise_contract_value
+      - feature_adoption_improvement_pct
+      - accessibility_user_satisfaction_score
+      - new_market_access
+
+  healthcare:
+    name: "Healthcare Case Study"
+    description: "Patient access and regulatory compliance"
+    context_fields:
+      - healthcare_service
+      - patient_population
+    challenge_areas:
+      - "Elderly patients unable to access online scheduling"
+      - "Patients with disabilities facing barriers in portal usage"
+      - "Mobile accessibility gaps affecting patient engagement"
+    solution_focus:
+      - "Patient Portal Optimization: Complete accessibility overhaul for patient-facing systems"
+      - "Appointment Scheduling: Accessible online booking and management"
+      - "Health Information Access: Medical record and test result accessibility"
+      - "Mobile Health Integration: Accessible mobile app and responsive design"
+    result_metrics:
+      - portal_usage_increase_pct
+      - phone_scheduling_reduction_pct
+      - digital_experience_satisfaction_score
+      - wcag_compliance_level
+
+case_study_process:
+  information_gathering:
+    steps:
+      - "Schedule success review 30-60 days after project completion"
+      - "Prepare interview guide customized for project type"
+      - "Record session with client permission for accurate quotes"
+      - "Gather specific performance data and business impact numbers"
+      - "Follow-up clarifications to confirm accuracy of all claims"
+    data_collection_checklist:
+      - "Quantified business results (conversion rates, revenue, satisfaction scores)"
+      - "Technical improvements (compliance scores, performance metrics)"
+      - "User experience enhancements (task completion, user feedback)"
+      - "Organizational benefits (team efficiency, process improvements)"
+      - "Strategic outcomes (competitive advantage, market position)"
+
+  client_approval:
+    steps:
+      - "Send complete case study draft for client review"
+      - "Verify all metrics, quotes, and company information"
+      - "Client legal/marketing team approval if required"
+      - "Confirm approved usage (website, proposals, presentations)"
+      - "Finalize client name usage vs. anonymous reference"
+    usage_rights:
+      public: "Full company name and details (website, marketing)"
+      reference_only: "Company name with limited details (proposals)"
+      anonymous: "Industry and size only (competitive sensitivity)"
+      restricted: "Internal use only (confidential information)"
+
+  distribution:
+    formats:
+      - "Website Case Study Page: Full detailed version with SEO optimization"
+      - "Sales Proposal Integration: Relevant case studies inserted in proposals"
+      - "Presentation Slides: Key highlights for sales presentations"
+      - "Social Media Content: Key results and quotes for LinkedIn/Twitter"
+      - "Trade Publication Articles: Industry-specific success stories"
+    performance_metrics:
+      - "Website Engagement: Time on page, conversion to contact forms"
+      - "Sales Impact: Proposal close rates with vs. without case studies"
+      - "Lead Generation: Case study downloads and follow-up engagement"
+      - "Social Proof: References and testimonials generated from case studies"
