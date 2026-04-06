@@ -152,7 +152,7 @@ export class NutritionDashboardComponent implements OnInit, AfterViewChecked {
           // Load profile alongside restored history
           this.api.getProfile(id).subscribe({
             next: (profile) => { this.profile = profile; },
-            error: () => {},
+            error: () => { /* profile load failed — non-fatal */ },
           });
         } else {
           this.addWelcomeMessages(id);
