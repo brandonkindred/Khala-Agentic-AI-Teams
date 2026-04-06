@@ -52,14 +52,15 @@ class TestFrontendMicrotaskReviewConfig:
 
         config = MicrotaskReviewConfig()
         assert config.max_retries == 3
-        assert config.on_failure == "skip_continue"
+        assert config.on_failure == "stop"
+        assert config.security_failure_always_stops is True
 
     def test_config_custom_values(self):
         from frontend_code_v2_team.models import MicrotaskReviewConfig
 
-        config = MicrotaskReviewConfig(max_retries=5, on_failure="stop")
+        config = MicrotaskReviewConfig(max_retries=5, on_failure="skip_continue")
         assert config.max_retries == 5
-        assert config.on_failure == "stop"
+        assert config.on_failure == "skip_continue"
 
 
 class TestFrontendMicrotaskStatus:
@@ -135,12 +136,21 @@ passed
 No issues found.
 """
 
+        # Provide mock QA and security agents that return no issues
+        # (without these, fail-closed gates correctly flag missing agents)
+        mock_qa = MagicMock()
+        mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
+        mock_sec = MagicMock()
+        mock_sec.run.return_value = MagicMock(vulnerabilities=[], issues=[])
+
         result = run_microtask_review(
             llm=mock_llm,
             task=task,
             microtask=mt,
             repo_path=tmp_path,
             files=files,
+            qa_agent=mock_qa,
+            security_agent=mock_sec,
         )
         assert result.passed
         assert result.build_ok
@@ -326,7 +336,8 @@ class TestBackendMicrotaskReviewConfig:
 
         config = MicrotaskReviewConfig()
         assert config.max_retries == 3
-        assert config.on_failure == "skip_continue"
+        assert config.on_failure == "stop"
+        assert config.security_failure_always_stops is True
 
 
 class TestBackendMicrotaskStatus:

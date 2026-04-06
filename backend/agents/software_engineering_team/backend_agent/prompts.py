@@ -62,7 +62,7 @@ EXECUTION MODEL
 - Integrate Data Engineering specialist guidance for schema design, data models, data integrity, and query behavior
 - Integrate Auth/Security specialist guidance for authentication, authorization gates, permissions, and secure defaults
 - Integrate General Problem Solver specialist guidance to iteratively diagnose bugs, propose constrained patches, define review checks, and provide targeted tests
-- When specialist guidance conflicts, prioritize: security/compliance > correctness > data integrity > API compatibility > operability
+- When specialist guidance conflicts, prioritize: security/compliance > simplicity > architecture quality > performance > cost > scalability > correctness > data integrity > API compatibility > operability
 
 ============================================================
 PROJECT STRUCTURE & FILE ORGANIZATION

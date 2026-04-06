@@ -437,9 +437,9 @@ def _lazy_init_frontend_code_v2_team():
 
 _task_requirements = task_requirements
 
-MAX_REVIEW_ITERATIONS = 100
-MAX_CLARIFICATION_REFINEMENTS = 100  # Max times to refine a task based on specialist clarification
-MAX_CODE_REVIEW_ITERATIONS = 100  # Max rounds of code review -> fix -> re-review
+MAX_REVIEW_ITERATIONS = 15
+MAX_CLARIFICATION_REFINEMENTS = 10  # Max times to refine a task based on specialist clarification
+MAX_CODE_REVIEW_ITERATIONS = 10  # Max rounds of code review -> fix -> re-review
 
 
 def _issues_to_dicts(

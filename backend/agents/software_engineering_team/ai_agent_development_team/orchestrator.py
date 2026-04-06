@@ -25,7 +25,7 @@ from .phases.problem_solving import run_problem_solving
 from .phases.review import run_review
 
 logger = logging.getLogger(__name__)
-MAX_REVIEW_ITERATIONS = 100
+MAX_REVIEW_ITERATIONS = 15
 
 
 class AIAgentDevelopmentTeamLead:

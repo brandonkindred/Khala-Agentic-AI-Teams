@@ -111,7 +111,7 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
             fp = issue_data.get("file_path") or input_data.file_path_or_label
             issues.append(
                 {
-                    "severity": issue_data.get("severity", "major"),
+                    "severity": issue_data.get("severity", "high"),
                     "category": issue_data.get("category", "general"),
                     "file_path": fp,
                     "description": issue_data.get("description", ""),

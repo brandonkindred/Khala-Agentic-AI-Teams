@@ -34,7 +34,7 @@ class ChunkReviewInput(BaseModel):
 class ChunkReviewOutput(BaseModel):
     """Output from reviewing one chunk (approved, issues, summary for this chunk)."""
 
-    approved: bool = Field(default=False, description="True if chunk has no critical/major issues")
+    approved: bool = Field(default=False, description="True if chunk has no critical/high issues")
     issues: List[Dict[str, Any]] = Field(
         default_factory=list,
         description="Issues found (each with severity, category, file_path, description, suggestion)",
@@ -46,8 +46,8 @@ class CodeReviewIssue(BaseModel):
     """A single issue found during code review."""
 
     severity: str = Field(
-        default="major",
-        description="Severity: critical, major, minor, or nit",
+        default="high",
+        description="Severity: critical, high, medium, low, or info",
     )
     category: str = Field(
         default="general",
@@ -105,7 +105,7 @@ class CodeReviewOutput(BaseModel):
 
     approved: bool = Field(
         default=False,
-        description="True when code passes review (no critical or major issues). Only approve when code is production-ready.",
+        description="True when code passes review (no critical or high issues). Only approve when code is production-ready.",
     )
     issues: List[CodeReviewIssue] = Field(
         default_factory=list,

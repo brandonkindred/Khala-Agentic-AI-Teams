@@ -32,7 +32,7 @@ from .phases.setup import run_setup
 
 logger = logging.getLogger(__name__)
 
-MAX_REVIEW_ITERATIONS = 100
+MAX_REVIEW_ITERATIONS = 15
 
 
 def _build_tool_agents(llm: LLMClient) -> Dict[ToolAgentKind, Any]:

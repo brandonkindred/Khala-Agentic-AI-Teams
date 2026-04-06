@@ -124,7 +124,7 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
             if isinstance(i, dict):
                 all_issues.append(
                     CodeReviewIssue(
-                        severity=i.get("severity", "major"),
+                        severity=i.get("severity", "high"),
                         category=i.get("category", "general"),
                         file_path=i.get("file_path", paths_label),
                         description=i.get("description", ""),
@@ -141,13 +141,13 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
             seen.add(key)
             deduped.append(issue)
 
-    # approved = False if any critical/major
-    critical_or_major = [i for i in deduped if i.severity in ("critical", "major")]
-    approved = all_approved and len(critical_or_major) == 0
+    # approved = False if any critical/high
+    critical_or_high = [i for i in deduped if i.severity in ("critical", "high")]
+    approved = all_approved and len(critical_or_high) == 0
 
     # Safety net: same as main agent
-    if not approved and not critical_or_major and deduped:
-        logger.info("CodeReviewCoordinator: overriding to approved=True (only minor/nit issues)")
+    if not approved and not critical_or_high and deduped:
+        logger.info("CodeReviewCoordinator: overriding to approved=True (only medium/low/info issues)")
         approved = True
 
     merged_summary = "\n\n".join(s for s in summaries if s.strip())

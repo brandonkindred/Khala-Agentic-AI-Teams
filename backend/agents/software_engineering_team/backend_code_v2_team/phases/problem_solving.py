@@ -37,14 +37,22 @@ from ..prompts import (
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS_PER_ISSUE = 100
+MAX_ITERATIONS_PER_ISSUE = 5
+
+MAX_BATCH_FIX_CODE_CHARS = 60_000  # Cap context to avoid blowing up the LLM context window
 
 
-def _format_all_code(current_files: Dict[str, str]) -> str:
-    """Format all current files for batch fix prompt."""
+def _format_all_code(current_files: Dict[str, str], max_chars: int = MAX_BATCH_FIX_CODE_CHARS) -> str:
+    """Format current files for batch fix prompt, truncating to stay within budget."""
     parts: List[str] = []
+    total = 0
     for path, content in current_files.items():
-        parts.append(f"--- {path} ---\n{content}\n")
+        chunk = f"--- {path} ---\n{content}\n"
+        if total + len(chunk) > max_chars:
+            parts.append(f"--- {path} --- (truncated, {len(content)} chars omitted)\n")
+            break
+        parts.append(chunk)
+        total += len(chunk)
     return "\n".join(parts) if parts else "(no code)"
 
 

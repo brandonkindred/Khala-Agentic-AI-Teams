@@ -337,8 +337,12 @@ class MicrotaskReviewConfig(BaseModel):
         description="Max fix attempts for documentation phase",
     )
     on_failure: Literal["stop", "skip_continue"] = Field(
-        default="skip_continue",
+        default="stop",
         description="Behavior when max retries exceeded: 'stop' aborts workflow, 'skip_continue' proceeds to next microtask",
+    )
+    security_failure_always_stops: bool = Field(
+        default=True,
+        description="When True, security review failures always stop the workflow regardless of on_failure setting",
     )
 
 

@@ -154,7 +154,7 @@ def _validate_file_paths(files: Dict[str, str]) -> tuple[Dict[str, str], list[st
 
 
 # ── Workflow constants ──────────────────────────────────────────────────────
-MAX_REVIEW_ITERATIONS = _int_env("SW_MAX_REVIEW_ITERATIONS", 100)
+MAX_REVIEW_ITERATIONS = _int_env("SW_MAX_REVIEW_ITERATIONS", 15)
 MAX_SAME_BUILD_FAILURES = _int_env(
     "SW_MAX_SAME_BUILD_FAILURES", 6
 )  # Stop if build fails identically this many times

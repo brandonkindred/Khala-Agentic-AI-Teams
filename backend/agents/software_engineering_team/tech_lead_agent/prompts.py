@@ -3,6 +3,7 @@
 from software_engineering_team.shared.coding_standards import (
     COMMIT_MESSAGE_STANDARDS,
     GIT_BRANCHING_RULES,
+    PRIORITY_FRAMEWORK,
 )
 
 TECH_LEAD_PROMPT = (
@@ -46,6 +47,15 @@ You must produce a plan using exactly four levels. Each level must be HIGHLY DET
   - Assigned: to exactly one engineer type (backend, frontend, or devops)
   - Description must include: expected behavior, what done looks like, key technical details, inputs/outputs, edge cases, error handling, validation rules
   - Include: acceptance criteria (5–7 items), and an "example" (sample request/response, UI mockup description, config snippet)
+
+============================================================
+DECISION PRIORITIES
+============================================================
+
+"""
+    + PRIORITY_FRAMEWORK
+    + """
+Apply this priority order when making trade-off decisions in the plan: task ordering, acceptance criteria, architecture choices, and resource allocation. Security tasks and acceptance criteria come first; scalability concerns are addressed last.
 
 ============================================================
 REVIEWING THE SPEC

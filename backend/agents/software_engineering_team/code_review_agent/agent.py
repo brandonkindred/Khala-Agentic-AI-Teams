@@ -131,7 +131,7 @@ class CodeReviewAgent:
             if isinstance(issue_data, dict) and issue_data.get("description"):
                 issues.append(
                     CodeReviewIssue(
-                        severity=issue_data.get("severity", "major"),
+                        severity=issue_data.get("severity", "high"),
                         category=issue_data.get("category", "general"),
                         file_path=issue_data.get("file_path", ""),
                         description=issue_data.get("description", ""),
@@ -140,17 +140,17 @@ class CodeReviewAgent:
                 )
 
         # Determine approval based on issue severity
-        critical_or_major = [i for i in issues if i.severity in ("critical", "major")]
+        critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
         raw_approved = bool(data.get("approved", False))
-        approved = raw_approved and len(critical_or_major) == 0
+        approved = raw_approved and len(critical_or_high) == 0
 
         # Safety net: handle rejected-with-no-actionable-issues (prevents unresolvable loops)
-        if not approved and not critical_or_major:
+        if not approved and not critical_or_high:
             summary_text = data.get("summary", "")
             if issues:
                 # Has only minor/nit issues -- auto-approve since nothing blocking
                 logger.info(
-                    "CodeReview: overriding to approved=True (only %s minor/nit issues, no critical/major)",
+                    "CodeReview: overriding to approved=True (only %s minor/nit issues, no critical/high)",
                     len(issues),
                 )
                 approved = True
@@ -163,7 +163,7 @@ class CodeReviewAgent:
                     summary_text[:200],
                 )
                 synthesized = CodeReviewIssue(
-                    severity="major",
+                    severity="high",
                     category="general",
                     file_path="",
                     description=f"Code review rejected: {summary_text}",
@@ -171,7 +171,7 @@ class CodeReviewAgent:
                     "Ensure the code meets all acceptance criteria and follows project conventions.",
                 )
                 issues.append(synthesized)
-                critical_or_major.append(synthesized)
+                critical_or_high.append(synthesized)
             else:
                 # No issues AND no summary -- LLM gave no useful feedback, auto-approve
                 logger.warning(
@@ -181,11 +181,11 @@ class CodeReviewAgent:
                 approved = True
 
         logger.info(
-            "CodeReview: done, approved=%s (raw_llm=%s), issues=%s (critical/major=%s)",
+            "CodeReview: done, approved=%s (raw_llm=%s), issues=%s (critical/high=%s)",
             approved,
             raw_approved,
             len(issues),
-            len(critical_or_major),
+            len(critical_or_high),
         )
 
         return CodeReviewOutput(

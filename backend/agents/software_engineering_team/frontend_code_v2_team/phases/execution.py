@@ -21,6 +21,7 @@ from ..models import (
     MicrotaskReviewFailedError,
     MicrotaskStatus,
     PlanningResult,
+    ReviewIssue,
     ReviewResult,
     ToolAgentInput,
     ToolAgentKind,
@@ -32,6 +33,19 @@ from ..prompts import EXECUTION_PROMPT
 logger = logging.getLogger(__name__)
 
 ToolAgentRunner = Callable[[ToolAgentInput], ToolAgentOutput]
+
+
+def _dedup_issues(
+    issues: List[ReviewIssue], seen: set[tuple[str, str]]
+) -> List[ReviewIssue]:
+    """Remove duplicate issues across review cycles based on (file_path, description)."""
+    unique: List[ReviewIssue] = []
+    for issue in issues:
+        key = (issue.file_path or "", issue.description or "")
+        if key not in seen:
+            seen.add(key)
+            unique.append(issue)
+    return unique
 
 
 class ReviewDependencies:
@@ -338,6 +352,10 @@ def run_execution_with_review_gates(
         phase_failed = False
         total_cycles = 0
         max_total_cycles = config.max_retries * 3
+        # Track files this microtask introduced for rollback on failure
+        microtask_file_keys = set(microtask_files.keys())
+        # Initialize review results so they're always defined for max-cycles check
+        sec_review = ReviewResult(passed=True, summary="")
 
         # ── Sequential Review Gates with Batch Fixes ──────────────────────────
         # Flow: Code Review -> QA -> Security -> Documentation
@@ -457,6 +475,9 @@ def run_execution_with_review_gates(
                     config.max_retries,
                     review_result.summary[:200],
                 )
+                # Rollback: remove this microtask's files from all_files
+                for fk in microtask_file_keys:
+                    all_files.pop(fk, None)
                 if config.on_failure == "stop":
                     raise MicrotaskReviewFailedError(mt, review_result)
                 break
@@ -622,7 +643,15 @@ def run_execution_with_review_gates(
                 mt.id,
                 total_cycles,
             )
-            if config.on_failure == "stop":
+            # Rollback: remove this microtask's files from all_files
+            for fk in microtask_file_keys:
+                all_files.pop(fk, None)
+            # Security failures always stop regardless of on_failure setting
+            _force_stop = config.on_failure == "stop" or (
+                getattr(config, "security_failure_always_stops", True)
+                and not sec_review.passed
+            )
+            if _force_stop:
                 raise MicrotaskReviewFailedError(
                     mt, ReviewResult(passed=False, issues=[], summary="Max cycles exceeded")
                 )
@@ -681,8 +710,8 @@ def run_execution_with_review_gates(
                 documentation=doc_files,
                 code_files=microtask_files,
                 task_description=task.description or "",
-                min_iterations=3,
-                max_iterations=5,
+                min_iterations=1,
+                max_iterations=2,
                 quality_threshold=0.9,
                 detail_callback=lambda d: _detail_cb(d, current_idx, "documentation"),
             )
