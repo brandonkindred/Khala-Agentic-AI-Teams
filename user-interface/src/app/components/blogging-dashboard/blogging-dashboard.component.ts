@@ -6,8 +6,8 @@ import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { marked } from 'marked';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatCardModule } from '@angular/material/card';
-import { Subscription, timer } from 'rxjs';
-import { switchMap } from 'rxjs/operators';
+import { Subject, Subscription, timer } from 'rxjs';
+import { startWith, switchMap } from 'rxjs/operators';
 import type { BlogJobStreamEvent } from '../../models';
 import { BloggingApiService } from '../../services/blogging-api.service';
 import { TeamAssistantApiService } from '../../services/team-assistant-api.service';
@@ -105,6 +105,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   private sseSub: Subscription | null = null;
   private queryParamsSub: Subscription | null = null;
   private pendingJobId: string | null = null;
+  private refreshTrigger$ = new Subject<void>();
 
   private static readonly ASSISTANT_URL = '/api/blogging/assistant';
 
@@ -198,6 +199,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         this.api.getJobStatus(jobId).subscribe({
           next: (status) => {
             this.selectedJobStatus = status;
+            this.triggerJobsRefresh();
           },
         });
       },
@@ -214,6 +216,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
     this.api.deleteJob(jobId).subscribe({
       next: () => {
         this.clearSelection();
+        this.triggerJobsRefresh();
       },
       error: (err) => {
         this.error = err?.error?.detail ?? err?.message ?? 'Failed to delete job';
@@ -235,8 +238,10 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
       const id = params['jobId'];
       if (id) this.pendingJobId = id;
     });
-    this.jobsSub = timer(0, POLL_JOBS_MS).pipe(
-      switchMap(() => this.api.getJobs(false))
+    this.jobsSub = this.refreshTrigger$.pipe(
+      startWith(undefined as void),
+      switchMap(() => timer(0, POLL_JOBS_MS)),
+      switchMap(() => this.api.getJobs(false)),
     ).subscribe({
       next: (jobs) => {
         this.allJobs = jobs;
@@ -276,6 +281,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.queryParamsSub?.unsubscribe();
     this.jobsSub?.unsubscribe();
+    this.refreshTrigger$.complete();
     this.stopJobStreaming();
   }
 
@@ -342,6 +348,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
 
   cancelJobFromList(jobId: string): void {
     this.api.cancelJob(jobId).subscribe({
+      next: () => { this.triggerJobsRefresh(); },
       error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to cancel job'; },
     });
   }
@@ -351,6 +358,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
     this.api.deleteJob(jobId).subscribe({
       next: () => {
         if (this.selectedBlogJob?.job_id === jobId) this.clearSelection();
+        this.triggerJobsRefresh();
       },
       error: (err) => { this.error = err?.error?.detail ?? err?.message ?? 'Failed to delete job'; },
     });
@@ -397,6 +405,8 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
         }
         this.pendingJobId = resp.job_id;
         this.activeView = 'jobs';
+        // Small delay so the backend has time to persist the new job record
+        setTimeout(() => this.triggerJobsRefresh(), 500);
       },
       error: (err) => {
         this.launching = false;
@@ -418,6 +428,11 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
     this.storyResponseText = '';
     this.qaAnswers = {};
     this.draftFeedbackText = '';
+  }
+
+  /** Immediately refresh the jobs list and reset the polling timer. */
+  private triggerJobsRefresh(): void {
+    this.refreshTrigger$.next();
   }
 
   /** Tear down both SSE and polling subscriptions. */
@@ -672,6 +687,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
       next: (status) => {
         this.selectedJobStatus = status;
         this.error = null;
+        this.triggerJobsRefresh();
       },
       error: (err) => {
         this.error = err?.error?.detail ?? err?.message ?? 'Failed to approve job';
@@ -685,6 +701,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
       next: (status) => {
         this.selectedJobStatus = status;
         this.error = null;
+        this.triggerJobsRefresh();
       },
       error: (err) => {
         this.error = err?.error?.detail ?? err?.message ?? 'Failed to unapprove job';
