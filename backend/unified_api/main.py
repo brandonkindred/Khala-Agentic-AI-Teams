@@ -10,6 +10,7 @@ Each agent team runs in its own container.  This server:
 No team code is imported or run in-process.
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -17,6 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -110,6 +112,36 @@ TEAM_SERVICE_URL_ENVS: dict[str, str] = {
 # Track which teams were successfully registered (for health endpoint).
 _registered_teams: dict[str, bool] = {}
 
+# Track upstream liveness per team (updated by background health checker).
+_team_liveness: dict[str, str] = {}  # team_key -> "healthy" | "unhealthy" | "unknown"
+
+# Background health check interval in seconds.
+_HEALTH_CHECK_INTERVAL = int(os.getenv("HEALTH_CHECK_INTERVAL", "30"))
+
+
+async def _check_team_health(team_key: str, service_url: str) -> str:
+    """Probe a team's /health endpoint. Returns 'healthy' or 'unhealthy'."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            resp = await client.get(f"{service_url.rstrip('/')}/health")
+            return "healthy" if resp.status_code == 200 else "unhealthy"
+    except Exception:
+        return "unhealthy"
+
+
+async def _health_check_loop() -> None:
+    """Periodically probe all registered teams' health endpoints."""
+    while True:
+        await asyncio.sleep(_HEALTH_CHECK_INTERVAL)
+        for team_key in list(_registered_teams.keys()):
+            if not _registered_teams.get(team_key):
+                continue
+            env_var = TEAM_SERVICE_URL_ENVS.get(team_key)
+            url = (os.environ.get(env_var, "").strip() if env_var else "") if env_var else ""
+            if url:
+                status = await _check_team_health(team_key, url)
+                _team_liveness[team_key] = status
+
 
 def _register_proxy_routes(app: FastAPI) -> dict[str, bool]:
     """Register a catch-all proxy route for every enabled team whose service URL is configured."""
@@ -132,10 +164,16 @@ def _register_proxy_routes(app: FastAPI) -> dict[str, bool]:
             name=f"{team_key}_proxy",
             tags=config.tags,
         )
-        async def _proxy(request: Request, path: str, _url: str = url) -> Any:
-            return await proxy_request(request, _url, path)
+        async def _proxy(
+            request: Request,
+            path: str,
+            _url: str = url,
+            _team_key: str = team_key,
+            _timeout: float = config.timeout_seconds,
+        ) -> Any:
+            return await proxy_request(request, _url, path, team_key=_team_key, timeout=_timeout)
 
-        logger.info("Proxying %s -> %s", config.prefix, url)
+        logger.info("Proxying %s -> %s (timeout=%.0fs, cell=%s)", config.prefix, url, config.timeout_seconds, config.cell)
         results[team_key] = True
 
     return results
@@ -185,7 +223,13 @@ async def lifespan(app: FastAPI):
     total = len(get_enabled_teams())
     logger.info("Registered %d/%d team proxy routes", ok, total)
 
+    # 3. Start background health checker for upstream team liveness.
+    health_task = asyncio.create_task(_health_check_loop())
+    logger.info("Started background health checker (interval=%ds)", _HEALTH_CHECK_INTERVAL)
+
     yield
+
+    health_task.cancel()
 
     logger.info("Shutting down Unified API Server...")
 
@@ -220,11 +264,15 @@ from unified_api.middleware import SecurityGatewayMiddleware
 app.add_middleware(SecurityGatewayMiddleware)
 
 # Integrations API (Slack config, etc.)
+from unified_api.routes.analytics import router as analytics_router
 from unified_api.routes.integrations import router as integrations_router
 from unified_api.routes.llm_tools import router as llm_tools_router
+from unified_api.routes.llm_usage import router as llm_usage_router
 
 app.include_router(integrations_router)
 app.include_router(llm_tools_router)
+app.include_router(llm_usage_router)
+app.include_router(analytics_router)
 
 
 # ---------------------------------------------------------------------------
@@ -256,13 +304,21 @@ async def root() -> ApiInfoResponse:
 
 @app.get("/health", response_model=UnifiedHealthResponse, tags=["health"])
 async def health() -> UnifiedHealthResponse:
-    """Unified health check — reports status of each team proxy."""
+    """Unified health check — reports proxy registration and upstream liveness per team."""
     teams = []
     all_healthy = True
     for key, config in TEAM_CONFIGS.items():
         registered = _registered_teams.get(key, False)
-        status = "healthy" if registered else "unavailable"
-        if config.enabled and not registered:
+        liveness = _team_liveness.get(key, "unknown")
+        if registered and liveness == "healthy":
+            status = "healthy"
+        elif registered and liveness == "unknown":
+            status = "healthy"  # Not yet checked — assume healthy
+        elif registered:
+            status = "unhealthy"
+        else:
+            status = "unavailable"
+        if config.enabled and status in ("unavailable", "unhealthy"):
             all_healthy = False
         teams.append(
             TeamHealth(name=config.name, prefix=config.prefix, status=status, enabled=config.enabled)

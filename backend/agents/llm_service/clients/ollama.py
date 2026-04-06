@@ -27,6 +27,7 @@ from ..interface import (
     LLMTemporaryError,
     LLMTruncatedError,
 )
+from ..telemetry import record_llm_call
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,41 @@ class OllamaLLMClient(LLMClient):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._model_num_ctx: Optional[int] = None
+        # Token usage from the last successful LLM call (populated by _ollama_post)
+        self._last_usage: Optional[Dict[str, Any]] = None
+        self._last_latency_ms: int = 0
+
+    def _record_telemetry(
+        self,
+        *,
+        status: str = "success",
+        error_type: Optional[str] = None,
+        prompt_text: Optional[str] = None,
+        response_text: Optional[str] = None,
+    ) -> None:
+        """Record LLM call telemetry using data from the last _ollama_post call."""
+        usage = self._last_usage or {}
+        caller = getattr(self, "_current_caller", "unknown")
+        # Extract team/agent from caller_tag (e.g. "blog_writer_agent.agent.write_draft")
+        agent_key = getattr(self, "_current_agent_key", "") or ""
+        team = getattr(self, "_current_team", "") or ""
+        try:
+            record_llm_call(
+                team=team,
+                agent_key=agent_key,
+                model=self.model,
+                caller_tag=caller,
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                total_tokens=usage.get("total_tokens", 0),
+                latency_ms=self._last_latency_ms,
+                status=status,
+                error_type=error_type,
+                prompt_text=prompt_text,
+                response_text=response_text,
+            )
+        except Exception:
+            logger.debug("Failed to record LLM telemetry", exc_info=True)
 
     def _ollama_auth_headers(self) -> dict[str, str]:
         """Return Authorization Bearer header for Ollama Cloud. Uses OLLAMA_API_KEY (or LLM_* overrides)."""
@@ -539,7 +575,11 @@ class OllamaLLMClient(LLMClient):
         backoff_max: float,
         sem: threading.BoundedSemaphore,
     ) -> str:
-        """POST to /v1/chat/completions with SSE streaming; return raw content. Raises LLM* on non-200 or malformed."""
+        """POST to /v1/chat/completions with SSE streaming; return raw content. Raises LLM* on non-200 or malformed.
+
+        Token usage from the response is stored in ``self._last_usage`` after each
+        successful call so callers can inspect prompt/completion token counts.
+        """
         url = f"{self.base_url}/v1/chat/completions"
         last_error: Optional[Exception] = None
         headers = self._ollama_auth_headers()
@@ -567,6 +607,7 @@ class OllamaLLMClient(LLMClient):
                                 tool_call_buffers: dict[int, dict] = {}
                                 has_reasoning: bool = False
                                 partial_buf = ""  # buffer for lines split across TCP chunks
+                                usage_data: Optional[Dict[str, Any]] = None  # token usage from final chunk
                                 for raw_line in response.iter_lines():
                                     if not raw_line:
                                         continue
@@ -604,6 +645,10 @@ class OllamaLLMClient(LLMClient):
                                             continue
 
                                     chunk = json.loads(chunk_data)
+                                    # Capture token usage (typically in the last SSE chunk)
+                                    chunk_usage = chunk.get("usage")
+                                    if chunk_usage and isinstance(chunk_usage, dict):
+                                        usage_data = chunk_usage
                                     choices = chunk.get("choices") or []
                                     if choices:
                                         delta = choices[0].get("delta", {})
@@ -642,13 +687,24 @@ class OllamaLLMClient(LLMClient):
                                 elapsed = time.monotonic() - t0
                                 joined_content = "".join(content_parts)
                                 caller = getattr(self, "_current_caller", "unknown")
+
+                                # Store usage for telemetry consumers
+                                self._last_usage = usage_data
+                                self._last_latency_ms = int(elapsed * 1000)
+                                prompt_tokens = (usage_data or {}).get("prompt_tokens", 0)
+                                completion_tokens = (usage_data or {}).get("completion_tokens", 0)
+                                total_tokens = (usage_data or {}).get("total_tokens", 0)
+
                                 logger.info(
-                                    "LLM streaming response complete in %.1fs (caller=%s, content=%d chars, reasoning=%s, finish=%s)",
+                                    "LLM streaming response complete in %.1fs (caller=%s, content=%d chars, reasoning=%s, finish=%s, tokens=%d/%d/%d p/c/t)",
                                     elapsed,
                                     caller,
                                     len(joined_content),
                                     has_reasoning,
                                     finish_reason or "stop",
+                                    prompt_tokens,
+                                    completion_tokens,
+                                    total_tokens,
                                 )
                                 if not joined_content.strip() and has_reasoning:
                                     logger.warning(
@@ -933,11 +989,15 @@ class OllamaLLMClient(LLMClient):
                 time.sleep(backoff_base + random.uniform(0, 1))
                 content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
             if not (content or "").strip():
+                self._record_telemetry(status="error", error_type="empty_response")
                 raise LLMTemporaryError(
                     "Empty response from LLM after retries; try again or pass think=False if thinking is enabled."
                 )
-            return self._extract_json(content)
+            result = self._extract_json(content)
+            self._record_telemetry(status="success", prompt_text=prompt, response_text=content)
+            return result
         except LLMTruncatedError as e:
+            self._record_telemetry(status="truncated", error_type="truncated")
             return self._complete_json_with_continuation(
                 initial_partial=e.partial_content,
                 prompt=prompt,
@@ -951,6 +1011,7 @@ class OllamaLLMClient(LLMClient):
                 use_think=think,
             )
         except LLMJsonParseError:
+            self._record_telemetry(status="error", error_type="json_parse", prompt_text=prompt, response_text=content)
             # If content starts with '{' but is unparseable, the server likely cut off the
             # response before the JSON was complete (finish_reason="stop" despite truncation).
             # Attempt continuation to recover the rest of the JSON.
@@ -1098,8 +1159,11 @@ class OllamaLLMClient(LLMClient):
         if tools:
             payload["tools"] = tools
         try:
-            return self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+            result = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+            self._record_telemetry(status="success", prompt_text=prompt, response_text=result)
+            return result
         except LLMTruncatedError as e:
+            self._record_telemetry(status="truncated", error_type="truncated")
             return self._complete_text_with_continuation(
                 initial_partial=e.partial_content,
                 prompt=prompt,
@@ -1211,12 +1275,16 @@ class OllamaLLMClient(LLMClient):
             try:
                 parsed = json.loads(stripped)
                 if isinstance(parsed, dict) and "__tool_calls__" in parsed:
+                    self._record_telemetry(status="success")
                     return parsed
             except json.JSONDecodeError:
                 pass
         try:
-            return self._extract_json(content)
+            result = self._extract_json(content)
+            self._record_telemetry(status="success")
+            return result
         except LLMJsonParseError:
+            self._record_telemetry(status="error", error_type="json_parse")
             if stripped.startswith("{"):
                 try:
                     parsed = json.loads(stripped)

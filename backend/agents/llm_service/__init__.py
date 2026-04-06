@@ -21,6 +21,7 @@ from .interface import (
     LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
 )
+from .telemetry import get_recent_calls, get_usage_summary, record_llm_call
 from .tool_loop import complete_json_with_tool_loop
 from .util import call_llm_with_retries, extract_json_from_response
 
@@ -49,4 +50,7 @@ __all__ = [
     "OLLAMA_WEEKLY_LIMIT_MESSAGE",
     "OllamaLLMClient",
     "DummyLLMClient",
+    "record_llm_call",
+    "get_recent_calls",
+    "get_usage_summary",
 ]
