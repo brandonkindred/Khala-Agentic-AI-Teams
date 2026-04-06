@@ -114,17 +114,22 @@ def _populate_template_sections(
     client_context: dict,
     findings: list[dict],
 ) -> list[dict]:
-    """Walk template sections and fill placeholders from client_context."""
+    """Walk template sections and fill placeholders from client_context.
+
+    Handles three template structures:
+    - Standard templates: ``sections`` list of ``{name: {fields, metrics, items}}``
+    - Industry templates: ``solution_focus``, ``challenge_areas``, ``result_metrics``
+    - Video script templates: ``segments`` list + ``key_soundbites``
+    """
     populated: list[dict] = []
 
-    # Handle standard templates (have "sections" key)
+    # --- Standard templates (sections key) ---
     raw_sections = template.get("sections", [])
     for section in raw_sections:
         if isinstance(section, dict):
             for section_name, section_def in section.items():
                 filled = {"section": section_name}
                 if isinstance(section_def, dict):
-                    # Pull matching fields from client_context
                     for key in section_def.get("fields", []):
                         filled[key] = client_context.get(key, f"[{key}]")
                     if "metrics" in section_def:
@@ -136,7 +141,26 @@ def _populate_template_sections(
                 filled["finding_count"] = len(findings)
                 populated.append(filled)
 
-    # Handle industry templates (have different structure)
+    # --- Video script templates (segments + key_soundbites) ---
+    if "segments" in template:
+        for segment in template["segments"]:
+            if isinstance(segment, dict):
+                for segment_name, segment_def in segment.items():
+                    filled = {
+                        "section": segment_name,
+                        "type": "video_segment",
+                        "duration_minutes": segment_def.get("duration_minutes", 0),
+                        "questions": segment_def.get("questions", []),
+                    }
+                    populated.append(filled)
+    if "key_soundbites" in template:
+        populated.append({
+            "section": "key_soundbites",
+            "type": "video_soundbites",
+            "items": template["key_soundbites"],
+        })
+
+    # --- Industry templates ---
     if "solution_focus" in template:
         populated.append({"section": "solution_focus", "items": template["solution_focus"]})
     if "challenge_areas" in template:

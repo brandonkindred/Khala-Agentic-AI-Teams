@@ -4,7 +4,7 @@ FastAPI endpoints for the Digital Accessibility Audit Team.
 
 import logging
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -458,14 +458,20 @@ async def export_backlog(
 class CaseStudyRequest(BaseModel):
     """Request body for case study generation."""
 
-    template_key: str = Field(
+    template_key: Literal[
+        "comprehensive",
+        "basic_audit",
+        "premium_assessment",
+        "enterprise_analysis",
+        "executive_summary",
+        "video_script",
+    ] = Field(
         default="comprehensive",
-        description="Template variant: comprehensive, basic_audit, premium_assessment, "
-        "enterprise_analysis, executive_summary, or video_script",
+        description="Template variant",
     )
-    industry: Optional[str] = Field(
+    industry: Optional[Literal["ecommerce", "saas", "healthcare"]] = Field(
         default=None,
-        description="Industry-specific template: ecommerce, saas, or healthcare",
+        description="Industry-specific template override",
     )
     client_context: Dict[str, Any] = Field(
         default_factory=dict,

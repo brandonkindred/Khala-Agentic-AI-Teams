@@ -124,9 +124,16 @@ def _populate_sections(
     client_context: dict,
     findings: List[Finding],
 ) -> List[Dict]:
-    """Walk template sections and merge client_context values."""
+    """Walk template sections and merge client_context values.
+
+    Handles three template structures:
+    - Standard templates: ``sections`` list of ``{name: {fields, metrics, items}}``
+    - Industry templates: ``solution_focus``, ``challenge_areas``, ``result_metrics``
+    - Video script templates: ``segments`` list + ``key_soundbites``
+    """
     populated: List[Dict] = []
 
+    # --- Standard templates (sections key) ---
     raw_sections = template.get("sections", [])
     for section in raw_sections:
         if isinstance(section, dict):
@@ -144,7 +151,26 @@ def _populate_sections(
                 filled["finding_count"] = len(findings)
                 populated.append(filled)
 
-    # Industry template special keys
+    # --- Video script templates (segments + key_soundbites) ---
+    if "segments" in template:
+        for segment in template["segments"]:
+            if isinstance(segment, dict):
+                for segment_name, segment_def in segment.items():
+                    filled = {
+                        "section": segment_name,
+                        "type": "video_segment",
+                        "duration_minutes": segment_def.get("duration_minutes", 0),
+                        "questions": segment_def.get("questions", []),
+                    }
+                    populated.append(filled)
+    if "key_soundbites" in template:
+        populated.append({
+            "section": "key_soundbites",
+            "type": "video_soundbites",
+            "items": template["key_soundbites"],
+        })
+
+    # --- Industry template special keys ---
     if "solution_focus" in template:
         populated.append({"section": "solution_focus", "items": template["solution_focus"]})
     if "challenge_areas" in template:
