@@ -11,6 +11,30 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from .a11y_agency_strands.app.models.architecture import (
+    ArchitectureAuditResult as ArchitectureAuditPhaseResult,
+)
+from .a11y_agency_strands.app.models.architecture import (
+    ArchitectureChecklistItem as ArchitectureChecklistItemResult,
+)
+from .a11y_agency_strands.app.models.architecture import (
+    ArchitectureSectionResult as ArchitectureSectionScore,
+)
+from .a11y_agency_strands.app.models.architecture import (
+    BusinessImpact as ArchitectureBusinessImpact,
+)
+from .a11y_agency_strands.app.models.architecture import (
+    WCAGCriterionStatus as ArchitectureWCAGStatus,
+)
+
+__all__ = [
+    "ArchitectureAuditPhaseResult",
+    "ArchitectureBusinessImpact",
+    "ArchitectureChecklistItemResult",
+    "ArchitectureSectionScore",
+    "ArchitectureWCAGStatus",
+]
+
 # ---------------------------------------------------------------------------
 # Phase Enum
 # ---------------------------------------------------------------------------
@@ -476,6 +500,7 @@ class AccessibilityAuditResult(BaseModel):
     verification_result: Optional[VerificationResult] = None
     report_packaging_result: Optional[ReportPackagingResult] = None
     retest_result: Optional[RetestResult] = None
+    architecture_audit_result: Optional["ArchitectureAuditPhaseResult"] = None
 
     # Final outputs
     final_findings: List[Finding] = Field(default_factory=list)
@@ -609,54 +634,6 @@ class BacklogExportResponse(BaseModel):
     format: str
     artifact_ref: str
     counts: Dict[str, int] = Field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# Architecture Audit Models
-# ---------------------------------------------------------------------------
-
-
-class ArchitectureChecklistItemResult(BaseModel):
-    """Result for a single checklist item in the architecture audit."""
-
-    id: str = Field(..., description="Checklist item identifier, e.g. 'nse_01'")
-    label: str = Field(default="", description="Human-readable description of the check")
-    passed: bool = Field(..., description="Whether the item passed the audit")
-    notes: str = Field(default="", description="Auditor notes or failure details")
-    wcag_ref: Optional[str] = Field(default=None, description="WCAG SC reference, e.g. '2.4.7'")
-    test_method: str = Field(default="", description="Testing method used")
-
-
-class ArchitectureSectionScore(BaseModel):
-    """Scored result for a single audit template section."""
-
-    section_id: str = Field(..., description="Section identifier")
-    name: str = Field(default="", description="Section display name")
-    passed_count: int = Field(default=0)
-    total_count: int = Field(default=0)
-    score_pct: float = Field(default=0.0, description="Pass percentage 0.0-100.0")
-    grade: str = Field(default="", description="Excellent / Good / Needs Improvement / Poor")
-    failing_items: List[str] = Field(default_factory=list, description="Labels of failing items")
-
-
-class ArchitectureWCAGStatus(BaseModel):
-    """Per-criterion compliance status from the architecture audit."""
-
-    sc: str = Field(..., description="Success criterion number, e.g. '2.4.7'")
-    status: str = Field(default="not_tested", description="pass / fail / partial / not_tested")
-    related_items: List[str] = Field(default_factory=list, description="Checklist item IDs")
-
-
-class ArchitectureAuditPhaseResult(BaseModel):
-    """Result of the site architecture and navigation accessibility audit."""
-
-    target: str = Field(..., description="Site URL or identifier audited")
-    template_version: str = Field(default="1.0")
-    section_scores: List[ArchitectureSectionScore] = Field(default_factory=list)
-    overall_score_pct: float = Field(default=0.0, description="Weighted overall pass percentage")
-    overall_grade: str = Field(default="", description="Overall grade from scoring scale")
-    wcag_compliance: List[ArchitectureWCAGStatus] = Field(default_factory=list)
-    recommendations: List[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

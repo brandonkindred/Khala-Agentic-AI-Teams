@@ -2,6 +2,7 @@ from .approval_tools import request_human_approval
 from .architecture_tools import (
     build_architecture_audit_report,
     load_architecture_audit_template,
+    pct_to_grade,
     score_architecture_section,
 )
 from .browser_tools import capture_dom_snippet, capture_screenshot
@@ -53,6 +54,7 @@ __all__ = [
     "run_lighthouse_accessibility",
     "build_architecture_audit_report",
     "load_architecture_audit_template",
+    "pct_to_grade",
     "score_architecture_section",
     "load_artifact",
     "persist_artifact",
