@@ -4,8 +4,9 @@ import { MatTabsModule } from '@angular/material/tabs';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatChipsModule } from '@angular/material/chips';
-import { Subscription } from 'rxjs';
+import { Observable, Subscription } from 'rxjs';
 import { AccessibilityApiService } from '../../services/accessibility-api.service';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import { AccessibilityAuditFormComponent } from '../accessibility-audit-form/accessibility-audit-form.component';
 import { AccessibilityJobStatusComponent } from '../accessibility-job-status/accessibility-job-status.component';
 import { AccessibilityFindingsComponent } from '../accessibility-findings/accessibility-findings.component';
@@ -37,6 +38,7 @@ type DashboardTab = 'create' | 'status' | 'findings' | 'report' | 'design-system
     AccessibilityReportComponent,
     AccessibilityDesignSystemComponent,
     TeamAssistantChatComponent,
+    DashboardShellComponent,
   ],
   templateUrl: './accessibility-dashboard.component.html',
   styleUrl: './accessibility-dashboard.component.scss',
@@ -44,6 +46,8 @@ type DashboardTab = 'create' | 'status' | 'findings' | 'report' | 'design-system
 export class AccessibilityDashboardComponent implements OnInit, OnDestroy {
   private readonly api = inject(AccessibilityApiService);
   private healthSub: Subscription | null = null;
+
+  healthCheckFn: () => Observable<{ status?: string }> = () => this.api.healthCheck();
 
   selectedTabIndex = 0;
   activeTab: DashboardTab = 'create';

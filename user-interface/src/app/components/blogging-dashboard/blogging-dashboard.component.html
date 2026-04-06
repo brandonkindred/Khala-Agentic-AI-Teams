@@ -1,7 +1,9 @@
-<div class="page-header">
-  <h1>Blogging</h1>
-  <p class="page-subtitle">Plan, draft, and refine blog posts with AI-powered quality gates.</p>
-  <div class="page-header-actions">
+<app-dashboard-shell
+  title="Blogging"
+  subtitle="Plan, draft, and refine blog posts with AI-powered quality gates."
+  icon="article"
+>
+  <ng-container dashboardActions>
     <button mat-raised-button color="primary" (click)="showNewPost()">
       <mat-icon>add</mat-icon> New Blog Post
     </button>
@@ -10,8 +12,7 @@
         <mat-icon>list</mat-icon> Jobs ({{ allJobs.length }})
       </button>
     }
-  </div>
-</div>
+  </ng-container>
 
 @if (error) {
   <app-error-message [message]="error" />
@@ -509,3 +510,4 @@
     </div>
   </div>
 }
+</app-dashboard-shell>

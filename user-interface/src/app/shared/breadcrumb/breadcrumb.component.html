@@ -1,0 +1,16 @@
+@if (breadcrumbs().length > 1) {
+  <nav aria-label="Breadcrumb" class="breadcrumb">
+    <ol class="breadcrumb-list">
+      @for (crumb of breadcrumbs(); track crumb.url; let last = $last) {
+        <li class="breadcrumb-item">
+          @if (!last) {
+            <a [routerLink]="crumb.url">{{ crumb.label }}</a>
+            <mat-icon aria-hidden="true" class="breadcrumb-separator">chevron_right</mat-icon>
+          } @else {
+            <span aria-current="page">{{ crumb.label }}</span>
+          }
+        </li>
+      }
+    </ol>
+  </nav>
+}

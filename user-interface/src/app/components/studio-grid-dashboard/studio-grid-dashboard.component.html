@@ -1,18 +1,10 @@
-<div class="page-header">
-  <div class="page-title-row">
-    <div class="page-icon">
-      <mat-icon>design_services</mat-icon>
-    </div>
-    <div class="page-title-text">
-      <h1>StudioGrid</h1>
-      <p>Design-system multi-agent workflow — wireframes, design system, hi-fi, and handoff</p>
-    </div>
-    <div class="header-health">
-      <app-health-indicator [healthCheck]="healthCheck" label="StudioGrid API" />
-    </div>
-  </div>
-</div>
-
+<app-dashboard-shell
+  title="StudioGrid"
+  subtitle="Design-system multi-agent workflow — wireframes, design system, hi-fi, and handoff"
+  icon="design_services"
+  [healthCheck]="healthCheck"
+  healthLabel="StudioGrid API"
+>
 <mat-tab-group animationDuration="200ms" class="studio-tabs">
   <mat-tab>
     <ng-template mat-tab-label>
@@ -25,3 +17,4 @@
   </mat-tab>
 
 </mat-tab-group>
+</app-dashboard-shell>

@@ -2,8 +2,8 @@ import { Component, inject } from '@angular/core';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatIconModule } from '@angular/material/icon';
 import { StudioGridApiService } from '../../services/studio-grid-api.service';
-import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { StudioGridRunPanelComponent } from '../studio-grid-run-panel/studio-grid-run-panel.component';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 
 @Component({
   selector: 'app-studio-grid-dashboard',
@@ -11,8 +11,8 @@ import { StudioGridRunPanelComponent } from '../studio-grid-run-panel/studio-gri
   imports: [
     MatTabsModule,
     MatIconModule,
-    HealthIndicatorComponent,
     StudioGridRunPanelComponent,
+    DashboardShellComponent,
   ],
   templateUrl: './studio-grid-dashboard.component.html',
   styleUrl: './studio-grid-dashboard.component.scss',

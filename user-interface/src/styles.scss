@@ -456,6 +456,46 @@ a {
 }
 
 // ============================================================================
+// Utility Classes
+// ============================================================================
+
+.text-error    { color: var(--kh-error); }
+.text-success  { color: var(--kh-success); }
+.text-warning  { color: var(--kh-warning); }
+.text-muted    { color: var(--kh-text-muted); }
+.text-tertiary { color: var(--kh-text-tertiary); }
+.text-sm       { font-size: var(--kh-text-sm); }
+.text-xs       { font-size: var(--kh-text-xs); }
+
+@for $i from 1 through 6 {
+  .mt-#{$i} { margin-top: var(--kh-space-#{$i}); }
+  .mb-#{$i} { margin-bottom: var(--kh-space-#{$i}); }
+  .ml-#{$i} { margin-left: var(--kh-space-#{$i}); }
+  .mr-#{$i} { margin-right: var(--kh-space-#{$i}); }
+  .p-#{$i}  { padding: var(--kh-space-#{$i}); }
+}
+
+.d-flex { display: flex; }
+.gap-2  { gap: var(--kh-space-2); }
+.gap-3  { gap: var(--kh-space-3); }
+
+// ============================================================================
+// Snackbar Notification Variants
+// ============================================================================
+
+.kh-snack-success .mdc-snackbar__surface {
+  border-left: 3px solid var(--kh-success) !important;
+}
+
+.kh-snack-error .mdc-snackbar__surface {
+  border-left: 3px solid var(--kh-error) !important;
+}
+
+.kh-snack-info .mdc-snackbar__surface {
+  border-left: 3px solid var(--kh-info) !important;
+}
+
+// ============================================================================
 // Selection
 // ============================================================================
 

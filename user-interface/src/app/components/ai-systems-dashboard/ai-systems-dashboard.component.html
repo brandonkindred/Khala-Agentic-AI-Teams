@@ -1,15 +1,10 @@
-<div class="dashboard-container">
-  <header class="dashboard-header">
-    <div class="title-section">
-      <mat-icon class="team-icon">psychology</mat-icon>
-      <div>
-        <h1>AI Systems</h1>
-        <p class="subtitle">Spec-driven AI agent system factory</p>
-      </div>
-    </div>
-    <app-health-indicator [healthCheck]="healthCheck" label="AI Systems API" />
-  </header>
-
+<app-dashboard-shell
+  title="AI Systems"
+  subtitle="Spec-driven AI agent system factory"
+  icon="psychology"
+  [healthCheck]="healthCheck"
+  healthLabel="AI Systems API"
+>
   <app-team-assistant-chat
     [teamApiUrl]="'/api/ai-systems/assistant'"
     [teamName]="'AI Systems'"
@@ -20,4 +15,4 @@
       {key: 'constraints', label: 'Constraints', placeholder: 'Performance, cost, or latency requirements'}
     ]"
   />
-</div>
+</app-dashboard-shell>

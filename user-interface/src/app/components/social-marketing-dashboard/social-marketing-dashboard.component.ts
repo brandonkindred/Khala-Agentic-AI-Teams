@@ -2,6 +2,7 @@ import { Component } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 
 @Component({
   selector: 'app-social-marketing-dashboard',
@@ -10,6 +11,7 @@ import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistan
     MatButtonModule,
     MatIconModule,
     TeamAssistantChatComponent,
+    DashboardShellComponent,
   ],
   templateUrl: './social-marketing-dashboard.component.html',
   styleUrl: './social-marketing-dashboard.component.scss',

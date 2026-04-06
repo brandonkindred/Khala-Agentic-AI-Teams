@@ -1,3 +1,8 @@
+<app-dashboard-shell
+  title="Agentic Teams"
+  subtitle="Build, manage, and orchestrate multi-agent team processes."
+  icon="groups"
+>
 @if (error()) {
   <div class="error-banner">
     <mat-icon>error_outline</mat-icon>
@@ -28,10 +33,6 @@
 
   <!-- Team list view -->
   <div class="page-header">
-    <h1>
-      <mat-icon class="header-icon">groups</mat-icon>
-      Agentic Teams
-    </h1>
     <button mat-raised-button color="primary" (click)="toggleCreateForm()">
       <mat-icon>{{ showCreateForm() ? 'close' : 'add' }}</mat-icon>
       {{ showCreateForm() ? 'Cancel' : 'New Team' }}
@@ -95,3 +96,4 @@
     </div>
   }
 }
+</app-dashboard-shell>

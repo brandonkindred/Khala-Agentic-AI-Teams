@@ -17,6 +17,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { StartupAdvisorApiService } from '../../services/startup-advisor-api.service';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import {
   STARTUP_ADVISOR_PROFILE_FIELDS,
   type StartupAdvisorMessage,
@@ -39,6 +40,7 @@ type InteractionMode = 'chat' | 'form';
     MatChipsModule,
     MatButtonToggleModule,
     MatSnackBarModule,
+    DashboardShellComponent,
   ],
   templateUrl: './startup-advisor-dashboard.component.html',
   styleUrl: './startup-advisor-dashboard.component.scss',

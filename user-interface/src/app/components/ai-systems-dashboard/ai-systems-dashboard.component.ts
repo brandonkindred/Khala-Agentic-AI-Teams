@@ -15,8 +15,8 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Observable, Subscription, interval, switchMap, takeWhile } from 'rxjs';
 import { AISystemsApiService } from '../../services/ai-systems-api.service';
-import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import type {
   AISystemRequest,
   AISystemStatusResponse,
@@ -44,8 +44,8 @@ type DashboardTab = 'build' | 'jobs' | 'blueprints';
     MatTableModule,
     MatExpansionModule,
     MatTooltipModule,
-    HealthIndicatorComponent,
     TeamAssistantChatComponent,
+    DashboardShellComponent,
   ],
   templateUrl: './ai-systems-dashboard.component.html',
   styleUrl: './ai-systems-dashboard.component.scss',

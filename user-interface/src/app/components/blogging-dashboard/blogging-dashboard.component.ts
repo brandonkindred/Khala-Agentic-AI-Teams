@@ -22,6 +22,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import { Router } from '@angular/router';
 import type {
   BlogJobListItem,
@@ -88,6 +89,7 @@ export function artifactLabel(name: string): string {
     LoadingSpinnerComponent,
     ErrorMessageComponent,
     TeamAssistantChatComponent,
+    DashboardShellComponent,
   ],
   templateUrl: './blogging-dashboard.component.html',
   styleUrl: './blogging-dashboard.component.scss',

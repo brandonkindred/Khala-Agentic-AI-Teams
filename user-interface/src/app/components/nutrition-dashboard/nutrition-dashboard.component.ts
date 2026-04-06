@@ -14,6 +14,7 @@ import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { NutritionApiService } from '../../services/nutrition-api.service';
 import { NutritionFormsComponent } from '../nutrition-forms/nutrition-forms.component';
+import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import type {
   ClientProfile,
   MealRecommendation,
@@ -49,6 +50,7 @@ const PHASES = [
     MatSlideToggleModule,
     MatButtonToggleModule,
     NutritionFormsComponent,
+    DashboardShellComponent,
   ],
   templateUrl: './nutrition-dashboard.component.html',
   styleUrl: './nutrition-dashboard.component.scss',

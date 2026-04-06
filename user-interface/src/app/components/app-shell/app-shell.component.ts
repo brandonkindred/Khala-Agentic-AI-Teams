@@ -6,6 +6,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { trigger, state, style, transition, animate } from '@angular/animations';
 import { ApiStatusWidgetComponent } from '../api-status-widget/api-status-widget.component';
+import { BreadcrumbComponent } from '../../shared/breadcrumb/breadcrumb.component';
 import { NavStateService } from '../../services/nav-state.service';
 import { NAV_GROUPS, NavGroup, NavItem } from '../../models/navigation.model';
 
@@ -25,6 +26,7 @@ import { NAV_GROUPS, NavGroup, NavItem } from '../../models/navigation.model';
     MatButtonModule,
     MatIconModule,
     ApiStatusWidgetComponent,
+    BreadcrumbComponent,
   ],
   templateUrl: './app-shell.component.html',
   styleUrl: './app-shell.component.scss',
