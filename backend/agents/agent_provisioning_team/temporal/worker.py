@@ -10,7 +10,13 @@ from typing import Optional
 
 from temporalio.worker import Worker
 
-from agent_provisioning_team.temporal.activities import run_provisioning_activity
+from agent_provisioning_team.temporal.activities import (
+    compensate_activity_v2,
+    credentials_activity_v2,
+    provision_tool_activity,
+    run_provisioning_activity,
+    setup_activity_v2,
+)
 from agent_provisioning_team.temporal.client import (
     connect_temporal_client,
     is_temporal_enabled,
@@ -18,7 +24,10 @@ from agent_provisioning_team.temporal.client import (
     set_temporal_loop,
 )
 from agent_provisioning_team.temporal.constants import TASK_QUEUE
-from agent_provisioning_team.temporal.workflows import AgentProvisioningWorkflow
+from agent_provisioning_team.temporal.workflows import (
+    AgentProvisioningWorkflow,
+    AgentProvisioningWorkflowV2,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +48,16 @@ def create_agent_provisioning_worker(client: Optional[object] = None) -> Optiona
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
-        workflows=[AgentProvisioningWorkflow],
-        activities=[run_provisioning_activity],
+        workflows=[AgentProvisioningWorkflow, AgentProvisioningWorkflowV2],
+        activities=[
+            run_provisioning_activity,
+            setup_activity_v2,
+            credentials_activity_v2,
+            provision_tool_activity,
+            compensate_activity_v2,
+        ],
         activity_executor=_activity_executor,
-        max_concurrent_activities=2,
+        max_concurrent_activities=8,
     )
     logger.info("Agent Provisioning Temporal worker created for task queue %s", TASK_QUEUE)
     return worker

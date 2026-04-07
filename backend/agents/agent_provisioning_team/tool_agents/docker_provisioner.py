@@ -15,6 +15,7 @@ from ..models import (
     ToolProvisionResult,
 )
 from ..shared.access_policy import get_permissions
+from ..shared.provisioner_state import ProvisionerStateStore
 from .base import BaseToolProvisioner
 
 
@@ -25,7 +26,14 @@ class DockerProvisionerTool(BaseToolProvisioner):
 
     def __init__(self, workspace_base: str = "/workspace") -> None:
         self.workspace_base = workspace_base
-        self._containers: Dict[str, Dict[str, Any]] = {}
+        # Persistent state: survives restarts, makes provision() idempotent.
+        self._state = ProvisionerStateStore("docker_provisioner")
+
+    @property
+    def _containers(self) -> Dict[str, Dict[str, Any]]:
+        # Backwards-compat view over the persistent store for tests/callers
+        # that still read `_containers` directly.
+        return self._state.list_agents()
 
     def provision(
         self,
@@ -34,7 +42,21 @@ class DockerProvisionerTool(BaseToolProvisioner):
         credentials: GeneratedCredentials,
         access_tier: AccessTier,
     ) -> ToolProvisionResult:
-        """Create and start a Docker container for the agent."""
+        """Create and start a Docker container for the agent (idempotent)."""
+        # Idempotency: if we already have a running container for this
+        # agent, return the existing info instead of trying to create a
+        # second one (which would fail with "container name already in use").
+        existing = self._state.get(agent_id)
+        if existing:
+            permissions = get_permissions("docker", access_tier)
+            credentials.extra["container_id"] = existing.get("container_id", "")
+            credentials.extra["container_name"] = existing.get("container_name", "")
+            credentials.extra["workspace_path"] = existing.get("workspace_path", "")
+            return self._make_success_result(
+                credentials=credentials,
+                permissions=permissions,
+                details={**existing, "reused": True},
+            )
         try:
             container_name = f"agent-{agent_id}"
             base_image = config.get("base_image", "python:3.11-slim")
@@ -81,13 +103,16 @@ class DockerProvisionerTool(BaseToolProvisioner):
 
             container_id = result.stdout.strip()[:12]
 
-            self._containers[agent_id] = {
-                "container_id": container_id,
-                "container_name": container_name,
-                "ssh_port": ssh_port,
-                "workspace_path": workspace_path,
-                "status": "running",
-            }
+            self._state.put(
+                agent_id,
+                {
+                    "container_id": container_id,
+                    "container_name": container_name,
+                    "ssh_port": ssh_port,
+                    "workspace_path": workspace_path,
+                    "status": "running",
+                },
+            )
 
             permissions = get_permissions("docker", access_tier)
 
@@ -106,9 +131,15 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 },
             )
 
+        except FileNotFoundError:
+            return self._make_error_result(
+                "Docker CLI not found on PATH — install Docker or run inside a host with docker.sock mounted"
+            )
         except subprocess.TimeoutExpired:
             return self._make_error_result("Docker container creation timed out")
-        except Exception as e:
+        except PermissionError as e:
+            return self._make_error_result(f"Docker permission denied: {e}")
+        except Exception as e:  # noqa: BLE001 — last-resort guard with explicit prior cases
             return self._make_error_result(f"Docker provisioning error: {str(e)}")
 
     def verify_access(
@@ -117,7 +148,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
         expected_tier: AccessTier,
     ) -> AccessVerification:
         """Verify Docker container access."""
-        container_info = self._containers.get(agent_id)
+        container_info = self._state.get(agent_id)
 
         if not container_info:
             return self._make_verification(
@@ -161,7 +192,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
 
     def deprovision(self, agent_id: str) -> DeprovisionResult:
         """Stop and remove the Docker container."""
-        container_info = self._containers.get(agent_id)
+        container_info = self._state.get(agent_id)
 
         if not container_info:
             return DeprovisionResult(
@@ -185,7 +216,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
                 timeout=30,
             )
 
-            del self._containers[agent_id]
+            self._state.delete(agent_id)
 
             return DeprovisionResult(
                 tool_name=self.tool_name,
@@ -208,7 +239,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
 
     def get_container_info(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """Get container information for an agent."""
-        return self._containers.get(agent_id)
+        return self._state.get(agent_id)
 
     def exec_in_container(
         self,
@@ -221,7 +252,7 @@ class DockerProvisionerTool(BaseToolProvisioner):
         Returns:
             Tuple of (exit_code, stdout, stderr)
         """
-        container_info = self._containers.get(agent_id)
+        container_info = self._state.get(agent_id)
         if not container_info:
             return 1, "", f"No container for agent {agent_id}"
 

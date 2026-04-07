@@ -21,27 +21,25 @@ from .phases.documentation import run_documentation
 from .phases.setup import cleanup_setup, run_setup
 from .shared.credential_store import CredentialStore
 from .shared.environment_store import EnvironmentStore
+from .shared.logging_context import install_filter as _install_log_filter
+from .shared.phase_state import (
+    restore_account_provisioning,
+    restore_credentials,
+    restore_documentation,
+    restore_setup,
+)
+from .shared.tool_agent_registry import build_default_tool_agents
 from .shared.tool_manifest import load_manifest
-from .tool_agents.docker_provisioner import DockerProvisionerTool
-from .tool_agents.generic_provisioner import GenericProvisionerTool
-from .tool_agents.git_provisioner import GitProvisionerTool
-from .tool_agents.postgres_provisioner import PostgresProvisionerTool
-from .tool_agents.redis_provisioner import RedisProvisionerTool
 
+_install_log_filter()
 logger = logging.getLogger(__name__)
 
 JobUpdater = Callable[..., None]
 
 
+# Backwards-compat alias for callers/tests that imported the old name.
 def _build_tool_agents() -> Dict[str, Any]:
-    """Build the default set of tool provisioner agents."""
-    return {
-        "docker_provisioner": DockerProvisionerTool(),
-        "postgres_provisioner": PostgresProvisionerTool(),
-        "git_provisioner": GitProvisionerTool(),
-        "redis_provisioner": RedisProvisionerTool(),
-        "generic_provisioner": GenericProvisionerTool(),
-    }
+    return build_default_tool_agents()
 
 
 class ProvisioningOrchestrator:
@@ -65,7 +63,7 @@ class ProvisioningOrchestrator:
     ) -> None:
         self.credential_store = credential_store or CredentialStore()
         self.environment_store = environment_store or EnvironmentStore()
-        self.tool_agents = tool_agents or _build_tool_agents()
+        self.tool_agents = tool_agents or build_default_tool_agents()
 
     def run_workflow(
         self,
@@ -92,8 +90,18 @@ class ProvisioningOrchestrator:
         """
         skip_phases = skip_phases or set()
         prior_results = prior_results or {}
+        # Bind correlation IDs onto contextvars so every log line from
+        # here down carries agent_id / phase via the logging filter.
+        # The orchestrator is typically invoked inside its own background
+        # thread, so the contextvar binding is isolated per-run.
+        from .shared.logging_context import _agent_id_var, _phase_var
+        _agent_id_var.set(agent_id)
+        _phase_var.set("init")
         if skip_phases:
             logger.info("Resuming workflow — skipping completed phases: %s", [p.value for p in skip_phases])
+
+        def _set_phase(name: str) -> None:
+            _phase_var.set(name)
 
         def _update(
             current_phase: Optional[str] = None,
@@ -124,8 +132,9 @@ class ProvisioningOrchestrator:
             )
 
         # -- SETUP --
+        _set_phase(Phase.SETUP.value)
         if Phase.SETUP in skip_phases and prior_results.get("setup"):
-            setup_result = type("R", (), prior_results["setup"])()  # reconstruct as namespace
+            setup_result = restore_setup(prior_results["setup"])
             logger.info("Skipping SETUP (already completed)")
         else:
             _update(current_phase=Phase.SETUP.value, progress=5, status_text="Creating Docker environment...")
@@ -144,8 +153,9 @@ class ProvisioningOrchestrator:
                 )
 
         # -- CREDENTIAL_GENERATION --
+        _set_phase(Phase.CREDENTIAL_GENERATION.value)
         if Phase.CREDENTIAL_GENERATION in skip_phases and prior_results.get("credential_generation"):
-            cred_result = type("R", (), prior_results["credential_generation"])()
+            cred_result = restore_credentials(prior_results["credential_generation"])
             logger.info("Skipping CREDENTIAL_GENERATION (already completed)")
         else:
             _update(current_phase=Phase.CREDENTIAL_GENERATION.value, progress=20, status_text="Generating credentials...")
@@ -167,8 +177,9 @@ class ProvisioningOrchestrator:
                 )
 
         # -- ACCOUNT_PROVISIONING --
+        _set_phase(Phase.ACCOUNT_PROVISIONING.value)
         if Phase.ACCOUNT_PROVISIONING in skip_phases and prior_results.get("account_provisioning"):
-            account_result = type("R", (), prior_results["account_provisioning"])()
+            account_result = restore_account_provisioning(prior_results["account_provisioning"])
             logger.info("Skipping ACCOUNT_PROVISIONING (already completed)")
         else:
             _update(
@@ -185,7 +196,26 @@ class ProvisioningOrchestrator:
                 ),
             )
 
+            # Compensation: if any tool failed, roll back already-provisioned
+            # tools and the Docker setup so we don't leak resources or
+            # encrypted credentials for a half-finished agent.
+            if not account_result.success:
+                logger.error(
+                    "ACCOUNT_PROVISIONING failed for agent=%s: %s — rolling back",
+                    agent_id, account_result.error,
+                )
+                self._compensate(agent_id, account_result.tool_results)
+                return ProvisioningResult(
+                    agent_id=agent_id,
+                    current_phase=Phase.ACCOUNT_PROVISIONING,
+                    completed_phases=[Phase.SETUP, Phase.CREDENTIAL_GENERATION],
+                    environment=setup_result.environment,
+                    success=False,
+                    error=account_result.error or "Account provisioning failed",
+                )
+
         # -- ACCESS_AUDIT --
+        _set_phase(Phase.ACCESS_AUDIT.value)
         if Phase.ACCESS_AUDIT in skip_phases and prior_results.get("access_audit"):
             audit_result = prior_results["access_audit"]
             logger.info("Skipping ACCESS_AUDIT (already completed)")
@@ -198,8 +228,9 @@ class ProvisioningOrchestrator:
             )
 
         # -- DOCUMENTATION --
+        _set_phase(Phase.DOCUMENTATION.value)
         if Phase.DOCUMENTATION in skip_phases and prior_results.get("documentation"):
-            doc_result = type("R", (), prior_results["documentation"])()
+            doc_result = restore_documentation(prior_results["documentation"])
             logger.info("Skipping DOCUMENTATION (already completed)")
         else:
             _update(current_phase=Phase.DOCUMENTATION.value, progress=85, status_text="Generating onboarding documentation...")
@@ -214,6 +245,7 @@ class ProvisioningOrchestrator:
             )
 
         # -- DELIVER --
+        _set_phase(Phase.DELIVER.value)
         _update(current_phase=Phase.DELIVER.value, progress=95, status_text="Finalizing provisioning...")
         deliver_result = run_deliver(
             agent_id=agent_id, environment=setup_result.environment,
@@ -232,6 +264,44 @@ class ProvisioningOrchestrator:
 
         _update(current_phase=Phase.DELIVER.value, progress=100, status_text="Provisioning complete")
         return final_result
+
+    def _compensate(
+        self,
+        agent_id: str,
+        tool_results: List[Any],
+    ) -> None:
+        """Roll back partial provisioning after a phase failure.
+
+        Best-effort: deprovisions any tools that did succeed, tears down the
+        Docker environment, and removes encrypted credentials so a failed
+        run doesn't leak resources or secrets to disk.
+        """
+        succeeded = [r.tool_name for r in tool_results if getattr(r, "success", False)]
+        for tool_name in succeeded:
+            provisioner = self.tool_agents.get(f"{tool_name}_provisioner")
+            if provisioner is None:
+                continue
+            try:
+                provisioner.deprovision(agent_id)
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                logger.exception("Compensation: deprovision failed for %s", tool_name)
+
+        docker = self.tool_agents.get("docker_provisioner")
+        if docker is not None:
+            try:
+                docker.deprovision(agent_id)
+            except Exception:  # noqa: BLE001
+                logger.exception("Compensation: docker teardown failed")
+
+        try:
+            self.credential_store.delete_credentials(agent_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Compensation: credential cleanup failed")
+
+        try:
+            cleanup_setup(agent_id, self.environment_store)
+        except Exception:  # noqa: BLE001
+            logger.exception("Compensation: environment cleanup failed")
 
     def deprovision(
         self,
