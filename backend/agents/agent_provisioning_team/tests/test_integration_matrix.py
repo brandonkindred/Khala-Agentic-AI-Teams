@@ -17,7 +17,6 @@ touches Docker / Postgres / Temporal.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -25,7 +24,6 @@ import pytest
 
 from agent_provisioning_team.models import (
     AccessTier,
-    AccessVerification,
     DeprovisionResult,
     EnvironmentInfo,
     GeneratedCredentials,
@@ -38,7 +36,6 @@ from agent_provisioning_team.phases.deliver import (
     _redact_details,
     redact_credentials_for_response,
 )
-from agent_provisioning_team.phases.documentation import run_documentation
 from agent_provisioning_team.shared.credential_store import (
     CredentialStore,
     CredentialStoreConfigError,
@@ -293,7 +290,6 @@ class TestLLMClient:
         assert "truncated" in out
 
     def test_llm_fallback_labeled(self):
-        out = LLMClient().complete.__self__ if False else None  # noqa: just typecheck access
         from agent_provisioning_team.shared.llm_client import LLMRequest
 
         resp = LLMClient().complete(LLMRequest(system="s", user="hello"))

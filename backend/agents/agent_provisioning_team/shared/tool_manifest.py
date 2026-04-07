@@ -84,7 +84,7 @@ class GenericProvisionerConfig(_ToolBaseConfig):
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
-PROVISIONER_CONFIG_SCHEMAS: Dict[str, Type[_StrictConfig]] = {
+PROVISIONER_CONFIG_SCHEMAS: Dict[str, Type[_ToolBaseConfig]] = {
     "docker_provisioner": DockerProvisionerConfig,
     "postgres_provisioner": PostgresProvisionerConfig,
     "redis_provisioner": RedisProvisionerConfig,
