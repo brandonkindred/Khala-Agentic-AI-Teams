@@ -8,7 +8,7 @@
 
 services:
   postgres:
-    image: postgres:16
+    image: postgres:17
     container_name: strands-stack-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}

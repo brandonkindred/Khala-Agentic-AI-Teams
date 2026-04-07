@@ -2,7 +2,7 @@
 
 This directory defines a **Docker Compose stack** that runs:
 
-- **PostgreSQL 16** – shared database with `temporal` and `strands` databases (created at first run)
+- **PostgreSQL 17** – shared database with `temporal` and `strands` databases (created at first run)
 - **Temporal** – workflow engine (Postgres-backed, no Elasticsearch)
 - **Temporal UI** – Web UI for workflows
 - **Ollama** (optional) – local Ollama server if you override LLM to use it
