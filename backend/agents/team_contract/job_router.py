@@ -101,6 +101,69 @@ def create_job_router(team: str) -> APIRouter:
         manager.update_job(job_id, status="cancelled")
         return {"job_id": job_id, "cancelled": True}
 
+    class _ResumeRequest(BaseModel):
+        key: Optional[str] = None
+        value: Any = None
+
+    @router.post("/{job_id}/resume")
+    def resume_job(job_id: str, request: _ResumeRequest) -> Dict[str, Any]:
+        """Resume a paused job by submitting input for a ``waiting_for`` key.
+
+        Works uniformly for Temporal and thread-mode jobs because both
+        record pauses via :func:`shared_temporal.wait_for_input`.
+        """
+        manager = _get_manager()
+        job = manager.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+        waiting = job.get("waiting_for") or {}
+        key = request.key
+        if key is None:
+            if len(waiting) == 1:
+                key = next(iter(waiting))
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Job is not waiting for a single input; specify 'key'. "
+                        f"waiting_for={list(waiting)}"
+                    ),
+                )
+        if key not in waiting:
+            raise HTTPException(
+                status_code=409, detail=f"Job is not waiting for key '{key}'"
+            )
+
+        from shared_temporal.checkpoints import submit_input
+
+        submit_input(team, job_id, key, request.value)
+
+        # If running under Temporal, also signal the workflow so
+        # ``workflow.wait_condition`` handlers wake up immediately.
+        try:
+            from shared_temporal.client import (
+                get_temporal_client,
+                get_temporal_loop,
+                is_temporal_enabled,
+            )
+
+            if is_temporal_enabled():
+                client = get_temporal_client()
+                loop = get_temporal_loop()
+                if client is not None and loop is not None:
+                    import asyncio
+
+                    async def _signal() -> None:
+                        handle = client.get_workflow_handle(f"{team}-{job_id}")
+                        await handle.signal("submit_input", {"key": key, "value": request.value})
+
+                    asyncio.run_coroutine_threadsafe(_signal(), loop)
+        except Exception:  # pragma: no cover - signal is best-effort
+            logger.exception("Resume signal failed for %s/%s", team, job_id)
+
+        return {"job_id": job_id, "resumed": True, "key": key}
+
     return router
 
 
