@@ -21,6 +21,7 @@ from .phases.documentation import run_documentation
 from .phases.setup import cleanup_setup, run_setup
 from .shared.credential_store import CredentialStore
 from .shared.environment_store import EnvironmentStore
+from .shared.logging_context import install_filter as _install_log_filter
 from .shared.phase_state import (
     restore_account_provisioning,
     restore_credentials,
@@ -30,6 +31,7 @@ from .shared.phase_state import (
 from .shared.tool_agent_registry import build_default_tool_agents
 from .shared.tool_manifest import load_manifest
 
+_install_log_filter()
 logger = logging.getLogger(__name__)
 
 JobUpdater = Callable[..., None]
@@ -88,8 +90,18 @@ class ProvisioningOrchestrator:
         """
         skip_phases = skip_phases or set()
         prior_results = prior_results or {}
+        # Bind correlation IDs onto contextvars so every log line from
+        # here down carries agent_id / phase via the logging filter.
+        # The orchestrator is typically invoked inside its own background
+        # thread, so the contextvar binding is isolated per-run.
+        from .shared.logging_context import _agent_id_var, _phase_var
+        _agent_id_var.set(agent_id)
+        _phase_var.set("init")
         if skip_phases:
             logger.info("Resuming workflow — skipping completed phases: %s", [p.value for p in skip_phases])
+
+        def _set_phase(name: str) -> None:
+            _phase_var.set(name)
 
         def _update(
             current_phase: Optional[str] = None,
@@ -120,6 +132,7 @@ class ProvisioningOrchestrator:
             )
 
         # -- SETUP --
+        _set_phase(Phase.SETUP.value)
         if Phase.SETUP in skip_phases and prior_results.get("setup"):
             setup_result = restore_setup(prior_results["setup"])
             logger.info("Skipping SETUP (already completed)")
@@ -140,6 +153,7 @@ class ProvisioningOrchestrator:
                 )
 
         # -- CREDENTIAL_GENERATION --
+        _set_phase(Phase.CREDENTIAL_GENERATION.value)
         if Phase.CREDENTIAL_GENERATION in skip_phases and prior_results.get("credential_generation"):
             cred_result = restore_credentials(prior_results["credential_generation"])
             logger.info("Skipping CREDENTIAL_GENERATION (already completed)")
@@ -163,6 +177,7 @@ class ProvisioningOrchestrator:
                 )
 
         # -- ACCOUNT_PROVISIONING --
+        _set_phase(Phase.ACCOUNT_PROVISIONING.value)
         if Phase.ACCOUNT_PROVISIONING in skip_phases and prior_results.get("account_provisioning"):
             account_result = restore_account_provisioning(prior_results["account_provisioning"])
             logger.info("Skipping ACCOUNT_PROVISIONING (already completed)")
@@ -200,6 +215,7 @@ class ProvisioningOrchestrator:
                 )
 
         # -- ACCESS_AUDIT --
+        _set_phase(Phase.ACCESS_AUDIT.value)
         if Phase.ACCESS_AUDIT in skip_phases and prior_results.get("access_audit"):
             audit_result = prior_results["access_audit"]
             logger.info("Skipping ACCESS_AUDIT (already completed)")
@@ -212,6 +228,7 @@ class ProvisioningOrchestrator:
             )
 
         # -- DOCUMENTATION --
+        _set_phase(Phase.DOCUMENTATION.value)
         if Phase.DOCUMENTATION in skip_phases and prior_results.get("documentation"):
             doc_result = restore_documentation(prior_results["documentation"])
             logger.info("Skipping DOCUMENTATION (already completed)")
@@ -228,6 +245,7 @@ class ProvisioningOrchestrator:
             )
 
         # -- DELIVER --
+        _set_phase(Phase.DELIVER.value)
         _update(current_phase=Phase.DELIVER.value, progress=95, status_text="Finalizing provisioning...")
         deliver_result = run_deliver(
             agent_id=agent_id, environment=setup_result.environment,

@@ -2,6 +2,21 @@
 Secure credential storage using Fernet encryption.
 
 Stores generated credentials encrypted at rest in .agent_cache/credentials/
+
+Key management
+--------------
+The store understands three sources of keys, in priority order:
+
+1. ``encryption_key=`` constructor argument (tests / explicit wiring).
+2. ``PROVISION_CREDENTIAL_KEY`` env var — comma-separated list of Fernet
+   keys. The FIRST key is always used for new encryptions; trailing keys
+   remain valid for decryption. This enables zero-downtime rotation via
+   ``cryptography.fernet.MultiFernet``.
+3. A key file at ``PA_CREDENTIAL_KEY_FILE`` or the dev fallback
+   ``<storage_dir>/.encryption_key`` (auto-generated in dev).
+
+In production set ``PROVISION_REQUIRE_KEY=1`` to disable the dev fallback
+and hard-fail if no key is configured.
 """
 
 import json
@@ -11,13 +26,17 @@ import string
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 DEFAULT_CREDENTIALS_DIR = Path(".agent_cache/provisioning_credentials")
 
 
+class CredentialStoreConfigError(RuntimeError):
+    """Raised when PROVISION_REQUIRE_KEY=1 is set but no valid key exists."""
+
+
 class CredentialStore:
-    """Secure credential storage with Fernet encryption."""
+    """Secure credential storage with Fernet encryption + rotation support."""
 
     def __init__(
         self,
@@ -27,18 +46,54 @@ class CredentialStore:
         self.storage_dir = storage_dir or DEFAULT_CREDENTIALS_DIR
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
-        key = encryption_key or os.environ.get("PROVISION_CREDENTIAL_KEY") or None
-        if key:
-            key = key.strip() if isinstance(key, str) else key
-        if not key:
-            key = self._load_key_from_file() or self._load_or_generate_key()
-        if isinstance(key, str):
-            key = key.encode()
+        keys = self._collect_keys(encryption_key)
+        if not keys:
+            if os.environ.get("PROVISION_REQUIRE_KEY", "").lower() in ("1", "true", "yes"):
+                raise CredentialStoreConfigError(
+                    "PROVISION_REQUIRE_KEY is set but no valid credential key was "
+                    "found. Set PROVISION_CREDENTIAL_KEY or PA_CREDENTIAL_KEY_FILE."
+                )
+            keys = [self._load_or_generate_key()]
+
         try:
-            self.fernet = Fernet(key)
-        except ValueError:
-            key = self._load_or_generate_key()
-            self.fernet = Fernet(key)
+            self._fernets = [Fernet(k) for k in keys]
+        except ValueError as e:
+            raise CredentialStoreConfigError(f"Invalid credential key: {e}") from e
+
+        self.multifernet = MultiFernet(self._fernets)
+        # Back-compat attribute (old tests may still read .fernet).
+        self.fernet = self._fernets[0]
+
+    # ---- key loading ----
+    def _collect_keys(self, override: Optional[str]) -> List[bytes]:
+        """Collect keys from explicit arg / env / file, in priority order."""
+        keys: List[bytes] = []
+
+        if override:
+            keys.extend(self._parse_key_list(override))
+
+        env = os.environ.get("PROVISION_CREDENTIAL_KEY", "").strip()
+        if env and not override:
+            keys.extend(self._parse_key_list(env))
+
+        file_key = self._load_key_from_file()
+        if file_key:
+            keys.append(file_key)
+
+        # Dedup while preserving order — first key wins for encryption.
+        seen = set()
+        out: List[bytes] = []
+        for k in keys:
+            if k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out
+
+    @staticmethod
+    def _parse_key_list(raw: str) -> List[bytes]:
+        """Parse a comma-separated list of Fernet keys, skipping blanks."""
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        return [p.encode() if isinstance(p, str) else p for p in parts]
 
     def _load_key_from_file(self) -> Optional[bytes]:
         """Load key from PA_CREDENTIAL_KEY_FILE if set (e.g. Docker build-time key)."""
@@ -104,14 +159,14 @@ class CredentialStore:
         if path.exists():
             try:
                 encrypted = path.read_bytes()
-                decrypted = self.fernet.decrypt(encrypted)
+                decrypted = self.multifernet.decrypt(encrypted)
                 existing = json.loads(decrypted.decode())
-            except Exception:
+            except (InvalidToken, ValueError, OSError):
                 existing = {}
 
         existing[tool_name] = credentials
 
-        encrypted = self.fernet.encrypt(json.dumps(existing).encode())
+        encrypted = self.multifernet.encrypt(json.dumps(existing).encode())
         path.write_bytes(encrypted)
         path.chmod(0o600)
 
@@ -128,14 +183,50 @@ class CredentialStore:
 
         try:
             encrypted = path.read_bytes()
-            decrypted = self.fernet.decrypt(encrypted)
+            decrypted = self.multifernet.decrypt(encrypted)
             all_creds = json.loads(decrypted.decode())
 
             if tool_name:
                 return all_creds.get(tool_name)
             return all_creds
-        except Exception:
+        except (InvalidToken, ValueError, OSError):
             return None
+
+    def rotate_key(self, new_key: str) -> int:
+        """Re-encrypt every stored agent file with a new Fernet key.
+
+        ``new_key`` is prepended to the key list and becomes the active
+        encryption key. Trailing (old) keys remain valid until callers
+        remove them from ``PROVISION_CREDENTIAL_KEY``. Returns the number
+        of files re-encrypted.
+
+        Callers are responsible for persisting ``new_key`` to their
+        secret manager / env var *before* calling this method; otherwise
+        a restart will lose the new key.
+        """
+        new_key_bytes = new_key.encode() if isinstance(new_key, str) else new_key
+        try:
+            new_fernet = Fernet(new_key_bytes)
+        except ValueError as e:
+            raise CredentialStoreConfigError(f"Invalid new key: {e}") from e
+
+        # Prepend new key so it becomes the active encryption key.
+        self._fernets = [new_fernet, *self._fernets]
+        self.multifernet = MultiFernet(self._fernets)
+        self.fernet = new_fernet
+
+        rotated = 0
+        for path in self.storage_dir.glob("*.enc"):
+            try:
+                encrypted = path.read_bytes()
+                re_encrypted = self.multifernet.rotate(encrypted)
+                path.write_bytes(re_encrypted)
+                path.chmod(0o600)
+                rotated += 1
+            except (InvalidToken, ValueError, OSError):
+                # Skip unreadable files; don't abort the rotation.
+                continue
+        return rotated
 
     def delete_credentials(self, agent_id: str) -> bool:
         """Delete all credentials for an agent."""
