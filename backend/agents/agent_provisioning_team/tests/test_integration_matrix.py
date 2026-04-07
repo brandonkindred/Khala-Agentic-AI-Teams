@@ -49,7 +49,6 @@ from agent_provisioning_team.shared.tool_manifest import (
 )
 from agent_provisioning_team.tool_agents.base import BaseToolProvisioner
 
-
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
