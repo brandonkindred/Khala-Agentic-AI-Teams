@@ -17,7 +17,11 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data_v18:/var/lib/postgresql/data
+      # Mount the parent dir (not `/data`) because the postgres:18 image stores
+      # its data under a major-version subdirectory (e.g. /var/lib/postgresql/18/docker)
+      # and refuses to start if it finds a legacy `/var/lib/postgresql/data`
+      # mount point. See docker-library/postgres#1259.
+      - postgres_data_v18:/var/lib/postgresql
       - ./postgres/init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
