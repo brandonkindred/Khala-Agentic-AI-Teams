@@ -1,42 +1,59 @@
-"""SQLite-backed store for user agent founder workflow runs and decisions."""
+"""Postgres-backed store for user agent founder workflow runs and decisions.
+
+Rewritten in PR 3 of the SQLite → Postgres migration. Targets the
+``user_agent_founder_runs`` / ``user_agent_founder_decisions`` tables
+declared in ``user_agent_founder.postgres`` and registered from the
+team's FastAPI lifespan. Public API (constructor, method names,
+dataclass shapes) is identical to the pre-migration SQLite version so
+``api/main.py`` and ``orchestrator.py`` need no changes.
+
+All data access goes through ``shared_postgres.get_conn`` (pool-backed
+since PR 0). Every public method is wrapped in ``@timed_query`` so
+slow reads and writes surface as structured log lines.
+"""
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import sqlite3
-import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Iterator, List, Optional
+from typing import Any, Optional
 from uuid import uuid4
+
+from psycopg.rows import dict_row
+
+from shared_postgres import get_conn
+from shared_postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS runs (
-    run_id         TEXT PRIMARY KEY,
-    status         TEXT NOT NULL DEFAULT 'pending',
-    se_job_id      TEXT,
-    analysis_job_id TEXT,
-    spec_content   TEXT,
-    repo_path      TEXT,
-    created_at     TEXT NOT NULL,
-    updated_at     TEXT NOT NULL,
-    error          TEXT
-);
-CREATE TABLE IF NOT EXISTS decisions (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id         TEXT NOT NULL,
-    question_id    TEXT NOT NULL,
-    question_text  TEXT NOT NULL,
-    answer_text    TEXT NOT NULL,
-    rationale      TEXT NOT NULL DEFAULT '',
-    timestamp      TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_decisions_run ON decisions(run_id);
-"""
+_STORE = "user_agent_founder"
+
+# Columns ``update_run`` is allowed to write. Used both as a whitelist
+# (defends against SQL injection via kwargs keys — psycopg3 parameter
+# binding is for values only, column names get interpolated via f-string)
+# and as a safety net against typo'd call sites.
+_UPDATE_ALLOWED_COLUMNS = frozenset(
+    {
+        "status",
+        "se_job_id",
+        "analysis_job_id",
+        "spec_content",
+        "repo_path",
+        "error",
+    }
+)
+
+
+def _row_ts(value: Any) -> str:
+    """Normalize a Postgres TIMESTAMPTZ to an ISO-8601 string.
+
+    Preserves the pre-migration dataclass contract where timestamps are
+    exposed as strings.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value or "")
 
 
 @dataclass
@@ -63,156 +80,158 @@ class StoredDecision:
     timestamp: str
 
 
+def _row_to_run(row: dict[str, Any]) -> StoredRun:
+    return StoredRun(
+        run_id=row["run_id"],
+        status=row["status"],
+        se_job_id=row["se_job_id"],
+        analysis_job_id=row["analysis_job_id"],
+        spec_content=row["spec_content"],
+        repo_path=row["repo_path"],
+        created_at=_row_ts(row["created_at"]),
+        updated_at=_row_ts(row["updated_at"]),
+        error=row["error"],
+    )
+
+
 class FounderRunStore:
-    """SQLite-backed store for founder agent workflow runs."""
+    """Postgres-backed store for founder agent workflow runs.
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
-        self._lock = threading.Lock()
-        if db_path is None:
-            self._file_path: Optional[str] = None
-            self._mem_conn: Optional[sqlite3.Connection] = sqlite3.connect(
-                ":memory:", check_same_thread=False
-            )
-            self._mem_conn.row_factory = sqlite3.Row
-            self._mem_conn.executescript(_SCHEMA)
-            self._mem_conn.commit()
-        else:
-            self._file_path = str(db_path)
-            self._mem_conn = None
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            self._init_file_schema()
+    The constructor takes no arguments — the Postgres DSN is read from
+    the ``POSTGRES_*`` env vars by ``shared_postgres.get_conn``. The
+    lazy ``get_founder_store()`` accessor defers instantiation so
+    ``import user_agent_founder.store`` stays cheap.
+    """
 
-    def _init_file_schema(self) -> None:
-        conn = sqlite3.connect(self._file_path, timeout=15)  # type: ignore[arg-type]
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(_SCHEMA)
-        conn.commit()
-        conn.close()
+    def __init__(self) -> None:
+        # Stateless; connection pooling lives in shared_postgres.
+        pass
 
-    @contextlib.contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
-        if self._mem_conn is not None:
-            with self._lock:
-                self._mem_conn.row_factory = sqlite3.Row
-                yield self._mem_conn
-                self._mem_conn.commit()
-        else:
-            conn = sqlite3.connect(self._file_path, check_same_thread=False, timeout=15)  # type: ignore[arg-type]
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.row_factory = sqlite3.Row
-            try:
-                yield conn
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
-
+    @timed_query(store=_STORE, op="create_run")
     def create_run(self) -> str:
         run_id = str(uuid4())
-        now = datetime.now(tz=timezone.utc).isoformat()
-        with self._db() as conn:
-            conn.execute(
-                "INSERT INTO runs (run_id, status, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        now = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO user_agent_founder_runs "
+                "(run_id, status, created_at, updated_at) VALUES (%s, %s, %s, %s)",
                 (run_id, "pending", now, now),
             )
         return run_id
 
+    @timed_query(store=_STORE, op="get_run")
     def get_run(self, run_id: str) -> Optional[StoredRun]:
-        with self._db() as conn:
-            row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT run_id, status, se_job_id, analysis_job_id, spec_content, "
+                "repo_path, created_at, updated_at, error "
+                "FROM user_agent_founder_runs WHERE run_id = %s",
+                (run_id,),
+            )
+            row = cur.fetchone()
             if row is None:
                 return None
-            return StoredRun(
-                run_id=row["run_id"],
-                status=row["status"],
-                se_job_id=row["se_job_id"],
-                analysis_job_id=row["analysis_job_id"],
-                spec_content=row["spec_content"],
-                repo_path=row["repo_path"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-                error=row["error"],
-            )
+            return _row_to_run(row)
 
+    @timed_query(store=_STORE, op="update_run")
     def update_run(self, run_id: str, **kwargs: Any) -> bool:
+        """Update one or more columns on a run row.
+
+        ``kwargs`` keys are filtered against ``_UPDATE_ALLOWED_COLUMNS``
+        before being interpolated into the SET clause — psycopg3
+        parameter binding covers values only, so column names MUST come
+        from a trusted whitelist to avoid SQL injection.
+        """
         if not kwargs:
             return False
-        allowed = {"status", "se_job_id", "analysis_job_id", "spec_content", "repo_path", "error"}
-        fields = {k: v for k, v in kwargs.items() if k in allowed}
+        fields = {k: v for k, v in kwargs.items() if k in _UPDATE_ALLOWED_COLUMNS}
         if not fields:
             return False
-        fields["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
-        set_clause = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values()) + [run_id]
-        with self._db() as conn:
-            result = conn.execute(f"UPDATE runs SET {set_clause} WHERE run_id = ?", values)
-        return result.rowcount > 0
 
+        # Ordered so set_clause and values stay in lock-step regardless
+        # of Python dict iteration order (stable in 3.7+ but explicit is
+        # better than implicit for SQL construction).
+        ordered_keys = list(fields.keys())
+        set_clause = ", ".join(f"{k} = %s" for k in ordered_keys) + ", updated_at = %s"
+        values: list[Any] = [fields[k] for k in ordered_keys]
+        values.append(datetime.now(tz=timezone.utc))
+        values.append(run_id)
+
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE user_agent_founder_runs SET {set_clause} WHERE run_id = %s",
+                values,
+            )
+            return cur.rowcount > 0
+
+    @timed_query(store=_STORE, op="add_decision")
     def add_decision(
-        self, run_id: str, question_id: str, question_text: str, answer_text: str, rationale: str
+        self,
+        run_id: str,
+        question_id: str,
+        question_text: str,
+        answer_text: str,
+        rationale: str,
     ) -> int:
-        ts = datetime.now(tz=timezone.utc).isoformat()
-        with self._db() as conn:
-            cursor = conn.execute(
-                "INSERT INTO decisions (run_id, question_id, question_text, answer_text, rationale, timestamp)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+        ts = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO user_agent_founder_decisions "
+                "(run_id, question_id, question_text, answer_text, rationale, timestamp) "
+                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
                 (run_id, question_id, question_text, answer_text, rationale, ts),
             )
-            return cursor.lastrowid  # type: ignore[return-value]
+            row = cur.fetchone()
+            return int(row[0])
 
-    def get_decisions(self, run_id: str) -> List[StoredDecision]:
-        with self._db() as conn:
-            rows = conn.execute(
-                "SELECT id, run_id, question_id, question_text, answer_text, rationale, timestamp"
-                " FROM decisions WHERE run_id = ? ORDER BY id",
+    @timed_query(store=_STORE, op="get_decisions")
+    def get_decisions(self, run_id: str) -> list[StoredDecision]:
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, run_id, question_id, question_text, answer_text, "
+                "rationale, timestamp FROM user_agent_founder_decisions "
+                "WHERE run_id = %s ORDER BY id",
                 (run_id,),
-            ).fetchall()
-        return [
-            StoredDecision(
-                decision_id=r["id"],
-                run_id=r["run_id"],
-                question_id=r["question_id"],
-                question_text=r["question_text"],
-                answer_text=r["answer_text"],
-                rationale=r["rationale"],
-                timestamp=r["timestamp"],
             )
-            for r in rows
-        ]
+            return [
+                StoredDecision(
+                    decision_id=int(r["id"]),
+                    run_id=r["run_id"],
+                    question_id=r["question_id"],
+                    question_text=r["question_text"],
+                    answer_text=r["answer_text"],
+                    rationale=r["rationale"],
+                    timestamp=_row_ts(r["timestamp"]),
+                )
+                for r in cur.fetchall()
+            ]
 
-    def list_runs(self) -> List[StoredRun]:
-        with self._db() as conn:
-            rows = conn.execute("SELECT * FROM runs ORDER BY created_at DESC").fetchall()
-        return [
-            StoredRun(
-                run_id=r["run_id"],
-                status=r["status"],
-                se_job_id=r["se_job_id"],
-                analysis_job_id=r["analysis_job_id"],
-                spec_content=r["spec_content"],
-                repo_path=r["repo_path"],
-                created_at=r["created_at"],
-                updated_at=r["updated_at"],
-                error=r["error"],
+    @timed_query(store=_STORE, op="list_runs")
+    def list_runs(self) -> list[StoredRun]:
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT run_id, status, se_job_id, analysis_job_id, spec_content, "
+                "repo_path, created_at, updated_at, error "
+                "FROM user_agent_founder_runs ORDER BY created_at DESC"
             )
-            for r in rows
-        ]
+            return [_row_to_run(r) for r in cur.fetchall()]
 
 
 # ---------------------------------------------------------------------------
-# Singleton
+# Lazy singleton
 # ---------------------------------------------------------------------------
 
 _default_store: Optional[FounderRunStore] = None
 
 
 def get_founder_store() -> FounderRunStore:
+    """Return the process-wide store, instantiating on first call.
+
+    Lazy so ``import user_agent_founder.store`` never touches Postgres
+    — the store itself is stateless; this singleton only exists to
+    give tests a stable identity for mocking.
+    """
     global _default_store
     if _default_store is None:
-        from user_agent_founder.db import get_db_path
-
-        _default_store = FounderRunStore(db_path=get_db_path())
+        _default_store = FounderRunStore()
     return _default_store
