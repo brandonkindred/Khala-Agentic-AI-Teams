@@ -29,6 +29,9 @@ COPY agents/job_service_client.py /app/job_service_client.py
 # Integration contracts (used by integrations_store)
 COPY agents/integrations /app/integrations
 
+# Postgres schema registry (used by blogging lifespan to register its schema)
+COPY agents/shared_postgres /app/shared_postgres
+
 # Minimal unified_api modules needed by blogging Medium integration.
 # These are lazy-imported by blogging/shared/medium_integration_access.py.
 COPY unified_api/__init__.py /app/unified_api/__init__.py

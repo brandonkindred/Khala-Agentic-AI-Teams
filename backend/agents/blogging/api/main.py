@@ -173,7 +173,21 @@ def _run_blogging_service_shutdown() -> None:
 
 @asynccontextmanager
 async def _blogging_lifespan(app: FastAPI):
+    # Register Postgres schema (no-op when POSTGRES_HOST is unset).
+    try:
+        from blogging.postgres import SCHEMA as BLOGGING_POSTGRES_SCHEMA
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(BLOGGING_POSTGRES_SCHEMA)
+    except Exception:
+        logger.exception("blogging postgres schema registration failed")
     yield
+    try:
+        from shared_postgres import close_pool
+
+        close_pool()
+    except Exception:
+        logger.warning("blogging shared_postgres close_pool failed", exc_info=True)
     _run_blogging_service_shutdown()
 
 
@@ -665,6 +679,7 @@ def _publish_terminal_event(job_id: str, event_type: str, **kwargs: Any) -> None
     """Publish a terminal SSE event and clean up subscribers."""
     try:
         from shared.job_event_bus import cleanup_job, publish
+
         publish(job_id, kwargs, event_type=event_type)
         cleanup_job(job_id)
     except Exception:
@@ -706,6 +721,7 @@ def _run_pipeline_with_tracking(job_id: str, request: FullPipelineRequest) -> No
                     logger.warning("Failed to update job %s: %s", job_id, e)
             try:
                 from shared.job_event_bus import publish
+
                 publish(job_id, kwargs, event_type="update")
             except Exception:
                 pass
@@ -955,9 +971,11 @@ def stream_job_status(job_id: str) -> StreamingResponse:
 
     # If the job is already terminal, send a snapshot + done and close immediately.
     if job.get("status") in _TERMINAL_STATUSES:
+
         def _terminal_gen():
             yield _sse_line(_snapshot_event())
             yield _sse_line({"type": "done"})
+
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
     def event_generator():
@@ -1074,9 +1092,13 @@ def resume_blog_job(job_id: str) -> StartPipelineResponse:
 
     payload = job.get("request_payload")
     if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Original request payload not available for resume.")
+        raise HTTPException(
+            status_code=400, detail="Original request payload not available for resume."
+        )
 
-    update_blog_job(job_id, status="running", error=None, failed_phase=None, status_text="Resuming...")
+    update_blog_job(
+        job_id, status="running", error=None, failed_phase=None, status_text="Resuming..."
+    )
 
     request = FullPipelineRequest(**payload)
 
@@ -1120,7 +1142,9 @@ def restart_blog_job(job_id: str) -> StartPipelineResponse:
 
     payload = job.get("request_payload")
     if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Original request payload not available for restart.")
+        raise HTTPException(
+            status_code=400, detail="Original request payload not available for restart."
+        )
 
     from blogging.shared.blog_job_store import reset_blog_job
 

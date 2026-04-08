@@ -75,3 +75,12 @@ for either mode.
 - `TEMPORAL_ADDRESS` — enables Temporal mode; unset falls back to threads.
 - `TEMPORAL_NAMESPACE` — default `default`.
 - `TEMPORAL_TASK_QUEUE` — default `strands-agents`.
+
+## See also
+
+- **`backend/agents/shared_postgres/`** — sibling module that applies the
+  same registry idea to Postgres DDL. Each team exports a `SCHEMA:
+  TeamSchema` from `<team>/postgres/__init__.py` and its FastAPI lifespan
+  calls `register_team_schemas(SCHEMA)` at startup. Unlike `shared_temporal`'s
+  Pattern A (import-time side effect), `shared_postgres` uses Pattern B
+  (explicit lifespan call) because DDL is synchronous blocking I/O.

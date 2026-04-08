@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 import httpx
@@ -13,9 +14,28 @@ from pydantic import BaseModel, Field
 
 from user_agent_founder.agent import get_founder_agent
 from user_agent_founder.orchestrator import run_workflow
+from user_agent_founder.postgres import SCHEMA as USER_AGENT_FOUNDER_POSTGRES_SCHEMA
 from user_agent_founder.store import get_founder_store
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    try:
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(USER_AGENT_FOUNDER_POSTGRES_SCHEMA)
+    except Exception:
+        logger.exception("user_agent_founder postgres schema registration failed")
+    yield
+    try:
+        from shared_postgres import close_pool
+
+        close_pool()
+    except Exception:
+        logger.warning("user_agent_founder shared_postgres close_pool failed", exc_info=True)
+
 
 app = FastAPI(
     title="User Agent Founder API",
@@ -25,6 +45,7 @@ app = FastAPI(
         "through the lens of a budget-conscious, speed-first, UX-obsessed founder."
     ),
     version="1.0.0",
+    lifespan=_lifespan,
 )
 
 # ---------------------------------------------------------------------------

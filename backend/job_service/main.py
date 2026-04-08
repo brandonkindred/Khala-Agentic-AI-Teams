@@ -16,8 +16,7 @@ from db import (
     apply_patch as db_apply_patch,
 )
 from db import (
-    close_pool,
-    ensure_schema,
+    close_pool as db_close_pool,
 )
 from db import (
     create_job as db_create_job,
@@ -65,6 +64,10 @@ from models import (
     ReplaceJobRequest,
     UpdateJobRequest,
 )
+from postgres import SCHEMA as JOB_SERVICE_SCHEMA
+
+from shared_postgres import close_pool as shared_close_pool
+from shared_postgres import register_team_schemas
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("job_service")
@@ -72,10 +75,11 @@ logger = logging.getLogger("job_service")
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    ensure_schema()
+    register_team_schemas(JOB_SERVICE_SCHEMA)
     logger.info("Job service started")
     yield
-    close_pool()
+    db_close_pool()
+    shared_close_pool()
     logger.info("Job service stopped")
 
 

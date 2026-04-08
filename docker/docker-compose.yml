@@ -72,8 +72,8 @@ services:
 
   job-service:
     build:
-      context: ../backend/job_service
-      dockerfile: Dockerfile
+      context: ../backend
+      dockerfile: job_service/Dockerfile
     image: strands-job-service
     container_name: strands-job-service
     depends_on:

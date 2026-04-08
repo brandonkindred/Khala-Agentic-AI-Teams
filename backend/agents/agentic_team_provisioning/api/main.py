@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -42,12 +43,32 @@ from agentic_team_provisioning.models import (
     TeamSummary,
     UpdateFormRecordRequest,
 )
+from agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    try:
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(AGENTIC_POSTGRES_SCHEMA)
+    except Exception:
+        logger.exception("agentic_team_provisioning postgres schema registration failed")
+    yield
+    try:
+        from shared_postgres import close_pool
+
+        close_pool()
+    except Exception:
+        logger.warning("agentic_team_provisioning shared_postgres close_pool failed", exc_info=True)
+
 
 app = FastAPI(
     title="Agentic Team Provisioning API",
     description="Create agentic teams and define their processes through conversation",
+    lifespan=_lifespan,
 )
 
 _store = AgenticTeamStore()
@@ -244,9 +265,13 @@ def recommend_agents_for_step(process_id: str, step_id: str):
     try:
         from studiogrid.runtime.registry_loader import RegistryLoader
 
-        loader = RegistryLoader(Path(__file__).resolve().parents[4] / "studiogrid" / "src" / "studiogrid")
+        loader = RegistryLoader(
+            Path(__file__).resolve().parents[4] / "studiogrid" / "src" / "studiogrid"
+        )
         search_text = f"{step.name} {step.description}"
-        found = loader.find_assisting_agents(problem_description=search_text, required_skills=[], limit=5)
+        found = loader.find_assisting_agents(
+            problem_description=search_text, required_skills=[], limit=5
+        )
         for agent in found:
             recommendations.append(
                 RecommendedAgent(
@@ -270,9 +295,7 @@ def recommend_agents_for_step(process_id: str, step_id: str):
         team = _store.get_team(team_id)
         if team:
             search_tokens = {
-                t.lower()
-                for t in f"{step.name} {step.description}".split()
-                if len(t) > 2
+                t.lower() for t in f"{step.name} {step.description}".split() if len(t) > 2
             }
             for agent in team.agents:
                 agent_tokens = {

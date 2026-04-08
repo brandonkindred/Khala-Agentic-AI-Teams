@@ -86,6 +86,11 @@ Each agent team has a **team-lead orchestrator** that coordinates role-separated
 - **Thread mode** (default, local dev): agents run as Python threads
 - **Temporal mode** (when `TEMPORAL_ADDRESS` is set): durable workflow execution using Temporal 1.24.2 — state survives server restarts
 
+### Shared infrastructure modules
+
+- **`backend/agents/shared_temporal/`** — Temporal client + per-team worker registry. Teams export `WORKFLOWS`/`ACTIVITIES` from `<team>/temporal/__init__.py`; workers start on import (Pattern A).
+- **`backend/agents/shared_postgres/`** — Postgres schema registry. Each team exports a `SCHEMA: TeamSchema` constant from `<team>/postgres/__init__.py` (pure data, no side effects), and the team's FastAPI lifespan calls `register_team_schemas(SCHEMA)` at startup (Pattern B). No-op when `POSTGRES_HOST` is unset. See `backend/agents/shared_postgres/README.md`.
+
 ### Software Engineering Team Pipeline (4 phases)
 
 1. **Discovery**: Spec → LLM parsing → Planning-v2 (6-phase workflow) → planning_v2_adapter

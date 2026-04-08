@@ -3,17 +3,39 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from startup_advisor.postgres import SCHEMA as STARTUP_ADVISOR_POSTGRES_SCHEMA
+
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    try:
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(STARTUP_ADVISOR_POSTGRES_SCHEMA)
+    except Exception:
+        logger.exception("startup_advisor postgres schema registration failed")
+    yield
+    try:
+        from shared_postgres import close_pool
+
+        close_pool()
+    except Exception:
+        logger.warning("startup_advisor shared_postgres close_pool failed", exc_info=True)
+
 
 app = FastAPI(
     title="Startup Advisor API",
     description="Persistent conversational startup advisor with probing dialogue",
     version="1.0.0",
+    lifespan=_lifespan,
 )
 
 

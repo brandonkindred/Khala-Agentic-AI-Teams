@@ -173,7 +173,9 @@ def _register_proxy_routes(app: FastAPI) -> dict[str, bool]:
         ) -> Any:
             return await proxy_request(request, _url, path, team_key=_team_key, timeout=_timeout)
 
-        logger.info("Proxying %s -> %s (timeout=%.0fs, cell=%s)", config.prefix, url, config.timeout_seconds, config.cell)
+        logger.info(
+            "Proxying %s -> %s (timeout=%.0fs, cell=%s)", config.prefix, url, config.timeout_seconds, config.cell
+        )
         results[team_key] = True
 
     return results
@@ -186,13 +188,33 @@ def _register_proxy_routes(app: FastAPI) -> dict[str, bool]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan: mount assistant sub-apps, then register proxy routes.
+    """Application lifespan: register own Postgres schemas, mount assistant sub-apps,
+    then register proxy routes.
 
     Order matters: assistant sub-apps must be mounted before proxy catch-all routes,
     otherwise the proxy's ``/{path:path}`` pattern swallows assistant requests.
     """
     global _registered_teams
     logger.info("Starting Unified API Server...")
+
+    # 0. Register Postgres schemas for modules that run in-process here
+    #    (unified_api itself + the team_assistant conversation store that we
+    #    mount as sub-apps). No-op when POSTGRES_HOST is unset.
+    try:
+        from shared_postgres import register_team_schemas
+        from unified_api.postgres import SCHEMA as UNIFIED_API_SCHEMA
+
+        register_team_schemas(UNIFIED_API_SCHEMA)
+    except Exception:
+        logger.exception("unified_api postgres schema registration failed")
+
+    try:
+        from shared_postgres import register_team_schemas
+        from team_assistant.postgres import SCHEMA as TEAM_ASSISTANT_SCHEMA
+
+        register_team_schemas(TEAM_ASSISTANT_SCHEMA)
+    except Exception:
+        logger.exception("team_assistant postgres schema registration failed")
 
     # 1. Mount team assistant conversational sub-apps (before proxy routes).
     try:
@@ -230,6 +252,14 @@ async def lifespan(app: FastAPI):
     yield
 
     health_task.cancel()
+
+    # Close Postgres connection pools owned by shared_postgres.
+    try:
+        from shared_postgres import close_pool
+
+        close_pool()
+    except Exception:
+        logger.warning("shared_postgres close_pool failed", exc_info=True)
 
     logger.info("Shutting down Unified API Server...")
 
@@ -320,9 +350,7 @@ async def health() -> UnifiedHealthResponse:
             status = "unavailable"
         if config.enabled and status in ("unavailable", "unhealthy"):
             all_healthy = False
-        teams.append(
-            TeamHealth(name=config.name, prefix=config.prefix, status=status, enabled=config.enabled)
-        )
+        teams.append(TeamHealth(name=config.name, prefix=config.prefix, status=status, enabled=config.enabled))
     return UnifiedHealthResponse(
         status="healthy" if all_healthy else "degraded",
         version="1.0.0",
