@@ -35,4 +35,8 @@ SCHEMA = TeamSchema(
         """CREATE INDEX IF NOT EXISTS idx_user_agent_founder_decisions_run
             ON user_agent_founder_decisions(run_id)""",
     ],
+    table_names=[
+        "user_agent_founder_runs",
+        "user_agent_founder_decisions",
+    ],
 )

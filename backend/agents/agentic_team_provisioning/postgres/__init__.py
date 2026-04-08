@@ -82,4 +82,13 @@ SCHEMA = TeamSchema(
         "CREATE INDEX IF NOT EXISTS idx_agentic_form_data_team ON agentic_form_data(team_id)",
         "CREATE INDEX IF NOT EXISTS idx_agentic_form_data_key ON agentic_form_data(form_key)",
     ],
+    table_names=[
+        "agentic_teams",
+        "agentic_processes",
+        "agentic_conversations",
+        "agentic_conv_messages",
+        "agentic_team_agents",
+        "agentic_env_provisions",
+        "agentic_form_data",
+    ],
 )
