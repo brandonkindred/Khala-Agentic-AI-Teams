@@ -94,7 +94,7 @@ def test_set_and_get_slack_config_non_sensitive(tmp_path: Path, monkeypatch: pyt
         enabled=True,
         mode="bot",
         webhook_url="",
-        bot_token="xoxb-token",
+        bot_token="xoxb-FAKE-opaque-bot",
         default_channel="#eng",
         channel_display_name="#eng",
         notify_open_questions=True,
@@ -104,7 +104,7 @@ def test_set_and_get_slack_config_non_sensitive(tmp_path: Path, monkeypatch: pyt
     assert cfg["enabled"] is True
     assert cfg["mode"] == "bot"
     assert cfg["webhook_url"] == ""
-    assert cfg["bot_token"] == "xoxb-token"
+    assert cfg["bot_token"] == "xoxb-FAKE-opaque-bot"
     assert cfg["default_channel"] == "#eng"
     assert cfg["channel_display_name"] == "#eng"
     assert cfg["notify_open_questions"] is True
@@ -117,12 +117,12 @@ def test_set_and_get_slack_credentials_encrypted(tmp_path: Path, monkeypatch: py
     _install_fake_pg_credentials(monkeypatch)
     store.set_slack_config(
         enabled=False,
-        client_id="my-client-id",
-        client_secret="my-super-secret",
+        client_id="opaque-client-id",
+        client_secret="opaque-client-secret",
     )
     cfg = store.get_slack_config()
-    assert cfg["client_id"] == "my-client-id"
-    assert cfg["client_secret"] == "my-super-secret"
+    assert cfg["client_id"] == "opaque-client-id"
+    assert cfg["client_secret"] == "opaque-client-secret"
 
     # Verify the credentials are NOT stored in plain text in the JSON file
     json_path = tmp_path / "integrations.json"
@@ -130,8 +130,8 @@ def test_set_and_get_slack_credentials_encrypted(tmp_path: Path, monkeypatch: py
     slack_json = raw.get("slack", {})
     assert "client_id" not in slack_json
     assert "client_secret" not in slack_json
-    assert "my-client-id" not in json.dumps(raw)
-    assert "my-super-secret" not in json.dumps(raw)
+    assert "opaque-client-id" not in json.dumps(raw)
+    assert "opaque-client-secret" not in json.dumps(raw)
 
 
 def test_credentials_encrypted_at_rest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,25 +145,39 @@ def test_credentials_encrypted_at_rest(tmp_path: Path, monkeypatch: pytest.Monke
     """
     store, _ = _reload_modules(tmp_path, monkeypatch)
     cred_store = _install_fake_pg_credentials(monkeypatch)
-    store.set_slack_config(enabled=False, client_id="abc123", client_secret="topsecret")
+    store.set_slack_config(
+        enabled=False,
+        client_id="opaque-cid-at-rest",
+        client_secret="opaque-csec-at-rest",
+    )
 
     raw_values = list(cred_store.values())
     assert raw_values, "no rows written to the credential store"
-    assert all("abc123" not in v for v in raw_values), "client_id stored in plain text"
-    assert all("topsecret" not in v for v in raw_values), "client_secret stored in plain text"
+    assert all("opaque-cid-at-rest" not in v for v in raw_values), "client_id stored in plain text"
+    assert all("opaque-csec-at-rest" not in v for v in raw_values), "client_secret stored in plain text"
 
 
 def test_clear_slack_oauth_preserves_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """clear_slack_oauth removes bot token and team info but keeps app credentials."""
     store, _ = _reload_modules(tmp_path, monkeypatch)
     _install_fake_pg_credentials(monkeypatch)
-    store.set_slack_config(enabled=True, mode="bot", client_id="cid", client_secret="csec")
-    store.set_slack_oauth_token(bot_token="xoxb-tok", team_id="T123", team_name="Acme", bot_user_id="U1")
+    store.set_slack_config(
+        enabled=True,
+        mode="bot",
+        client_id="opaque-cid",
+        client_secret="opaque-csec",
+    )
+    store.set_slack_oauth_token(
+        bot_token="xoxb-FAKE-opaque-bot",
+        team_id="T123",
+        team_name="Acme",
+        bot_user_id="U1",
+    )
 
     store.clear_slack_oauth()
     cfg = store.get_slack_config()
-    assert cfg["client_id"] == "cid"
-    assert cfg["client_secret"] == "csec"
+    assert cfg["client_id"] == "opaque-cid"
+    assert cfg["client_secret"] == "opaque-csec"
     assert cfg["bot_token"] == ""
     assert cfg["team_id"] == ""
     assert cfg["team_name"] == ""

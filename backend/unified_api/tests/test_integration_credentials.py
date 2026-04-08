@@ -89,9 +89,7 @@ def test_get_integration_fernet_round_trip(tmp_path: Path, monkeypatch: pytest.M
 # ---------------------------------------------------------------------------
 
 
-def test_get_credential_returns_empty_when_postgres_disabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_get_credential_returns_empty_when_postgres_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """When POSTGRES_HOST is unset, ``get_credential`` returns '' without calling pg_*.
 
     This is the defensive branch that keeps ``get_slack_config()`` from
@@ -103,17 +101,13 @@ def test_get_credential_returns_empty_when_postgres_disabled(
     import unified_api.postgres_encrypted_credentials as pg_mod
 
     calls = []
-    monkeypatch.setattr(
-        pg_mod, "pg_get_credential", lambda *a, **k: calls.append(a) or "from_pg"
-    )
+    monkeypatch.setattr(pg_mod, "pg_get_credential", lambda *a, **k: calls.append(a) or "from_pg")
 
     assert mod.get_credential("svc", "key") == ""
     assert calls == []  # never reached pg_get_credential
 
 
-def test_get_credential_delegates_to_pg_when_enabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_get_credential_delegates_to_pg_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("POSTGRES_HOST", "localhost")
     mod = _reload(tmp_path, monkeypatch)
 
@@ -151,12 +145,8 @@ def test_set_credential_empty_value_deletes(tmp_path: Path, monkeypatch: pytest.
 
     deletes = []
     sets = []
-    monkeypatch.setattr(
-        pg_mod, "pg_delete_credential", lambda svc, key: deletes.append((svc, key))
-    )
-    monkeypatch.setattr(
-        pg_mod, "pg_set_credential", lambda svc, key, v: sets.append((svc, key, v))
-    )
+    monkeypatch.setattr(pg_mod, "pg_delete_credential", lambda svc, key: deletes.append((svc, key)))
+    monkeypatch.setattr(pg_mod, "pg_set_credential", lambda svc, key, v: sets.append((svc, key, v)))
 
     mod.set_credential("svc", "k", "")
     assert deletes == [("svc", "k")]
@@ -170,9 +160,7 @@ def test_delete_credential_delegates(tmp_path: Path, monkeypatch: pytest.MonkeyP
     import unified_api.postgres_encrypted_credentials as pg_mod
 
     captured = []
-    monkeypatch.setattr(
-        pg_mod, "pg_delete_credential", lambda svc, key: captured.append((svc, key))
-    )
+    monkeypatch.setattr(pg_mod, "pg_delete_credential", lambda svc, key: captured.append((svc, key)))
 
     mod.delete_credential("svc", "k")
     assert captured == [("svc", "k")]
@@ -185,9 +173,7 @@ def test_delete_service_credentials_delegates(tmp_path: Path, monkeypatch: pytes
     import unified_api.postgres_encrypted_credentials as pg_mod
 
     captured = []
-    monkeypatch.setattr(
-        pg_mod, "pg_delete_service_credentials", lambda svc: captured.append(svc)
-    )
+    monkeypatch.setattr(pg_mod, "pg_delete_service_credentials", lambda svc: captured.append(svc))
 
     mod.delete_service_credentials("slack")
     assert captured == ["slack"]
@@ -265,29 +251,23 @@ def _fake_get_conn_factory(cursor: _FakeCursor):
     return _fake_get_conn
 
 
-def test_migrate_skipped_when_postgres_disabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_migrate_skipped_when_postgres_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("POSTGRES_HOST", raising=False)
     mod = _reload(tmp_path, monkeypatch)
     # Presence of a SQLite file does not matter when Postgres is off.
-    _write_legacy_sqlite(tmp_path, mod, [("slack", "client_id", "abc")])
+    _write_legacy_sqlite(tmp_path, mod, [("slack", "client_id", "opaque-value")])
     result = mod.migrate_sqlite_to_postgres_once()
     assert result == {"status": "skipped", "reason": "postgres_disabled"}
 
 
-def test_migrate_skipped_when_sqlite_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_migrate_skipped_when_sqlite_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("POSTGRES_HOST", "localhost")
     mod = _reload(tmp_path, monkeypatch)
     result = mod.migrate_sqlite_to_postgres_once()
     assert result == {"status": "skipped", "reason": "no_sqlite_file"}
 
 
-def test_migrate_happy_path_writes_rows_and_marker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_migrate_happy_path_writes_rows_and_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("POSTGRES_HOST", "localhost")
     mod = _reload(tmp_path, monkeypatch)
 
@@ -295,9 +275,9 @@ def test_migrate_happy_path_writes_rows_and_marker(
         tmp_path,
         mod,
         [
-            ("slack", "client_id", "slack-cid-123"),
-            ("slack", "client_secret", "slack-sec-456"),
-            ("medium", "refresh_token", "medium-rt-789"),
+            ("slack", "client_id", "opaque-slack-client-id"),
+            ("slack", "client_secret", "opaque-slack-client-secret"),
+            ("medium", "refresh_token", "opaque-medium-refresh-token"),
         ],
     )
 
@@ -331,29 +311,21 @@ def test_migrate_happy_path_writes_rows_and_marker(
     assert result == {"status": "migrated", "rows": 3}
 
     plaintexts = {(s, k): v for s, k, v in upserted_rows}
-    assert plaintexts[("slack", "client_id")] == "slack-cid-123"
-    assert plaintexts[("slack", "client_secret")] == "slack-sec-456"
-    assert plaintexts[("medium", "refresh_token")] == "medium-rt-789"
+    assert plaintexts[("slack", "client_id")] == "opaque-slack-client-id"
+    assert plaintexts[("slack", "client_secret")] == "opaque-slack-client-secret"
+    assert plaintexts[("medium", "refresh_token")] == "opaque-medium-refresh-token"
 
     # The marker INSERT must be issued AFTER the bulk upsert.
-    marker_calls = [
-        (sql, params)
-        for sql, params in cursor.executed
-        if "INSERT INTO migration_markers" in sql
-    ]
+    marker_calls = [(sql, params) for sql, params in cursor.executed if "INSERT INTO migration_markers" in sql]
     assert len(marker_calls) == 1
     assert marker_calls[0][1][0] == "integration_credentials_v1"
 
 
-def test_migrate_idempotent_when_marker_present(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_migrate_idempotent_when_marker_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Second run short-circuits inside the same transaction when the marker exists."""
     monkeypatch.setenv("POSTGRES_HOST", "localhost")
     mod = _reload(tmp_path, monkeypatch)
-    _write_legacy_sqlite(
-        tmp_path, mod, [("slack", "client_id", "abc")]
-    )
+    _write_legacy_sqlite(tmp_path, mod, [("slack", "client_id", "opaque-value")])
 
     cursor = _FakeCursor(marker_present=True)
     import shared_postgres
@@ -374,9 +346,7 @@ def test_migrate_idempotent_when_marker_present(
     assert bulk_called["count"] == 0
 
 
-def test_migrate_skips_corrupt_row_without_aborting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_migrate_skips_corrupt_row_without_aborting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("POSTGRES_HOST", "localhost")
     mod = _reload(tmp_path, monkeypatch)
 
@@ -384,27 +354,23 @@ def test_migrate_skips_corrupt_row_without_aborting(
     db_path = tmp_path / "integration_credentials.db"
     fernet = mod.get_integration_fernet()
     conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE service_integrations (service TEXT, key TEXT, value TEXT, PRIMARY KEY (service, key))")
     conn.execute(
-        "CREATE TABLE service_integrations (service TEXT, key TEXT, value TEXT, PRIMARY KEY (service, key))"
+        "INSERT INTO service_integrations VALUES (?, ?, ?)",
+        ("slack", "client_id", fernet.encrypt(b"opaque-good-row").decode()),
     )
     conn.execute(
         "INSERT INTO service_integrations VALUES (?, ?, ?)",
-        ("slack", "client_id", fernet.encrypt(b"good-value").decode()),
-    )
-    conn.execute(
-        "INSERT INTO service_integrations VALUES (?, ?, ?)",
-        ("slack", "client_secret", "NOT_VALID_FERNET_TOKEN"),
+        ("slack", "client_secret", "not-a-valid-fernet-ciphertext"),
     )
     conn.commit()
     conn.close()
 
     rows = mod._read_sqlite_rows(db_path)
-    assert rows == [("slack", "client_id", "good-value")]
+    assert rows == [("slack", "client_id", "opaque-good-row")]
 
 
-def test_migrate_empty_sqlite_still_writes_marker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_migrate_empty_sqlite_still_writes_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A legacy SQLite file with zero rows still records the marker."""
     monkeypatch.setenv("POSTGRES_HOST", "localhost")
     mod = _reload(tmp_path, monkeypatch)
@@ -418,10 +384,6 @@ def test_migrate_empty_sqlite_still_writes_marker(
     result = mod.migrate_sqlite_to_postgres_once()
     assert result == {"status": "skipped", "reason": "empty_sqlite"}
 
-    marker_inserts = [
-        (sql, params)
-        for sql, params in cursor.executed
-        if "INSERT INTO migration_markers" in sql
-    ]
+    marker_inserts = [(sql, params) for sql, params in cursor.executed if "INSERT INTO migration_markers" in sql]
     assert len(marker_inserts) == 1
     assert marker_inserts[0][1][0] == "integration_credentials_v1"
