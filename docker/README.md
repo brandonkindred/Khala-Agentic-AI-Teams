@@ -2,7 +2,7 @@
 
 This directory defines a **Docker Compose stack** that runs:
 
-- **PostgreSQL 18** – shared database with `temporal` and `strands` databases (created at first run). Note: major-version bumps in this stack are destructive — wipe the `postgres_data` volume with `docker compose down -v` before bringing the stack back up.
+- **PostgreSQL 18** – shared database with `temporal` and `strands` databases (created at first run). The data volume is `postgres_data_v18`; the name is suffixed with the major version so each bump starts from an empty volume declaratively, without `docker compose down -v`. Orphaned previous-version volumes can be cleaned up with `docker volume prune`.
 - **Temporal** – workflow engine (Postgres-backed, no Elasticsearch)
 - **Temporal UI** – Web UI for workflows
 - **Ollama** (optional) – local Ollama server if you override LLM to use it
@@ -19,7 +19,7 @@ This directory defines a **Docker Compose stack** that runs:
 
 2. **Start the stack** (from repo root)
 
-   Agent output and project data are stored in the **`agents_workspace`** Docker volume (mounted at `/workspace` in the agents container). This data persists when containers are stopped or recreated. Postgres data is stored in the **`postgres_data`** volume. To remove all persisted data, use `docker compose down -v` (the `-v` flag removes named volumes).
+   Agent output and project data are stored in the **`agents_workspace`** Docker volume (mounted at `/workspace` in the agents container). This data persists when containers are stopped or recreated. Postgres data is stored in the **`postgres_data_v18`** volume (the suffix tracks the Postgres major version; bumping Postgres renames the volume so the next `up` starts from an empty data dir). To remove all persisted data, use `docker compose down -v` (the `-v` flag removes named volumes).
 
    Use `--env-file docker/.env` so variables from `docker/.env` (e.g. `OLLAMA_API_KEY`) are passed into the containers.
 
@@ -88,7 +88,7 @@ When **ENABLE_LOG_API** is not set or is 0, the endpoint returns **404** so it i
 
 | Volume            | Service        | Purpose |
 |-------------------|----------------|---------|
-| `postgres_data`   | PostgreSQL     | Database files (Temporal + app DBs). |
+| `postgres_data_v18` | PostgreSQL   | Database files (Temporal + app DBs). Suffix tracks the Postgres major version — renaming the volume on each major bump gives a fresh data dir declaratively. |
 | `agents_workspace`| strands-agents | Agent workspace at `/workspace` (repos, generated code, artifacts). |
 
 Data in these volumes survives `docker compose down` and container restarts. To wipe persisted data, run `docker compose down -v`.

@@ -17,7 +17,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data_v18:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
@@ -892,6 +892,11 @@ networks:
     external: true
 
 volumes:
-  postgres_data:
+  # Renamed from `postgres_data` when the stack jumped to Postgres 18. Docker
+  # treats a new volume name as a fresh volume, so this is how we declaratively
+  # force an empty data dir on major-version bumps without out-of-band
+  # `docker compose down -v`. The prior `postgres_data` volume (if any) is
+  # left orphaned and can be cleaned up with `docker volume prune`.
+  postgres_data_v18:
   agents_workspace:
   agents_data:
