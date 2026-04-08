@@ -8,7 +8,7 @@
 
 services:
   postgres:
-    image: postgres:17
+    image: postgres:18
     container_name: strands-stack-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -17,7 +17,11 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # Mount the parent dir (not `/data`) because the postgres:18 image stores
+      # its data under a major-version subdirectory (e.g. /var/lib/postgresql/18/docker)
+      # and refuses to start if it finds a legacy `/var/lib/postgresql/data`
+      # mount point. See docker-library/postgres#1259.
+      - postgres_data_v18:/var/lib/postgresql
       - ./postgres/init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
@@ -892,6 +896,11 @@ networks:
     external: true
 
 volumes:
-  postgres_data:
+  # Renamed from `postgres_data` when the stack jumped to Postgres 18. Docker
+  # treats a new volume name as a fresh volume, so this is how we declaratively
+  # force an empty data dir on major-version bumps without out-of-band
+  # `docker compose down -v`. The prior `postgres_data` volume (if any) is
+  # left orphaned and can be cleaned up with `docker volume prune`.
+  postgres_data_v18:
   agents_workspace:
   agents_data:
