@@ -3,6 +3,11 @@
 Stores jobs in a single ``jobs`` table with a JSONB ``data`` column for
 team-specific fields.  Top-level columns (status, timestamps) are extracted
 for efficient indexing and querying.
+
+DDL is declared in :mod:`job_service.postgres` and applied at startup via
+``shared_postgres.register_team_schemas``. This module keeps its own
+``psycopg2.pool.ThreadedConnectionPool`` for high-throughput CRUD (see
+``close_pool`` below — it closes this local pool, not the shared one).
 """
 
 from __future__ import annotations
@@ -22,7 +27,8 @@ import psycopg2.pool
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Connection pool
+# Connection pool (job-service-local; separate from shared_postgres which
+# is only used at startup for DDL).
 # ---------------------------------------------------------------------------
 
 _pool: psycopg2.pool.ThreadedConnectionPool | None = None
@@ -56,33 +62,6 @@ def get_conn() -> Generator:
         raise
     finally:
         pool.putconn(conn)
-
-
-def ensure_schema() -> None:
-    """Create the jobs table and indexes if they do not already exist."""
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("""
-                CREATE TABLE IF NOT EXISTS jobs (
-                    job_id            TEXT NOT NULL,
-                    team              TEXT NOT NULL,
-                    status            TEXT NOT NULL DEFAULT 'pending',
-                    data              JSONB NOT NULL DEFAULT '{}',
-                    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    PRIMARY KEY (team, job_id)
-                )
-            """)
-        cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_jobs_team_status
-                ON jobs (team, status)
-            """)
-        cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_jobs_heartbeat
-                ON jobs (team, last_heartbeat_at)
-                WHERE status IN ('pending', 'running')
-            """)
-    logger.info("Job service schema ensured")
 
 
 def close_pool() -> None:

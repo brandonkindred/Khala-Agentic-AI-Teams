@@ -1,0 +1,58 @@
+# Example AuthorProfile — copy this file, fill it in, and either:
+#   - point AUTHOR_PROFILE_PATH at it, OR
+#   - drop it at $AGENT_CACHE/author_profile.yaml
+#
+# This file is used as a fallback when no real profile is configured. It is
+# intentionally generic so it never leaks personal data into prompts.
+
+identity:
+  full_name: "Example Author"
+  short_name: "Example"
+  pronouns: "they/them"
+  tagline: "Builder, writer, lifelong learner."
+
+professional:
+  current_title: "Software Engineer"
+  current_employer: "Example Company"
+  past_employers: []
+  founded_companies: []
+  awards: []
+
+social:
+  medium: ""
+  linkedin: ""
+  github: ""
+  twitter: ""
+  website: ""
+  other: {}
+
+voice:
+  archetype: "The Practical Builder"
+  tone_words:
+    - "friendly"
+    - "direct"
+    - "practical"
+    - "honest"
+  signature_phrases: []
+  banned_phrases:
+    - "delve into"
+    - "in today's fast-paced world"
+    - "unlock the power of"
+    - "crushing it"
+    - "smash like and subscribe"
+  influences: []
+  style_notes:
+    - "Lead with personal experience."
+    - "Acknowledge trade-offs."
+    - "Close with one practical next step."
+
+background:
+  bio: "Generic example author used as a fallback profile."
+  origin_story: ""
+  expertise: []
+  audiences:
+    - "engineers"
+    - "founders"
+  notable_projects: []
+
+extra: {}

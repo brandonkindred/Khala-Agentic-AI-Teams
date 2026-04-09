@@ -1,9 +1,9 @@
 """
 Example: run the blog draft agent with a research document and outline.
 
-Loads the Brandon Kindred style guide from docs/ and generates a draft
-that complies with it. Pass your own research_document and outline, or
-use placeholders for testing.
+Loads the author's style guide from docs/ (rendered against the configured
+author profile) and generates a draft that complies with it. Pass your own
+research_document and outline, or use placeholders for testing.
 """
 
 import logging

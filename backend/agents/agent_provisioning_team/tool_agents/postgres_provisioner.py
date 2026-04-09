@@ -15,6 +15,7 @@ from ..models import (
     ToolProvisionResult,
 )
 from ..shared.access_policy import get_permissions, validate_permissions
+from ..shared.provisioner_state import ProvisionerStateStore
 from .base import BaseToolProvisioner
 
 try:
@@ -42,7 +43,12 @@ class PostgresProvisionerTool(BaseToolProvisioner):
         self.port = port or int(os.environ.get("POSTGRES_PORT", "5432"))
         self.admin_user = admin_user or os.environ.get("POSTGRES_USER", "postgres")
         self.admin_password = admin_password or os.environ.get("POSTGRES_PASSWORD", "")
-        self._provisioned: Dict[str, Dict[str, Any]] = {}
+        # Persistent idempotency store — survives process restarts.
+        self._state = ProvisionerStateStore("postgres_provisioner")
+
+    @property
+    def _provisioned(self) -> Dict[str, Dict[str, Any]]:
+        return self._state.list_agents()
 
     def _get_admin_connection(self):
         """Get a connection with admin privileges."""
@@ -67,6 +73,25 @@ class PostgresProvisionerTool(BaseToolProvisioner):
         """Create a PostgreSQL database and user for the agent."""
         if not HAS_PSYCOPG2:
             return self._make_error_result("psycopg2 is not installed")
+
+        # Idempotency: short-circuit if we already provisioned this agent.
+        existing = self._state.get(agent_id)
+        if existing:
+            permissions = existing.get("permissions", get_permissions("postgresql", access_tier))
+            credentials.extra.setdefault("database", existing["database"])
+            credentials.extra.setdefault("host", self.host)
+            credentials.extra.setdefault("port", self.port)
+            return self._make_success_result(
+                credentials=credentials,
+                permissions=permissions,
+                details={
+                    "database": existing["database"],
+                    "username": existing["username"],
+                    "host": self.host,
+                    "port": self.port,
+                    "reused": True,
+                },
+            )
 
         try:
             db_prefix = config.get("database_prefix", "agent_")
@@ -117,11 +142,14 @@ class PostgresProvisionerTool(BaseToolProvisioner):
             credentials.extra["host"] = self.host
             credentials.extra["port"] = self.port
 
-            self._provisioned[agent_id] = {
-                "database": db_name,
-                "username": username,
-                "permissions": permissions,
-            }
+            self._state.put(
+                agent_id,
+                {
+                    "database": db_name,
+                    "username": username,
+                    "permissions": permissions,
+                },
+            )
 
             return self._make_success_result(
                 credentials=credentials,
@@ -175,7 +203,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
         expected_tier: AccessTier,
     ) -> AccessVerification:
         """Verify PostgreSQL access for the agent."""
-        prov_info = self._provisioned.get(agent_id)
+        prov_info = self._state.get(agent_id)
 
         if not prov_info:
             return self._make_verification(
@@ -208,7 +236,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
                 error="psycopg2 is not installed",
             )
 
-        prov_info = self._provisioned.get(agent_id)
+        prov_info = self._state.get(agent_id)
         if not prov_info:
             return DeprovisionResult(
                 tool_name=self.tool_name,
@@ -241,7 +269,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
             cursor.close()
             conn.close()
 
-            del self._provisioned[agent_id]
+            self._state.delete(agent_id)
 
             return DeprovisionResult(
                 tool_name=self.tool_name,

@@ -16,21 +16,37 @@ logger = logging.getLogger(__name__)
 
 def load_style_file(path: Union[str, Path], label: str = "file") -> str:
     """
-    Load file content as UTF-8 text. On failure (missing file, read error), log and return "".
+    Load a style/guideline file as UTF-8 text and render any Jinja2 placeholders
+    against the runtime author profile.
+
+    Style guides under ``backend/agents/blogging/docs/`` are Jinja2 templates that
+    reference the user's identity via ``{{ author.* }}`` (see
+    ``backend.agents.shared.author_profile``). This loader renders them on read so
+    callers always see fully resolved markdown.
+
+    On failure (missing file, read error, render error), log and return "".
 
     Args:
         path: Path to the file.
-        label: Human-readable label for log messages (e.g. "writing style guide", "brand spec").
+        label: Human-readable label for log messages.
 
     Returns:
-        File content stripped of surrounding whitespace, or "" on any error.
+        Rendered file content stripped of surrounding whitespace, or "" on any error.
     """
     p = Path(path)
     try:
-        return p.read_text(encoding="utf-8").strip()
+        raw = p.read_text(encoding="utf-8")
     except OSError as e:
         logger.error("Could not load %s from %s: %s", label, p, e)
         return ""
+
+    try:
+        from author_profile import load_author_profile, render_template
+
+        return render_template(raw, load_author_profile()).strip()
+    except Exception as e:  # noqa: BLE001 — render failure shouldn't crash agents
+        logger.error("Could not render %s from %s: %s", label, p, e)
+        return raw.strip()
 
 
 def save_style_file(path: Union[str, Path], content: str, label: str = "file") -> bool:

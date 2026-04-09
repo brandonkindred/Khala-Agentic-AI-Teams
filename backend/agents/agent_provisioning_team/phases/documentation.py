@@ -15,7 +15,24 @@ from ..models import (
     ToolOnboardingInfo,
     ToolProvisionResult,
 )
+from ..prompts import (
+    format_onboarding_summary_prompt,
+    format_tool_getting_started_prompt,
+)
+from ..shared.llm_client import LLMClient, LLMRequest, sanitize_prompt_var
 from ..shared.tool_manifest import ToolManifest
+
+# Module-level shared client; cheap to construct, no network until is_configured.
+_LLM = LLMClient()
+
+_SUMMARY_SYSTEM = (
+    "You are the onboarding writer for the Strands Agent Provisioning Team. "
+    "Produce concise, technical onboarding text that complies with the canonical agent anatomy."
+)
+_TOOL_DOC_SYSTEM = (
+    "You are the tool documentation writer. Write a short, accurate getting-started "
+    "blurb for an AI agent that just received credentials for the named tool."
+)
 
 
 def run_documentation(
@@ -94,6 +111,7 @@ def run_documentation(
         agent_id=agent_id,
         tool_count=len(successful_tools),
         access_tier=access_tier,
+        tool_names=[r.tool_name for r in successful_tools],
     )
 
     onboarding = OnboardingPacket(
@@ -117,16 +135,34 @@ def _generate_summary(
     agent_id: str,
     tool_count: int,
     access_tier: AccessTier,
+    tool_names: Optional[List[str]] = None,
 ) -> str:
-    """Generate the onboarding summary text."""
+    """Generate the onboarding summary text.
+
+    Calls the LLM client when configured; otherwise returns a deterministic
+    template fallback so the pipeline keeps working until the LLM service
+    integration lands this week.
+    """
     tier_descriptions = {
         AccessTier.MINIMAL: "read-only access to resources",
         AccessTier.STANDARD: "read/write access to your own resources",
         AccessTier.ELEVATED: "administrative access to your own resources",
         AccessTier.FULL: "full administrative access",
     }
-
     tier_desc = tier_descriptions.get(access_tier, "standard access")
+
+    if _LLM.is_configured:
+        prompt = format_onboarding_summary_prompt(
+            agent_id=sanitize_prompt_var(agent_id),
+            access_tier=sanitize_prompt_var(access_tier.value),
+            tool_names=sanitize_prompt_var(", ".join(tool_names or [])),
+        )
+        try:
+            return _LLM.complete(
+                LLMRequest(system=_SUMMARY_SYSTEM, user=prompt, max_tokens=300)
+            ).strip()
+        except Exception:  # noqa: BLE001 — fall through to deterministic template
+            pass
 
     return (
         f"Your agent environment is ready with {tool_count} tool(s) configured. "
@@ -154,6 +190,22 @@ def _generate_getting_started(
                 text = text.replace(f"{{{key}}}", str(value))
 
         return text
+
+    if _LLM.is_configured:
+        prompt = format_tool_getting_started_prompt(
+            tool_name=sanitize_prompt_var(tool_name),
+            description=sanitize_prompt_var(getattr(onboarding_config, "description", "") or ""),
+            connection_details=sanitize_prompt_var(
+                "available via env var" if credentials and credentials.connection_string else "n/a"
+            ),
+            permissions=sanitize_prompt_var(", ".join(result.permissions or [])),
+        )
+        try:
+            return _LLM.complete(
+                LLMRequest(system=_TOOL_DOC_SYSTEM, user=prompt, max_tokens=400)
+            ).strip()
+        except Exception:  # noqa: BLE001
+            pass
 
     lines = [f"To use {tool_name}:"]
 

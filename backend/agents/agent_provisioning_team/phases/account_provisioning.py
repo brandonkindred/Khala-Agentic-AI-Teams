@@ -13,24 +13,14 @@ from ..models import (
     ToolProvisionResult,
 )
 from ..shared.environment_store import EnvironmentStore
+from ..shared.tool_agent_registry import build_default_tool_agents
 from ..shared.tool_manifest import ToolManifest
 from ..tool_agents.base import ToolProvisionerInterface
-from ..tool_agents.docker_provisioner import DockerProvisionerTool
-from ..tool_agents.generic_provisioner import GenericProvisionerTool
-from ..tool_agents.git_provisioner import GitProvisionerTool
-from ..tool_agents.postgres_provisioner import PostgresProvisionerTool
-from ..tool_agents.redis_provisioner import RedisProvisionerTool
 
 
+# Backwards-compat shim for older imports/tests.
 def _build_provisioners() -> Dict[str, ToolProvisionerInterface]:
-    """Build the default set of tool provisioners."""
-    return {
-        "docker_provisioner": DockerProvisionerTool(),
-        "postgres_provisioner": PostgresProvisionerTool(),
-        "git_provisioner": GitProvisionerTool(),
-        "redis_provisioner": RedisProvisionerTool(),
-        "generic_provisioner": GenericProvisionerTool(),
-    }
+    return build_default_tool_agents()
 
 
 def run_account_provisioning(
@@ -59,7 +49,7 @@ def run_account_provisioning(
     Returns:
         AccountProvisioningResult with per-tool results
     """
-    provs = provisioners or _build_provisioners()
+    provs = provisioners or build_default_tool_agents()
     env_store = environment_store or EnvironmentStore()
 
     tools = manifest.tools
@@ -170,7 +160,7 @@ def deprovision_tools(
     Returns:
         Dict of tool_name -> success status
     """
-    provs = provisioners or _build_provisioners()
+    provs = provisioners or build_default_tool_agents()
     results: Dict[str, bool] = {}
 
     for name, provisioner in provs.items():

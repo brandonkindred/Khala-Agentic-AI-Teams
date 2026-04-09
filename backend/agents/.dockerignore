@@ -43,3 +43,7 @@ software_engineering_team/test_repo/
 # OS
 .DS_Store
 Thumbs.db
+
+# Author profile (PII)
+**/author_profile.yaml
+!**/author_profile.example.yaml

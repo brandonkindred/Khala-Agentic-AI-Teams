@@ -13,24 +13,14 @@ from ..models import (
     ToolProvisionResult,
 )
 from ..shared.access_policy import validate_permissions
+from ..shared.tool_agent_registry import build_default_tool_agents
 from ..shared.tool_manifest import ToolManifest
 from ..tool_agents.base import ToolProvisionerInterface
-from ..tool_agents.docker_provisioner import DockerProvisionerTool
-from ..tool_agents.generic_provisioner import GenericProvisionerTool
-from ..tool_agents.git_provisioner import GitProvisionerTool
-from ..tool_agents.postgres_provisioner import PostgresProvisionerTool
-from ..tool_agents.redis_provisioner import RedisProvisionerTool
 
 
+# Backwards-compat shim for older imports/tests.
 def _build_provisioners() -> Dict[str, ToolProvisionerInterface]:
-    """Build the default set of tool provisioners."""
-    return {
-        "docker_provisioner": DockerProvisionerTool(),
-        "postgres_provisioner": PostgresProvisionerTool(),
-        "git_provisioner": GitProvisionerTool(),
-        "redis_provisioner": RedisProvisionerTool(),
-        "generic_provisioner": GenericProvisionerTool(),
-    }
+    return build_default_tool_agents()
 
 
 def run_access_audit(
@@ -58,7 +48,10 @@ def run_access_audit(
     Returns:
         AccessAuditResult with verification results
     """
-    provisioners or _build_provisioners()
+    # NOTE: previously this line was `provisioners or _build_provisioners()`
+    # which discarded the result and left `provs` unbound. The bug meant the
+    # audit phase silently ran without provisioner instances.
+    provs = provisioners if provisioners is not None else build_default_tool_agents()  # noqa: F841 — held for future per-tool re-verification
 
     verifications: List[AccessVerification] = []
     all_warnings: List[str] = []
@@ -136,7 +129,7 @@ def audit_single_tool(
     Returns:
         AccessVerification result
     """
-    provs = _build_provisioners()
+    provs = build_default_tool_agents()
 
     provisioner_name = f"{tool_name}_provisioner"
     prov = provisioner or provs.get(provisioner_name)

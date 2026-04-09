@@ -200,10 +200,12 @@ Interactive docs: http://localhost:8000/docs
 
 The Writer and Copy Editor agents do **not** accept file paths. Callers must load the writing style guide and brand spec **before** instantiating the agents, then pass the **full file contents** as strings:
 
-- **Writing style guide**: typically `docs/writing_guidelines.md` (read as UTF-8 text).
-- **Brand spec prompt**: typically `docs/brand_spec_prompt.md` (read as full text via `load_brand_spec_prompt` for writer/editor and compliance; validators use a default in-memory spec).
+- **Writing style guide**: typically `docs/writing_guidelines.md` (a Jinja2 template; rendered against the configured author profile when loaded).
+- **Brand spec prompt**: typically `docs/brand_spec_prompt.md` (a Jinja2 template; rendered via `load_brand_spec_prompt` for writer/editor and compliance; validators use a default in-memory spec).
 
-Use `shared.load_style_file(path, label)` to load a file: on success it returns the stripped content; on failure (missing file, read error) it **logs an error** and returns an empty string. Then instantiate the agents with `writing_style_guide_content=...` and `brand_spec_content=...`. If both contents are empty, the agents use a minimal built-in fallback.
+Both templates pull the user's identity, voice, and background from an `AuthorProfile` resolved at runtime — see `author_profile/` and the `AUTHOR_PROFILE_PATH` / `AUTHOR_PROFILE_STRICT` env vars in the root `CLAUDE.md`. To customize the author voice without editing the templates, copy `author_profile/author_profile.example.yaml`, fill it in, and either set `AUTHOR_PROFILE_PATH` or drop the file at `$AGENT_CACHE/author_profile.yaml`.
+
+Use `shared.load_style_file(path, label)` to load a file: on success it returns the rendered, stripped content; on failure (missing file, read error, render error) it **logs an error** and returns an empty string. Then instantiate the agents with `writing_style_guide_content=...` and `brand_spec_content=...`. If both contents are empty, the agents use a minimal built-in fallback.
 
 ## Logging
 

@@ -17,7 +17,7 @@ class StoryGap(BaseModel):
     )
     seed_question: str = Field(
         ...,
-        description="Opening question the ghost writer asks Brandon to surface a personal story",
+        description="Opening question the ghost writer asks the author to surface a personal story",
     )
 
 

@@ -25,3 +25,7 @@ workspace
 **/plans/
 **/*.plan.md
 post_mortems
+
+# Author profile (PII)
+**/author_profile.yaml
+!**/author_profile.example.yaml

@@ -79,3 +79,6 @@ backend/.a11y_artifacts/
 backend/.tmp/
 .claude/settings.local.json
 .claude/*
+# Author profile (PII): never commit real profile, only the example.
+**/author_profile.yaml
+!**/author_profile.example.yaml

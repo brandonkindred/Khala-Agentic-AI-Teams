@@ -593,7 +593,7 @@ class BlogWriterAgent:
             "if none, NEVER fabricate); at least one specific number (dollar figure, percentage, or duration) if the "
             "topic supports it; trade-offs acknowledged; technical concepts introduced through the pain they solve "
             "(not as definitions); one practical next step in the conclusion. "
-            "QUALITY CHECK: Does this sound like Brandon wrote it, not an AI? Would a skeptical reader find the "
+            "QUALITY CHECK: Does this sound like the author's voice per the brand spec, not an AI? Would a skeptical reader find the "
             "arguments convincing? Is it actionable and valuable to the target audience? Does it flow logically "
             "from intro to conclusion? "
             "FINAL CHECK: scan every 'I' or 'my' sentence, if it describes a specific event not from the "

@@ -7,6 +7,7 @@ import json
 import logging
 import sqlite3
 import threading
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -31,11 +32,31 @@ from branding_team.models import (
     TeamOutput,
 )
 from branding_team.orchestrator import BrandingTeamOrchestrator
+from branding_team.postgres import SCHEMA as BRANDING_POSTGRES_SCHEMA
 from branding_team.store import get_default_store
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Branding Team API", version="2.0.0")
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    # Register Postgres schema (no-op when POSTGRES_HOST is unset).
+    try:
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(BRANDING_POSTGRES_SCHEMA)
+    except Exception:
+        logger.exception("branding postgres schema registration failed")
+    yield
+    try:
+        from shared_postgres import close_pool
+
+        close_pool()
+    except Exception:
+        logger.warning("branding shared_postgres close_pool failed", exc_info=True)
+
+
+app = FastAPI(title="Branding Team API", version="2.0.0", lifespan=_lifespan)
 branding_store = get_default_store()
 orchestrator = BrandingTeamOrchestrator()
 conversation_store = get_conversation_store()
@@ -832,7 +853,11 @@ def create_branding_conversation(
                 if output:
                     branding_store.append_brand_version(client_id, brand.id, output)
                 brand_id = brand.id
-                logger.info("Auto-created brand %s from initial message in conversation %s", brand.id, conversation_id)
+                logger.info(
+                    "Auto-created brand %s from initial message in conversation %s",
+                    brand.id,
+                    conversation_id,
+                )
 
         messages, mission, latest_output = conversation_store.get(conversation_id) or (
             [],

@@ -42,17 +42,6 @@ def _get_psycopg():
         return None
 
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS encrypted_integration_credentials (
-    service TEXT NOT NULL,
-    credential_key TEXT NOT NULL,
-    ciphertext TEXT NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (service, credential_key)
-);
-"""
-
-
 def postgres_credentials_enabled() -> bool:
     return bool(os.getenv("POSTGRES_HOST", "").strip())
 
@@ -67,12 +56,12 @@ def _dsn() -> str:
     return f"postgresql://{user}:{pwd}@{host}:{port}/{db}"
 
 
-def _ensure_table(cur) -> None:
-    cur.execute(_DDL)
-
-
 def pg_get_credential(service: str, key: str) -> str:
-    """Return decrypted plaintext or empty string."""
+    """Return decrypted plaintext or empty string.
+
+    The ``encrypted_integration_credentials`` table is created at startup
+    by ``shared_postgres.register_team_schemas`` — no per-call DDL here.
+    """
     if not postgres_credentials_enabled():
         return ""
     row: tuple | None = None
@@ -81,7 +70,6 @@ def pg_get_credential(service: str, key: str) -> str:
 
         try:
             with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
-                _ensure_table(cur)
                 cur.execute(
                     "SELECT ciphertext FROM encrypted_integration_credentials "
                     "WHERE service = %s AND credential_key = %s",
@@ -116,7 +104,6 @@ def pg_set_credential(service: str, key: str, value: str) -> None:
     encrypted = get_integration_fernet().encrypt(value.encode()).decode()
 
     with _LOCK, psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
-        _ensure_table(cur)
         cur.execute(
             """
                     INSERT INTO encrypted_integration_credentials (service, credential_key, ciphertext, updated_at)
@@ -138,7 +125,6 @@ def pg_delete_credential(service: str, key: str) -> None:
     with _LOCK:
         try:
             with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
-                _ensure_table(cur)
                 cur.execute(
                     "DELETE FROM encrypted_integration_credentials WHERE service = %s AND credential_key = %s",
                     (service, key),

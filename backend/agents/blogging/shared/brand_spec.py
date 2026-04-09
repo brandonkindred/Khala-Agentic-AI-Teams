@@ -125,22 +125,28 @@ def brand_spec_prompt_configured(
 
 def load_brand_spec_prompt(path: str | Path) -> str:
     """
-    Load the full brand spec prompt from brand_spec_prompt.md.
+    Load and render the brand spec prompt template.
 
-    Reads the file as UTF-8 and returns its contents. Use this for draft/editor
-    and compliance agents; validators use a default BrandSpec when only the
-    prompt file is available.
+    The template at ``path`` (typically ``docs/brand_spec_prompt.md``) is a
+    Jinja2 template that references an :class:`AuthorProfile` via the
+    top-level ``author`` variable. The author profile is resolved at call
+    time from ``$AUTHOR_PROFILE_PATH``, ``$AGENT_CACHE/author_profile.yaml``,
+    or the bundled example (see ``backend.agents.shared.author_profile``).
 
     Args:
-        path: Path to brand_spec_prompt.md.
+        path: Path to the brand spec template (markdown with Jinja2).
 
     Returns:
-        File contents as string (stripped).
+        Fully rendered brand spec prompt as a stripped string.
 
     Raises:
-        FileNotFoundError: If the file does not exist.
+        FileNotFoundError: If the template file does not exist.
     """
+    from author_profile import load_author_profile, render_template_file
+
     p = Path(path).resolve()
     if not p.exists():
         raise FileNotFoundError(f"Brand spec prompt not found: {p}")
-    return p.read_text(encoding="utf-8").strip()
+
+    profile = load_author_profile()
+    return render_template_file(p, profile).strip()

@@ -1,8 +1,9 @@
 """
 Example: run the blog copy editor agent on a draft.
 
-Loads the Brandon Kindred style guide from docs/ and provides feedback
-on how well the draft aligns with the brand and writing style.
+Loads the author's style guide from docs/ (rendered against the configured
+author profile) and provides feedback on how well the draft aligns with
+the brand and writing style.
 """
 
 import logging

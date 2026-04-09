@@ -161,18 +161,65 @@ def redact_credentials_for_response(
             extra={k: v for k, v in cred.extra.items() if "password" not in k.lower()},
         )
 
+    redacted_tool_results = [
+        ToolProvisionResult(
+            tool_name=tr.tool_name,
+            success=tr.success,
+            credentials=None,  # already represented in redacted_creds above
+            permissions=tr.permissions,
+            details=_redact_details(tr.details) if tr.details else {},
+            error=tr.error,
+        )
+        for tr in result.tool_results
+    ]
+
     return ProvisioningResult(
         agent_id=result.agent_id,
         current_phase=result.current_phase,
         completed_phases=result.completed_phases,
         environment=result.environment,
         credentials=redacted_creds,
-        tool_results=result.tool_results,
+        tool_results=redacted_tool_results,
         access_audit=result.access_audit,
         onboarding=result.onboarding,
         success=result.success,
         error=result.error,
     )
+
+
+# Field substrings that should never round-trip back to API consumers in
+# clear text. Matched case-insensitively against dict keys at any depth.
+_SENSITIVE_KEY_SUBSTRINGS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "private_key",
+    "privatekey",
+    "connection_string",
+    "conn_str",
+    "dsn",
+)
+
+
+def _redact_details(value):
+    """Recursively redact sensitive fields from a tool result `details` blob."""
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            key_l = str(k).lower()
+            if any(s in key_l for s in _SENSITIVE_KEY_SUBSTRINGS):
+                out[k] = "***"
+            else:
+                out[k] = _redact_details(v)
+        return out
+    if isinstance(value, list):
+        return [_redact_details(v) for v in value]
+    if isinstance(value, str):
+        return _redact_connection_string(value) if "://" in value and "@" in value else value
+    return value
 
 
 def _redact_connection_string(conn_str: Optional[str]) -> Optional[str]:
