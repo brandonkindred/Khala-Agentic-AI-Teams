@@ -41,7 +41,6 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'blogging-dashboard', label: 'Pipeline Dashboard', icon: 'space_dashboard', route: '/blogging/dashboard', group: 'content', nested: true },
       { id: 'branding', label: 'Branding', icon: 'palette', route: '/branding', group: 'content' },
       { id: 'social-marketing', label: 'Social Marketing', icon: 'campaign', route: '/social-marketing', group: 'content' },
-      { id: 'studio-grid', label: 'StudioGrid', icon: 'design_services', route: '/studio-grid', group: 'content' },
     ],
   },
   {

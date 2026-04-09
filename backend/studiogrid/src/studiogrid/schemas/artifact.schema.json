@@ -1,1 +1,0 @@
-{"type":"object","required":["artifact_type","format","payload"],"properties":{"artifact_type":{"type":"string"},"format":{"type":"string"},"payload":{"type":"object"}}}

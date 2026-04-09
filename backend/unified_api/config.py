@@ -169,14 +169,6 @@ TEAM_CONFIGS: dict[str, TeamConfig] = {
         cell="core_dev",
         timeout_seconds=300.0,
     ),
-    "studio_grid": TeamConfig(
-        name="StudioGrid",
-        prefix="/api/studio-grid",
-        description="Design-system multi-agent workflow: wireframes, design system, hi-fi, handoff",
-        tags=["design", "ux"],
-        cell="content",
-        timeout_seconds=120.0,
-    ),
     "sales_team": TeamConfig(
         name="AI Sales Team",
         prefix="/api/sales",

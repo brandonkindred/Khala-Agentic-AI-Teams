@@ -52,7 +52,7 @@
     </h4>
 
     @if (assignedAgents().length === 0) {
-      <p class="empty-text">No agents assigned yet. Search or use recommendations below.</p>
+      <p class="empty-text">No agents assigned yet. Use recommendations below.</p>
     } @else {
       <div class="assigned-list">
         @for (agent of assignedAgents(); track agent.agent_name) {
@@ -65,63 +65,6 @@
             <button mat-icon-button (click)="removeAgent(agent.agent_name)" matTooltip="Remove agent" class="remove-btn">
               <mat-icon>close</mat-icon>
             </button>
-          </div>
-        }
-      </div>
-    }
-  </div>
-
-  <mat-divider></mat-divider>
-
-  <!-- Agent Search -->
-  <div class="editor-section">
-    <h4>
-      <mat-icon>search</mat-icon>
-      Search Agents
-    </h4>
-
-    <mat-form-field appearance="outline" class="full-width">
-      <mat-label>Search by skill, tool, or keyword...</mat-label>
-      <input matInput [value]="agentSearchTerm()" (input)="onSearchInput($event)" />
-      <mat-icon matSuffix>search</mat-icon>
-    </mat-form-field>
-
-    @if (searchLoading()) {
-      <mat-progress-bar mode="indeterminate" class="search-progress"></mat-progress-bar>
-    }
-
-    @if (agentSearchResults().length > 0) {
-      <div class="agent-results">
-        @for (agent of agentSearchResults(); track agent.agent_id) {
-          <div class="result-card" [class.already-assigned]="isAgentAssigned(agent.agent_id)">
-            <div class="result-header">
-              <mat-icon>smart_toy</mat-icon>
-              <span class="result-name">{{ agent.agent_id }}</span>
-              @if (!isAgentAssigned(agent.agent_id)) {
-                <button mat-stroked-button class="assign-btn" (click)="assignAgent(agent.agent_id, '')">
-                  <mat-icon>add</mat-icon> Assign
-                </button>
-              } @else {
-                <mat-chip class="assigned-chip">
-                  <mat-icon matChipAvatar>check</mat-icon>
-                  Assigned
-                </mat-chip>
-              }
-            </div>
-            @if (agent.skills && agent.skills.length > 0) {
-              <div class="result-tags">
-                @for (s of agent.skills; track s) {
-                  <span class="tag skill">{{ s }}</span>
-                }
-              </div>
-            }
-            @if (agent.tools && agent.tools.length > 0) {
-              <div class="result-tags">
-                @for (t of agent.tools; track t) {
-                  <span class="tag tool">{{ t }}</span>
-                }
-              </div>
-            }
           </div>
         }
       </div>

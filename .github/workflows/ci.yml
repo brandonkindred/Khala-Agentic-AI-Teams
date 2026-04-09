@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check agents/ unified_api/ blogging_service/ team_service/ studiogrid_service/
+      - run: ruff check agents/ unified_api/ blogging_service/ team_service/
 
   lint-frontend:
     name: Lint Angular (ng lint)
@@ -294,8 +294,6 @@ jobs:
             dockerfile: backend/blogging_service/Dockerfile
           - service: strands-team-service
             dockerfile: backend/team_service/Dockerfile
-          - service: strands-studiogrid-service
-            dockerfile: backend/studiogrid_service/Dockerfile
     steps:
       - uses: actions/checkout@v4
 

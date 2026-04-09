@@ -1,1 +1,0 @@
-{"type":"object","required":["gate","passed","required_fixes"],"properties":{"gate":{"type":"string"},"passed":{"type":"boolean"},"required_fixes":{"type":"array"}}}

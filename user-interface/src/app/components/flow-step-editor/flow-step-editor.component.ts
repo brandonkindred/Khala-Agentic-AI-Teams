@@ -20,15 +20,12 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDividerModule } from '@angular/material/divider';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
-import { debounceTime, distinctUntilChanged, Subject } from 'rxjs';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
-import { StudioGridApiService } from '../../services/studio-grid-api.service';
 import type {
   ProcessStep,
   ProcessStepAgent,
   StepType,
   RecommendedAgent,
-  AgentInfo,
   ProcessDefinition,
 } from '../../models';
 
@@ -62,7 +59,6 @@ export class FlowStepEditorComponent implements OnChanges {
   @Output() closed = new EventEmitter<void>();
 
   private readonly agenticApi = inject(AgenticTeamApiService);
-  private readonly studioApi = inject(StudioGridApiService);
   private readonly fb = inject(FormBuilder);
 
   stepTypes: { value: StepType; label: string }[] = [
@@ -81,12 +77,6 @@ export class FlowStepEditorComponent implements OnChanges {
     condition: [''],
   });
 
-  // Agent search
-  agentSearchTerm = signal('');
-  agentSearchResults = signal<AgentInfo[]>([]);
-  searchLoading = signal(false);
-  private searchSubject = new Subject<string>();
-
   // Recommendations
   recommendations = signal<RecommendedAgent[]>([]);
   recommendationsLoading = signal(false);
@@ -96,12 +86,6 @@ export class FlowStepEditorComponent implements OnChanges {
 
   // Next steps selection
   selectedNextSteps = signal<string[]>([]);
-
-  constructor() {
-    this.searchSubject
-      .pipe(debounceTime(400), distinctUntilChanged())
-      .subscribe((term) => this.executeSearch(term));
-  }
 
   ngOnChanges(changes: SimpleChanges): void {
     if (changes['step'] && this.step) {
@@ -115,30 +99,6 @@ export class FlowStepEditorComponent implements OnChanges {
       this.selectedNextSteps.set([...this.step.next_steps]);
       this.loadRecommendations();
     }
-  }
-
-  onSearchInput(event: Event): void {
-    const value = (event.target as HTMLInputElement).value;
-    this.agentSearchTerm.set(value);
-    this.searchSubject.next(value);
-  }
-
-  private executeSearch(term: string): void {
-    if (!term.trim()) {
-      this.agentSearchResults.set([]);
-      return;
-    }
-    this.searchLoading.set(true);
-    this.studioApi.findAgents({ problem: term, skills: [], limit: 8 }).subscribe({
-      next: (res) => {
-        this.agentSearchResults.set(res.assisting_agents ?? []);
-        this.searchLoading.set(false);
-      },
-      error: () => {
-        this.agentSearchResults.set([]);
-        this.searchLoading.set(false);
-      },
-    });
   }
 
   private loadRecommendations(): void {

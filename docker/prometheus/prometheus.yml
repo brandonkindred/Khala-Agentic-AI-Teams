@@ -57,8 +57,6 @@ scrape_configs:
         labels: { service: planning-v3-service, team: planning_v3 }
       - targets: ["coding-team-service:8103"]
         labels: { service: coding-team-service, team: coding_team }
-      - targets: ["studio-grid-service:8104"]
-        labels: { service: studio-grid-service, team: studio_grid }
       - targets: ["sales-service:8105"]
         labels: { service: sales-service, team: sales_team }
       - targets: ["road-trip-service:8106"]

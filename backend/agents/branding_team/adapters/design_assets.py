@@ -1,4 +1,4 @@
-"""Adapter to request design assets (StudioGrid when available, otherwise stub)."""
+"""Adapter to request design assets (stub; calls a design service when configured)."""
 
 from __future__ import annotations
 
@@ -19,19 +19,19 @@ def request_design_assets(
 ) -> DesignAssetRequestResult:
     """
     Request design assets for a brand proposal. If BRANDING_DESIGN_SERVICE_URL or
-    StudioGrid is configured, call it; otherwise return a structured stub.
+    a compatible design service is configured, call it; otherwise return a structured stub.
     """
     base = _design_service_url()
     request_id = f"design_{uuid4().hex[:12]}"
     if base:
-        # Future: POST to e.g. f"{base}/api/studiogrid/run" with intake derived from codification
-        # For now we still return stub until StudioGrid is mounted and contract is defined
+        # Future: POST to a configured design service with intake derived from codification.
+        # For now we still return stub until a design service is wired up and contract is defined.
         pass
     return DesignAssetRequestResult(
         request_id=request_id,
         status="pending",
         artifacts=[
-            "Design request queued; attach StudioGrid when available.",
+            "Design request queued; attach a design service when available.",
             f"Brand direction: {codification.positioning_statement[:100]}...",
         ],
     )

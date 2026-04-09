@@ -403,7 +403,7 @@ class CompetitiveSnapshot(BaseModel):
 
 
 class DesignAssetRequestResult(BaseModel):
-    """Result of a design asset request (stub or from StudioGrid)."""
+    """Result of a design asset request (stub or from a configured design service)."""
 
     request_id: str
     status: str = "pending"

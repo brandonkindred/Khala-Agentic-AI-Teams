@@ -21,8 +21,6 @@ RUN pip install --no-cache-dir -r /app/agents/requirements.txt
 COPY agents /app/agents
 COPY unified_api /app/unified_api
 COPY run_unified_api.py /app/
-# StudioGrid design-system workflow (mounted at /api/studio-grid when import succeeds)
-COPY studiogrid /app/studiogrid
 
 # Generate PA credential encryption key at build time so it persists across container runs
 RUN python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" > /app/pa_credential_key

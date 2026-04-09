@@ -64,7 +64,6 @@ The Unified API mounts teams under `/api/*` prefixes. Current configured routes 
 - `/api/nutrition-meal-planning`
 - `/api/planning-v3`
 - `/api/coding-team` (logical sub-team of software engineering)
-- `/api/studio-grid`
 - `/api/sales`
 - `/api/road-trip-planning`
 - `/api/agentic-team-provisioning`

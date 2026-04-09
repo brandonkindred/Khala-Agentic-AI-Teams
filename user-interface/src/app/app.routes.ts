@@ -18,7 +18,6 @@ import { AISystemsDashboardComponent } from './components/ai-systems-dashboard/a
 import { InvestmentDashboardComponent } from './components/investment-dashboard/investment-dashboard.component';
 import { InvestmentStrategyLabPageComponent } from './components/investment-strategy-lab-page/investment-strategy-lab-page.component';
 import { IntegrationsDashboardComponent } from './components/integrations-dashboard/integrations-dashboard.component';
-import { StudioGridDashboardComponent } from './components/studio-grid-dashboard/studio-grid-dashboard.component';
 import { SalesDashboardComponent } from './components/sales-dashboard/sales-dashboard.component';
 import { NutritionDashboardComponent } from './components/nutrition-dashboard/nutrition-dashboard.component';
 import { StartupAdvisorDashboardComponent } from './components/startup-advisor-dashboard/startup-advisor-dashboard.component';
@@ -58,7 +57,6 @@ export const routes: Routes = [
       },
       { path: 'investment/strategy-lab', component: InvestmentStrategyLabPageComponent, data: { breadcrumb: 'Strategy Lab', title: 'Strategy Lab' } },
       { path: 'integrations', component: IntegrationsDashboardComponent, data: { breadcrumb: 'Integrations', title: 'Integrations' } },
-      { path: 'studio-grid', component: StudioGridDashboardComponent, data: { breadcrumb: 'StudioGrid', title: 'StudioGrid' } },
       { path: 'sales', component: SalesDashboardComponent, data: { breadcrumb: 'Sales', title: 'Sales' } },
       { path: 'nutrition', component: NutritionDashboardComponent, data: { breadcrumb: 'Nutritionist', title: 'Nutritionist' } },
       { path: 'agentic-teams', component: AgenticTeamDashboardComponent, data: { breadcrumb: 'Agentic Teams', title: 'Agentic Teams' } },

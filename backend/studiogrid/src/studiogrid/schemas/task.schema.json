@@ -1,1 +1,0 @@
-{"type":"object","required":["task_id","owner_agent"],"properties":{"task_id":{"type":"string"},"owner_agent":{"type":"string"}}}

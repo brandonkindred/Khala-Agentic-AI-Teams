@@ -42,7 +42,6 @@ def test_team_configs_has_expected_teams():
         "nutrition_meal_planning",
         "planning_v3",
         "coding_team",
-        "studio_grid",
         "sales_team",
         "road_trip_planning",
     }

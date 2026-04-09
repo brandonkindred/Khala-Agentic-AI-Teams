@@ -265,36 +265,7 @@ def recommend_agents_for_step(process_id: str, step_id: str):
     team_id = _store.get_process_team_id(process_id)
     recommendations: list[RecommendedAgent] = []
 
-    # Try registry-based recommendations via studiogrid
-    try:
-        from studiogrid.runtime.registry_loader import RegistryLoader
-
-        loader = RegistryLoader(
-            Path(__file__).resolve().parents[4] / "studiogrid" / "src" / "studiogrid"
-        )
-        search_text = f"{step.name} {step.description}"
-        found = loader.find_assisting_agents(
-            problem_description=search_text, required_skills=[], limit=5
-        )
-        for agent in found:
-            recommendations.append(
-                RecommendedAgent(
-                    agent_name=agent.get("agent_id", ""),
-                    source="registry",
-                    role=agent.get("description", "")[:120],
-                    skills=agent.get("skills", []),
-                    tools=[
-                        r.get("name", str(r)) if isinstance(r, dict) else str(r)
-                        for r in agent.get("resources", [])
-                    ],
-                    keywords=agent.get("match", {}).get("keywords", []),
-                    match_score=float(agent.get("score", 0)),
-                )
-            )
-    except Exception:
-        logger.debug("StudioGrid registry not available for recommendations", exc_info=True)
-
-    # Also recommend matching roster agents
+    # Recommend matching roster agents
     if team_id:
         team = _store.get_team(team_id)
         if team:

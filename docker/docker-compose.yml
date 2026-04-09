@@ -105,7 +105,6 @@ services:
   # ── Team Microservices ──────────────────────────────────────────────────────
   # Each agent team runs in its own container using the generic team_service/Dockerfile.
   # Blogging uses its own Dockerfile (needs Playwright/Chromium).
-  # StudioGrid uses studiogrid_service/Dockerfile (code lives outside agents/).
 
   blogging-service:
     build:
@@ -551,35 +550,6 @@ services:
       timeout: 5s
       retries: 5
 
-  studio-grid-service:
-    build:
-      context: ../backend
-      dockerfile: studiogrid_service/Dockerfile
-      args: { TEAM_PORT: "8104" }
-    image: strands-studio-grid-service
-    container_name: strands-studio-grid-service
-    depends_on:
-      postgres: { condition: service_healthy }
-      job-service: { condition: service_healthy }
-    environment:
-      <<: *team-env-base
-      TEAM_MODULE: studiogrid.api.main
-      TEAM_NAME: studio_grid
-      TEAM_PORT: "8104"
-      TEAM_TEMPORAL_WORKER_MODULE: ""
-      TEAM_TEMPORAL_WORKER_FUNC: ""
-    volumes: *team-volumes
-    extra_hosts: *team-extra-hosts
-    ports: ["8104:8104"]
-    networks:
-      stack: { ipv4_address: 172.28.0.22, aliases: [studio-grid-service] }
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8104/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-
   sales-service:
     build:
       context: ../backend
@@ -780,7 +750,6 @@ services:
       nutrition-service: { condition: service_healthy }
       planning-v3-service: { condition: service_healthy }
       coding-team-service: { condition: service_healthy }
-      studio-grid-service: { condition: service_healthy }
       sales-service: { condition: service_healthy }
       road-trip-service: { condition: service_healthy }
       startup-advisor-service: { condition: service_healthy }
@@ -827,7 +796,6 @@ services:
       NUTRITION_MEAL_PLANNING_SERVICE_URL: http://nutrition-service:8101
       PLANNING_V3_SERVICE_URL: http://planning-v3-service:8102
       CODING_TEAM_SERVICE_URL: http://coding-team-service:8103
-      STUDIO_GRID_SERVICE_URL: http://studio-grid-service:8104
       SALES_TEAM_SERVICE_URL: http://sales-service:8105
       ROAD_TRIP_PLANNING_SERVICE_URL: http://road-trip-service:8106
       STARTUP_ADVISOR_SERVICE_URL: http://startup-advisor-service:8107
@@ -852,7 +820,6 @@ services:
       - "nutrition-service:172.28.0.19"
       - "planning-v3-service:172.28.0.20"
       - "coding-team-service:172.28.0.21"
-      - "studio-grid-service:172.28.0.22"
       - "sales-service:172.28.0.23"
       - "road-trip-service:172.28.0.24"
       - "startup-advisor-service:172.28.0.25"
@@ -929,7 +896,6 @@ services:
       - "nutrition-service:172.28.0.19"
       - "planning-v3-service:172.28.0.20"
       - "coding-team-service:172.28.0.21"
-      - "studio-grid-service:172.28.0.22"
       - "sales-service:172.28.0.23"
       - "road-trip-service:172.28.0.24"
       - "startup-advisor-service:172.28.0.25"

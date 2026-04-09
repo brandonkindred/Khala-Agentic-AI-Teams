@@ -1,1 +1,0 @@
-{"type":"object","required":["title","options"],"properties":{"title":{"type":"string"},"options":{"type":"array"}}}

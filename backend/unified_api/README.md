@@ -28,7 +28,6 @@ graph TB
             Nutrition["/api/nutrition-meal-planning"]
             PlanV3["/api/planning-v3"]
             Coding["/api/coding-team"]
-            Studio["/api/studio-grid"]
             Sales["/api/sales"]
             RoadTrip["/api/road-trip-planning"]
             AgenticProv["/api/agentic-team-provisioning"]
@@ -97,7 +96,6 @@ Execution stays in agent code (e.g. `agent_git_tools` + `GitToolContext`); these
 | Nutrition & Meal Planning | `/api/nutrition-meal-planning` | `/api/nutrition-meal-planning/docs` |
 | Planning V3 | `/api/planning-v3` | `/api/planning-v3/docs` |
 | Coding Team | `/api/coding-team` | `/api/coding-team/docs` |
-| StudioGrid | `/api/studio-grid` | `/api/studio-grid/docs` |
 | AI Sales Team | `/api/sales` | `/api/sales/docs` |
 | Road Trip Planning | `/api/road-trip-planning` | `/api/road-trip-planning/docs` |
 | Agentic Team Provisioning | `/api/agentic-team-provisioning` | `/api/agentic-team-provisioning/docs` |

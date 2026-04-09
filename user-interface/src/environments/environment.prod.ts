@@ -20,8 +20,6 @@ export const environment = {
   investmentApiUrl: `${apiBase}/api/investment`,
   nutritionApiUrl: `${apiBase}/api/nutrition-meal-planning`,
   integrationsApiUrl: `${apiBase}/api/integrations`,
-  /** StudioGrid design-system workflow API */
-  studioGridApiUrl: `${apiBase}/api/studio-grid`,
   salesApiUrl: `${apiBase}/api/sales`,
   agenticTeamProvisioningApiUrl: `${apiBase}/api/agentic-team-provisioning`,
   startupAdvisorApiUrl: `${apiBase}/api/startup-advisor`,

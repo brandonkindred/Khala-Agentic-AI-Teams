@@ -1,1 +1,0 @@
-{"type":"object","required":["run_id","phase","status"],"properties":{"run_id":{"type":"string"},"phase":{"type":"string"},"status":{"type":"string"}}}
