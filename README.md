@@ -7,15 +7,9 @@ Strands Agents is a monorepo for multi-agent "team" systems. Each team exposes a
 ```text
 strands-agents/
 ├── backend/
-│   ├── agents/                 # Team implementations + team-specific APIs (~19 mounted teams)
+│   ├── agents/                 # Team implementations + team-specific APIs (21 mounted teams)
 │   ├── unified_api/            # Unified FastAPI app mounting all teams
 │   ├── run_unified_api.py      # Unified API launcher
-│   ├── studiogrid/             # StudioGrid design-system workflow
-│   ├── blogging_service/       # Isolated blogging microservice container
-│   ├── job_service/            # Centralized job state tracking service (Postgres)
-│   ├── team_service/           # Generic team microservice container
-│   ├── studiogrid_service/     # StudioGrid microservice container
-│   ├── post_mortems/           # Agent failure audit log
 │   ├── Makefile                # Build, lint, test, run targets
 │   └── pyproject.toml          # Ruff + pytest config
 ├── user-interface/             # Angular 19 frontend
@@ -54,7 +48,7 @@ UI: <http://localhost:4200>
 
 ## Unified API team routes
 
-The Unified API mounts teams under `/api/*` prefixes. Current configured routes (19 teams):
+The Unified API mounts teams under `/api/*` prefixes. Current configured routes (21 enabled teams):
 
 - `/api/blogging`
 - `/api/software-engineering`
@@ -66,15 +60,17 @@ The Unified API mounts teams under `/api/*` prefixes. Current configured routes 
 - `/api/agent-provisioning`
 - `/api/accessibility-audit`
 - `/api/ai-systems`
-- `/api/investment`
+- `/api/investment` (also serves the Investment Strategy Lab sub-team — disabled as a separate mount)
 - `/api/nutrition-meal-planning`
 - `/api/planning-v3`
-- `/api/coding-team`
+- `/api/coding-team` (logical sub-team of software engineering)
 - `/api/studio-grid`
 - `/api/sales`
 - `/api/road-trip-planning`
 - `/api/agentic-team-provisioning`
 - `/api/startup-advisor`
+- `/api/user-agent-founder`
+- `/api/deepthought`
 
 ## Platform notes (cross-cutting)
 
@@ -104,6 +100,8 @@ The Unified API mounts teams under `/api/*` prefixes. Current configured routes 
 - `backend/agents/road_trip_planning_team/README.md` (Road Trip Planning)
 - `backend/agents/agentic_team_provisioning/` (Agentic Team Provisioning)
 - `backend/agents/startup_advisor/README.md` (Startup Advisor)
+- `backend/agents/user_agent_founder/README.md` (User Agent Founder)
+- `backend/agents/deepthought/README.md` (Deepthought recursive agent)
 
 ## Docker
 
@@ -118,8 +116,6 @@ See `docker/README.md` for env vars, ports, and deployment notes.
 ## Additional docs
 
 - `backend/unified_api/README.md` (mounts, `TeamConfig`, optional `parent_team_key`, logical disabled teams)
-- `backend/studiogrid/README.md`
-- `backend/post_mortems/POST_MORTEMS.md`
 - `ARCHITECTURE.md`
 - `CONTRIBUTORS.md`
 - `CLAUDE.md` (Cursor / Claude Code guidance for this repo)

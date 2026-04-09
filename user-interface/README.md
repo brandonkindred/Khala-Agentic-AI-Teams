@@ -1,6 +1,6 @@
 # Strands Agents User Interface
 
-Angular application providing an interactive UI for all Strands agent APIs: Blogging, Software Engineering Team, Personal Assistant, Market Research, SOC2 Compliance, Social Media Marketing, Branding, Agent Provisioning, Accessibility Audit, AI Systems, Investment, Nutrition & Meal Planning, Planning V3, Coding Team, StudioGrid, AI Sales Team, Road Trip Planning, Agentic Team Provisioning, and Startup Advisor.
+Angular application providing an interactive UI for all Strands agent APIs: Blogging, Software Engineering Team, Personal Assistant, Market Research, SOC2 Compliance, Social Media Marketing, Branding, Agent Provisioning, Accessibility Audit, AI Systems, Investment (Advisor + Strategy Lab), Nutrition & Meal Planning, Planning V3, Coding Team, StudioGrid, AI Sales Team, Road Trip Planning, Agentic Team Provisioning, Startup Advisor, User Agent Founder, and Deepthought.
 
 ## Prerequisites
 
@@ -23,20 +23,14 @@ npm ci
 
 ## Configuration
 
-API base URLs are configured in `src/environments/environment.ts` (development) and `src/environments/environment.prod.ts` (production). Default ports:
+API base URLs are configured in `src/environments/environment.ts` (development) and `src/environments/environment.prod.ts` (production). All teams are served by the **Unified API**:
 
 | API | Default URL | Port |
 |-----|-------------|------|
-| Blogging | `http://localhost:8001` | 8001 |
-| Software Engineering Team | `http://localhost:8000` | 8000 |
-| Personal Assistant | `http://localhost:8015` | 8015 |
-| Market Research | `http://localhost:8011` | 8011 |
-| SOC2 Compliance | `http://localhost:8020` | 8020 |
-| Social Media Marketing | `http://localhost:8010` | 8010 |
-| Branding | `http://localhost:8012` | 8012 |
-| **Unified API** | `http://localhost:8080` | 8080 |
+| **Unified API (local)** | `http://localhost:8080` | 8080 |
+| **Unified API (Docker)** | `http://localhost:8888` | 8888 (host) → 8080 (container) |
 
-**Note:** The Unified API provides all 19 team APIs under a single endpoint with namespaced prefixes (e.g., `/api/blogging`, `/api/personal-assistant`, `/api/planning-v3`, `/api/coding-team`, `/api/sales`, `/api/road-trip-planning`, `/api/agentic-team-provisioning`, `/api/startup-advisor`). When running via Docker Compose the UI at port 4201 proxies all `/api/*` requests to the agents container at port 8888.
+**Note:** The Unified API provides all 21 team APIs under a single endpoint with namespaced prefixes — `/api/blogging`, `/api/software-engineering`, `/api/personal-assistant`, `/api/market-research`, `/api/soc2-compliance`, `/api/social-marketing`, `/api/branding`, `/api/agent-provisioning`, `/api/accessibility-audit`, `/api/ai-systems`, `/api/investment`, `/api/nutrition-meal-planning`, `/api/planning-v3`, `/api/coding-team`, `/api/studio-grid`, `/api/sales`, `/api/road-trip-planning`, `/api/agentic-team-provisioning`, `/api/startup-advisor`, `/api/user-agent-founder`, `/api/deepthought`. When running via Docker Compose the UI at port 4201 proxies all `/api/*` requests to the agents container exposed on host port 8888.
 
 To override, edit `src/environments/environment.ts` before building.
 

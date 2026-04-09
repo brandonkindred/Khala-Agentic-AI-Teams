@@ -4,21 +4,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Strands Agents** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It consists of 13+ agent "teams" (software engineering, blogging, market research, SOC2 compliance, etc.), each exposed as a FastAPI service, unified under a single Unified API with an Angular 19 frontend.
+**Strands Agents** is a multi-agent orchestration platform that simulates autonomous software development teams and specialized business functions. It currently mounts **21 enabled agent "teams"** (software engineering, blogging, personal assistant, market research, SOC2 compliance, social marketing, branding, agent provisioning, accessibility audit, AI systems, investment, nutrition & meal planning, planning v3, coding team, studio grid, sales, road trip planning, agentic team provisioning, startup advisor, user agent founder, deepthought) under a single Unified FastAPI app, with an Angular 19 frontend. The authoritative team list lives in `backend/unified_api/config.py` (`TEAM_CONFIGS`).
 
 ## Repository Structure
 
 ```
 backend/
   agents/                    # All agent team implementations
-    software_engineering_team/  # Primary team — full dev pipeline
+    software_engineering_team/  # Primary team — full dev pipeline; contains
+                                # backend_code_v2_team/, frontend_code_v2_team/,
+                                # devops_team/, planning_v2_team/, planning_v2_adapter.py,
+                                # planning_v3_adapter.py, integration_team/, qa_agent/, etc.
+    planning_v3_team/        # Client-facing discovery/PRD team (mounted at /api/planning-v3)
+    coding_team/             # SE sub-team: tech lead + stack specialists (logical sub-team)
     blogging/                # Blog content pipeline
+    personal_assistant_team/
+    market_research_team/
+    soc2_compliance_team/
+    social_media_marketing_team/
+    branding_team/
+    agent_provisioning_team/
+    accessibility_audit_team/
+    ai_systems_team/
+    investment_team/         # Advisor/IPS + Strategy Lab (one /api/investment prefix)
+    nutrition_meal_planning_team/
+    sales_team/
+    road_trip_planning_team/
+    agentic_team_provisioning/
+    startup_advisor/
+    user_agent_founder/
+    deepthought/
     llm_service/             # Centralized LLM client (Ollama, Claude)
-    integrations/            # Shared integration contracts
+    integrations/            # Shared integration contracts (Google login, Medium, etc.)
+    artifact_registry/       # Shared artifact persistence
+    event_bus/               # Cross-team event publishing
+    shared_temporal/         # Temporal worker/workflow plumbing
     api/                     # Legacy blog API surface (see blogging/ for current pipeline)
   unified_api/               # Single-entry-point FastAPI server (port 8080)
-    config.py                # Team routing + Temporal settings
-    main.py                  # App with team route mounting
+    config.py                # TEAM_CONFIGS, security gateway, Temporal settings
+    main.py                  # App with team route mounting + security gateway
   run_unified_api.py         # CLI launcher
   Makefile                   # Primary build/run targets
   requirements.txt           # Top-level Python deps
@@ -118,7 +142,7 @@ Each agent team has a **team-lead orchestrator** that coordinates role-separated
 
 ### Software Engineering Team Pipeline (4 phases)
 
-1. **Discovery**: Spec → LLM parsing → Planning-v2 (6-phase workflow) → planning_v2_adapter
+1. **Discovery**: Spec → LLM parsing → Planning (Planning-v2 6-phase workflow via `planning_v2_adapter.py`, or the newer `planning_v3_adapter.py` which delegates to the standalone `planning_v3_team`)
 2. **Design**: Tech Lead generates task assignments; Architecture Expert produces architecture docs
 3. **Execution** (parallel queues):
    - Prefix queue: git/DevOps setup (sequential)
@@ -132,9 +156,14 @@ Each agent team has a **team-lead orchestrator** that coordinates role-separated
 
 ### Sub-Team Variants
 
-- **Backend-Code-V2** (`backend_code_v2_team/`): 3-layer (Backend Tech Lead → Backend Dev Agent + 7 tool agents)
-- **Frontend-Code-V2** (`frontend_code_v2_team/`): 3-layer (Frontend Tech Lead → Frontend Dev Agent + 12 tool agents)
-- **DevOps Team**: 5-phase (Intake → Change Design → Write Artifacts → Validation → Completion)
+All three live **inside** `backend/agents/software_engineering_team/`:
+
+- **Backend-Code-V2** (`software_engineering_team/backend_code_v2_team/`): 3-layer (Backend Tech Lead → Backend Dev Agent + tool agents for linting, build, code review, security, QA, DbC, git ops)
+- **Frontend-Code-V2** (`software_engineering_team/frontend_code_v2_team/`): 3-layer (Frontend Tech Lead → Frontend Dev Agent + tool agents)
+- **DevOps Team** (`software_engineering_team/devops_team/`): 5-phase (Intake → Change Design → Write Artifacts → Validation → Completion)
+- **Planning V2** (`software_engineering_team/planning_v2_team/`): legacy 6-phase planning, still supported via `planning_v2_adapter.py`
+- **Coding Team** (`backend/agents/coding_team/`): standalone module mounted at `/api/coding-team` and used by SE as a logical sub-team (`parent_team_key="software_engineering"`)
+- **Planning V3** (`backend/agents/planning_v3_team/`): standalone client-facing discovery/PRD team mounted at `/api/planning-v3`; SE invokes it through `planning_v3_adapter.py`
 
 ### Unified API Routing
 
@@ -175,6 +204,15 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 | `BLOG_PLANNING_MAX_ITERATIONS` | Blog planning refine loop cap (default 5) |
 | `BLOG_PLANNING_MAX_PARSE_RETRIES` | JSON parse/repair attempts per planning LLM call (default 3) |
 | `BLOG_PLANNING_MODEL` | Optional Ollama model name for **planning only** (same base URL as `LLM_*`) |
+| `INTEGRATIONS_BROWSER_SESSION_ROOT` | Root for Playwright `storage_state` files used by browser-based integrations (Medium, etc.); Docker maps to the shared `agents_data` volume |
+| `SE_WORKSPACE_DIR` | Root for software-engineering team per-job workspaces |
+| `AGENT_CACHE` | Shared cache root for all teams (Docker: `/data/agents`); each team namespaces under `{team_name}/` |
+| `UNIFIED_API_PORT` / `UNIFIED_API_HOST` | Bind address/port for the Unified API (default `0.0.0.0:8080`) |
+| `POSTGRES_HOST` (and `POSTGRES_PORT`/`USER`/`PASSWORD`/`DB`) | When set, enables Postgres-backed stores (job state, encrypted integration credentials, etc.); without it the platform falls back to local SQLite where supported |
+| `ARCHITECT_MODEL_SPECIALIST` / `ARCHITECT_MODEL_ORCHESTRATOR` | Per-role model overrides for the AI Systems team |
+| `ALPHA_VANTAGE_API_KEY` / `FRED_API_KEY` | Market data providers used by the Investment Strategy Lab |
+| `STRATEGY_LAB_MARKET_DATA_*` | Strategy Lab market-data cache/timeout/provider tuning |
+| `BRANDING_DB_PATH` / `STARTUP_ADVISOR_DB_PATH` / `USER_AGENT_FOUNDER_DB_PATH` | Local SQLite paths for those teams when Postgres is not configured |
 | `AUTHOR_PROFILE_PATH` | Path to user/author profile YAML injected into blogging prompts. Falls back to `$AGENT_CACHE/author_profile.yaml`, then to the bundled example. See `backend/agents/blogging/author_profile/`. |
 | `AUTHOR_PROFILE_STRICT` | When `true`, missing/invalid profile raises instead of falling back to the bundled example. Recommended for production. |
 
@@ -186,7 +224,7 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 
 ## Testing
 
-- **Backend**: `pytest` — CI runs per-team test suites (SE, blogging, market research, SOC2, social marketing)
+- **Backend**: `pytest` — CI runs per-team test suites (SE, blogging, market research, SOC2, social marketing, investment, planning v3, sales, deepthought, etc.)
 - **Frontend**: Vitest + Angular testing utilities; 80% line coverage target for `src/app`
 - **CI**: GitHub Actions — ruff lint must pass first, then parallel test jobs, then docker smoke test
 
