@@ -890,6 +890,96 @@ services:
         ipv4_address: 172.28.0.7
     restart: unless-stopped
 
+  # ── Observability (Prometheus + Grafana) ───────────────────────────────────
+  # Prometheus scrapes /metrics on the unified API, job-service, and every
+  # team microservice (exposed automatically via prometheus-fastapi-instrumentator
+  # in backend/team_service/entrypoint.py). Grafana ships with a pre-provisioned
+  # Prometheus datasource and a starter FastAPI dashboard.
+
+  prometheus:
+    image: prom/prometheus:v3.11.0
+    container_name: strands-stack-prometheus
+    depends_on:
+      strands-agents: { condition: service_healthy }
+      job-service: { condition: service_healthy }
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    extra_hosts:
+      - "strands-agents:172.28.0.6"
+      - "job-service:172.28.0.5"
+      - "blogging-service:172.28.0.8"
+      - "se-service:172.28.0.9"
+      - "pa-service:172.28.0.10"
+      - "market-research-service:172.28.0.11"
+      - "soc2-service:172.28.0.12"
+      - "social-marketing-service:172.28.0.13"
+      - "branding-service:172.28.0.14"
+      - "agent-provisioning-service:172.28.0.15"
+      - "a11y-service:172.28.0.16"
+      - "ai-systems-service:172.28.0.17"
+      - "investment-service:172.28.0.18"
+      - "nutrition-service:172.28.0.19"
+      - "planning-v3-service:172.28.0.20"
+      - "coding-team-service:172.28.0.21"
+      - "studio-grid-service:172.28.0.22"
+      - "sales-service:172.28.0.23"
+      - "road-trip-service:172.28.0.24"
+      - "startup-advisor-service:172.28.0.25"
+      - "agentic-team-provisioning-service:172.28.0.26"
+      - "user-agent-founder-service:172.28.0.27"
+      - "deepthought-service:172.28.0.28"
+    ports:
+      - "9090:9090"
+    networks:
+      stack:
+        ipv4_address: 172.28.0.29
+        aliases:
+          - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:12.4.2
+    container_name: strands-stack-grafana
+    depends_on:
+      prometheus: { condition: service_healthy }
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    extra_hosts:
+      - "prometheus:172.28.0.29"
+    ports:
+      - "3000:3000"
+    networks:
+      stack:
+        ipv4_address: 172.28.0.30
+        aliases:
+          - grafana
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
 networks:
   stack:
     name: strands-stack
@@ -904,3 +994,5 @@ volumes:
   postgres_data_v18:
   agents_workspace:
   agents_data:
+  prometheus_data:
+  grafana_data:

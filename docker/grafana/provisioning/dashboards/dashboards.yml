@@ -1,0 +1,15 @@
+apiVersion: 1
+
+providers:
+  - name: strands-default
+    orgId: 1
+    folder: Strands
+    folderUid: strands
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

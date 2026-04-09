@@ -68,10 +68,14 @@ def _shutdown_hook() -> None:
 
 
 def _resolve_app() -> str:
-    """Return a uvicorn import string for the ASGI app.
+    """Return a uvicorn import string for the instrumented ASGI app.
 
-    If TEAM_APP_ATTR points to an APIRouter (not a FastAPI app), write a
-    wrapper module to disk so uvicorn worker processes can import it.
+    Always writes /app/_team_wrapper.py so every team gets:
+      * A FastAPI app (wrapping a router if TEAM_APP_ATTR == "router", else
+        re-exporting the team's own FastAPI app).
+      * prometheus-fastapi-instrumentator installed and /metrics exposed.
+    The wrapper is re-imported by each uvicorn worker on fork, so per-worker
+    instrumentation state is fine with workers>1.
     """
     # Validate the team module can be imported (fail fast with a clear error).
     try:
@@ -80,20 +84,39 @@ def _resolve_app() -> str:
         logger.exception("FATAL: cannot import team module %s", TEAM_MODULE)
         raise
 
-    if TEAM_APP_ATTR == "router":
-        # Write a real Python file that uvicorn workers can import.
-        import pathlib
+    import pathlib
 
-        wrapper_path = pathlib.Path("/app/_team_wrapper.py")
-        wrapper_path.write_text(
-            f"from fastapi import FastAPI\n"
+    wrapper_path = pathlib.Path("/app/_team_wrapper.py")
+
+    if TEAM_APP_ATTR == "router":
+        body = (
+            "from fastapi import FastAPI\n"
             f"from {TEAM_MODULE} import {TEAM_APP_ATTR} as _router\n"
             f"app = FastAPI(title='{TEAM_NAME} API')\n"
-            f"app.include_router(_router)\n",
-            encoding="utf-8",
+            "app.include_router(_router)\n"
         )
-        return "_team_wrapper:app"
-    return f"{TEAM_MODULE}:{TEAM_APP_ATTR}"
+    else:
+        body = f"from {TEAM_MODULE} import {TEAM_APP_ATTR} as app\n"
+
+    body += (
+        "try:\n"
+        "    from prometheus_fastapi_instrumentator import Instrumentator\n"
+        "    Instrumentator(\n"
+        "        should_group_status_codes=True,\n"
+        "        should_ignore_untemplated=True,\n"
+        "        excluded_handlers=['/metrics', '/health'],\n"
+        "    ).instrument(app).expose(\n"
+        "        app, endpoint='/metrics', include_in_schema=False\n"
+        "    )\n"
+        "except Exception:\n"
+        "    import logging\n"
+        "    logging.getLogger('team_service').warning(\n"
+        "        'prometheus instrumentator unavailable', exc_info=True\n"
+        "    )\n"
+    )
+
+    wrapper_path.write_text(body, encoding="utf-8")
+    return "_team_wrapper:app"
 
 
 if __name__ == "__main__":

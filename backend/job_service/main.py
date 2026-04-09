@@ -85,6 +85,18 @@ async def lifespan(application: FastAPI):
 
 app = FastAPI(title="Strands Job Service", version="1.0.0", lifespan=lifespan)
 
+# Prometheus metrics — exposes GET /metrics for scraping.
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+
+    Instrumentator(
+        should_group_status_codes=True,
+        should_ignore_untemplated=True,
+        excluded_handlers=["/metrics", "/health"],
+    ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+except Exception:
+    logger.warning("prometheus instrumentator unavailable", exc_info=True)
+
 
 # ---------------------------------------------------------------------------
 # Health

@@ -293,6 +293,19 @@ from unified_api.middleware import SecurityGatewayMiddleware
 
 app.add_middleware(SecurityGatewayMiddleware)
 
+# Prometheus metrics — exposes GET /metrics for scraping. SecurityGatewayMiddleware
+# only intercepts /api/{team}/* paths, so /metrics bypasses it automatically.
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+
+    Instrumentator(
+        should_group_status_codes=True,
+        should_ignore_untemplated=True,
+        excluded_handlers=["/metrics", "/health"],
+    ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False, tags=["observability"])
+except Exception:
+    logger.warning("prometheus instrumentator unavailable", exc_info=True)
+
 # Integrations API (Slack config, etc.)
 from unified_api.routes.analytics import router as analytics_router
 from unified_api.routes.integrations import router as integrations_router

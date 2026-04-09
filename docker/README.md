@@ -42,6 +42,8 @@ This directory defines a **Docker Compose stack** that runs:
    | **Angular UI** | http://localhost:4201       (proxies /api to agents; nested routes e.g. SE Planning/Coding Team, Investment Advisor/Strategy Lab, Agentic roster) |
    | Agents API     | http://localhost:8888       (direct) |
    | Temporal UI    | http://localhost:8080       |
+   | Prometheus     | http://localhost:9090       (scrape targets: `/targets`; metric browser: `/graph`) |
+   | Grafana        | http://localhost:3000       (login `admin`/`admin` by default; Strands folder holds the FastAPI overview dashboard) |
    | Postgres       | localhost:5432 (user `postgres` / `temporal` / `strands`) |
    | Ollama (local) | http://localhost:11434      |
 
@@ -90,6 +92,8 @@ When **ENABLE_LOG_API** is not set or is 0, the endpoint returns **404** so it i
 |-------------------|----------------|---------|
 | `postgres_data_v18` | PostgreSQL   | Database files (Temporal + app DBs). Suffix tracks the Postgres major version — renaming the volume on each major bump gives a fresh data dir declaratively. |
 | `agents_workspace`| strands-agents | Agent workspace at `/workspace` (repos, generated code, artifacts). |
+| `prometheus_data` | Prometheus    | Prometheus TSDB (metric samples). Retention window controlled by `PROMETHEUS_RETENTION` (default `15d`). |
+| `grafana_data`    | Grafana       | Grafana state (users, saved dashboards, datasource cache). |
 
 Data in these volumes survives `docker compose down` and container restarts. To wipe persisted data, run `docker compose down -v`.
 
@@ -100,6 +104,8 @@ Data in these volumes survives `docker compose down` and container restarts. To 
 | 5432  | PostgreSQL     |
 | 7233  | Temporal gRPC  |
 | 8080  | Temporal UI    |
+| 3000  | Grafana        |
+| 9090  | Prometheus     |
 | 4201  | Angular UI (proxies /api to agents) |
 | 8888  | Agents API (direct) |
 | 8108  | Agentic Team Provisioning API (direct; also proxied at `/api/agentic-team-provisioning` on 8888) |
@@ -124,6 +130,19 @@ On **macOS** with Podman Machine, container memory is capped by the machine’s 
 
 When running in this stack, the **strands-agents** service uses the **stack’s Postgres** (database `strands`, user `strands`) via **POSTGRES_HOST=postgres**. The container does not start its own PostgreSQL. The init script in `docker/postgres/init/` creates the `strands` database and user on first run.
 
+## Observability (Prometheus + Grafana)
+
+The stack ships with a Prometheus server and Grafana instance pre-wired.
+
+- **Prometheus** at http://localhost:9090 scrapes `/metrics` on the unified API (`strands-agents:8080`), the job service (`job-service:8085`), and every team microservice on its own port. Config file: `docker/prometheus/prometheus.yml`. View scrape health at http://localhost:9090/targets — every target should report `UP` once containers are healthy.
+- **Grafana** at http://localhost:3000 (default `admin`/`admin`, override via `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` in `.env`). The Prometheus datasource is provisioned automatically from `docker/grafana/provisioning/datasources/prometheus.yml`. A starter **Strands FastAPI Overview** dashboard (request rate, p95 latency, 5xx rate, scrape health) is provisioned under the "Strands" folder.
+- **Retention** is controlled by `PROMETHEUS_RETENTION` (default `15d`). Data persists in the `prometheus_data` and `grafana_data` named volumes.
+- **Grafana admin password caveat**: `GRAFANA_ADMIN_PASSWORD` is only read on first boot (when `grafana_data` is empty). Changing it later has no effect — reset via the Grafana UI, or remove the volume with `docker volume rm docker_grafana_data` to re-seed from env vars.
+
+Metrics are produced by `prometheus-fastapi-instrumentator` which is installed into the unified API (`backend/unified_api/main.py`), the job service (`backend/job_service/main.py`), the blogging service (`backend/blogging_service/entrypoint.py`), and the generic team entrypoint (`backend/team_service/entrypoint.py`). That means every team container automatically exposes `/metrics` without any per-team code changes. Dropping additional dashboard JSON files into `docker/grafana/provisioning/dashboards/` picks them up automatically every 30 seconds.
+
+Add a new team? Edit `docker/prometheus/prometheus.yml` and append a new target entry to the `team-services` job with the service's DNS name and port, then add a matching `extra_hosts` entry to the `prometheus` service in `docker-compose.yml`.
+
 ## Verification
 
 After starting the stack:
@@ -132,6 +151,9 @@ After starting the stack:
 2. **Temporal UI** – Open http://localhost:8080 and confirm the Temporal Web UI loads.
 3. **Agents** – `curl http://localhost:8888/health` should return `{"status":"ok"}` (agents use stack Postgres and Ollama Cloud when configured).
 4. **Logs API** – With `ENABLE_LOG_API=1` in `.env`, `curl "http://localhost:8888/api/software-engineering/logs?service=sw_api&lines=100"` should return 200 and log content. With `ENABLE_LOG_API` unset, the same URL should return 404.
+5. **Metrics endpoints** – `curl -sf http://localhost:8888/metrics | head` and the same on `:8585` (job service) and `:8090`–`:8110` (team services) should return Prometheus text-format output (`# HELP ...`).
+6. **Prometheus targets** – Open http://localhost:9090/targets; all rows should be green (`UP`). Or run `curl -s 'http://localhost:9090/api/v1/query?query=up' | jq '.data.result[] | {service:.metric.service, up:.value[1]}'`.
+7. **Grafana datasource** – `curl -sf -u admin:admin http://localhost:3000/api/datasources | jq` should list one `Prometheus` datasource. Then open http://localhost:3000 → Dashboards → Strands → **Strands FastAPI Overview** and confirm the panels render live data after generating some traffic (e.g. `for i in {1..20}; do curl -sf http://localhost:8888/health > /dev/null; done`).
 
 ## Security
 
