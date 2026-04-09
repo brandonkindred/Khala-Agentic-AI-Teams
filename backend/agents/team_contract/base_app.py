@@ -84,11 +84,32 @@ def create_team_app(
     caps = capabilities or []
     registry = health_checks or HealthCheckRegistry()
 
+    # Initialize OpenTelemetry providers before constructing the app so the
+    # FastAPI instrumentor we install below sees fully-configured tracers.
+    try:
+        from shared_observability import init_otel, instrument_fastapi_app
+    except Exception:  # pragma: no cover - shared_observability always ships with agents
+        init_otel = None  # type: ignore[assignment]
+        instrument_fastapi_app = None  # type: ignore[assignment]
+    if init_otel is not None:
+        try:
+            init_otel(service_name=f"{name}-team", team_key=name)
+        except Exception:
+            logger.warning("shared_observability init_otel failed for %s", name, exc_info=True)
+
     app = FastAPI(
         title=f"Strands {name.replace('_', ' ').title()} Team",
         description=description or f"Agent team: {name}",
         version=version,
     )
+
+    if instrument_fastapi_app is not None:
+        try:
+            instrument_fastapi_app(app, team_key=name)
+        except Exception:
+            logger.warning(
+                "OpenTelemetry FastAPI instrumentation failed for %s", name, exc_info=True
+            )
 
     # CORS
     app.add_middleware(

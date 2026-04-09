@@ -9,8 +9,12 @@ from pydantic import BaseModel, Field
 
 from market_research_team.models import HumanReview, ResearchMission, TeamOutput, TeamTopology
 from market_research_team.orchestrator import MarketResearchOrchestrator
+from shared_observability import init_otel, instrument_fastapi_app
+
+init_otel(service_name="market-research-team", team_key="market_research")
 
 app = FastAPI(title="Market Research Team API", version="1.0.0")
+instrument_fastapi_app(app, team_key="market_research")
 
 
 class RunMarketResearchRequest(BaseModel):

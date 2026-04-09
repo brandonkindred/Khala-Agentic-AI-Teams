@@ -39,14 +39,18 @@ from planning_v3_team.shared.job_store import (  # noqa: E402
     mark_job_failed,
     update_job,
 )
+from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+init_otel(service_name="planning-v3-team", team_key="planning_v3")
 
 app = FastAPI(
     title="Planning V3 API",
     description="Client-facing discovery and requirements; PRD and handoff for dev/UI/UX",
     version="1.0.0",
 )
+instrument_fastapi_app(app, team_key="planning_v3")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

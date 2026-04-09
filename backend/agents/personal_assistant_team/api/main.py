@@ -42,14 +42,19 @@ try:
 except ImportError:
     slack_notify_pa_response = None
 
+from shared_observability import init_otel, instrument_fastapi_app
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+init_otel(service_name="personal-assistant-team", team_key="personal_assistant")
 
 app = FastAPI(
     title="Personal Assistant API",
     description="A comprehensive personal assistant that manages email, calendars, tasks, deals, and more.",
     version="0.1.0",
 )
+instrument_fastapi_app(app, team_key="personal_assistant")
 
 app.add_middleware(
     CORSMiddleware,

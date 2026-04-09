@@ -9,9 +9,12 @@ from typing import Any, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from shared_observability import init_otel, instrument_fastapi_app
 from startup_advisor.postgres import SCHEMA as STARTUP_ADVISOR_POSTGRES_SCHEMA
 
 logger = logging.getLogger(__name__)
+
+init_otel(service_name="startup-advisor", team_key="startup_advisor")
 
 
 @asynccontextmanager
@@ -37,6 +40,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=_lifespan,
 )
+instrument_fastapi_app(app, team_key="startup_advisor")
 
 
 # ---------------------------------------------------------------------------

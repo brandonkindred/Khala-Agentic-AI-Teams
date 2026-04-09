@@ -44,6 +44,9 @@ from sales_team.outcome_store import (
     record_deal_outcome,
     record_stage_outcome,
 )
+from shared_observability import init_otel, instrument_fastapi_app
+
+init_otel(service_name="sales-team", team_key="sales_team")
 
 app = FastAPI(
     title="AI Sales Team API",
@@ -55,6 +58,7 @@ app = FastAPI(
         "HubSpot, Anthony Iannarino, Jill Konrath, Sales Hacker, Salesfolk, and Zig Ziglar."
     ),
 )
+instrument_fastapi_app(app, team_key="sales_team")
 
 logger = logging.getLogger(__name__)
 _job_manager = JobServiceClient(team="sales_team")

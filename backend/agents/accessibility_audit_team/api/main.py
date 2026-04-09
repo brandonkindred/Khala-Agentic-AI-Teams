@@ -16,6 +16,7 @@ from job_service_client import (
     JobServiceClient,
     start_stale_job_monitor,
 )
+from shared_observability import init_otel
 
 from ..models import (
     AccessibilityAuditResult,
@@ -29,6 +30,8 @@ from ..models import (
     WCAGLevel,
 )
 from ..orchestrator import AccessibilityAuditOrchestrator
+
+init_otel(service_name="accessibility-audit-team", team_key="accessibility_audit")
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

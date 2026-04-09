@@ -61,15 +61,19 @@ from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
 from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
 from investment_team.strategy_ideation_agent import StrategyIdeationAgent
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
+from shared_observability import init_otel, instrument_fastapi_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+init_otel(service_name="investment-team", team_key="investment")
 
 app = FastAPI(
     title="Investment Team API",
     description="Investment profile management, portfolio proposals, strategy validation, and promotion gates.",
     version="1.0.0",
 )
+instrument_fastapi_app(app, team_key="investment")
 
 _workflow_state = WorkflowState()
 _lock = threading.Lock()

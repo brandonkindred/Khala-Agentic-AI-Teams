@@ -7,3 +7,11 @@ beautifulsoup4>=4.12,<5.0
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.32,<1.0
 playwright>=1.49,<1.51
+# OpenTelemetry: blogging container runs shared_observability.init_otel at startup
+opentelemetry-api>=1.27,<2.0
+opentelemetry-sdk>=1.27,<2.0
+opentelemetry-exporter-otlp-proto-http>=1.27,<2.0
+opentelemetry-exporter-otlp-proto-grpc>=1.27,<2.0
+opentelemetry-instrumentation-fastapi>=0.48b0,<1.0
+opentelemetry-instrumentation-httpx>=0.48b0,<1.0
+opentelemetry-instrumentation-logging>=0.48b0,<1.0

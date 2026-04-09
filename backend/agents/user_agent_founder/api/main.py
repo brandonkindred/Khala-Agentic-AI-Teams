@@ -12,12 +12,15 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from shared_observability import init_otel, instrument_fastapi_app
 from user_agent_founder.agent import get_founder_agent
 from user_agent_founder.orchestrator import run_workflow
 from user_agent_founder.postgres import SCHEMA as USER_AGENT_FOUNDER_POSTGRES_SCHEMA
 from user_agent_founder.store import get_founder_store
 
 logger = logging.getLogger(__name__)
+
+init_otel(service_name="user-agent-founder", team_key="user_agent_founder")
 
 
 @asynccontextmanager
@@ -47,6 +50,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=_lifespan,
 )
+instrument_fastapi_app(app, team_key="user_agent_founder")
 
 # ---------------------------------------------------------------------------
 # Request / Response models

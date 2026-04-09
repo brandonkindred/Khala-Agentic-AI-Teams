@@ -13,8 +13,11 @@ from fastapi.responses import StreamingResponse
 
 from deepthought.models import AgentEvent, DeepthoughtRequest, DeepthoughtResponse
 from deepthought.orchestrator import DeepthoughtOrchestrator
+from shared_observability import init_otel, instrument_fastapi_app
 
 logger = logging.getLogger(__name__)
+
+init_otel(service_name="deepthought-team", team_key="deepthought")
 
 app = FastAPI(
     title="Deepthought API",
@@ -24,6 +27,7 @@ app = FastAPI(
     ),
     version="2.0.0",
 )
+instrument_fastapi_app(app, team_key="deepthought")
 
 app.add_middleware(
     CORSMiddleware,

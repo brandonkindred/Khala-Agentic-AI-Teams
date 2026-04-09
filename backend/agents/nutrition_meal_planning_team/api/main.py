@@ -10,6 +10,8 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from shared_observability import init_otel, instrument_fastapi_app
+
 from ..models import (
     ChatRequest,
     ChatResponse,
@@ -37,11 +39,14 @@ from ..shared.job_store import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+init_otel(service_name="nutrition-meal-planning-team", team_key="nutrition_meal_planning")
+
 app = FastAPI(
     title="Nutrition & Meal Planning API",
     description="Personal nutrition and meal planning with learning from feedback",
     version="0.1.0",
 )
+instrument_fastapi_app(app, team_key="nutrition_meal_planning")
 
 app.add_middleware(
     CORSMiddleware,

@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
+from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 from ..models import (
     AgentBlueprint,
@@ -45,11 +46,14 @@ from ..shared.job_store import (
     reset_job as store_reset_job,
 )
 
+init_otel(service_name="ai-systems-team", team_key="ai_systems")
+
 app = FastAPI(
     title="AI Systems API",
     description="API for generating AI agent system blueprints from specifications",
     version="1.0.0",
 )
+instrument_fastapi_app(app, team_key="ai_systems")
 
 app.add_middleware(
     CORSMiddleware,

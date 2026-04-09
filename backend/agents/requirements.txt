@@ -17,3 +17,11 @@ APScheduler>=3.10,<4.0
 pytz>=2024.1
 # Observability: exposes /metrics on the unified API for Prometheus scraping
 prometheus-fastapi-instrumentator>=7.0,<8.0
+# OpenTelemetry: tracing, metrics, and log correlation for every team
+opentelemetry-api>=1.27,<2.0
+opentelemetry-sdk>=1.27,<2.0
+opentelemetry-exporter-otlp-proto-http>=1.27,<2.0
+opentelemetry-exporter-otlp-proto-grpc>=1.27,<2.0
+opentelemetry-instrumentation-fastapi>=0.48b0,<1.0
+opentelemetry-instrumentation-httpx>=0.48b0,<1.0
+opentelemetry-instrumentation-logging>=0.48b0,<1.0

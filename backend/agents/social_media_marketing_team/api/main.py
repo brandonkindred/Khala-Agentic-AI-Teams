@@ -23,6 +23,7 @@ from job_service_client import (
     start_stale_job_monitor,
     validate_job_for_action,
 )
+from shared_observability import init_otel, instrument_fastapi_app
 from social_media_marketing_team.adapters.branding import (
     BrandContext,
     BrandIncompleteError,
@@ -63,7 +64,10 @@ async def _lifespan(_application: FastAPI) -> AsyncIterator[None]:
     stop_scheduler()
 
 
+init_otel(service_name="social-media-marketing-team", team_key="social_marketing")
+
 app = FastAPI(title="Social Media Marketing Team API", version="1.0.0", lifespan=_lifespan)
+instrument_fastapi_app(app, team_key="social_marketing")
 
 logger = logging.getLogger(__name__)
 try:

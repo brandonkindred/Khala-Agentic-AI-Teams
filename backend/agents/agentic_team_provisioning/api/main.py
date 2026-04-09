@@ -44,8 +44,11 @@ from agentic_team_provisioning.models import (
     UpdateFormRecordRequest,
 )
 from agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
+from shared_observability import init_otel, instrument_fastapi_app
 
 logger = logging.getLogger(__name__)
+
+init_otel(service_name="agentic-team-provisioning", team_key="agentic_team_provisioning")
 
 
 @asynccontextmanager
@@ -70,6 +73,7 @@ app = FastAPI(
     description="Create agentic teams and define their processes through conversation",
     lifespan=_lifespan,
 )
+instrument_fastapi_app(app, team_key="agentic_team_provisioning")
 
 _store = AgenticTeamStore()
 _agent = ProcessDesignerAgent()

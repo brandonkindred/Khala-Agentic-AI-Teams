@@ -136,7 +136,113 @@ def record_llm_call(
     )
     with _log_lock:
         _call_log.append(record)
+    _emit_otel_llm_span(record)
     return record
+
+
+# ---------------------------------------------------------------------------
+# OpenTelemetry integration
+# ---------------------------------------------------------------------------
+#
+# Every LLM invocation also produces an OpenTelemetry span + metrics so that
+# platform-wide traces show which team/agent triggered which model call, how
+# long it took, and how many tokens were consumed. The span is added as an
+# event to whatever span is currently active, so it nests correctly under
+# the server span created by the FastAPI instrumentor.
+#
+# All OpenTelemetry state is resolved lazily and wrapped in try/except so
+# importing llm_service still works when the SDK is absent (e.g. tests).
+
+_otel_initialized: bool = False
+_otel_tracer: Any = None
+_otel_llm_calls: Any = None
+_otel_llm_tokens: Any = None
+_otel_llm_latency: Any = None
+
+
+def _ensure_otel_instruments() -> None:
+    """Lazily acquire the tracer and metric instruments."""
+    global _otel_initialized, _otel_tracer, _otel_llm_calls, _otel_llm_tokens, _otel_llm_latency
+
+    if _otel_initialized:
+        return
+    _otel_initialized = True
+    try:
+        from shared_observability import get_meter, get_tracer
+
+        _otel_tracer = get_tracer("strands.llm_service")
+        meter = get_meter("strands.llm_service")
+        _otel_llm_calls = meter.create_counter(
+            "strands.llm.calls",
+            description="Total LLM calls made by a Strands team/agent",
+        )
+        _otel_llm_tokens = meter.create_counter(
+            "strands.llm.tokens",
+            description="Total tokens consumed by LLM calls (prompt + completion)",
+        )
+        _otel_llm_latency = meter.create_histogram(
+            "strands.llm.latency_ms",
+            description="LLM call latency in milliseconds",
+            unit="ms",
+        )
+    except Exception:
+        logger.debug("OpenTelemetry instruments unavailable for llm_service", exc_info=True)
+        _otel_tracer = None
+        _otel_llm_calls = None
+        _otel_llm_tokens = None
+        _otel_llm_latency = None
+
+
+def _emit_otel_llm_span(record: LLMCallRecord) -> None:
+    """Emit an OpenTelemetry span + metrics for a single LLM call record."""
+    _ensure_otel_instruments()
+    if _otel_tracer is None:
+        return
+    try:
+        attributes = {
+            "strands.team": record.team or "unknown",
+            "strands.agent_key": record.agent_key or "unknown",
+            "strands.caller_tag": record.caller_tag or "",
+            "llm.vendor": "ollama",
+            "llm.request.model": record.model or "unknown",
+            "llm.usage.prompt_tokens": record.prompt_tokens,
+            "llm.usage.completion_tokens": record.completion_tokens,
+            "llm.usage.total_tokens": record.total_tokens,
+            "llm.latency_ms": record.latency_ms,
+            "llm.status": record.status,
+        }
+        if record.error_type:
+            attributes["llm.error_type"] = record.error_type
+        if record.job_id:
+            attributes["strands.job_id"] = record.job_id
+
+        span_name = f"llm.call {record.agent_key or 'agent'}"
+        span = _otel_tracer.start_span(span_name, attributes=attributes)
+        if record.status != "success":
+            try:
+                from opentelemetry.trace import Status, StatusCode
+
+                span.set_status(
+                    Status(StatusCode.ERROR, description=record.error_type or record.status)
+                )
+            except Exception:
+                pass
+        span.end()
+
+        metric_attrs = {
+            "team": record.team or "unknown",
+            "agent_key": record.agent_key or "unknown",
+            "model": record.model or "unknown",
+            "status": record.status,
+        }
+        if _otel_llm_calls is not None:
+            _otel_llm_calls.add(1, metric_attrs)
+        if _otel_llm_tokens is not None and record.total_tokens:
+            _otel_llm_tokens.add(record.total_tokens, metric_attrs)
+        if _otel_llm_latency is not None and record.latency_ms:
+            _otel_llm_latency.record(record.latency_ms, metric_attrs)
+    except Exception:
+        logger.debug("Failed to emit OpenTelemetry LLM span", exc_info=True)
 
 
 def get_recent_calls(

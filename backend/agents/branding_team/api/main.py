@@ -34,8 +34,11 @@ from branding_team.models import (
 from branding_team.orchestrator import BrandingTeamOrchestrator
 from branding_team.postgres import SCHEMA as BRANDING_POSTGRES_SCHEMA
 from branding_team.store import get_default_store
+from shared_observability import init_otel, instrument_fastapi_app
 
 logger = logging.getLogger(__name__)
+
+init_otel(service_name="branding-team", team_key="branding")
 
 
 @asynccontextmanager
@@ -57,6 +60,7 @@ async def _lifespan(application: FastAPI):
 
 
 app = FastAPI(title="Branding Team API", version="2.0.0", lifespan=_lifespan)
+instrument_fastapi_app(app, team_key="branding")
 branding_store = get_default_store()
 orchestrator = BrandingTeamOrchestrator()
 conversation_store = get_conversation_store()

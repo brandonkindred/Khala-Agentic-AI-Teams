@@ -28,14 +28,18 @@ from coding_team.job_store import (  # noqa: E402
 )
 from coding_team.models import CodingTeamPlanInput  # noqa: E402
 from coding_team.orchestrator import run_coding_team_orchestrator  # noqa: E402
+from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+init_otel(service_name="coding-team", team_key="coding_team")
 
 app = FastAPI(
     title="Coding Team API",
     description="Tech Lead and Senior SWEs with Task Graph. POST /run to start a job; poll GET /status/{job_id}.",
 )
+instrument_fastapi_app(app, team_key="coding_team")
 
 
 class RunRequest(BaseModel):

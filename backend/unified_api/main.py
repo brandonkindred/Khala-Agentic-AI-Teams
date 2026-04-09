@@ -39,6 +39,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("unified_api")
 
+# Initialize OpenTelemetry providers as early as possible so every module
+# imported below — including the team proxy, security gateway, and any
+# assistant sub-apps — uses the real tracer/meter providers.
+try:
+    from shared_observability import init_otel
+
+    init_otel(service_name="unified-api", team_key="unified_api")
+except Exception:
+    logger.warning("shared_observability init_otel failed", exc_info=True)
+
 
 # ---------------------------------------------------------------------------
 # Response models
@@ -304,6 +314,16 @@ app.add_middleware(
 from unified_api.middleware import SecurityGatewayMiddleware
 
 app.add_middleware(SecurityGatewayMiddleware)
+
+# OpenTelemetry FastAPI instrumentation — server spans for every request,
+# trace IDs injected into logs, and outbound httpx calls nested under the
+# request span automatically.
+try:
+    from shared_observability import instrument_fastapi_app
+
+    instrument_fastapi_app(app, team_key="unified_api")
+except Exception:
+    logger.warning("OpenTelemetry FastAPI instrumentation unavailable", exc_info=True)
 
 # Prometheus metrics — exposes GET /metrics for scraping. SecurityGatewayMiddleware
 # only intercepts /api/{team}/* paths, so /metrics bypasses it automatically.

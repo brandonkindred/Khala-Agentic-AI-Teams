@@ -71,12 +71,27 @@ def _resolve_app() -> str:
     """Return a uvicorn import string for the instrumented ASGI app.
 
     Always writes /app/_team_wrapper.py so every team gets:
+      * OpenTelemetry initialized before the team module is imported, so any
+        tracer/meter calls made during import land on the real providers.
       * A FastAPI app (wrapping a router if TEAM_APP_ATTR == "router", else
         re-exporting the team's own FastAPI app).
+      * FastAPI OpenTelemetry instrumentation (trace every request/response).
       * prometheus-fastapi-instrumentator installed and /metrics exposed.
+
     The wrapper is re-imported by each uvicorn worker on fork, so per-worker
     instrumentation state is fine with workers>1.
     """
+    import pathlib
+
+    # Initialize OpenTelemetry *before* importing the team module so any
+    # tracer/meter references captured at import time see the real providers.
+    try:
+        from shared_observability import init_otel
+
+        init_otel(service_name=TEAM_NAME, team_key=TEAM_NAME)
+    except Exception:
+        logger.warning("shared_observability init_otel unavailable", exc_info=True)
+
     # Validate the team module can be imported (fail fast with a clear error).
     try:
         importlib.import_module(TEAM_MODULE)
@@ -84,19 +99,42 @@ def _resolve_app() -> str:
         logger.exception("FATAL: cannot import team module %s", TEAM_MODULE)
         raise
 
-    import pathlib
-
     wrapper_path = pathlib.Path("/app/_team_wrapper.py")
 
+    # Every worker re-runs this wrapper on fork, so re-initialise OTel and
+    # re-instrument the app on each import.
+    body = (
+        "try:\n"
+        "    from shared_observability import init_otel, instrument_fastapi_app\n"
+        f"    init_otel(service_name='{TEAM_NAME}', team_key='{TEAM_NAME}')\n"
+        "except Exception:\n"
+        "    import logging\n"
+        "    logging.getLogger('team_service').warning(\n"
+        "        'shared_observability init_otel failed', exc_info=True\n"
+        "    )\n"
+        "    def instrument_fastapi_app(*_a, **_k):\n"
+        "        return None\n"
+    )
+
     if TEAM_APP_ATTR == "router":
-        body = (
+        body += (
             "from fastapi import FastAPI\n"
             f"from {TEAM_MODULE} import {TEAM_APP_ATTR} as _router\n"
             f"app = FastAPI(title='{TEAM_NAME} API')\n"
             "app.include_router(_router)\n"
         )
     else:
-        body = f"from {TEAM_MODULE} import {TEAM_APP_ATTR} as app\n"
+        body += f"from {TEAM_MODULE} import {TEAM_APP_ATTR} as app\n"
+
+    body += (
+        "try:\n"
+        f"    instrument_fastapi_app(app, team_key='{TEAM_NAME}')\n"
+        "except Exception:\n"
+        "    import logging\n"
+        "    logging.getLogger('team_service').warning(\n"
+        "        'instrument_fastapi_app failed', exc_info=True\n"
+        "    )\n"
+    )
 
     body += (
         "try:\n"

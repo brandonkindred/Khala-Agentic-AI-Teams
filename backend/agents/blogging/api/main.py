@@ -49,6 +49,7 @@ from job_service_client import (  # noqa: E402
     validate_job_for_action,
 )
 from llm_service import OllamaLLMClient  # noqa: E402
+from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 try:
     from shared.artifacts import ARTIFACT_NAMES, ARTIFACT_PRODUCER, read_artifact, write_artifact
@@ -191,12 +192,15 @@ async def _blogging_lifespan(app: FastAPI):
     _run_blogging_service_shutdown()
 
 
+init_otel(service_name="blogging-team", team_key="blogging")
+
 app = FastAPI(
     title="Blog Research & Review API",
     description="Blog pipeline: planning, drafting, and quality gates. Supports sync and async execution with job polling and SSE.",
     version="0.3.0",
     lifespan=_blogging_lifespan,
 )
+instrument_fastapi_app(app, team_key="blogging")
 
 
 class AudienceDetails(BaseModel):

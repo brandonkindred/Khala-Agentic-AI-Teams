@@ -35,6 +35,7 @@ if _arch_dir.exists() and str(_arch_dir) not in sys.path:
 
 from spec_parser import SPEC_FILENAME, validate_work_path  # noqa: E402
 
+from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 from software_engineering_team.shared.execution_tracker import execution_tracker  # noqa: E402
 from software_engineering_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_AGENT_CRASH,
@@ -63,6 +64,8 @@ from software_engineering_team.shared.logging_config import setup_logging  # noq
 
 setup_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+init_otel(service_name="software-engineering-team", team_key="software_engineering")
 
 _stale_monitor_started = False
 _stale_monitor_lock = threading.Lock()
@@ -154,6 +157,7 @@ app = FastAPI(
     version="0.3.0",
     lifespan=_lifespan,
 )
+instrument_fastapi_app(app, team_key="software_engineering")
 
 app.add_middleware(
     CORSMiddleware,

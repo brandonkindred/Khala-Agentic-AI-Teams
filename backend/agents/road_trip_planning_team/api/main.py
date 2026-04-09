@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from llm_service import get_client
+from shared_observability import init_otel, instrument_fastapi_app
 
 from ..agents.activities_expert_agent import ActivitiesExpertAgent
 from ..agents.itinerary_composer_agent import ItineraryComposerAgent
@@ -30,6 +31,8 @@ from ..shared.job_store import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+init_otel(service_name="road-trip-planning-team", team_key="road_trip_planning")
+
 app = FastAPI(
     title="Road Trip Planning API",
     description=(
@@ -38,6 +41,7 @@ app = FastAPI(
     ),
     version="0.1.0",
 )
+instrument_fastapi_app(app, team_key="road_trip_planning")
 
 app.add_middleware(
     CORSMiddleware,
