@@ -53,6 +53,31 @@ python run_unified_api.py
 python run_unified_api.py --port 9000 --reload --workers 4
 ```
 
+### Local dev with Postgres
+
+All migrated teams (blogging, branding, startup_advisor, team_assistant,
+user_agent_founder, agentic_team_provisioning, unified_api credentials)
+now require Postgres for local dev and tests — no SQLite fallback.
+
+```bash
+# Start Postgres from the full stack compose file (or the tiny subset)
+cp docker/.env.example docker/.env              # once, if not done
+docker compose -f docker/docker-compose.yml up -d postgres
+
+# Export the vars every shared_postgres caller reads
+export POSTGRES_HOST=localhost
+export POSTGRES_PORT=5432
+export POSTGRES_USER=postgres
+export POSTGRES_PASSWORD=postgres
+export POSTGRES_DB=postgres
+
+# Now `pytest`, `uvicorn <team>.api.main:app`, etc. all work
+```
+
+Pool sizing is controlled by `POSTGRES_POOL_MIN_SIZE` (default 2) and
+`POSTGRES_POOL_MAX_SIZE` (default 10); slow-query logging threshold is
+`POSTGRES_SLOW_QUERY_MS` (default 100).
+
 ### Frontend
 
 ```bash

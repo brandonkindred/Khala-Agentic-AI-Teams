@@ -208,6 +208,18 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("unified_api postgres schema registration failed")
 
+    # 0a. One-shot SQLite → Postgres cutover for integration credentials.
+    # Opt-in via INTEGRATIONS_MIGRATE_SQLITE=1; idempotent via a
+    # migration_markers row so repeated runs are safe.
+    if os.getenv("INTEGRATIONS_MIGRATE_SQLITE", "").strip() == "1":
+        try:
+            from unified_api.integration_credentials import migrate_sqlite_to_postgres_once
+
+            result = migrate_sqlite_to_postgres_once()
+            logger.info("integration_credentials migration result: %s", result)
+        except Exception:
+            logger.exception("integration_credentials SQLite → Postgres migration failed")
+
     try:
         from shared_postgres import register_team_schemas
         from team_assistant.postgres import SCHEMA as TEAM_ASSISTANT_SCHEMA

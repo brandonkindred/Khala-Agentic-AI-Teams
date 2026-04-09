@@ -32,4 +32,5 @@ SCHEMA = TeamSchema(
             ON jobs (team, last_heartbeat_at)
             WHERE status IN ('pending', 'running')""",
     ],
+    table_names=["jobs"],
 )

@@ -48,11 +48,11 @@ def test_notify_pa_response_skipped_when_toggle_off() -> None:
 
 
 def test_send_payload_uses_bot_mode() -> None:
-    cfg = {"mode": "bot", "bot_token": "xoxb-test", "default_channel": "#alerts"}
+    cfg = {"mode": "bot", "bot_token": "xoxb-FAKE-opaque-bot", "default_channel": "#alerts"}
     payload = {"text": "hello", "blocks": []}
     with patch("unified_api.slack_notifier._post_bot_sync") as mock_bot:
         slack_notifier._send_payload(cfg, payload)
-    mock_bot.assert_called_once_with("xoxb-test", "#alerts", payload)
+    mock_bot.assert_called_once_with("xoxb-FAKE-opaque-bot", "#alerts", payload)
 
 
 def test_notify_open_questions_callable_with_orchestrator_signature() -> None:

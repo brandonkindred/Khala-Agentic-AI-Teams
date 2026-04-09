@@ -1,16 +1,20 @@
 """Shared Postgres client.
 
-Env-var helpers plus a thin wrapper around ``psycopg`` (v3) for opening
-short-lived connections. Used by ``ensure_team_schema`` at startup to
-run DDL; heavy CRUD paths (e.g. ``job_service/db.py``) keep their own
-pool because DDL doesn't need pooling and the agents image already
-pins ``psycopg[binary]``.
+Env-var helpers plus a process-wide ``psycopg_pool.ConnectionPool`` per
+database. ``get_conn()`` acquires a pooled connection; ``close_pool()``
+tears the pools down at shutdown. Used by ``ensure_team_schema`` at
+startup and by team stores on hot paths.
 
 Env vars (identical to ``job_service/db.py`` and
 ``backend/unified_api/postgres_encrypted_credentials.py``):
 
     POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD,
     POSTGRES_DB
+
+Pool sizing:
+
+    POSTGRES_POOL_MIN_SIZE  (default 2)
+    POSTGRES_POOL_MAX_SIZE  (default 10)
 
 ``is_postgres_enabled()`` returns ``True`` only when ``POSTGRES_HOST`` is
 set.
@@ -27,10 +31,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Track connections currently being used per database so ``close_pool``
-# can log anomalies; the module does not keep a real pool open.
-_active_conns_lock = threading.Lock()
-_active_conns: dict[str, int] = {}
+# Per-database connection pools. Created lazily on first ``get_conn`` call
+# for that database name.
+_pools_lock = threading.Lock()
+_pools: dict[str, object] = {}  # database name -> ConnectionPool
 
 
 def is_postgres_enabled() -> bool:
@@ -52,11 +56,28 @@ def _dsn(database: Optional[str] = None) -> str:
     return f"host={host} port={port} dbname={dbname} user={user} password={password}"
 
 
-def _connect(database: Optional[str] = None):
-    """Open a fresh ``psycopg`` connection.
+def _pool_sizes() -> tuple[int, int]:
+    """Return ``(min_size, max_size)`` for the pool, from env vars."""
+    try:
+        min_size = int(os.environ.get("POSTGRES_POOL_MIN_SIZE", "2"))
+    except ValueError:
+        min_size = 2
+    try:
+        max_size = int(os.environ.get("POSTGRES_POOL_MAX_SIZE", "10"))
+    except ValueError:
+        max_size = 10
+    if max_size < min_size:
+        max_size = min_size
+    return min_size, max_size
 
-    Raises ``RuntimeError`` when Postgres is disabled or psycopg is not
-    installed, so callers fail loudly instead of silently skipping writes.
+
+def _connect(database: Optional[str] = None):
+    """Open a fresh (unpooled) ``psycopg`` connection.
+
+    Used for the initial DDL ``ensure_team_schema`` path and as a test
+    seam. Raises ``RuntimeError`` when Postgres is disabled or psycopg
+    is not installed, so callers fail loudly instead of silently
+    skipping writes.
     """
     if not is_postgres_enabled():
         raise RuntimeError("POSTGRES_HOST is not set; cannot open a Postgres connection.")
@@ -69,48 +90,77 @@ def _connect(database: Optional[str] = None):
     return psycopg.connect(_dsn(database))
 
 
+def _get_or_create_pool(database: Optional[str] = None):
+    """Return (creating if needed) the ``ConnectionPool`` for ``database``.
+
+    Raises ``RuntimeError`` when Postgres is disabled or ``psycopg_pool``
+    is not installed.
+    """
+    if not is_postgres_enabled():
+        raise RuntimeError("POSTGRES_HOST is not set; cannot open a Postgres connection.")
+
+    db = database or _default_database()
+    with _pools_lock:
+        pool = _pools.get(db)
+        if pool is not None:
+            return pool
+        try:
+            from psycopg_pool import ConnectionPool
+        except ImportError as e:
+            raise RuntimeError(
+                "psycopg_pool is not installed; install psycopg_pool to use shared_postgres."
+            ) from e
+        min_size, max_size = _pool_sizes()
+        pool = ConnectionPool(
+            conninfo=_dsn(database),
+            min_size=min_size,
+            max_size=max_size,
+            open=True,
+            name=f"shared_postgres[{db}]",
+        )
+        _pools[db] = pool
+        logger.info(
+            "shared_postgres pool opened: database=%s min_size=%d max_size=%d",
+            db,
+            min_size,
+            max_size,
+        )
+        return pool
+
+
 @contextmanager
 def get_conn(database: Optional[str] = None) -> Generator:
-    """Yield a fresh ``psycopg`` connection for ``database``.
+    """Yield a pooled ``psycopg`` connection for ``database``.
 
-    Commits on clean exit, rolls back on exception, always closes the
-    connection. Suitable for startup DDL and infrequent operations; for
-    high-throughput CRUD, use a dedicated pool.
+    Commits on clean exit, rolls back on exception, always returns the
+    connection to the pool. The first call for a given ``database``
+    lazily creates the pool.
     """
-    db = database or _default_database()
-    conn = _connect(database)
-    with _active_conns_lock:
-        _active_conns[db] = _active_conns.get(db, 0) + 1
-    try:
+    pool = _get_or_create_pool(database)
+    # ``ConnectionPool.connection()`` is itself a context manager that
+    # commits on clean exit, rolls back on exception, and returns the
+    # connection to the pool.
+    with pool.connection() as conn:
         yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        try:
-            conn.close()
-        finally:
-            with _active_conns_lock:
-                _active_conns[db] = max(0, _active_conns.get(db, 0) - 1)
 
 
 def close_pool(database: Optional[str] = None) -> None:
-    """No-op for the per-call client; kept for lifespan API parity.
+    """Close and drop the connection pool(s) opened by ``get_conn``.
 
-    Connections opened by ``get_conn`` are closed automatically when
-    their context manager exits. This function exists so team lifespans
-    can mirror the ``shared_temporal``/FastAPI shape without special
-    casing. Logs a warning if any connections are still reported active.
+    Called from FastAPI lifespan shutdown. Safe to call multiple times;
+    safe to call when no pool was ever opened.
     """
-    with _active_conns_lock:
-        dbs = [database] if database is not None else list(_active_conns.keys())
+    with _pools_lock:
+        if database is not None:
+            dbs = [database]
+        else:
+            dbs = list(_pools.keys())
         for db in dbs:
-            leaked = _active_conns.get(db, 0)
-            if leaked > 0:
-                logger.warning(
-                    "shared_postgres close_pool: %d active connection(s) reported for database=%s",
-                    leaked,
-                    db,
-                )
-            _active_conns.pop(db, None)
+            pool = _pools.pop(db, None)
+            if pool is None:
+                continue
+            try:
+                pool.close()
+                logger.info("shared_postgres pool closed: database=%s", db)
+            except Exception as e:
+                logger.warning("shared_postgres pool close failed: database=%s error=%s", db, e)

@@ -14,13 +14,20 @@ SCHEMA = TeamSchema(
     team="team_assistant",
     database=None,
     statements=[
+        # NOTE: ``team_key`` partitions conversations across the many
+        # assistant sub-apps mounted by ``unified_api``. Without this
+        # column all assistants would share a single global pool — the
+        # legacy SQLite layer kept one ``{team_key}.db`` per assistant.
         """CREATE TABLE IF NOT EXISTS team_assistant_conversations (
             conversation_id TEXT PRIMARY KEY,
+            team_key        TEXT NOT NULL,
             job_id          TEXT,
             context_json    JSONB NOT NULL DEFAULT '{}'::jsonb,
             created_at      TIMESTAMPTZ NOT NULL,
             updated_at      TIMESTAMPTZ NOT NULL
         )""",
+        """CREATE INDEX IF NOT EXISTS idx_team_assistant_conversations_team_key
+            ON team_assistant_conversations(team_key)""",
         """CREATE INDEX IF NOT EXISTS idx_team_assistant_conversations_job_id
             ON team_assistant_conversations(job_id)""",
         """CREATE TABLE IF NOT EXISTS team_assistant_conv_messages (
@@ -42,5 +49,10 @@ SCHEMA = TeamSchema(
         )""",
         """CREATE INDEX IF NOT EXISTS idx_team_assistant_conv_artifacts_conv
             ON team_assistant_conv_artifacts(conversation_id)""",
+    ],
+    table_names=[
+        "team_assistant_conversations",
+        "team_assistant_conv_messages",
+        "team_assistant_conv_artifacts",
     ],
 )

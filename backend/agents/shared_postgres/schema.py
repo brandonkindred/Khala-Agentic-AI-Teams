@@ -33,8 +33,14 @@ class TeamSchema:
             ``CREATE INDEX IF NOT EXISTS`` / ``ALTER TABLE ...`` string.
             Statements run in order, each in its own transaction, so a
             failure in one doesn't abort the rest.
+        table_names: Explicit list of tables the team owns. Used by
+            ``shared_postgres.testing.truncate_team_tables`` to wipe
+            state between tests. Kept as an explicit declaration
+            instead of regex-parsing ``statements`` so there is no
+            ambiguity around comments, whitespace, or unusual DDL.
     """
 
     team: str
     statements: list[str] = field(default_factory=list)
     database: Optional[str] = None
+    table_names: list[str] = field(default_factory=list)

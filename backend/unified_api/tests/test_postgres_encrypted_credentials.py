@@ -169,3 +169,59 @@ def test_pg_delete_credential_noop_when_disabled(monkeypatch: pytest.MonkeyPatch
     """pg_delete_credential() is a no-op and does not raise when POSTGRES_HOST is unset."""
     mod = _reload(monkeypatch, postgres_host="")
     mod.pg_delete_credential("svc", "key")  # must not raise
+
+
+def test_pg_delete_service_credentials_noop_when_disabled(monkeypatch: pytest.MonkeyPatch):
+    """pg_delete_service_credentials() is a no-op and does not raise when POSTGRES_HOST is unset."""
+    mod = _reload(monkeypatch, postgres_host="")
+    mod.pg_delete_service_credentials("svc")  # must not raise
+
+
+def test_pg_delete_service_credentials_noop_when_psycopg_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """pg_delete_service_credentials() is a silent no-op when psycopg is missing."""
+    mod = _reload(monkeypatch, postgres_host="localhost")
+    mod._psycopg_module = None
+    mod._psycopg_import_failed = True
+    # Must not raise, must not try to open a connection.
+    mod.pg_delete_service_credentials("svc")
+
+
+# ---------------------------------------------------------------------------
+# pg_upsert_credentials_bulk (takes an existing cursor)
+# ---------------------------------------------------------------------------
+
+
+def test_pg_upsert_credentials_bulk_issues_one_exec_per_row(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Each row is written via cur.execute; the helper returns the row count."""
+    mod = _reload(monkeypatch, postgres_host="localhost")
+
+    calls: list[tuple[str, tuple]] = []
+    cursor = MagicMock()
+    cursor.execute.side_effect = lambda sql, params: calls.append((sql, params))
+
+    rows = [
+        ("slack", "client_id", "cipher-a"),
+        ("slack", "client_secret", "cipher-b"),
+        ("medium", "refresh_token", "cipher-c"),
+    ]
+
+    applied = mod.pg_upsert_credentials_bulk(cursor, rows)
+
+    assert applied == 3
+    assert len(calls) == 3
+    for (sql, params), expected in zip(calls, rows, strict=True):
+        assert "INSERT INTO encrypted_integration_credentials" in sql
+        assert "ON CONFLICT" in sql
+        assert params == expected
+
+
+def test_pg_upsert_credentials_bulk_empty_iterable(monkeypatch: pytest.MonkeyPatch):
+    """Zero rows returns zero; cursor is never touched."""
+    mod = _reload(monkeypatch, postgres_host="localhost")
+    cursor = MagicMock()
+    assert mod.pg_upsert_credentials_bulk(cursor, []) == 0
+    cursor.execute.assert_not_called()

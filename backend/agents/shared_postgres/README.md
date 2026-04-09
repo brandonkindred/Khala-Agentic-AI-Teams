@@ -99,6 +99,22 @@ required because:
 | `POSTGRES_USER` | `postgres` | |
 | `POSTGRES_PASSWORD` | (empty) | |
 | `POSTGRES_DB` | `postgres` | Default database; overridden per-team via `TeamSchema.database`. |
+| `POSTGRES_POOL_MIN_SIZE` | `2` | Minimum connections kept in each per-database pool. |
+| `POSTGRES_POOL_MAX_SIZE` | `10` | Maximum connections per pool (clamped to ≥ min). |
+| `POSTGRES_SLOW_QUERY_MS` | `100` | `@timed_query` logs at INFO above this threshold, DEBUG below it. |
+
+## Connection pooling
+
+`get_conn()` acquires a connection from a process-wide `psycopg_pool.ConnectionPool`
+lazily created per database name on first use. Commits on clean exit,
+rolls back on exception, and returns the connection to the pool. Use it
+for both startup DDL and hot-path CRUD — there is no need for a
+dedicated pool per team anymore. Call `close_pool()` at shutdown to
+close every pool this process opened.
+
+Pool sizing is process-wide via env vars above. For high-throughput
+teams, bump `POSTGRES_POOL_MAX_SIZE` in that team's container env
+rather than adding a second pool.
 
 ## API
 
@@ -108,12 +124,61 @@ from shared_postgres import (
     is_postgres_enabled,     # bool gate
     register_team_schemas,   # no-op when disabled; else runs DDL
     ensure_team_schema,      # raises if disabled; forces DDL run
-    get_conn,                # context manager (database override)
-    close_pool,              # lifespan shutdown
+    get_conn,                # context manager (pooled, database override)
+    close_pool,              # lifespan shutdown — closes every pool
     register_all_team_schemas,  # CLI / test-harness helper
     TEAM_POSTGRES_MODULES,   # registry dict
+    Json,                    # psycopg.types.json.Json re-export for JSONB inserts
+    dict_row,                # psycopg.rows.dict_row re-export for cursor(row_factory=...)
+    timed_query,             # @timed_query decorator for store methods
+)
+from shared_postgres.testing import truncate_team_tables, truncate_all_teams
+```
+
+## `TeamSchema.table_names`
+
+When a team owns tables that tests need to reset between runs, populate
+`TeamSchema.table_names` with the explicit list. Example:
+
+```python
+SCHEMA = TeamSchema(
+    team="branding",
+    statements=[ "CREATE TABLE IF NOT EXISTS branding_clients (...)", ... ],
+    table_names=["branding_clients", "branding_brands", "branding_sessions"],
 )
 ```
+
+Test fixtures then call `truncate_team_tables(SCHEMA)` between tests —
+no fragile regex parsing of the DDL.
+
+## Observability
+
+Wrap store methods with `@timed_query(store="<team>")`. Example:
+
+```python
+from shared_postgres import timed_query, get_conn
+
+class BrandingStore:
+    @timed_query(store="branding")
+    def save_client(self, client):
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(...)
+```
+
+Logs go to the `shared_postgres.metrics` logger:
+`store=branding op=save_client duration_ms=12 status=ok` at DEBUG, or
+`status=ok slow=true` at INFO for slow queries.
+
+## Tests
+
+CI runs `shared_postgres/tests/` against a `postgres:18` service
+container; the job runs `register_all_team_schemas()` first to catch
+cross-team DDL conflicts before any per-team test. Local contributors
+run `docker compose -f docker/docker-compose.yml up -d postgres` and
+export the `POSTGRES_*` vars to hit the same code path.
+
+Tests that don't need live Postgres mock `get_conn` via `monkeypatch`
+as before — nothing forces them to connect.
 
 ## The registry
 

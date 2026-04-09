@@ -345,48 +345,267 @@ def test_dsn_database_override(monkeypatch):
     assert "dbname=other_db" in dsn
 
 
-def test_close_pool_is_idempotent(monkeypatch):
-    # No connections tracked — close_pool must not raise.
-    client_mod._active_conns.clear()
-    close_pool()
-    close_pool("some_db")
+def test_pool_sizes_defaults(monkeypatch):
+    monkeypatch.delenv("POSTGRES_POOL_MIN_SIZE", raising=False)
+    monkeypatch.delenv("POSTGRES_POOL_MAX_SIZE", raising=False)
+    min_size, max_size = client_mod._pool_sizes()
+    assert (min_size, max_size) == (2, 10)
 
 
-def test_close_pool_warns_on_leaked_conns(monkeypatch, caplog):
-    client_mod._active_conns.clear()
-    client_mod._active_conns["mydb"] = 2
-    with caplog.at_level("WARNING"):
-        close_pool()
-    assert any("active connection" in rec.message for rec in caplog.records)
-    assert client_mod._active_conns == {}
+def test_pool_sizes_from_env(monkeypatch):
+    monkeypatch.setenv("POSTGRES_POOL_MIN_SIZE", "5")
+    monkeypatch.setenv("POSTGRES_POOL_MAX_SIZE", "25")
+    assert client_mod._pool_sizes() == (5, 25)
 
 
-def test_get_conn_commits_on_success(monkeypatch):
+def test_pool_sizes_clamps_max_below_min(monkeypatch):
+    monkeypatch.setenv("POSTGRES_POOL_MIN_SIZE", "8")
+    monkeypatch.setenv("POSTGRES_POOL_MAX_SIZE", "4")
+    assert client_mod._pool_sizes() == (8, 8)
+
+
+def test_get_or_create_pool_raises_when_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    with pytest.raises(RuntimeError, match="POSTGRES_HOST is not set"):
+        client_mod._get_or_create_pool()
+
+
+class _FakePool:
+    def __init__(self):
+        self.closed = False
+        self.conn = MagicMock()
+        self._conn_cm = _conn_context(self.conn)
+
+    def connection(self):
+        return self._conn_cm
+
+    def close(self):
+        self.closed = True
+
+
+@contextmanager
+def _conn_context(conn):
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def test_get_conn_uses_pooled_connection(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    fake = _FakePool()
 
-    conn = MagicMock()
-    monkeypatch.setattr(client_mod, "_connect", lambda database=None: conn)
-    client_mod._active_conns.clear()
+    def _fake_get_or_create_pool(database=None):
+        return fake
+
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", _fake_get_or_create_pool)
 
     with client_mod.get_conn() as c:
-        assert c is conn
+        assert c is fake.conn
 
-    conn.commit.assert_called_once()
-    conn.rollback.assert_not_called()
-    conn.close.assert_called_once()
-    assert client_mod._active_conns.get("postgres", 0) == 0
+    fake.conn.commit.assert_called_once()
+    fake.conn.rollback.assert_not_called()
 
 
 def test_get_conn_rolls_back_on_error(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "postgres")
-
-    conn = MagicMock()
-    monkeypatch.setattr(client_mod, "_connect", lambda database=None: conn)
-    client_mod._active_conns.clear()
+    fake = _FakePool()
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
 
     with pytest.raises(RuntimeError), client_mod.get_conn():
         raise RuntimeError("boom")
 
-    conn.rollback.assert_called_once()
-    conn.close.assert_called_once()
-    assert client_mod._active_conns.get("postgres", 0) == 0
+    fake.conn.rollback.assert_called_once()
+    fake.conn.commit.assert_not_called()
+
+
+def test_close_pool_is_idempotent():
+    client_mod._pools.clear()
+    close_pool()
+    close_pool("some_db")  # no-op when nothing registered
+
+
+def test_close_pool_closes_registered_pools(monkeypatch):
+    client_mod._pools.clear()
+    fake_a = _FakePool()
+    fake_b = _FakePool()
+    client_mod._pools["db_a"] = fake_a
+    client_mod._pools["db_b"] = fake_b
+
+    close_pool("db_a")
+    assert fake_a.closed is True
+    assert fake_b.closed is False
+    assert "db_a" not in client_mod._pools
+    assert "db_b" in client_mod._pools
+
+    close_pool()  # closes remaining
+    assert fake_b.closed is True
+    assert client_mod._pools == {}
+
+
+# ---------------------------------------------------------------------------
+# TeamSchema.table_names + truncate_team_tables
+# ---------------------------------------------------------------------------
+
+
+def test_team_schema_table_names_default():
+    schema = TeamSchema(team="foo")
+    assert schema.table_names == []
+
+
+def test_truncate_team_tables_noop_on_empty_list(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres.testing import truncate_team_tables
+
+    schema = TeamSchema(team="demo", statements=[], table_names=[])
+    assert truncate_team_tables(schema) == 0
+
+
+def test_truncate_team_tables_issues_truncate(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres import testing as testing_mod
+
+    executed: list[str] = []
+
+    @contextmanager
+    def fake_get_conn(database=None):
+        cursor = MagicMock()
+        cursor.__enter__ = lambda self: cursor
+        cursor.__exit__ = lambda self, *a: None
+        cursor.execute.side_effect = lambda sql: executed.append(sql)
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        yield conn
+
+    monkeypatch.setattr(testing_mod, "get_conn", fake_get_conn)
+
+    schema = TeamSchema(
+        team="demo",
+        table_names=["demo_a", "demo_b"],
+    )
+    applied = testing_mod.truncate_team_tables(schema)
+    assert applied == 2
+    assert len(executed) == 1
+    assert "TRUNCATE TABLE" in executed[0]
+    assert '"demo_a"' in executed[0]
+    assert '"demo_b"' in executed[0]
+    assert "RESTART IDENTITY CASCADE" in executed[0]
+
+
+def test_truncate_team_tables_raises_when_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    from shared_postgres.testing import truncate_team_tables
+
+    schema = TeamSchema(team="demo", table_names=["demo_a"])
+    with pytest.raises(RuntimeError, match="POSTGRES_HOST is not set"):
+        truncate_team_tables(schema)
+
+
+def test_truncate_team_tables_rejects_quote_in_name(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres.testing import truncate_team_tables
+
+    schema = TeamSchema(team="demo", table_names=['bad"name'])
+    with pytest.raises(ValueError, match="double-quote"):
+        truncate_team_tables(schema)
+
+
+# ---------------------------------------------------------------------------
+# @timed_query decorator
+# ---------------------------------------------------------------------------
+
+
+def test_timed_query_logs_debug_on_fast_call(caplog):
+    from shared_postgres.metrics import timed_query
+
+    @timed_query(store="demo")
+    def fast(x):
+        return x * 2
+
+    with caplog.at_level("DEBUG", logger="shared_postgres.metrics"):
+        assert fast(5) == 10
+
+    msgs = [rec.message for rec in caplog.records if rec.name == "shared_postgres.metrics"]
+    assert any("store=demo op=fast" in m and "status=ok" in m for m in msgs)
+
+
+def test_timed_query_logs_info_on_slow_call(monkeypatch, caplog):
+    from shared_postgres.metrics import timed_query
+
+    # Force the threshold to 0 so any duration is "slow".
+    monkeypatch.setenv("POSTGRES_SLOW_QUERY_MS", "0")
+
+    @timed_query(store="demo", op="slow_op")
+    def slow():
+        return 42
+
+    with caplog.at_level("INFO", logger="shared_postgres.metrics"):
+        assert slow() == 42
+
+    info_msgs = [
+        rec.message
+        for rec in caplog.records
+        if rec.name == "shared_postgres.metrics" and rec.levelname == "INFO"
+    ]
+    assert any("store=demo op=slow_op" in m and "slow=true" in m for m in info_msgs)
+
+
+def test_timed_query_re_raises_and_logs_error(caplog):
+    from shared_postgres.metrics import timed_query
+
+    @timed_query(store="demo")
+    def boom():
+        raise ValueError("nope")
+
+    with caplog.at_level("WARNING", logger="shared_postgres.metrics"):
+        with pytest.raises(ValueError, match="nope"):
+            boom()
+
+    warn_msgs = [
+        rec.message
+        for rec in caplog.records
+        if rec.name == "shared_postgres.metrics" and rec.levelname == "WARNING"
+    ]
+    assert any("status=error" in m and "ValueError" in m for m in warn_msgs)
+
+
+# ---------------------------------------------------------------------------
+# Lazy Json / dict_row re-exports
+# ---------------------------------------------------------------------------
+
+
+def _psycopg_installed() -> bool:
+    try:
+        import psycopg  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(not _psycopg_installed(), reason="psycopg not installed")
+def test_json_reexport_returns_psycopg_adapter():
+    import shared_postgres
+
+    Json = shared_postgres.Json
+    from psycopg.types.json import Json as PsycopgJson
+
+    assert Json is PsycopgJson
+
+
+@pytest.mark.skipif(not _psycopg_installed(), reason="psycopg not installed")
+def test_dict_row_reexport_returns_psycopg_factory():
+    import shared_postgres
+
+    dict_row = shared_postgres.dict_row
+    from psycopg.rows import dict_row as psycopg_dict_row
+
+    assert dict_row is psycopg_dict_row
+
+
+def test_getattr_raises_on_unknown():
+    import shared_postgres
+
+    with pytest.raises(AttributeError, match="no attribute"):
+        _ = shared_postgres.not_a_real_thing  # type: ignore[attr-defined]

@@ -38,4 +38,9 @@ SCHEMA = TeamSchema(
         """CREATE INDEX IF NOT EXISTS idx_startup_advisor_conv_artifacts_conv
             ON startup_advisor_conv_artifacts(conversation_id)""",
     ],
+    table_names=[
+        "startup_advisor_conversations",
+        "startup_advisor_conv_messages",
+        "startup_advisor_conv_artifacts",
+    ],
 )

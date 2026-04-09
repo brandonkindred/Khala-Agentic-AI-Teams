@@ -100,7 +100,7 @@ def test_validate_bot_token_accepts_valid_token():
     """_validate_bot_token does not raise for an xoxb- prefixed token."""
     from unified_api.routes.integrations import _validate_bot_token
 
-    _validate_bot_token("xoxb-valid-token")
+    _validate_bot_token("xoxb-FAKE-opaque-bot")
 
 
 def test_validate_bot_token_raises_for_missing_token():
@@ -254,7 +254,7 @@ def test_put_slack_bot_mode_requires_default_channel():
             json={
                 "enabled": True,
                 "mode": "bot",
-                "bot_token": "xoxb-some-token",
+                "bot_token": "xoxb-FAKE-opaque-bot-a",
                 "default_channel": "",
             },
         )
@@ -272,7 +272,7 @@ def test_put_slack_bot_mode_accepts_valid_token_and_channel():
             json={
                 "enabled": True,
                 "mode": "bot",
-                "bot_token": "xoxb-valid",
+                "bot_token": "xoxb-FAKE-opaque-bot-b",
                 "default_channel": "#eng",
             },
         )
@@ -294,7 +294,10 @@ def test_slack_oauth_connect_returns_400_when_client_id_missing():
 
 def test_slack_oauth_connect_returns_400_when_client_secret_missing():
     """GET /slack/oauth/connect returns 400 when Client Secret is not configured."""
-    with patch(f"{_STORE_MODULE}.get_slack_config", return_value=dict(_DEFAULT_SLACK_CFG, client_id="my-id")):
+    with patch(
+        f"{_STORE_MODULE}.get_slack_config",
+        return_value=dict(_DEFAULT_SLACK_CFG, client_id="opaque-cid"),
+    ):
         resp = client.get("/api/integrations/slack/oauth/connect")
     assert resp.status_code == 400
     assert "Client Secret" in resp.json()["detail"]
@@ -305,7 +308,7 @@ def test_slack_oauth_connect_returns_url_and_client_id():
     with (
         patch(
             f"{_STORE_MODULE}.get_slack_config",
-            return_value=dict(_DEFAULT_SLACK_CFG, client_id="cid-123", client_secret="csec"),
+            return_value=dict(_DEFAULT_SLACK_CFG, client_id="opaque-cid", client_secret="opaque-csec"),
         ),
         patch(f"{_STORE_MODULE}.generate_oauth_state", return_value="test-state-xyz"),
     ):
@@ -359,7 +362,7 @@ def test_slack_oauth_callback_success_stores_token_and_redirects():
     """GET /slack/oauth/callback on success calls set_slack_oauth_token and redirects."""
     mock_exchange = {
         "ok": True,
-        "access_token": "xoxb-new",
+        "access_token": "xoxb-FAKE-opaque-bot-c",
         "team": {"id": "T1", "name": "Acme"},
         "bot_user_id": "U1",
     }
@@ -367,7 +370,7 @@ def test_slack_oauth_callback_success_stores_token_and_redirects():
         patch(f"{_STORE_MODULE}.verify_and_clear_oauth_state", return_value=True),
         patch(
             f"{_STORE_MODULE}.get_slack_config",
-            return_value=dict(_DEFAULT_SLACK_CFG, client_id="cid", client_secret="csec"),
+            return_value=dict(_DEFAULT_SLACK_CFG, client_id="opaque-cid", client_secret="opaque-csec"),
         ),
         patch(f"{_STORE_MODULE}._exchange_code", return_value=mock_exchange),
         patch(f"{_STORE_MODULE}.set_slack_oauth_token") as mock_set_token,
@@ -376,7 +379,7 @@ def test_slack_oauth_callback_success_stores_token_and_redirects():
     assert resp.status_code in (302, 307)
     assert "slack_connected=1" in resp.headers["location"]
     mock_set_token.assert_called_once_with(
-        bot_token="xoxb-new",
+        bot_token="xoxb-FAKE-opaque-bot-c",
         team_id="T1",
         team_name="Acme",
         bot_user_id="U1",
@@ -525,8 +528,8 @@ def test_medium_google_oauth_connect_returns_auth_url():
             return_value=dict(
                 _DEFAULT_MEDIUM_CFG,
                 oauth_provider="google",
-                google_client_id="gid",
-                google_client_secret="gsec",
+                google_client_id="opaque-google-cid",
+                google_client_secret="opaque-google-csec",
             ),
         ),
         patch(f"{_STORE_MODULE}.generate_medium_google_oauth_state", return_value="mg-state"),
@@ -572,8 +575,8 @@ def test_medium_google_oauth_callback_success_stores_identity():
             f"{_STORE_MODULE}.get_medium_config",
             return_value=dict(
                 _DEFAULT_MEDIUM_CFG,
-                google_client_id="gid",
-                google_client_secret="gsec",
+                google_client_id="opaque-google-cid",
+                google_client_secret="opaque-google-csec",
             ),
         ),
         patch(

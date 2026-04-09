@@ -1,49 +1,54 @@
-"""SQLite-backed store for startup advisor conversation state.
+"""Postgres-backed store for startup advisor conversation state.
 
-Follows the same pattern as ``BrandingConversationStore``: in-memory DB when no
-path is supplied (for tests), file-backed with WAL mode for production.
+Rewritten in PR 2 of the SQLite → Postgres migration. The public API
+(constructor, method names, return types) is identical to the prior
+SQLite version so callers in ``startup_advisor/api/main.py`` and the
+assistant agent need no changes.
+
+All DDL lives in ``startup_advisor.postgres`` and is registered from
+the team's FastAPI lifespan via ``shared_postgres.register_team_schemas``.
+This module is pure data access: it opens short-lived connections
+through ``shared_postgres.get_conn`` (which is pool-backed since PR 0).
+
+Every public method is wrapped in ``@timed_query`` so slow reads and
+writes surface as structured log lines without requiring a Prometheus
+exporter.
 """
 
 from __future__ import annotations
 
-import contextlib
-import json
 import logging
-import sqlite3
-import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Iterator, List, Optional
+from typing import Any, Optional
 from uuid import uuid4
+
+from psycopg.rows import dict_row
+from psycopg.types.json import Json
+
+from shared_postgres import get_conn
+from shared_postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS conversations (
-    conversation_id    TEXT PRIMARY KEY,
-    context_json       TEXT NOT NULL DEFAULT '{}',
-    created_at         TEXT NOT NULL,
-    updated_at         TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS conv_messages (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id TEXT NOT NULL,
-    role            TEXT NOT NULL,
-    content         TEXT NOT NULL,
-    timestamp       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_conv_messages ON conv_messages(conversation_id);
-CREATE TABLE IF NOT EXISTS conv_artifacts (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id TEXT NOT NULL,
-    artifact_type   TEXT NOT NULL,
-    title           TEXT NOT NULL DEFAULT '',
-    payload_json    TEXT NOT NULL,
-    created_at      TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_conv_artifacts ON conv_artifacts(conversation_id);
-"""
+_STORE = "startup_advisor"
+
+
+def _now_iso() -> str:
+    return datetime.now(tz=timezone.utc).isoformat()
+
+
+def _row_ts(value: Any) -> str:
+    """Normalize a Postgres TIMESTAMPTZ value to an ISO-8601 string.
+
+    psycopg3 returns a timezone-aware ``datetime``; the public dataclass
+    contract on ``StoredMessage`` / ``StoredArtifact`` / ``ConversationSummary``
+    exposes timestamps as strings, so we format here rather than
+    forcing every caller to handle both shapes.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value or "")
 
 
 @dataclass
@@ -71,188 +76,191 @@ class ConversationSummary:
 
 
 class StartupAdvisorConversationStore:
-    """SQLite-backed store for startup advisor chat conversations."""
+    """Postgres-backed store for startup advisor chat conversations.
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
-        self._lock = threading.Lock()
-        if db_path is None:
-            self._file_path: Optional[str] = None
-            self._mem_conn: Optional[sqlite3.Connection] = sqlite3.connect(
-                ":memory:", check_same_thread=False
-            )
-            self._mem_conn.row_factory = sqlite3.Row
-            self._mem_conn.executescript(_SCHEMA)
-            self._mem_conn.commit()
-        else:
-            self._file_path = str(db_path)
-            self._mem_conn = None
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            self._init_file_schema()
+    The constructor takes no arguments — the Postgres DSN is read from
+    the ``POSTGRES_*`` env vars by ``shared_postgres.get_conn``. The
+    lazy ``get_conversation_store()`` module-level accessor defers
+    instantiation so ``import startup_advisor.store`` stays cheap and
+    never touches Postgres on import.
+    """
 
-    def _init_file_schema(self) -> None:
-        conn = sqlite3.connect(self._file_path, timeout=15)  # type: ignore[arg-type]
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(_SCHEMA)
-        conn.commit()
-        conn.close()
+    def __init__(self) -> None:
+        # Stateless; the connection pool lives inside shared_postgres.
+        pass
 
-    @contextlib.contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
-        if self._mem_conn is not None:
-            with self._lock:
-                self._mem_conn.row_factory = sqlite3.Row
-                yield self._mem_conn
-                self._mem_conn.commit()
-        else:
-            conn = sqlite3.connect(self._file_path, check_same_thread=False, timeout=15)  # type: ignore[arg-type]
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.row_factory = sqlite3.Row
-            try:
-                yield conn
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
-
+    @timed_query(store=_STORE, op="create")
     def create(self, conversation_id: Optional[str] = None, context: Optional[dict] = None) -> str:
         cid = conversation_id or str(uuid4())
-        ctx_json = json.dumps(context or {})
-        now = datetime.now(tz=timezone.utc).isoformat()
-        with self._db() as conn:
-            conn.execute(
-                "INSERT INTO conversations (conversation_id, context_json, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?)",
-                (cid, ctx_json, now, now),
+        now = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO startup_advisor_conversations "
+                "(conversation_id, context_json, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s)",
+                (cid, Json(context or {}), now, now),
             )
         return cid
 
-    def get(self, conversation_id: str) -> Optional[tuple[List[StoredMessage], dict[str, Any]]]:
-        with self._db() as conn:
-            row = conn.execute(
-                "SELECT context_json FROM conversations WHERE conversation_id = ?",
+    @timed_query(store=_STORE, op="get")
+    def get(self, conversation_id: str) -> Optional[tuple[list[StoredMessage], dict[str, Any]]]:
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT context_json FROM startup_advisor_conversations WHERE conversation_id = %s",
                 (conversation_id,),
-            ).fetchone()
+            )
+            row = cur.fetchone()
             if row is None:
                 return None
-            context = json.loads(row[0]) if row[0] else {}
-            msg_rows = conn.execute(
-                "SELECT role, content, timestamp FROM conv_messages"
-                " WHERE conversation_id = ? ORDER BY id",
+            context = row["context_json"] or {}
+
+            cur.execute(
+                "SELECT role, content, timestamp FROM startup_advisor_conv_messages "
+                "WHERE conversation_id = %s ORDER BY id",
                 (conversation_id,),
-            ).fetchall()
-            messages = [StoredMessage(role=r[0], content=r[1], timestamp=r[2]) for r in msg_rows]
+            )
+            messages = [
+                StoredMessage(
+                    role=r["role"],
+                    content=r["content"],
+                    timestamp=_row_ts(r["timestamp"]),
+                )
+                for r in cur.fetchall()
+            ]
         return (messages, context)
 
+    @timed_query(store=_STORE, op="append_message")
     def append_message(self, conversation_id: str, role: str, content: str) -> bool:
         if role not in ("user", "assistant"):
             return False
-        ts = datetime.now(tz=timezone.utc).isoformat()
-        with self._db() as conn:
-            if (
-                conn.execute(
-                    "SELECT 1 FROM conversations WHERE conversation_id = ?", (conversation_id,)
-                ).fetchone()
-                is None
-            ):
+        ts = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM startup_advisor_conversations WHERE conversation_id = %s",
+                (conversation_id,),
+            )
+            if cur.fetchone() is None:
                 return False
-            conn.execute(
-                "INSERT INTO conv_messages (conversation_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            cur.execute(
+                "INSERT INTO startup_advisor_conv_messages "
+                "(conversation_id, role, content, timestamp) VALUES (%s, %s, %s, %s)",
                 (conversation_id, role, content, ts),
             )
-            conn.execute(
-                "UPDATE conversations SET updated_at = ? WHERE conversation_id = ?",
+            cur.execute(
+                "UPDATE startup_advisor_conversations SET updated_at = %s "
+                "WHERE conversation_id = %s",
                 (ts, conversation_id),
             )
         return True
 
+    @timed_query(store=_STORE, op="update_context")
     def update_context(self, conversation_id: str, context: dict[str, Any]) -> bool:
-        ts = datetime.now(tz=timezone.utc).isoformat()
-        with self._db() as conn:
-            result = conn.execute(
-                "UPDATE conversations SET context_json = ?, updated_at = ? WHERE conversation_id = ?",
-                (json.dumps(context), ts, conversation_id),
+        ts = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE startup_advisor_conversations "
+                "SET context_json = %s, updated_at = %s WHERE conversation_id = %s",
+                (Json(context), ts, conversation_id),
             )
-        return result.rowcount > 0
+            return cur.rowcount > 0
 
+    @timed_query(store=_STORE, op="add_artifact")
     def add_artifact(
-        self, conversation_id: str, artifact_type: str, title: str, payload: dict[str, Any]
+        self,
+        conversation_id: str,
+        artifact_type: str,
+        title: str,
+        payload: dict[str, Any],
     ) -> int:
-        ts = datetime.now(tz=timezone.utc).isoformat()
-        with self._db() as conn:
-            cursor = conn.execute(
-                "INSERT INTO conv_artifacts (conversation_id, artifact_type, title, payload_json, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (conversation_id, artifact_type, title, json.dumps(payload), ts),
+        ts = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO startup_advisor_conv_artifacts "
+                "(conversation_id, artifact_type, title, payload_json, created_at) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (conversation_id, artifact_type, title, Json(payload), ts),
             )
-            return cursor.lastrowid  # type: ignore[return-value]
+            row = cur.fetchone()
+            return int(row[0])
 
-    def get_artifacts(self, conversation_id: str) -> List[StoredArtifact]:
-        with self._db() as conn:
-            rows = conn.execute(
-                "SELECT id, artifact_type, title, payload_json, created_at"
-                " FROM conv_artifacts WHERE conversation_id = ? ORDER BY id",
+    @timed_query(store=_STORE, op="get_artifacts")
+    def get_artifacts(self, conversation_id: str) -> list[StoredArtifact]:
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, artifact_type, title, payload_json, created_at "
+                "FROM startup_advisor_conv_artifacts "
+                "WHERE conversation_id = %s ORDER BY id",
                 (conversation_id,),
-            ).fetchall()
-        return [
-            StoredArtifact(
-                artifact_id=r[0],
-                artifact_type=r[1],
-                title=r[2],
-                payload=json.loads(r[3]),
-                created_at=r[4],
             )
-            for r in rows
-        ]
+            return [
+                StoredArtifact(
+                    artifact_id=int(r["id"]),
+                    artifact_type=r["artifact_type"],
+                    title=r["title"],
+                    payload=r["payload_json"] or {},
+                    created_at=_row_ts(r["created_at"]),
+                )
+                for r in cur.fetchall()
+            ]
 
-    def list_conversations(self) -> List[ConversationSummary]:
-        with self._db() as conn:
-            rows = conn.execute(
+    @timed_query(store=_STORE, op="list_conversations")
+    def list_conversations(self) -> list[ConversationSummary]:
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
                 """
-                SELECT c.conversation_id, c.created_at, c.updated_at, COUNT(m.id) AS message_count
-                FROM conversations c
-                LEFT JOIN conv_messages m ON m.conversation_id = c.conversation_id
+                SELECT c.conversation_id, c.created_at, c.updated_at,
+                       COUNT(m.id) AS message_count
+                FROM startup_advisor_conversations c
+                LEFT JOIN startup_advisor_conv_messages m
+                    ON m.conversation_id = c.conversation_id
                 GROUP BY c.conversation_id, c.created_at, c.updated_at
                 ORDER BY c.updated_at DESC
                 """
-            ).fetchall()
-        return [
-            ConversationSummary(
-                conversation_id=str(r[0]),
-                created_at=str(r[1] or ""),
-                updated_at=str(r[2] or ""),
-                message_count=int(r[3] or 0),
             )
-            for r in rows
-        ]
+            return [
+                ConversationSummary(
+                    conversation_id=str(r["conversation_id"]),
+                    created_at=_row_ts(r["created_at"]),
+                    updated_at=_row_ts(r["updated_at"]),
+                    message_count=int(r["message_count"] or 0),
+                )
+                for r in cur.fetchall()
+            ]
 
+    @timed_query(store=_STORE, op="get_or_create_singleton")
     def get_or_create_singleton(self) -> str:
         """Return the single conversation ID, creating one if none exists.
 
-        The startup advisor uses a single persistent conversation per deployment.
+        The startup advisor uses a single persistent conversation per
+        deployment. In Postgres this is a straight
+        ``ORDER BY created_at ASC LIMIT 1`` — ties are extremely unlikely
+        and the worst case is returning the older row, which is fine.
         """
-        with self._db() as conn:
-            row = conn.execute(
-                "SELECT conversation_id FROM conversations ORDER BY created_at ASC LIMIT 1"
-            ).fetchone()
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT conversation_id FROM startup_advisor_conversations "
+                "ORDER BY created_at ASC LIMIT 1"
+            )
+            row = cur.fetchone()
             if row is not None:
                 return str(row[0])
         return self.create()
 
 
 # ---------------------------------------------------------------------------
-# Singleton
+# Lazy singleton
 # ---------------------------------------------------------------------------
 
 _default_store: Optional[StartupAdvisorConversationStore] = None
 
 
 def get_conversation_store() -> StartupAdvisorConversationStore:
+    """Return the process-wide store, instantiating on first call.
+
+    The store itself holds no state — the singleton exists purely to
+    give callers a stable identity for caching/mocking in tests.
+    """
     global _default_store
     if _default_store is None:
-        from startup_advisor.db import get_db_path
-
-        _default_store = StartupAdvisorConversationStore(db_path=get_db_path())
+        _default_store = StartupAdvisorConversationStore()
     return _default_store

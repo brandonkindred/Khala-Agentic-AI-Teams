@@ -1,107 +1,85 @@
-"""
-Persistent story bank for author narratives.
+"""Postgres-backed story bank for author narratives.
 
-Stores first-person stories elicited by the ghost writer so they can be reused
-across future blog posts.  Each story is tagged with keywords, a one-sentence
-semantic summary, and the section context it was originally written for.
+Rewritten in PR 4 of the SQLite → Postgres migration. Stores
+first-person stories elicited by the ghost writer so they can be
+reused across future blog posts. Each story is tagged with keywords,
+a one-sentence semantic summary, and the section context it was
+originally written for.
 
-Storage: SQLite database at ``{AGENT_CACHE}/blogging_team/story_bank.db``.
+Storage: the ``blogging_stories`` table declared in
+``blogging.postgres`` and registered from the blogging team's FastAPI
+lifespan. DDL lives there — this module is pure data access via
+``shared_postgres.get_conn`` (pool-backed since PR 0).
+
+The public API (module-level functions ``save_story``,
+``find_relevant_stories``, ``list_stories``, ``get_story``,
+``delete_story``) is unchanged so callers in
+``blog_writing_process_v2.py`` and ``api/main.py`` need no edits.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import sqlite3
-import threading
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
+
+from psycopg.rows import dict_row
+
+from shared_postgres import Json, get_conn
+from shared_postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CACHE = ".agent_cache"
-_DB_FILENAME = "story_bank.db"
-_lock = threading.Lock()
+_STORE = "blogging_story_bank"
 
 
-def _db_path() -> str:
-    cache = os.environ.get("AGENT_CACHE", _DEFAULT_CACHE)
-    directory = Path(cache) / "blogging_team"
-    directory.mkdir(parents=True, exist_ok=True)
-    return str(directory / _DB_FILENAME)
+def _row_ts(value: Any) -> str:
+    """Normalize a Postgres TIMESTAMPTZ to an ISO-8601 string."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value or "")
 
 
-def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(_db_path(), timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.row_factory = sqlite3.Row
-    return conn
+def _row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
+    """Convert a ``dict_row`` cursor row into the public dict shape.
+
+    psycopg3 returns JSONB columns as Python lists/dicts already, so
+    ``keywords`` needs no ``json.loads``. Timestamps become ISO strings
+    to preserve the pre-migration contract.
+    """
+    return {
+        "id": row["id"],
+        "narrative": row["narrative"],
+        "section_title": row["section_title"],
+        "section_context": row["section_context"],
+        "keywords": list(row["keywords"] or []),
+        "summary": row["summary"] or "",
+        "created_at": _row_ts(row["created_at"]),
+    }
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS stories (
-            id          TEXT PRIMARY KEY,
-            narrative   TEXT NOT NULL,
-            section_title   TEXT NOT NULL DEFAULT '',
-            section_context TEXT NOT NULL DEFAULT '',
-            keywords    TEXT NOT NULL DEFAULT '[]',
-            source_job_id   TEXT,
-            created_at  TEXT NOT NULL
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_stories_keywords
-        ON stories (keywords)
-        """
-    )
-    # Migration: add summary column (safe if already exists)
-    try:
-        conn.execute("ALTER TABLE stories ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    conn.commit()
-
-
-_schema_ensured = False
-
-
-def _conn() -> sqlite3.Connection:
-    global _schema_ensured
-    c = _get_conn()
-    if not _schema_ensured:
-        with _lock:
-            if not _schema_ensured:
-                _ensure_schema(c)
-                _schema_ensured = True
-    return c
-
-
+@timed_query(store=_STORE, op="save_story")
 def save_story(
     narrative: str,
     section_title: str = "",
     section_context: str = "",
-    keywords: Optional[List[str]] = None,
+    keywords: Optional[list[str]] = None,
     source_job_id: Optional[str] = None,
     llm_client: Any = None,
 ) -> str:
     """Persist a story narrative and return its ID.
 
-    If *llm_client* is provided, generates a one-sentence semantic summary
-    for improved retrieval relevance.
+    If *llm_client* is provided, generates a one-sentence semantic
+    summary for improved retrieval relevance. The summary step is
+    best-effort — failures are logged and the row still lands with
+    ``summary=''``.
     """
     story_id = uuid.uuid4().hex[:12]
-    now = datetime.now(timezone.utc).isoformat()
-    kw_json = json.dumps(keywords or [], ensure_ascii=False)
+    now = datetime.now(timezone.utc)
 
-    # Generate semantic summary if LLM is available
+    # Best-effort semantic summary. Done before the DB call so a slow
+    # LLM doesn't hold the Postgres connection open longer than needed.
     summary = ""
     if llm_client is not None:
         try:
@@ -115,52 +93,60 @@ def save_story(
         except Exception as e:
             logger.warning("Story bank: summary generation failed (non-fatal): %s", e)
 
-    conn = _conn()
-    try:
-        conn.execute(
-            "INSERT INTO stories (id, narrative, section_title, section_context, keywords, source_job_id, created_at, summary) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (story_id, narrative, section_title, section_context, kw_json, source_job_id, now, summary),
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO blogging_stories "
+            "(id, narrative, section_title, section_context, keywords, summary, source_job_id, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                story_id,
+                narrative,
+                section_title,
+                section_context,
+                Json(keywords or []),
+                summary,
+                source_job_id,
+                now,
+            ),
         )
-        conn.commit()
-        logger.info(
-            "Story bank: saved story %s (section=%s, keywords=%s, has_summary=%s)",
-            story_id,
-            section_title,
-            keywords,
-            bool(summary),
-        )
-        return story_id
-    finally:
-        conn.close()
+
+    logger.info(
+        "Story bank: saved story %s (section=%s, keywords=%s, has_summary=%s)",
+        story_id,
+        section_title,
+        keywords,
+        bool(summary),
+    )
+    return story_id
 
 
+@timed_query(store=_STORE, op="find_relevant_stories")
 def find_relevant_stories(
-    query_keywords: List[str],
+    query_keywords: list[str],
     limit: int = 5,
     story_opportunity: Optional[str] = None,
     llm_client: Any = None,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Return stories relevant to *query_keywords*, ranked by relevance.
 
-    Uses a two-stage approach:
-    1. **Fast path**: keyword overlap scoring (set intersection) to get top candidates.
-    2. **Slow path** (if *story_opportunity* and *llm_client* are provided): LLM-scored
-       reranking of candidates with summaries for better semantic relevance.
+    Two-stage retrieval, unchanged from the SQLite implementation:
+    1. Fast path: keyword overlap scoring (set intersection) selects
+       the top candidates.
+    2. Slow path (optional): if ``story_opportunity`` and
+       ``llm_client`` are provided and more candidates than the limit
+       have summaries, an LLM rerank picks the most relevant by
+       semantic similarity.
 
-    Each result is a dict with keys: id, narrative, section_title, section_context,
-    keywords, summary, created_at.
+    Each result is a dict with keys: id, narrative, section_title,
+    section_context, keywords, summary, created_at.
     """
     if not query_keywords:
         return []
 
-    # Stage 1: keyword-based candidate retrieval
     candidates = _keyword_scored_candidates(query_keywords, limit=max(limit, 10))
-
     if not candidates:
         return []
 
-    # Stage 2: LLM reranking (optional, when we have summaries and an opportunity description)
     candidates_with_summaries = [c for c in candidates if c.get("summary")]
     if story_opportunity and llm_client and len(candidates_with_summaries) > limit:
         reranked = _llm_rerank(candidates_with_summaries, story_opportunity, llm_client, limit)
@@ -170,50 +156,44 @@ def find_relevant_stories(
     return candidates[:limit]
 
 
-def _keyword_scored_candidates(query_keywords: List[str], limit: int = 10) -> List[Dict[str, Any]]:
-    """Retrieve stories ranked by keyword overlap count."""
-    conn = _conn()
-    try:
-        rows = conn.execute(
-            "SELECT id, narrative, section_title, section_context, keywords, summary, created_at FROM stories"
-        ).fetchall()
-    finally:
-        conn.close()
+def _keyword_scored_candidates(query_keywords: list[str], limit: int = 10) -> list[dict[str, Any]]:
+    """Retrieve stories ranked by keyword-overlap count (fast path).
+
+    Reads every row because the table is low-volume (dozens of
+    stories, not millions). Scoring is done in Python for simplicity
+    — a future optimization could push the overlap into Postgres via
+    the JSONB ``?|`` operator.
+    """
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, narrative, section_title, section_context, keywords, "
+            "summary, created_at FROM blogging_stories"
+        )
+        rows = cur.fetchall()
 
     query_lower = {k.lower().strip() for k in query_keywords if k.strip()}
     if not query_lower:
         return []
 
-    scored: List[tuple] = []
+    scored: list[tuple[int, dict[str, Any]]] = []
     for row in rows:
-        try:
-            story_kw = {k.lower().strip() for k in json.loads(row["keywords"])}
-        except (json.JSONDecodeError, TypeError):
-            story_kw = set()
+        story_kw = {str(k).lower().strip() for k in (row["keywords"] or [])}
         overlap = len(query_lower & story_kw)
         if overlap > 0:
-            scored.append((overlap, dict(row)))
+            scored.append((overlap, _row_to_dict(row)))
 
     scored.sort(key=lambda t: t[0], reverse=True)
-    results = []
-    for _, item in scored[:limit]:
-        item["keywords"] = (
-            json.loads(item["keywords"]) if isinstance(item["keywords"], str) else item["keywords"]
-        )
-        results.append(item)
-    return results
+    return [item for _, item in scored[:limit]]
 
 
 def _llm_rerank(
-    candidates: List[Dict[str, Any]],
+    candidates: list[dict[str, Any]],
     story_opportunity: str,
     llm_client: Any,
     limit: int,
-) -> List[Dict[str, Any]]:
-    """Use LLM to rerank candidates by semantic relevance to the story opportunity."""
-    summaries = "\n".join(
-        f"{i + 1}. {c['summary']}" for i, c in enumerate(candidates)
-    )
+) -> list[dict[str, Any]]:
+    """Use an LLM to rerank candidates by semantic relevance."""
+    summaries = "\n".join(f"{i + 1}. {c['summary']}" for i, c in enumerate(candidates))
     prompt = (
         f"Story needed: {story_opportunity}\n\n"
         f"Candidate stories (by summary):\n{summaries}\n\n"
@@ -225,10 +205,9 @@ def _llm_rerank(
             prompt,
             system_prompt="Return a JSON array of integers only. No other text.",
         )
-        # Handle various return formats
         indices = data if isinstance(data, list) else data.get("indices", data.get("text", []))
         if isinstance(indices, list):
-            reranked = []
+            reranked: list[dict[str, Any]] = []
             for idx in indices[:limit]:
                 i = int(idx) - 1  # 1-based to 0-based
                 if 0 <= i < len(candidates):
@@ -240,56 +219,37 @@ def _llm_rerank(
     return []
 
 
-def list_stories(limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
-    """Return all stories, newest first."""
-    conn = _conn()
-    try:
-        rows = conn.execute(
-            "SELECT id, narrative, section_title, section_context, keywords, summary, created_at "
-            "FROM stories ORDER BY created_at DESC LIMIT ? OFFSET ?",
+@timed_query(store=_STORE, op="list_stories")
+def list_stories(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    """Return stories, newest first, with LIMIT/OFFSET pagination."""
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, narrative, section_title, section_context, keywords, "
+            "summary, created_at FROM blogging_stories "
+            "ORDER BY created_at DESC LIMIT %s OFFSET %s",
             (limit, offset),
-        ).fetchall()
-    finally:
-        conn.close()
-
-    results = []
-    for row in rows:
-        item = dict(row)
-        try:
-            item["keywords"] = json.loads(item["keywords"])
-        except (json.JSONDecodeError, TypeError):
-            item["keywords"] = []
-        results.append(item)
-    return results
+        )
+        return [_row_to_dict(r) for r in cur.fetchall()]
 
 
-def get_story(story_id: str) -> Optional[Dict[str, Any]]:
+@timed_query(store=_STORE, op="get_story")
+def get_story(story_id: str) -> Optional[dict[str, Any]]:
     """Return a single story by ID, or None."""
-    conn = _conn()
-    try:
-        row = conn.execute(
-            "SELECT id, narrative, section_title, section_context, keywords, summary, created_at "
-            "FROM stories WHERE id = ?",
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, narrative, section_title, section_context, keywords, "
+            "summary, created_at FROM blogging_stories WHERE id = %s",
             (story_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return None
-    item = dict(row)
-    try:
-        item["keywords"] = json.loads(item["keywords"])
-    except (json.JSONDecodeError, TypeError):
-        item["keywords"] = []
-    return item
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return _row_to_dict(row)
 
 
+@timed_query(store=_STORE, op="delete_story")
 def delete_story(story_id: str) -> bool:
     """Delete a story by ID. Returns True if a row was removed."""
-    conn = _conn()
-    try:
-        cur = conn.execute("DELETE FROM stories WHERE id = ?", (story_id,))
-        conn.commit()
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM blogging_stories WHERE id = %s", (story_id,))
         return cur.rowcount > 0
-    finally:
-        conn.close()

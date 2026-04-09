@@ -26,4 +26,5 @@ SCHEMA = TeamSchema(
         """CREATE INDEX IF NOT EXISTS idx_blogging_stories_source_job
             ON blogging_stories(source_job_id)""",
     ],
+    table_names=["blogging_stories"],
 )
