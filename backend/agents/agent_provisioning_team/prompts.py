@@ -104,12 +104,11 @@ def format_ai_agent_create_prompt(requirements: str) -> str:
 
 
 def format_ai_agent_refine_prompt(current_definition: str, refinement_goals: str) -> str:
-    return f"{get_anatomy_prompt_preamble()}\n\n---\n\n{
-        _AI_AGENT_REFINE_BODY.format(
-            current_definition=current_definition,
-            refinement_goals=refinement_goals,
-        )
-    }"
+    body = _AI_AGENT_REFINE_BODY.format(
+        current_definition=current_definition,
+        refinement_goals=refinement_goals,
+    )
+    return f"{get_anatomy_prompt_preamble()}\n\n---\n\n{body}"
 
 
 # Backward-compatible names: full prompt string with .format() placeholders (anatomy applied at access time).
