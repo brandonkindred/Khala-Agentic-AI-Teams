@@ -47,6 +47,10 @@ COPY agents/blogging /app/blogging
 # ── Entrypoint ───────────────────────────────────────────────────────────────
 COPY blogging_service/entrypoint.py /app/entrypoint.py
 
+RUN adduser --disabled-password --gecos "" --uid 1000 appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app:/app/blogging
 EXPOSE 8090
