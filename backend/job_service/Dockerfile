@@ -16,6 +16,10 @@ COPY agents/shared_postgres /app/shared_postgres
 # Job service source
 COPY job_service /app/
 
+RUN adduser --disabled-password --gecos "" --uid 1000 appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 EXPOSE 8085

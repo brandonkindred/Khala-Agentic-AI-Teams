@@ -17,16 +17,15 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from planning_v2_team.tool_agents.json_utils import (
-    default_decompose_by_sections,
-    parse_json_with_recovery,
-)
-
 from software_engineering_team.shared.context_sizing import (
     compute_pra_spec_review_spec_chars,
     compute_prd_snippet_chars,
 )
 from software_engineering_team.shared.deduplication import dedupe_strings as _dedupe_items
+from software_engineering_team.shared.json_utils import (
+    default_decompose_by_sections,
+    parse_json_with_recovery,
+)
 
 from .models import (
     AnalysisPhase,
