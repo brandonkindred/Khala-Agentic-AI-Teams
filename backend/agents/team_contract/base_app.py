@@ -98,7 +98,7 @@ def create_team_app(
             logger.warning("shared_observability init_otel failed for %s", name, exc_info=True)
 
     app = FastAPI(
-        title=f"Strands {name.replace('_', ' ').title()} Team",
+        title=f"Khala {name.replace('_', ' ').title()} Team",
         description=description or f"Agent team: {name}",
         version=version,
     )

@@ -1,6 +1,6 @@
 # System Design
 
-This directory contains all architecture decision records (ADRs), feature specifications, and other design documents for the Strands Agents platform.
+This directory contains all architecture decision records (ADRs), feature specifications, and other design documents for the Khala platform.
 
 ## Directory Structure
 

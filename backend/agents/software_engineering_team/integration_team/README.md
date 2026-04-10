@@ -10,6 +10,6 @@ Post-execution agents that integrate or package the product after backend and fr
 
 These agents run after implementation (and quality gates). Tech Lead triggers DevOps and Documentation; Integration runs once in the orchestrator.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../../README.md) monorepo (Unified API, Angular UI, and full team index).

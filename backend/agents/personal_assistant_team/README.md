@@ -300,6 +300,6 @@ response = assistant.run(OrchestratorRequest(
 # Profile will be automatically updated with these preferences
 ```
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

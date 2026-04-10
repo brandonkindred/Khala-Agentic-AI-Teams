@@ -1,6 +1,6 @@
 # shared_observability
 
-Shared OpenTelemetry bootstrap for every Strands agent team. This module
+Shared OpenTelemetry bootstrap for every Khala agent team. This module
 is the single source of truth for tracing, metrics, and log-trace
 correlation across the platform.
 

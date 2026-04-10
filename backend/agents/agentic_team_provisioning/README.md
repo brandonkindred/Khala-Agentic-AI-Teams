@@ -28,6 +28,6 @@ When enabled (`AGENTIC_TEAM_AGENT_PROVISIONING_ENABLED`), saving a process can s
 
 The Angular app (**Agentic Teams**) shows chat, **Team Roster** (live refresh after messages), process diagram, and staffing gaps. Routes under `/agentic-teams`.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

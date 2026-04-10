@@ -1,5 +1,5 @@
 """
-Unified API Server — reverse-proxy router for Strands Agent team microservices.
+Unified API Server — reverse-proxy router for Khala team microservices.
 
 Each agent team runs in its own container.  This server:
   1. Proxies ``/api/{team}/*`` requests to the team's container.

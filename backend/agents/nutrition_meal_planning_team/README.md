@@ -47,6 +47,6 @@ Data is stored under `.agent_cache/nutrition_meal_planning_team/` (or `AGENT_CAC
 
 Uses the Personal Assistant team’s LLM client (`personal_assistant_team.shared.llm`) for completion and JSON extraction. Requires `personal_assistant_team` to be available when the API runs.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

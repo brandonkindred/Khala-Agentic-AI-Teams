@@ -1,4 +1,4 @@
-# Strands Agents - Docker Deployment
+# Khala - Docker Deployment
 
 This document describes how to run all 6 agent teams in a consistent, repeatable Docker environment with pre-installed tools (Node.js, Angular CLI, Git, Docker CLI).
 
@@ -77,7 +77,7 @@ A spec file is copied into the image at build time as `/app/initial_spec.md`, so
 
 ```bash
 # Build with custom spec (spec must be in build context)
-docker build --build-arg SPEC_FILE=./my-project/initial_spec.md -t strands-agents .
+docker build --build-arg SPEC_FILE=./my-project/initial_spec.md -t khala .
 
 # Or with docker-compose (SPEC_FILE is passed as build arg)
 SPEC_FILE=./my-spec.md docker-compose build
@@ -103,7 +103,7 @@ curl -X POST http://localhost:18000/run-team \
 
 The Software Engineering team expects `repo_path` to point to a directory containing `initial_spec.md`. You can use the baked-in spec at `/app` (see above), or mount your project into `/workspace`:
 ```bash
-docker-compose run -v $(pwd)/my-project:/workspace/my-project strands-agents
+docker-compose run -v $(pwd)/my-project:/workspace/my-project khala
 ```
 
 Or use the default `./workspace` directory - create `workspace/my-project/initial_spec.md` before calling `/run-team` with `repo_path: "/workspace/my-project"`.
@@ -111,7 +111,7 @@ Or use the default `./workspace` directory - create `workspace/my-project/initia
 ## Building a Custom Image
 
 ```bash
-docker build -t strands-agents .
+docker build -t khala .
 ```
 
 ## Verification
@@ -120,7 +120,7 @@ After building and starting the container, verify the setup:
 
 ```bash
 # 1. Build completes without errors
-docker build -t strands-agents .
+docker build -t khala .
 
 # 2. Container starts
 docker-compose up -d
@@ -133,13 +133,13 @@ for port in 18000 18001 18002 18003 18004 18005; do
 done
 
 # 4. Tools available inside container
-docker exec strands-agents node --version
-docker exec strands-agents ng version
-docker exec strands-agents git --version
-docker exec strands-agents docker --version
+docker exec khala node --version
+docker exec khala ng version
+docker exec khala git --version
+docker exec khala docker --version
 
 # 5. All supervisor processes running
-docker exec strands-agents supervisorctl status
+docker exec khala supervisorctl status
 ```
 
 ## Troubleshooting
@@ -159,15 +159,15 @@ docker exec strands-agents supervisorctl status
 
 **Solutions:**
 1. Ensure the container runs with `privileged: true` (required for Docker-in-Docker)
-2. Check dockerd is running: `docker exec strands-agents supervisorctl status dockerd`
-3. Verify docker works: `docker exec strands-agents docker info`
+2. Check dockerd is running: `docker exec khala supervisorctl status dockerd`
+3. Verify docker works: `docker exec khala docker info`
 
 ### Port Already in Use
 
 **Symptom:** `failed to bind host port for 0.0.0.0:8000: address already in use`
 
 **Solutions:**
-1. Stop any existing strands-agents container: `docker-compose down`
+1. Stop any existing khala container: `docker-compose down`
 2. Stop other services using ports 18000-18005 (or 8000-8005 if you changed the mapping)
 3. The default host ports are 18000-18005 to avoid conflicts with Ollama (11434) and common dev servers
 
@@ -176,18 +176,18 @@ docker exec strands-agents supervisorctl status
 **Symptom:** Container reports unhealthy or restarts repeatedly.
 
 **Solutions:**
-1. Check logs: `docker logs strands-agents`
-2. Verify all 6 API processes started: `docker exec strands-agents supervisorctl status`
+1. Check logs: `docker logs khala`
+2. Verify all 6 API processes started: `docker exec khala supervisorctl status`
 3. Ensure ports 8000-8005 are not in use on the host
 
 ### Tool Verification
 
 Verify tools inside the container:
 ```bash
-docker exec strands-agents node --version
-docker exec strands-agents ng version
-docker exec strands-agents git --version
-docker exec strands-agents docker --version
+docker exec khala node --version
+docker exec khala ng version
+docker exec khala git --version
+docker exec khala docker --version
 ```
 
 ## Security Considerations
@@ -199,6 +199,6 @@ docker exec strands-agents docker --version
 - Do not expose the container to untrusted networks
 - The workspace volume is the only host path mounted; ensure it contains only trusted content
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

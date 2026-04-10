@@ -90,6 +90,6 @@ When `LLM_MODEL_<agent_key>` and `LLM_MODEL` are unset, `config.AGENT_DEFAULT_MO
 3. In `factory.py`, branch on provider and return the new client (and cache if needed).
 4. No changes required in agent teams; they keep using `get_client(agent_key)`.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

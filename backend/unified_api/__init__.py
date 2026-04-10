@@ -1,5 +1,5 @@
 """
-Unified API Server - Single entry point for all Strands Agent team APIs.
+Unified API Server - Single entry point for all Khala team APIs.
 
 This module consolidates all agent team APIs under a single server with
 namespaced route prefixes for each team.

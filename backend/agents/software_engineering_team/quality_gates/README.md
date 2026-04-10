@@ -18,6 +18,6 @@ from quality_gates import CodeReviewAgent, QAExpertAgent, CybersecurityExpertAge
 # Accessibility: from frontend_team.accessibility_agent import AccessibilityExpertAgent
 ```
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../../README.md) monorepo (Unified API, Angular UI, and full team index).

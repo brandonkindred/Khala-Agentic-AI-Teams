@@ -53,6 +53,6 @@ ai_agent_development_team/
 - Per-microtask status tracking (`pending/in_progress/completed/failed`) with emitted files and notes.
 - Workflow trace events per phase for job-stream/status integrations.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../../README.md) monorepo (Unified API, Angular UI, and full team index).

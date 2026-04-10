@@ -1,6 +1,6 @@
-# Strands Agents User Interface
+# Khala User Interface
 
-Angular application providing an interactive UI for all Strands agent APIs: Blogging, Software Engineering Team, Personal Assistant, Market Research, SOC2 Compliance, Social Media Marketing, Branding, Agent Provisioning, Accessibility Audit, AI Systems, Investment (Advisor + Strategy Lab), Nutrition & Meal Planning, Planning V3, Coding Team, AI Sales Team, Road Trip Planning, Agentic Team Provisioning, Startup Advisor, User Agent Founder, and Deepthought.
+Angular application providing an interactive UI for all Khala agent APIs: Blogging, Software Engineering Team, Personal Assistant, Market Research, SOC2 Compliance, Social Media Marketing, Branding, Agent Provisioning, Accessibility Audit, AI Systems, Investment (Advisor + Strategy Lab), Nutrition & Meal Planning, Planning V3, Coding Team, AI Sales Team, Road Trip Planning, Agentic Team Provisioning, Startup Advisor, User Agent Founder, and Deepthought.
 
 ## Prerequisites
 
@@ -110,6 +110,6 @@ See [docs/API_MAPPING.md](docs/API_MAPPING.md) for the full UI-to-API mapping.
 
 `src/environments/environment.ts` includes `codingTeamApiUrl` (and the usual unified-style `*ApiUrl` fields) when calling team-specific health endpoints.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../README.md) monorepo (Unified API, Angular UI, and full team index).

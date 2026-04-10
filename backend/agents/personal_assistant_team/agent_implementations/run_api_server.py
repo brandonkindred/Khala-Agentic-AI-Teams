@@ -20,7 +20,7 @@ from pathlib import Path
 _this_file = Path(__file__).resolve()
 _team_dir = _this_file.parent.parent  # personal_assistant_team/
 _agents_dir = _team_dir.parent  # agents/
-_project_root = _agents_dir.parent  # strands-agents/
+_project_root = _agents_dir.parent  # khala/
 
 # Add agents dir to path so imports like personal_assistant_team.api.main work
 if str(_agents_dir) not in sys.path:

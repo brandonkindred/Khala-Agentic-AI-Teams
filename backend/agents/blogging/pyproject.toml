@@ -3,10 +3,10 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "strands-research-agent"
+name = "khala-research-agent"
 version = "0.1.0"
 description = "A Strands-style research agent that turns a short content brief into curated web references."
-authors = [{ name = "Strands Agent", email = "dev@example.com" }]
+authors = [{ name = "Khala Agent", email = "dev@example.com" }]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

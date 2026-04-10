@@ -264,6 +264,6 @@ blogging/
 
 This repository is provided as an example implementation for building Strands-style research agents.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

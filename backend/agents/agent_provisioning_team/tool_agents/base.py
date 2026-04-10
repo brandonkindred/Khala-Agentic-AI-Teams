@@ -80,7 +80,7 @@ class BaseToolProvisioner(ABC):
 
     @staticmethod
     def canonical_anatomy_prompt_preamble() -> str:
-        """Full Strands agent anatomy text for prompts (AGENT_ANATOMY.md + diagram list)."""
+        """Full Khala agent anatomy text for prompts (AGENT_ANATOMY.md + diagram list)."""
         from ..anatomy_assets import get_anatomy_prompt_preamble
 
         return get_anatomy_prompt_preamble()

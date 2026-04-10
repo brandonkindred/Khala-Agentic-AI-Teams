@@ -1,4 +1,4 @@
-"""OpenTelemetry bootstrap used by every Strands agent team.
+"""OpenTelemetry bootstrap used by every Khala agent team.
 
 The public API is intentionally tiny:
 

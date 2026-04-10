@@ -1,12 +1,12 @@
-# Strands Full Stack (Postgres, Temporal, Ollama, Agents)
+# Khala Full Stack (Postgres, Temporal, Ollama, Agents)
 
 This directory defines a **Docker Compose stack** that runs:
 
-- **PostgreSQL 18** – shared database with `temporal` and `strands` databases (created at first run). The data volume is `postgres_data_v18`; the name is suffixed with the major version so each bump starts from an empty volume declaratively, without `docker compose down -v`. Orphaned previous-version volumes can be cleaned up with `docker volume prune`.
+- **PostgreSQL 18** – shared database with `temporal` and `khala` databases (created at first run). The data volume is `postgres_data_v18`; the name is suffixed with the major version so each bump starts from an empty volume declaratively, without `docker compose down -v`. Orphaned previous-version volumes can be cleaned up with `docker volume prune`.
 - **Temporal** – workflow engine (Postgres-backed, no Elasticsearch)
 - **Temporal UI** – Web UI for workflows
 - **Ollama** (optional) – local Ollama server if you override LLM to use it
-- **Strands Agents** – all agent APIs; **default LLM is Ollama Cloud** (https://ollama.com) when running from Docker
+- **Khala** – all agent APIs; **default LLM is Ollama Cloud** (https://ollama.com) when running from Docker
 
 ## Quick start
 
@@ -43,8 +43,8 @@ This directory defines a **Docker Compose stack** that runs:
    | Agents API     | http://localhost:8888       (direct) |
    | Temporal UI    | http://localhost:8080       |
    | Prometheus     | http://localhost:9090       (scrape targets: `/targets`; metric browser: `/graph`) |
-   | Grafana        | http://localhost:3000       (login `admin`/`admin` by default; Strands folder holds the FastAPI overview dashboard) |
-   | Postgres       | localhost:5432 (user `postgres` / `temporal` / `strands`) |
+   | Grafana        | http://localhost:3000       (login `admin`/`admin` by default; Khala folder holds the FastAPI overview dashboard) |
+   | Postgres       | localhost:5432 (user `postgres` / `temporal` / `khala`) |
    | Ollama (local) | http://localhost:11434      |
 
    Use the **Angular UI at 4201** so API requests go through the same origin and nginx proxies them to the backend. If you run only the API container and use the UI with `ng serve`, point the dev API base to `http://localhost:8888` in `user-interface/src/environments/environment.ts`.
@@ -57,7 +57,7 @@ Optional (defaults in compose / `docker/.env.example`; copy to `docker/.env` and
 
 - **LLM_BASE_URL** – default is `https://ollama.com` (Ollama Cloud). Set to `http://ollama:11434` to use the local Ollama container instead.
 - **LLM_MODEL** – default `qwen3.5:397b-cloud`
-- **POSTGRES_USER**, **POSTGRES_PASSWORD**, **POSTGRES_DB** – used for the default Postgres superuser; init scripts create `temporal` and `strands` DBs and users.
+- **POSTGRES_USER**, **POSTGRES_PASSWORD**, **POSTGRES_DB** – used for the default Postgres superuser; init scripts create `temporal` and `khala` DBs and users.
 
 Personal Assistant credential encryption uses a key generated at **Docker image build time** (stored in the image), so credentials persist across container restarts without setting any env var.
 
@@ -91,7 +91,7 @@ When **ENABLE_LOG_API** is not set or is 0, the endpoint returns **404** so it i
 | Volume            | Service        | Purpose |
 |-------------------|----------------|---------|
 | `postgres_data_v18` | PostgreSQL   | Database files (Temporal + app DBs). Suffix tracks the Postgres major version — renaming the volume on each major bump gives a fresh data dir declaratively. |
-| `agents_workspace`| strands-agents | Agent workspace at `/workspace` (repos, generated code, artifacts). |
+| `agents_workspace`| khala | Agent workspace at `/workspace` (repos, generated code, artifacts). |
 | `prometheus_data` | Prometheus    | Prometheus TSDB (metric samples). Retention window controlled by `PROMETHEUS_RETENTION` (default `15d`). |
 | `grafana_data`    | Grafana       | Grafana state (users, saved dashboards, datasource cache). |
 
@@ -113,29 +113,29 @@ Data in these volumes survives `docker compose down` and container restarts. To 
 
 Agents direct ports (when needed): 18000–18005 map to APIs 8000–8005.
 
-The Unified API (`strands-agents` on 8888) only registers each team’s `/api/...` route when the matching `*_SERVICE_URL` is set (see `docker-compose.yml`). **Agentic Team Provisioning** requires `AGENTIC_TEAM_PROVISIONING_SERVICE_URL` pointing at the `agentic-team-provisioning-service` container (included in the full stack).
+The Unified API (`khala` on 8888) only registers each team’s `/api/...` route when the matching `*_SERVICE_URL` is set (see `docker-compose.yml`). **Agentic Team Provisioning** requires `AGENTIC_TEAM_PROVISIONING_SERVICE_URL` pointing at the `agentic-team-provisioning-service` container (included in the full stack).
 
-## Resource limits (strands-agents / Podman)
+## Resource limits (khala / Podman)
 
-The **strands-agents** service is configured for 8 vCPUs and 2G memory (`deploy.resources` plus legacy `cpus` / `mem_limit`). After changing these in `docker-compose.yml`, recreate the container so limits apply:
+The **khala** service is configured for 8 vCPUs and 2G memory (`deploy.resources` plus legacy `cpus` / `mem_limit`). After changing these in `docker-compose.yml`, recreate the container so limits apply:
 
 ```bash
-podman compose -f docker/docker-compose.yml down strands-agents
-podman compose -f docker/docker-compose.yml --env-file docker/.env up -d strands-agents
+podman compose -f docker/docker-compose.yml down khala
+podman compose -f docker/docker-compose.yml --env-file docker/.env up -d khala
 ```
 
 On **macOS** with Podman Machine, container memory is capped by the machine’s memory. If 2G is not applied, increase it and recreate the machine: `podman machine stop; podman machine set --memory 8192; podman machine start` (then recreate the container).
 
 ## Agents and Postgres
 
-When running in this stack, the **strands-agents** service uses the **stack’s Postgres** (database `strands`, user `strands`) via **POSTGRES_HOST=postgres**. The container does not start its own PostgreSQL. The init script in `docker/postgres/init/` creates the `strands` database and user on first run.
+When running in this stack, the **khala** service uses the **stack’s Postgres** (database `khala`, user `khala`) via **POSTGRES_HOST=postgres**. The container does not start its own PostgreSQL. The init script in `docker/postgres/init/` creates the `khala` database and user on first run.
 
 ## Observability (Prometheus + Grafana)
 
 The stack ships with a Prometheus server and Grafana instance pre-wired.
 
-- **Prometheus** at http://localhost:9090 scrapes `/metrics` on the unified API (`strands-agents:8080`), the job service (`job-service:8085`), and every team microservice on its own port. Config file: `docker/prometheus/prometheus.yml`. View scrape health at http://localhost:9090/targets — every target should report `UP` once containers are healthy.
-- **Grafana** at http://localhost:3000 (default `admin`/`admin`, override via `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` in `.env`). The Prometheus datasource is provisioned automatically from `docker/grafana/provisioning/datasources/prometheus.yml`. A starter **Strands FastAPI Overview** dashboard (request rate, p95 latency, 5xx rate, scrape health) is provisioned under the "Strands" folder.
+- **Prometheus** at http://localhost:9090 scrapes `/metrics` on the unified API (`khala:8080`), the job service (`job-service:8085`), and every team microservice on its own port. Config file: `docker/prometheus/prometheus.yml`. View scrape health at http://localhost:9090/targets — every target should report `UP` once containers are healthy.
+- **Grafana** at http://localhost:3000 (default `admin`/`admin`, override via `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` in `.env`). The Prometheus datasource is provisioned automatically from `docker/grafana/provisioning/datasources/prometheus.yml`. A starter **Khala FastAPI Overview** dashboard (request rate, p95 latency, 5xx rate, scrape health) is provisioned under the "Khala" folder.
 - **Retention** is controlled by `PROMETHEUS_RETENTION` (default `15d`). Data persists in the `prometheus_data` and `grafana_data` named volumes.
 - **Grafana admin password caveat**: `GRAFANA_ADMIN_PASSWORD` is only read on first boot (when `grafana_data` is empty). Changing it later has no effect — reset via the Grafana UI, or remove the volume with `docker volume rm docker_grafana_data` to re-seed from env vars.
 
@@ -153,7 +153,7 @@ After starting the stack:
 4. **Logs API** – With `ENABLE_LOG_API=1` in `.env`, `curl "http://localhost:8888/api/software-engineering/logs?service=sw_api&lines=100"` should return 200 and log content. With `ENABLE_LOG_API` unset, the same URL should return 404.
 5. **Metrics endpoints** – `curl -sf http://localhost:8888/metrics | head` and the same on `:8585` (job service) and `:8090`–`:8110` (team services) should return Prometheus text-format output (`# HELP ...`).
 6. **Prometheus targets** – Open http://localhost:9090/targets; all rows should be green (`UP`). Or run `curl -s 'http://localhost:9090/api/v1/query?query=up' | jq '.data.result[] | {service:.metric.service, up:.value[1]}'`.
-7. **Grafana datasource** – `curl -sf -u admin:admin http://localhost:3000/api/datasources | jq` should list one `Prometheus` datasource. Then open http://localhost:3000 → Dashboards → Strands → **Strands FastAPI Overview** and confirm the panels render live data after generating some traffic (e.g. `for i in {1..20}; do curl -sf http://localhost:8888/health > /dev/null; done`).
+7. **Grafana datasource** – `curl -sf -u admin:admin http://localhost:3000/api/datasources | jq` should list one `Prometheus` datasource. Then open http://localhost:3000 → Dashboards → Khala → **Khala FastAPI Overview** and confirm the panels render live data after generating some traffic (e.g. `for i in {1..20}; do curl -sf http://localhost:8888/health > /dev/null; done`).
 
 ## Security
 
@@ -161,6 +161,6 @@ After starting the stack:
 - For production, do not expose Temporal or Postgres to the public internet; keep them on internal networks.
 - Leave **ENABLE_LOG_API** unset or 0 in production so the logs endpoint is disabled.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../README.md) monorepo (Unified API, Angular UI, and full team index).

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "software-engineering-team"
 version = "0.1.0"
 description = "A multi-agent software engineering team: Tech Lead, Architecture, DevOps, Security, Backend, Frontend, QA."
-authors = [{ name = "Strands Agent", email = "dev@example.com" }]
+authors = [{ name = "Khala Agent", email = "dev@example.com" }]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

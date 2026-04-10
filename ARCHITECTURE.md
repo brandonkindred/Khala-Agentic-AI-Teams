@@ -528,7 +528,7 @@ The repository contains two independent agent systems. The software engineering 
 
 ```mermaid
 flowchart TB
-    Root["strands-agents/"]
+    Root["khala/"]
 
     Root --> SWTeam["agents/software_engineering_team/"]
     Root --> BlogTeam["agents/blogging/"]

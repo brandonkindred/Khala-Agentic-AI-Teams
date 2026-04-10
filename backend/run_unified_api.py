@@ -2,7 +2,7 @@
 """
 Unified API Server Launcher.
 
-Starts the unified API server that consolidates all Strands Agent team APIs
+Starts the unified API server that consolidates all Khala team APIs
 under a single entry point.
 
 Usage:

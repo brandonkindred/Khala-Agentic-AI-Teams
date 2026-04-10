@@ -396,6 +396,6 @@ It implements:
 
 See `a11y_agency_spec.md` in that module for the exact phase sequence and gate contract.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

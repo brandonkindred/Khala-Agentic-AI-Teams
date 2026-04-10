@@ -1,7 +1,7 @@
--- Job service schema: runs against strands_jobs database.
+-- Job service schema: runs against khala_jobs database.
 -- This file is executed by the Postgres entrypoint on first init.
 
-\connect strands_jobs;
+\connect khala_jobs;
 
 CREATE TABLE IF NOT EXISTS jobs (
     job_id            TEXT NOT NULL,

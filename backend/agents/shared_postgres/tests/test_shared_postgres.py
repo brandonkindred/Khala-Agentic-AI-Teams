@@ -59,8 +59,8 @@ def test_team_schema_frozen():
 
 
 def test_team_schema_database_override():
-    schema = TeamSchema(team="job_service", database="strands_jobs", statements=["SELECT 1"])
-    assert schema.database == "strands_jobs"
+    schema = TeamSchema(team="job_service", database="khala_jobs", statements=["SELECT 1"])
+    assert schema.database == "khala_jobs"
     assert schema.statements == ["SELECT 1"]
 
 

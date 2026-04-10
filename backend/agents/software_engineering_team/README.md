@@ -554,6 +554,6 @@ The `DevOpsTeamLeadAgent` provides a `run_workflow()` method that accepts the sa
 
 The MVP can be extended with: ContainerizationBuildAgent, EnvironmentConfigSecretsIntegrationAgent, ObservabilityAlertingAgent, ReliabilitySREReviewAgent, and corresponding tool agents (ContainerBuildScanToolAgent, RuntimeVerificationToolAgent, SecretsConfigIntegrityToolAgent, ObservabilityConfigValidationToolAgent, ChangeExecutionToolAgent).
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

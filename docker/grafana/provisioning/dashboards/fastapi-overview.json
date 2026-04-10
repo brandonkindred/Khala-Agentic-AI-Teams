@@ -218,7 +218,7 @@
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "",
-  "title": "Strands FastAPI Overview",
+  "title": "Khala FastAPI Overview",
   "uid": "khala-fastapi-overview",
   "version": 1,
   "weekStart": ""

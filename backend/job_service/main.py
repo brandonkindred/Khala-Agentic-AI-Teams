@@ -1,6 +1,6 @@
 """Job Service — a standalone FastAPI microservice for centralized job management.
 
-Persists job data in a dedicated Postgres database (``strands_jobs``).  All
+Persists job data in a dedicated Postgres database (``khala_jobs``).  All
 agent teams interact with this service over HTTP via the ``JobServiceClient``.
 """
 
@@ -83,7 +83,7 @@ async def lifespan(application: FastAPI):
     logger.info("Job service stopped")
 
 
-app = FastAPI(title="Strands Job Service", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Khala Job Service", version="1.0.0", lifespan=lifespan)
 
 # Prometheus metrics — exposes GET /metrics for scraping.
 try:

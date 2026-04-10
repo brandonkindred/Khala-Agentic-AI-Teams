@@ -26,7 +26,7 @@ from ..shared.tool_manifest import ToolManifest
 _LLM = LLMClient()
 
 _SUMMARY_SYSTEM = (
-    "You are the onboarding writer for the Strands Agent Provisioning Team. "
+    "You are the onboarding writer for the Khala Agent Provisioning Team. "
     "Produce concise, technical onboarding text that complies with the canonical agent anatomy."
 )
 _TOOL_DOC_SYSTEM = (
@@ -240,7 +240,7 @@ def generate_readme(onboarding: OnboardingPacket) -> str:
         "",
         "## Standard AI agent anatomy",
         "",
-        "Every AI agent in Strands must follow the canonical **Agent Provisioning** anatomy: "
+        "Every AI agent in Khala must follow the canonical **Agent Provisioning** anatomy: "
         "Input/Output, Agent core, Tools, tiered Memory, Prompt roles (System/User/Assistant), "
         "Security Guardrails, and Subagents with recursive INPUT/OUTPUT.",
         "",

@@ -1,6 +1,6 @@
 # shared_postgres
 
-Shared Postgres schema registration for Strands agent teams. Sibling to
+Shared Postgres schema registration for Khala agent teams. Sibling to
 `shared_temporal/`: each team declares its tables once, and the team's
 FastAPI lifespan applies them at startup when `POSTGRES_HOST` is set.
 

@@ -1,6 +1,6 @@
 # Unified API Server
 
-The Unified API Server consolidates all Strands Agent team APIs under a single entry point, providing a consistent interface for accessing all platform capabilities.
+The Unified API Server consolidates all Khala team APIs under a single entry point, providing a consistent interface for accessing all platform capabilities.
 
 ## Overview
 
@@ -350,7 +350,7 @@ Software Engineering jobs are stored under `{cache_dir}/software_engineering_tea
 1. Ensure the UI talks to the same server that is running the job (e.g. unified API on port 8080).
 2. Set **AGENT_CACHE** to an absolute path and restart the server so job creation and listing use the same directory regardless of CWD:
    ```bash
-   export AGENT_CACHE=/var/lib/strands/agent_cache
+   export AGENT_CACHE=/var/lib/khala/agent_cache
    python run_unified_api.py
    ```
 3. Verify the list endpoint: `GET http://localhost:8080/api/software-engineering/run-team/jobs`. If it returns `{ "jobs": [] }` while a job is running elsewhere, the backend is reading from a different store (different process or CWD). Check server logs for the line `Software engineering job store path: ...` to see which directory is used.
@@ -381,6 +381,6 @@ app.add_middleware(
 )
 ```
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../README.md) monorepo (Unified API, Angular UI, and full team index).
