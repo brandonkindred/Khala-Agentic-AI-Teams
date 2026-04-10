@@ -2,6 +2,7 @@ import {
   Component,
   Input,
   OnDestroy,
+  OnInit,
   inject,
   signal,
 } from '@angular/core';
@@ -18,7 +19,6 @@ import { Subscription, interval, switchMap, takeWhile } from 'rxjs';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import type {
   AgenticTeam,
-  ProcessDefinition,
   TestPipelineRun,
   PipelineStepResult,
 } from '../../models';
@@ -40,7 +40,7 @@ import type {
   templateUrl: './pipeline-test-runner.component.html',
   styleUrl: './pipeline-test-runner.component.scss',
 })
-export class PipelineTestRunnerComponent implements OnDestroy {
+export class PipelineTestRunnerComponent implements OnInit, OnDestroy {
   @Input() team!: AgenticTeam;
 
   private readonly api = inject(AgenticTeamApiService);

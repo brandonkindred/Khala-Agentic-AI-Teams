@@ -1,4 +1,4 @@
-import { Component, Input, inject, signal } from '@angular/core';
+import { Component, Input, OnInit, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
@@ -20,7 +20,7 @@ import type { AgenticTeam, AgentQualityScore } from '../../models';
   templateUrl: './agentic-team-test-panel.component.html',
   styleUrl: './agentic-team-test-panel.component.scss',
 })
-export class AgenticTeamTestPanelComponent {
+export class AgenticTeamTestPanelComponent implements OnInit {
   @Input() team!: AgenticTeam;
 
   private readonly api = inject(AgenticTeamApiService);

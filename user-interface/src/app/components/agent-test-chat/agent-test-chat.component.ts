@@ -206,7 +206,7 @@ export class AgentTestChatComponent implements OnInit, OnChanges, AfterViewCheck
   }
 
   private sendMessage(content: string): void {
-    let session = this.activeSession();
+    const session = this.activeSession();
     if (!session) {
       // Auto-create session on first message
       const agent = this.selectedAgent();
