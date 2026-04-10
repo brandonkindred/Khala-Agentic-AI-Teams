@@ -19,7 +19,7 @@ gives a team microservice:
 - `trace_id` / `span_id` attributes injected into Python log records via
   `LoggingInstrumentor` for correlation in log aggregators.
 - A shared resource with `service.name`, `service.version`,
-  `service.namespace=strands-agents`, and `strands.team=<team_key>`.
+  `service.namespace=khala`, and `khala.team=<team_key>`.
 
 Everything is best-effort. If the `opentelemetry-*` packages are not
 installed (for example in a minimal test env), the helpers log a warning

@@ -1,5 +1,5 @@
 {
-  "name": "strands-agents",
+  "name": "khala",
   "private": true,
   "description": "Monorepo root - run npm commands from user-interface/",
   "scripts": {

@@ -1,6 +1,6 @@
 # Unified API server image. Matches backend Makefile: same deps, same run as `make deploy`.
 # Build from repo root: docker build -f backend/Dockerfile backend
-# Or from backend: docker build -t strands-unified-api .
+# Or from backend: docker build -t khala-unified-api .
 
 FROM python:3.11-slim
 

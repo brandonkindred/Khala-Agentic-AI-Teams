@@ -200,9 +200,9 @@ def _emit_otel_llm_span(record: LLMCallRecord) -> None:
         return
     try:
         attributes = {
-            "strands.team": record.team or "unknown",
-            "strands.agent_key": record.agent_key or "unknown",
-            "strands.caller_tag": record.caller_tag or "",
+            "khala.team": record.team or "unknown",
+            "khala.agent_key": record.agent_key or "unknown",
+            "khala.caller_tag": record.caller_tag or "",
             "llm.vendor": "ollama",
             "llm.request.model": record.model or "unknown",
             "llm.usage.prompt_tokens": record.prompt_tokens,

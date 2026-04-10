@@ -290,9 +290,9 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="Strands Agents Unified API",
+    title="Khala Unified API",
     description=(
-        "Reverse-proxy router for all Strands Agent team microservices. "
+        "Reverse-proxy router for all Khala team microservices. "
         "Each team runs in its own container; this server routes requests, "
         "hosts team assistant chat, and enforces the security gateway."
     ),
@@ -368,9 +368,9 @@ async def root() -> ApiInfoResponse:
         for key, config in TEAM_CONFIGS.items()
     ]
     return ApiInfoResponse(
-        name="Strands Agents Unified API",
+        name="Khala Unified API",
         version="1.0.0",
-        description="Reverse-proxy router for all Strands Agent team microservices",
+        description="Reverse-proxy router for all Khala team microservices",
         teams=teams,
         docs_url="/docs",
     )

@@ -9,7 +9,7 @@ if [ -s "$NVM_DIR/nvm.sh" ]; then
 fi
 
 # Verify tools are available
-echo "=== Strands Agents - Tool Verification ==="
+echo "=== Khala - Tool Verification ==="
 node --version || echo "WARN: node not found"
 npm --version || echo "WARN: npm not found"
 ng version 2>/dev/null | head -1 || echo "WARN: ng (Angular CLI) not found"
@@ -34,9 +34,9 @@ if [ -n "$POSTGRES_HOST" ]; then
 else
     echo "=== Initializing PostgreSQL ==="
     PGDATA="/var/lib/postgresql/data"
-    POSTGRES_USER="${POSTGRES_USER:-strands}"
-    POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-strands}"
-    POSTGRES_DB="${POSTGRES_DB:-strands}"
+    POSTGRES_USER="${POSTGRES_USER:-khala}"
+    POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-khala}"
+    POSTGRES_DB="${POSTGRES_DB:-khala}"
 
     # Ensure directories exist with correct permissions
     mkdir -p "$PGDATA" /run/postgresql
