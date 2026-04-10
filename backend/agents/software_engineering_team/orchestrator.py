@@ -35,8 +35,6 @@ _arch_dir = _team_dir / "architect-agents"
 if _arch_dir.exists() and str(_arch_dir) not in sys.path:
     sys.path.insert(0, str(_arch_dir))
 
-from software_engineering_team.shared.plan_dir import ensure_plan_dir  # noqa: E402
-
 from llm_service import (  # noqa: E402
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
     LLMError,
@@ -72,6 +70,7 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     update_task_state,
 )
 from software_engineering_team.shared.models import TaskUpdate  # noqa: E402
+from software_engineering_team.shared.plan_dir import ensure_plan_dir  # noqa: E402
 from software_engineering_team.shared.repo_utils import (  # noqa: E402
     read_repo_code,
     truncate_for_context,
@@ -2611,7 +2610,7 @@ def run_orchestrator(
 
         # Planning consolidation: master plan, risk register, ship checklist
         try:
-            from software_engineering_team.shared.planning_consolidation import run_planning_consolidation
+            from software_engineering_team.shared.planning_consolidation import run_planning_consolidation  # noqa: I001
 
             run_planning_consolidation(plan_dir, assignment, architecture, project_overview)
         except Exception as e:

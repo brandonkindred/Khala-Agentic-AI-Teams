@@ -49,7 +49,6 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     delete_job,
     get_job,
     get_stale_after_seconds,
-    is_cancel_requested,
     list_jobs,
     mark_stale_jobs_failed,
     request_cancel,
