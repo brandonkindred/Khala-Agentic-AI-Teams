@@ -140,13 +140,13 @@
                 <!-- Expanded output -->
                 @if (expandedStepId() === step.step_id && result?.output) {
                   <div class="step-output">
-                    <pre>{{ result.output }}</pre>
+                    <pre>{{ result!.output }}</pre>
                   </div>
                 }
 
                 <!-- One-line summary when collapsed -->
                 @if (expandedStepId() !== step.step_id && result?.output && status === 'completed') {
-                  <div class="step-summary">{{ result.output | slice:0:120 }}{{ result.output.length > 120 ? '...' : '' }}</div>
+                  <div class="step-summary">{{ result!.output | slice:0:120 }}{{ result!.output.length > 120 ? '...' : '' }}</div>
                 }
 
                 <!-- Error display -->
