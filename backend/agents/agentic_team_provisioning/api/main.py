@@ -19,6 +19,7 @@ from agentic_team_provisioning.infrastructure import get_team_infrastructure, pr
 from agentic_team_provisioning.models import (
     AgentEnvProvisionSummary,
     AgenticTeamAgent,
+    AgentQualityScore,
     AssetInfo,
     ConversationStateResponse,
     ConversationSummaryResponse,
@@ -26,24 +27,46 @@ from agentic_team_provisioning.models import (
     CreateFormRecordRequest,
     CreateTeamRequest,
     CreateTeamResponse,
+    CreateTestChatSessionRequest,
     FormRecord,
     ProcessDefinition,
     ProcessOutput,
     ProcessStatus,
     ProcessTrigger,
+    RateMessageRequest,
     RecommendAgentsResponse,
     RecommendedAgent,
+    RenameTestChatSessionRequest,
     RosterValidationResult,
     SendMessageRequest,
+    SendTestChatMessageRequest,
+    SetTeamModeRequest,
+    StartPipelineRunRequest,
+    SubmitPipelineInputRequest,
     SubmitTeamAnswersRequest,
     TeamDetailResponse,
     TeamJobDetail,
     TeamJobSummary,
     TeamPendingQuestion,
     TeamSummary,
+    TestChatMessage,
+    TestChatSession,
+    TestChatSessionDetail,
+    TestPipelineRun,
     UpdateFormRecordRequest,
 )
 from agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
+from agentic_team_provisioning.runtime.agent_builder import (
+    build_agent as _build_test_agent,
+)
+from agentic_team_provisioning.runtime.agent_builder import (
+    call_agent as _call_test_agent,
+)
+from agentic_team_provisioning.runtime.agent_builder import (
+    generate_starter_prompts,
+)
+from agentic_team_provisioning.runtime.pipeline_runner import get_pipeline_runner
+from agentic_team_provisioning.testing.store import get_test_store
 from shared_observability import init_otel, instrument_fastapi_app
 
 logger = logging.getLogger(__name__)
@@ -77,6 +100,10 @@ instrument_fastapi_app(app, team_key="agentic_team_provisioning")
 
 _store = AgenticTeamStore()
 _agent = ProcessDesignerAgent()
+
+# Interactive testing mode singletons
+_test_store = get_test_store()
+_pipeline_runner = get_pipeline_runner(_test_store)
 
 # Retroactive provisioning: ensure all existing teams have infrastructure
 try:
@@ -633,4 +660,274 @@ def delete_team_form_record(team_id: str, form_key: str, record_id: str):
     infra = _get_infra_or_404(team_id)
     if not infra.form_store.delete_record(record_id):
         raise HTTPException(status_code=404, detail="Record not found")
-    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Interactive Testing Mode
+# ---------------------------------------------------------------------------
+
+
+@app.put("/teams/{team_id}/mode")
+def set_team_mode(team_id: str, req: SetTeamModeRequest):
+    """Toggle team between development and testing mode."""
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    _test_store.set_team_mode(team_id, req.mode.value)
+    return {"team_id": team_id, "mode": req.mode.value}
+
+
+# ---------------------------------------------------------------------------
+# Agent Chat Testing
+# ---------------------------------------------------------------------------
+
+
+def _find_agent_in_roster(team_id: str, agent_name: str) -> AgenticTeamAgent:
+    """Look up an agent by name in the team roster."""
+    agents = _store.list_team_agents(team_id)
+    for a in agents:
+        if a.agent_name == agent_name:
+            return a
+    raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found in team roster")
+
+
+@app.post("/teams/{team_id}/test-chat/sessions", response_model=TestChatSession, status_code=201)
+def create_test_chat_session(team_id: str, req: CreateTestChatSessionRequest):
+    """Create a new chat test session for an agent."""
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    _find_agent_in_roster(team_id, req.agent_name)
+    session_id = str(uuid.uuid4())
+    row = _test_store.create_chat_session(session_id, team_id, req.agent_name)
+    return TestChatSession(**row)
+
+
+@app.get("/teams/{team_id}/test-chat/sessions", response_model=List[TestChatSession])
+def list_test_chat_sessions(team_id: str, agent_name: Optional[str] = None):
+    """List chat test sessions for a team, optionally filtered by agent."""
+    rows = _test_store.list_chat_sessions(team_id, agent_name=agent_name)
+    return [TestChatSession(**r) for r in rows]
+
+
+@app.get("/teams/{team_id}/test-chat/sessions/{session_id}", response_model=TestChatSessionDetail)
+def get_test_chat_session(team_id: str, session_id: str):
+    """Get a chat session with full message history and suggested prompts."""
+    session_row = _test_store.get_chat_session(session_id)
+    if not session_row or session_row["team_id"] != team_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    messages = _test_store.list_chat_messages(session_id)
+    session = TestChatSession(**session_row)
+
+    # Generate suggested prompts if no messages yet
+    prompts: list[str] = []
+    if not messages:
+        try:
+            agent_def = _find_agent_in_roster(team_id, session.agent_name)
+            prompts = generate_starter_prompts(
+                agent_def.agent_name, agent_def.role, agent_def.skills, agent_def.expertise
+            )
+        except HTTPException:
+            pass
+
+    return TestChatSessionDetail(
+        session=session,
+        messages=[TestChatMessage(**m) for m in messages],
+        suggested_prompts=prompts,
+    )
+
+
+@app.put("/teams/{team_id}/test-chat/sessions/{session_id}/name")
+def rename_test_chat_session(team_id: str, session_id: str, req: RenameTestChatSessionRequest):
+    """Rename a chat test session."""
+    session_row = _test_store.get_chat_session(session_id)
+    if not session_row or session_row["team_id"] != team_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _test_store.rename_chat_session(session_id, req.session_name)
+    return {"session_id": session_id, "session_name": req.session_name}
+
+
+@app.delete("/teams/{team_id}/test-chat/sessions/{session_id}", status_code=204)
+def delete_test_chat_session(team_id: str, session_id: str):
+    """Delete a chat test session and its messages."""
+    session_row = _test_store.get_chat_session(session_id)
+    if not session_row or session_row["team_id"] != team_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _test_store.delete_chat_session(session_id)
+
+
+@app.post("/teams/{team_id}/test-chat/sessions/{session_id}/messages")
+def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessageRequest):
+    """Send a message to an agent and get a synchronous response.
+
+    The full conversation history is sent to the agent for multi-turn
+    context. Both user and assistant messages are stored.
+    """
+    session_row = _test_store.get_chat_session(session_id)
+    if not session_row or session_row["team_id"] != team_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    agent_name = session_row["agent_name"]
+    agent_def = _find_agent_in_roster(team_id, agent_name)
+
+    # Store user message
+    user_msg_id = str(uuid.uuid4())
+    _test_store.create_chat_message(user_msg_id, session_id, "user", req.content)
+
+    # Build conversation context from history
+    history = _test_store.list_chat_messages(session_id)
+    context_parts = []
+    for msg in history[:-1]:  # Exclude the just-added user message (will add below)
+        prefix = "User" if msg["role"] == "user" else "Assistant"
+        context_parts.append(f"{prefix}: {msg['content']}")
+    context_parts.append(f"User: {req.content}")
+    full_context = "\n\n".join(context_parts)
+
+    # Build and invoke agent
+    agent_instance = _build_test_agent(
+        agent_def.agent_name,
+        agent_def.role,
+        agent_def.skills,
+        agent_def.capabilities,
+        agent_def.tools,
+        agent_def.expertise,
+    )
+    response_text = _call_test_agent(agent_instance, full_context)
+
+    # Store assistant message
+    asst_msg_id = str(uuid.uuid4())
+    _test_store.create_chat_message(asst_msg_id, session_id, "assistant", response_text)
+
+    # Return all messages
+    all_messages = _test_store.list_chat_messages(session_id)
+    return {
+        "session": TestChatSession(**session_row),
+        "messages": [TestChatMessage(**m) for m in all_messages],
+    }
+
+
+@app.get("/teams/{team_id}/test-chat/sessions/{session_id}/export")
+def export_test_chat_session(team_id: str, session_id: str):
+    """Export a chat session transcript as Markdown text."""
+    session_row = _test_store.get_chat_session(session_id)
+    if not session_row or session_row["team_id"] != team_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    messages = _test_store.list_chat_messages(session_id)
+    agent_name = session_row["agent_name"]
+    session_name = session_row.get("session_name") or f"Chat with {agent_name}"
+
+    lines = [f"# {session_name}", f"Agent: {agent_name}", ""]
+    for msg in messages:
+        role_label = "**User**" if msg["role"] == "user" else f"**{agent_name}**"
+        rating_str = ""
+        if msg.get("rating"):
+            rating_str = " \u2705" if msg["rating"] == "thumbs_up" else " \u274c"
+        lines.append(f"{role_label}{rating_str}:")
+        lines.append(msg["content"])
+        lines.append("")
+
+    return Response(
+        content="\n".join(lines),
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{session_id}.md"'},
+    )
+
+
+@app.put("/teams/{team_id}/test-chat/messages/{message_id}/rating")
+def rate_test_chat_message(team_id: str, message_id: str, req: RateMessageRequest):
+    """Rate an assistant message (thumbs up/thumbs down)."""
+    if not _test_store.update_message_rating(message_id, req.rating.value):
+        raise HTTPException(status_code=404, detail="Message not found")
+    return {"message_id": message_id, "rating": req.rating.value}
+
+
+@app.get("/teams/{team_id}/test-chat/quality-scores", response_model=List[AgentQualityScore])
+def get_agent_quality_scores(team_id: str):
+    """Get aggregated quality scores per agent based on chat ratings."""
+    rows = _test_store.get_agent_quality_scores(team_id)
+    return [AgentQualityScore(**r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Pipeline Testing (End-to-End Walkthrough)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/teams/{team_id}/test-pipeline/runs", response_model=TestPipelineRun, status_code=201)
+def start_pipeline_run(team_id: str, req: StartPipelineRunRequest):
+    """Start an end-to-end pipeline test run."""
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    # Find the process
+    process = None
+    for p in team.processes:
+        if p.process_id == req.process_id:
+            process = p
+            break
+    if process is None:
+        raise HTTPException(status_code=404, detail="Process not found")
+
+    # Build ProcessDefinition from stored data
+    process_def = (
+        process if isinstance(process, ProcessDefinition) else ProcessDefinition(**process)
+    )
+
+    run_id = str(uuid.uuid4())
+    run_row = _test_store.create_pipeline_run(run_id, team_id, req.process_id, req.initial_input)
+
+    # Gather team agents
+    team_agents_raw = _store.list_team_agents(team_id)
+    team_agents = [
+        a if isinstance(a, AgenticTeamAgent) else AgenticTeamAgent(**a) for a in team_agents_raw
+    ]
+
+    # Start the pipeline in a background thread
+    _pipeline_runner.start_run(run_id, team_agents, process_def)
+
+    return TestPipelineRun(**run_row)
+
+
+@app.get("/teams/{team_id}/test-pipeline/runs", response_model=List[TestPipelineRun])
+def list_pipeline_runs(team_id: str):
+    """List pipeline test runs for a team."""
+    rows = _test_store.list_pipeline_runs(team_id)
+    return [TestPipelineRun(**r) for r in rows]
+
+
+@app.get("/teams/{team_id}/test-pipeline/runs/{run_id}", response_model=TestPipelineRun)
+def get_pipeline_run(team_id: str, run_id: str):
+    """Get the current status and step results of a pipeline test run."""
+    row = _test_store.get_pipeline_run(run_id)
+    if not row or row["team_id"] != team_id:
+        raise HTTPException(status_code=404, detail="Pipeline run not found")
+    return TestPipelineRun(**row)
+
+
+@app.post("/teams/{team_id}/test-pipeline/runs/{run_id}/input")
+def submit_pipeline_input(team_id: str, run_id: str, req: SubmitPipelineInputRequest):
+    """Submit human input at a WAIT step to resume the pipeline."""
+    row = _test_store.get_pipeline_run(run_id)
+    if not row or row["team_id"] != team_id:
+        raise HTTPException(status_code=404, detail="Pipeline run not found")
+    if row["status"] != "waiting_for_input":
+        raise HTTPException(status_code=400, detail="Pipeline is not waiting for input")
+    _pipeline_runner.submit_human_input(run_id, req.input)
+    updated = _test_store.get_pipeline_run(run_id)
+    return TestPipelineRun(**(updated or row))
+
+
+@app.post("/teams/{team_id}/test-pipeline/runs/{run_id}/cancel")
+def cancel_pipeline_run(team_id: str, run_id: str):
+    """Cancel a running or waiting pipeline test run."""
+    row = _test_store.get_pipeline_run(run_id)
+    if not row or row["team_id"] != team_id:
+        raise HTTPException(status_code=404, detail="Pipeline run not found")
+    if row["status"] not in ("running", "waiting_for_input"):
+        raise HTTPException(status_code=400, detail="Pipeline is not in a cancellable state")
+    _pipeline_runner.cancel_run(run_id)
+    updated = _test_store.get_pipeline_run(run_id)
+    return TestPipelineRun(**(updated or row))

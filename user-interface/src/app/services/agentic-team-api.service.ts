@@ -11,9 +11,15 @@ import type {
   AgenticConversationStateResponse,
   AgenticConversationSummary,
   AgentEnvProvisionSummary,
+  AgentQualityScore,
   ProcessDefinition,
   RecommendAgentsResponse,
   RosterValidationResult,
+  TeamMode,
+  TestChatSession,
+  TestChatSessionDetail,
+  TestChatMessage,
+  TestPipelineRun,
 } from '../models';
 
 @Injectable({ providedIn: 'root' })
@@ -110,5 +116,104 @@ export class AgenticTeamApiService {
   /** Sandbox provisioning status for each process step agent (Agent Provisioning team). */
   listAgentEnvironments(teamId: string): Observable<AgentEnvProvisionSummary[]> {
     return this.http.get<AgentEnvProvisionSummary[]>(`${this.base}/teams/${teamId}/agent-environments`);
+  }
+
+  // -------------------------------------------------------------------------
+  // Interactive Testing Mode
+  // -------------------------------------------------------------------------
+
+  setTeamMode(teamId: string, mode: TeamMode): Observable<{ team_id: string; mode: string }> {
+    return this.http.put<{ team_id: string; mode: string }>(`${this.base}/teams/${teamId}/mode`, { mode });
+  }
+
+  // Agent Chat Testing
+
+  createTestChatSession(teamId: string, agentName: string): Observable<TestChatSession> {
+    return this.http.post<TestChatSession>(`${this.base}/teams/${teamId}/test-chat/sessions`, {
+      agent_name: agentName,
+    });
+  }
+
+  listTestChatSessions(teamId: string, agentName?: string): Observable<TestChatSession[]> {
+    const params = agentName ? `?agent_name=${encodeURIComponent(agentName)}` : '';
+    return this.http.get<TestChatSession[]>(`${this.base}/teams/${teamId}/test-chat/sessions${params}`);
+  }
+
+  getTestChatSession(teamId: string, sessionId: string): Observable<TestChatSessionDetail> {
+    return this.http.get<TestChatSessionDetail>(
+      `${this.base}/teams/${teamId}/test-chat/sessions/${sessionId}`,
+    );
+  }
+
+  renameTestChatSession(
+    teamId: string, sessionId: string, sessionName: string,
+  ): Observable<{ session_id: string; session_name: string }> {
+    return this.http.put<{ session_id: string; session_name: string }>(
+      `${this.base}/teams/${teamId}/test-chat/sessions/${sessionId}/name`,
+      { session_name: sessionName },
+    );
+  }
+
+  deleteTestChatSession(teamId: string, sessionId: string): Observable<void> {
+    return this.http.delete<void>(`${this.base}/teams/${teamId}/test-chat/sessions/${sessionId}`);
+  }
+
+  sendTestChatMessage(
+    teamId: string, sessionId: string, content: string,
+  ): Observable<{ session: TestChatSession; messages: TestChatMessage[] }> {
+    return this.http.post<{ session: TestChatSession; messages: TestChatMessage[] }>(
+      `${this.base}/teams/${teamId}/test-chat/sessions/${sessionId}/messages`,
+      { content },
+    );
+  }
+
+  exportTestChatSession(teamId: string, sessionId: string): Observable<Blob> {
+    return this.http.get(`${this.base}/teams/${teamId}/test-chat/sessions/${sessionId}/export`, {
+      responseType: 'blob',
+    });
+  }
+
+  rateTestChatMessage(
+    teamId: string, messageId: string, rating: string,
+  ): Observable<{ message_id: string; rating: string }> {
+    return this.http.put<{ message_id: string; rating: string }>(
+      `${this.base}/teams/${teamId}/test-chat/messages/${messageId}/rating`,
+      { rating },
+    );
+  }
+
+  getAgentQualityScores(teamId: string): Observable<AgentQualityScore[]> {
+    return this.http.get<AgentQualityScore[]>(`${this.base}/teams/${teamId}/test-chat/quality-scores`);
+  }
+
+  // Pipeline Testing
+
+  startPipelineRun(teamId: string, processId: string, initialInput?: string): Observable<TestPipelineRun> {
+    return this.http.post<TestPipelineRun>(`${this.base}/teams/${teamId}/test-pipeline/runs`, {
+      process_id: processId,
+      initial_input: initialInput ?? null,
+    });
+  }
+
+  listPipelineRuns(teamId: string): Observable<TestPipelineRun[]> {
+    return this.http.get<TestPipelineRun[]>(`${this.base}/teams/${teamId}/test-pipeline/runs`);
+  }
+
+  getPipelineRun(teamId: string, runId: string): Observable<TestPipelineRun> {
+    return this.http.get<TestPipelineRun>(`${this.base}/teams/${teamId}/test-pipeline/runs/${runId}`);
+  }
+
+  submitPipelineInput(teamId: string, runId: string, inputText: string): Observable<TestPipelineRun> {
+    return this.http.post<TestPipelineRun>(
+      `${this.base}/teams/${teamId}/test-pipeline/runs/${runId}/input`,
+      { input: inputText },
+    );
+  }
+
+  cancelPipelineRun(teamId: string, runId: string): Observable<TestPipelineRun> {
+    return this.http.post<TestPipelineRun>(
+      `${this.base}/teams/${teamId}/test-pipeline/runs/${runId}/cancel`,
+      {},
+    );
   }
 }

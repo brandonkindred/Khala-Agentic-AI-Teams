@@ -1,0 +1,20 @@
+<div class="test-panel">
+  <mat-button-toggle-group [value]="activeTab()" (change)="activeTab.set($event.value)" class="tab-toggle">
+    <mat-button-toggle value="chat">
+      <mat-icon>chat</mat-icon> Chat with Agent
+    </mat-button-toggle>
+    <mat-button-toggle value="pipeline">
+      <mat-icon>play_arrow</mat-icon> Run Pipeline
+    </mat-button-toggle>
+  </mat-button-toggle-group>
+
+  @if (activeTab() === 'chat') {
+    <app-agent-test-chat
+      [team]="team"
+      [qualityScores]="qualityScores()"
+      (scoresChanged)="loadQualityScores()"
+    />
+  } @else {
+    <app-pipeline-test-runner [team]="team" />
+  }
+</div>
