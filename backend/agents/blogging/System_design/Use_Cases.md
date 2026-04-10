@@ -85,13 +85,11 @@ sequenceDiagram
     participant Val as Validators
     participant FC as Fact Check Agent
     participant CA as Compliance Agent
-    participant Pub as Publication Agent
-
     Author->>UI: Submit brief, audience, tone, profile
-    UI->>API: POST /jobs {brief, audience, ...}
+    UI->>API: POST /full-pipeline-async {brief, audience, ...}
     API->>JS: create_blog_job(job_id)
     API-->>UI: {job_id}
-    UI->>API: GET /stream/{job_id} (SSE)
+    UI->>API: GET /job/{job_id}/stream (SSE)
 
     Note over Pipeline: Phase 1: PLANNING (0-15%)
     API->>Pipeline: run_blog_full_pipeline_job()
@@ -116,7 +114,7 @@ sequenceDiagram
         loop Per story gap
             GW-->>UI: SSE {waiting_for_story_input}
             Author->>UI: Provide story details
-            UI->>API: POST /job/{id}/story-message
+            UI->>API: POST /job/{id}/story-response
             API->>GW: deliver user message
         end
         GW-->>Pipeline: StoryElicitationResult[]
@@ -175,7 +173,7 @@ sequenceDiagram
     Note over Pipeline: Phase 8: TITLE_SELECTION (90-96%)
     Pipeline-->>UI: SSE {waiting_for_title_selection, title_choices}
     Author->>UI: Select preferred title
-    UI->>API: POST /job/{id}/title-selection
+    UI->>API: POST /job/{id}/select-title
 
     Note over Pipeline: Phase 9: FINALIZE (96-100%)
     Pipeline->>Pipeline: Generate PublishingPack
@@ -206,7 +204,7 @@ sequenceDiagram
     Note over Author: Reviews titles:<br/>curiosity_gap, specificity,<br/>audience_fit, seo_potential,<br/>emotional_pull
 
     Author->>UI: Select preferred title
-    UI->>API: POST /job/{id}/title-selection {selected_title}
+    UI->>API: POST /job/{id}/select-title {title}
     API->>JS: submit_title_selection(job_id, title)
     JS->>Pipeline: Resume with selected title
     Pipeline->>Pipeline: Continue to FINALIZE phase
@@ -232,8 +230,8 @@ sequenceDiagram
 
         loop Multi-turn interview (max rounds)
             Author->>UI: Share story detail
-            UI->>API: POST /job/{id}/story-message {message}
-            API->>JS: submit_story_user_message(job_id, gap_idx, message)
+            UI->>API: POST /job/{id}/story-response {message}
+            API->>JS: submit_story_user_message(job_id, message)
             GW->>GW: Process response, generate follow-up
             GW-->>UI: Follow-up question or "story complete"
         end
@@ -309,49 +307,34 @@ sequenceDiagram
 
 ---
 
-## 5. Use Case: Publication Workflow
+## 5. Use Case: Approval Workflow
+
+The API exposes `approve` and `unapprove` endpoints for completed or needs-human-review jobs. There is no `reject` endpoint — authors can unapprove and provide feedback via draft-feedback instead.
+
+> **Note:** The pipeline orchestrator produces a `PublishingPack` artifact directly. The Publication Agent module provides models and platform formatters but is **not** invoked by the pipeline's `run_pipeline()` function.
 
 ```mermaid
 sequenceDiagram
     actor Author
     participant UI as Angular UI
     participant API as Blogging API
-    participant Pub as Publication Agent
-    participant FS as File System
+    participant JS as Job Store
 
-    Note over Pub: Draft passes all gates
-
-    Pub->>Pub: submit_draft(SubmitDraftInput)
-    Pub->>FS: Write to blog_posts/pending/{slug}/
-    Pub-->>UI: PublicationSubmission {state: awaiting_approval}
+    Note over API: Pipeline completed with<br/>status: COMPLETED or NEEDS_HUMAN_REVIEW
 
     alt Author approves
-        Author->>UI: Approve publication
-        UI->>API: POST /job/{id}/approve
-        API->>Pub: approve(submission_id)
+        Author->>UI: Approve job
+        UI->>API: POST /job/{job_id}/approve
+        API->>JS: approve_blog_job(job_id)
+        JS-->>API: Updated job (approved=true)
+        API-->>UI: BlogJobStatusResponse
 
-        par Platform formatting
-            Pub->>Pub: format_for_medium()
-            Pub->>Pub: format_for_devto()
-            Pub->>Pub: format_for_substack()
-        end
-
-        Pub->>FS: Write to blog_posts/{slug}/
-        Note over FS: final.md<br/>medium.md<br/>devto.md<br/>substack.md
-
-        Pub-->>UI: ApprovalResult {folder_path, platform_paths}
-
-    else Author rejects
-        Author->>UI: Reject with feedback
-        UI->>API: POST /job/{id}/reject {feedback}
-        API->>Pub: reject(submission_id, feedback)
-        Pub->>Pub: Collect rejection feedback
-
-        opt Revision requested
-            Pub->>Pub: Revision loop with Writer + Copy Editor
-            Pub-->>UI: RevisionLoopResult
-            Note over Author: Re-review revised draft
-        end
+    else Author wants changes
+        Author->>UI: Unapprove job
+        UI->>API: POST /job/{job_id}/unapprove
+        API->>JS: unapprove_blog_job(job_id)
+        JS-->>API: Updated job (approved=false)
+        API-->>UI: BlogJobStatusResponse
     end
 ```
 
@@ -435,19 +418,24 @@ sequenceDiagram
 | Use Case | Method | Endpoint | Request Body | Response |
 |----------|--------|----------|-------------|----------|
 | Run full pipeline (sync) | POST | `/full-pipeline` | `FullPipelineRequest` | `FullPipelineResponse` |
-| Create async job | POST | `/jobs` | `FullPipelineRequest` | `{job_id}` |
-| Poll job status | GET | `/job/{id}` | — | `BlogJobStatusResponse` |
-| Stream progress (SSE) | GET | `/stream/{job_id}` | — | SSE events |
-| Select title | POST | `/job/{id}/title-selection` | `{selected_title}` | 200 OK |
-| Submit draft feedback | POST | `/job/{id}/draft-feedback` | `UserDraftFeedback` | 200 OK |
-| Send story message | POST | `/job/{id}/story-message` | `{message}` | 200 OK |
-| Skip story gap | POST | `/job/{id}/skip-story` | — | 200 OK |
-| Submit answers | POST | `/job/{id}/answers` | `{question_id: answer}` | 200 OK |
-| Approve publication | POST | `/job/{id}/approve` | — | `ApprovalResult` |
-| Reject publication | POST | `/job/{id}/reject` | `{feedback}` | `RejectionResponse` |
+| Start async pipeline | POST | `/full-pipeline-async` | `FullPipelineRequest` | `StartPipelineResponse {job_id}` |
+| Poll job status | GET | `/job/{job_id}` | — | `BlogJobStatusResponse` |
+| Stream progress (SSE) | GET | `/job/{job_id}/stream` | — | SSE events |
+| Cancel job | POST | `/job/{job_id}/cancel` | — | `CancelJobResponse` |
+| Resume job | POST | `/job/{job_id}/resume` | — | `StartPipelineResponse` |
+| Restart job | POST | `/job/{job_id}/restart` | — | `StartPipelineResponse` |
+| Delete job | DELETE | `/job/{job_id}` | — | `DeleteJobResponse` |
+| Select title | POST | `/job/{job_id}/select-title` | `SelectTitleRequest {title}` | `BlogJobStatusResponse` |
+| Rate title candidates | POST | `/job/{job_id}/rate-titles` | `RateTitlesRequest {ratings}` | `BlogJobStatusResponse` |
+| Submit draft feedback | POST | `/job/{job_id}/draft-feedback` | `DraftFeedbackRequest {feedback, approved}` | `BlogJobStatusResponse` |
+| Send story response | POST | `/job/{job_id}/story-response` | `StoryResponseRequest {message}` | `BlogJobStatusResponse` |
+| Skip story gap | POST | `/job/{job_id}/skip-story-gap` | — | `BlogJobStatusResponse` |
+| Submit answers | POST | `/job/{job_id}/answers` | `BlogAnswersRequest {answers}` | `BlogJobStatusResponse` |
+| Approve job | POST | `/job/{job_id}/approve` | — | `BlogJobStatusResponse` |
+| Unapprove job | POST | `/job/{job_id}/unapprove` | — | `BlogJobStatusResponse` |
+| List artifacts | GET | `/job/{job_id}/artifacts` | — | `ArtifactListResponse` |
+| Get artifact content | GET | `/job/{job_id}/artifacts/{name}` | — | JSON or file download |
 | Research & review | POST | `/research-and-review` | `{brief, audience, ...}` | `{title_choices, outline, ...}` |
 | Medium stats (sync) | POST | `/medium-stats` | `MediumStatsRequest` | `MediumStatsReport` |
-| Medium stats (async) | POST | `/medium-stats-async` | `MediumStatsRequest` | `{job_id}` |
-| Restart job | POST | `/restart/{id}` | — | 200 OK |
-| Delete job | DELETE | `/job/{id}` | — | 200 OK |
+| Medium stats (async) | POST | `/medium-stats-async` | `MediumStatsRequest` | `StartPipelineResponse {job_id}` |
 | Health check | GET | `/health` | — | `{status, brand_spec_configured}` |

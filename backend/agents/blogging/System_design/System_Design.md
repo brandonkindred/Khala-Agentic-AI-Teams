@@ -329,7 +329,7 @@ classDiagram
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING : POST /jobs
+    [*] --> PENDING : POST /full-pipeline-async
     PENDING --> RUNNING : Pipeline starts
 
     RUNNING --> COMPLETED : All gates PASS
@@ -626,7 +626,7 @@ sequenceDiagram
     participant Bus as Job Event Bus
     participant Pipeline as Pipeline Orchestrator
 
-    UI->>API: GET /stream/{job_id}
+    UI->>API: GET /job/{job_id}/stream
     API->>Bus: subscribe(job_id)
     Bus-->>API: Subscription (Event + deque)
 

@@ -10,7 +10,7 @@ The complete end-to-end pipeline from API request to publishing pack, showing al
 
 ```mermaid
 flowchart TD
-    Start([POST /jobs or /full-pipeline]) --> CreateJob[Create blog job in store<br/>Status: PENDING]
+    Start([POST /full-pipeline-async or /full-pipeline]) --> CreateJob[Create blog job in store<br/>Status: PENDING]
     CreateJob --> ResolveProfile[Resolve LengthPolicy<br/>from content_profile / target_word_count]
     ResolveProfile --> LoadBrandSpec[Load brand spec + writing guidelines<br/>Render Jinja2 templates with AuthorProfile]
     LoadBrandSpec --> StartPipeline[Start pipeline<br/>Status: RUNNING]
@@ -382,50 +382,31 @@ sequenceDiagram
 
 ---
 
-## 8. Publication Decision Tree
+## 8. Finalization & Approval Decision Tree
 
-The approval/rejection flow after all quality gates pass.
+After all quality gates pass and the title is selected, the pipeline generates a `PublishingPack` artifact and completes the job. Approval is handled by the API layer via separate endpoints.
+
+> **Note:** The pipeline orchestrator produces the `PublishingPack` directly and does **not** invoke the Publication Agent. The Publication Agent module provides platform formatters and models that can be used independently.
 
 ```mermaid
 flowchart TD
-    Start([All gates PASS<br/>Title selected]) --> GeneratePack["Generate PublishingPack<br/>- title_options<br/>- meta_description<br/>- header_polish<br/>- internal_links<br/>- snippet_copy<br/>- tags"]
+    Start([All gates PASS<br/>Title selected]) --> GeneratePack["Generate PublishingPack artifact<br/>- title_options<br/>- meta_description<br/>- header_polish<br/>- internal_links<br/>- snippet_copy<br/>- tags"]
 
-    GeneratePack --> Submit["Submit draft to<br/>Publication Agent"]
-    Submit --> WriteTemp["Write to<br/>blog_posts/pending/{slug}/"]
-    WriteTemp --> WaitApproval["State: awaiting_approval<br/>Wait for human decision"]
+    GeneratePack --> WriteFinal["Write final.md +<br/>publishing_pack.json to work_dir"]
+    WriteFinal --> CompleteJob["complete_blog_job()<br/>Status: COMPLETED"]
+    CompleteJob --> SSE["SSE: {phase: finalize,<br/>progress: 100, status: COMPLETED}"]
+
+    SSE --> WaitApproval["Job available for<br/>author review"]
 
     WaitApproval --> Decision{Author<br/>decision?}
 
-    Decision -->|Approve| FormatPlatforms
+    Decision -->|"POST /job/{id}/approve"| Approve["approve_blog_job(job_id)<br/>Mark as approved"]
+    Approve --> Approved([Job approved])
 
-    subgraph FormatPlatforms["Platform Formatting"]
-        FMedium["format_for_medium()<br/>Medium markdown + metadata"]
-        FDevTo["format_for_devto()<br/>dev.to frontmatter + markdown"]
-        FSubstack["format_for_substack()<br/>Substack-compatible HTML/markdown"]
-    end
-
-    FormatPlatforms --> WriteFinal["Write to blog_posts/{slug}/<br/>- final.md<br/>- medium.md<br/>- devto.md<br/>- substack.md"]
-    WriteFinal --> SaveMetadata["Save PublicationMetadata<br/>approved_at = now()"]
-    SaveMetadata --> Approved([ApprovalResult<br/>with all file paths])
-
-    Decision -->|Reject| CollectFeedback["State: collecting_rejection_feedback<br/>Collect rejection reasons"]
-    CollectFeedback --> WantRevision{Revision<br/>requested?}
-    WantRevision -->|No| Rejected([Draft rejected<br/>Feedback stored])
-    WantRevision -->|Yes| RevisionLoop
-
-    subgraph RevisionLoop["Revision Loop"]
-        RevWriter["Writer Agent revision<br/>with rejection feedback"]
-        RevEditor["Copy Editor review<br/>of revised draft"]
-        RevWriter --> RevEditor
-        RevEditor --> RevCheck{Editor<br/>satisfied?}
-        RevCheck -->|No| RevWriter
-        RevCheck -->|Yes| RevDone[Revised draft ready]
-    end
-
-    RevDone --> WaitApproval
+    Decision -->|"POST /job/{id}/unapprove"| Unapprove["unapprove_blog_job(job_id)<br/>Clear approval flag"]
+    Unapprove --> WaitApproval
 
     style Approved fill:#ccffcc,stroke:#00cc00
-    style Rejected fill:#ffcccc,stroke:#cc0000
 ```
 
 ---

@@ -52,7 +52,7 @@ graph TD
 
 ## 2. Component Architecture
 
-The pipeline orchestrator (`run_pipeline()`) coordinates 9 specialized agents across 5 functional groups: Research, Planning, Content Production, Quality Gates, and Publication.
+The pipeline orchestrator (`run_pipeline()`) coordinates specialized agents across 5 functional groups: Research, Planning, Content Production, Quality Gates, and Finalization. The Publication Agent and Medium Stats Agent are invoked independently by the API layer, not by the pipeline orchestrator.
 
 ```mermaid
 graph LR
@@ -77,7 +77,7 @@ graph LR
         CMA["Compliance Agent<br/><i>blog_compliance_agent/</i>"]
     end
 
-    subgraph "Publication & Analytics"
+    subgraph "API-Level (outside pipeline)"
         PUA["Publication Agent<br/><i>blog_publication_agent/</i>"]
         MSA["Medium Stats Agent<br/><i>blog_medium_stats_agent/</i>"]
     end
@@ -90,7 +90,6 @@ graph LR
     RP --> VA
     RP --> FCA
     RP --> CMA
-    RP --> PUA
 
     RA -->|ResearchAgentOutput| PA
     PA -->|ContentPlan| WA
@@ -101,8 +100,10 @@ graph LR
     VA -->|ValidatorReport| CMA
     FCA -->|FactCheckReport| RP
     CMA -->|ComplianceReport| RP
-    RP -->|approved draft| PUA
+    RP -->|PublishingPack| RP
 ```
+
+> **Note:** `run_pipeline()` produces a `PublishingPack` artifact but does **not** invoke the Publication Agent. Publication (approve/unapprove) and Medium stats collection are handled by separate API endpoints outside the pipeline.
 
 ### Pipeline Phase Mapping
 
@@ -221,7 +222,7 @@ graph TD
 | **shared_postgres** | `blogging_stories` table for story bank persistence; schema registered at FastAPI lifespan startup via `register_team_schemas(SCHEMA)` |
 | **shared_temporal** | `BlogFullPipelineWorkflow` wraps the full pipeline as a single long-lived activity (12h timeout, 3 retries, 30s heartbeat); checkpoints for human-in-the-loop pauses |
 | **llm_service** | `OllamaLLMClient` singleton created at API startup; agents call `complete_json()` for structured output and `complete()` for text generation; factory resolves model via env chain |
-| **event_bus** | Thread-safe SSE pub/sub: pipeline publishes progress events per job; Angular UI subscribes via `/stream/{job_id}` endpoint for real-time updates |
+| **event_bus** | Thread-safe SSE pub/sub: pipeline publishes progress events per job; Angular UI subscribes via `/job/{job_id}/stream` endpoint for real-time updates |
 
 ---
 
@@ -237,7 +238,7 @@ graph TD
 | **Validators** | `validators/` | Deterministic content checks (no LLM) | Draft text | `ValidatorReport` | Banned phrases, reading level, paragraph length, required sections |
 | **Fact Check Agent** | `blog_fact_check_agent/` | Claims verification and risk flagging | Draft + allowed claims | `FactCheckReport` | Flags unverified claims; identifies required disclaimers |
 | **Compliance Agent** | `blog_compliance_agent/` | Brand/style enforcement with veto power | Draft + brand spec + validator report | `ComplianceReport` | FAIL status blocks publication; triggers rewrite loop |
-| **Publication Agent** | `blog_publication_agent/` | Draft submission, approval, platform formatting | `SubmitDraftInput` | `ApprovalResult` | Formats for Medium, DevTo, Substack; writes to `blog_posts/` |
+| **Publication Agent** | `blog_publication_agent/` | Draft submission, approval, platform formatting | `SubmitDraftInput` | `ApprovalResult` | Formats for Medium, DevTo, Substack; writes to `blog_posts/`; invoked by API, not by pipeline |
 | **Medium Stats Agent** | `blog_medium_stats_agent/` | Medium.com dashboard stats scraping | `MediumStatsRunConfig` | `MediumStatsReport` | Playwright automation; Google browser login integration |
 
 ---
@@ -248,11 +249,12 @@ The blogging team mounts at `/api/blogging` with these endpoint groups:
 
 | Category | Endpoints | Purpose |
 |----------|-----------|---------|
-| **Pipeline** | `POST /full-pipeline`, `POST /research-and-review` | Trigger pipeline execution |
-| **Jobs** | `POST /jobs`, `GET /job/{id}`, `DELETE /job/{id}`, `POST /restart/{id}` | Async job lifecycle management |
-| **Streaming** | `GET /stream/{job_id}` (SSE) | Real-time progress events |
-| **Collaboration** | `POST /job/{id}/title-selection`, `POST /job/{id}/draft-feedback`, `POST /job/{id}/story-message`, `POST /job/{id}/skip-story`, `POST /job/{id}/answers` | Human-in-the-loop inputs |
-| **Publication** | `POST /job/{id}/approve`, `POST /job/{id}/reject` | Final draft approval |
+| **Pipeline** | `POST /full-pipeline` (sync), `POST /full-pipeline-async`, `POST /research-and-review` | Trigger pipeline execution |
+| **Jobs** | `GET /job/{job_id}`, `DELETE /job/{job_id}`, `POST /job/{job_id}/restart`, `POST /job/{job_id}/resume`, `POST /job/{job_id}/cancel` | Async job lifecycle management |
+| **Streaming** | `GET /job/{job_id}/stream` (SSE) | Real-time progress events |
+| **Collaboration** | `POST /job/{job_id}/select-title`, `POST /job/{job_id}/rate-titles`, `POST /job/{job_id}/draft-feedback`, `POST /job/{job_id}/story-response`, `POST /job/{job_id}/skip-story-gap`, `POST /job/{job_id}/answers` | Human-in-the-loop inputs |
+| **Approval** | `POST /job/{job_id}/approve`, `POST /job/{job_id}/unapprove` | Final draft approval |
+| **Artifacts** | `GET /job/{job_id}/artifacts`, `GET /job/{job_id}/artifacts/{name}` | Browse and download pipeline artifacts |
 | **Analytics** | `POST /medium-stats`, `POST /medium-stats-async` | Medium.com stats collection |
 | **Health** | `GET /health` | Brand spec configuration status |
 
