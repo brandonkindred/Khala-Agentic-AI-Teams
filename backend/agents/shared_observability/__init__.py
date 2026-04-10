@@ -1,4 +1,4 @@
-"""Shared OpenTelemetry helpers for all Strands agent teams.
+"""Shared OpenTelemetry helpers for all Khala agent teams.
 
 Every team microservice calls ``init_otel()`` once at startup and
 ``instrument_fastapi_app(app)`` right after creating its FastAPI instance.

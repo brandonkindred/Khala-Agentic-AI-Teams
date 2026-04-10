@@ -2,10 +2,12 @@
 
 Khala is a monorepo for multi-agent "team" systems. Each team exposes a FastAPI service and the platform also provides a Unified API plus an Angular UI.
 
+(Named after the Protoss unifying religion from StarCraft — a psionic link joining many minds into one.)
+
 ## Repository layout
 
 ```text
-strands-agents/
+khala/
 ├── backend/
 │   ├── agents/                 # Team implementations + team-specific APIs (21 mounted teams)
 │   ├── unified_api/            # Unified FastAPI app mounting all teams
@@ -119,4 +121,4 @@ See `docker/README.md` for env vars, ports, and deployment notes.
 - `CONTRIBUTORS.md`
 - `CLAUDE.md` (Cursor / Claude Code guidance for this repo)
 
-Individual package READMEs under `backend/agents/**` and `user-interface/` end with a **Strands platform** link back to this file.
+Individual package READMEs under `backend/agents/**` and `user-interface/` end with a **Khala platform** link back to this file.

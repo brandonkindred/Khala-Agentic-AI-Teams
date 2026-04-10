@@ -1,5 +1,5 @@
 """
-Standard team contract package for Strands agent teams.
+Standard team contract package for Khala agent teams.
 
 Provides a factory function ``create_team_app()`` that returns a FastAPI app
 with standardized health, readiness, metadata, and job lifecycle endpoints

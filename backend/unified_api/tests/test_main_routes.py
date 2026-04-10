@@ -33,7 +33,7 @@ def test_root_response_has_required_fields():
     """GET / response contains name, version, teams, and docs_url."""
     resp = client.get("/")
     data = resp.json()
-    assert data["name"] == "Strands Agents Unified API"
+    assert data["name"] == "Khala Unified API"
     assert data["version"] == "1.0.0"
     assert isinstance(data["teams"], list)
     assert len(data["teams"]) > 0

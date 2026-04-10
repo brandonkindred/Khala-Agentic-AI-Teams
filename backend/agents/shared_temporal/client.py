@@ -32,7 +32,7 @@ def get_temporal_namespace() -> str:
 
 
 def get_default_task_queue() -> str:
-    return os.getenv("TEMPORAL_TASK_QUEUE", "strands-agents").strip() or "strands-agents"
+    return os.getenv("TEMPORAL_TASK_QUEUE", "khala").strip() or "khala"
 
 
 def is_temporal_enabled() -> bool:

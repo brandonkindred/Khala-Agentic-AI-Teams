@@ -379,7 +379,7 @@ Add pyright to CI. Fix violations incrementally. Remove the `agent_implementatio
 
 #### 4.3.4 Create Team Scaffolding CLI
 
-Build `strands scaffold <team_name>` that generates: `api/main.py`, `agent.py`, `models.py`, `prompts.py`, `temporal/__init__.py`, `postgres/__init__.py`, `tests/test_*.py`, and registers in `config.py`.
+Build `khala scaffold <team_name>` that generates: `api/main.py`, `agent.py`, `models.py`, `prompts.py`, `temporal/__init__.py`, `postgres/__init__.py`, `tests/test_*.py`, and registers in `config.py`.
 
 #### 4.3.5 Consolidate Configuration Management
 

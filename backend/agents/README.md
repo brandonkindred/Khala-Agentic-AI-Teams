@@ -1,6 +1,6 @@
 # Backend Agents
 
-This directory contains the Strands agent-team implementations and their APIs.
+This directory contains the Khala agent-team implementations and their APIs.
 
 ## Directory structure
 

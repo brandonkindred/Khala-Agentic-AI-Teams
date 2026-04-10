@@ -1732,7 +1732,7 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
 @app.delete("/strategy-lab/storage", response_model=ClearStrategyLabStorageResponse)
 def clear_strategy_lab_storage() -> ClearStrategyLabStorageResponse:
     """
-    Remove all persisted strategy lab data from the job service (Postgres ``strands_jobs.jobs``
+    Remove all persisted strategy lab data from the job service (Postgres ``khala_jobs.jobs``
     when ``JOB_SERVICE_URL`` is set, or local ``AGENT_CACHE`` files otherwise).
 
     Deletes:

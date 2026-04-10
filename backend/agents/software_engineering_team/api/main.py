@@ -2132,11 +2132,11 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
 # Project name: no spaces, only letters, numbers, hyphen, underscore
 PROJECT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 ENV_WORKSPACE_ROOT = "WORKSPACE_ROOT"
-DEFAULT_PROJECTS_DIR_NAME = "strands_projects"
+DEFAULT_PROJECTS_DIR_NAME = "khala_projects"
 
 
 def _get_projects_root() -> Path:
-    """Resolve the root directory for created projects. When WORKSPACE_ROOT is set, use it/projects; else tempdir/strands_projects."""
+    """Resolve the root directory for created projects. When WORKSPACE_ROOT is set, use it/projects; else tempdir/khala_projects."""
     workspace_root_str = os.environ.get(ENV_WORKSPACE_ROOT)
     if workspace_root_str:
         root = Path(workspace_root_str).resolve() / "projects"

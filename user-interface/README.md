@@ -1,6 +1,6 @@
 # Khala User Interface
 
-Angular application providing an interactive UI for all Strands agent APIs: Blogging, Software Engineering Team, Personal Assistant, Market Research, SOC2 Compliance, Social Media Marketing, Branding, Agent Provisioning, Accessibility Audit, AI Systems, Investment (Advisor + Strategy Lab), Nutrition & Meal Planning, Planning V3, Coding Team, AI Sales Team, Road Trip Planning, Agentic Team Provisioning, Startup Advisor, User Agent Founder, and Deepthought.
+Angular application providing an interactive UI for all Khala agent APIs: Blogging, Software Engineering Team, Personal Assistant, Market Research, SOC2 Compliance, Social Media Marketing, Branding, Agent Provisioning, Accessibility Audit, AI Systems, Investment (Advisor + Strategy Lab), Nutrition & Meal Planning, Planning V3, Coding Team, AI Sales Team, Road Trip Planning, Agentic Team Provisioning, Startup Advisor, User Agent Founder, and Deepthought.
 
 ## Prerequisites
 

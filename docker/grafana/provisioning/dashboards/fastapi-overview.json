@@ -20,7 +20,7 @@
   "liveNow": false,
   "panels": [
     {
-      "datasource": { "type": "prometheus", "uid": "strands-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "khala-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -57,7 +57,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "strands-prometheus" },
+          "datasource": { "type": "prometheus", "uid": "khala-prometheus" },
           "editorMode": "code",
           "expr": "sum by (service) (rate(http_requests_total[5m]))",
           "legendFormat": "{{service}}",
@@ -69,7 +69,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "strands-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "khala-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -106,7 +106,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "strands-prometheus" },
+          "datasource": { "type": "prometheus", "uid": "khala-prometheus" },
           "editorMode": "code",
           "expr": "histogram_quantile(0.95, sum by (le, service) (rate(http_request_duration_seconds_bucket[5m])))",
           "legendFormat": "{{service}}",
@@ -118,7 +118,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "strands-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "khala-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -155,7 +155,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "strands-prometheus" },
+          "datasource": { "type": "prometheus", "uid": "khala-prometheus" },
           "editorMode": "code",
           "expr": "sum by (service) (rate(http_requests_total{status=~\"5..\"}[5m]))",
           "legendFormat": "{{service}}",
@@ -167,7 +167,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "strands-prometheus" },
+      "datasource": { "type": "prometheus", "uid": "khala-prometheus" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -199,7 +199,7 @@
       "pluginVersion": "12.4.2",
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "strands-prometheus" },
+          "datasource": { "type": "prometheus", "uid": "khala-prometheus" },
           "editorMode": "code",
           "expr": "up{job=~\"unified-api|job-service|team-services\"}",
           "legendFormat": "{{service}}",
@@ -213,13 +213,13 @@
   ],
   "refresh": "15s",
   "schemaVersion": 39,
-  "tags": ["strands", "fastapi", "observability"],
+  "tags": ["khala", "fastapi", "observability"],
   "templating": { "list": [] },
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "",
-  "title": "Strands FastAPI Overview",
-  "uid": "strands-fastapi-overview",
+  "title": "Khala FastAPI Overview",
+  "uid": "khala-fastapi-overview",
   "version": 1,
   "weekStart": ""
 }

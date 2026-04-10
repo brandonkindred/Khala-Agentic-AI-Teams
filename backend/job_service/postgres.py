@@ -1,9 +1,9 @@
-"""Postgres schema for the strands job service.
+"""Postgres schema for the khala job service.
 
 Owns the single ``jobs`` table that every agent team reads/writes via
-``JobServiceClient``. The table lives in the ``strands_jobs`` database
+``JobServiceClient``. The table lives in the ``khala_jobs`` database
 (see `docker-compose.yml` — the container sets ``POSTGRES_DB`` to
-``strands_jobs``, so ``database=None`` below resolves to it).
+``khala_jobs``, so ``database=None`` below resolves to it).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from shared_postgres import TeamSchema
 SCHEMA = TeamSchema(
     team="job_service",
     # None = use the container's POSTGRES_DB env var. In Docker this is
-    # already ``strands_jobs``; in other contexts the caller may set
+    # already ``khala_jobs``; in other contexts the caller may set
     # POSTGRES_DB explicitly.
     database=None,
     statements=[

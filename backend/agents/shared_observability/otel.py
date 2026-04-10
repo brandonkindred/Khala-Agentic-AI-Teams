@@ -1,4 +1,4 @@
-"""OpenTelemetry bootstrap used by every Strands agent team.
+"""OpenTelemetry bootstrap used by every Khala agent team.
 
 The public API is intentionally tiny:
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 _init_lock = threading.Lock()
 _initialized: bool = False
 _enabled: bool = False
-_service_name: str = "strands-agents"
+_service_name: str = "khala"
 _team_key: str = "unknown"
 _tracer_provider: Any = None
 _meter_provider: Any = None
@@ -89,8 +89,8 @@ def init_otel(
         resource_attrs = {
             "service.name": _service_name,
             "service.version": service_version,
-            "service.namespace": "strands-agents",
-            "strands.team": team_key,
+            "service.namespace": "khala",
+            "khala.team": team_key,
         }
         # Let users add extra resource attributes via the standard OTel env.
         resource = Resource.create(resource_attrs)

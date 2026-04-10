@@ -8,7 +8,7 @@ todos:
     status: completed
   - id: docker-compose
     content: |
-      Create docker-compose.yml at project root with service 'strands-agents': (1) build context '.' with Dockerfile. (2) container_name: strands-agents. (3) volumes: /var/run/docker.sock:/var/run/docker.sock (Docker CLI access), ./workspace:/workspace (working directory for agent repos). (4) ports: 8000:8000, 8001:8001, 8002:8002, 8003:8003, 8004:8004, 8005:8005. (5) environment: SW_LLM_PROVIDER=ollama, SW_LLM_BASE_URL=http://host.docker.internal:11434, SW_LLM_MODEL=${SW_LLM_MODEL:-qwen3-coder-next:cloud}, PYTHONUNBUFFERED=1. (6) extra_hosts: host.docker.internal:host-gateway (required for Linux to reach host Ollama). (7) restart: unless-stopped. (8) healthcheck: curl --fail http://localhost:8000/health with interval 30s, timeout 10s, retries 3.
+      Create docker-compose.yml at project root with service 'khala': (1) build context '.' with Dockerfile. (2) container_name: khala. (3) volumes: /var/run/docker.sock:/var/run/docker.sock (Docker CLI access), ./workspace:/workspace (working directory for agent repos). (4) ports: 8000:8000, 8001:8001, 8002:8002, 8003:8003, 8004:8004, 8005:8005. (5) environment: SW_LLM_PROVIDER=ollama, SW_LLM_BASE_URL=http://host.docker.internal:11434, SW_LLM_MODEL=${SW_LLM_MODEL:-qwen3-coder-next:cloud}, PYTHONUNBUFFERED=1. (6) extra_hosts: host.docker.internal:host-gateway (required for Linux to reach host Ollama). (7) restart: unless-stopped. (8) healthcheck: curl --fail http://localhost:8000/health with interval 30s, timeout 10s, retries 3.
     status: completed
   - id: supervisord
     content: |
@@ -24,11 +24,11 @@ todos:
     status: completed
   - id: readme-docker
     content: |
-      Create docker/README.md with Docker usage documentation: (1) Prerequisites: Docker, Docker Compose, Ollama running on host. (2) Quick start: docker-compose up -d. (3) Environment variables table: SW_LLM_PROVIDER, SW_LLM_BASE_URL, SW_LLM_MODEL, per-agent model overrides. (4) Port mapping table for all 6 APIs with example curl commands. (5) Volume mounts explanation: workspace for agent output, docker.sock for Docker CLI. (6) Troubleshooting: Ollama connection issues, Docker socket permissions, health check failures. (7) Building custom image: docker build -t strands-agents . (8) Security considerations: Docker socket access implications.
+      Create docker/README.md with Docker usage documentation: (1) Prerequisites: Docker, Docker Compose, Ollama running on host. (2) Quick start: docker-compose up -d. (3) Environment variables table: SW_LLM_PROVIDER, SW_LLM_BASE_URL, SW_LLM_MODEL, per-agent model overrides. (4) Port mapping table for all 6 APIs with example curl commands. (5) Volume mounts explanation: workspace for agent output, docker.sock for Docker CLI. (6) Troubleshooting: Ollama connection issues, Docker socket permissions, health check failures. (7) Building custom image: docker build -t khala . (8) Security considerations: Docker socket access implications.
     status: completed
   - id: verify-build
     content: |
-      Verify the Docker build works: (1) Run docker build -t strands-agents . and ensure it completes without errors. (2) Run docker-compose up -d and verify container starts. (3) Test health endpoints: curl localhost:8000/health through 8005/health. (4) Verify tools inside container: docker exec strands-agents node --version, ng version, git --version, docker --version. (5) Test a simple API call to /run-team or similar endpoint.
+      Verify the Docker build works: (1) Run docker build -t khala . and ensure it completes without errors. (2) Run docker-compose up -d and verify container starts. (3) Test health endpoints: curl localhost:8000/health through 8005/health. (4) Verify tools inside container: docker exec khala node --version, ng version, git --version, docker --version. (5) Test a simple API call to /run-team or similar endpoint.
     status: completed
 isProject: false
 ---
@@ -165,7 +165,7 @@ Environment variable `SW_LLM_BASE_URL` configures the connection.
 
 ```bash
 # Build the image
-docker build -t strands-agents .
+docker build -t khala .
 
 # Run with docker-compose (recommended)
 docker-compose up -d
@@ -177,7 +177,7 @@ docker run -d \
   -p 8000-8005:8000-8005 \
   -e SW_LLM_BASE_URL=http://host.docker.internal:11434 \
   --add-host=host.docker.internal:host-gateway \
-  strands-agents
+  khala
 
 # Check health
 curl http://localhost:8000/health

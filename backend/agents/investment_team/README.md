@@ -74,7 +74,7 @@ flowchart LR
 - `DELETE /strategy-lab/storage` — purge strategy lab rows from the job service (lab records, `strat-lab-*` / `bt-lab-*` strategies and backtests, and all paper-trading sessions)
 - `GET /workflow/status`, `GET /workflow/queues`
 
-**Clearing strategy lab data in Postgres directly** (job DB `strands_jobs`, table `jobs`):
+**Clearing strategy lab data in Postgres directly** (job DB `khala_jobs`, table `jobs`):
 
 ```sql
 DELETE FROM jobs WHERE team = 'investment_strategy_lab_records';

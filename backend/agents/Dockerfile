@@ -1,4 +1,4 @@
-# Multi-stage Dockerfile for strands-agents
+# Multi-stage Dockerfile for khala
 # Packages all 6 agent teams with pre-installed tools, UI, PostgreSQL, and nginx
 
 # ---------------------------------------------------------------------------

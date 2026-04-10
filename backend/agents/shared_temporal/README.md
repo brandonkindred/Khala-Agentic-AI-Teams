@@ -74,7 +74,7 @@ for either mode.
 
 - `TEMPORAL_ADDRESS` — enables Temporal mode; unset falls back to threads.
 - `TEMPORAL_NAMESPACE` — default `default`.
-- `TEMPORAL_TASK_QUEUE` — default `strands-agents`.
+- `TEMPORAL_TASK_QUEUE` — default `khala`.
 
 ## See also
 
