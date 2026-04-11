@@ -354,17 +354,17 @@ stateDiagram-v2
     DRAFT_INITIAL --> DRAFT_REVIEW : Draft v1 generated
     DRAFT_INITIAL --> DRAFT_REVIEW : Story placeholders filled
 
-    DRAFT_REVIEW --> COPY_EDIT : User approves or skips
+    DRAFT_REVIEW --> COPY_EDIT_LOOP : User approves or skips
     DRAFT_REVIEW --> DRAFT_REVIEW : User provides feedback
 
-    COPY_EDIT --> FACT_CHECK : Editor approves or loop exhausted
+    COPY_EDIT_LOOP --> FACT_CHECK : Editor approves or loop exhausted
 
-    FACT_CHECK --> COMPLIANCE : Report generated
+    FACT_CHECK --> COMPLIANCE : Validators + fact check complete
     COMPLIANCE --> TITLE_SELECTION : All gates PASS
-    COMPLIANCE --> REWRITE : Any gate FAIL
+    COMPLIANCE --> REWRITE_LOOP : Any gate FAIL
 
-    REWRITE --> FACT_CHECK : Revised draft ready
-    REWRITE --> NEEDS_REVIEW : Max rewrite iterations
+    REWRITE_LOOP --> FACT_CHECK : Revised draft ready
+    REWRITE_LOOP --> FINALIZE : Max rewrite iterations (NEEDS_HUMAN_REVIEW)
 
     TITLE_SELECTION --> FINALIZE : Title selected
     FINALIZE --> [*] : Publishing pack written
@@ -380,43 +380,47 @@ stateDiagram-v2
 
 ### 3.3 Progress Tracking
 
-Each phase maps to a progress range. The `get_phase_progress(phase, sub_progress)` function computes overall percentage:
+Each phase maps to a progress range from `PHASE_PROGRESS_RANGES` in `shared/models.py`. The `get_phase_progress(phase, sub_progress)` function computes the overall percentage:
 
-| Phase | Range | Calculation |
-|-------|-------|-------------|
-| PLANNING | 0–15% | `0 + (15-0) * sub_progress` |
-| DRAFT_INITIAL | 15–30% | `15 + (30-15) * sub_progress` |
-| DRAFT_REVIEW | 30–45% | `30 + (45-30) * sub_progress` |
-| COPY_EDIT | 45–60% | `45 + (60-45) * sub_progress` |
-| FACT_CHECK | 60–70% | `60 + (70-60) * sub_progress` |
-| COMPLIANCE | 70–82% | `70 + (82-70) * sub_progress` |
-| REWRITE_LOOP | 82–90% | `82 + (90-82) * sub_progress` |
-| TITLE_SELECTION | 90–96% | `90 + (96-90) * sub_progress` |
-| FINALIZE | 96–100% | `96 + (100-96) * sub_progress` |
+| `BlogPhase` | Enum value | Range | Calculation |
+|-------------|-----------|-------|-------------|
+| `PLANNING` | `planning` | 0–15% | `0 + 15 * sub_progress` |
+| `DRAFT_INITIAL` | `draft_initial` | 15–30% | `15 + 15 * sub_progress` |
+| `DRAFT_REVIEW` | `draft_review` | 30–45% | `30 + 15 * sub_progress` |
+| `COPY_EDIT_LOOP` | `copy_edit` | 45–60% | `45 + 15 * sub_progress` |
+| `FACT_CHECK` | `fact_check` | 60–70% | `60 + 10 * sub_progress` |
+| `COMPLIANCE` | `compliance` | 70–82% | `70 + 12 * sub_progress` |
+| `REWRITE_LOOP` | `rewrite` | 82–90% | `82 + 8 * sub_progress` |
+| `TITLE_SELECTION` | `title_selection` | 90–96% | `90 + 6 * sub_progress` |
+| `FINALIZE` | `finalize` | 96–100% | `96 + 4 * sub_progress` |
+
+Note that the two loop phases have shorter enum values (`copy_edit`, `rewrite`) than their enum names suggest.
 
 ---
 
 ## 4. Artifact Persistence
 
-All pipeline outputs are written to `work_dir/{job_id}/` as versioned artifacts. The `write_artifact()` / `read_artifact()` functions auto-serialize JSON for `.json` files.
+All pipeline outputs are written to `work_dir/{job_id}/` as versioned artifacts. The canonical filenames come from `ARTIFACT_NAMES` in `shared/artifacts.py:18-34`, and per-artifact producer metadata lives in `ARTIFACT_PRODUCER` (same file). The `write_artifact()` / `read_artifact()` helpers auto-serialize JSON for `.json` files.
 
-| Artifact | Phase | Producer | Format | Purpose |
-|----------|-------|----------|--------|---------|
-| `brand_spec_prompt.md` | Draft Initial | Pipeline | Markdown | Brand and style rules (single source of truth) |
-| `research_packet.md` | Planning | Research Agent | Markdown | Compiled research document with sources |
-| `content_plan.json` | Planning | Planning Agent | JSON | Structured plan (machine-readable) |
-| `content_plan.md` | Planning | Planning Agent | Markdown | Human-readable plan with analysis |
-| `content_brief.md` | Planning | Planning Agent | Markdown | Title choices + outline |
-| `outline.md` | Planning | Planning Agent | Markdown | Flat outline (display / compatibility) |
-| `draft_v1.md` | Draft Initial | Writer Agent | Markdown | First draft |
-| `draft_v2.md` | Copy Edit | Writer Agent | Markdown | Revised draft after copy editing |
-| `final.md` | Finalize | Pipeline | Markdown | Approved final draft |
-| `editor_feedback.json` | Copy Edit | Copy Editor Agent | JSON | Feedback items from editor |
-| `validator_report.json` | Compliance | Validators | JSON | Deterministic check results |
-| `compliance_report.json` | Compliance | Compliance Agent | JSON | Brand/style violations |
-| `fact_check_report.json` | Fact Check | Fact Check Agent | JSON | Claims and risk assessment |
-| `publishing_pack.json` | Finalize | Pipeline | JSON | Title options, meta, tags, platform versions |
-| `medium_stats_report.json` | Analytics | Medium Stats Agent | JSON | Medium.com dashboard stats |
+| Artifact | `producer_phase` | `producer_agent` | Format | Purpose |
+|----------|-----------------|------------------|--------|---------|
+| `brand_spec_prompt.md` | `draft_initial` | Pipeline (brand load) | Markdown | Brand and style rules (single source of truth) |
+| `research_packet.md` | `research` | BlogResearchAgent | Markdown | Compiled research document. **Legacy slot**: declared in `ARTIFACT_NAMES` but not currently written by the v2 pipeline, since research is skipped |
+| `content_plan.json` | `planning` | BlogPlanningAgent | JSON | Structured plan (machine-readable) |
+| `content_plan.md` | `planning` | BlogPlanningAgent | Markdown | Human-readable plan with analysis |
+| `content_brief.md` | `planning` | BlogPlanningAgent | Markdown | Title choices + outline |
+| `outline.md` | `planning` | BlogPlanningAgent | Markdown | Flat outline (display / compatibility) |
+| `draft_v1.md` | `draft_initial` | BlogWriterAgent | Markdown | First draft |
+| `draft_v2.md` | `copy_edit` | BlogCopyEditorAgent | Markdown | Revised draft after copy editing |
+| `final.md` | `finalize` | BlogCopyEditorAgent | Markdown | Approved final draft |
+| `editor_feedback.json` | `copy_edit` | BlogCopyEditorAgent | JSON | Feedback items from the editor |
+| `validator_report.json` | `compliance` | Validators | JSON | Deterministic check results |
+| `compliance_report.json` | `compliance` | BlogComplianceAgent | JSON | Brand/style violations |
+| `fact_check_report.json` | `fact_check` | BlogFactCheckAgent | JSON | Claims and risk assessment |
+| `publishing_pack.json` | `finalize` | Pipeline | JSON | Title options, meta, tags, platform versions |
+| `medium_stats_report.json` | `medium_stats` | BlogMediumStatsAgent | JSON | Medium.com dashboard stats |
+
+**Planning attribution:** the `producer_agent` metadata still names `BlogPlanningAgent` for the four planning artifacts because that is the logical role. In the current v2 wiring, the code path that produces the `ContentPlan` is `BlogWriterAgent.plan_content()` (see `blog_writer_agent/agent.py:294`), which implements the same refine-until-done contract.
 
 ---
 
@@ -587,20 +591,22 @@ The `BLOG_PLANNING_MODEL` env var allows using a different model specifically fo
 
 ### 8.1 Story Bank Table
 
+Defined in `postgres/__init__.py` as a `TeamSchema` constant and registered at FastAPI lifespan startup via `register_team_schemas(SCHEMA)`:
+
 ```sql
 CREATE TABLE IF NOT EXISTS blogging_stories (
     id              TEXT PRIMARY KEY,
     narrative       TEXT NOT NULL,
-    section_title   TEXT,
-    section_context TEXT,
-    keywords        JSONB,
-    summary         TEXT,
+    section_title   TEXT NOT NULL DEFAULT '',
+    section_context TEXT NOT NULL DEFAULT '',
+    keywords        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    summary         TEXT NOT NULL DEFAULT '',
     source_job_id   TEXT,
-    created_at      TIMESTAMPTZ DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_blogging_stories_source_job
-    ON blogging_stories (source_job_id);
+    ON blogging_stories(source_job_id);
 ```
 
 **Design decisions**:

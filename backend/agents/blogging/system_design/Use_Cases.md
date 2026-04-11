@@ -29,15 +29,15 @@ graph TD
 
     subgraph "Blogging Team Use Cases"
         UC1["Run Full Pipeline"]
-        UC2["Research & Review Only"]
-        UC3["Review Draft & Provide Feedback"]
-        UC4["Select Title"]
-        UC5["Provide Story Input"]
-        UC6["Answer Agent Questions"]
-        UC7["Approve / Reject Publication"]
-        UC8["Collect Medium Stats"]
-        UC9["Monitor Pipeline Progress"]
-        UC10["Restart Failed Job"]
+        UC2["Review Draft & Provide Feedback"]
+        UC3["Select Title"]
+        UC4["Provide Story Input"]
+        UC5["Answer Agent Questions"]
+        UC6["Approve / Unapprove Publication"]
+        UC7["Collect Medium Stats"]
+        UC8["Monitor Pipeline Progress"]
+        UC9["Browse / Reuse Story Bank"]
+        UC10["Restart / Resume / Cancel Job"]
     end
 
     Author --> UC1
@@ -47,19 +47,19 @@ graph TD
     Author --> UC5
     Author --> UC6
     Author --> UC7
-    Author --> UC8
+    Author --> UC9
     Author --> UC10
 
-    UI --> UC9
+    UI --> UC8
     APIClient --> UC1
-    APIClient --> UC2
-    APIClient --> UC8
+    APIClient --> UC7
+    APIClient --> UC9
 
+    UC1 -->|includes| UC2
     UC1 -->|includes| UC3
     UC1 -->|includes| UC4
     UC1 -->|includes| UC5
     UC1 -->|includes| UC6
-    UC1 -->|includes| UC7
 ```
 
 ---
@@ -77,8 +77,6 @@ sequenceDiagram
     participant API as Blogging API
     participant JS as Job Store
     participant Pipeline as Pipeline Orchestrator
-    participant RA as Research Agent
-    participant PA as Planning Agent
     participant WA as Writer Agent
     participant GW as Ghost Writer
     participant CE as Copy Editor
@@ -93,20 +91,19 @@ sequenceDiagram
 
     Note over Pipeline: Phase 1: PLANNING (0-15%)
     API->>Pipeline: run_blog_full_pipeline_job()
-    Pipeline->>RA: run(ResearchBriefInput)
-    RA-->>Pipeline: ResearchAgentOutput
-    Pipeline->>PA: run(PlanningInput)
+    Pipeline->>WA: plan_content(PlanningInput)
+    Note over WA: research_digest defaults to "";<br/>no ResearchAgent call in v2
 
-    loop Refine until acceptable
-        PA->>PA: Generate/refine ContentPlan
-        PA->>PA: Check requirements_analysis
+    loop Refine until acceptable (max 5 iterations)
+        WA->>WA: Generate / refine ContentPlan
+        WA->>WA: Check requirements_analysis<br/>(plan_acceptable AND scope_feasible)
     end
 
-    PA-->>Pipeline: PlanningPhaseResult
+    WA-->>Pipeline: PlanningPhaseResult
     Pipeline-->>UI: SSE {phase: planning, progress: 15}
 
     Note over Pipeline: Phase 2: DRAFT_INITIAL (15-30%)
-    Pipeline->>WA: draft_from_planning(WriterInput)
+    Pipeline->>WA: run(WriterInput)
     WA-->>Pipeline: WriterOutput (draft_v1)
 
     opt Story placeholders detected
@@ -383,33 +380,36 @@ sequenceDiagram
 
 ---
 
-## 7. Use Case: Research & Review Only
+## 7. Use Case: Story Bank Reuse
 
-A lightweight use case for exploring a topic without full pipeline execution.
+Stories elicited by the Ghost Writer during a previous pipeline run are persisted to the `blogging_stories` Postgres table so they can be reused across posts. The API exposes browse, search, and delete endpoints.
 
 ```mermaid
 sequenceDiagram
     actor Author
+    participant UI as Angular UI
     participant API as Blogging API
-    participant RA as Research Agent
-    participant PA as Planning Agent
+    participant PG as Postgres (blogging_stories)
 
-    Author->>API: POST /research-and-review {brief, audience, tone, max_results}
+    Author->>UI: Open story bank
+    UI->>API: GET /stories
+    API->>PG: SELECT * FROM blogging_stories ORDER BY created_at DESC
+    PG-->>API: rows
+    API-->>UI: Stories list
 
-    API->>RA: run(ResearchBriefInput)
-    Note over RA: Web search + arXiv search<br/>Source ranking + synthesis
-    RA-->>API: ResearchAgentOutput
+    Author->>UI: Search "onboarding"
+    UI->>API: GET /stories/search/onboarding
+    API->>PG: SELECT ... WHERE keywords ? 'onboarding'
+    PG-->>API: matching rows
+    API-->>UI: Search results
 
-    API->>PA: run(PlanningInput)
-    Note over PA: Generate ContentPlan<br/>Refine loop until acceptable
-    PA-->>API: PlanningPhaseResult
-
-    API-->>Author: {title_choices, outline, compiled_document, notes}
-
-    opt work_dir provided
-        API->>API: Persist research_packet.md, content_plan.json, outline.md
-    end
+    Author->>UI: Delete story
+    UI->>API: DELETE /stories/{story_id}
+    API->>PG: DELETE FROM blogging_stories WHERE id = %s
+    API-->>UI: {deleted: true}
 ```
+
+During a new pipeline run, the Ghost Writer elicitation step queries this table for keyword-overlap matches against the current content plan so unchanged stories do not need to be re-interviewed.
 
 ---
 
@@ -419,6 +419,7 @@ sequenceDiagram
 |----------|--------|----------|-------------|----------|
 | Run full pipeline (sync) | POST | `/full-pipeline` | `FullPipelineRequest` | `FullPipelineResponse` |
 | Start async pipeline | POST | `/full-pipeline-async` | `FullPipelineRequest` | `StartPipelineResponse {job_id}` |
+| List jobs | GET | `/jobs` | — | `ListJobsResponse` |
 | Poll job status | GET | `/job/{job_id}` | — | `BlogJobStatusResponse` |
 | Stream progress (SSE) | GET | `/job/{job_id}/stream` | — | SSE events |
 | Cancel job | POST | `/job/{job_id}/cancel` | — | `CancelJobResponse` |
@@ -434,8 +435,11 @@ sequenceDiagram
 | Approve job | POST | `/job/{job_id}/approve` | — | `BlogJobStatusResponse` |
 | Unapprove job | POST | `/job/{job_id}/unapprove` | — | `BlogJobStatusResponse` |
 | List artifacts | GET | `/job/{job_id}/artifacts` | — | `ArtifactListResponse` |
-| Get artifact content | GET | `/job/{job_id}/artifacts/{name}` | — | JSON or file download |
-| Research & review | POST | `/research-and-review` | `{brief, audience, ...}` | `{title_choices, outline, ...}` |
+| Get artifact content | GET | `/job/{job_id}/artifacts/{artifact_name}` | — | JSON or file download |
+| List stories | GET | `/stories` | — | `{stories: [...]}` |
+| Get story | GET | `/stories/{story_id}` | — | Story record |
+| Delete story | DELETE | `/stories/{story_id}` | — | `{deleted: true}` |
+| Search stories | GET | `/stories/search/{keywords}` | — | `{matches: [...]}` |
 | Medium stats (sync) | POST | `/medium-stats` | `MediumStatsRequest` | `MediumStatsReport` |
 | Medium stats (async) | POST | `/medium-stats-async` | `MediumStatsRequest` | `StartPipelineResponse {job_id}` |
 | Health check | GET | `/health` | — | `{status, brand_spec_configured}` |

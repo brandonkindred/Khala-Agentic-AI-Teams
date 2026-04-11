@@ -25,7 +25,7 @@ graph TD
         subgraph Blogging Team
             BlogAPI["Blogging FastAPI App<br/>(/api/blogging)"]
             Pipeline["Pipeline Orchestrator<br/>(blog_writing_process_v2)"]
-            Agents["9 Specialized Agents"]
+            Agents["10 Agent Roles<br/>(orchestrated + standalone)"]
         end
 
         Temporal["Temporal Server<br/>(port 7233)"]
@@ -52,72 +52,79 @@ graph TD
 
 ## 2. Component Architecture
 
-The pipeline orchestrator (`run_pipeline()`) coordinates specialized agents across 5 functional groups: Research, Planning, Content Production, Quality Gates, and Finalization. The Publication Agent and Medium Stats Agent are invoked independently by the API layer, not by the pipeline orchestrator.
+The pipeline orchestrator (`run_pipeline()` in `agent_implementations/blog_writing_process_v2.py`) coordinates agents across three functional groups that run inline: Content Production, Quality Gates, and Finalization. Four additional agent modules — Research Agent, Planning Agent (class), Publication Agent, and Medium Stats Agent — live in the team but are **not** invoked by `run_pipeline()` in the current v2 path: they are either standalone modules or are driven directly by the API layer.
 
 ```mermaid
 graph LR
-    subgraph Orchestrator
-        RP["run_pipeline()<br/><i>blog_writing_process_v2.py</i>"]
+    subgraph Orchestrator["Orchestrator: run_pipeline()"]
+        RP["blog_writing_process_v2.py"]
     end
 
-    subgraph "Research & Planning"
-        RA["Research Agent<br/><i>blog_research_agent/</i>"]
-        PA["Planning Agent<br/><i>blog_planning_agent/</i>"]
+    subgraph InlinePlanning["Planning (inline)"]
+        WAPlan["BlogWriterAgent.plan_content()<br/><i>blog_writer_agent/agent.py</i>"]
     end
 
-    subgraph "Content Production"
+    subgraph Production["Content Production"]
         WA["Writer Agent<br/><i>blog_writer_agent/</i>"]
         CEA["Copy Editor Agent<br/><i>blog_copy_editor_agent/</i>"]
-        GWA["Ghost Writer Agent<br/><i>ghost_writer_agent/</i>"]
+        GWA["Ghost Writer Elicitation<br/><i>ghost_writer_agent/</i>"]
     end
 
-    subgraph "Quality Gates"
+    subgraph Gates["Quality Gates"]
         VA["Validators<br/><i>validators/runner.py</i>"]
         FCA["Fact Check Agent<br/><i>blog_fact_check_agent/</i>"]
         CMA["Compliance Agent<br/><i>blog_compliance_agent/</i>"]
     end
 
-    subgraph "API-Level (outside pipeline)"
+    subgraph Standalone["Standalone / API-Level"]
+        RA["Research Agent<br/><i>blog_research_agent/</i><br/>(not called by v2 pipeline)"]
+        PAStand["Planning Agent class<br/><i>blog_planning_agent/</i><br/>(alternative, not wired)"]
         PUA["Publication Agent<br/><i>blog_publication_agent/</i>"]
         MSA["Medium Stats Agent<br/><i>blog_medium_stats_agent/</i>"]
     end
 
-    RP --> RA
-    RP --> PA
+    RP --> WAPlan
     RP --> WA
-    RP --> CEA
     RP --> GWA
+    RP --> CEA
     RP --> VA
     RP --> FCA
     RP --> CMA
 
-    RA -->|ResearchAgentOutput| PA
-    PA -->|ContentPlan| WA
+    WAPlan -->|ContentPlan| WA
     WA -->|draft| CEA
     CEA -->|FeedbackItems| WA
-    GWA -->|stories| WA
+    GWA -->|elicited stories| WA
     WA -->|final draft| VA
-    VA -->|ValidatorReport| CMA
-    FCA -->|FactCheckReport| RP
+    VA -->|ValidatorReport| FCA
+    FCA -->|FactCheckReport| CMA
     CMA -->|ComplianceReport| RP
     RP -->|PublishingPack| RP
 ```
 
-> **Note:** `run_pipeline()` produces a `PublishingPack` artifact but does **not** invoke the Publication Agent. Publication (approve/unapprove) and Medium stats collection are handled by separate API endpoints outside the pipeline.
+> **Note 1:** Planning is performed by `BlogWriterAgent.plan_content()` (see `blog_writer_agent/agent.py:294`), which implements the refine-until-done loop. The `BlogPlanningAgent` class in `blog_planning_agent/agent.py` is an alternative implementation that is not currently wired into `run_pipeline()`.
+>
+> **Note 2:** The v2 pipeline currently skips external research. `PlanningInput.research_digest` defaults to `""` (see `shared/content_plan.py:197`), and the orchestrator does not invoke `BlogResearchAgent`. The research agent module remains available as a standalone component.
+>
+> **Note 3:** `run_pipeline()` writes a `PublishingPack` artifact but does **not** call the Publication Agent. Publication (approve/unapprove) and Medium stats collection are handled by separate API endpoints.
 
 ### Pipeline Phase Mapping
 
-| Phase | Progress | Agent(s) Involved |
-|-------|----------|-------------------|
-| Planning | 0–15% | Research Agent, Planning Agent |
-| Draft Initial | 15–30% | Writer Agent, Ghost Writer Agent |
-| Draft Review | 30–45% | Writer Agent (human feedback loop) |
-| Copy Edit | 45–60% | Copy Editor Agent, Writer Agent |
-| Fact Check | 60–70% | Fact Check Agent |
-| Compliance | 70–82% | Compliance Agent, Validators |
-| Rewrite Loop | 82–90% | Writer Agent (gate-driven rewrites) |
-| Title Selection | 90–96% | Human choice (via job store) |
-| Finalize | 96–100% | Pipeline (publishing pack generation) |
+Phase names and progress ranges come from `BlogPhase` and `PHASE_PROGRESS_RANGES` in `shared/models.py`.
+
+| `BlogPhase` | Enum value | Progress | Agent(s) Involved |
+|-------------|-----------|----------|-------------------|
+| `PLANNING` | `planning` | 0–15% | `BlogWriterAgent.plan_content()` (refine loop) |
+| `DRAFT_INITIAL` | `draft_initial` | 15–30% | Writer Agent, Ghost Writer Elicitation |
+| `DRAFT_REVIEW` | `draft_review` | 30–45% | Writer Agent (human feedback loop) |
+| `COPY_EDIT_LOOP` | `copy_edit` | 45–60% | Copy Editor Agent ↔ Writer Agent |
+| `FACT_CHECK` | `fact_check` | 60–70% | Validators + Fact Check Agent |
+| `COMPLIANCE` | `compliance` | 70–82% | Compliance Agent |
+| `REWRITE_LOOP` | `rewrite` | 82–90% | Writer Agent (gate-driven rewrites) |
+| `TITLE_SELECTION` | `title_selection` | 90–96% | Human choice (via job store) |
+| `FINALIZE` | `finalize` | 96–100% | Pipeline (publishing pack generation) |
+
+**Implementation note:** `run_pipeline()` evaluates the gates inside a single loop bounded by `max_rewrite_iterations`. On each iteration it runs Validators → Fact Check → Compliance in sequence. Title selection only runs once inside the `all_pass` branch, after every gate has returned `PASS`.
 
 ---
 
@@ -219,42 +226,45 @@ graph TD
 
 | Module | Blogging Team Usage |
 |--------|---------------------|
-| **shared_postgres** | `blogging_stories` table for story bank persistence; schema registered at FastAPI lifespan startup via `register_team_schemas(SCHEMA)` |
-| **shared_temporal** | `BlogFullPipelineWorkflow` wraps the full pipeline as a single long-lived activity (12h timeout, 3 retries, 30s heartbeat); checkpoints for human-in-the-loop pauses |
-| **llm_service** | `OllamaLLMClient` singleton created at API startup; agents call `complete_json()` for structured output and `complete()` for text generation; factory resolves model via env chain |
-| **event_bus** | Thread-safe SSE pub/sub: pipeline publishes progress events per job; Angular UI subscribes via `/job/{job_id}/stream` endpoint for real-time updates |
+| **shared_postgres** | `blogging_stories` table for story bank persistence; schema registered at FastAPI lifespan startup via `register_team_schemas(SCHEMA)`. See `postgres/__init__.py` |
+| **shared_temporal** | `BlogFullPipelineWorkflow` wraps the full pipeline as a single long-lived activity. `schedule_to_close_timeout=12h`, `heartbeat_timeout=5m`, `RetryPolicy(maximum_attempts=3, initial_interval=30s, maximum_interval=2m, backoff_coefficient=2.0)`. A background heartbeat thread calls `activity.heartbeat()` every 30s (`shared/run_pipeline_job.py:170`). See `temporal/workflows.py:15-38` |
+| **llm_service** | `get_client("blog")` returns an `OllamaLLMClient`; agents call `complete_json()` for structured output and `complete()` for text generation. Planning can use a different model via the `BLOG_PLANNING_MODEL` env var |
+| **event_bus** | Thread-safe SSE pub/sub (`shared/job_event_bus.py`): `run_pipeline_job.py` publishes update events for every job store mutation; the UI subscribes via `GET /job/{job_id}/stream` |
 
 ---
 
 ## 5. Agent Responsibility Matrix
 
-| Agent | Module | Role | Input Model | Output Model | Key Behavior |
-|-------|--------|------|-------------|--------------|--------------|
-| **Research Agent** | `blog_research_agent/` | Web + arXiv search, source ranking, document synthesis | `ResearchBriefInput` | `ResearchAgentOutput` | Stateless; parallel search queries; relevance scoring |
-| **Planning Agent** | `blog_planning_agent/` | Structured content plan with refine-until-done loop | `PlanningInput` | `PlanningPhaseResult` | Self-critique via `RequirementsAnalysis`; max 5 iterations |
-| **Writer Agent** | `blog_writer_agent/` | Draft generation and revision from feedback | `WriterInput` / `ReviseWriterInput` | `WriterOutput` | Dual role: initial draft + feedback-driven revision; detects uncertainty questions |
-| **Copy Editor Agent** | `blog_copy_editor_agent/` | Draft quality, style, and length feedback | `CopyEditorInput` | `CopyEditorOutput` | Read-only feedback; staleness detection; escalation after 10 iterations |
-| **Ghost Writer Agent** | `ghost_writer_agent/` | Personal story elicitation via multi-turn interview | `StoryGap` | `StoryElicitationResult` | Conversational interview; stories saved to bank for reuse |
-| **Validators** | `validators/` | Deterministic content checks (no LLM) | Draft text | `ValidatorReport` | Banned phrases, reading level, paragraph length, required sections |
-| **Fact Check Agent** | `blog_fact_check_agent/` | Claims verification and risk flagging | Draft + allowed claims | `FactCheckReport` | Flags unverified claims; identifies required disclaimers |
-| **Compliance Agent** | `blog_compliance_agent/` | Brand/style enforcement with veto power | Draft + brand spec + validator report | `ComplianceReport` | FAIL status blocks publication; triggers rewrite loop |
-| **Publication Agent** | `blog_publication_agent/` | Draft submission, approval, platform formatting | `SubmitDraftInput` | `ApprovalResult` | Formats for Medium, DevTo, Substack; writes to `blog_posts/`; invoked by API, not by pipeline |
-| **Medium Stats Agent** | `blog_medium_stats_agent/` | Medium.com dashboard stats scraping | `MediumStatsRunConfig` | `MediumStatsReport` | Playwright automation; Google browser login integration |
+Agents marked **[pipeline]** are orchestrated by `run_pipeline()`. Agents marked **[standalone]** live in the team but are not invoked by the pipeline — they are either triggered directly by the API layer or exist as alternative implementations.
+
+| Agent | Module | Orchestration | Role | Key I/O |
+|-------|--------|---------------|------|---------|
+| **Writer Agent** | `blog_writer_agent/` | [pipeline] | Plan generation (`plan_content()`) + initial draft + feedback-driven revision + uncertainty detection | `PlanningInput`/`WriterInput`/`ReviseWriterInput` → `PlanningPhaseResult`/`WriterOutput` |
+| **Ghost Writer Elicitation** | `ghost_writer_agent/` | [pipeline] | Identifies `[Author: ...]` placeholders, conducts multi-turn interviews, persists stories to Postgres for reuse | `ContentPlan`/`StoryGap` → `StoryElicitationResult[]` |
+| **Copy Editor Agent** | `blog_copy_editor_agent/` | [pipeline] | Read-only feedback loop with staleness detection and human-escalation after `COPY_EDIT_ESCALATION_THRESHOLD` (default 10) iterations | `CopyEditorInput` → `CopyEditorOutput` |
+| **Validators** | `validators/` | [pipeline] | Deterministic no-LLM checks (banned phrases, reading level, paragraph length, required sections, claims policy) | Draft text → `ValidatorReport` |
+| **Fact Check Agent** | `blog_fact_check_agent/` | [pipeline] | LLM-based claim verification and risk flagging with required-disclaimer detection | Draft + allowed claims → `FactCheckReport` |
+| **Compliance Agent** | `blog_compliance_agent/` | [pipeline] | LLM-based brand/style enforcement with veto power — FAIL triggers the closed-loop rewrite | Draft + brand spec + validator report → `ComplianceReport` |
+| **Research Agent** | `blog_research_agent/` | [standalone] | Ollama web_search + arXiv + ranking + synthesis. Not called by v2 pipeline; `PlanningInput.research_digest` defaults to `""` | `ResearchBriefInput` → `ResearchAgentOutput` |
+| **Planning Agent (class)** | `blog_planning_agent/` | [standalone] | Alternative planning implementation with its own refine loop. Not wired into v2; planning uses `BlogWriterAgent.plan_content()` instead | `PlanningInput` → `PlanningPhaseResult` |
+| **Publication Agent** | `blog_publication_agent/` | [standalone] | Draft submission and platform formatting (Medium, dev.to, Substack). `run_pipeline()` writes the `publishing_pack.json` artifact directly and does not call this agent | `SubmitDraftInput` → `ApprovalResult` |
+| **Medium Stats Agent** | `blog_medium_stats_agent/` | [standalone] | Playwright automation against `medium.com/me/stats`, reusing the shared Google browser login when configured | `MediumStatsRunConfig` → `MediumStatsReport` |
 
 ---
 
 ## 6. API Surface
 
-The blogging team mounts at `/api/blogging` with these endpoint groups:
+The blogging team mounts at `/api/blogging`. Routes live in `api/main.py`.
 
 | Category | Endpoints | Purpose |
 |----------|-----------|---------|
-| **Pipeline** | `POST /full-pipeline` (sync), `POST /full-pipeline-async`, `POST /research-and-review` | Trigger pipeline execution |
-| **Jobs** | `GET /job/{job_id}`, `DELETE /job/{job_id}`, `POST /job/{job_id}/restart`, `POST /job/{job_id}/resume`, `POST /job/{job_id}/cancel` | Async job lifecycle management |
+| **Pipeline** | `POST /full-pipeline` (sync), `POST /full-pipeline-async` | Trigger full pipeline execution |
+| **Jobs** | `GET /jobs`, `GET /job/{job_id}`, `DELETE /job/{job_id}`, `POST /job/{job_id}/restart`, `POST /job/{job_id}/resume`, `POST /job/{job_id}/cancel` | List and manage async jobs |
 | **Streaming** | `GET /job/{job_id}/stream` (SSE) | Real-time progress events |
 | **Collaboration** | `POST /job/{job_id}/select-title`, `POST /job/{job_id}/rate-titles`, `POST /job/{job_id}/draft-feedback`, `POST /job/{job_id}/story-response`, `POST /job/{job_id}/skip-story-gap`, `POST /job/{job_id}/answers` | Human-in-the-loop inputs |
 | **Approval** | `POST /job/{job_id}/approve`, `POST /job/{job_id}/unapprove` | Final draft approval |
-| **Artifacts** | `GET /job/{job_id}/artifacts`, `GET /job/{job_id}/artifacts/{name}` | Browse and download pipeline artifacts |
+| **Artifacts** | `GET /job/{job_id}/artifacts`, `GET /job/{job_id}/artifacts/{artifact_name}` | Browse and download pipeline artifacts |
+| **Story bank** | `GET /stories`, `GET /stories/{story_id}`, `DELETE /stories/{story_id}`, `GET /stories/search/{keywords}` | Cross-post personal-anecdote reuse |
 | **Analytics** | `POST /medium-stats`, `POST /medium-stats-async` | Medium.com stats collection |
 | **Health** | `GET /health` | Brand spec configuration status |
 
@@ -262,11 +272,11 @@ The blogging team mounts at `/api/blogging` with these endpoint groups:
 
 ## 7. Execution Modes
 
-The blogging team supports two runtime modes:
+`POST /full-pipeline-async` picks one of two runtime modes based on whether Temporal is configured (see `shared/run_pipeline_job.py`):
 
 | Mode | Trigger | Characteristics |
 |------|---------|-----------------|
-| **Thread Mode** (default) | `TEMPORAL_ADDRESS` not set | Agents run as Python threads; pipeline executes in-process; state in memory + job store |
-| **Temporal Mode** | `TEMPORAL_ADDRESS` is set | `BlogFullPipelineWorkflow` wraps pipeline as durable activity; 12h timeout; 30s heartbeat; state survives server restarts; 3 retries with exponential backoff |
+| **Thread Mode** (fallback) | `TEMPORAL_ADDRESS` not set | A daemon Python thread runs `run_blog_full_pipeline_job()` in-process; job state lives in Postgres (via `blog_job_store`); progress is published to the in-memory SSE bus |
+| **Temporal Mode** | `TEMPORAL_ADDRESS` is set | `BlogFullPipelineWorkflow` schedules `run_full_pipeline_activity`; `schedule_to_close_timeout=12h`, `heartbeat_timeout=5m`, retry policy 3 attempts with 30s→2m exponential backoff. A background heartbeat thread calls `activity.heartbeat()` every 30s; state survives worker restarts |
 
-Both modes use the same `run_blog_full_pipeline_job()` entry point and produce identical artifacts.
+Both modes call the same `run_blog_full_pipeline_job()` entry point, produce identical artifacts, and publish identical SSE events. The synchronous `POST /full-pipeline` endpoint always runs in-process on the request thread.

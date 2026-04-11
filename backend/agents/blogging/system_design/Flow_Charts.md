@@ -15,35 +15,34 @@ flowchart TD
     ResolveProfile --> LoadBrandSpec[Load brand spec + writing guidelines<br/>Render Jinja2 templates with AuthorProfile]
     LoadBrandSpec --> StartPipeline[Start pipeline<br/>Status: RUNNING]
 
-    StartPipeline --> Research["Research Agent<br/>Web search + arXiv + synthesis<br/>(0-8%)"]
-    Research --> Planning["Planning Agent<br/>Content plan + refine loop<br/>(8-15%)"]
+    StartPipeline --> Planning["BlogWriterAgent.plan_content()<br/>ContentPlan + refine loop<br/>(research_digest defaults to empty)<br/>(BlogPhase.PLANNING, 0-15%)"]
 
     Planning --> PlanOK{Plan<br/>acceptable?}
     PlanOK -->|No| PlanFail([FAILED<br/>PlanningError])
-    PlanOK -->|Yes| WriteDraft["Writer Agent<br/>Generate draft_v1<br/>(15-25%)"]
+    PlanOK -->|Yes| WriteDraft["Writer Agent<br/>Generate draft_v1<br/>(DRAFT_INITIAL, 15-25%)"]
 
     WriteDraft --> StoryCheck{Story<br/>placeholders<br/>detected?}
-    StoryCheck -->|Yes| StoryElicit["Ghost Writer Agent<br/>Multi-turn interviews<br/>(25-30%)"]
+    StoryCheck -->|Yes| StoryElicit["Ghost Writer Elicitation<br/>Multi-turn interviews<br/>(story_elicitation sub-phase, ~27%)"]
     StoryCheck -->|No| DraftReady
     StoryElicit --> RegenDraft[Regenerate draft with stories]
     RegenDraft --> DraftReady
 
     DraftReady[Draft ready] --> UncertaintyCheck{Uncertainty<br/>questions?}
-    UncertaintyCheck -->|Yes| WaitAnswers["Wait for user answers<br/>(30-35%)"]
+    UncertaintyCheck -->|Yes| WaitAnswers["Wait for user answers<br/>(DRAFT_REVIEW, 30-35%)"]
     UncertaintyCheck -->|No| DraftReview
     WaitAnswers --> ReviseAnswers[Revise draft with answers]
     ReviseAnswers --> DraftReview
 
-    DraftReview["Wait for draft feedback<br/>(35-45%)"] --> FeedbackReceived{Author<br/>approved?}
+    DraftReview["Wait for draft feedback<br/>(DRAFT_REVIEW, 35-45%)"] --> FeedbackReceived{Author<br/>approved?}
     FeedbackReceived -->|Feedback| ReviseDraft[Revise from user feedback]
     ReviseDraft --> DraftReview
     FeedbackReceived -->|Approved / Skipped| CopyEdit
 
-    CopyEdit["Copy Edit Loop<br/>(45-60%)"] --> EditorApproved{Editor<br/>approved?}
+    CopyEdit["Copy Edit Loop<br/>(COPY_EDIT_LOOP, 45-60%)"] --> EditorApproved{Editor<br/>approved?}
     EditorApproved -->|Yes| RunGates
     EditorApproved -->|Loop exhausted| RunGates
 
-    subgraph RunGates["Quality Gates (60-82%)"]
+    subgraph RunGates["Quality Gates (FACT_CHECK 60-70%, COMPLIANCE 70-82%)"]
         Validators["Validators<br/>Banned phrases, reading level,<br/>paragraph length, required sections"]
         FactCheck["Fact Check Agent<br/>Claims verification, risk flags,<br/>required disclaimers"]
         Compliance["Compliance Agent<br/>Brand spec alignment,<br/>violation detection"]
@@ -53,17 +52,23 @@ flowchart TD
     Compliance --> GatesPass{All gates<br/>PASS?}
     GatesPass -->|Yes| TitleSelect
     GatesPass -->|No| RewriteCheck{Rewrite<br/>iterations<br/>remaining?}
-    RewriteCheck -->|Yes| Rewrite["Rewrite from gate feedback<br/>(82-90%)"]
+    RewriteCheck -->|Yes| Rewrite["Rewrite from consolidated<br/>required_fixes<br/>(REWRITE_LOOP, 82-90%)"]
     Rewrite --> RunGates
     RewriteCheck -->|No| NeedsReview([NEEDS_HUMAN_REVIEW])
 
-    TitleSelect["Title Selection<br/>Wait for user choice<br/>(90-96%)"] --> Finalize["Generate PublishingPack<br/>(96-100%)"]
+    TitleSelect["Title Selection<br/>Wait for user choice<br/>(TITLE_SELECTION, 90-96%)"] --> Finalize["Write final.md +<br/>publishing_pack.json<br/>(FINALIZE, 96-100%)"]
     Finalize --> Complete([COMPLETED / PASS])
 
     style PlanFail fill:#ffcccc,stroke:#cc0000
     style NeedsReview fill:#fff3cd,stroke:#cc9900
     style Complete fill:#ccffcc,stroke:#00cc00
 ```
+
+**Implementation notes:**
+
+- The research phase shown in earlier versions of this diagram has been removed. `run_pipeline()` builds `PlanningInput` with `research_digest=""` (the default in `shared/content_plan.py:197`) and never calls `BlogResearchAgent`. The research module remains available as a standalone component.
+- Planning is done inline by `BlogWriterAgent.plan_content()` (`blog_writer_agent/agent.py:294`), not by a separate `BlogPlanningAgent` class.
+- Validators, fact-check, and compliance all run inside a single loop bounded by `max_rewrite_iterations`. Title selection is only reached after an iteration where every gate returned `PASS`.
 
 ---
 
@@ -323,7 +328,37 @@ flowchart TD
 
 ---
 
-## 7. Temporal Workflow Execution
+## 7. Async Pipeline: Temporal vs Thread Branching
+
+When a client calls `POST /full-pipeline-async`, the API chooses a runtime mode based on whether Temporal is configured. Both paths end up calling the same `run_blog_full_pipeline_job()` entry point.
+
+```mermaid
+flowchart TD
+    Start([POST /full-pipeline-async]) --> CreateJob[create_blog_job<br/>Status: PENDING]
+    CreateJob --> CheckTemporal{TEMPORAL_ADDRESS<br/>set?}
+
+    CheckTemporal -->|Yes| StartWF[temporal client:<br/>start BlogFullPipelineWorkflow]
+    StartWF --> Worker[Temporal worker picks up activity]
+    Worker --> Activity[run_full_pipeline_activity]
+    Activity --> HB[Spawn heartbeat thread<br/>activity.heartbeat every 30s]
+    HB --> RunJob
+
+    CheckTemporal -->|No| Thread[Daemon Python thread<br/>runs in API process]
+    Thread --> RunJob
+
+    RunJob["run_blog_full_pipeline_job(job_id, request)"]
+    RunJob --> Pipeline[run_pipeline orchestrator]
+    Pipeline --> JobUpdates[Update Postgres job store<br/>Publish SSE events]
+
+    style CheckTemporal fill:#e6f3ff,stroke:#4a90d9
+    style RunJob fill:#ccffcc,stroke:#00cc00
+```
+
+In thread mode, a failure crashes only the daemon thread; the API process keeps serving. In Temporal mode, the workflow is durable: if the worker dies mid-pipeline the retry policy reruns the activity up to 3 times (30s→2m backoff), and the `heartbeat_timeout=5m` ensures stuck activities are detected and reassigned.
+
+---
+
+## 8. Temporal Workflow Execution Detail
 
 The durable workflow execution path when `TEMPORAL_ADDRESS` is configured.
 
@@ -382,7 +417,7 @@ sequenceDiagram
 
 ---
 
-## 8. Finalization & Approval Decision Tree
+## 9. Finalization & Approval Decision Tree
 
 After all quality gates pass and the title is selected, the pipeline generates a `PublishingPack` artifact and completes the job. Approval is handled by the API layer via separate endpoints.
 
@@ -411,9 +446,9 @@ flowchart TD
 
 ---
 
-## 9. Research Agent Internal Flow
+## 10. Research Agent Internal Flow (standalone module)
 
-The research agent's internal pipeline for gathering and synthesizing information.
+The research agent lives in `blog_research_agent/` and is a fully functional standalone module. It is **not** invoked by `run_pipeline()` in the current v2 path — it is kept available for future re-integration or direct scripted use. The flow below documents how the module works when it is run on its own.
 
 ```mermaid
 flowchart TD
