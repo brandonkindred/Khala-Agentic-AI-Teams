@@ -35,6 +35,11 @@ COPY agents/shared_postgres /app/shared_postgres
 # Shared Temporal helpers (checkpoints/runner/worker) imported by blog_job_store
 COPY agents/shared_temporal /app/shared_temporal
 
+# Shared OpenTelemetry helpers (init_otel/instrument_fastapi_app) imported by
+# blogging.api.main. Falls through to no-op when the opentelemetry SDK
+# packages are not installed, so no extra deps needed in this slim image.
+COPY agents/shared_observability /app/shared_observability
+
 # Minimal unified_api modules needed by blogging Medium integration.
 # These are lazy-imported by blogging/shared/medium_integration_access.py.
 COPY unified_api/__init__.py /app/unified_api/__init__.py
