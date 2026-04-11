@@ -161,13 +161,23 @@ a specific client's IPS. Keeping both tracks in one package lets
 
 ### 2. IPS-first, hard-constraint model
 
-Every advisor-side recommendation must survive `PolicyGuardianAgent`
-([`agents.py`](../agents.py):49-103) before it can reach a user. IPS caps
+`PolicyGuardianAgent` ([`agents.py`](../agents.py):49-103) treats IPS caps
 (per-position, asset-class, speculative sleeve) and explicit permissions
-(options, crypto, live trading) are treated as **hard constraints** — not
-soft scores. A proposal that violates them is rejected outright and never
-reaches the Investment Committee agent. This is the team's most important
-invariant.
+(options, crypto, live trading) as **hard constraints** — not soft scores.
+When a proposal is run through `POST /proposals/{proposal_id}/validate`
+([`api/main.py`](../api/main.py):534-555) the guardian returns a structured
+list of violations that the caller is expected to gate on before acting.
+
+**Scope of enforcement (today).** The guardian is only invoked by the
+proposal-validation endpoint. It is **not** automatically applied by
+`POST /memos` ([`api/main.py`](../api/main.py):783-793) — that endpoint calls
+`InvestmentCommitteeAgent.draft_memo` directly — nor by `POST /promotions/decide`,
+which consumes a `ValidationReport` rather than a `PortfolioProposal`. In
+practice, enforcement is the caller's responsibility: validate the proposal
+first, then decide whether to request a memo or promote a strategy. Closing
+this gap (automatic PolicyGuardian pre-check on memo and promotion paths) is
+tracked in [`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md) as part of
+the Phase 0 foundation cleanup.
 
 ### 3. Separation of duties is structural
 
@@ -193,15 +203,29 @@ See [`flow_charts.md`](./flow_charts.md) for the decision tree.
 
 ### 5. Safe-by-default workflow mode
 
-`InvestmentTeamOrchestrator.bootstrap` ([`orchestrator.py`](../orchestrator.py):69-71)
-reads `IPS.default_mode` at startup and is expected to begin in
-`WorkflowMode.MONITOR_ONLY`. Any data-integrity failure triggers
-`handle_data_integrity(False)` which **unconditionally degrades** the workflow
-to `monitor_only` and writes
-`data_integrity_failed:degrade_to_monitor_only` to the audit log
-([`orchestrator.py`](../orchestrator.py):77-80). There is no auto-recovery —
-the mode only rises again through an explicit operator action. This is the
-team's second-most-important invariant.
+The API module constructs a single process-wide `WorkflowState()` at
+import time ([`api/main.py`](../api/main.py):78). `WorkflowState` is a
+dataclass whose `mode` field defaults to `WorkflowMode.MONITOR_ONLY`
+([`orchestrator.py`](../orchestrator.py):50), so the running system always
+boots in `monitor_only` regardless of any user's `IPS.default_mode`. The only
+endpoints that expose the workflow state are the read-only
+`GET /workflow/status` ([`api/main.py`](../api/main.py):756) and
+`GET /workflow/queues` ([`api/main.py`](../api/main.py):767).
+
+**What is designed but not wired.** `InvestmentTeamOrchestrator.bootstrap`
+([`orchestrator.py`](../orchestrator.py):69-71) — which would copy
+`ips.default_mode` into `WorkflowState` — and
+`handle_data_integrity(False)` ([`orchestrator.py`](../orchestrator.py):77-80)
+— which would degrade the mode on an integrity failure and write
+`data_integrity_failed:degrade_to_monitor_only` to the audit log — exist as
+methods on the orchestrator and are exercised by
+[`tests/test_investment_team.py`](../tests/test_investment_team.py), but
+**neither is called from the API layer today**. The current production
+behavior is therefore: start in `monitor_only`, stay in `monitor_only`, and
+rely on the fact that no code path mutates `_workflow_state.mode`. Wiring
+these hooks into the FastAPI lifespan (and exposing an operator endpoint to
+raise the mode) is tracked in
+[`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md).
 
 ### 6. Persistence via the Khala job service (not a team schema)
 

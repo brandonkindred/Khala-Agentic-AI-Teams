@@ -213,44 +213,59 @@ flowchart TD
 
 ## 4. Orchestrator workflow mode
 
-`WorkflowMode` governs what the orchestrator will let through. It is
-initialized from `IPS.default_mode` at bootstrap, can be raised by explicit
-operator action, and is automatically clamped to `monitor_only` on any
-data-integrity failure.
+`WorkflowMode` is the orchestrator's safety throttle. The diagram below
+distinguishes **what is live today** (solid transitions implemented in
+`api/main.py`) from **what is designed but not yet wired** (dashed
+transitions defined on the orchestrator but only exercised by tests).
 
 ```mermaid
 stateDiagram-v2
-    [*] --> monitor_only : orchestrator.bootstrap(ips)<br/>reads ips.default_mode<br/>(orchestrator.py:69-71)
+    [*] --> monitor_only : WorkflowState() default<br/>(orchestrator.py:50)<br/>instantiated at api/main.py:78
 
-    monitor_only --> paper : operator raises mode<br/>(validated paper-trading plan)
-    paper --> live : operator raises mode<br/>+ passed 6-gate promotion<br/>+ ips.live_trading_enabled
-    live --> paper : operator lowers mode<br/>(e.g. regime change)
-    paper --> monitor_only : operator lowers mode
+    monitor_only --> monitor_only : GET /workflow/status<br/>(read-only)
 
-    monitor_only --> monitor_only : bootstrap / refresh
-    paper --> monitor_only : handle_data_integrity(False)<br/>(orchestrator.py:77-80)
-    live --> monitor_only : handle_data_integrity(False)<br/>(orchestrator.py:77-80)
+    monitor_only --> paper : designed: operator raises mode<br/>(not wired to any endpoint)
+    paper --> live : designed: operator raises mode<br/>+ passed 6-gate promotion<br/>+ ips.live_trading_enabled
+    live --> paper : designed: operator lowers mode
+    paper --> monitor_only : designed: operator lowers mode
+    paper --> monitor_only : designed: handle_data_integrity(False)<br/>(orchestrator.py:77-80, tests only)
+    live --> monitor_only : designed: handle_data_integrity(False)<br/>(orchestrator.py:77-80, tests only)
 
     note right of monitor_only
-        Safe default.
-        Everything is dry-run;
-        no proposal leaves the team.
+        Today: the process always
+        stays here. No code path
+        mutates _workflow_state.mode.
     end note
     note right of live
-        Requires IPS permission
-        + human approval
-        + risk officer sign-off.
+        Requires IPS permission,
+        human approval, and risk
+        officer sign-off by design —
+        no endpoint exposes the
+        transition yet.
     end note
 ```
 
 **Key notes**
 
-- `handle_data_integrity(False)` writes
-  `data_integrity_failed:degrade_to_monitor_only` to `WorkflowState.audit_log`
-  and cannot be overridden without operator intervention.
-- `GET /workflow/status` ([`api/main.py`](../api/main.py):756) exposes the
-  current mode plus the full audit log so an operator can see exactly why
-  a degrade happened.
-- Mode transitions that *raise* the mode (`monitor_only → paper → live`) are
-  **not** automatic — they require explicit operator calls. The only automatic
-  transition in the system is the degrade to `monitor_only`.
+- **Current behavior.** `_workflow_state = WorkflowState()` is created once
+  at module import ([`api/main.py`](../api/main.py):78) and the dataclass
+  default pins `mode = WorkflowMode.MONITOR_ONLY`
+  ([`orchestrator.py`](../orchestrator.py):50). `GET /workflow/status`
+  ([`api/main.py`](../api/main.py):756) and `GET /workflow/queues`
+  ([`api/main.py`](../api/main.py):767) are the only endpoints that touch
+  it, and both are read-only.
+- **What is defined but not called.** `InvestmentTeamOrchestrator.bootstrap`
+  ([`orchestrator.py`](../orchestrator.py):69-71) (which would copy
+  `ips.default_mode` into the state) and `handle_data_integrity`
+  ([`orchestrator.py`](../orchestrator.py):77-80) (which would degrade the
+  mode and write `data_integrity_failed:degrade_to_monitor_only` to the
+  audit log) are only invoked from
+  [`tests/test_investment_team.py`](../tests/test_investment_team.py). No
+  production path calls them, and there is no FastAPI `lifespan` wiring them
+  to startup.
+- **Why the dashed transitions still appear.** They document the orchestrator
+  contract that downstream code is expected to adopt in Phase 0 of the
+  migration roadmap in
+  [`../ARCHITECTURE_REVIEW.md`](../ARCHITECTURE_REVIEW.md). Once wiring lands,
+  the dashed edges become solid and the safe-degrade invariant is enforced at
+  runtime rather than only in tests.
