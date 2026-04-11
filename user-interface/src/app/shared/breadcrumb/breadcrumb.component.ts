@@ -40,25 +40,21 @@ export class BreadcrumbComponent {
   }
 
   private buildBreadcrumbs(route: ActivatedRoute, url = '', crumbs: Breadcrumb[] = []): Breadcrumb[] {
-    const children = route.children;
-    if (children.length === 0) {
+    const child = route.children[0];
+    if (!child?.snapshot) {
       return crumbs;
     }
 
-    for (const child of children) {
-      const segments = child.snapshot.url.map(s => s.path);
-      if (segments.length > 0) {
-        url += '/' + segments.join('/');
-      }
-
-      const label = child.snapshot.data['breadcrumb'];
-      if (label) {
-        crumbs.push({ label, url });
-      }
-
-      return this.buildBreadcrumbs(child, url, crumbs);
+    const segments = child.snapshot.url.map(s => s.path);
+    if (segments.length > 0) {
+      url += '/' + segments.join('/');
     }
 
-    return crumbs;
+    const label = child.snapshot.data['breadcrumb'];
+    if (label) {
+      crumbs.push({ label, url });
+    }
+
+    return this.buildBreadcrumbs(child, url, crumbs);
   }
 }
