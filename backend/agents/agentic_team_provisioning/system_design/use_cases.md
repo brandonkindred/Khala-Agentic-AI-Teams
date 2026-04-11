@@ -156,10 +156,11 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 |---|---|
 | **Primary actor** | End user (designer, tester) |
 | **API Layer category** | `Testing Chat` (new, grouped with the original 5 under `API Layer`) |
-| **Preconditions** | Team is in `TeamMode.TESTING` (set via `PUT /teams/{team_id}/mode`, `api/main.py:670-677`); at least one roster agent. |
+| **Preconditions** | Team exists; the target agent exists in the team roster (`_find_agent_in_roster`, `api/main.py:685-691`). `TeamMode` is **not** checked server-side — see note below. |
 | **Trigger** | `POST /teams/{team_id}/test-chat/sessions/{session_id}/messages`. |
 | **Main flow** | 1. `get_chat_session` verifies the session belongs to the team; 2. `_find_agent_in_roster` locates the roster entry; 3. `_test_store.create_chat_message` stores the user message; 4. Full history is concatenated to build context; 5. `build_agent` (`runtime/agent_builder.py`) produces a `strands.Agent`; 6. `call_agent` invokes the LLM; 7. Assistant response stored with `create_chat_message`; 8. Optionally rated via `PUT .../messages/{message_id}/rating`. |
 | **Postconditions** | Messages persisted; quality scores aggregated at `GET /teams/{team_id}/test-chat/quality-scores`. |
+| **Note on `TeamMode`** | `PUT /teams/{team_id}/mode` (`api/main.py:670-677`) records the mode as advisory metadata but the test-chat handlers (`:694`, `:760`) do **not** read it. A team in `DEVELOPMENT` mode can still accept test-chat sessions. Treat mode as a UI hint, not a server-enforced gate. |
 | **Relevant files** | `api/main.py:694-851`, `runtime/agent_builder.py`, `testing/store.py` |
 
 ### UC9 — End-to-end pipeline test run with WAIT-step human input (new)
@@ -168,24 +169,27 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 |---|---|
 | **Primary actor** | End user |
 | **API Layer category** | `Pipeline Runs` (new) |
-| **Preconditions** | A `ProcessDefinition` exists; team has matching roster. |
+| **Preconditions** | A `ProcessDefinition` exists on the team. `TeamMode` is not checked — `start_pipeline_run` (`api/main.py:858`) only validates team and process existence. |
 | **Trigger** | `POST /teams/{team_id}/test-pipeline/runs` with `process_id` and `initial_input`. |
-| **Main flow** | 1. Route locates the process; 2. `_test_store.create_pipeline_run` persists a `TestPipelineRun` in `RUNNING`; 3. `PipelineRunner.start_run` spawns `pipeline-{run_id[:16]}` daemon thread; 4. Thread walks the DAG by `StepType`; 5. On `WAIT`, status becomes `WAITING_FOR_INPUT` and a `threading.Event` blocks; 6. User calls `POST /teams/{team_id}/test-pipeline/runs/{run_id}/input`; 7. `submit_human_input` sets the event; 8. Run finishes → `COMPLETED` / `FAILED` / `CANCELLED`. |
+| **Main flow** | 1. Route locates the process; 2. `_test_store.create_pipeline_run` persists a `TestPipelineRun` in `RUNNING`; 3. `PipelineRunner.start_run` spawns `pipeline-{run_id[:16]}` daemon thread; 4. Thread topologically sorts `process.steps` once (`runtime/pipeline_runner.py:254-293`) and iterates the resulting list linearly; 5. For each step, the runner specializes **only** `WAIT` (blocks on a `threading.Event`) and `DECISION` (runs the agent and records the decision string); every other `StepType` — `ACTION`, `PARALLEL_SPLIT`, `PARALLEL_JOIN`, `SUBPROCESS` — falls through to `_handle_action_step` and runs the first assigned agent as a plain action (see `runtime/pipeline_runner.py:90-115`); 6. On `WAIT`, status becomes `WAITING_FOR_INPUT`; 7. User calls `POST /teams/{team_id}/test-pipeline/runs/{run_id}/input`; `submit_human_input` sets the event; 8. Run finishes → `COMPLETED` / `FAILED` / `CANCELLED`. |
 | **Postconditions** | `test_pipeline_runs` row with per-step `PipelineStepResult` entries. |
+| **Note on step semantics** | The runner does **not** fan out `PARALLEL_SPLIT`, synchronize `PARALLEL_JOIN`, branch on `DECISION` results, or recurse into `SUBPROCESS`. When designing a test pipeline, assume a linear topologically-sorted walk with WAIT-pause. See `flow_charts.md` §6 "Unimplemented semantics". |
 | **Relevant files** | `api/main.py:858-933`, `runtime/pipeline_runner.py`, `testing/store.py`, `models.py:414-427` |
 
 ## 3. Priority matrix
 
-| Use case | Category | Priority | Mode |
+| Use case | Category | Priority | Typical usage context |
 |---|---|---|---|
-| UC1 Conversational team design | `User Requests` | Critical path | Development |
-| UC2 Roster validation | `Team / Job Status` | Critical path | Development |
-| UC3 Process edit | `User Requests` | Critical path | Development |
-| UC4 Agent env provisioning | `Team / Job Status` | Critical path (async) | Development |
+| UC1 Conversational team design | `User Requests` | Critical path | Design-time |
+| UC2 Roster validation | `Team / Job Status` | Critical path | Design-time |
+| UC3 Process edit | `User Requests` | Critical path | Design-time |
+| UC4 Agent env provisioning | `Team / Job Status` | Critical path (async) | Design-time |
 | UC5 Questions / jobs | `Questions` + `Team / Job Status` | Essential | Runtime |
 | UC6 Assets (files) | `Assets` | Essential | Runtime |
 | UC7 Form data | `Form Information` | Essential | Runtime |
-| UC8 Testing chat | `Testing Chat` | Optional | Testing |
-| UC9 Pipeline test run | `Pipeline Runs` | Optional | Testing |
+| UC8 Testing chat | `Testing Chat` | Optional | Design / debug |
+| UC9 Pipeline test run | `Pipeline Runs` | Optional | Design / debug |
+
+The **Typical usage context** column describes when a user would naturally reach for the use case; it is **not** a reflection of `TeamMode`. `TeamMode` is advisory metadata and none of these endpoints are gated by it (see UC8 note and `flow_charts.md` §8).
 
 Every use case can be traced back to exactly one box in `AgenticTeamApiInteractionsArchitecture.png` (the original five) or to one of the two new `API Layer` boxes added here, so reviewers can hold the PNG and this document side by side without losing context.

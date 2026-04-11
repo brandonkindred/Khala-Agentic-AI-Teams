@@ -17,6 +17,14 @@ All diagrams use **Mermaid** (renderable directly on GitHub) and reuse the vocab
 | [`use_cases.md`](use_cases.md) | Actor → UI → API Layer use-case map. Enumerates the concrete use cases that flow through each of the 5 API categories from the API interactions PNG, plus Testing Chat and Pipeline Runs. | [`../designs/AgenticTeamApiInteractionsArchitecture.png`](../designs/AgenticTeamApiInteractionsArchitecture.png) |
 | [`flow_charts.md`](flow_charts.md) | Sequence diagrams (conversational team design, agent env provisioning bridge, asset upload, form record write), flow charts (roster validation, pipeline run), and state diagrams (`PipelineRunStatus`, `TeamMode`). | Animates the static boxes from both legacy PNGs. |
 
+## Accuracy notes — read these before designing a test pipeline
+
+These docs describe the code **as implemented**, not what the `StepType` enum or `ProcessDesignerAgent` system prompt suggest is possible. Two gaps to be aware of:
+
+1. **`PipelineRunner` walks a linear topological order.** `runtime/pipeline_runner.py:83` pre-computes `step_order = _topological_sort(process.steps)` once and iterates it linearly at lines 90-115. Only `WAIT` and `DECISION` have dedicated handlers; `PARALLEL_SPLIT`, `PARALLEL_JOIN`, and `SUBPROCESS` all fall through to `_handle_action_step`. Even `DECISION` does **not** alter traversal — it runs the agent, records the decision string, and advances to the next topologically-sorted step. Do not design pipeline tests that depend on fan-out, barriers, recursion, or branch selection; they will silently run as plain linear sequences. Details and the full "expected vs. actual" table are in [`flow_charts.md`](flow_charts.md#6-flowchart--pipeline-test-run-animates-uc9).
+
+2. **`TeamMode` is advisory metadata, not a server-side gate.** `PUT /teams/{id}/mode` (`api/main.py:670-677`) records the mode, but `create_test_chat_session` (`:694`), `send_test_chat_message` (`:760`), and `start_pipeline_run` (`:858`) never read it. A team in `DEVELOPMENT` mode can still accept test chat sessions and pipeline runs. Treat `TeamMode` as a UI hint, not a security boundary. See [`use_cases.md` UC8](use_cases.md#uc8--interactive-testing-chat-with-a-rostered-agent-new) and [`flow_charts.md` §8](flow_charts.md#8-state--teammode-advisory-metadata-only).
+
 ## Related references
 
 - [`../AGENTIC_TEAM_ARCHITECTURE.md`](../AGENTIC_TEAM_ARCHITECTURE.md) — **normative contract** for every agentic team produced by this service. Do not contradict.

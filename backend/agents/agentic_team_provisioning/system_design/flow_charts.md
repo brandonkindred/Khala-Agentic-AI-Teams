@@ -168,39 +168,61 @@ Source: [`roster_validation.py:23-151`](../roster_validation.py).
 
 ## 6. Flowchart — Pipeline test run (animates UC9)
 
+> **Important — this flowchart documents what the code actually does, not what the `StepType` enum advertises.** `runtime/pipeline_runner.py` pre-computes a single topological order of `process.steps` (`_topological_sort`, line 254-293) and walks it linearly. Only two step types have dedicated handlers: `WAIT` (blocks on a `threading.Event` until `POST .../input` or `cancel`) and `DECISION` (runs the agent against `step.condition`, records the decision string as the step's output, and advances to the next topologically-sorted step). **Every other `StepType` — `ACTION`, `PARALLEL_SPLIT`, `PARALLEL_JOIN`, `SUBPROCESS` — falls through to `_handle_action_step` and is treated as a plain action.** The runner does **not** fan out parallel splits, synchronize joins, branch on decision results, or recurse into subprocesses. If you design a test pipeline that depends on those semantics, it will silently run as a linear sequence of actions instead. See the "Unimplemented semantics" note below the diagram.
+
 ```mermaid
 flowchart TD
     Start["POST /teams/{id}/test-pipeline/runs"]
-    Start --> Locate["Locate ProcessDefinition in team.processes"]
-    Locate --> Create["_test_store.create_pipeline_run<br/>(status=RUNNING)"]
-    Create --> Spawn["PipelineRunner.start_run<br/>→ thread: pipeline-{run_id[:16]}"]
+    Start --> Locate["Locate ProcessDefinition in team.processes<br/>(api/main.py:858-877)"]
+    Locate --> Create["_test_store.create_pipeline_run<br/>(status=RUNNING, initial_input)"]
+    Create --> Spawn["PipelineRunner.start_run<br/>→ daemon thread: pipeline-{run_id[:16]}"]
     Spawn --> Execute["_execute(run_id, team_agents, process, resume_event)"]
-    Execute --> Walk{"for step in DAG"}
-    Walk -->|ACTION| RunAction["build_agent(...) → call_agent(input) → PipelineStepResult"]
-    Walk -->|DECISION| EvalCond["evaluate step.condition → pick next step_id"]
-    Walk -->|PARALLEL_SPLIT| Fan["enqueue children in parallel"]
-    Walk -->|PARALLEL_JOIN| Merge["wait for all parents"]
-    Walk -->|SUBPROCESS| Nest["recurse into sub-process"]
-    Walk -->|WAIT| Pause["status=WAITING_FOR_INPUT<br/>human_prompt=step.description<br/>resume_event.wait()"]
+    Execute --> Sort["step_order = _topological_sort(process.steps)<br/>prev_output = run.initial_input or ''"]
+    Sort --> Walk{"for step in step_order"}
 
-    Pause --> Resume{"POST .../input OR cancel?"}
-    Resume -->|input| Resumed["submit_human_input:<br/>human_inputs[run_id]=input<br/>status=running<br/>event.set()"]
-    Resume -->|cancel| Cancelled["cancel_run:<br/>status=CANCELLED<br/>event.set()"]
+    Walk --> CancelCheck{"status == 'cancelled'?"}
+    CancelCheck -->|yes| End["End"]
+    CancelCheck -->|no| SetCurrent["update_pipeline_run<br/>(current_step_id, status=running)"]
+
+    SetCurrent --> StepKind{"step.step_type"}
+    StepKind -->|"WAIT"| Pause["_handle_wait_step:<br/>status=WAITING_FOR_INPUT<br/>human_prompt=step.description<br/>resume_event.wait()"]
+    StepKind -->|"DECISION"| DecisionHandler["_handle_decision_step:<br/>build_agent → call_agent(condition_prompt)<br/>record decision as prev_output<br/><b>does not alter traversal</b>"]
+    StepKind -->|"ACTION / PARALLEL_SPLIT /<br/>PARALLEL_JOIN / SUBPROCESS<br/>(everything else)"| ActionHandler["_handle_action_step:<br/>agent_name = step.agents[0]<br/>build_agent → call_agent(step_input)<br/>append PipelineStepResult"]
+
+    Pause --> ResumeSignal{"resume_event.set() by..."}
+    ResumeSignal -->|"submit_human_input"| Resumed["human_inputs[run_id]=input<br/>status=running<br/>prev_output = input"]
+    ResumeSignal -->|"cancel_run"| Cancelled["status=CANCELLED<br/>return"]
+
     Resumed --> Walk
-    RunAction --> Walk
-    EvalCond --> Walk
-    Fan --> Walk
-    Merge --> Walk
-    Nest --> Walk
+    DecisionHandler --> Walk
+    ActionHandler --> Walk
 
-    Walk -->|done| Finish["status=COMPLETED<br/>finished_at=now"]
-    Walk -.->|exception| Fail["status=FAILED<br/>error=str(e)"]
-    Cancelled --> End["End"]
+    Walk -->|done| Finish["status=COMPLETED<br/>step_results=[...], finished_at=now"]
+    Walk -.->|exception| Fail["status=FAILED<br/>error=str(exc)"]
+    Cancelled --> End
     Finish --> End
     Fail --> End
+
+    classDef impl fill:#e6f4ea,stroke:#188038
+    classDef gap  fill:#fef7e0,stroke:#f9ab00
+    class Pause,DecisionHandler,ActionHandler impl
+    class StepKind gap
 ```
 
-Source: [`runtime/pipeline_runner.py:33-120+`](../runtime/pipeline_runner.py), [`api/main.py:858-933`](../api/main.py), `StepType` in [`models.py:24-32`](../models.py), `PipelineRunStatus` in [`models.py:57-64`](../models.py).
+### Unimplemented semantics (design intent vs. runtime reality)
+
+| `StepType` | Enum (`models.py:24-32`) | `ProcessDesignerAgent` prompt (`assistant/agent.py:73`) | `PipelineRunner` behaviour |
+|---|---|---|---|
+| `ACTION`        | ✔ defined | advertised | `_handle_action_step` — runs assigned agent on prev output |
+| `DECISION`      | ✔ defined | advertised as branching | `_handle_decision_step` runs the agent, records the decision string, but **the loop ignores the return value and advances to the next topologically-sorted step**. Decision results are visible in `step_results` for human inspection only. |
+| `WAIT`          | ✔ defined | advertised | `_handle_wait_step` — pauses on `threading.Event`, resumes via `submit_human_input` |
+| `PARALLEL_SPLIT`| ✔ defined | advertised as fan-out | falls through to `_handle_action_step`; **no fan-out** |
+| `PARALLEL_JOIN` | ✔ defined | advertised as barrier | falls through to `_handle_action_step`; **no synchronization** |
+| `SUBPROCESS`    | ✔ defined | advertised as nested process | falls through to `_handle_action_step`; **no recursion into a sub-DAG** |
+
+If any of these semantics are needed, they must be added to `PipelineRunner._execute`. The author of a new test should treat the current runner as **"walk the DAG topologically and run one agent per step; pause on WAIT; record decisions as strings."**
+
+Source: [`runtime/pipeline_runner.py:73-293`](../runtime/pipeline_runner.py) (especially `_execute` at line 73, `_handle_action_step` at line 132, `_handle_wait_step` at line 171, `_handle_decision_step` at line 209, `_topological_sort` at line 254), [`api/main.py:858-933`](../api/main.py), `StepType` in [`models.py:24-32`](../models.py), `PipelineRunStatus` in [`models.py:57-64`](../models.py).
 
 ## 7. State — `PipelineRunStatus`
 
@@ -220,18 +242,25 @@ stateDiagram-v2
 
 Source: [`models.py:57-64`](../models.py), [`runtime/pipeline_runner.py:58-71`](../runtime/pipeline_runner.py).
 
-## 8. State — `TeamMode`
+## 8. State — `TeamMode` (advisory metadata only)
+
+> `TeamMode` is **metadata**, not a server-side gate. `PUT /teams/{id}/mode` (`api/main.py:670-677`) writes the mode via `_test_store.set_team_mode`, but **none** of the test-chat or test-pipeline handlers read it — `create_test_chat_session` (`:694`), `send_test_chat_message` (`:760`), and `start_pipeline_run` (`:858`) only check team/session/agent existence. A team in `DEVELOPMENT` mode can still accept test-chat sessions and pipeline runs; a team in `TESTING` mode still accepts design-mode conversation endpoints. Mode is a **UI hint**, not a security boundary.
 
 ```mermaid
 stateDiagram-v2
     [*] --> DEVELOPMENT : POST /teams
     DEVELOPMENT --> TESTING : PUT /teams/{id}/mode (mode=testing)
     TESTING --> DEVELOPMENT : PUT /teams/{id}/mode (mode=development)
-    TESTING --> TESTING : Test chat / pipeline runs
-    DEVELOPMENT --> DEVELOPMENT : Chat / process edits / provisioning
+
+    note right of DEVELOPMENT
+      Advisory label.
+      Every endpoint is reachable in both modes —
+      design-mode chat, test chat, and pipeline runs
+      all work regardless of the current value.
+    end note
 ```
 
-Source: [`models.py:43-47`](../models.py), [`api/main.py:670-677`](../api/main.py).
+Source: [`models.py:43-47`](../models.py), [`api/main.py:670-677`](../api/main.py); absence of mode checks in `api/main.py:694, 760, 858`.
 
 ---
 
