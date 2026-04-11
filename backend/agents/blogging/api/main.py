@@ -990,6 +990,11 @@ def stream_job_status(job_id: str) -> StreamingResponse:
 
             deadline = time.monotonic() + 4 * 3600  # 4-hour max connection
             while time.monotonic() < deadline:
+                # Liveness signal for the event-bus reaper: this consumer is
+                # still reading, so don't evict the subscription even if the
+                # job is quiet for longer than the idle TTL.
+                sub.touch()
+
                 # Drain all queued events
                 sent_terminal = False
                 while sub.events:

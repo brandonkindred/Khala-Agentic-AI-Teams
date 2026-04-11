@@ -394,6 +394,10 @@ class GhostWriterElicitationAgent:
             for round_num in range(max_rounds):
                 # ── Wait for the user to respond (event-driven) ─────────
                 while is_waiting_for_story_input(job_id):
+                    # Liveness signal for the event-bus reaper: this consumer
+                    # may wait on human input for much longer than the idle
+                    # TTL, but is not actually abandoned.
+                    sub.touch()
                     job_data = get_blog_job(job_id)
                     if job_data and job_data.get("status") in ("failed", "cancelled"):
                         return StoryElicitationResult(

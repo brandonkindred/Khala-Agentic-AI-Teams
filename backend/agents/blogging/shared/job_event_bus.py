@@ -17,6 +17,15 @@ To bound in-memory growth under abnormal conditions (e.g. a crash that skips
 the ``finally`` block running), a background reaper evicts idle subscriptions
 older than :data:`_SUB_TTL_SECONDS`, and a hard cap of
 :data:`_MAX_JOBS_TRACKED` jobs triggers eviction of the oldest entries.
+
+**Consumers MUST call** :meth:`Subscription.touch` at least once per
+:data:`_SUB_TTL_SECONDS` (default 1h) while their stream is alive. The reaper
+uses ``last_activity`` as its liveness signal, and publish-side activity is
+not a reliable proxy — a legitimate job can go quiet for long stretches (e.g.
+the SSE endpoint's 4-hour keepalive window, or the ghost-writer waiting on
+human input). Evicting an actively connected consumer would cause later
+terminal events to be dropped, so the contract is: if you're still reading,
+touch the subscription.
 """
 
 from __future__ import annotations
@@ -59,15 +68,28 @@ _REAPER_INTERVAL_SECONDS: float = float(_env_int("BLOGGING_EVENT_BUS_REAPER_INTE
 class Subscription:
     """Handle returned by :func:`subscribe`.
 
-    ``created_at`` is set on construction and never changes; ``last_activity``
-    is refreshed by :func:`publish` whenever an event is appended, so the
-    reaper only evicts genuinely idle subscriptions.
+    ``created_at`` is set on construction and never changes. ``last_activity``
+    is the liveness signal used by the reaper: consumers should call
+    :meth:`touch` at least once per :data:`_SUB_TTL_SECONDS` while their
+    stream is alive. :func:`publish` also refreshes it on each delivered
+    event, but publish-side activity alone is not sufficient — legitimate
+    quiet periods (SSE keepalives during a slow job, ghost-writer waiting on
+    human input) must not trigger eviction.
     """
 
     notify: threading.Event = field(default_factory=threading.Event)
     events: deque = field(default_factory=lambda: deque(maxlen=500))
     created_at: float = field(default_factory=time.monotonic)
     last_activity: float = field(default_factory=time.monotonic)
+
+    def touch(self) -> None:
+        """Refresh the liveness timestamp. Consumers call this each loop iteration.
+
+        Cheap (single attribute write; no lock needed — CPython attribute
+        assignment is atomic, and a stale read from the reaper is harmless:
+        it will re-check on the next interval).
+        """
+        self.last_activity = time.monotonic()
 
 
 _lock = threading.Lock()
