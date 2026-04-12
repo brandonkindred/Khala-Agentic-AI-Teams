@@ -6,11 +6,39 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any, Optional
 from unittest.mock import MagicMock
 
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
+
+from llm_service.clients.dummy import DummyLLMClient  # noqa: E402
+
+
+class _TextStubClient(DummyLLMClient):
+    """Returns a canned text response through the Strands ``stream()`` path.
+
+    ``complete_json`` returns a plain string (not dict) so that
+    ``DummyLLMClient.stream()`` emits it as raw text, matching the template-based
+    output parsers used by the backend-code-v2 phases.
+    """
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__()
+        self._text = text
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        return self._text
 
 from backend_code_v2_team.models import (  # noqa: E402
     BackendCodeV2WorkflowResult,
@@ -191,8 +219,7 @@ class TestPlanningPhase:
 
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = (
+        mock_llm = _TextStubClient(
             "## MICROTASKS ##\n## END MICROTASKS ##\n"
             "## LANGUAGE ##\npython\n## END LANGUAGE ##\n"
             "## SUMMARY ##\nempty\n## END SUMMARY ##"
@@ -255,8 +282,7 @@ class TestExecutionPhase:
 
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = (
+        mock_llm = _TextStubClient(
             "## FILE app.py ##\nprint('hello')\n## SUMMARY ##\ndone\n## END SUMMARY ##"
         )
         task = Task(
@@ -289,8 +315,7 @@ class TestReviewPhase:
 
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = (
+        mock_llm = _TextStubClient(
             "## PASSED ##\ntrue\n## END PASSED ##\n"
             "## ISSUES ##\n## END ISSUES ##\n"
             "## SUMMARY ##\nall good\n## END SUMMARY ##"
@@ -314,8 +339,7 @@ class TestReviewPhase:
 
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = (
+        mock_llm = _TextStubClient(
             "## PASSED ##\nfalse\n## END PASSED ##\n"
             "## ISSUES ##\n---\nsource: code_review\nseverity: critical\ndescription: SQL injection\nfile_path: \nrecommendation: \n---\n## END ISSUES ##\n"
             "## SUMMARY ##\ncritical issue\n## END SUMMARY ##"
@@ -369,8 +393,7 @@ class TestProblemSolvingPhase:
 
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = (
+        mock_llm = _TextStubClient(
             "## FILE a.py ##\nfixed_code()\n"
             "## FIXES_APPLIED ##\n---\nissue: bug\nfix: fixed\n---\n## END FIXES_APPLIED ##\n"
             "## RESOLVED ##\ntrue\n## END RESOLVED ##\n"
@@ -405,8 +428,7 @@ class TestToolAgents:
     def test_data_engineering_agent(self):
         from backend_code_v2_team.tool_agents.data_engineering import DataEngineeringToolAgent
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = (
+        mock_llm = _TextStubClient(
             "## FILE models.py ##\nclass User: pass\n## SUMMARY ##\nschema done\n## END SUMMARY ##"
         )
         agent = DataEngineeringToolAgent(mock_llm)
@@ -419,8 +441,7 @@ class TestToolAgents:
     def test_api_openapi_agent(self):
         from backend_code_v2_team.tool_agents.api_openapi import ApiOpenApiToolAgent
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = (
+        mock_llm = _TextStubClient(
             "## FILE routes.py ##\nroute()\n## SUMMARY ##\napi done\n## END SUMMARY ##"
         )
         agent = ApiOpenApiToolAgent(mock_llm)
@@ -433,8 +454,7 @@ class TestToolAgents:
     def test_auth_agent(self):
         from backend_code_v2_team.tool_agents.auth import AuthToolAgent
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = (
+        mock_llm = _TextStubClient(
             "## FILE auth.py ##\ndef login(): pass\n## SUMMARY ##\nauth done\n## END SUMMARY ##"
         )
         agent = AuthToolAgent(mock_llm)
@@ -576,8 +596,7 @@ class TestToolAgents:
         """run() delegates to execute() for backward compatibility."""
         from backend_code_v2_team.tool_agents.data_engineering import DataEngineeringToolAgent
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = (
+        mock_llm = _TextStubClient(
             "## FILE x.py ##\ncode\n## SUMMARY ##\ndone\n## END SUMMARY ##"
         )
         agent = DataEngineeringToolAgent(mock_llm)

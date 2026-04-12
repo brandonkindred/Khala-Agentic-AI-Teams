@@ -1,6 +1,5 @@
 """Tests for the Product Requirements Analysis agent."""
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -1440,8 +1439,7 @@ def test_sop_models_basic() -> None:
 
 def test_assess_sub_phase_gaps_complete() -> None:
     """When LLM reports sub-phase as complete, returns (True, [])."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": True,
             "completeness_rationale": "All deployment aspects covered.",
@@ -1469,8 +1467,7 @@ def test_assess_sub_phase_gaps_complete() -> None:
 
 def test_assess_sub_phase_gaps_incomplete_with_follow_ups() -> None:
     """When LLM reports gaps, returns (False, [OpenQuestion, ...])."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Missing region info.",
@@ -1533,8 +1530,7 @@ def test_assess_sub_phase_gaps_incomplete_with_follow_ups() -> None:
 
 def test_assess_sub_phase_gaps_malformed_json() -> None:
     """Malformed LLM JSON should degrade gracefully to (True, [])."""
-    llm = MagicMock()
-    llm.complete_text.return_value = "This is not valid JSON at all"
+    llm = _StubClient("This is not valid JSON at all")
     agent = ProductRequirementsAnalysisAgent(llm)
     is_complete, follow_ups = agent._assess_sub_phase_gaps(
         SOPSubPhase.DEPLOYMENT,
@@ -1548,8 +1544,12 @@ def test_assess_sub_phase_gaps_malformed_json() -> None:
 
 def test_assess_sub_phase_gaps_llm_exception() -> None:
     """LLM exception should degrade gracefully to (True, [])."""
-    llm = MagicMock()
-    llm.complete_text.side_effect = RuntimeError("LLM unavailable")
+
+    class _FailingClient(DummyLLMClient):
+        def complete_json(self, prompt, **kwargs):
+            raise RuntimeError("LLM unavailable")
+
+    llm = _FailingClient()
     agent = ProductRequirementsAnalysisAgent(llm)
     is_complete, follow_ups = agent._assess_sub_phase_gaps(
         SOPSubPhase.SECURITY,
@@ -1563,8 +1563,7 @@ def test_assess_sub_phase_gaps_llm_exception() -> None:
 
 def test_assess_sub_phase_gaps_duplicate_ids_skipped() -> None:
     """Follow-up questions with IDs already in decisions_map are skipped with a warning."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Gaps remain.",
@@ -1649,8 +1648,7 @@ def test_assess_sub_phase_gaps_duplicate_ids_skipped() -> None:
 
 def test_assess_sub_phase_gaps_all_dupes_returns_empty_follow_ups() -> None:
     """When all LLM questions are duplicates, follow_ups is empty (loop will exit)."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Gaps remain.",
@@ -1684,8 +1682,7 @@ def test_assess_sub_phase_gaps_all_dupes_returns_empty_follow_ups() -> None:
 
 def test_assess_sub_phase_gaps_options_padded_to_min_3() -> None:
     """When LLM returns < 3 options, they are padded to at least 3."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Gaps.",
@@ -1723,8 +1720,7 @@ def test_assess_sub_phase_gaps_options_padded_to_min_3() -> None:
 
 def test_assess_sub_phase_gaps_exactly_one_default() -> None:
     """After option padding/parsing, exactly one option has is_default=True."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Gaps.",
@@ -1768,8 +1764,7 @@ def test_assess_sub_phase_gaps_exactly_one_default() -> None:
 
 def test_assess_sub_phase_gaps_no_defaults_sets_first() -> None:
     """When LLM returns no default option, the first option becomes default."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Gaps.",
@@ -1815,8 +1810,7 @@ def test_assess_sub_phase_gaps_no_defaults_sets_first() -> None:
 
 def test_assess_sub_phase_gaps_empty_llm_response() -> None:
     """Empty LLM response should degrade gracefully to (True, [])."""
-    llm = MagicMock()
-    llm.complete_text.return_value = ""
+    llm = _StubClient("")
     agent = ProductRequirementsAnalysisAgent(llm)
     is_complete, follow_ups = agent._assess_sub_phase_gaps(
         SOPSubPhase.BUDGET,
@@ -1830,8 +1824,7 @@ def test_assess_sub_phase_gaps_empty_llm_response() -> None:
 
 def test_assess_sub_phase_gaps_passes_existing_ids_to_prompt() -> None:
     """Verify that existing question IDs are passed to the LLM prompt."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _TrackingStubClient(
         {"is_complete": True, "completeness_rationale": "Done.", "follow_up_questions": []}
     )
     agent = ProductRequirementsAnalysisAgent(llm)
@@ -1850,9 +1843,9 @@ def test_assess_sub_phase_gaps_passes_existing_ids_to_prompt() -> None:
         {"P1.deploy.a": "AWS", "P1.deploy.b": "ECS"},
     )
     # The prompt should contain the existing question IDs
-    call_args = llm.complete_text.call_args[0][0]
-    assert "P1.deploy.a" in call_args
-    assert "P1.deploy.b" in call_args
+    prompt = llm.last_prompt
+    assert "P1.deploy.a" in prompt
+    assert "P1.deploy.b" in prompt
 
 
 def test_max_gap_rounds_constant() -> None:
