@@ -147,7 +147,9 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
 
     # Safety net: same as main agent
     if not approved and not critical_or_high and deduped:
-        logger.info("CodeReviewCoordinator: overriding to approved=True (only medium/low/info issues)")
+        logger.info(
+            "CodeReviewCoordinator: overriding to approved=True (only medium/low/info issues)"
+        )
         approved = True
 
     merged_summary = "\n\n".join(s for s in summaries if s.strip())
