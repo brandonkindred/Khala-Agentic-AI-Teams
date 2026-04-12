@@ -62,6 +62,8 @@ from .prompts import (
 if TYPE_CHECKING:
     from llm_service import LLMClient
 
+from llm_service import run_json_via_strands
+
 logger = logging.getLogger(__name__)
 
 OPEN_QUESTIONS_POLL_INTERVAL = 5.0
@@ -4121,9 +4123,19 @@ Previously Answered Questions:
             ],
             indent=2,
         )
-        prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
+        # User prompt includes "consolidated_questions" as schema anchor.
+        user_prompt = (
+            "Identify duplicate questions and produce JSON with field: "
+            "consolidated_questions.\n\n" + questions_json
+        )
         try:
-            raw = self.llm.complete_json(prompt, temperature=0.1)
+            raw = run_json_via_strands(
+                self.llm,
+                system_prompt=CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json),
+                user_prompt=user_prompt,
+                agent_key="pra",
+                temperature=0.1,
+            )
             if not isinstance(raw, dict):
                 return list(open_questions)
             consolidated = raw.get("consolidated_questions", [])
@@ -4177,9 +4189,21 @@ Previously Answered Questions:
             for q in open_questions
         ]
         questions_json = json.dumps(questions_payload, indent=2)
-        prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
+        # User prompt includes "aligned_questions" as schema anchor.
+        user_prompt = (
+            "Ensure each question and its options make sense together. "
+            "Produce JSON with field: aligned_questions.\n\n" + questions_json
+        )
         try:
-            raw = self.llm.complete_json(prompt, temperature=0.1)
+            raw = run_json_via_strands(
+                self.llm,
+                system_prompt=REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(
+                    questions_json=questions_json
+                ),
+                user_prompt=user_prompt,
+                agent_key="pra",
+                temperature=0.1,
+            )
             if not isinstance(raw, dict):
                 return list(open_questions)
             aligned = raw.get("aligned_questions", [])
@@ -4220,12 +4244,23 @@ Previously Answered Questions:
         ]
         questions_json = json.dumps(questions_payload, indent=2)
         spec_excerpt = (spec_content or "")[:15000]
-        prompt = GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
-            spec_excerpt=spec_excerpt,
-            questions_json=questions_json,
+        # User prompt includes "recommendations" as schema anchor.
+        user_prompt = (
+            "For each question, produce a short recommendation. "
+            "Produce JSON with field: recommendations.\n\n"
+            f"Spec excerpt:\n{spec_excerpt}\n\nQuestions:\n{questions_json}"
         )
         try:
-            raw = self.llm.complete_json(prompt, temperature=0.1)
+            raw = run_json_via_strands(
+                self.llm,
+                system_prompt=GENERATE_QUESTION_RECOMMENDATIONS_PROMPT.format(
+                    spec_excerpt=spec_excerpt,
+                    questions_json=questions_json,
+                ),
+                user_prompt=user_prompt,
+                agent_key="pra",
+                temperature=0.1,
+            )
             if not isinstance(raw, dict):
                 return list(open_questions)
             recs = raw.get("recommendations", [])
