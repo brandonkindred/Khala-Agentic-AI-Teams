@@ -6,8 +6,9 @@ import json
 import logging
 from typing import List
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import RoutePlan, StopActivities, TravelerGroupProfile, TripRequest
 
@@ -38,9 +39,13 @@ class ActivitiesExpertAgent:
     """Generates tailored activity and dining recommendations for all route stops."""
 
     def __init__(self, llm=None) -> None:
-        self._agent = llm if llm is not None else Agent(
-            model=get_strands_model("road_trip_planning"),
-            system_prompt=SYSTEM_PROMPT,
+        self._agent = (
+            llm
+            if llm is not None
+            else Agent(
+                model=get_strands_model("road_trip_planning"),
+                system_prompt=SYSTEM_PROMPT,
+            )
         )
 
     def run(

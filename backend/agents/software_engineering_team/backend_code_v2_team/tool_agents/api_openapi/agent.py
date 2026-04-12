@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import logging
 
-from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 
 from ...models import (
     ToolAgentInput,
@@ -40,8 +41,8 @@ openapi.yaml fragments, etc.).
 class ApiOpenApiToolAgent:
     """Produces API routes, OpenAPI specs, and service contracts."""
 
-    def __init__(self, llm: LLMClient) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        self._model = get_strands_model()
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)
@@ -53,7 +54,7 @@ class ApiOpenApiToolAgent:
             existing_code=inp.existing_code[:4000] if inp.existing_code else "(none)",
         )
         logger.info("ApiOpenApi: running for microtask %s", inp.microtask.id)
-        raw = self.llm.complete_text(prompt, think=True)
+        raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip()
         data = parse_files_and_summary_template(raw)
         return ToolAgentOutput(
             files=data.get("files") or {},

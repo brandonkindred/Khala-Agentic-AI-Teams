@@ -11,7 +11,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 from software_engineering_team.shared.models import SystemArchitecture, Task
 
 from ..models import (
@@ -88,7 +89,7 @@ def _run_general_microtask(
         existing_code=existing_code[:8000] if existing_code else "(none)",
         architecture_context=arch_ctx or "(none)",
     )
-    raw = llm.complete_text(prompt, think=True)
+    raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=get_strands_model())(prompt)).strip()
     data = parse_files_and_summary_template(raw)
     files = data.get("files") or {}
 

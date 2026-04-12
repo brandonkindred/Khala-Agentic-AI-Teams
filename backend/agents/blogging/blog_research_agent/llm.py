@@ -13,7 +13,6 @@ from llm_service import (
     LLMJsonParseError,
     LLMTruncatedError,
     OllamaLLMClient,
-    get_client,
     get_strands_model,
 )
 
@@ -24,6 +23,5 @@ __all__ = [
     "LLMJsonParseError",
     "LLMTruncatedError",
     "OllamaLLMClient",
-    "get_client",
     "get_strands_model",
 ]

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
 import logging
 
 from frontend_team_deprecated.models import UXDesignerOutput
 
-from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 
 from .models import UXDesignerInput
 from .prompts import UX_DESIGNER_PROMPT
@@ -35,7 +38,7 @@ class UXDesignerAgent:
             context_parts.append(f"**Architecture:**\n{input_data.architecture.overview}")
 
         prompt = UX_DESIGNER_PROMPT + "\n\n---\n\n" + "\n\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+        data = json.loads((lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip())
 
         return UXDesignerOutput(
             user_journeys=data.get("user_journeys", "") or "",

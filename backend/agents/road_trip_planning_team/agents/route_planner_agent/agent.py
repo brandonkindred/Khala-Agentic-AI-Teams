@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import logging
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import RoutePlan, RouteStop, TravelerGroupProfile, TripRequest
 
@@ -39,9 +40,13 @@ class RoutePlannerAgent:
     """Plans the optimal ordered route for a road trip."""
 
     def __init__(self, llm=None) -> None:
-        self._agent = llm if llm is not None else Agent(
-            model=get_strands_model("road_trip_planning"),
-            system_prompt=SYSTEM_PROMPT,
+        self._agent = (
+            llm
+            if llm is not None
+            else Agent(
+                model=get_strands_model("road_trip_planning"),
+                system_prompt=SYSTEM_PROMPT,
+            )
         )
 
     def run(self, trip: TripRequest, group_profile: TravelerGroupProfile) -> RoutePlan:

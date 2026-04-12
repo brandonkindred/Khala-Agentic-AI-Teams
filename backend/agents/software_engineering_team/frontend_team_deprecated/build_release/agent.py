@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+
 import logging
 
-from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 
 from .models import BuildReleaseInput, BuildReleaseOutput
 from .prompts import BUILD_RELEASE_PROMPT
@@ -35,7 +38,7 @@ class BuildReleaseAgent:
             context_parts.append(f"**Existing pipeline:**\n{input_data.existing_pipeline[:3000]}")
 
         prompt = BUILD_RELEASE_PROMPT + "\n\n---\n\n" + "\n\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+        data = json.loads((lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip())
 
         return BuildReleaseOutput(
             ci_plan=data.get("ci_plan", "") or "",

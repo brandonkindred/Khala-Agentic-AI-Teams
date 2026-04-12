@@ -11,7 +11,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from blog_research_agent.tools.web_search import OllamaWebSearch
 
-from llm_service import get_strands_model
 from social_media_marketing_team.trend_discovery_agent import TrendDiscoveryAgent
 from social_media_marketing_team.trend_models import TrendDigest
 
@@ -33,11 +32,8 @@ def run_trend_job() -> None:
     global _latest_digest
     logger.info("TrendDiscovery: starting run")
     try:
-        from strands import Agent
-
-        llm = Agent(model=get_strands_model("trend_discovery"))
         searcher = OllamaWebSearch()
-        agent = TrendDiscoveryAgent(llm_client=llm, web_search=searcher)
+        agent = TrendDiscoveryAgent(web_search=searcher)
         digest = agent.run()
         with _digest_lock:
             _latest_digest = digest

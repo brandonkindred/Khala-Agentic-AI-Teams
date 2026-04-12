@@ -7,8 +7,9 @@ import logging
 from datetime import datetime, timezone
 from typing import List
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import (
     Accommodation,
@@ -64,9 +65,13 @@ class ItineraryComposerAgent:
     """Assembles the final day-by-day itinerary from all specialist agent outputs."""
 
     def __init__(self, llm=None) -> None:
-        self._agent = llm if llm is not None else Agent(
-            model=get_strands_model("road_trip_planning"),
-            system_prompt=SYSTEM_PROMPT,
+        self._agent = (
+            llm
+            if llm is not None
+            else Agent(
+                model=get_strands_model("road_trip_planning"),
+                system_prompt=SYSTEM_PROMPT,
+            )
         )
 
     def run(

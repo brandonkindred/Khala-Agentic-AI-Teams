@@ -10,7 +10,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 from software_engineering_team.shared.models import SystemArchitecture, Task
 
 from ..models import (
@@ -125,7 +126,7 @@ def run_planning(
     prompt = _build_context(task, architecture, existing_code, language)
 
     logger.info("[%s] Planning phase: generating microtasks (stack=%s)", task.id, language)
-    raw = llm.complete_text(prompt, think=True)
+    raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=get_strands_model())(prompt)).strip()
     raw_parsed = parse_planning_template(raw)
     result = _parse_planning_output(raw_parsed, language)
     logger.info(
@@ -192,7 +193,7 @@ def plan_fixes_for_unresolved_issues(
     logger.info(
         "[%s] Planning fix microtasks for %d unresolved issues", task.id, len(unresolved_issues)
     )
-    raw = llm.complete_text(prompt, think=True)
+    raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=get_strands_model())(prompt)).strip()
     raw_parsed = parse_planning_template(raw)
     result = _parse_planning_output(raw_parsed, language)
     return result.microtasks

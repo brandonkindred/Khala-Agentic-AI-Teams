@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 from software_engineering_team.shared.models import Task
 
 from ..models import IntakeResult

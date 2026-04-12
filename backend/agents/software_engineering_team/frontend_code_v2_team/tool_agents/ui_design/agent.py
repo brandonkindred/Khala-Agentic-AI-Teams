@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, List, Optional
+from typing import List, Optional
 
 from ...models import (
     ToolAgentInput,
@@ -13,8 +13,8 @@ from ...models import (
     ToolAgentPhaseOutput,
 )
 
-if TYPE_CHECKING:
-    from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +61,9 @@ Respond with valid JSON only. No explanatory text outside JSON.
 class UiDesignToolAgent:
     """UI Design tool agent: visual system, layout, typography, component specs."""
 
-    def __init__(self, llm: Optional["LLMClient"] = None) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        self._model = get_strands_model()
+        self.llm = llm  # kept for backward compat checks
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)
@@ -73,7 +74,7 @@ class UiDesignToolAgent:
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Generate UI design artifacts: component specs, design tokens, motion guidelines."""
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(
                 recommendations=[
                     "Consider layout and component structure.",
@@ -87,7 +88,7 @@ class UiDesignToolAgent:
             spec_content=(inp.task_description or "")[:5000],
         )
         try:
-            raw = self.llm.complete_text(prompt, think=True)
+            raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip()
         except Exception as e:
             logger.warning("UI Design plan LLM call failed: %s", e)
             return ToolAgentPhaseOutput(

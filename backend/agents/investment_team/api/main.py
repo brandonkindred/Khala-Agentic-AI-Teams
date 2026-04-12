@@ -914,6 +914,7 @@ def _run_one_strategy_lab_cycle(
         on_phase: Optional callback ``(phase: str, data: dict) -> None`` called at each
             phase boundary to emit progress events.
     """
+
     def _emit(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
         if on_phase:
             on_phase(phase, data or {})
@@ -1030,7 +1031,10 @@ def _run_one_strategy_lab_cycle(
         _strategies[strategy_id] = strategy
         _backtests[backtest_id] = backtest
 
-    _emit("complete", {"record_id": lab_record_id, "is_winning": is_winning, "metrics": metrics_preview})
+    _emit(
+        "complete",
+        {"record_id": lab_record_id, "is_winning": is_winning, "metrics": metrics_preview},
+    )
 
     return record
 
@@ -1127,7 +1131,9 @@ def _strategy_lab_worker(
                 )
             with _lock:
                 raw_prior = list(_strategy_lab_records.values())
-            prior_for_brief = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior]
+            prior_for_brief = [
+                StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior
+            ]
             prior_for_brief.sort(key=lambda r: r.created_at)
 
             expert = SignalIntelligenceExpert()
@@ -1188,34 +1194,44 @@ def _strategy_lab_worker(
                     on_phase=on_phase,
                 )
                 completed_ids.append(record.lab_record_id)
-                _update_run({
-                    "completed_cycles": len(completed_ids),
-                    "completed_record_ids": list(completed_ids),
-                    "current_cycle": None,
-                })
-                _publish("cycle_complete", {
-                    "cycle_index": cycle_num,
-                    "record_id": record.lab_record_id,
-                    "completed_cycles": len(completed_ids),
-                })
+                _update_run(
+                    {
+                        "completed_cycles": len(completed_ids),
+                        "completed_record_ids": list(completed_ids),
+                        "current_cycle": None,
+                    }
+                )
+                _publish(
+                    "cycle_complete",
+                    {
+                        "cycle_index": cycle_num,
+                        "record_id": record.lab_record_id,
+                        "completed_cycles": len(completed_ids),
+                    },
+                )
             except HTTPException as exc:
                 if exc.status_code == 502:
                     logger.warning(
                         "Strategy lab cycle %d/%d skipped (no market data after fallback)",
-                        cycle_num, request.batch_size,
+                        cycle_num,
+                        request.batch_size,
                     )
                     skipped += 1
                     _update_run({"skipped_cycles": skipped, "current_cycle": None})
-                    _publish("cycle_skipped", {"cycle_index": cycle_num, "reason": "no_market_data"})
+                    _publish(
+                        "cycle_skipped", {"cycle_index": cycle_num, "reason": "no_market_data"}
+                    )
                     continue
                 raise
             except Exception as exc:
                 logger.exception("Strategy lab cycle %d/%d failed", cycle_num, request.batch_size)
-                _update_run({
-                    "status": "failed",
-                    "error": f"Cycle {cycle_num} failed: {exc}",
-                    "current_cycle": None,
-                })
+                _update_run(
+                    {
+                        "status": "failed",
+                        "error": f"Cycle {cycle_num} failed: {exc}",
+                        "current_cycle": None,
+                    }
+                )
                 _publish("error", {"detail": f"Cycle {cycle_num} failed: {exc}"})
                 return
 
@@ -1224,7 +1240,10 @@ def _strategy_lab_worker(
             msg += f" ({skipped} skipped due to unavailable market data)"
 
         _update_run({"status": "completed", "current_cycle": None})
-        _publish("complete", {"message": msg, "completed_count": len(completed_ids), "skipped_count": skipped})
+        _publish(
+            "complete",
+            {"message": msg, "completed_count": len(completed_ids), "skipped_count": skipped},
+        )
 
     except Exception as exc:
         logger.exception("Strategy lab worker failed for run %s", run_id)
@@ -1253,7 +1272,9 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     with _lock:
         active = [r for r in _active_runs.values() if r["status"] == "running"]
         if active:
-            raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+            raise HTTPException(
+                status_code=409, detail="A strategy lab run is already in progress."
+            )
 
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     now = _now()
@@ -1331,7 +1352,11 @@ class InvestmentJobsListResponse(BaseModel):
     jobs: List[InvestmentJobSummary] = Field(default_factory=list)
 
 
-@app.get("/strategy-lab/jobs", response_model=InvestmentJobsListResponse, summary="List strategy lab runs as jobs")
+@app.get(
+    "/strategy-lab/jobs",
+    response_model=InvestmentJobsListResponse,
+    summary="List strategy lab runs as jobs",
+)
 def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResponse:
     """Return strategy lab runs in a format compatible with the central Jobs Dashboard."""
     jobs: List[InvestmentJobSummary] = []
@@ -1348,14 +1373,16 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             total = state.get("total_cycles", 1)
             progress = int((completed / total) * 100) if total else 0
             label = hypothesis or f"Strategy batch ({completed}/{total})"
-            jobs.append(InvestmentJobSummary(
-                job_id=state["run_id"],
-                status=state["status"],
-                label=label,
-                progress=progress,
-                current_phase=phase,
-                created_at=state.get("started_at"),
-            ))
+            jobs.append(
+                InvestmentJobSummary(
+                    job_id=state["run_id"],
+                    status=state["status"],
+                    label=label,
+                    progress=progress,
+                    current_phase=phase,
+                    created_at=state.get("started_at"),
+                )
+            )
 
     # Persisted runs from job service (completed runs not in memory)
     try:
@@ -1370,14 +1397,16 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             completed = data.get("completed_cycles", 0)
             total = data.get("total_cycles", 1)
             progress = int((completed / total) * 100) if total else 0
-            jobs.append(InvestmentJobSummary(
-                job_id=jid,
-                status=job.get("status", data.get("status", "completed")),
-                label=f"Strategy batch ({completed}/{total})",
-                progress=progress,
-                current_phase=None,
-                created_at=data.get("started_at"),
-            ))
+            jobs.append(
+                InvestmentJobSummary(
+                    job_id=jid,
+                    status=job.get("status", data.get("status", "completed")),
+                    label=f"Strategy batch ({completed}/{total})",
+                    progress=progress,
+                    current_phase=None,
+                    created_at=data.get("started_at"),
+                )
+            )
     except Exception as exc:
         logger.warning("Failed to load persisted strategy lab runs: %s", exc)
 
@@ -1421,7 +1450,9 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     with _lock:
         active = [r for r in _active_runs.values() if r["status"] == "running"]
         if active:
-            raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+            raise HTTPException(
+                status_code=409, detail="A strategy lab run is already in progress."
+            )
 
     # Re-initialize in-memory state
     resumed_state = {
@@ -1453,7 +1484,8 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     thread.start()
 
     return StrategyLabRunStartResponse(
-        run_id=run_id, total_cycles=total_cycles,
+        run_id=run_id,
+        total_cycles=total_cycles,
         message=f"Run resumed from cycle {completed_cycles + 1} of {total_cycles}.",
     )
 
@@ -1483,7 +1515,9 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     with _lock:
         active = [r for r in _active_runs.values() if r["status"] == "running"]
         if active:
-            raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+            raise HTTPException(
+                status_code=409, detail="A strategy lab run is already in progress."
+            )
 
     request = RunStrategyLabRequest(**payload)
 
@@ -1512,12 +1546,15 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     thread.start()
 
     return StrategyLabRunStartResponse(
-        run_id=run_id, total_cycles=request.batch_size,
+        run_id=run_id,
+        total_cycles=request.batch_size,
         message="Run restarted from scratch.",
     )
 
 
-@app.get("/strategy-lab/runs", response_model=ActiveRunsResponse, summary="List active strategy lab runs")
+@app.get(
+    "/strategy-lab/runs", response_model=ActiveRunsResponse, summary="List active strategy lab runs"
+)
 def list_strategy_lab_runs() -> ActiveRunsResponse:
     """Return all tracked runs (active and recently completed, kept for 5 min after finish)."""
     with _lock:
@@ -1570,9 +1607,13 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
     # If the run is already terminal, send snapshot + done immediately.
     if state.get("status") in ("completed", "failed"):
+
         async def _terminal_gen():
-            yield _sse_line({"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")})
+            yield _sse_line(
+                {"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")}
+            )
             yield _sse_line({"type": "done"})
+
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
     async def event_generator():
@@ -1582,7 +1623,9 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
             with _lock:
                 current = _active_runs.get(run_id, {})
             if current:
-                yield _sse_line({"type": "snapshot", **_run_state_to_response(current).model_dump(mode="json")})
+                yield _sse_line(
+                    {"type": "snapshot", **_run_state_to_response(current).model_dump(mode="json")}
+                )
 
             deadline = time_mod.monotonic() + 4 * 3600  # 4-hour max
             while time_mod.monotonic() < deadline:

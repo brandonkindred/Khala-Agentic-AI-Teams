@@ -104,8 +104,11 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
         ]
     )
 
-    prompt = CODE_REVIEW_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-    data = llm.complete_json(prompt, temperature=0.1, think=True)
+    prompt = "\n".join(context_parts)
+    agent = Agent(model=get_strands_model("code_review"), system_prompt=CODE_REVIEW_PROMPT)
+    result = agent(prompt)
+    raw = (result.message if hasattr(result, "message") else str(result)).strip()
+    data = json.loads(raw)
 
     issues = []
     for issue_data in data.get("issues") or []:

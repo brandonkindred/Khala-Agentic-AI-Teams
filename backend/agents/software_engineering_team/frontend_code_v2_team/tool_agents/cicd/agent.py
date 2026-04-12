@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import Dict, Optional
 
 from ...models import ToolAgentInput, ToolAgentOutput, ToolAgentPhaseInput, ToolAgentPhaseOutput
 
-if TYPE_CHECKING:
-    from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +60,9 @@ Respond with valid JSON only. No explanatory text outside JSON.
 class CicdAdapterAgent:
     """CI/CD tool agent: generates CI/CD artifacts in plan and deliver phases."""
 
-    def __init__(self, llm: Optional["LLMClient"] = None) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        self._model = get_strands_model()
+        self.llm = llm  # kept for backward compat checks
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)
@@ -72,7 +73,7 @@ class CicdAdapterAgent:
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Generate CI/CD artifacts: CI plan, preview env, release/rollback, error reporting, pipeline YAML."""
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(
                 recommendations=[
                     "Configure CI pipeline with lint, typecheck, test, and build steps.",
@@ -89,7 +90,7 @@ class CicdAdapterAgent:
             spec_content=spec_excerpt if spec_excerpt.strip() else "(no spec provided)",
         )
         try:
-            raw = self.llm.complete_text(prompt, think=True)
+            raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip()
         except Exception as e:
             logger.warning("CI/CD plan LLM call failed: %s", e)
             return ToolAgentPhaseOutput(
@@ -120,7 +121,7 @@ class CicdAdapterAgent:
 
     def deliver(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Generate pipeline YAML files if needed during deliver phase."""
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(summary="CI/CD deliver (no LLM).")
         spec_excerpt = (inp.spec_context or "")[:MAX_SPEC_CHARS]
         task_desc = inp.task_description or inp.task_title or "Frontend CI/CD setup"
@@ -129,7 +130,7 @@ class CicdAdapterAgent:
             spec_content=spec_excerpt if spec_excerpt.strip() else "(no spec provided)",
         )
         try:
-            raw = self.llm.complete_text(prompt, think=True)
+            raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip()
         except Exception as e:
             logger.warning("CI/CD deliver LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="CI/CD deliver failed (LLM error).")

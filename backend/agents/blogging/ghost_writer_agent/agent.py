@@ -24,14 +24,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from shared.content_plan import ContentPlan
 
-from llm_service.interface import (
-    LLMClient,
-    LLMJsonParseError,
-    LLMPermanentError,
-    LLMRateLimitError,
-    LLMTemporaryError,
-    LLMTruncatedError,
-)
+import re
+
+from strands import Agent
 
 from .models import StoryElicitationResult, StoryGap
 
@@ -206,8 +201,8 @@ class GhostWriterElicitationAgent:
       - Narrator: compiles vivid first-person narratives
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        self.llm_client = llm_client
+    def __init__(self, llm_client: Any) -> None:
+        self._model = llm_client
 
     # ------------------------------------------------------------------
     # Gap finding
@@ -277,8 +272,12 @@ class GhostWriterElicitationAgent:
         )
 
         try:
-            data = self.llm_client.complete_json(prompt, system_prompt=system)
-            # complete_json may return {"text": "[...]"} or a list directly
+            agent = Agent(model=self._model, system_prompt=system)
+            result = agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.")
+            raw = (result.message if hasattr(result, "message") else str(result)).strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            data = json.loads(raw)
             if isinstance(data, dict):
                 for key in ("questions", "seeds", "text"):
                     if key in data and isinstance(data[key], list):
@@ -289,12 +288,8 @@ class GhostWriterElicitationAgent:
                 # Treat empty/whitespace-only items as failures — fall through to fallback
                 if all(cleaned):
                     return cleaned
-        except (LLMJsonParseError, LLMTruncatedError) as e:
-            logger.warning("Ghost writer batch seed generation parse error: %s", e)
-        except (LLMTemporaryError, LLMRateLimitError) as e:
-            logger.warning("Ghost writer batch seed generation transient error: %s", e)
-        except LLMPermanentError as e:
-            logger.warning("Ghost writer batch seed generation permanent error: %s", e)
+        except Exception as e:
+            logger.warning("Ghost writer batch seed generation error: %s", e)
 
         # Fallback: generate generic friendly seeds without LLM
         return [
@@ -307,11 +302,12 @@ class GhostWriterElicitationAgent:
         outline_text = self._plan_to_text(content_plan)
         prompt = f"Content plan:\n\n{outline_text}\n\nIdentify story gaps."
 
+        agent = Agent(model=self._model, system_prompt=_FIND_GAPS_SYSTEM)
         for attempt in range(2):
             try:
                 working_prompt = prompt if attempt == 0 else prompt + _JSON_RETRY_SUFFIX
-                response = self.llm_client.complete(working_prompt, system_prompt=_FIND_GAPS_SYSTEM)
-                raw = (response or "").strip()
+                result = agent(working_prompt)
+                raw = (result.message if hasattr(result, "message") else str(result)).strip()
                 start = raw.find("[")
                 end = raw.rfind("]") + 1
                 if start == -1 or end == 0:
@@ -333,20 +329,17 @@ class GhostWriterElicitationAgent:
                     )
                 logger.info("Ghost writer: found %s story gap(s) via LLM", len(gaps))
                 return gaps
-            except LLMJsonParseError as e:
+            except (json.JSONDecodeError, TypeError) as e:
                 if attempt == 0:
                     logger.warning("Ghost writer gap-finding JSON parse failed, retrying: %s", e)
                     continue
                 logger.warning("Ghost writer gap-finding JSON parse failed after retry: %s", e)
                 return []
-            except (LLMTemporaryError, LLMRateLimitError) as e:
-                logger.warning("Ghost writer gap-finding transient error: %s", e)
+            except Exception as e:
+                logger.warning("Ghost writer gap-finding error: %s", e)
                 if attempt == 0:
                     time.sleep(2.0)
                     continue
-                return []
-            except LLMPermanentError as e:
-                logger.warning("Ghost writer gap-finding permanent error: %s", e)
                 return []
         return []
 

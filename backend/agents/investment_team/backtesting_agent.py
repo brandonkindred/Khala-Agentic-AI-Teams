@@ -11,8 +11,9 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from .market_data_service import OHLCVBar
 from .models import (
@@ -65,9 +66,13 @@ class BacktestingAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
-        self._agent = llm_client if llm_client is not None else Agent(
-            model=get_strands_model("backtesting"),
-            system_prompt=_EVALUATE_SYSTEM,
+        self._agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=get_strands_model("backtesting"),
+                system_prompt=_EVALUATE_SYSTEM,
+            )
         )
 
     def run_backtest(

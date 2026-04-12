@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 
 from ..models import DeliverResult, ExecutionResult, ReviewResult
 from ..prompts import DELIVER_PROMPT

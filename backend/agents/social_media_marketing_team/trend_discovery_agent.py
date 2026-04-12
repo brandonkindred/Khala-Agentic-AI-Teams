@@ -16,9 +16,9 @@ from typing import List, Optional
 
 from blog_research_agent.models import CandidateResult, SearchQuery
 from blog_research_agent.tools.web_search import OllamaWebSearch, WebSearchError
+from strands import Agent
 
 from llm_service import get_strands_model
-from strands import Agent
 
 from .trend_models import TrendDigest, TrendingTopic
 
@@ -93,12 +93,16 @@ class TrendDiscoveryAgent:
     by the rest of the platform).
     """
 
-    def __init__(self, llm_client: LLMClient, web_search: OllamaWebSearch) -> None:
-        if llm_client is None:
-            raise ValueError("llm_client is required")
+    def __init__(self, llm_client=None, web_search: OllamaWebSearch = None) -> None:
         if web_search is None:
             raise ValueError("web_search is required")
-        self.llm = llm_client
+        self._agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=get_strands_model("trend_discovery"),
+            )
+        )
         self.web_search = web_search
 
     def _search_one(self, query: SearchQuery) -> List[CandidateResult]:
@@ -158,7 +162,9 @@ class TrendDiscoveryAgent:
 
         topics: List[TrendingTopic] = []
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            result = self._agent(prompt)
+            raw_text = (result.message if hasattr(result, "message") else str(result)).strip()
+            data = json.loads(raw_text)
             raw_topics = data.get("topics", []) if isinstance(data, dict) else []
             for item in raw_topics[:3]:
                 if not isinstance(item, dict):
@@ -180,7 +186,7 @@ class TrendDiscoveryAgent:
                         relevance_score=score,
                     )
                 )
-        except (LLMJsonParseError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        except Exception as exc:
             logger.warning(
                 "TrendDiscoveryAgent: LLM synthesis failed: %s; returning empty topic list", exc
             )

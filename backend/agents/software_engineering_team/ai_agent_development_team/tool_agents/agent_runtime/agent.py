@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient
+import json
+
+from llm_service import get_strands_model
+from strands import Agent
 
 from ...models import ToolAgentInput, ToolAgentOutput
 
@@ -15,15 +18,15 @@ Return JSON with files/recommendations/summary.
 
 
 class AgentRuntimeToolAgent:
-    def __init__(self, llm: LLMClient) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        self._model = get_strands_model()
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        raw = self.llm.complete_json(
+        raw = json.loads((lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(
             PROMPT.format(
                 microtask=inp.microtask.description or inp.microtask.title,
                 spec=inp.spec_context[:5000],
-            ),
+            )).strip()),
             think=True,
         )
         return ToolAgentOutput(

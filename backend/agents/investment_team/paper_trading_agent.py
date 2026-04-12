@@ -14,8 +14,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from .market_data_service import OHLCVBar
 from .models import (
@@ -139,13 +140,21 @@ class PaperTradingAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
-        self._evaluate_agent = llm_client if llm_client is not None else Agent(
-            model=get_strands_model("paper_trading"),
-            system_prompt=_EVALUATE_SYSTEM,
+        self._evaluate_agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=get_strands_model("paper_trading"),
+                system_prompt=_EVALUATE_SYSTEM,
+            )
         )
-        self._divergence_agent = llm_client if llm_client is not None else Agent(
-            model=get_strands_model("paper_trading"),
-            system_prompt=_DIVERGENCE_SYSTEM,
+        self._divergence_agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=get_strands_model("paper_trading"),
+                system_prompt=_DIVERGENCE_SYSTEM,
+            )
         )
 
     def run_session(

@@ -6,7 +6,10 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
-from llm_service import LLMClient, compact_text
+import json
+
+from llm_service import LLMClient, compact_text, get_client, get_strands_model
+from strands import Agent
 from software_engineering_team.shared.prompt_utils import log_llm_prompt
 from software_engineering_team.shared.repo_utils import int_env as _int_env
 from software_engineering_team.shared.task_plan import TaskPlan
@@ -158,9 +161,10 @@ class DevOpsExpertAgent:
     DevOps expert specializing in CI/CD pipelines, IaC, Dockerization, and networking.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        self._model = get_strands_model("devops")
+        # Keep LLMClient for context_sizing / compact_text utilities
+        self.llm = llm_client if llm_client is not None else get_client("devops")
 
     def _plan_task(
         self,
@@ -207,10 +211,13 @@ class DevOpsExpertAgent:
             if codebase_ctx:
                 context_parts.extend(["", codebase_ctx])
         context = "\n".join(context_parts)
-        prompt = DEVOPS_PLANNING_PROMPT + "\n\n---\n\n" + context
+        prompt = context
         log_llm_prompt(logger, "DevOps", "planning", (task_description or "")[:80], prompt)
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+            agent = Agent(model=self._model, system_prompt=DEVOPS_PLANNING_PROMPT)
+            result = agent(prompt)
+            raw = (result.message if hasattr(result, "message") else str(result)).strip()
+            data = json.loads(raw)
             plan = TaskPlan.from_llm_json(data)
             return plan.to_markdown()
         except Exception as e:
@@ -282,8 +289,11 @@ class DevOpsExpertAgent:
                 ]
             )
 
-        prompt = DEVOPS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+        prompt = "\n".join(context_parts)
+        agent = Agent(model=self._model, system_prompt=DEVOPS_PROMPT)
+        result = agent(prompt)
+        raw = (result.message if hasattr(result, "message") else str(result)).strip()
+        data = json.loads(raw)
 
         summary = data.get("summary", "")
         needs_clarification = bool(data.get("needs_clarification", False))

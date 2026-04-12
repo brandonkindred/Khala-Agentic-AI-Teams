@@ -1,18 +1,14 @@
-"""Architecture Expert agent: designs system architecture from requirements.
-
-Wave 5 migration: uses ``llm_service.run_json_via_strands`` to route the
-single-shot LLM call through a fresh Strands ``Agent``. Keeps all existing
-defensive post-processing (synthetic-architecture fallback, diagram
-backfill, component defaulting, planning-hint derivation) because the
-helper returns a raw dict rather than a Pydantic-validated model.
-"""
+"""Architecture Expert agent: designs system architecture from requirements."""
 
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict
 
-from llm_service import LLMClient, run_json_via_strands
+import json
+
+from llm_service import LLMPermanentError, get_strands_model
+from strands import Agent
 from software_engineering_team.shared.models import (
     ArchitectureComponent,
     ProductRequirements,
@@ -142,9 +138,8 @@ class ArchitectureExpertAgent:
     reference when implementing or validating changes.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        self._agent = Agent(model=get_strands_model("architecture"), system_prompt=ARCHITECTURE_PROMPT)
 
     def run(self, input_data: ArchitectureInput) -> ArchitectureOutput:
         """Design system architecture from requirements."""
@@ -202,30 +197,17 @@ class ArchitectureExpertAgent:
                 ["", "**Technology Preferences:**", ", ".join(input_data.technology_preferences)]
             )
 
-        # User prompt carries a schema hint that includes the
-        # ``architecture_document``, ``components``, ``overview`` anchor
-        # tokens so ``DummyLLMClient.complete_json`` routes to the dummy
-        # architecture stub in tests. See llm_service/README.md "Migration
-        # rule: keep pattern anchors in the user prompt".
-        user_prompt = (
-            "Design the system architecture. Produce JSON with keys: "
-            "overview, architecture_document, components (each with name, "
-            "type, description, technology, dependencies, interfaces), "
-            "diagrams (dict of diagram name to Mermaid source), decisions, "
-            "summary, tenancy_model, reliability_model.\n\n" + "\n".join(context_parts)
-        )
+        prompt = "\n".join(context_parts)
 
-        data: Dict[str, Any] = (
-            run_json_via_strands(
-                self.llm,
-                system_prompt=ARCHITECTURE_PROMPT,
-                user_prompt=user_prompt,
-                agent_key="architecture",
-                temperature=0.2,
-                think=True,
+        try:
+            result = self._agent(prompt)
+            raw = (result.message if hasattr(result, "message") else str(result)).strip()
+            data: Dict[str, Any] = json.loads(raw) or {}
+        except LLMPermanentError:
+            logger.warning(
+                "Architecture Expert: LLM returned non-JSON response, falling back to synthetic architecture"
             )
-            or {}
-        )
+            data = {}
 
         # Detect raw wrapper from JSON parse failure (only "content" key, or no "overview")
         is_parse_failure = not data.get("overview") or (len(data) == 1 and "content" in data)

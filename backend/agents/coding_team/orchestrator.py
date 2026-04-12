@@ -89,7 +89,7 @@ def run_coding_team_orchestrator(
     _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
     llm_getter = get_llm or (
-        lambda key: __import__("llm_service.factory", fromlist=["get_client"]).get_client(
+        lambda key: __import__("llm_service.strands_provider", fromlist=["get_strands_model"]).get_strands_model(
             key or "coding_team"
         )
     )

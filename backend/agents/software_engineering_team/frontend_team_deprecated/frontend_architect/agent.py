@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import logging
 from typing import Optional
 
@@ -12,7 +14,8 @@ from frontend_team_deprecated.models import (
     UXDesignerOutput,
 )
 
-from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 
 from .models import FrontendArchitectInput
 from .prompts import FRONTEND_ARCHITECT_PROMPT
@@ -73,7 +76,7 @@ class FrontendArchitectAgent:
                 )
 
         prompt = FRONTEND_ARCHITECT_PROMPT + "\n\n---\n\n" + "\n\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+        data = json.loads((lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip())
 
         return FrontendArchitectOutput(
             folder_structure=data.get("folder_structure", "") or "",

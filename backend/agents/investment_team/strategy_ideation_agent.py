@@ -8,8 +8,9 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from .models import StrategyLabRecord, TradeRecord
 from .signal_intelligence_agent import brief_to_prompt_block
@@ -252,14 +253,29 @@ class StrategyIdeationAgent:
 
     def __init__(self, llm_client=None) -> None:
         _model = get_strands_model("strategy_ideation")
-        self._ideation_agent = llm_client if llm_client is not None else Agent(
-            model=_model, system_prompt=_IDEATION_SYSTEM,
+        self._ideation_agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=_model,
+                system_prompt=_IDEATION_SYSTEM,
+            )
         )
-        self._analysis_draft_agent = llm_client if llm_client is not None else Agent(
-            model=_model, system_prompt=_ANALYSIS_DRAFT_SYSTEM,
+        self._analysis_draft_agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=_model,
+                system_prompt=_ANALYSIS_DRAFT_SYSTEM,
+            )
         )
-        self._self_review_agent = llm_client if llm_client is not None else Agent(
-            model=_model, system_prompt=_SELF_REVIEW_SYSTEM,
+        self._self_review_agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=_model,
+                system_prompt=_SELF_REVIEW_SYSTEM,
+            )
         )
 
     def ideate_strategy(

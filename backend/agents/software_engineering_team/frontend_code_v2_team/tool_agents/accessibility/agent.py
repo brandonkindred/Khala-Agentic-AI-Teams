@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 
@@ -18,8 +18,8 @@ from ...models import (
 from ...output_templates import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
 
-if TYPE_CHECKING:
-    from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +102,9 @@ def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) 
 class AccessibilityToolAgent:
     """Accessibility tool agent: WCAG 2.2 compliance review and fixes one at a time."""
 
-    def __init__(self, llm: Optional["LLMClient"] = None) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        self._model = get_strands_model()
+        self.llm = llm  # kept for backward compat checks
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)
@@ -124,7 +125,7 @@ class AccessibilityToolAgent:
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Find accessibility issues in current code. Returns issues with source=accessibility."""
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(summary="Accessibility review skipped (no LLM).")
         code_text = "\n\n".join(
             f"--- {p} ---\n{c}" for p, c in list(inp.current_files.items())[:20]
@@ -136,7 +137,7 @@ class AccessibilityToolAgent:
             code=code_text,
         )
         try:
-            raw = self.llm.complete_text(prompt, think=True)
+            raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip()
         except Exception as e:
             logger.warning("Accessibility review LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="Accessibility review failed (LLM error).")
@@ -171,7 +172,7 @@ class AccessibilityToolAgent:
 
     def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Fix accessibility-owned issues one at a time."""
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(summary="Accessibility problem_solve skipped (no LLM).")
         a11y_issues = [
             i
@@ -193,7 +194,7 @@ class AccessibilityToolAgent:
                 current_code=relevant_code,
             )
             try:
-                raw = self.llm.complete_text(prompt, think=True)
+                raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip()
             except Exception as e:
                 logger.warning(
                     "Accessibility fix for issue %s failed: %s",

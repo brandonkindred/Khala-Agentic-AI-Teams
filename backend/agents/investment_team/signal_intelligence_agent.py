@@ -8,8 +8,9 @@ import json
 import re
 from typing import List
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from .market_lab_data.models import MarketLabContext
 from .models import StrategyLabRecord
@@ -73,9 +74,13 @@ def brief_to_prompt_block(brief: SignalIntelligenceBriefV1) -> str:
 
 class SignalIntelligenceExpert:
     def __init__(self, llm_client=None) -> None:
-        self._agent = llm_client if llm_client is not None else Agent(
-            model=get_strands_model("signal_intelligence"),
-            system_prompt=_SIGNAL_SYSTEM,
+        self._agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=get_strands_model("signal_intelligence"),
+                system_prompt=_SIGNAL_SYSTEM,
+            )
         )
 
     def produce_signal_brief(

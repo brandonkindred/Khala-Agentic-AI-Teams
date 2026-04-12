@@ -70,8 +70,9 @@ class SubmitAnswersRequest(BaseModel):
 
 def _get_llm():
     """Return Strands-compatible model for the planning_v3 team."""
-    from llm_service import get_strands_model
     from strands import Agent
+
+    from llm_service import get_strands_model
 
     return Agent(model=get_strands_model("planning_v3"))
 

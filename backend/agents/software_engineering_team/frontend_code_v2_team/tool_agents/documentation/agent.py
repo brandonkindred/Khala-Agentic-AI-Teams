@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from ...models import (
     Microtask,
@@ -21,8 +21,8 @@ from ...prompts import (
     TYPESCRIPT_CONVENTIONS,
 )
 
-if TYPE_CHECKING:
-    from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +79,9 @@ def _extract_doc_files(files: Dict[str, str]) -> Dict[str, str]:
 class DocumentationToolAgent:
     """Documentation tool agent: reviews documentation completeness and updates docs."""
 
-    def __init__(self, llm: Optional["LLMClient"] = None) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        self._model = get_strands_model()
+        self.llm = llm  # kept for backward compat checks
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)
@@ -112,7 +113,7 @@ class DocumentationToolAgent:
         This method is called after each microtask passes review, to update
         inline documentation (JSDoc, comments) for the code that was just added.
         """
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(summary="Documentation update skipped (no LLM).")
 
         code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(files.items())[:15])[
@@ -130,7 +131,7 @@ class DocumentationToolAgent:
         )
 
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip()
         except Exception as e:
             logger.warning("Documentation microtask LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="Documentation update failed (LLM error).")
@@ -153,7 +154,7 @@ class DocumentationToolAgent:
         - Storybook stories exist for UI components
         - Code comments explain non-obvious logic
         """
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(summary="Documentation review skipped (no LLM).")
 
         doc_files = _extract_doc_files(inp.current_files)
@@ -180,7 +181,7 @@ class DocumentationToolAgent:
         )
 
         try:
-            raw = self.llm.complete_text(prompt)
+            raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip()
         except Exception as e:
             logger.warning("Documentation review LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="Documentation review failed (LLM error).")
@@ -209,7 +210,7 @@ class DocumentationToolAgent:
 
         Only fixes issues with source 'documentation' or 'tool_documentation'.
         """
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(summary="Documentation problem_solve skipped (no LLM).")
 
         doc_issues = [
@@ -238,7 +239,7 @@ class DocumentationToolAgent:
             )
 
             try:
-                raw = self.llm.complete_text(prompt)
+                raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=self._model)(prompt)).strip()
             except Exception as e:
                 logger.warning(
                     "Documentation fix for issue %s failed: %s", (issue.description or "")[:50], e

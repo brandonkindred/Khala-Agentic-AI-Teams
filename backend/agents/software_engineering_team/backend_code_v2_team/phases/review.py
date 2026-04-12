@@ -12,7 +12,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from llm_service import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 from software_engineering_team.shared.models import Task
 
 from ..models import (
@@ -53,7 +54,7 @@ def _run_llm_review(
         else "N/A",
         code=code_text[:MAX_REVIEW_CODE_CHARS],
     )
-    raw = llm.complete_text(prompt, think=True)
+    raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=get_strands_model())(prompt)).strip()
     data = parse_review_template(raw)
     issues: List[ReviewIssue] = []
     for item in data.get("issues") or []:
@@ -1021,7 +1022,7 @@ def run_documentation_self_review(
         )
 
         try:
-            raw = llm.complete_text(prompt, think=True)
+            raw = (lambda _r: _r.message if hasattr(_r, "message") else str(_r))(Agent(model=get_strands_model())(prompt)).strip()
         except Exception as exc:
             logger.warning(
                 "Documentation self-review LLM call failed (iteration %d): %s",
