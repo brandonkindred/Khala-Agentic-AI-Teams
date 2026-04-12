@@ -25,13 +25,12 @@ class AgentRuntimeToolAgent:
         self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        raw = json.loads((lambda _r: str(_r))(Agent(model=self._model)(
-            PROMPT.format(
-                microtask=inp.microtask.description or inp.microtask.title,
-                spec=inp.spec_context[:5000],
-            )).strip()),
-            think=True,
+        agent = Agent(model=self._model)
+        prompt = PROMPT.format(
+            microtask=inp.microtask.description or inp.microtask.title,
+            spec=inp.spec_context[:5000],
         )
+        raw = json.loads(str(agent(prompt)).strip())
         return ToolAgentOutput(
             files=raw.get("files") or {},
             recommendations=raw.get("recommendations") or [],

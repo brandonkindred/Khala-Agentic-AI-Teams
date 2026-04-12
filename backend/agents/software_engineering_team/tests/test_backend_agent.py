@@ -21,7 +21,7 @@ from backend_agent.agent import (
 )
 from backend_agent.models import BackendInput
 
-from llm_service import DummyLLMClient
+from software_engineering_team.tests.conftest import ConfigurableLLM
 
 
 def test_problem_solver_cycle_constant_defaults_to_twenty() -> None:
@@ -164,7 +164,7 @@ def test_build_code_review_issues_for_missing_test_routes_returns_targeted_issue
 
 def test_backend_agent_includes_problem_solving_header_when_issues_present() -> None:
     """When code_review_issues are present, prompt includes PROBLEM-SOLVING MODE header."""
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.complete_json.return_value = {
         "code": "",
         "language": "python",
@@ -201,7 +201,7 @@ def test_backend_agent_includes_problem_solving_header_when_issues_present() -> 
 
 def test_backend_agent_no_problem_solving_header_when_no_issues() -> None:
     """When no issues are present, prompt does not include PROBLEM-SOLVING MODE header."""
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.complete_json.return_value = {
         "code": "",
         "language": "python",
@@ -226,7 +226,7 @@ def test_backend_agent_logs_llm_prompt(caplog: pytest.LogCaptureFixture) -> None
     import logging
 
     caplog.set_level(logging.INFO)
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.complete_json.return_value = {
         "code": "",
         "language": "python",
@@ -250,7 +250,7 @@ def test_backend_agent_logs_problem_solving_context_and_header_when_issues_prese
     import logging
 
     caplog.set_level(logging.INFO)
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.complete_json.return_value = {
         "code": "",
         "language": "python",
@@ -288,7 +288,7 @@ def test_backend_agent_no_problem_solving_logs_when_no_issues(
     import logging
 
     caplog.set_level(logging.INFO)
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.complete_json.return_value = {
         "code": "",
         "language": "python",
@@ -309,7 +309,7 @@ def test_backend_agent_content_only_with_code_block_raises_llm_permanent_error()
     """When LLM returns only content (no files dict), backend raises LLMPermanentError (fail fast)."""
     from llm_service import LLMPermanentError
 
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.complete_json.return_value = {
         "content": "```\napp/main.py\nprint(1)\n```",
     }
@@ -322,7 +322,7 @@ def test_backend_agent_content_only_raises_llm_permanent_error() -> None:
     """When LLM returns only content with no files/code, agent raises LLMPermanentError (fail fast)."""
     from llm_service import LLMPermanentError
 
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.complete_json.return_value = {"content": "no code blocks here at all"}
     agent = BackendExpertAgent(llm_client=mock_llm)
     with pytest.raises(LLMPermanentError, match="no files"):
@@ -333,7 +333,7 @@ def test_backend_plan_task_returns_plan_markdown() -> None:
     """_plan_task parses LLM JSON and returns (plan_text, False)."""
     from software_engineering_team.shared.models import Task, TaskType
 
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.return_value = {
         "feature_intent": "Add CRUD for tasks",
@@ -367,7 +367,7 @@ def test_regenerate_with_issues_passes_task_plan_to_backend_input(tmp_path: Path
     """_regenerate_with_issues passes task_plan through to BackendInput when provided."""
     from unittest.mock import patch
 
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.return_value = {
         "code": "",
@@ -407,7 +407,7 @@ def test_regenerate_with_issues_passes_task_plan_to_backend_input(tmp_path: Path
 
 def test_backend_run_injects_task_plan_and_follow_instruction_into_prompt() -> None:
     """When task_plan is set, run() injects Implementation plan and follow-plan instruction into prompt."""
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.return_value = {
         "code": "",
@@ -484,7 +484,7 @@ def test_run_workflow_exits_at_five_same_build_failures_and_notifies_tech_lead(
     )
     same_error = "ImportError: No module named 'foo'"
 
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.side_effect = [
         {
@@ -619,7 +619,7 @@ def test_run_workflow_invokes_build_fix_specialist_when_same_build_fails_twice(
     )
     same_error = "ImportError: No module named 'foo'"
 
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.side_effect = [
         {
@@ -747,7 +747,7 @@ def test_run_workflow_skips_specialist_when_none(tmp_path: Path) -> None:
         },
     )
 
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.side_effect = [
         {
@@ -809,7 +809,7 @@ def test_run_workflow_skips_specialist_when_none(tmp_path: Path) -> None:
 
 def test_backend_agent_includes_specialist_tooling_plan_in_prompt() -> None:
     """When specialist_tooling_plan is provided, prompt includes Backend Agent V2 specialist coordination block."""
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.complete_json.return_value = {
         "code": "",
         "language": "python",
@@ -837,7 +837,7 @@ def test_backend_agent_includes_specialist_tooling_plan_in_prompt() -> None:
 
 def test_backend_agent_includes_specialist_findings_in_prompt() -> None:
     """When specialist_findings are provided, prompt includes specialist constraints block."""
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.complete_json.return_value = {
         "code": "",
         "language": "python",
@@ -906,7 +906,7 @@ def test_run_workflow_uses_problem_solver_agent_on_build_failure(tmp_path: Path)
         },
     )
 
-    mock_llm = DummyLLMClient()
+    mock_llm = ConfigurableLLM()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.side_effect = [
         {

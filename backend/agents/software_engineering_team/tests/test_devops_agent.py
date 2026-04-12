@@ -6,13 +6,15 @@ from unittest.mock import MagicMock
 
 from devops_agent.agent import DevOpsExpertAgent, _gather_codebase_context
 
+from software_engineering_team.tests.conftest import ConfigurableLLM
+
 
 def test_devops_run_workflow_calls_plan_task_without_error() -> None:
     """run_workflow calls _plan_task and completes without AttributeError."""
     import subprocess
     import tempfile
 
-    mock_llm = MagicMock()
+    mock_llm = ConfigurableLLM()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.side_effect = [
         {
@@ -57,7 +59,7 @@ def test_devops_run_workflow_calls_plan_task_without_error() -> None:
 
 def test_devops_plan_task_returns_plan_markdown() -> None:
     """_plan_task parses LLM JSON and returns plan markdown."""
-    mock_llm = MagicMock()
+    mock_llm = ConfigurableLLM()
     mock_llm.get_max_context_tokens.return_value = 16384
     mock_llm.complete_json.return_value = {
         "feature_intent": "Containerize the backend for build and deploy",
