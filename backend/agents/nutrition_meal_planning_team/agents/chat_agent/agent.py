@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
-from llm_service import LLMClient, LLMError, LLMJsonParseError
+from strands import Agent
 
 from ...models import (
     ClientProfile,

@@ -43,7 +43,9 @@ from llm_service import (  # noqa: E402
     LLMRateLimitError,
     LLMTemporaryError,
     get_client,
+    get_strands_model,
 )
+from strands import Agent  # noqa: E402
 from software_engineering_team.shared.development_plan_writer import (  # noqa: E402
     write_architecture_plan,
     write_tech_lead_plan,

@@ -8,12 +8,14 @@ verdict generation.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from llm_service.interface import LLMClient
+from llm_service import get_strands_model
+from strands import Agent
 
 from .market_data_service import OHLCVBar
 from .models import (

@@ -1,20 +1,14 @@
-"""Accessibility Expert agent: WCAG 2.2 compliance review.
-
-Built on the AWS Strands Agents SDK via ``llm_service.LLMClientModel``. The
-``LLMClient`` passed in at construction time is wrapped into a Strands
-``Model`` so the agent inherits retries, per-agent model routing, telemetry,
-and the dummy-client path for tests.
-"""
+"""Accessibility Expert agent: WCAG 2.2 compliance review."""
 
 from __future__ import annotations
 
+import json
 import logging
 
+from llm_service import get_strands_model
 from strands import Agent
 
-from llm_service import LLMClient, LLMClientModel
-
-from .models import AccessibilityInput, AccessibilityOutput
+from .models import AccessibilityInput, AccessibilityIssue, AccessibilityOutput
 from .prompts import ACCESSIBILITY_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -26,85 +20,48 @@ class AccessibilityExpertAgent:
     and produces a list of issues for the coding agent to fix.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self._model = LLMClientModel(
-            llm_client,
-            agent_key="accessibility",
-            temperature=0.1,
-            think=True,
-        )
+    def __init__(self, llm_client=None) -> None:
+        self._agent = Agent(model=get_strands_model("accessibility"), system_prompt=ACCESSIBILITY_PROMPT)
 
     def run(self, input_data: AccessibilityInput) -> AccessibilityOutput:
         """Review code for WCAG 2.2 compliance and produce issue list."""
         logger.info("Accessibility: reviewing %s chars of code", len(input_data.code or ""))
-
-        user_prompt = self._build_user_prompt(input_data)
-
-        # A fresh Strands Agent per call — reusing the same instance across
-        # calls breaks structured_output forced-tool-choice on the second
-        # call (Strands accumulates message history).
-        agent = Agent(model=self._model, system_prompt=ACCESSIBILITY_PROMPT)
-
-        try:
-            agent_result = agent(user_prompt, structured_output_model=AccessibilityOutput)
-            result = agent_result.structured_output
-            if not isinstance(result, AccessibilityOutput):
-                raise TypeError(
-                    f"Expected AccessibilityOutput, got {type(result).__name__ if result else 'None'}"
-                )
-        except Exception as exc:  # noqa: BLE001 — LLM/validation failures must not crash the run
-            logger.warning("Accessibility: structured_output failed (%s); returning fallback", exc)
-            return AccessibilityOutput(
-                issues=[],
-                approved=False,
-                summary=f"Accessibility analysis failed: {exc}",
-            )
-
-        # Re-derive ``approved`` from severities so a disagreement between the
-        # LLM's ``approved`` flag and the reported issue list is resolved in
-        # favor of the issue list.
-        critical_or_high = [i for i in result.issues if i.severity in ("critical", "high")]
-        result.approved = len(critical_or_high) == 0
-
-        logger.info(
-            "Accessibility: done, %s issues found, approved=%s",
-            len(result.issues),
-            result.approved,
-        )
-        return result
-
-    @staticmethod
-    def _build_user_prompt(input_data: AccessibilityInput) -> str:
-        """Assemble the user-facing prompt.
-
-        The persona (``ACCESSIBILITY_PROMPT``) lives on the Strands
-        ``Agent``'s system prompt. The user prompt carries the code under
-        review plus an explicit schema hint. The words "accessibility",
-        "wcag", and "issues" MUST appear here because
-        ``DummyLLMClient.complete_json`` pattern-matches on them to return
-        a deterministic stub in tests — see llm_service/README.md
-        "Migration rule: keep pattern anchors in the user prompt".
-        """
-        parts = [
-            "Review the following code for WCAG 2.2 accessibility issues. "
-            "Produce structured JSON with fields: issues, summary, approved. "
-            "Each issue must include severity, wcag_criterion, description, "
-            "location, and recommendation.",
-            "",
+        context_parts = [
             f"**Language:** {input_data.language}",
+            "**Code to review:**",
+            "```",
+            input_data.code,
+            "```",
         ]
         if input_data.task_description:
-            parts.append(f"**Task:** {input_data.task_description}")
-        parts.extend(
-            [
-                "**Code to review:**",
-                "```",
-                input_data.code,
-                "```",
-            ]
-        )
+            context_parts.insert(2, f"**Task:** {input_data.task_description}")
         if input_data.architecture:
-            parts.append(f"**Architecture:** {input_data.architecture.overview}")
+            context_parts.append(f"**Architecture:** {input_data.architecture.overview}")
 
-        return "\n".join(parts)
+        prompt = "\n".join(context_parts)
+        result = self._agent(prompt)
+        raw = (result.message if hasattr(result, "message") else str(result)).strip()
+        data = json.loads(raw)
+
+        issues = []
+        for i in data.get("issues") or []:
+            if isinstance(i, dict) and i.get("description"):
+                issues.append(
+                    AccessibilityIssue(
+                        severity=i.get("severity", "medium"),
+                        wcag_criterion=i.get("wcag_criterion", ""),
+                        description=i["description"],
+                        location=i.get("location", ""),
+                        recommendation=i.get("recommendation", ""),
+                    )
+                )
+
+        critical_issues = [i for i in issues if i.severity in ("critical", "high")]
+        approved = len(critical_issues) == 0
+
+        logger.info("Accessibility: done, %s issues found, approved=%s", len(issues), approved)
+        return AccessibilityOutput(
+            issues=issues,
+            approved=approved,
+            summary=data.get("summary", ""),
+        )
