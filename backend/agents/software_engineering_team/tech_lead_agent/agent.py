@@ -513,8 +513,9 @@ class TechLeadAgent:
                 ]
             )
 
-        prompt = TECH_LEAD_REFINE_TASK_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+        prompt = "\n".join(context_parts)
+        agent = Agent(model=self._model, system_prompt=TECH_LEAD_REFINE_TASK_PROMPT)
+        data = _agent_json(agent, prompt)
 
         return Task(
             id=task.id,
@@ -564,8 +565,9 @@ class TechLeadAgent:
         if architecture:
             context_parts.extend(["", "**Architecture:**", architecture.overview])
 
-        prompt = TECH_LEAD_EVALUATE_QA_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+        prompt = "\n".join(context_parts)
+        agent = Agent(model=self._model, system_prompt=TECH_LEAD_EVALUATE_QA_PROMPT)
+        data = _agent_json(agent, prompt)
 
         tasks = []
         for t in data.get("tasks") or []:
@@ -629,8 +631,9 @@ class TechLeadAgent:
                 str(requirement_task_mapping), max_mapping, self.llm, "requirement-task mapping"
             ),
         ]
-        prompt = TECH_LEAD_SHOULD_RUN_SECURITY_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
+        prompt = "\n".join(context_parts)
+        agent = Agent(model=self._model, system_prompt=TECH_LEAD_SHOULD_RUN_SECURITY_PROMPT)
+        data = _agent_json(agent, prompt)
         run_security = bool(data.get("run_security", False))
         logger.info("Tech Lead: run_security=%s (%s)", run_security, data.get("rationale", "")[:80])
         return run_security
@@ -735,8 +738,9 @@ class TechLeadAgent:
                 ]
             )
 
-        prompt = TECH_LEAD_REVIEW_PROGRESS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+        prompt = "\n".join(context_parts)
+        agent = Agent(model=self._model, system_prompt=TECH_LEAD_REVIEW_PROGRESS_PROMPT)
+        data = _agent_json(agent, prompt)
 
         new_tasks: List[Task] = []
         for t in data.get("tasks") or []:

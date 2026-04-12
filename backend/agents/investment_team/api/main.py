@@ -1795,7 +1795,6 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     """
     from investment_team.market_data_service import MarketDataService
     from investment_team.paper_trading_agent import PaperTradingAgent
-    from llm_service.factory import get_client
 
     # 1 — Look up the winning strategy lab record
     with _lock:
