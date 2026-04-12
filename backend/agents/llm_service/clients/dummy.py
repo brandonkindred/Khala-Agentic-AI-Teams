@@ -451,7 +451,18 @@ class DummyLLMClient(LLMClient, Model):
                     "Criterion 3: Error states display meaningful messages",
                 ],
             }
-        elif ("execution_order" in lowered or "task_assignments" in lowered) and "tasks" in lowered:
+        elif (
+            ("execution_order" in lowered or "task_assignments" in lowered)
+            and "tasks" in lowered
+        ) or (
+            # Strands-migrated Tech Lead: user prompt has product context
+            # while execution_order / initiative → epic → story keywords
+            # live in the system prompt.
+            system_prompt
+            and "execution_order" in system_prompt.lower()
+            and "initiative" in system_prompt.lower()
+            and "**product title:**" in lowered
+        ):
             return {
                 "tasks": [
                     {
@@ -483,6 +494,27 @@ class DummyLLMClient(LLMClient, Model):
                 "requirement_task_mapping": [],
                 "clarification_questions": [],
             }
+        elif "bugs_found" in lowered and (
+            "integration_test" in lowered or "readme_content" in lowered or "test_plan" in lowered
+        ):
+            # Kept ABOVE code-review catch-all and security/accessibility
+            # branches because QA prompts now include a shared
+            # REVIEW_PRIORITY_FRAMEWORK that mentions "security
+            # vulnerabilities", and QA user prompts also contain
+            # "code to review" which would match the code-review catch-all.
+            # ``bugs_found`` is the anchor token — it's unique to the QA
+            # output contract.
+            return {
+                "bugs_found": [],
+                "integration_tests": "# Dummy integration test",
+                "unit_tests": "# Dummy unit tests",
+                "test_plan": "Dummy test plan",
+                "summary": "Dummy QA assessment",
+                "live_test_notes": "Dummy notes",
+                "readme_content": "# Dummy README",
+                "suggested_commit_message": "test: add integration tests",
+                "approved": True,
+            }
         elif "senior code reviewer" in lowered and ("approved" in lowered or "issues" in lowered):
             return {
                 "approved": True,
@@ -501,26 +533,6 @@ class DummyLLMClient(LLMClient, Model):
                 "summary": "Code review passed (dummy).",
                 "spec_compliance_notes": "",
                 "suggested_commit_message": "",
-            }
-        elif "bugs_found" in lowered and (
-            "integration_test" in lowered or "readme_content" in lowered or "test_plan" in lowered
-        ):
-            # Kept ABOVE the security/accessibility branches because QA
-            # prompts now include a shared REVIEW_PRIORITY_FRAMEWORK that
-            # mentions "security vulnerabilities". ``bugs_found`` is the
-            # anchor token — it's unique to the QA output contract and
-            # keeps the frontend agent (which mentions "integration_tests"
-            # in its prompt) from matching this branch accidentally.
-            return {
-                "bugs_found": [],
-                "integration_tests": "# Dummy integration test",
-                "unit_tests": "# Dummy unit tests",
-                "test_plan": "Dummy test plan",
-                "summary": "Dummy QA assessment",
-                "live_test_notes": "Dummy notes",
-                "readme_content": "# Dummy README",
-                "suggested_commit_message": "test: add integration tests",
-                "approved": True,
             }
         elif "security" in lowered and "vulnerabilities" in lowered:
             return {"vulnerabilities": [], "summary": "No security issues found (dummy)"}

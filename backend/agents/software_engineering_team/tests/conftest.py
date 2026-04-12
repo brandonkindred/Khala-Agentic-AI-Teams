@@ -8,11 +8,12 @@ from llm_service import DummyLLMClient
 
 
 class _TrackingMock:
-    """Lightweight mock that tracks calls and supports return_value."""
+    """Lightweight mock that tracks calls and supports return_value / side_effect."""
 
     def __init__(self, fallback):
         self._fallback = fallback
         self._return_value = _SENTINEL
+        self._side_effect = _SENTINEL
         self.call_count = 0
         self.call_args = None
         self.call_args_list = []
@@ -25,10 +26,29 @@ class _TrackingMock:
     def return_value(self, value):
         self._return_value = value
 
+    @property
+    def side_effect(self):
+        return self._side_effect
+
+    @side_effect.setter
+    def side_effect(self, value):
+        self._side_effect = value
+
     def __call__(self, *args, **kwargs):
         self.call_count += 1
         self.call_args = (args, kwargs)
         self.call_args_list.append((args, kwargs))
+        if self._side_effect is not _SENTINEL:
+            if isinstance(self._side_effect, list):
+                if self._side_effect:
+                    item = self._side_effect.pop(0)
+                    if isinstance(item, Exception):
+                        raise item
+                    return item
+            elif callable(self._side_effect):
+                return self._side_effect(*args, **kwargs)
+            elif isinstance(self._side_effect, Exception):
+                raise self._side_effect
         if self._return_value is not _SENTINEL:
             return self._return_value
         return self._fallback(*args, **kwargs)

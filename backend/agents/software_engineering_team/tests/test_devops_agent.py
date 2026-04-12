@@ -54,7 +54,7 @@ def test_devops_run_workflow_calls_plan_task_without_error() -> None:
             task_id="devops-frontend",
         )
     assert result.success
-    assert mock_llm.complete_json.call_count >= 1
+    assert mock_llm.complete_json_mock.call_count >= 1
 
 
 def test_devops_plan_task_returns_plan_markdown() -> None:
