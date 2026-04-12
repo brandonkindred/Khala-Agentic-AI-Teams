@@ -15,7 +15,6 @@ from strands import Agent
 
 from branding_team.models import BrandPhase
 
-
 # ---------------------------------------------------------------------------
 # LLM model configuration
 # ---------------------------------------------------------------------------

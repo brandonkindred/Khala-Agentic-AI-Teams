@@ -283,7 +283,9 @@ class VisualIdentityOutput(BaseModel):
         default_factory=lambda: CreativeRefinementDecision()
     )
     # Absorbed from legacy BrandGuidelinesAgent.design_system()
-    design_system: "DesignSystemDefinition" = Field(default_factory=lambda: DesignSystemDefinition())
+    design_system: "DesignSystemDefinition" = Field(
+        default_factory=lambda: DesignSystemDefinition()
+    )
 
 
 # ---------------------------------------------------------------------------
