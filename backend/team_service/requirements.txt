@@ -1,31 +1,32 @@
 # Shared Python deps for all generic team containers.
 # This is a superset — each team uses what it needs at runtime.
 # Blogging is excluded (has its own Dockerfile with Playwright).
-pydantic>=2.8,<3.0
+pydantic>=2.12,<3.0
 pyyaml>=6.0,<7.0
-httpx>=0.27,<0.28
-beautifulsoup4>=4.12,<5.0
-fastapi>=0.115,<1.0
-uvicorn[standard]>=0.32,<1.0
-cryptography>=41.0.0
-psycopg[binary]>=3.1,<3.3
-psycopg_pool>=3.2,<4.0
-temporalio>=1.5,<1.6
-strands-agents>=0.1
-strands-agents-tools>=0.1
-python-multipart>=0.0.9,<1.0
-slack-sdk>=3.27,<4
-APScheduler>=3.10,<4.0
-pytz>=2024.1
-python-dotenv>=1.0,<2.0
+httpx>=0.28,<1.0
+beautifulsoup4>=4.14,<5.0
+fastapi>=0.135,<1.0
+uvicorn[standard]>=0.44,<1.0
+cryptography>=46.0,<47.0
+psycopg[binary]>=3.3,<4.0
+psycopg_pool>=3.3,<4.0
+temporalio>=1.25,<2.0
+strands-agents>=1.35,<2.0
+strands-agents-tools>=0.4,<1.0
+ollama>=0.6,<1.0
+python-multipart>=0.0.26,<1.0
+slack-sdk>=3.41,<4
+APScheduler>=3.11,<4.0
+pytz>=2026.1
+python-dotenv>=1.2,<2.0
 yfinance>=1.2,<2.0
 # Observability: team services auto-expose /metrics via team_service/entrypoint.py
-prometheus-fastapi-instrumentator>=7.0,<8.0
+prometheus-fastapi-instrumentator>=7.1,<8.0
 # OpenTelemetry: every team container runs shared_observability.init_otel at startup
-opentelemetry-api>=1.27,<2.0
-opentelemetry-sdk>=1.27,<2.0
-opentelemetry-exporter-otlp-proto-http>=1.27,<2.0
-opentelemetry-exporter-otlp-proto-grpc>=1.27,<2.0
-opentelemetry-instrumentation-fastapi>=0.48b0,<1.0
-opentelemetry-instrumentation-httpx>=0.48b0,<1.0
-opentelemetry-instrumentation-logging>=0.48b0,<1.0
+opentelemetry-api>=1.41,<2.0
+opentelemetry-sdk>=1.41,<2.0
+opentelemetry-exporter-otlp-proto-http>=1.41,<2.0
+opentelemetry-exporter-otlp-proto-grpc>=1.41,<2.0
+opentelemetry-instrumentation-fastapi>=0.62b0,<1.0
+opentelemetry-instrumentation-httpx>=0.62b0,<1.0
+opentelemetry-instrumentation-logging>=0.62b0,<1.0

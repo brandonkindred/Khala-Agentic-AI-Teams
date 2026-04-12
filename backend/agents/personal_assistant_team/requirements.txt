@@ -1,31 +1,31 @@
 # Core dependencies
-pydantic>=2.0
-fastapi>=0.100.0
-uvicorn>=0.23.0
-httpx>=0.24.0
+pydantic>=2.12,<3.0
+fastapi>=0.135,<1.0
+uvicorn>=0.44,<1.0
+httpx>=0.28,<1.0
 
 # Email support
-imapclient>=2.3.0
+imapclient>=3.1,<4.0
 
 # Google APIs (Gmail, Calendar)
-google-auth>=2.22.0
-google-auth-oauthlib>=1.0.0
-google-api-python-client>=2.95.0
+google-auth>=2.49,<3.0
+google-auth-oauthlib>=1.3,<2.0
+google-api-python-client>=2.194,<3.0
 
 # Credential encryption
-cryptography>=41.0.0
+cryptography>=46.0,<47.0
 
 # Date/time parsing
-python-dateutil>=2.8.0
+python-dateutil>=2.9,<3.0
 
 # YAML support for profile storage
-PyYAML>=6.0
+PyYAML>=6.0,<7.0
 
 # OpenTelemetry: shared_observability.init_otel runs at every startup
-opentelemetry-api>=1.27,<2.0
-opentelemetry-sdk>=1.27,<2.0
-opentelemetry-exporter-otlp-proto-http>=1.27,<2.0
-opentelemetry-exporter-otlp-proto-grpc>=1.27,<2.0
-opentelemetry-instrumentation-fastapi>=0.48b0,<1.0
-opentelemetry-instrumentation-httpx>=0.48b0,<1.0
-opentelemetry-instrumentation-logging>=0.48b0,<1.0
+opentelemetry-api>=1.41,<2.0
+opentelemetry-sdk>=1.41,<2.0
+opentelemetry-exporter-otlp-proto-http>=1.41,<2.0
+opentelemetry-exporter-otlp-proto-grpc>=1.41,<2.0
+opentelemetry-instrumentation-fastapi>=0.62b0,<1.0
+opentelemetry-instrumentation-httpx>=0.62b0,<1.0
+opentelemetry-instrumentation-logging>=0.62b0,<1.0
