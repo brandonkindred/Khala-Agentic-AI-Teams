@@ -1,6 +1,12 @@
 pytest>=8.0,<9.0
 pydantic>=2.8,<3.0
 httpx>=0.27,<0.28
+# Strands Agents SDK is the LLM orchestration framework used via
+# ``llm_service.LLMClientModel`` / ``llm_service.get_strands_model``. Listed
+# in the shared agents requirements so every team CI job installs it; the
+# adapter itself is lazy-loaded so non-Strands teams don't pay an import
+# cost at module load time.
+strands-agents>=1.35,<2.0
 json-repair>=0.28,<0.60
 PyYAML>=6.0,<7.0
 beautifulsoup4>=4.12,<5.0
