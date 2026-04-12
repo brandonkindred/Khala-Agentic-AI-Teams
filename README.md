@@ -9,7 +9,7 @@ Khala is a monorepo for multi-agent "team" systems. Each team exposes a FastAPI 
 ```text
 khala/
 ├── backend/
-│   ├── agents/                 # Team implementations + team-specific APIs (21 mounted teams)
+│   ├── agents/                 # Team implementations + team-specific APIs (20 enabled teams)
 │   ├── unified_api/            # Unified FastAPI app mounting all teams
 │   ├── run_unified_api.py      # Unified API launcher
 │   ├── Makefile                # Build, lint, test, run targets
@@ -50,7 +50,7 @@ UI: <http://localhost:4200>
 
 ## Unified API team routes
 
-The Unified API mounts teams under `/api/*` prefixes. Current configured routes (21 enabled teams):
+The Unified API mounts teams under `/api/*` prefixes. Current configured routes (20 enabled teams):
 
 - `/api/blogging`
 - `/api/software-engineering`
