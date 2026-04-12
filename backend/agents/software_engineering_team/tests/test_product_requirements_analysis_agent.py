@@ -265,8 +265,7 @@ def test_update_spec_writes_versioned_file(tmp_path: Path) -> None:
     (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
     (tmp_path / "plan" / "product_analysis" / "updated_spec_v6.md").write_text("# v6")
 
-    llm = MagicMock()
-    llm.complete_text.return_value = "# Updated spec content"
+    llm = _StubClient("# Updated spec content")
 
     agent = ProductRequirementsAnalysisAgent(llm)
     answered = [
@@ -1242,8 +1241,7 @@ def test_extract_sop_decisions_from_spec_empty_spec() -> None:
 
 def test_extract_sop_decisions_from_spec_success() -> None:
     """LLM returns valid decisions; verify SOPDecision parsing."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "extracted_decisions": [
                 {
@@ -1272,8 +1270,7 @@ def test_extract_sop_decisions_from_spec_success() -> None:
 
 def test_extract_sop_decisions_from_spec_low_confidence_filtered() -> None:
     """Low-confidence extractions should be filtered out."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "extracted_decisions": [
                 {"sop_id": "P1.deploy.a", "decision": "Cloud", "confidence": 0.95},
@@ -1289,8 +1286,12 @@ def test_extract_sop_decisions_from_spec_low_confidence_filtered() -> None:
 
 def test_extract_sop_decisions_from_spec_llm_failure() -> None:
     """LLM failure should return empty list, not raise."""
-    llm = MagicMock()
-    llm.complete_text.side_effect = RuntimeError("LLM unavailable")
+
+    class _FailingClient(DummyLLMClient):
+        def complete_json(self, prompt, **kwargs):
+            raise RuntimeError("LLM unavailable")
+
+    llm = _FailingClient()
     agent = ProductRequirementsAnalysisAgent(llm)
     decisions = agent._extract_sop_decisions_from_spec("Some spec content")
     assert decisions == []
