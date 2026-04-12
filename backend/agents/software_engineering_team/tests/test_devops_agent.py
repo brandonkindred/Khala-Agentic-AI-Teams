@@ -16,7 +16,7 @@ def test_devops_run_workflow_calls_plan_task_without_error() -> None:
 
     mock_llm = ConfigurableLLM()
     mock_llm._max_context_tokens = 16384
-    mock_llm.complete_json.side_effect = [
+    mock_llm.complete_json_mock.side_effect = [
         {
             "feature_intent": "Containerize",
             "what_changes": ["Dockerfile"],
@@ -61,7 +61,7 @@ def test_devops_plan_task_returns_plan_markdown() -> None:
     """_plan_task parses LLM JSON and returns plan markdown."""
     mock_llm = ConfigurableLLM()
     mock_llm._max_context_tokens = 16384
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "feature_intent": "Containerize the backend for build and deploy",
         "what_changes": ["Dockerfile", ".github/workflows/ci.yml"],
         "algorithms_data_structures": "Multi-stage Docker build; non-root user in container",
