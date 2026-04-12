@@ -28,28 +28,32 @@ def test_parse_spec_with_llm_uses_dummy() -> None:
 
 def test_parse_spec_with_llm_raises_on_invalid_structure() -> None:
     """When LLM returns acceptance_criteria or constraints as non-list, raises ValueError."""
-    from unittest.mock import MagicMock
 
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {
-        "title": "Test",
-        "description": "Desc",
-        "acceptance_criteria": "not a list",  # invalid
-        "constraints": [],
-        "priority": "medium",
-    }
+    class _BadCriteriaLLM(DummyLLMClient):
+        def complete_json(self, prompt, **kwargs):
+            return {
+                "title": "Test",
+                "description": "Desc",
+                "acceptance_criteria": "not a list",
+                "constraints": [],
+                "priority": "medium",
+            }
+
     with pytest.raises(ValueError, match="acceptance_criteria"):
-        parse_spec_with_llm("spec", mock_llm)
+        parse_spec_with_llm("spec", _BadCriteriaLLM())
 
-    mock_llm.complete_json.return_value = {
-        "title": "Test",
-        "description": "Desc",
-        "acceptance_criteria": [],
-        "constraints": "not a list",  # invalid
-        "priority": "medium",
-    }
+    class _BadConstraintsLLM(DummyLLMClient):
+        def complete_json(self, prompt, **kwargs):
+            return {
+                "title": "Test",
+                "description": "Desc",
+                "acceptance_criteria": [],
+                "constraints": "not a list",
+                "priority": "medium",
+            }
+
     with pytest.raises(ValueError, match="constraints"):
-        parse_spec_with_llm("spec", mock_llm)
+        parse_spec_with_llm("spec", _BadConstraintsLLM())
 
 
 def test_load_spec_from_repo(tmp_path) -> None:

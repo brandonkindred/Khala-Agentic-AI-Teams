@@ -9,7 +9,6 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from llm_service import get_client
 from shared_observability import init_otel, instrument_fastapi_app
 
 from ..agents.activities_expert_agent import ActivitiesExpertAgent
@@ -51,13 +50,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialise LLM client and all specialist agents once at startup
-_llm = get_client("road_trip_planning")
-_traveler_profiler = TravelerProfilerAgent(_llm)
-_route_planner = RoutePlannerAgent(_llm)
-_activities_expert = ActivitiesExpertAgent(_llm)
-_logistics_agent = LogisticsAgent(_llm)
-_itinerary_composer = ItineraryComposerAgent(_llm)
+# Initialise all specialist agents once at startup (each creates its own Strands Agent)
+_traveler_profiler = TravelerProfilerAgent()
+_route_planner = RoutePlannerAgent()
+_activities_expert = ActivitiesExpertAgent()
+_logistics_agent = LogisticsAgent()
+_itinerary_composer = ItineraryComposerAgent()
 
 
 def _run_pipeline(trip_request: PlanTripRequest) -> TripItinerary:

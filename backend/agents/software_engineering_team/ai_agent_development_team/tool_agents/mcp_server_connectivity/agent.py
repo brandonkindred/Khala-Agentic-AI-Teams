@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient
+import json
+
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import ToolAgentInput, ToolAgentOutput
 
@@ -28,17 +32,18 @@ Return JSON with:
 class MCPServerConnectivityToolAgent:
     """Generates MCP discovery/setup/connectivity artifacts for AI agent systems."""
 
-    def __init__(self, llm: LLMClient) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+
+        self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
-        raw = self.llm.complete_json(
-            PROMPT.format(
-                microtask=inp.microtask.description or inp.microtask.title,
-                spec=inp.spec_context[:5000],
-            ),
-            think=True,
+        agent = Agent(model=self._model)
+        prompt = PROMPT.format(
+            microtask=inp.microtask.description or inp.microtask.title,
+            spec=inp.spec_context[:5000],
         )
+        raw = json.loads(str(agent(prompt)).strip())
         return ToolAgentOutput(
             files=raw.get("files") or {},
             recommendations=raw.get("recommendations") or [],

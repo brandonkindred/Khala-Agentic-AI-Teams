@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
+from typing import Any, Dict, Optional
 
-from llm_service import LLMClient, get_client
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from .agents import (
     AvailabilityTSCAgent,
@@ -36,6 +40,39 @@ _NAME_TO_CATEGORY = {
 logger = logging.getLogger(__name__)
 
 
+class _StrandsLLMAdapter:
+    """Adapts a Strands Agent to the LLMClient interface expected by SOC2 agents."""
+
+    def __init__(self, agent: Agent) -> None:
+        self._agent = agent
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        result = self._agent(prompt)
+        return str(result).strip()
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        raw = self.complete(prompt, temperature=temperature, system_prompt=system_prompt)
+        return json.loads(raw)
+
+    def get_max_context_tokens(self) -> int:
+        return 16384
+
+
 class SOC2AuditOrchestrator:
     """
     Runs a full SOC2 compliance audit on a code repository:
@@ -44,8 +81,12 @@ class SOC2AuditOrchestrator:
     3. Compile results and produce either a compliance report (if issues found) or next-steps document
     """
 
-    def __init__(self, llm_client: LLMClient | None = None) -> None:
-        self.llm = llm_client or get_client("soc2")
+    def __init__(self, llm_client=None) -> None:
+        if llm_client is not None:
+            self.llm = llm_client
+        else:
+            agent = Agent(model=get_strands_model("soc2"))
+            self.llm = _StrandsLLMAdapter(agent)
         self.security_agent = SecurityTSCAgent()
         self.availability_agent = AvailabilityTSCAgent()
         self.processing_integrity_agent = ProcessingIntegrityTSCAgent()
@@ -137,9 +178,9 @@ class SOC2AuditOrchestrator:
         )
 
 
-def run_soc2_audit(repo_path: str | Path, llm_client: LLMClient | None = None) -> SOC2AuditResult:
+def run_soc2_audit(repo_path: str | Path, llm_client=None) -> SOC2AuditResult:
     """
-    One-shot SOC2 audit. Uses default LLM client if none provided.
+    One-shot SOC2 audit. Uses default Strands Agent if no LLM client provided.
     """
     orch = SOC2AuditOrchestrator(llm_client=llm_client)
     return orch.run(repo_path)

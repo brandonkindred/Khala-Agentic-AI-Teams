@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import Dict, List
+
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import (
     ReviewIssue,
@@ -19,9 +23,6 @@ from ...prompts import (
     PYTHON_CONVENTIONS,
     QA_TOOL_AGENT_REVIEW_PROMPT,
 )
-
-if TYPE_CHECKING:
-    from llm_service import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +55,11 @@ def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) 
 class TestingQAToolAgent:
     """QA tool agent: finds testing/quality issues in review and fixes them one at a time in problem_solve."""
 
-    def __init__(self, llm: Optional["LLMClient"] = None) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+
+        self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
+        self.llm = llm  # kept for backward compat checks
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)
@@ -72,7 +76,7 @@ class TestingQAToolAgent:
 
     def review(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Find QA/testing issues in current code. Returns issues with source=qa."""
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(summary="Testing/QA review skipped (no LLM).")
         code_text = "\n\n".join(
             f"--- {p} ---\n{c}" for p, c in list(inp.current_files.items())[:20]
@@ -84,7 +88,7 @@ class TestingQAToolAgent:
             code=code_text,
         )
         try:
-            raw = self.llm.complete_text(prompt, think=True)
+            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
         except Exception as e:
             logger.warning("Testing/QA review LLM call failed: %s", e)
             return ToolAgentPhaseOutput(summary="Testing/QA review failed (LLM error).")
@@ -108,7 +112,7 @@ class TestingQAToolAgent:
 
     def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Fix QA-owned issues one at a time. Only fixes issues with source qa or tool_testing_qa."""
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(summary="Testing/QA problem_solve skipped (no LLM).")
         qa_issues = [
             i
@@ -133,7 +137,7 @@ class TestingQAToolAgent:
                 current_code=relevant_code,
             )
             try:
-                raw = self.llm.complete_text(prompt, think=True)
+                raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
             except Exception as e:
                 logger.warning(
                     "Testing/QA fix for issue %s failed: %s", (issue.description or "")[:50], e

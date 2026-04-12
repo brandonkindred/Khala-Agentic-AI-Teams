@@ -1,9 +1,9 @@
 from ..models.phase_result import PageAuditResult
 from ..tools import build_page_inventory, persist_artifact, run_lighthouse_accessibility
-from .base import ToolContext, tool
+from .base import ToolContext, a11y_phase
 
 
-@tool(context=True)
+@a11y_phase(context=True)
 def run_page_audit(page_id: str, tool_context: ToolContext) -> dict:
     record = {"page": page_id, "tier": "tier1", "status": "audited"}
     build_page_inventory([record])

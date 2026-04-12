@@ -13,13 +13,15 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
+from strands import Agent
+
 from llm_service import (
     LLMClient as _BaseLLMClient,
 )
 from llm_service import (
     LLMError,
     LLMJsonParseError,
-    get_client,
+    get_strands_model,
 )
 
 
@@ -308,11 +310,11 @@ class LLMClient(_BaseLLMClient):
         return suggestions
 
 
-class _PALLMClientWrapper(LLMClient):
-    """Wraps central LLMClient and re-raises LLMJsonParseError as JSONExtractionFailure."""
+class _PAStrandsWrapper(LLMClient):
+    """Wraps a Strands Agent and exposes the LLMClient interface for PA agents."""
 
-    def __init__(self, inner: _BaseLLMClient):
-        self._inner = inner
+    def __init__(self, agent: Agent):
+        self._agent = agent
 
     def _ollama_complete(
         self,
@@ -324,13 +326,8 @@ class _PALLMClientWrapper(LLMClient):
         json_mode: bool = False,
         think: bool = False,
     ) -> str:
-        return self._inner.complete(
-            prompt,
-            temperature=temperature,
-            max_tokens=max_tokens or 4096,
-            system_prompt=system_prompt,
-            think=think,
-        )
+        result = self._agent(prompt)
+        return str(result).strip()
 
     def complete_json(
         self,
@@ -342,25 +339,33 @@ class _PALLMClientWrapper(LLMClient):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         try:
-            return self._inner.complete_json(
-                prompt,
-                temperature=temperature,
-                system_prompt=system_prompt,
-                think=think,
+            raw = self._ollama_complete(
+                prompt, temperature=temperature, system_prompt=system_prompt, think=think
             )
-        except LLMJsonParseError as e:
+            parsed = self._try_parse_json(raw)
+            if parsed is not None:
+                return parsed
+            raise JSONExtractionFailure(
+                "Failed to parse JSON from agent response",
+                original_prompt=prompt,
+                attempts_made=1,
+                raw_responses=[raw],
+                response_preview=raw[:200],
+            )
+        except JSONExtractionFailure:
+            raise
+        except Exception as e:
             raise JSONExtractionFailure(
                 str(e),
                 original_prompt=prompt,
                 attempts_made=1,
                 continuation_attempts=0,
                 decomposition_attempts=0,
-                raw_responses=[getattr(e, "response_preview", "") or ""],
+                raw_responses=[],
                 recovery_suggestions=[
                     "Check that the prompt asks for valid JSON.",
                     "Try simplifying the request or breaking it into smaller parts.",
                 ],
-                response_preview=getattr(e, "response_preview", ""),
             ) from e
 
     def complete(
@@ -371,24 +376,20 @@ class _PALLMClientWrapper(LLMClient):
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
     ) -> str:
-        return self._inner.complete(
-            prompt,
-            temperature=temperature,
-            max_tokens=max_tokens or 4096,
-            system_prompt=system_prompt,
-        )
+        return self._ollama_complete(prompt, temperature=temperature, system_prompt=system_prompt)
 
     def get_max_context_tokens(self) -> int:
-        return self._inner.get_max_context_tokens()
+        return 4096
 
 
 def get_llm_client_with_pa_exceptions(agent_key: Optional[str] = None) -> LLMClient:
-    """Return a client that re-raises LLMJsonParseError as JSONExtractionFailure (for PA agents)."""
-    return _PALLMClientWrapper(get_client(agent_key))
+    """Return a Strands-Agent-backed client that raises JSONExtractionFailure on parse errors."""
+    agent = Agent(model=get_strands_model(agent_key))
+    return _PAStrandsWrapper(agent)
 
 
 def get_llm_client(agent_key: Optional[str] = None) -> LLMClient:
-    """Return PA wrapper around central client (re-raises LLMJsonParseError as JSONExtractionFailure)."""
+    """Return PA wrapper around Strands Agent (raises JSONExtractionFailure on parse errors)."""
     return get_llm_client_with_pa_exceptions(agent_key)
 
 

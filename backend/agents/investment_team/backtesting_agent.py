@@ -7,10 +7,13 @@ the LLM evaluation callback with backtest-specific prompt context.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from llm_service.interface import LLMClient
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from .market_data_service import OHLCVBar
 from .models import (
@@ -40,6 +43,17 @@ _EVALUATE_SYSTEM = (
 )
 
 
+def _make_agent_complete_json(agent: Agent) -> Any:
+    """Return a callable compatible with evaluate_bar's llm_complete_json signature."""
+
+    def _complete_json(prompt: str, **_kwargs: Any) -> Dict[str, Any]:
+        result = agent(prompt)
+        raw = str(result).strip()
+        return json.loads(raw)
+
+    return _complete_json
+
+
 # ---------------------------------------------------------------------------
 # Agent
 # ---------------------------------------------------------------------------
@@ -51,8 +65,15 @@ class BacktestingAgent:
     chronologically and using the LLM to interpret strategy entry/exit rules.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        self._agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=get_strands_model("backtesting"),
+                system_prompt=_EVALUATE_SYSTEM,
+            )
+        )
 
     def run_backtest(
         self,
@@ -71,6 +92,8 @@ class BacktestingAgent:
             slippage_bps=config.slippage_bps,
         )
 
+        _complete_json = _make_agent_complete_json(self._agent)
+
         def _evaluate(
             symbol: str,
             bar: OHLCVBar,
@@ -79,7 +102,7 @@ class BacktestingAgent:
             capital: float,
         ) -> Dict[str, Any]:
             return evaluate_bar(
-                self.llm.complete_json,
+                _complete_json,
                 strategy,
                 _EVALUATE_SYSTEM,
                 symbol,

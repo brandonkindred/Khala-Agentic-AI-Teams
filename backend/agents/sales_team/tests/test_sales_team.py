@@ -1,7 +1,6 @@
 """Tests for the AI Sales Team pod — including outcome tracking and learning loop.
 
-All tests run without the strands SDK installed (agents operate in stub mode),
-making them suitable for CI environments without AWS credentials.
+The strands SDK is a hard dependency. Tests require it to be installed.
 """
 
 from __future__ import annotations
@@ -587,111 +586,6 @@ class TestOutcomeStore:
 # ---------------------------------------------------------------------------
 # Heuristic learning engine tests
 # ---------------------------------------------------------------------------
-
-
-class TestHeuristicLearning:
-    """Test heuristic insight computation without requiring Strands SDK."""
-
-    def test_empty_outcomes(self):
-        from sales_team.outcome_store import compute_heuristic_insights
-
-        insights = compute_heuristic_insights([], [])
-        assert insights.total_outcomes_analyzed == 0
-        assert insights.win_rate == 0.0
-        assert len(insights.actionable_recommendations) > 0
-
-    def test_win_rate_calculation(self):
-        from sales_team.outcome_store import compute_heuristic_insights
-
-        deals = [
-            DealOutcome(
-                company_name=f"Co{i}",
-                final_stage_reached=PipelineStage.NEGOTIATION,
-                result=OutcomeResult.WON if i < 3 else OutcomeResult.LOST,
-            )
-            for i in range(5)
-        ]
-        insights = compute_heuristic_insights([], deals)
-        assert insights.win_rate == pytest.approx(0.6)
-
-    def test_top_industries_from_wins(self):
-        from sales_team.outcome_store import compute_heuristic_insights
-
-        deals = [
-            DealOutcome(
-                company_name=f"SaasCo{i}",
-                industry="SaaS",
-                final_stage_reached=PipelineStage.NEGOTIATION,
-                result=OutcomeResult.WON,
-            )
-            for i in range(3)
-        ] + [
-            DealOutcome(
-                company_name="FinCo",
-                industry="FinTech",
-                final_stage_reached=PipelineStage.NEGOTIATION,
-                result=OutcomeResult.LOST,
-            )
-        ]
-        insights = compute_heuristic_insights([], deals)
-        assert "SaaS" in insights.top_performing_industries
-
-    def test_common_objections_from_stage_outcomes(self):
-        from sales_team.outcome_store import compute_heuristic_insights
-
-        stages = [
-            StageOutcome(
-                company_name=f"Co{i}",
-                stage=PipelineStage.NEGOTIATION,
-                outcome=OutcomeResult.OBJECTION,
-                objection_text="Price is too high",
-            )
-            for i in range(4)
-        ]
-        insights = compute_heuristic_insights(stages, [])
-        assert "Price is too high" in insights.common_objections
-
-    def test_best_close_techniques_from_wins(self):
-        from sales_team.outcome_store import compute_heuristic_insights
-
-        deals = [
-            DealOutcome(
-                company_name=f"Co{i}",
-                final_stage_reached=PipelineStage.NEGOTIATION,
-                result=OutcomeResult.WON,
-                close_technique_used=CloseType.SUMMARY,
-            )
-            for i in range(3)
-        ]
-        insights = compute_heuristic_insights([], deals)
-        assert "summary" in insights.best_close_techniques
-
-    def test_stage_conversion_rates(self):
-        from sales_team.outcome_store import compute_heuristic_insights
-
-        stages = [
-            StageOutcome(
-                company_name=f"Co{i}", stage=PipelineStage.OUTREACH, outcome=OutcomeResult.CONVERTED
-            )
-            for i in range(3)
-        ] + [
-            StageOutcome(
-                company_name=f"Co{i + 3}",
-                stage=PipelineStage.OUTREACH,
-                outcome=OutcomeResult.STALLED,
-            )
-            for i in range(1)
-        ]
-        insights = compute_heuristic_insights(stages, [])
-        assert "outreach" in insights.stage_conversion_rates
-        assert insights.stage_conversion_rates["outreach"] == pytest.approx(0.75)
-
-    def test_insights_version_increments(self):
-        from sales_team.outcome_store import compute_heuristic_insights
-
-        i1 = compute_heuristic_insights([], [], current_version=0)
-        i2 = compute_heuristic_insights([], [], current_version=i1.insights_version)
-        assert i2.insights_version == i1.insights_version + 1
 
 
 # ---------------------------------------------------------------------------

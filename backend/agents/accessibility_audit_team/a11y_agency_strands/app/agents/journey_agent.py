@@ -5,10 +5,10 @@ from ..tools import (
     log_screen_reader_test,
     persist_artifact,
 )
-from .base import ToolContext, tool
+from .base import ToolContext, a11y_phase
 
 
-@tool(context=True)
+@a11y_phase(context=True)
 def run_journey_assessment(journey_id: str, tool_context: ToolContext) -> dict:
     results = [
         log_keyboard_test(journey_id, "pass"),

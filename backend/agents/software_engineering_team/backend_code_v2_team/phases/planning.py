@@ -11,7 +11,9 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from llm_service import LLMClient
+from strands import Agent
+
+from llm_service import LLMClient, get_strands_model
 from software_engineering_team.shared.models import SystemArchitecture, Task
 
 from ..models import (
@@ -25,6 +27,17 @@ from ..models import (
 )
 from ..output_templates import parse_planning_template
 from ..prompts import PLANNING_FIXES_FOR_ISSUES_PROMPT, PLANNING_PROMPT
+
+
+def _resolve_model(llm):
+    """Use injected LLM client as Strands model when it implements Model; else create one."""
+    from strands.models.model import Model as _StrandsModel
+
+    if llm is not None and isinstance(llm, _StrandsModel):
+        return llm
+    from llm_service import LLMClient as _LLMClient
+
+    return get_strands_model(client=llm) if (llm is not None and isinstance(llm, _LLMClient)) else get_strands_model()
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +128,7 @@ def run_planning(
     prompt = _build_context(task, architecture, existing_code, language)
 
     logger.info("[%s] Planning phase: generating microtasks (language=%s)", task.id, language)
-    raw = llm.complete_text(prompt, think=True)
+    raw = (lambda _r: str(_r))(Agent(model=_resolve_model(llm))(prompt)).strip()
     raw_parsed = parse_planning_template(raw)
     result = _parse_planning_output(raw_parsed, language)
     logger.info(
@@ -189,7 +202,7 @@ def plan_fixes_for_unresolved_issues(
     logger.info(
         "[%s] Planning fix microtasks for %d unresolved issues", task_id, len(unresolved_issues)
     )
-    raw = llm.complete_text(prompt, think=True)
+    raw = (lambda _r: str(_r))(Agent(model=_resolve_model(llm))(prompt)).strip()
     raw_parsed = parse_planning_template(raw)
     result = _parse_planning_output(raw_parsed, language)
     logger.info("[%s] Planned %d fix microtasks", task_id, len(result.microtasks))

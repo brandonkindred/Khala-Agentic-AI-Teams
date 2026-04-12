@@ -33,7 +33,12 @@ def _minimal_plan() -> ContentPlan:
 
 
 class _PromptCapturingLLM(DummyLLMClient):
-    """Dummy LLM that records all prompts passed to complete() for tests."""
+    """Dummy LLM that records all prompts for tests.
+
+    Since the blogging agents now use ``strands.Agent(model=llm)`` which calls
+    ``stream()`` -> ``complete_json()``, prompt capture happens in
+    ``complete_json`` (called by the inherited ``DummyLLMClient.stream``).
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -41,20 +46,18 @@ class _PromptCapturingLLM(DummyLLMClient):
         self.all_prompts: list[str] = []
         self.last_complete_json_prompt: str = ""
 
-    def complete(self, prompt: str, **kwargs: object) -> str:
+    def complete_json(self, prompt: str, **kwargs: object) -> dict:
         self.last_prompt = prompt
         self.all_prompts.append(prompt)
-        # Return a self-review-clean draft (empty JSON array = no issues)
-        if "Review this draft" in prompt:
-            return "[]"
-        # Return a deterministic-fix-clean draft
-        if "Fix ONLY these" in prompt:
-            return '{"draft": 0}\n---DRAFT---\n# Draft\n\nPlaceholder draft content.'
-        return '{"draft": 0}\n---DRAFT---\n# Draft\n\nPlaceholder draft content.'
-
-    def complete_json(self, prompt: str, **kwargs: object) -> dict:
         self.last_complete_json_prompt = prompt
-        return {"draft": "# Draft\n\nPlaceholder."}
+        lowered = prompt.lower() if isinstance(prompt, str) else ""
+        # Self-review prompt: return empty issues list
+        if "review this draft" in lowered:
+            return {"issues": []}
+        # Deterministic fix prompt
+        if "fix only these" in lowered:
+            return {"draft": "# Draft\n\nPlaceholder draft content."}
+        return {"draft": "# Draft\n\nPlaceholder draft content."}
 
 
 def test_writer_input_requires_content_plan() -> None:
@@ -70,13 +73,28 @@ def test_golden_draft_h2_headings_match_content_plan_sections() -> None:
     plan = _minimal_plan()
 
     class H2DraftLLM(DummyLLMClient):
-        def complete(self, prompt, **kwargs):  # type: ignore[no-untyped-def]
+        """Override complete_json so DummyLLMClient.stream() returns a draft
+        whose H2 headings match the content plan sections."""
+
+        def complete_json(self, prompt, **kwargs):  # type: ignore[no-untyped-def]
             self._request_count += 1
+            lowered = prompt.lower() if isinstance(prompt, str) else ""
+            # Self-review prompt: return empty issues list
+            if "review this draft" in lowered:
+                return {"issues": []}
+            # Deterministic fix prompt: pass through
+            if "fix only these" in lowered:
+                body = "\n\n".join(
+                    f"## {s.title}\n\nBody for {s.title}."
+                    for s in sorted(plan.sections, key=lambda x: x.order)
+                )
+                return {"draft": "# Post title\n\n" + body}
+            # Default: return draft with planned H2 headings
             body = "\n\n".join(
                 f"## {s.title}\n\nBody for {s.title}."
                 for s in sorted(plan.sections, key=lambda x: x.order)
             )
-            return '{"draft": 0}\n---DRAFT---\n# Post title\n\n' + body
+            return {"draft": "# Post title\n\n" + body}
 
     agent = BlogWriterAgent(
         llm_client=H2DraftLLM(),

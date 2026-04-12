@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import List, Optional
+import re
+from typing import Any, List, Optional
 
-from llm_service import LLMClient, LLMError, LLMJsonParseError
+from strands import Agent
 
 from ...models import (
     ClientProfile,
@@ -56,8 +58,8 @@ def _summarize_history(entries: List[MealHistoryEntry]) -> str:
 class MealPlanningAgent:
     """Suggests meals from profile, nutrition plan, and meal history. Caller records recommendations and passes history."""
 
-    def __init__(self, llm: LLMClient) -> None:
-        self.llm = llm
+    def __init__(self, model: Any) -> None:
+        self._agent = Agent(model=model, system_prompt=SYSTEM_PROMPT)
 
     def run(
         self,
@@ -83,23 +85,22 @@ class MealPlanningAgent:
             + " days, meal types: "
             + ", ".join(meal_types)
             + '. Output JSON: {"suggestions": [ ... ]} with each item having name, ingredients, portions_servings, prep_time_minutes, cook_time_minutes, rationale, meal_type, suggested_date.'
+            + "\n\nRespond with valid JSON only, no markdown fences."
         )
 
         try:
-            data = self.llm.complete_json(
-                prompt,
-                temperature=0.4,
-                system_prompt=SYSTEM_PROMPT,
-                expected_keys=["suggestions"],
-                think=True,
-            )
-        except (LLMJsonParseError, LLMError) as e:
+            result = self._agent(prompt)
+            raw = str(result).strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            data = json.loads(raw)
+        except Exception as e:
             logger.warning("Meal planning LLM call failed: %s", e)
             return []
 
         suggestions = data.get("suggestions") or []
-        result: List[MealRecommendation] = []
+        result_list: List[MealRecommendation] = []
         for s in suggestions:
             if isinstance(s, dict):
-                result.append(MealRecommendation.model_validate(s))
-        return result
+                result_list.append(MealRecommendation.model_validate(s))
+        return result_list

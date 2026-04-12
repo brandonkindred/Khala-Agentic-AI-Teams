@@ -4,10 +4,13 @@ Strategy Ideation Agent — generates swing trading strategies using LLM, inform
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from llm_service.interface import LLMClient
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from .models import StrategyLabRecord, TradeRecord
 from .signal_intelligence_agent import brief_to_prompt_block
@@ -234,6 +237,13 @@ def _format_simulated_trades_summary(
 # ---------------------------------------------------------------------------
 
 
+def _agent_complete_json(agent: Agent, prompt: str) -> Dict[str, Any]:
+    """Call an Agent, extract text, and parse as JSON."""
+    result = agent(prompt)
+    raw = str(result).strip()
+    return json.loads(raw)
+
+
 class StrategyIdeationAgent:
     """
     Uses an LLM to:
@@ -241,8 +251,32 @@ class StrategyIdeationAgent:
       2. Generate a post-backtest narrative explaining success or failure.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        _model = get_strands_model("strategy_ideation")
+        self._ideation_agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=_model,
+                system_prompt=_IDEATION_SYSTEM,
+            )
+        )
+        self._analysis_draft_agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=_model,
+                system_prompt=_ANALYSIS_DRAFT_SYSTEM,
+            )
+        )
+        self._self_review_agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=_model,
+                system_prompt=_SELF_REVIEW_SYSTEM,
+            )
+        )
 
     def ideate_strategy(
         self,
@@ -294,12 +328,7 @@ class StrategyIdeationAgent:
             signal_section=signal_section,
         )
 
-        data = self.llm.complete_json(
-            prompt,
-            temperature=0.85,
-            system_prompt=_IDEATION_SYSTEM,
-            think=True,
-        )
+        data = _agent_complete_json(self._ideation_agent, prompt)
 
         rationale = str(data.pop("rationale", "No rationale provided."))
         data.pop("signal_sources", None)
@@ -349,12 +378,7 @@ class StrategyIdeationAgent:
             draft_prompt = _ANALYSIS_DRAFT_LOSE.format(**common)
 
         try:
-            draft_data = self.llm.complete_json(
-                draft_prompt,
-                temperature=0.35,
-                system_prompt=_ANALYSIS_DRAFT_SYSTEM,
-                think=True,
-            )
+            draft_data = _agent_complete_json(self._analysis_draft_agent, draft_prompt)
             draft_narrative = str(draft_data.get("draft_narrative", "")).strip()
         except Exception as exc:
             logger.warning("Draft analysis failed: %s", exc)
@@ -385,12 +409,7 @@ class StrategyIdeationAgent:
         )
 
         try:
-            reviewed = self.llm.complete_json(
-                review_prompt,
-                temperature=0.15,
-                system_prompt=_SELF_REVIEW_SYSTEM,
-                think=True,
-            )
+            reviewed = _agent_complete_json(self._self_review_agent, review_prompt)
             revised = str(reviewed.get("revised_narrative", "")).strip()
             verification = str(reviewed.get("verification_notes", "")).strip()
         except Exception as exc:

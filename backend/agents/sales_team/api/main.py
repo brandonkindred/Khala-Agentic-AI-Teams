@@ -576,12 +576,9 @@ def refresh_insights() -> InsightsRefreshResponse:
 
 @app.get("/health", tags=["health"])
 def health() -> Dict[str, str]:
-    from sales_team.agents import HAS_STRANDS
-
     counts = outcome_counts()
     return {
         "status": "ok",
-        "strands_sdk": "available" if HAS_STRANDS else "stub_mode",
         "stage_outcomes_recorded": str(counts["stage_outcomes"]),
         "deal_outcomes_recorded": str(counts["deal_outcomes"]),
         "insights_available": str(counts["has_insights"]),

@@ -26,13 +26,18 @@ def complete_text_with_continuation(
     agent_name: str = "PlanningV2",
     max_continuation_cycles: int = MAX_CONTINUATION_CYCLES,
 ) -> str:
-    """Call LLM with text mode; truncation is handled by the client (llm_service).
+    """Call LLM with text mode via Strands Agent.
 
     Does not require or parse JSON. Callers should use output_templates to parse
-    the returned text. Continuation on truncation is performed inside the
-    Ollama client (same as complete_json); this wrapper delegates to llm.complete_text.
+    the returned text.
     """
-    return llm.complete_text(prompt)
+    from strands import Agent
+
+    from llm_service import get_strands_model
+
+    agent = Agent(model=get_strands_model(agent_name))
+    result = agent(prompt)
+    return str(result).strip()
 
 
 def attempt_fix_output_continuation(

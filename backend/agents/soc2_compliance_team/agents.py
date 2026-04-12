@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
-from llm_service import LLMClient, compact_text
+from llm_service import compact_text
 
 from .models import (
     FindingSeverity,
@@ -58,7 +58,7 @@ def _parse_finding(d: Dict[str, Any], category: TSCCategory) -> TSCFinding:
 
 
 def _run_tsc_agent(
-    llm: LLMClient,
+    llm: Any,
     category: TSCCategory,
     criterion_name: str,
     focus_areas: str,
@@ -121,7 +121,7 @@ Identify any gaps, missing controls, or risks relative to this criterion. If the
 class SecurityTSCAgent:
     """Audits the repository against SOC2 Security (Common Criteria CC1–CC9)."""
 
-    def run(self, llm: LLMClient, context: RepoContext) -> TSCAuditResult:
+    def run(self, llm: Any, context: RepoContext) -> TSCAuditResult:
         focus = (
             "Logical and physical access controls; authentication and authorization; "
             "encryption of data at rest and in transit; change management; risk assessment; "
@@ -135,7 +135,7 @@ class SecurityTSCAgent:
 class AvailabilityTSCAgent:
     """Audits against SOC2 Availability criterion."""
 
-    def run(self, llm: LLMClient, context: RepoContext) -> TSCAuditResult:
+    def run(self, llm: Any, context: RepoContext) -> TSCAuditResult:
         focus = (
             "System availability; capacity and performance management; "
             "backup and recovery; monitoring and incident management; environmental controls."
@@ -146,7 +146,7 @@ class AvailabilityTSCAgent:
 class ProcessingIntegrityTSCAgent:
     """Audits against SOC2 Processing Integrity criterion."""
 
-    def run(self, llm: LLMClient, context: RepoContext) -> TSCAuditResult:
+    def run(self, llm: Any, context: RepoContext) -> TSCAuditResult:
         focus = (
             "Processing completeness, validity, accuracy, timeliness, and authorization; "
             "data validation; error handling; reconciliation and quality assurance of processing."
@@ -159,7 +159,7 @@ class ProcessingIntegrityTSCAgent:
 class ConfidentialityTSCAgent:
     """Audits against SOC2 Confidentiality criterion."""
 
-    def run(self, llm: LLMClient, context: RepoContext) -> TSCAuditResult:
+    def run(self, llm: Any, context: RepoContext) -> TSCAuditResult:
         focus = (
             "Identification and classification of confidential information; "
             "disclosure only as agreed; secure handling and disposal of confidential data."
@@ -170,7 +170,7 @@ class ConfidentialityTSCAgent:
 class PrivacyTSCAgent:
     """Audits against SOC2 Privacy criterion."""
 
-    def run(self, llm: LLMClient, context: RepoContext) -> TSCAuditResult:
+    def run(self, llm: Any, context: RepoContext) -> TSCAuditResult:
         focus = (
             "Collection, use, retention, disclosure, and disposal of personal information; "
             "consent; data subject rights; privacy notice and policies; PII handling in code/config."
@@ -192,7 +192,7 @@ class ReportWriterAgent:
 
     def run(
         self,
-        llm: LLMClient,
+        llm: Any,
         repo_path: str,
         tsc_results: List[TSCAuditResult],
     ) -> tuple[SOC2ComplianceReport | None, NextStepsDocument | None]:
@@ -219,7 +219,7 @@ class ReportWriterAgent:
 
     def _produce_compliance_report(
         self,
-        llm: LLMClient,
+        llm: Any,
         repo_path: str,
         tsc_results: List[TSCAuditResult],
         findings_by_tsc: Dict[str, List[Dict[str, Any]]],
@@ -261,7 +261,7 @@ Respond with valid JSON only. No text outside JSON."""
 
     def _produce_next_steps(
         self,
-        llm: LLMClient,
+        llm: Any,
         repo_path: str,
         tsc_results: List[TSCAuditResult],
     ) -> NextStepsDocument:

@@ -27,9 +27,9 @@ logger = logging.getLogger(__name__)
 
 
 def _default_llm_getter(agent_key: str) -> Any:
-    from llm_service import get_client
+    from llm_service import get_strands_model
 
-    return get_client(agent_key)
+    return get_strands_model(agent_key)
 
 
 # ---------------------------------------------------------------------------

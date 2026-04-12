@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
-from llm_service import LLMClient
 from software_engineering_team.shared.prompt_utils import log_llm_prompt
 
 from .models import RepairInput, RepairOutput
@@ -20,9 +20,18 @@ class RepairExpertAgent:
     code fixes for the agent codebase (software_engineering_team/).
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+    def __init__(self, llm_client: Any = None) -> None:
+        if llm_client is not None:
+            self._agent = llm_client
+        else:
+            from strands import Agent
+
+            from llm_service import get_strands_model
+
+            self._agent = Agent(
+                model=get_strands_model("repair"),
+                system_prompt=REPAIR_PROMPT,
+            )
 
     def run(self, input_data: RepairInput) -> RepairOutput:
         """
@@ -39,10 +48,11 @@ class RepairExpertAgent:
 **Agent type:** {input_data.agent_type}
 **Agent source path (edits must be under this):** {input_data.agent_source_path}
 """
-        prompt = REPAIR_PROMPT + "\n\n---\n\n" + context
+        prompt = context
         log_llm_prompt(logger, "Repair", "analyze", input_data.task_id[:40], prompt)
         try:
-            raw = self.llm.complete_json(prompt, temperature=0.1, think=True)
+            result = self._agent(prompt)
+            raw = str(result).strip()
             data = json.loads(raw) if isinstance(raw, str) else raw
             fixes = data.get("suggested_fixes", [])
             if not isinstance(fixes, list):

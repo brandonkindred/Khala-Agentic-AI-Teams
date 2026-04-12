@@ -4,10 +4,13 @@ Signal Intelligence Expert — synthesizes a structured brief from priors, mix h
 
 from __future__ import annotations
 
+import json
 import re
 from typing import List
 
-from llm_service.interface import LLMClient
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from .market_lab_data.models import MarketLabContext
 from .models import StrategyLabRecord
@@ -70,8 +73,15 @@ def brief_to_prompt_block(brief: SignalIntelligenceBriefV1) -> str:
 
 
 class SignalIntelligenceExpert:
-    def __init__(self, llm_client: LLMClient) -> None:
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        self._agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=get_strands_model("signal_intelligence"),
+                system_prompt=_SIGNAL_SYSTEM,
+            )
+        )
 
     def produce_signal_brief(
         self,
@@ -95,12 +105,9 @@ class SignalIntelligenceExpert:
 {_SIGNAL_JSON_INSTRUCTIONS}
 """
 
-        raw = self.llm.complete_json(
-            prompt,
-            temperature=0.58,
-            system_prompt=_SIGNAL_SYSTEM,
-            think=True,
-        )
+        result = self._agent(prompt)
+        raw_text = str(result).strip()
+        raw = json.loads(raw_text)
         data = dict(raw) if isinstance(raw, dict) else {}
         data.setdefault("brief_version", 1)
         return SignalIntelligenceBriefV1.model_validate(data)

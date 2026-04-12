@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List
+
+from strands import Agent
 
 from llm_service import LLMClient
 
@@ -40,7 +43,7 @@ class PerformanceEngineerAgent:
             context_parts.insert(2, f"**Architecture:** {input_data.architecture.overview}")
 
         prompt = PERFORMANCE_ENGINEER_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
+        data = json.loads((lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip())
 
         issues: List[Dict[str, Any]] = []
         for i in data.get("issues") or []:

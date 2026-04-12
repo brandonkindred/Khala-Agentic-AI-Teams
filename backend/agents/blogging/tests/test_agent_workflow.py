@@ -8,11 +8,15 @@ from blog_research_agent.models import (
     SourceDocument,
 )
 
-from llm_service import LLMClient
+from llm_service import DummyLLMClient
 
 
-class StubLLM(LLMClient):
-    """Deterministic LLM stub for tests."""
+class StubLLM(DummyLLMClient):
+    """Deterministic LLM stub for tests.
+
+    Extends DummyLLMClient (which implements the Strands Model ABC) so it can
+    be passed to ``strands.Agent(model=StubLLM())``.
+    """
 
     def complete_json(self, prompt: str, *, temperature: float = 0.0, think=None, **kwargs):
         lowered = prompt.lower()

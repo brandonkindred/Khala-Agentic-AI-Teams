@@ -3,50 +3,31 @@
 Used by the interactive testing mode to turn declarative agent
 definitions (role, skills, capabilities, tools, expertise) into
 runnable agents that can respond to user messages.
+
+The strands SDK is a hard dependency. The system will fail fast if it is not installed.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
+
+from strands import Agent as StrandsAgent
+from strands_tools import current_time, http_request, python_repl
 
 logger = logging.getLogger(__name__)
 
-# Optional strands import — graceful degradation when not installed.
-try:
-    from strands import Agent as StrandsAgent
-
-    HAS_STRANDS = True
-except ImportError:
-    HAS_STRANDS = False
-    StrandsAgent = None  # type: ignore[assignment,misc]
-
-# Optional common tools from strands_tools.
-_COMMON_TOOLS: list[Any] = []
-try:
-    from strands_tools import (  # type: ignore[import-untyped]
-        current_time,
-        http_request,
-        python_repl,
-    )
-
-    _COMMON_TOOLS = [http_request, python_repl, current_time]
-except ImportError:
-    pass
+_COMMON_TOOLS: list[Any] = [http_request, python_repl, current_time]
 
 # Registry mapping tool name strings from the roster to actual tool objects.
-TOOL_REGISTRY: dict[str, Any] = {}
-if len(_COMMON_TOOLS) >= 3:
-    TOOL_REGISTRY.update(
-        {
-            "http_request": _COMMON_TOOLS[0],
-            "http": _COMMON_TOOLS[0],
-            "python_repl": _COMMON_TOOLS[1],
-            "python": _COMMON_TOOLS[1],
-            "current_time": _COMMON_TOOLS[2],
-        }
-    )
+TOOL_REGISTRY: dict[str, Any] = {
+    "http_request": http_request,
+    "http": http_request,
+    "python_repl": python_repl,
+    "python": python_repl,
+    "current_time": current_time,
+}
 
 
 def build_system_prompt(
@@ -94,15 +75,8 @@ def build_agent(
     capabilities: list[str],
     tools: list[str],
     expertise: list[str],
-) -> Optional[Any]:
-    """Compile roster agent metadata into a live strands.Agent.
-
-    Returns ``None`` if the strands SDK is not installed.
-    """
-    if not HAS_STRANDS:
-        logger.warning("strands SDK not available; agent %s will use stub mode", agent_name)
-        return None
-
+) -> StrandsAgent:
+    """Compile roster agent metadata into a live strands.Agent."""
     system_prompt = build_system_prompt(agent_name, role, skills, capabilities, tools, expertise)
     resolved = resolve_tools(tools)
     model = os.environ.get("AGENTIC_TEAM_TEST_MODEL", "us.anthropic.claude-sonnet-4-20250514")
@@ -115,18 +89,12 @@ def build_agent(
     )
 
 
-def call_agent(agent_instance: Any, message: str) -> str:
+def call_agent(agent_instance: StrandsAgent, message: str) -> str:
     """Invoke a strands.Agent and extract the text response."""
-    if agent_instance is None:
-        return f"[Stub response — strands SDK not available. Input: {message[:200]}]"
-    try:
-        result = agent_instance(message)
-        if hasattr(result, "message"):
-            return str(result.message).strip()
-        return str(result).strip()
-    except Exception as exc:
-        logger.error("Agent call failed: %s", exc, exc_info=True)
-        return f"[Agent error: {exc}]"
+    result = agent_instance(message)
+    if hasattr(result, "message"):
+        return str(result.message).strip()
+    return str(result).strip()
 
 
 def generate_starter_prompts(

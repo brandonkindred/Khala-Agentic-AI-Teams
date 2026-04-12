@@ -5,7 +5,7 @@ from __future__ import annotations
 from ..models.architecture import BusinessImpact
 from ..models.phase_result import ArchitecturePhaseResult
 from ..tools.template_audit_engine import TemplateAuditEngine
-from .base import ToolContext, tool
+from .base import ToolContext, a11y_phase
 
 _TEMPLATE_NAME = "site_architecture_audit_template.yaml"
 
@@ -36,7 +36,7 @@ def _extract_business_impact(overrides: dict[str, dict]) -> BusinessImpact:
     return BusinessImpact(**kwargs)
 
 
-@tool(context=True)
+@a11y_phase(context=True)
 def run_architecture_audit(target: str, tool_context: ToolContext) -> dict:
     """Run the site architecture and navigation accessibility audit."""
     state = tool_context.invocation_state

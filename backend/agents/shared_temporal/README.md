@@ -57,7 +57,6 @@ every agent team. Replaces the per-team `temporal/client.py`,
        job_id=job_id,
        workflow=MyTeamWorkflow.run,
        workflow_args=[request.dict()],
-       fallback=lambda: run_pipeline(request.dict()),  # thread-mode dev
    )
    ```
 
@@ -72,7 +71,7 @@ for either mode.
 
 ## Environment
 
-- `TEMPORAL_ADDRESS` — enables Temporal mode; unset falls back to threads.
+- `TEMPORAL_ADDRESS` — required; Temporal is mandatory for all teams.
 - `TEMPORAL_NAMESPACE` — default `default`.
 - `TEMPORAL_TASK_QUEUE` — default `khala`.
 

@@ -12,7 +12,7 @@ from pathlib import Path
 from blog_writer_agent import BlogWriterAgent, WriterInput
 from shared.style_loader import load_style_file
 
-from llm_service import get_client  # or DummyLLMClient for quick test
+from llm_service import get_strands_model
 
 from . import _path_setup  # noqa: F401  # Add blogging to path when run from project root
 
@@ -24,8 +24,7 @@ BRAND_SPEC_PROMPT_PATH = _blogging_docs / "brand_spec_prompt.md"
 
 
 def main() -> None:
-    llm_client = get_client("blog")
-    # Or: from llm_service import DummyLLMClient; llm_client = DummyLLMClient()
+    llm_client = get_strands_model("blog")
 
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
     brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")

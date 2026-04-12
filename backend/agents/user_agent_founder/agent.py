@@ -139,31 +139,24 @@ def _parse_answer(raw: str) -> dict[str, Any]:
 class FounderAgent:
     """Simulates a budget-conscious, speed-first, UX-obsessed startup founder."""
 
-    def __init__(self, llm=None) -> None:  # noqa: ANN001
-        if llm is None:
-            from llm_service import get_client
+    def __init__(self) -> None:
+        from strands import Agent
 
-            self._llm = get_client("user_agent_founder")
-        else:
-            self._llm = llm
+        from llm_service import get_strands_model
+
+        self._agent = Agent(
+            model=get_strands_model("user_agent_founder"),
+            system_prompt=FOUNDER_SYSTEM_PROMPT,
+        )
+
+    def _call(self, prompt: str) -> str:
+        """Invoke the Strands agent and extract text."""
+        result = self._agent(prompt)
+        return str(result).strip()
 
     def generate_spec(self) -> str:
-        """Generate the TaskFlow product specification.
-
-        Returns:
-            Markdown spec content.
-        """
-        try:
-            raw = self._llm.complete(
-                SPEC_GENERATION_PROMPT,
-                temperature=0.6,
-                system_prompt=FOUNDER_SYSTEM_PROMPT,
-                think=True,
-            )
-            return raw.strip()
-        except Exception:
-            logger.exception("LLM call failed during spec generation")
-            raise
+        """Generate the TaskFlow product specification."""
+        return self._call(SPEC_GENERATION_PROMPT)
 
     def answer_question(self, question: dict[str, Any]) -> dict[str, Any]:
         """Answer a pending question from the SE team.
@@ -197,29 +190,7 @@ class FounderAgent:
             options_text=options_text,
         )
 
-        try:
-            raw = self._llm.complete(
-                prompt,
-                temperature=0.4,
-                system_prompt=FOUNDER_SYSTEM_PROMPT,
-                think=True,
-            )
-            return _parse_answer(raw)
-        except Exception:
-            logger.exception("LLM call failed during question answering")
-            # Fall back to the default option if available
-            for opt in options:
-                if opt.get("is_default"):
-                    return {
-                        "selected_option_id": opt["id"],
-                        "other_text": None,
-                        "rationale": "LLM unavailable; selected the default option.",
-                    }
-            return {
-                "selected_option_id": "other",
-                "other_text": "Go with the simplest, cheapest option that ships fastest.",
-                "rationale": "LLM unavailable; falling back to founder's core values.",
-            }
+        return _parse_answer(self._call(prompt))
 
 
 # ---------------------------------------------------------------------------

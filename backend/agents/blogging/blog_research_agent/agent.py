@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import ast
+import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from pydantic import HttpUrl
+from strands import Agent
 
 logger = logging.getLogger(__name__)
 
 from llm_service import compact_text  # noqa: E402
 
 from .agent_cache import AgentCache  # noqa: E402
-from .llm import LLMClient, LLMJsonParseError  # noqa: E402
 from .models import (  # noqa: E402
     AcademicPaper,
     CandidateResult,
@@ -45,7 +47,7 @@ class ResearchAgent:
 
     def __init__(
         self,
-        llm_client: LLMClient,
+        llm_client: Any,
         *,
         web_search: OllamaWebSearch | None = None,
         web_fetcher: SimpleWebFetcher | None = None,
@@ -57,16 +59,25 @@ class ResearchAgent:
             - llm_client is not None.
             - max_fetch_documents >= 1.
         Invariants (after construction):
-            - self.llm is not None.
+            - self._model is not None.
             - self.max_fetch_documents >= 1.
         """
         assert llm_client is not None, "llm_client is required"
         assert max_fetch_documents >= 1, "max_fetch_documents must be at least 1"
-        self.llm = llm_client
+        self._model = llm_client
         self.web_search = web_search or OllamaWebSearch()
         self.web_fetcher = web_fetcher or SimpleWebFetcher()
         self.max_fetch_documents = max_fetch_documents
         self.cache = cache
+
+    def _call_json(self, prompt: str) -> dict:
+        """Call the Strands Agent and parse JSON from the result."""
+        agent = Agent(model=self._model, system_prompt="You are a research assistant. Respond with valid JSON only.")
+        result = agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.")
+        raw = str(result).strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        return json.loads(raw)
 
     # Public API ---------------------------------------------------------
 
@@ -263,7 +274,7 @@ class ResearchAgent:
             prompt += f"Tone/Purpose: {brief_input.tone_or_purpose}\n"
 
         self._report_llm("Parsing brief...", 0.05)
-        parsed = self.llm.complete_json(prompt, temperature=0.0, think=False)
+        parsed = self._call_json(prompt)
 
         return {
             "core_topics": parsed.get("core_topics") or [brief_input.brief],
@@ -287,7 +298,7 @@ class ResearchAgent:
             tone_or_purpose=brief_input.tone_or_purpose or "",
         )
         self._report_llm("Generating search queries...", 0.10)
-        data = self.llm.complete_json(prompt, temperature=0.3, think=False)
+        data = self._call_json(prompt)
         queries_data = data.get("queries") or []
 
         queries: List[SearchQuery] = []
@@ -378,14 +389,10 @@ class ResearchAgent:
     ) -> Tuple[SourceDocument, float, float, float, str]:
         """Score a single document for relevance, authority, accuracy, and type. Used by _score_documents."""
         # Budget: use 1.0 chars/token (safe for web content which tokenizes poorly).
-        ctx_tokens = (
-            self.llm.get_max_context_tokens()
-            if hasattr(self.llm, "get_max_context_tokens")
-            else 16384
-        )
+        ctx_tokens = 16384  # Default context budget for safety
         max_content_chars = max(4000, ctx_tokens - 6000)  # 1 char ≈ 1 token for safety
         doc_content = compact_text(
-            doc.content or "", max_content_chars, self.llm, "document for scoring"
+            doc.content or "", max_content_chars, self._model, "document for scoring"
         )
         # Hard safety net: if compaction returned something still over budget, truncate.
         if len(doc_content) > max_content_chars:
@@ -399,7 +406,7 @@ class ResearchAgent:
                 f"Document content:\n{doc_content}\n"
             )
         )
-        data = self.llm.complete_json(prompt, temperature=0.0, think=False)
+        data = self._call_json(prompt)
         rel = data.get("relevance_score")
         auth = data.get("authority_score")
         acc = data.get("accuracy_score")
@@ -464,14 +471,10 @@ class ResearchAgent:
     ) -> ResearchReference:
         """Summarize a single document into a ResearchReference. Used by _summarize_documents."""
         doc, relevance, authority, accuracy, type_label = item
-        ctx_tokens = (
-            self.llm.get_max_context_tokens()
-            if hasattr(self.llm, "get_max_context_tokens")
-            else 16384
-        )
+        ctx_tokens = 16384  # Default context budget for safety
         max_content_chars = max(4000, ctx_tokens - 6000)  # 1 char ≈ 1 token for safety
         doc_content = compact_text(
-            doc.content or "", max_content_chars, self.llm, "document for summarization"
+            doc.content or "", max_content_chars, self._model, "document for summarization"
         )
         if len(doc_content) > max_content_chars:
             doc_content = doc_content[:max_content_chars]
@@ -486,7 +489,7 @@ class ResearchAgent:
             f"Document content:\n{doc_content}\n"
         )
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2, think=False)
+            data = self._call_json(prompt)
             summary = data.get("summary") or ""
             key_points = data.get("key_points") or []
         except Exception as e:
@@ -578,11 +581,11 @@ class ResearchAgent:
         )
         self._report_llm("Synthesizing overview...", 0.78)
         try:
-            data = self.llm.complete_json(prompt, temperature=0.3, think=True)
-        except LLMJsonParseError as e:
+            data = self._call_json(prompt)
+        except (json.JSONDecodeError, TypeError) as e:
             logger.warning(
                 "Overview synthesis: LLM returned invalid or empty JSON (%s). Using fallback.",
-                getattr(e, "response_preview", str(e))[:200],
+                str(e)[:200],
             )
             return None
         except ValueError as e:
@@ -662,7 +665,7 @@ class ResearchAgent:
         )
         self._report_llm("Finding similar topics...", 0.90)
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2, think=False)
+            data = self._call_json(prompt)
             items = data.get("similar_topics") or []
             topics: List[str] = []
             for item in items if isinstance(items, list) else []:

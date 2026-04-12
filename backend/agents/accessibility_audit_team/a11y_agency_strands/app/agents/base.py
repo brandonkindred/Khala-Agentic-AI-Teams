@@ -1,12 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 
-def tool(*, context: bool = False) -> Callable:
+def a11y_phase(*, context: bool = False) -> Callable:
+    """Temporary decorator replacing the former local @tool.
+
+    Phase 3 will replace this with ``from strands import tool`` and migrate
+    all consumers to proper strands.Agent instances.
+    """
     def decorator(func: Callable) -> Callable:
-        func._tool_context_enabled = context  # type: ignore[attr-defined]
+        func._a11y_phase_context_enabled = context  # type: ignore[attr-defined]
         return func
 
     return decorator
@@ -15,12 +20,3 @@ def tool(*, context: bool = False) -> Callable:
 @dataclass(slots=True)
 class ToolContext:
     invocation_state: dict[str, Any]
-
-
-@dataclass(slots=True)
-class StubAgent:
-    name: str
-    state: dict[str, Any] = field(default_factory=dict)
-
-    def invoke(self, payload: dict[str, Any], structured_output_model: type[Any]) -> Any:
-        return structured_output_model.model_validate(payload)

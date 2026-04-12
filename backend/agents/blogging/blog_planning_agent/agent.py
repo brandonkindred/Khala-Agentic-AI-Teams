@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, Callable, Optional
 
@@ -20,8 +21,7 @@ from shared.content_plan import (
 from shared.content_profile import LengthPolicy
 from shared.errors import PlanningError
 from shared.planning_config import planning_max_iterations, planning_max_parse_retries
-
-from llm_service import LLMClient, LLMJsonParseError
+from strands import Agent
 
 from .json_utils import parse_json_object
 from .prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
@@ -91,8 +91,20 @@ def _build_refine_prompt(inp: PlanningInput, previous: ContentPlan, feedback: st
 class BlogPlanningAgent:
     """Generates and refines a ContentPlan until acceptance criteria or max iterations."""
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        self.llm = llm_client
+    def __init__(self, llm_client: Any) -> None:
+        self._model = llm_client
+
+    def _call_agent(self, prompt: str, system: str) -> str:
+        """Call a Strands Agent with the given prompt and system prompt, return raw text."""
+        agent = Agent(model=self._model, system_prompt=system)
+        result = agent(prompt)
+        return str(result).strip()
+
+    def _parse_json_response(self, raw: str) -> dict:
+        """Strip markdown fences and parse JSON."""
+        raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+        raw = re.sub(r"\s*```$", "", raw)
+        return json.loads(raw)
 
     def _complete_plan_json(
         self,
@@ -107,26 +119,23 @@ class BlogPlanningAgent:
         last_err: Optional[Exception] = None
         for attempt in range(max_parse_retries):
             if on_llm_request:
-                on_llm_request("Planning: generating structured plan…")
+                on_llm_request("Planning: generating structured plan...")
             try:
-                data = self.llm.complete_json(
-                    prompt,
-                    temperature=0.25,
-                    system_prompt=system,
-                    think=True,
+                raw = self._call_agent(
+                    prompt + "\n\nRespond with valid JSON only, no markdown fences.",
+                    system,
                 )
+                data = self._parse_json_response(raw)
                 if isinstance(data, dict) and data:
                     return data, parse_retries
-            except (LLMJsonParseError, TypeError, ValueError) as e:
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
                 last_err = e
                 parse_retries += 1
-                logger.warning("complete_json failed (attempt %s): %s", attempt + 1, e)
+                logger.warning("JSON parse failed (attempt %s): %s", attempt + 1, e)
             try:
-                raw = self.llm.complete(
+                raw = self._call_agent(
                     prompt + "\n\nRespond with a single JSON object only, no markdown fences.",
-                    temperature=0.25,
-                    system_prompt=system,
-                    think=True,
+                    system,
                 )
                 data = parse_json_object(raw)
                 return data, parse_retries

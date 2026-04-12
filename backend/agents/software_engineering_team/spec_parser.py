@@ -88,12 +88,24 @@ MAX_CONTEXT_FILE_SIZE = 100 * 1024
 MAX_TOTAL_CONTEXT_SIZE = 500 * 1024
 
 
-def parse_spec_with_llm(spec_content: str, llm_client) -> ProductRequirements:
+def parse_spec_with_llm(spec_content: str, llm_client=None) -> ProductRequirements:
     """
     Use LLM to extract structured ProductRequirements from spec content.
     """
+    import json as _json
+
+    from strands import Agent
+    from strands.models.model import Model as _StrandsModel
+
+    if llm_client is not None and isinstance(llm_client, _StrandsModel):
+        model = llm_client
+    else:
+        from llm_service import get_strands_model
+
+        model = get_strands_model("spec_intake")
+
     logger.info("Parsing spec with LLM (%s chars)", len(spec_content))
-    prompt = """Parse the following software project specification into a structured format.
+    system_prompt = """Parse the following software project specification into a structured format.
 
 Return a single JSON object with:
 - "title": string (project/feature name)
@@ -102,13 +114,17 @@ Return a single JSON object with:
 - "constraints": list of strings (technical/business constraints)
 - "priority": string ("high", "medium", or "low")
 
-Specification:
----
-"""
-    prompt += spec_content
-    prompt += "\n---\n\nRespond with valid JSON only. No explanatory text."
+Respond with valid JSON only. No explanatory text."""
 
-    data = llm_client.complete_json(prompt, temperature=0.1)
+    prompt = (
+        "Parse this specification and return JSON with acceptance_criteria and constraints.\n"
+        "Specification:\n---\n" + spec_content + "\n---"
+    )
+
+    agent = Agent(model=model, system_prompt=system_prompt)
+    result = agent(prompt)
+    raw = str(result).strip()
+    data = _json.loads(raw)
     if not isinstance(data.get("acceptance_criteria"), list):
         raise ValueError(
             f"LLM returned invalid spec structure: 'acceptance_criteria' must be a list, got {type(data.get('acceptance_criteria'))}"

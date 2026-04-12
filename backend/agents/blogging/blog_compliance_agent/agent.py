@@ -9,19 +9,14 @@ All errors are raised explicitly - no silent failures.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
-from llm_service import (
-    LLMClient,
-    LLMJsonParseError,
-    LLMPermanentError,
-    LLMRateLimitError,
-    LLMTemporaryError,
-    LLMTruncatedError,
-)
+from strands import Agent
 
 from .models import ComplianceReport, Violation
 from .prompts import COMPLIANCE_PROMPT
@@ -74,9 +69,9 @@ class BlogComplianceAgent:
     FAIL status triggers the orchestrator to block publication and enter the rewrite loop.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
+    def __init__(self, llm_client: Any) -> None:
         assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+        self._model = llm_client
 
     def run(
         self,
@@ -122,15 +117,20 @@ class BlogComplianceAgent:
         if on_llm_request:
             on_llm_request("Checking compliance with brand guidelines...")
 
+        agent = Agent(model=self._model, system_prompt="You are a brand compliance evaluator.")
         data: Optional[Dict[str, Any]] = None
         base_prompt = prompt
         working_prompt = prompt
         for llm_round in range(_MAX_COMPLIANCE_LLM_ROUNDS):
             for json_attempt in range(2):
                 try:
-                    data = self.llm.complete_json(working_prompt, temperature=0.1)
+                    result = agent(working_prompt + "\n\nRespond with valid JSON only, no markdown fences.")
+                    raw = str(result).strip()
+                    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                    raw = re.sub(r"\s*```$", "", raw)
+                    data = json.loads(raw)
                     break
-                except LLMJsonParseError as e:
+                except (json.JSONDecodeError, TypeError) as e:
                     if json_attempt == 0:
                         logger.warning(
                             "Compliance JSON parse failed (attempt 1), retrying with strict instruction: %s",
@@ -149,7 +149,7 @@ class BlogComplianceAgent:
                                 "Wrote compliance_report.json (fallback): status=%s", report.status
                             )
                         return report
-                except (LLMTemporaryError, LLMRateLimitError) as e:
+                except Exception as e:
                     if llm_round >= _MAX_COMPLIANCE_LLM_ROUNDS - 1:
                         logger.warning(
                             "Compliance LLM still failing after agent retries; using fallback report: %s",
@@ -164,7 +164,7 @@ class BlogComplianceAgent:
                         return report
                     wait = min(60.0, 15.0 * (llm_round + 1))
                     logger.warning(
-                        "Compliance LLM transport/transient error (round %d/%d, json attempt %d): %s — "
+                        "Compliance LLM error (round %d/%d, json attempt %d): %s — "
                         "sleeping %.0fs and retrying.",
                         llm_round + 1,
                         _MAX_COMPLIANCE_LLM_ROUNDS,
@@ -175,17 +175,6 @@ class BlogComplianceAgent:
                     time.sleep(wait)
                     working_prompt = base_prompt
                     break
-                except (LLMPermanentError, LLMTruncatedError) as e:
-                    logger.warning(
-                        "Compliance LLM permanent/truncation error; using fallback report: %s", e
-                    )
-                    report = _fallback_compliance_report(e)
-                    if work_dir and write_artifact:
-                        write_artifact(work_dir, "compliance_report.json", report.to_dict())
-                        logger.info(
-                            "Wrote compliance_report.json (fallback): status=%s", report.status
-                        )
-                    return report
             if data is not None:
                 break
 
@@ -238,7 +227,7 @@ class BlogComplianceAgent:
 
 def run_compliance_from_work_dir(
     work_dir: Union[str, Path],
-    llm_client: LLMClient,
+    llm_client: Any,
     *,
     draft_artifact: str = "final.md",
     brand_spec_path: Optional[Union[str, Path]] = None,

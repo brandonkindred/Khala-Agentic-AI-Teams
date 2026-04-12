@@ -1,9 +1,9 @@
 """Integration / API-contract agent: validates full-stack backend-frontend alignment.
 
-Built on the AWS Strands Agents SDK via ``llm_service.LLMClientModel``: the
-``LLMClient`` passed in at construction time is wrapped into a Strands
-``Model`` so the agent inherits retries, per-agent model routing, telemetry,
-and the dummy-client path for tests.
+Built on the AWS Strands Agents SDK via ``llm_service.get_strands_model``: the
+model returned by ``get_strands_model`` is passed to a Strands ``Agent`` so the
+agent inherits retries, per-agent model routing, telemetry, and the
+dummy-client path for tests.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import logging
 
 from strands import Agent
 
-from llm_service import LLMClient, LLMClientModel
+from llm_service import get_strands_model
 
 from .models import IntegrationInput, IntegrationOutput
 from .prompts import INTEGRATION_PROMPT
@@ -26,14 +26,11 @@ class IntegrationAgent:
     Detects contract mismatches, missing endpoints, wrong payload shapes.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self._model = LLMClientModel(
-            llm_client,
-            agent_key="integration",
-            temperature=0.1,
-            think=True,
-        )
+    def __init__(self, llm_client=None) -> None:
+        if llm_client is not None:
+            self._model = llm_client
+        else:
+            self._model = get_strands_model("integration")
 
     def run(self, input_data: IntegrationInput) -> IntegrationOutput:
         """Analyze backend and frontend code for integration/contract issues."""

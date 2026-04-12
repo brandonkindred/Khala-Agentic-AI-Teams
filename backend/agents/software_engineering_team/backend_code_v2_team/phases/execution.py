@@ -12,7 +12,9 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from llm_service import LLMClient
+from strands import Agent
+
+from llm_service import LLMClient, get_strands_model
 from software_engineering_team.shared.models import SystemArchitecture, Task
 
 from ..models import (
@@ -31,6 +33,17 @@ from ..models import (
 )
 from ..output_templates import parse_files_and_summary_template
 from ..prompts import EXECUTION_PROMPT, JAVA_CONVENTIONS, PYTHON_CONVENTIONS
+
+
+def _resolve_model(llm):
+    """Use injected LLM client as Strands model when it implements Model; else create one."""
+    from strands.models.model import Model as _StrandsModel
+
+    if llm is not None and isinstance(llm, _StrandsModel):
+        return llm
+    from llm_service import LLMClient as _LLMClient
+
+    return get_strands_model(client=llm) if (llm is not None and isinstance(llm, _LLMClient)) else get_strands_model()
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +109,7 @@ def _run_general_microtask(
         existing_code=existing_code[:8000] if existing_code else "(none)",
         architecture_context=arch_ctx or "(none)",
     )
-    raw = llm.complete_text(prompt, think=True)
+    raw = (lambda _r: str(_r))(Agent(model=_resolve_model(llm))(prompt)).strip()
     data = parse_files_and_summary_template(raw)
     files = data.get("files") or {}
 

@@ -8,10 +8,7 @@ import os
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
-
-if TYPE_CHECKING:
-    from investment_team.strategy_lab import StrategyLabOrchestrator
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -62,6 +59,7 @@ from investment_team.models import (
 from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
 from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
+from investment_team.strategy_ideation_agent import StrategyIdeationAgent
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 from shared_observability import init_otel, instrument_fastapi_app
 
@@ -817,7 +815,6 @@ def _run_real_data_backtest(
     # deferring keeps application startup fast and avoids loading these until needed.
     from investment_team.backtesting_agent import BacktestingAgent
     from investment_team.market_data_service import MarketDataService
-    from llm_service.factory import get_client
 
     market_service = MarketDataService()
     symbols = market_service.get_symbols_for_strategy(strategy)
@@ -841,8 +838,7 @@ def _run_real_data_backtest(
             detail="Failed to fetch historical market data. Please check the date range and try again.",
         )
 
-    llm = get_client("backtesting")
-    agent = BacktestingAgent(llm_client=llm)
+    agent = BacktestingAgent()
     return agent.run_backtest(strategy, config, market_data)
 
 
@@ -902,41 +898,143 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
 
 
 def _run_one_strategy_lab_cycle(
+    agent: StrategyIdeationAgent,
     config: BacktestConfig,
-    orchestrator: "StrategyLabOrchestrator",
     *,
     precomputed_signal_brief: Optional[SignalIntelligenceBriefV1] = None,
     signal_brief_storage: Optional[Dict[str, Any]] = None,
     on_phase: Optional[Any] = None,
-    exclude_asset_classes: Optional[List[str]] = None,
 ) -> StrategyLabRecord:
-    """Single ideation → validate → execute → refine → analyze cycle via the v2 orchestrator.
+    """Single ideation → backtest → analysis; persists to store so the next cycle sees full history.
 
-    The orchestrator handles the full code-generation + sandboxed-execution pipeline
-    internally, including up to 10 refinement rounds.
+    If all data providers fail for the ideated asset class, re-ideates for a different
+    asset class (up to one retry) rather than aborting the entire batch.
+
+    Args:
+        on_phase: Optional callback ``(phase: str, data: dict) -> None`` called at each
+            phase boundary to emit progress events.
     """
+
+    def _emit(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
+        if on_phase:
+            on_phase(phase, data or {})
+
     with _lock:
         raw_prior = list(_strategy_lab_records.values())
 
     prior_records = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior]
     prior_records.sort(key=lambda r: r.created_at)
 
-    record = orchestrator.run_cycle(
-        prior_records=prior_records,
+    _emit("ideating")
+
+    try:
+        strategy_data, rationale = agent.ideate_strategy(
+            prior_results=prior_records,
+            precomputed_signal_brief=precomputed_signal_brief,
+        )
+    except Exception as exc:
+        logger.error("Strategy ideation failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Strategy ideation failed: {exc}") from exc
+
+    strategy, strategy_id = _build_strategy_from_ideation(strategy_data)
+    strategy_preview = {"asset_class": strategy.asset_class, "hypothesis": strategy.hypothesis}
+
+    _emit("fetching_data", {"strategy": strategy_preview})
+
+    try:
+        result, trades = _run_real_data_backtest(strategy, config)
+    except HTTPException as exc:
+        if exc.status_code != 502:
+            raise
+        failed_ac = strategy.asset_class
+        logger.warning(
+            "No market data for asset class %s (all providers failed); re-ideating with exclusion",
+            failed_ac,
+        )
+        _emit("ideating", {"retry": True, "excluded": failed_ac})
+        try:
+            strategy_data, rationale = agent.ideate_strategy(
+                prior_results=prior_records,
+                precomputed_signal_brief=precomputed_signal_brief,
+                exclude_asset_classes=[failed_ac],
+            )
+        except Exception as exc2:
+            raise HTTPException(
+                status_code=500, detail=f"Re-ideation after data failure failed: {exc2}"
+            ) from exc2
+
+        strategy, strategy_id = _build_strategy_from_ideation(strategy_data)
+        strategy_preview = {"asset_class": strategy.asset_class, "hypothesis": strategy.hypothesis}
+        _emit("fetching_data", {"strategy": strategy_preview, "retry": True})
+        result, trades = _run_real_data_backtest(strategy, config)
+
+    metrics_preview = {
+        "annualized_return_pct": round(result.annualized_return_pct, 2),
+        "sharpe_ratio": round(result.sharpe_ratio, 2),
+        "max_drawdown_pct": round(result.max_drawdown_pct, 2),
+        "win_rate_pct": round(result.win_rate_pct, 2),
+        "total_trades": len(trades),
+    }
+    _emit("analyzing", {"strategy": strategy_preview, "metrics": metrics_preview})
+
+    now = _now()
+    backtest_id = f"bt-lab-{uuid.uuid4().hex[:8]}"
+    backtest = BacktestRecord(
+        backtest_id=backtest_id,
+        strategy_id=strategy_id,
+        strategy=strategy,
         config=config,
-        signal_brief=precomputed_signal_brief,
-        on_phase=on_phase,
-        exclude_asset_classes=exclude_asset_classes,
+        submitted_by="strategy_ideation_agent",
+        submitted_at=now,
+        completed_at=now,
+        result=result,
+        notes=[],
+        trades=trades,
     )
 
-    # Attach signal brief before persisting (PersistentDict serializes at assignment)
-    if signal_brief_storage and not record.signal_intelligence_brief:
-        record.signal_intelligence_brief = signal_brief_storage
+    is_winning = result.annualized_return_pct > 8.0
+
+    lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
+    provisional_record = StrategyLabRecord(
+        lab_record_id=lab_record_id,
+        strategy=strategy,
+        backtest=backtest,
+        is_winning=is_winning,
+        strategy_rationale=rationale,
+        analysis_narrative="",
+        created_at=now,
+    )
+
+    try:
+        narrative = agent.analyze_result(provisional_record, rationale)
+    except Exception as exc:
+        logger.warning("Analysis narrative generation failed: %s", exc)
+        narrative = (
+            f"Strategy returned {result.annualized_return_pct:.1f}% annualized "
+            f"({'above' if is_winning else 'below'} the 8% winning threshold). "
+            f"Sharpe ratio: {result.sharpe_ratio:.2f}, max drawdown: {result.max_drawdown_pct:.1f}%."
+        )
+
+    record = StrategyLabRecord(
+        lab_record_id=lab_record_id,
+        strategy=strategy,
+        backtest=backtest,
+        is_winning=is_winning,
+        strategy_rationale=rationale,
+        analysis_narrative=narrative,
+        created_at=now,
+        signal_intelligence_brief=signal_brief_storage,
+    )
 
     with _lock:
-        _strategy_lab_records[record.lab_record_id] = record
-        _strategies[record.strategy.strategy_id] = record.strategy
-        _backtests[record.backtest.backtest_id] = record.backtest
+        _strategy_lab_records[lab_record_id] = record
+        _strategies[strategy_id] = strategy
+        _backtests[backtest_id] = backtest
+
+    _emit(
+        "complete",
+        {"record_id": lab_record_id, "is_winning": is_winning, "metrics": metrics_preview},
+    )
 
     return record
 
@@ -1002,11 +1100,7 @@ def _strategy_lab_worker(
         publish(run_id, payload, event_type=event_type)
 
     try:
-        from investment_team.strategy_lab import StrategyLabOrchestrator
-        from investment_team.strategy_lab.quality_gates import ConvergenceTracker
-        from llm_service.factory import get_client
-
-        orchestrator = StrategyLabOrchestrator(convergence_tracker=ConvergenceTracker())
+        agent = StrategyIdeationAgent()
 
         config = BacktestConfig(
             start_date=request.start_date,
@@ -1037,11 +1131,12 @@ def _strategy_lab_worker(
                 )
             with _lock:
                 raw_prior = list(_strategy_lab_records.values())
-            prior_for_brief = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior]
+            prior_for_brief = [
+                StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior
+            ]
             prior_for_brief.sort(key=lambda r: r.created_at)
 
-            llm_signal = get_client("signal_intelligence")
-            expert = SignalIntelligenceExpert(llm_signal)
+            expert = SignalIntelligenceExpert()
             t0 = datetime.now(tz=timezone.utc)
             try:
                 brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
@@ -1092,41 +1187,51 @@ def _strategy_lab_worker(
 
             try:
                 record = _run_one_strategy_lab_cycle(
+                    agent,
                     config,
-                    orchestrator,
                     precomputed_signal_brief=precomputed_brief,
                     signal_brief_storage=signal_brief_storage,
                     on_phase=on_phase,
                 )
                 completed_ids.append(record.lab_record_id)
-                _update_run({
-                    "completed_cycles": len(completed_ids),
-                    "completed_record_ids": list(completed_ids),
-                    "current_cycle": None,
-                })
-                _publish("cycle_complete", {
-                    "cycle_index": cycle_num,
-                    "record_id": record.lab_record_id,
-                    "completed_cycles": len(completed_ids),
-                })
+                _update_run(
+                    {
+                        "completed_cycles": len(completed_ids),
+                        "completed_record_ids": list(completed_ids),
+                        "current_cycle": None,
+                    }
+                )
+                _publish(
+                    "cycle_complete",
+                    {
+                        "cycle_index": cycle_num,
+                        "record_id": record.lab_record_id,
+                        "completed_cycles": len(completed_ids),
+                    },
+                )
             except HTTPException as exc:
                 if exc.status_code == 502:
                     logger.warning(
                         "Strategy lab cycle %d/%d skipped (no market data after fallback)",
-                        cycle_num, request.batch_size,
+                        cycle_num,
+                        request.batch_size,
                     )
                     skipped += 1
                     _update_run({"skipped_cycles": skipped, "current_cycle": None})
-                    _publish("cycle_skipped", {"cycle_index": cycle_num, "reason": "no_market_data"})
+                    _publish(
+                        "cycle_skipped", {"cycle_index": cycle_num, "reason": "no_market_data"}
+                    )
                     continue
                 raise
             except Exception as exc:
                 logger.exception("Strategy lab cycle %d/%d failed", cycle_num, request.batch_size)
-                _update_run({
-                    "status": "failed",
-                    "error": f"Cycle {cycle_num} failed: {exc}",
-                    "current_cycle": None,
-                })
+                _update_run(
+                    {
+                        "status": "failed",
+                        "error": f"Cycle {cycle_num} failed: {exc}",
+                        "current_cycle": None,
+                    }
+                )
                 _publish("error", {"detail": f"Cycle {cycle_num} failed: {exc}"})
                 return
 
@@ -1135,7 +1240,10 @@ def _strategy_lab_worker(
             msg += f" ({skipped} skipped due to unavailable market data)"
 
         _update_run({"status": "completed", "current_cycle": None})
-        _publish("complete", {"message": msg, "completed_count": len(completed_ids), "skipped_count": skipped})
+        _publish(
+            "complete",
+            {"message": msg, "completed_count": len(completed_ids), "skipped_count": skipped},
+        )
 
     except Exception as exc:
         logger.exception("Strategy lab worker failed for run %s", run_id)
@@ -1164,7 +1272,9 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     with _lock:
         active = [r for r in _active_runs.values() if r["status"] == "running"]
         if active:
-            raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+            raise HTTPException(
+                status_code=409, detail="A strategy lab run is already in progress."
+            )
 
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     now = _now()
@@ -1242,7 +1352,11 @@ class InvestmentJobsListResponse(BaseModel):
     jobs: List[InvestmentJobSummary] = Field(default_factory=list)
 
 
-@app.get("/strategy-lab/jobs", response_model=InvestmentJobsListResponse, summary="List strategy lab runs as jobs")
+@app.get(
+    "/strategy-lab/jobs",
+    response_model=InvestmentJobsListResponse,
+    summary="List strategy lab runs as jobs",
+)
 def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResponse:
     """Return strategy lab runs in a format compatible with the central Jobs Dashboard."""
     jobs: List[InvestmentJobSummary] = []
@@ -1259,14 +1373,16 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             total = state.get("total_cycles", 1)
             progress = int((completed / total) * 100) if total else 0
             label = hypothesis or f"Strategy batch ({completed}/{total})"
-            jobs.append(InvestmentJobSummary(
-                job_id=state["run_id"],
-                status=state["status"],
-                label=label,
-                progress=progress,
-                current_phase=phase,
-                created_at=state.get("started_at"),
-            ))
+            jobs.append(
+                InvestmentJobSummary(
+                    job_id=state["run_id"],
+                    status=state["status"],
+                    label=label,
+                    progress=progress,
+                    current_phase=phase,
+                    created_at=state.get("started_at"),
+                )
+            )
 
     # Persisted runs from job service (completed runs not in memory)
     try:
@@ -1281,14 +1397,16 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             completed = data.get("completed_cycles", 0)
             total = data.get("total_cycles", 1)
             progress = int((completed / total) * 100) if total else 0
-            jobs.append(InvestmentJobSummary(
-                job_id=jid,
-                status=job.get("status", data.get("status", "completed")),
-                label=f"Strategy batch ({completed}/{total})",
-                progress=progress,
-                current_phase=None,
-                created_at=data.get("started_at"),
-            ))
+            jobs.append(
+                InvestmentJobSummary(
+                    job_id=jid,
+                    status=job.get("status", data.get("status", "completed")),
+                    label=f"Strategy batch ({completed}/{total})",
+                    progress=progress,
+                    current_phase=None,
+                    created_at=data.get("started_at"),
+                )
+            )
     except Exception as exc:
         logger.warning("Failed to load persisted strategy lab runs: %s", exc)
 
@@ -1332,7 +1450,9 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     with _lock:
         active = [r for r in _active_runs.values() if r["status"] == "running"]
         if active:
-            raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+            raise HTTPException(
+                status_code=409, detail="A strategy lab run is already in progress."
+            )
 
     # Re-initialize in-memory state
     resumed_state = {
@@ -1364,7 +1484,8 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     thread.start()
 
     return StrategyLabRunStartResponse(
-        run_id=run_id, total_cycles=total_cycles,
+        run_id=run_id,
+        total_cycles=total_cycles,
         message=f"Run resumed from cycle {completed_cycles + 1} of {total_cycles}.",
     )
 
@@ -1394,7 +1515,9 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     with _lock:
         active = [r for r in _active_runs.values() if r["status"] == "running"]
         if active:
-            raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+            raise HTTPException(
+                status_code=409, detail="A strategy lab run is already in progress."
+            )
 
     request = RunStrategyLabRequest(**payload)
 
@@ -1423,12 +1546,15 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     thread.start()
 
     return StrategyLabRunStartResponse(
-        run_id=run_id, total_cycles=request.batch_size,
+        run_id=run_id,
+        total_cycles=request.batch_size,
         message="Run restarted from scratch.",
     )
 
 
-@app.get("/strategy-lab/runs", response_model=ActiveRunsResponse, summary="List active strategy lab runs")
+@app.get(
+    "/strategy-lab/runs", response_model=ActiveRunsResponse, summary="List active strategy lab runs"
+)
 def list_strategy_lab_runs() -> ActiveRunsResponse:
     """Return all tracked runs (active and recently completed, kept for 5 min after finish)."""
     with _lock:
@@ -1481,9 +1607,13 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
     # If the run is already terminal, send snapshot + done immediately.
     if state.get("status") in ("completed", "failed"):
+
         async def _terminal_gen():
-            yield _sse_line({"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")})
+            yield _sse_line(
+                {"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")}
+            )
             yield _sse_line({"type": "done"})
+
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
     async def event_generator():
@@ -1493,7 +1623,9 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
             with _lock:
                 current = _active_runs.get(run_id, {})
             if current:
-                yield _sse_line({"type": "snapshot", **_run_state_to_response(current).model_dump(mode="json")})
+                yield _sse_line(
+                    {"type": "snapshot", **_run_state_to_response(current).model_dump(mode="json")}
+                )
 
             deadline = time_mod.monotonic() + 4 * 3600  # 4-hour max
             while time_mod.monotonic() < deadline:
@@ -1706,7 +1838,6 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     """
     from investment_team.market_data_service import MarketDataService
     from investment_team.paper_trading_agent import PaperTradingAgent
-    from llm_service.factory import get_client
 
     # 1 — Look up the winning strategy lab record
     with _lock:
@@ -1752,9 +1883,7 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         )
 
     # 3 — Run paper trading session
-    # Lazy imports: yfinance and LLM client are heavy; deferring keeps app startup fast.
-    llm = get_client("paper_trading")
-    agent = PaperTradingAgent(llm_client=llm)
+    agent = PaperTradingAgent()
 
     try:
         session = agent.run_session(

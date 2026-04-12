@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import List
 
-from llm_service import LLMClient, LLMJsonParseError
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import RoutePlan, StopActivities, TravelerGroupProfile, TripRequest
 
@@ -35,8 +38,15 @@ Respect accessibility requirements if present. Output only valid JSON."""
 class ActivitiesExpertAgent:
     """Generates tailored activity and dining recommendations for all route stops."""
 
-    def __init__(self, llm: LLMClient) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        self._agent = (
+            llm
+            if llm is not None
+            else Agent(
+                model=get_strands_model("road_trip_planning"),
+                system_prompt=SYSTEM_PROMPT,
+            )
+        )
 
     def run(
         self,
@@ -78,14 +88,10 @@ class ActivitiesExpertAgent:
         )
 
         try:
-            data = self.llm.complete_json(
-                prompt,
-                temperature=0.5,
-                system_prompt=SYSTEM_PROMPT,
-                expected_keys=["activities", "dining"],
-                think=True,
-            )
-        except LLMJsonParseError as e:
+            result = self._agent(prompt)
+            raw = str(result).strip()
+            data = json.loads(raw)
+        except Exception as e:
             logger.warning("ActivitiesExpertAgent JSON parse failed for %s: %s", location, e)
             return StopActivities(location=location)
 

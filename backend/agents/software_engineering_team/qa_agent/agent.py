@@ -1,9 +1,9 @@
 """QA Expert agent: bug detection, integration tests, live testing.
 
-Built on the AWS Strands Agents SDK via ``llm_service.LLMClientModel``. The
-``LLMClient`` passed in at construction time is wrapped into a Strands
-``Model`` so the agent inherits retries, per-agent model routing, telemetry,
-and the dummy-client path for tests.
+Built on the AWS Strands Agents SDK via ``llm_service.get_strands_model``. The
+model returned by ``get_strands_model`` is passed to a Strands ``Agent`` so the
+agent inherits retries, per-agent model routing, telemetry, and the
+dummy-client path for tests.
 
 The agent supports three request modes — ``default``, ``fix_build``, and
 ``write_tests`` — each with a distinct system prompt. Because Strands
@@ -18,7 +18,7 @@ from typing import Dict
 
 from strands import Agent
 
-from llm_service import LLMClient, LLMClientModel
+from llm_service import get_strands_model
 
 from .models import QAInput, QAOutput
 from .prompts import QA_PROMPT, QA_PROMPT_FIX_BUILD, QA_PROMPT_WRITE_TESTS
@@ -32,14 +32,11 @@ class QAExpertAgent:
     and ensures adequate integration tests.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self._model = LLMClientModel(
-            llm_client,
-            agent_key="qa",
-            temperature=0.1,
-            think=True,
-        )
+    def __init__(self, llm_client=None) -> None:
+        if llm_client is not None:
+            self._model = llm_client
+        else:
+            self._model = get_strands_model("qa")
         # One system prompt per request mode. A fresh Strands Agent is
         # constructed per ``run()`` call in :meth:`run` using the selected
         # persona; see the note there for why agents are not cached.
