@@ -499,62 +499,49 @@ class GhostWriterElicitationAgent:
         gap: StoryGap,
         conversation: List[Dict[str, str]],
     ) -> Dict[str, Any]:
-        """Use the LLM evaluator to assess whether the conversation has enough material.
+        """Use the LLM evaluator to assess whether the conversation has enough material."""
+        system = (
+            _EVALUATE_SUFFICIENCY_SYSTEM
+            + f"\n\nSection: {gap.section_title}\nContext: {gap.section_context}"
+        )
 
-        Uses ``chat_json_round`` with native message history for proper role attribution,
-        and ``think=True`` for chain-of-thought reasoning.
-        """
-        messages: list[Dict[str, Any]] = [
-            {"role": "system", "content": _EVALUATE_SUFFICIENCY_SYSTEM},
-            {
-                "role": "system",
-                "content": f"Section: {gap.section_title}\nContext: {gap.section_context}",
-            },
-        ]
+        # Build a text representation of the conversation
+        conv_text = ""
         for msg in conversation:
-            role = "assistant" if msg["role"] == "agent" else "user"
-            messages.append({"role": role, "content": msg["content"]})
-        messages.append({
-            "role": "user",
-            "content": "Evaluate the conversation above. Respond with the JSON object only.",
-        })
+            role = "Ghost writer" if msg["role"] == "agent" else "Author"
+            conv_text += f"{role}: {msg['content']}\n"
+
+        prompt = (
+            conv_text
+            + "\nEvaluate the conversation above. Respond with the JSON object only, no markdown fences."
+        )
 
         default = {"sufficient": False, "no_experience": False, "story_context": None, "missing": None}
+        agent = Agent(model=self._model, system_prompt=system)
 
         for attempt in range(2):
             try:
-                result = self.llm_client.chat_json_round(messages, temperature=0.2, think=True)
-                if isinstance(result, dict):
-                    return result
+                working_prompt = prompt if attempt == 0 else prompt + _JSON_RETRY_SUFFIX
+                result = agent(working_prompt)
+                raw = (result.message if hasattr(result, "message") else str(result)).strip()
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return data
                 return default
-            except LLMJsonParseError as e:
+            except (json.JSONDecodeError, TypeError) as e:
                 if attempt == 0:
                     logger.warning("Ghost writer evaluator JSON parse failed, retrying: %s", e)
-                    messages[-1]["content"] += _JSON_RETRY_SUFFIX
                     continue
                 logger.warning("Ghost writer evaluator JSON parse failed after retry: %s", e)
                 return default
-            except LLMTruncatedError as e:
-                # Try to parse partial content
-                if e.partial_content:
-                    try:
-                        start = e.partial_content.find("{")
-                        end = e.partial_content.rfind("}") + 1
-                        if start != -1 and end > start:
-                            return json.loads(e.partial_content[start:end])
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                logger.warning("Ghost writer evaluator truncated: %s", e)
-                return default
-            except (LLMTemporaryError, LLMRateLimitError) as e:
+            except Exception as e:
                 if attempt == 0:
-                    logger.warning("Ghost writer evaluator transient error, retrying: %s", e)
+                    logger.warning("Ghost writer evaluator error, retrying: %s", e)
                     time.sleep(2.0)
                     continue
-                logger.warning("Ghost writer evaluator transient error after retry: %s", e)
-                return default
-            except LLMPermanentError as e:
-                logger.warning("Ghost writer evaluator permanent error: %s", e)
+                logger.warning("Ghost writer evaluator error after retry: %s", e)
                 return default
         return default
 
@@ -592,13 +579,12 @@ class GhostWriterElicitationAgent:
         )
 
         try:
-            result = self.llm_client.complete(prompt, system_prompt=_INTERVIEWER_SYSTEM)
-            return (result or "").strip() or None
-        except (LLMTemporaryError, LLMRateLimitError, LLMJsonParseError, LLMTruncatedError) as e:
+            agent = Agent(model=self._model, system_prompt=_INTERVIEWER_SYSTEM)
+            result = agent(prompt)
+            raw = (result.message if hasattr(result, "message") else str(result)).strip()
+            return raw or None
+        except Exception as e:
             logger.warning("Ghost writer interviewer failed: %s", e)
-            return None
-        except LLMPermanentError as e:
-            logger.warning("Ghost writer interviewer permanent error: %s", e)
             return None
 
     # ------------------------------------------------------------------
@@ -648,21 +634,17 @@ class GhostWriterElicitationAgent:
             "Compile the narrative now."
         )
 
+        agent = Agent(model=self._model, system_prompt=_NARRATOR_SYSTEM)
         for attempt in range(2):
             try:
-                return self.llm_client.complete(prompt, system_prompt=_NARRATOR_SYSTEM, think=True)
-            except (LLMTemporaryError, LLMRateLimitError) as e:
+                result = agent(prompt)
+                return (result.message if hasattr(result, "message") else str(result)).strip() or None
+            except Exception as e:
                 if attempt == 0:
-                    logger.warning("Ghost writer narrator transient error, retrying: %s", e)
+                    logger.warning("Ghost writer narrator error, retrying: %s", e)
                     time.sleep(2.0)
                     continue
-                logger.warning("Ghost writer narrator transient error after retry: %s", e)
-                return None
-            except (LLMJsonParseError, LLMTruncatedError) as e:
-                logger.warning("Ghost writer narrator parse/truncation error: %s", e)
-                return None
-            except LLMPermanentError as e:
-                logger.warning("Ghost writer narrator permanent error: %s", e)
+                logger.warning("Ghost writer narrator error after retry: %s", e)
                 return None
         return None
 
