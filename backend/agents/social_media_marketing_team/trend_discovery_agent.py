@@ -96,13 +96,8 @@ class TrendDiscoveryAgent:
     def __init__(self, llm_client=None, web_search: OllamaWebSearch = None) -> None:
         if web_search is None:
             raise ValueError("web_search is required")
-        self._agent = (
-            llm_client
-            if llm_client is not None
-            else Agent(
-                model=get_strands_model("trend_discovery"),
-            )
-        )
+        model = get_strands_model("trend_discovery") if llm_client is None else llm_client
+        self._agent = Agent(model=model)
         self.web_search = web_search
 
     def _search_one(self, query: SearchQuery) -> List[CandidateResult]:
