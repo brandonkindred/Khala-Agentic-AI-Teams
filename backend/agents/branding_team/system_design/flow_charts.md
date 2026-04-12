@@ -16,8 +16,8 @@ flowchart TB
     Start([run mission, human_review, brand_checks])
     Start --> ResolveStop["stop_idx = target_phase or last phase<br/>(orchestrator.py:184)"]
     ResolveStop --> P1["Phase 1 — Strategic Core<br/>strategic_core_agent.execute(mission)<br/>(orchestrator.py:187)"]
-    P1 --> Legacy["Legacy bridge agents (always run)<br/>codifier · moodboard · refinement ·<br/>guidelines · wiki · compliance<br/>(orchestrator.py:196-203)"]
-    Legacy --> G1{"stop_idx >= 1?"}
+    P1 --> Specialists["Specialist agents (always run)<br/>codifier · moodboard · refinement ·<br/>guidelines · wiki · compliance<br/>(orchestrator.py:196-203)"]
+    Specialists --> G1{"stop_idx >= 1?"}
     G1 -- no --> Finalize
     G1 -- yes --> P2["Phase 2 — Narrative & Messaging<br/>narrative_agent.execute(mission, strategic_core)<br/>(orchestrator.py:210)"]
     P2 --> G2{"stop_idx >= 2 AND narrative?"}

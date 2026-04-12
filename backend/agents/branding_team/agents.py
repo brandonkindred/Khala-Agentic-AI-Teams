@@ -3,7 +3,7 @@
 Each function returns a configured ``strands.Agent`` instance for use as a
 node in a ``GraphBuilder`` graph or ``Swarm``.  Agents are grouped by phase.
 
-The only non-Strands class retained is ``BrandComplianceAgent`` which runs
+``BrandComplianceAgent`` is the only non-Strands class; it runs
 outside the graph as a post-processing utility.
 """
 

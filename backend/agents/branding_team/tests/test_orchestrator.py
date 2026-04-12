@@ -412,8 +412,8 @@ def test_phase_gates_are_populated() -> None:
         assert gate.status.value in ("approved", "not_started", "pending_review", "in_progress")
 
 
-def test_absorbed_legacy_fields_at_new_locations() -> None:
-    """Verify legacy outputs are now accessible via their new phase-output homes."""
+def test_phase_absorbed_fields_populated() -> None:
+    """Verify sub-team outputs are accessible via their phase-output homes."""
     with _patch_graph_invoke(ALL_PHASES):
         orchestrator = BrandingTeamOrchestrator()
         result = orchestrator.run(mission=_mission(), human_review=HumanReview(approved=True))

@@ -685,7 +685,7 @@ def request_design_assets_for_brand(client_id: str, brand_id: str) -> DesignAsse
 
 
 # ---------------------------------------------------------------------------
-# Legacy run endpoint
+# Direct run endpoint
 # ---------------------------------------------------------------------------
 
 

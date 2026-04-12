@@ -11,7 +11,7 @@ adapters, runtime modes, and configuration.
 backend/agents/branding_team/
 ├── __init__.py
 ├── README.md                # User-facing operational reference
-├── agents.py                # 5 phase agents + compliance + 5 legacy bridge agents
+├── agents.py                # 5 phase agents + compliance + 5 specialist agents
 ├── orchestrator.py          # BrandingTeamOrchestrator (run / run_phase / brand book builder)
 ├── models.py                # All Pydantic models (mission, phase outputs, TeamOutput, Client, Brand)
 ├── store.py                 # BrandingStore — SQLite client/brand CRUD with version history
@@ -335,7 +335,7 @@ no-op when `POSTGRES_HOST` is not set.
 ## LLM integration
 
 Only the `BrandingAssistantAgent` touches the shared LLM client. Everything
-else in the pipeline (phase agents, compliance agent, legacy bridges) is
+else in the pipeline (phase agents, compliance agent, specialist agents) is
 deterministic Python code — they do not call LLMs today.
 
 **Initialization** (`assistant/agent.py:129-135`) happens lazily:

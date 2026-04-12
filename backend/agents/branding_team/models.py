@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# Shared / legacy models
+# Shared models
 # ---------------------------------------------------------------------------
 
 
@@ -216,7 +216,7 @@ class NarrativeMessagingOutput(BaseModel):
     elevator_pitches: List[ElevatorPitch] = Field(default_factory=list)
     boilerplate_variants: List[str] = Field(default_factory=list)
     persona_profiles: List[PersonaProfile] = Field(default_factory=list)
-    # Absorbed from legacy BrandGuidelinesAgent.writing_guidelines()
+    # Voice and writing guidelines (from BrandGuidelinesAgent)
     writing_guidelines: "WritingGuidelines" = Field(default_factory=lambda: WritingGuidelines())
 
 
@@ -276,13 +276,13 @@ class VisualIdentityOutput(BaseModel):
     voice_tone_spectrum: List[VoiceToneEntry] = Field(default_factory=list)
     language_dos: List[str] = Field(default_factory=list)
     language_donts: List[str] = Field(default_factory=list)
-    # Absorbed from legacy MoodBoardIdeationAgent
+    # Mood board candidates (from MoodBoardIdeationAgent)
     mood_board_candidates: List["MoodBoardConcept"] = Field(default_factory=list)
-    # Absorbed from legacy CreativeRefinementAgent
+    # Creative refinement decision (from CreativeRefinementAgent)
     creative_refinement: "CreativeRefinementDecision" = Field(
         default_factory=lambda: CreativeRefinementDecision()
     )
-    # Absorbed from legacy BrandGuidelinesAgent.design_system()
+    # Design system definition (from BrandGuidelinesAgent)
     design_system: "DesignSystemDefinition" = Field(
         default_factory=lambda: DesignSystemDefinition()
     )
@@ -372,9 +372,9 @@ class GovernanceOutput(BaseModel):
     review_trigger_points: List[str] = Field(default_factory=list)
     evolution_framework: str = ""
     version_control_cadence: str = ""
-    # Absorbed from legacy BrandGuidelinesAgent.brand_guidelines()
+    # Brand governance rules (from BrandGuidelinesAgent)
     brand_guidelines: List[str] = Field(default_factory=list)
-    # Absorbed from legacy BrandWikiAgent.build_wiki_backlog()
+    # Knowledge-base backlog (from BrandWikiAgent)
     wiki_backlog: List["WikiEntry"] = Field(default_factory=list)
 
 
@@ -478,7 +478,7 @@ class WikiEntry(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Team output — phased outputs only; legacy fields absorbed into phase models
+# Team output — all phase outputs plus cross-cutting results
 # ---------------------------------------------------------------------------
 
 

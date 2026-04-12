@@ -55,7 +55,7 @@ SCHEMA = TeamSchema(
         )""",
         """CREATE INDEX IF NOT EXISTS idx_branding_conv_messages_conv
             ON branding_conv_messages(conversation_id)""",
-        # One live conversation per brand — the invariant the legacy SQLite
+        # One live conversation per brand — the invariant the original SQLite
         # layer enforced via ``_run_migrations``. Partial index so rows with
         # NULL brand_id (unlinked conversations) are unaffected.
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_branding_conv_brand_unique
