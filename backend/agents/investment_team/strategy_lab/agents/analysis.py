@@ -62,8 +62,12 @@ class AnalysisAgent:
         metrics: BacktestResult,
         trades: List[TradeRecord],
         rationale: str,
+        on_sub_phase: Any = None,
     ) -> str:
         """Produce a polished analysis narrative via draft + self-review.
+
+        Args:
+            on_sub_phase: Optional callback ``(sub_phase: str) -> None`` for progress.
 
         Returns the final narrative string.
         """
@@ -107,6 +111,8 @@ class AnalysisAgent:
             return _fallback_narrative(spec, metrics, is_winning)
 
         # Phase 2: Self-review
+        if on_sub_phase:
+            on_sub_phase("review")
         review_prompt = _SELF_REVIEW_PROMPT.format(
             asset_class=spec.asset_class,
             hypothesis=spec.hypothesis,

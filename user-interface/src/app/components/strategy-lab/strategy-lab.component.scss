@@ -588,136 +588,364 @@
 // ── In-progress tracking ────────────────────────────────────────────────────
 
 .in-progress-section {
-  margin-bottom: 1.5rem;
-  padding: 1rem;
-  background: rgba(92, 107, 192, 0.04);
-  border-radius: 8px;
-  border: 1px solid rgba(92, 107, 192, 0.15);
+  margin-bottom: var(--kh-space-6);
+  padding: var(--kh-space-4) var(--kh-space-5);
+  background: var(--kh-surface-1);
+  border-radius: var(--kh-radius-lg);
+  border: 1px solid var(--kh-border);
 }
 
 .progress-header {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
+  gap: var(--kh-space-3);
+  margin-bottom: var(--kh-space-3);
+}
 
-  mat-icon {
-    color: #5c6bc0;
-    animation: pulse-icon 1.5s ease-in-out infinite;
-  }
+.pulse-icon {
+  color: var(--kh-accent);
+  animation: pulse-icon 1.5s ease-in-out infinite;
 }
 
 .progress-title {
   font-weight: 600;
-  font-size: 0.95rem;
-}
-
-.skipped-badge {
-  font-size: 0.75rem;
-  padding: 2px 8px;
-  border-radius: 12px;
-  background: rgba(255, 152, 0, 0.12);
-  color: #e65100;
-}
-
-mat-progress-bar {
-  margin-bottom: 0.75rem;
-  border-radius: 4px;
-}
-
-.progress-card {
-  border-left: 4px solid #5c6bc0;
-  transition: border-color 0.3s ease;
-
-  &.phase-border-ideating { border-left-color: #42a5f5; }
-  &.phase-border-fetching_data { border-left-color: #ffb300; }
-  &.phase-border-backtesting { border-left-color: #66bb6a; }
-  &.phase-border-analyzing { border-left-color: #ab47bc; }
-  &.phase-border-complete { border-left-color: #4caf50; }
-}
-
-.phase-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 0.5rem;
-}
-
-.phase-chip-ideating { background: rgba(66, 165, 245, 0.15) !important; color: #1565c0 !important; }
-.phase-chip-fetching_data { background: rgba(255, 179, 0, 0.15) !important; color: #e65100 !important; }
-.phase-chip-backtesting { background: rgba(102, 187, 106, 0.15) !important; color: #2e7d32 !important; }
-.phase-chip-analyzing { background: rgba(171, 71, 188, 0.15) !important; color: #6a1b9a !important; }
-.phase-chip-complete { background: rgba(76, 175, 80, 0.15) !important; color: #2e7d32 !important; }
-
-.cycle-label {
-  font-size: 0.8rem;
-  color: rgba(0, 0, 0, 0.5);
-}
-
-.preview-rows {
-  margin: 0.5rem 0;
-}
-
-.preview-row {
-  display: flex;
-  gap: 0.75rem;
-  margin-bottom: 0.25rem;
-  font-size: 0.85rem;
-}
-
-.preview-label {
-  font-weight: 600;
-  min-width: 80px;
-  color: rgba(0, 0, 0, 0.6);
-}
-
-.preview-value {
+  font-size: var(--kh-text-md);
+  color: var(--kh-text-primary);
   flex: 1;
 }
 
-.hypothesis-text {
-  font-style: italic;
+.skipped-badge {
+  font-size: var(--kh-text-xs);
+  padding: 2px 8px;
+  border-radius: var(--kh-radius-full);
+  background: var(--kh-warning-subtle);
+  color: var(--kh-warning);
+  font-weight: 500;
 }
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: var(--kh-radius-full);
+  font-size: var(--kh-text-xs);
+  font-weight: 600;
+  text-transform: capitalize;
+  letter-spacing: 0.03em;
+
+  &::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+}
+
+.status-running {
+  background: var(--kh-accent-subtle);
+  color: var(--kh-accent-text);
+}
+
+.progress-section {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-3);
+  margin-bottom: var(--kh-space-4);
+
+  mat-progress-bar {
+    flex: 1;
+    height: 6px;
+    border-radius: var(--kh-radius-full);
+  }
+
+  .progress-text {
+    font-size: var(--kh-text-xs);
+    font-weight: 600;
+    font-family: var(--kh-font-mono);
+    color: var(--kh-text-tertiary);
+    min-width: 2.5rem;
+  }
+}
+
+// ── Phase Stepper ───────────────────────────────────────────────────────────
+
+.phase-stepper {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0;
+  padding: var(--kh-space-5) var(--kh-space-3);
+  margin: 0 0 var(--kh-space-4) 0;
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border);
+  border-radius: var(--kh-radius-lg);
+}
+
+.phase-step {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+  z-index: 1;
+
+  &.has-connector::after {
+    content: '';
+    position: absolute;
+    top: 18px;
+    left: 50%;
+    width: 50%;
+    height: 2px;
+    background: var(--kh-border-strong);
+    z-index: 0;
+    pointer-events: none;
+  }
+
+  &.has-connector.next-completed::after {
+    background: var(--kh-success);
+  }
+}
+
+.phase-node {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  border-radius: 50%;
+  border: 2px solid var(--kh-border-strong);
+  background: var(--kh-surface-3);
+  transition: all var(--kh-transition-slow);
+  z-index: 1;
+  flex-shrink: 0;
+
+  mat-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    color: var(--kh-text-muted);
+  }
+}
+
+.phase-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--kh-text-muted);
+  text-align: center;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  padding: 0 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+// Completed phase
+.phase-step.completed {
+  .phase-node {
+    border-color: var(--kh-success);
+    background: var(--kh-success);
+
+    mat-icon { color: #000; }
+  }
+
+  .phase-label { color: var(--kh-success); }
+}
+
+// Current/active phase
+.phase-step.current {
+  .phase-node {
+    border-color: var(--kh-accent);
+    background: var(--kh-accent-muted);
+    box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.25);
+
+    mat-icon { color: var(--kh-accent); }
+  }
+
+  .phase-label {
+    color: var(--kh-accent-text);
+    font-weight: 700;
+  }
+}
+
+// Pending phase
+.phase-step.pending {
+  .phase-node {
+    border-color: var(--kh-border-strong);
+    background: var(--kh-surface-3);
+
+    mat-icon { color: var(--kh-text-muted); }
+  }
+
+  .phase-label { color: var(--kh-text-muted); }
+}
+
+// Skipped phase (refine not needed)
+.phase-step.skipped {
+  .phase-node {
+    border-color: var(--kh-border);
+    border-style: dashed;
+    background: var(--kh-surface-2);
+
+    mat-icon { color: var(--kh-text-muted); opacity: 0.4; }
+  }
+
+  .phase-label { color: var(--kh-text-muted); opacity: 0.5; }
+}
+
+// ── Strategy Preview ────────────────────────────────────────────────────────
+
+.strategy-preview {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-3);
+  padding: var(--kh-space-2) var(--kh-space-3);
+  margin-bottom: var(--kh-space-3);
+  background: var(--kh-surface-2);
+  border-radius: var(--kh-radius-md);
+  border: 1px solid var(--kh-border);
+
+  .preview-icon {
+    color: var(--kh-accent);
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+  }
+
+  .preview-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .preview-asset {
+    font-weight: 600;
+    font-size: var(--kh-text-sm);
+    color: var(--kh-accent-text);
+    text-transform: capitalize;
+  }
+
+  .preview-hypothesis {
+    font-size: var(--kh-text-xs);
+    color: var(--kh-text-tertiary);
+    font-style: italic;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+// ── Metrics Preview ─────────────────────────────────────────────────────────
 
 .metrics-preview {
   display: flex;
-  gap: 1rem;
+  gap: var(--kh-space-3);
   flex-wrap: wrap;
-  margin-top: 0.5rem;
-  padding-top: 0.5rem;
-  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  margin-bottom: var(--kh-space-3);
+  padding: var(--kh-space-2) 0;
+  border-top: 1px solid var(--kh-border);
 }
 
 .metric-chip {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 0.25rem 0.75rem;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.04);
+  padding: var(--kh-space-1) var(--kh-space-3);
+  border-radius: var(--kh-radius-sm);
+  background: var(--kh-surface-2);
 
-  &.winning { background: rgba(76, 175, 80, 0.1); }
-  &.losing { background: rgba(244, 67, 54, 0.08); }
+  &.winning { background: var(--kh-success-subtle); }
+  &.losing { background: var(--kh-error-subtle); }
 }
 
 .metric-value {
   font-weight: 700;
-  font-size: 0.95rem;
+  font-size: var(--kh-text-base);
+  color: var(--kh-text-primary);
 }
 
 .metric-label {
-  font-size: 0.7rem;
-  color: rgba(0, 0, 0, 0.5);
+  font-size: 0.625rem;
+  color: var(--kh-text-muted);
   text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
+
+// ── Activity Log ────────────────────────────────────────────────────────────
+
+.activity-log {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--kh-border);
+  border-radius: var(--kh-radius-md);
+  background: var(--kh-surface-2);
+  padding: var(--kh-space-2);
+}
+
+.log-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--kh-space-2);
+  padding: 3px 0;
+  font-size: var(--kh-text-xs);
+  font-family: var(--kh-font-mono);
+  line-height: 1.4;
+}
+
+.log-time {
+  color: var(--kh-text-muted);
+  min-width: 60px;
+  flex-shrink: 0;
+}
+
+.log-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+
+  mat-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
+}
+
+.log-entry.log-done .log-indicator mat-icon { color: var(--kh-success); }
+.log-entry.log-error .log-indicator mat-icon { color: var(--kh-error); }
+.log-entry.log-active .log-indicator { color: var(--kh-accent); }
+
+.log-message {
+  color: var(--kh-text-secondary);
+  min-width: 0;
+}
+
+.log-entry.log-active .log-message {
+  color: var(--kh-text-primary);
+}
+
+// ── Waiting state ───────────────────────────────────────────────────────────
 
 .progress-waiting {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.75rem 0;
-  font-size: 0.9rem;
-  color: rgba(0, 0, 0, 0.5);
+  gap: var(--kh-space-3);
+  padding: var(--kh-space-3) 0;
+  font-size: var(--kh-text-sm);
+  color: var(--kh-text-tertiary);
 }
 
 @keyframes pulse-icon {

@@ -546,9 +546,19 @@ export interface QualityGateResult {
 export interface StrategyLabCycleProgress {
   cycle_index: number;
   phase: StrategyLabPhase;
+  sub_phase?: string;
   refinement_round?: number;
   strategy?: { asset_class: string; hypothesis: string };
   metrics?: Partial<BacktestResult>;
+  checks_passed?: number;
+  checks_total?: number;
+  symbols_count?: number;
+  bars_count?: number;
+  trades_count?: number;
+  execution_time?: number;
+  failure_phase?: string;
+  changes_made?: string;
+  is_winning?: boolean;
 }
 
 export interface StrategyLabRunStatus {

@@ -64,74 +64,105 @@
   @if (running && runStatus) {
     <div class="in-progress-section">
       <div class="progress-header">
-        <mat-icon>hourglass_top</mat-icon>
+        <mat-icon class="pulse-icon">hub</mat-icon>
         <span class="progress-title">
-          Running — Strategy {{ runStatus.completed_cycles + 1 }} of {{ runStatus.total_cycles }}
+          Strategy {{ runStatus.completed_cycles + 1 }} of {{ runStatus.total_cycles }}
         </span>
         @if (runStatus.skipped_cycles) {
           <span class="skipped-badge">{{ runStatus.skipped_cycles }} skipped</span>
         }
+        <span class="status-badge status-running">Running</span>
       </div>
 
-      <mat-progress-bar mode="determinate" [value]="progressPercent()"></mat-progress-bar>
+      <div class="progress-section">
+        <mat-progress-bar mode="determinate" [value]="progressPercent()"></mat-progress-bar>
+        <span class="progress-text">{{ progressPercent() }}%</span>
+      </div>
 
       @if (runStatus.current_cycle) {
-        <mat-card class="progress-card" [class]="'phase-border-' + runStatus.current_cycle.phase">
-          <mat-card-content>
-            <div class="phase-row">
-              <mat-chip [class]="'phase-chip-' + runStatus.current_cycle.phase">
-                {{ phaseLabel(runStatus.current_cycle.phase, runStatus.current_cycle.refinement_round) }}
-              </mat-chip>
-              <span class="cycle-label">Cycle {{ runStatus.current_cycle.cycle_index }}</span>
+        <!-- Phase stepper -->
+        <div class="phase-stepper">
+          @for (phase of STRATEGY_LAB_PHASES; track phase.id; let i = $index; let last = $last) {
+            <div class="phase-step"
+                 [class.completed]="isPhaseCompleted(phase.id)"
+                 [class.current]="isCurrentPhase(phase.id)"
+                 [class.pending]="isPhasePending(phase.id)"
+                 [class.skipped]="isPhaseSkipped(phase.id)"
+                 [class.has-connector]="!last"
+                 [class.next-completed]="!last && isPhaseCompleted(STRATEGY_LAB_PHASES[i + 1].id)">
+              <div class="phase-node">
+                <mat-icon>{{ isPhaseCompleted(phase.id) ? 'check' : phase.icon }}</mat-icon>
+              </div>
+              <span class="phase-label">{{ phase.label }}</span>
             </div>
+          }
+        </div>
 
-            @if (runStatus.current_cycle.strategy) {
-              <div class="preview-rows">
-                <div class="preview-row">
-                  <span class="preview-label">Asset Class</span>
-                  <span class="preview-value">{{ runStatus.current_cycle.strategy.asset_class }}</span>
-                </div>
-                <div class="preview-row">
-                  <span class="preview-label">Hypothesis</span>
-                  <span class="preview-value hypothesis-text">{{ runStatus.current_cycle.strategy.hypothesis }}</span>
-                </div>
+        <!-- Strategy preview (once ideation completes) -->
+        @if (runStatus.current_cycle.strategy) {
+          <div class="strategy-preview">
+            <mat-icon class="preview-icon">{{ getAssetClassIcon(runStatus.current_cycle.strategy.asset_class) }}</mat-icon>
+            <div class="preview-text">
+              <span class="preview-asset">{{ runStatus.current_cycle.strategy.asset_class }}</span>
+              <span class="preview-hypothesis">{{ runStatus.current_cycle.strategy.hypothesis }}</span>
+            </div>
+          </div>
+        }
+
+        <!-- Live metrics (once available) -->
+        @if (runStatus.current_cycle.metrics) {
+          <div class="metrics-preview">
+            @if (runStatus.current_cycle.metrics.annualized_return_pct !== undefined) {
+              <div class="metric-chip" [class]="returnColor(runStatus.current_cycle.metrics.annualized_return_pct!)">
+                <span class="metric-value">{{ runStatus.current_cycle.metrics.annualized_return_pct | number:'1.1-1' }}%</span>
+                <span class="metric-label">Return pa</span>
               </div>
             }
-
-            @if (runStatus.current_cycle.metrics) {
-              <div class="metrics-preview">
-                @if (runStatus.current_cycle.metrics.annualized_return_pct !== undefined) {
-                  <div class="metric-chip" [class]="returnColor(runStatus.current_cycle.metrics.annualized_return_pct!)">
-                    <span class="metric-value">{{ runStatus.current_cycle.metrics.annualized_return_pct | number:'1.1-1' }}%</span>
-                    <span class="metric-label">Return pa</span>
-                  </div>
-                }
-                @if (runStatus.current_cycle.metrics.sharpe_ratio !== undefined) {
-                  <div class="metric-chip">
-                    <span class="metric-value">{{ runStatus.current_cycle.metrics.sharpe_ratio | number:'1.2-2' }}</span>
-                    <span class="metric-label">Sharpe</span>
-                  </div>
-                }
-                @if (runStatus.current_cycle.metrics.max_drawdown_pct !== undefined) {
-                  <div class="metric-chip">
-                    <span class="metric-value">{{ runStatus.current_cycle.metrics.max_drawdown_pct | number:'1.1-1' }}%</span>
-                    <span class="metric-label">Max DD</span>
-                  </div>
-                }
-                @if (runStatus.current_cycle.metrics.win_rate_pct !== undefined) {
-                  <div class="metric-chip">
-                    <span class="metric-value">{{ runStatus.current_cycle.metrics.win_rate_pct | number:'1.0-0' }}%</span>
-                    <span class="metric-label">Win Rate</span>
-                  </div>
-                }
+            @if (runStatus.current_cycle.metrics.sharpe_ratio !== undefined) {
+              <div class="metric-chip">
+                <span class="metric-value">{{ runStatus.current_cycle.metrics.sharpe_ratio | number:'1.2-2' }}</span>
+                <span class="metric-label">Sharpe</span>
               </div>
             }
-          </mat-card-content>
-        </mat-card>
+            @if (runStatus.current_cycle.metrics.max_drawdown_pct !== undefined) {
+              <div class="metric-chip">
+                <span class="metric-value">{{ runStatus.current_cycle.metrics.max_drawdown_pct | number:'1.1-1' }}%</span>
+                <span class="metric-label">Max DD</span>
+              </div>
+            }
+            @if (runStatus.current_cycle.metrics.win_rate_pct !== undefined) {
+              <div class="metric-chip">
+                <span class="metric-value">{{ runStatus.current_cycle.metrics.win_rate_pct | number:'1.0-0' }}%</span>
+                <span class="metric-label">Win Rate</span>
+              </div>
+            }
+          </div>
+        }
+
+        <!-- Activity log -->
+        @if (activityLog.length > 0) {
+          <div class="activity-log" #logContainer>
+            @for (entry of activityLog; track $index) {
+              <div class="log-entry" [class]="'log-' + entry.status">
+                <span class="log-time">{{ entry.time }}</span>
+                <span class="log-indicator">
+                  @if (entry.status === 'active') {
+                    <mat-spinner diameter="12"></mat-spinner>
+                  } @else if (entry.status === 'done') {
+                    <mat-icon>check_circle</mat-icon>
+                  } @else {
+                    <mat-icon>cancel</mat-icon>
+                  }
+                </span>
+                <span class="log-message">{{ entry.message }}</span>
+              </div>
+            }
+          </div>
+        }
       } @else {
         <div class="progress-waiting">
           <mat-spinner diameter="24"></mat-spinner>
-          <span>Preparing next strategy…</span>
+          <span>Preparing next strategy...</span>
         </div>
       }
     </div>
