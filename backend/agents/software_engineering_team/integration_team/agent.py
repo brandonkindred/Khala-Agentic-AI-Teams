@@ -1,12 +1,20 @@
-"""Integration / API-contract agent: validates full-stack backend-frontend alignment."""
+"""Integration / API-contract agent: validates full-stack backend-frontend alignment.
+
+Built on the AWS Strands Agents SDK via ``llm_service.LLMClientModel``: the
+``LLMClient`` passed in at construction time is wrapped into a Strands
+``Model`` so the agent inherits retries, per-agent model routing, telemetry,
+and the dummy-client path for tests.
+"""
 
 from __future__ import annotations
 
 import logging
 
-from llm_service import LLMClient
+from strands import Agent
 
-from .models import IntegrationInput, IntegrationIssue, IntegrationOutput
+from llm_service import LLMClient, LLMClientModel
+
+from .models import IntegrationInput, IntegrationOutput
 from .prompts import INTEGRATION_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -20,7 +28,12 @@ class IntegrationAgent:
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+        self._model = LLMClientModel(
+            llm_client,
+            agent_key="integration",
+            temperature=0.1,
+            think=True,
+        )
 
     def run(self, input_data: IntegrationInput) -> IntegrationOutput:
         """Analyze backend and frontend code for integration/contract issues."""
@@ -30,7 +43,62 @@ class IntegrationAgent:
             len(input_data.frontend_code or ""),
         )
 
-        context_parts = [
+        user_prompt = self._build_user_prompt(input_data)
+
+        # A fresh Strands Agent per call. Strands' Agent accumulates message
+        # history across invocations; reusing the same instance breaks the
+        # forced-tool-choice mechanism used by ``structured_output_model``
+        # on the second call. Construction is cheap — it just wraps the
+        # cached model reference with a system_prompt.
+        agent = Agent(model=self._model, system_prompt=INTEGRATION_PROMPT)
+
+        try:
+            agent_result = agent(user_prompt, structured_output_model=IntegrationOutput)
+            result = agent_result.structured_output
+            if not isinstance(result, IntegrationOutput):
+                raise TypeError(
+                    f"Expected IntegrationOutput, got {type(result).__name__ if result else 'None'}"
+                )
+        except Exception as exc:  # noqa: BLE001 — agent failures should not crash the run
+            logger.warning(
+                "Integration: structured_output failed (%s); returning failed result", exc
+            )
+            return IntegrationOutput(
+                passed=False,
+                issues=[],
+                summary=f"Integration analysis failed: {exc}",
+                fix_task_suggestions=[],
+            )
+
+        # Trust the returned issues but re-derive ``passed`` from severities so a
+        # disagreement between the LLM's ``passed`` flag and the reported issues
+        # is resolved in favor of the issue list.
+        critical_or_high = [i for i in result.issues if i.severity in ("critical", "high")]
+        result.passed = len(critical_or_high) == 0
+
+        logger.info(
+            "Integration: done, %s issues (%s critical/high), passed=%s",
+            len(result.issues),
+            len(critical_or_high),
+            result.passed,
+        )
+        return result
+
+    @staticmethod
+    def _build_user_prompt(input_data: IntegrationInput) -> str:
+        """Assemble the user-facing prompt.
+
+        Note: the system prompt (``INTEGRATION_PROMPT``) is handed to the
+        Strands ``Agent`` separately. We still include the phrases
+        "integration expert", "backend code", and "frontend code" in the
+        user-visible prompt because ``DummyLLMClient`` pattern-matches on
+        those to return a deterministic stub in tests.
+        """
+        parts = [
+            "You are acting as an integration expert. Analyze the following backend "
+            "code and frontend code for contract mismatches and report findings as "
+            "structured JSON.",
+            "",
             "**Backend code:**",
             "```",
             input_data.backend_code or "# No backend code",
@@ -42,7 +110,7 @@ class IntegrationAgent:
             "```",
         ]
         if input_data.spec_content:
-            context_parts.extend(
+            parts.extend(
                 [
                     "",
                     "**Project specification:**",
@@ -52,41 +120,6 @@ class IntegrationAgent:
                 ]
             )
         if input_data.architecture:
-            context_parts.append(f"**Architecture:** {input_data.architecture.overview}")
+            parts.append(f"**Architecture:** {input_data.architecture.overview}")
 
-        prompt = INTEGRATION_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
-
-        issues = []
-        for i in data.get("issues") or []:
-            if isinstance(i, dict) and i.get("description"):
-                issues.append(
-                    IntegrationIssue(
-                        severity=i.get("severity", "medium"),
-                        category=i.get("category", "contract_mismatch"),
-                        description=i["description"],
-                        backend_location=i.get("backend_location", ""),
-                        frontend_location=i.get("frontend_location", ""),
-                        recommendation=i.get("recommendation", ""),
-                    )
-                )
-
-        critical_issues = [i for i in issues if i.severity in ("critical", "high")]
-        passed = len(critical_issues) == 0
-
-        fix_suggestions = data.get("fix_task_suggestions") or []
-        if not isinstance(fix_suggestions, list):
-            fix_suggestions = []
-
-        logger.info(
-            "Integration: done, %s issues (%s critical/high), passed=%s",
-            len(issues),
-            len(critical_issues),
-            passed,
-        )
-        return IntegrationOutput(
-            passed=passed,
-            issues=issues,
-            summary=data.get("summary", ""),
-            fix_task_suggestions=fix_suggestions,
-        )
+        return "\n".join(parts)

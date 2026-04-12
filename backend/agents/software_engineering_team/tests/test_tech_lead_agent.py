@@ -48,3 +48,19 @@ def test_tech_lead_tasks_have_assignees(
     for task in result.assignment.tasks:
         assert task.assignee
         assert task.description or task.id
+
+
+def test_tech_lead_multiple_sequential_runs_on_same_instance(
+    requirements: ProductRequirements, architecture: SystemArchitecture
+) -> None:
+    """Regression: a single ``TechLeadAgent`` instance must handle many
+    sequential ``run()`` calls. See
+    test_code_review_agent.py::test_multiple_run_calls_on_same_instance_succeed
+    for the root-cause details — the Wave 5 migration routes every LLM call
+    through ``run_json_via_strands`` which builds a fresh Strands ``Agent``
+    per call, so this regression should be avoided by construction."""
+    agent = TechLeadAgent(llm_client=DummyLLMClient())
+    for i in range(3):
+        result = agent.run(TechLeadInput(requirements=requirements, architecture=architecture))
+        assert result.assignment is not None, f"run {i} returned no assignment"
+        assert len(result.assignment.tasks) >= 1, f"run {i} returned no tasks"

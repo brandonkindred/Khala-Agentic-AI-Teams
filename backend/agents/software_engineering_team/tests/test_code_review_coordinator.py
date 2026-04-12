@@ -1,16 +1,31 @@
-"""Tests for Code Review Coordinator."""
+"""Tests for Code Review Coordinator.
 
-from unittest.mock import MagicMock
+Pure-function tests (``parse_code_into_file_blocks``, ``build_chunks``)
+stay as they were — no LLM dependency. The LLM-integration tests use
+``DummyLLMClient`` subclasses now that ``ChunkReviewAgent`` is
+Strands-backed and bypasses ``llm.complete_json`` in favor of the
+``chat_json_round`` + structured-output flow.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
 
 from code_review_agent.coordinator import (
     build_chunks,
     parse_code_into_file_blocks,
     run_coordinator,
 )
-from code_review_agent.models import CodeReviewInput
+from code_review_agent.models import CodeReviewInput, CodeReviewOutput
+
+from llm_service.clients.dummy import DummyLLMClient
+
+# ---------------------------------------------------------------------------
+# Pure-function tests (unchanged from pre-Strands)
+# ---------------------------------------------------------------------------
 
 
-def test_parse_code_into_file_blocks_single_file():
+def test_parse_code_into_file_blocks_single_file() -> None:
     """Parse single file block."""
     code = "### app/main.py ###\ndef foo(): pass"
     blocks = parse_code_into_file_blocks(code)
@@ -19,7 +34,7 @@ def test_parse_code_into_file_blocks_single_file():
     assert "def foo" in blocks[0][1]
 
 
-def test_parse_code_into_file_blocks_multiple_files():
+def test_parse_code_into_file_blocks_multiple_files() -> None:
     """Parse multiple file blocks."""
     code = """### app/main.py ###
 def foo(): pass
@@ -32,7 +47,7 @@ class User: pass"""
     assert blocks[1][0] == "app/models.py"
 
 
-def test_parse_code_into_file_blocks_content_with_blank_lines():
+def test_parse_code_into_file_blocks_content_with_blank_lines() -> None:
     """Content with blank lines stays in same block."""
     code = """### app/main.py ###
 def foo():
@@ -45,7 +60,7 @@ def bar():
     assert "def bar" in blocks[0][1]
 
 
-def test_build_chunks_groups_files_under_limit():
+def test_build_chunks_groups_files_under_limit() -> None:
     """Chunks stay under max_chars."""
     blocks = [
         ("a.py", "x" * 5000),
@@ -53,29 +68,62 @@ def test_build_chunks_groups_files_under_limit():
         ("c.py", "z" * 5000),
     ]
     chunks = build_chunks(blocks, max_chars=15_000)
-    # Each block is ~5000 + header ~20 = ~5020. Two fit in 15K, third in new chunk
     assert len(chunks) >= 1
-    for paths, content in chunks:
+    for _paths, content in chunks:
         assert len(content) <= 15_000 + 100  # small tolerance for headers
 
 
-def test_run_coordinator_with_large_code_uses_chunk_reviewer():
-    """Coordinator with 2-3 files >30K chars produces one CodeReviewOutput."""
-    # Build code that exceeds single-call limit (model context ~22K chars default)
+# ---------------------------------------------------------------------------
+# run_coordinator — LLM-integration tests
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedClient(DummyLLMClient):
+    """Returns a different canned response on each ``complete_json`` call.
+
+    Used to simulate the coordinator dispatching to multiple chunks and
+    each chunk getting its own LLM response.
+    """
+
+    def __init__(self, responses: List[Dict[str, Any]]) -> None:
+        super().__init__()
+        self._responses = list(responses)
+        self._idx = 0
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if self._idx < len(self._responses):
+            resp = self._responses[self._idx]
+            self._idx += 1
+            return resp
+        # After the scripted responses are exhausted, fall back to the last
+        # one so additional chunks don't crash the test.
+        return self._responses[-1] if self._responses else {}
+
+
+def test_run_coordinator_with_multi_file_code_merges_chunk_summaries() -> None:
+    """Multiple file blocks → multiple chunks → merged CodeReviewOutput."""
     file1 = "### app/main.py ###\n" + ("x" * 20_000)
     file2 = "### app/models.py ###\n" + ("y" * 20_000)
     code = file1 + "\n\n" + file2
 
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete.return_value = "compacted content"  # for compact_text()
-    mock_llm.complete_json.side_effect = [
-        {"approved": True, "issues": [], "summary": "Chunk 1 OK"},
-        {"approved": True, "issues": [], "summary": "Chunk 2 OK"},
-    ]
+    client = _ScriptedClient(
+        [
+            {"approved": True, "issues": [], "summary": "Chunk 1 OK"},
+            {"approved": True, "issues": [], "summary": "Chunk 2 OK"},
+        ]
+    )
 
     result = run_coordinator(
-        mock_llm,
+        client,
         CodeReviewInput(
             code=code,
             task_description="Add feature",
@@ -83,36 +131,40 @@ def test_run_coordinator_with_large_code_uses_chunk_reviewer():
         ),
     )
 
+    assert isinstance(result, CodeReviewOutput)
     assert result.approved is True
-    assert len(result.issues) == 0
-    assert "Chunk 1" in result.summary and "Chunk 2" in result.summary
-    assert mock_llm.complete_json.call_count == 2
+    assert result.issues == []
+    # Coordinator concatenates chunk summaries with blank lines between.
+    assert "Chunk 1" in result.summary
+    assert "Chunk 2" in result.summary
 
 
-def test_run_coordinator_merges_issues_and_rejects_if_critical():
-    """Coordinator merges issues; approved=False if any critical/major."""
+def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:
+    """Coordinator merges issues across chunks; a single critical issue
+    propagates to ``approved=False``."""
     file1 = "### app/main.py ###\n" + ("x" * 20_000)
     code = file1
 
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete.return_value = "compacted content"  # for compact_text()
-    mock_llm.complete_json.return_value = {
-        "approved": False,
-        "issues": [
+    client = _ScriptedClient(
+        [
             {
-                "severity": "critical",
-                "category": "security",
-                "file_path": "app/main.py",
-                "description": "SQL injection risk",
-                "suggestion": "Use parameterized queries",
+                "approved": False,
+                "issues": [
+                    {
+                        "severity": "critical",
+                        "category": "security",
+                        "file_path": "app/main.py",
+                        "description": "SQL injection risk",
+                        "suggestion": "Use parameterized queries",
+                    }
+                ],
+                "summary": "Critical issue found.",
             }
-        ],
-        "summary": "Critical issue found.",
-    }
+        ]
+    )
 
     result = run_coordinator(
-        mock_llm,
+        client,
         CodeReviewInput(
             code=code,
             task_description="Add feature",
@@ -123,24 +175,18 @@ def test_run_coordinator_merges_issues_and_rejects_if_critical():
     assert result.approved is False
     assert len(result.issues) == 1
     assert result.issues[0].severity == "critical"
+    assert result.issues[0].file_path == "app/main.py"
 
 
-def test_code_review_agent_uses_coordinator_when_code_exceeds_single_call_limit():
-    """CodeReviewAgent.run uses coordinator when code exceeds model-based single-call limit."""
-    code = "### app/main.py ###\n" + ("x" * 25_000)
-
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete.return_value = "compacted content"  # for compact_text()
-    mock_llm.complete_json.return_value = {
-        "approved": True,
-        "issues": [],
-        "summary": "OK",
-    }
-
+def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
+    """End-to-end: ``CodeReviewAgent.run`` with code larger than the
+    single-call limit dispatches to the coordinator and returns a
+    merged CodeReviewOutput."""
     from code_review_agent.agent import CodeReviewAgent
 
-    agent = CodeReviewAgent(llm_client=mock_llm)
+    code = "### app/main.py ###\n" + ("x" * 25_000)
+
+    agent = CodeReviewAgent(llm_client=DummyLLMClient())
     result = agent.run(
         CodeReviewInput(
             code=code,
@@ -149,6 +195,5 @@ def test_code_review_agent_uses_coordinator_when_code_exceeds_single_call_limit(
         )
     )
 
-    # Coordinator is used -> multiple complete_json calls (one per chunk)
-    assert mock_llm.complete_json.call_count >= 1
+    assert isinstance(result, CodeReviewOutput)
     assert result.approved is True

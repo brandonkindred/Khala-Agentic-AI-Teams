@@ -3,6 +3,7 @@
 import json
 import logging
 from pathlib import Path
+from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,6 +26,34 @@ from product_requirements_analysis_agent.models import (
     ToolGapAnalysis,
     ToolRecommendation,
 )
+
+from llm_service.clients.dummy import DummyLLMClient
+
+
+class _StubClient(DummyLLMClient):
+    """Returns a canned response for every ``complete_json`` call.
+
+    Routes transparently through the Strands adapter path
+    (``chat_json_round`` → ``StructuredOutputTool`` detection → the
+    ``complete_json`` override below). For PRA tests, this replaces the
+    pre-migration ``MagicMock().complete_json.return_value = {...}``
+    pattern for the 3 methods migrated to ``run_json_via_strands``."""
+
+    def __init__(self, response: Dict[str, Any]) -> None:
+        super().__init__()
+        self._response = response
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        return self._response
 
 
 def test_format_answered_questions_for_prompt_empty() -> None:
@@ -670,44 +699,45 @@ def test_build_specialist_collaboration_plan_recommends_ui_arch_and_risk_agents(
 
 def test_consolidate_open_questions_parses_llm_output_into_open_questions() -> None:
     """_consolidate_open_questions should parse valid LLM JSON into List[OpenQuestion] with expected shape."""
-    llm = MagicMock()
-    llm.complete_json.return_value = {
-        "consolidated_questions": [
-            {
-                "id": "auth_approach",
-                "question_text": "Which authentication approach do you want?",
-                "context": "Spec does not specify auth.",
-                "category": "security",
-                "priority": "high",
-                "allow_multiple": False,
-                "constraint_domain": "auth",
-                "constraint_layer": 2,
-                "depends_on": None,
-                "blocking": True,
-                "owner": "user",
-                "section_impact": ["Technical Approach"],
-                "due_date": "2026-03-06",
-                "status": "open",
-                "asked_via": ["web_ui"],
-                "options": [
-                    {
-                        "id": "opt_oauth",
-                        "label": "OAuth (e.g. Google)",
-                        "is_default": True,
-                        "rationale": "Simple",
-                        "confidence": 0.8,
-                    },
-                    {
-                        "id": "opt_sso",
-                        "label": "Enterprise SSO",
-                        "is_default": False,
-                        "rationale": "Enterprise",
-                        "confidence": 0.5,
-                    },
-                ],
-            }
-        ]
-    }
+    llm = _StubClient(
+        {
+            "consolidated_questions": [
+                {
+                    "id": "auth_approach",
+                    "question_text": "Which authentication approach do you want?",
+                    "context": "Spec does not specify auth.",
+                    "category": "security",
+                    "priority": "high",
+                    "allow_multiple": False,
+                    "constraint_domain": "auth",
+                    "constraint_layer": 2,
+                    "depends_on": None,
+                    "blocking": True,
+                    "owner": "user",
+                    "section_impact": ["Technical Approach"],
+                    "due_date": "2026-03-06",
+                    "status": "open",
+                    "asked_via": ["web_ui"],
+                    "options": [
+                        {
+                            "id": "opt_oauth",
+                            "label": "OAuth (e.g. Google)",
+                            "is_default": True,
+                            "rationale": "Simple",
+                            "confidence": 0.8,
+                        },
+                        {
+                            "id": "opt_sso",
+                            "label": "Enterprise SSO",
+                            "is_default": False,
+                            "rationale": "Enterprise",
+                            "confidence": 0.5,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
     agent = ProductRequirementsAnalysisAgent(llm)
     q1 = OpenQuestion(
         id="q1",
@@ -734,37 +764,38 @@ def test_consolidate_open_questions_parses_llm_output_into_open_questions() -> N
 
 def test_review_question_answer_alignment_parses_llm_output_and_preserves_ids() -> None:
     """_review_question_answer_alignment should return List[OpenQuestion] with same ids when LLM returns valid aligned_questions."""
-    llm = MagicMock()
-    llm.complete_json.return_value = {
-        "aligned_questions": [
-            {
-                "id": "infra_q",
-                "question_text": "What platform category for deployment?",
-                "context": "Spec does not specify.",
-                "category": "infrastructure",
-                "priority": "high",
-                "allow_multiple": False,
-                "constraint_domain": "infrastructure",
-                "constraint_layer": 1,
-                "depends_on": None,
-                "blocking": True,
-                "owner": "user",
-                "section_impact": [],
-                "due_date": "",
-                "status": "open",
-                "asked_via": ["web_ui"],
-                "options": [
-                    {
-                        "id": "opt_paas",
-                        "label": "PaaS (Heroku, Render)",
-                        "is_default": True,
-                        "rationale": "",
-                        "confidence": 0.7,
-                    },
-                ],
-            }
-        ]
-    }
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {
+                    "id": "infra_q",
+                    "question_text": "What platform category for deployment?",
+                    "context": "Spec does not specify.",
+                    "category": "infrastructure",
+                    "priority": "high",
+                    "allow_multiple": False,
+                    "constraint_domain": "infrastructure",
+                    "constraint_layer": 1,
+                    "depends_on": None,
+                    "blocking": True,
+                    "owner": "user",
+                    "section_impact": [],
+                    "due_date": "",
+                    "status": "open",
+                    "asked_via": ["web_ui"],
+                    "options": [
+                        {
+                            "id": "opt_paas",
+                            "label": "PaaS (Heroku, Render)",
+                            "is_default": True,
+                            "rationale": "",
+                            "confidence": 0.7,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
     agent = ProductRequirementsAnalysisAgent(llm)
     q = OpenQuestion(
         id="infra_q",

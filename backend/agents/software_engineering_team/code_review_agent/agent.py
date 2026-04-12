@@ -1,10 +1,26 @@
-"""Code Review agent: reviews code against spec, standards, and conventions."""
+"""Code Review agent: reviews code against spec, standards, and conventions.
+
+Built on the AWS Strands Agents SDK via ``llm_service.LLMClientModel``. The
+``LLMClient`` passed in at construction time is wrapped into a Strands
+``Model`` so the agent inherits retries, per-agent model routing, telemetry,
+and the dummy-client path for tests.
+
+Two code paths remain:
+
+1. **Small code** (fits inside a single model context) — one Strands Agent
+   call with ``structured_output_model=CodeReviewOutput``.
+2. **Large code** — compaction, then delegation to ``run_coordinator`` which
+   splits the code into chunks and dispatches each to ``ChunkReviewAgent``
+   (itself a Strands-backed agent).
+"""
 
 from __future__ import annotations
 
 import logging
 
-from llm_service import LLMClient, compact_text
+from strands import Agent
+
+from llm_service import LLMClient, LLMClientModel, compact_text
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_chunk_chars,
     compute_code_review_total_chars,
@@ -27,7 +43,16 @@ class CodeReviewAgent:
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
+        # ``self.llm`` is retained for ``compact_text`` calls and for
+        # ``run_coordinator`` (which still needs raw LLMClient for
+        # context-sizing and compaction of spec/architecture excerpts).
         self.llm = llm_client
+        self._model = LLMClientModel(
+            llm_client,
+            agent_key="code_review",
+            temperature=0.1,
+            think=True,
+        )
 
     def run(self, input_data: CodeReviewInput) -> CodeReviewOutput:
         """Review code and return approval or issues."""
@@ -35,7 +60,8 @@ class CodeReviewAgent:
         single_call_limit = compute_code_review_chunk_chars(self.llm)
         if len(code) > single_call_limit:
             logger.info(
-                "CodeReview: code size %s exceeds single-call limit %s (model context), using coordinator",
+                "CodeReview: code size %s exceeds single-call limit %s "
+                "(model context), using coordinator",
                 len(code),
                 single_call_limit,
             )
@@ -53,11 +79,13 @@ class CodeReviewAgent:
                     existing_codebase=input_data.existing_codebase,
                 )
             return run_coordinator(self.llm, input_data)
+
         max_total = compute_code_review_total_chars(self.llm)
         code = compact_text(code, max_total, self.llm, "code for review")
 
         logger.info(
-            "CodeReview: reviewing %s chars of %s code | task=%s | has_spec=%s | has_architecture=%s | acceptance_criteria=%s",
+            "CodeReview: reviewing %s chars of %s code | task=%s | has_spec=%s "
+            "| has_architecture=%s | acceptance_criteria=%s",
             len(code),
             input_data.language,
             input_data.task_description[:80] if input_data.task_description else "",
@@ -66,16 +94,120 @@ class CodeReviewAgent:
             len(input_data.acceptance_criteria),
         )
 
-        context_parts = [
+        user_prompt = self._build_user_prompt(input_data, code)
+
+        # A fresh Strands Agent per call — reusing the same instance across
+        # calls breaks structured_output forced-tool-choice on the second
+        # call (Strands accumulates message history).
+        agent = Agent(model=self._model, system_prompt=CODE_REVIEW_PROMPT)
+
+        try:
+            agent_result = agent(user_prompt, structured_output_model=CodeReviewOutput)
+            result = agent_result.structured_output
+            if not isinstance(result, CodeReviewOutput):
+                raise TypeError(
+                    f"Expected CodeReviewOutput, got {type(result).__name__ if result else 'None'}"
+                )
+        except Exception as exc:  # noqa: BLE001 — LLM/validation errors must not crash the run
+            logger.warning("CodeReview: structured_output failed (%s); returning fallback", exc)
+            return CodeReviewOutput(
+                approved=False,
+                issues=[],
+                summary=f"Code review failed: {exc}",
+                spec_compliance_notes="",
+                suggested_commit_message="",
+            )
+
+        result = self._reconcile_approval(result)
+
+        logger.info(
+            "CodeReview: done, approved=%s, issues=%s",
+            result.approved,
+            len(result.issues),
+        )
+        return result
+
+    @staticmethod
+    def _reconcile_approval(result: CodeReviewOutput) -> CodeReviewOutput:
+        """Apply the safety-net policy.
+
+        The contract is: **never** return ``approved=False`` with no
+        actionable issues, because the coding agent would have nothing to
+        fix and we'd loop forever. Rules:
+
+        1. Only critical/high severities are truly blocking. If the LLM
+           flagged approved=False but all issues are minor/nit, auto-approve.
+        2. If the LLM said approved=False with zero issues but a non-empty
+           summary, synthesize a high-severity issue so the fix is actionable.
+        3. If the LLM said approved=False with zero issues AND zero summary,
+           auto-approve (nothing to act on).
+        """
+        critical_or_high = [i for i in result.issues if i.severity in ("critical", "high")]
+        raw_approved = result.approved
+        result.approved = raw_approved and len(critical_or_high) == 0
+
+        if not result.approved and not critical_or_high:
+            if result.issues:
+                logger.info(
+                    "CodeReview: overriding to approved=True "
+                    "(only %s minor/nit issues, no critical/high)",
+                    len(result.issues),
+                )
+                result.approved = True
+            elif result.summary and result.summary.strip():
+                logger.warning(
+                    "CodeReview: LLM returned approved=False with 0 issues -- "
+                    "synthesizing issue from summary: %s",
+                    result.summary[:200],
+                )
+                synthesized = CodeReviewIssue(
+                    severity="high",
+                    category="general",
+                    file_path="",
+                    description=f"Code review rejected: {result.summary}",
+                    suggestion=(
+                        "Address the concerns described in the review summary. "
+                        "Ensure the code meets all acceptance criteria and follows project conventions."
+                    ),
+                )
+                result.issues.append(synthesized)
+                # approved stays False — caller sees the synthesized issue and can act
+            else:
+                logger.warning(
+                    "CodeReview: LLM returned approved=False with no issues and no summary -- "
+                    "auto-approving (no actionable feedback to give coding agent)"
+                )
+                result.approved = True
+
+        return result
+
+    @staticmethod
+    def _build_user_prompt(input_data: CodeReviewInput, code: str) -> str:
+        """Assemble the user-facing prompt.
+
+        The persona (``CODE_REVIEW_PROMPT``) lives on the Strands ``Agent``'s
+        system prompt. The user prompt carries the code under review plus
+        a schema hint that includes "senior code reviewer" and "issues" /
+        "approved" — both required by ``DummyLLMClient.complete_json`` to
+        route to the code-review stub in tests. See
+        ``llm_service/README.md`` "Migration rule: keep pattern anchors in
+        the user prompt".
+        """
+        parts = [
+            "Acting as a senior code reviewer, review the code below and produce "
+            "structured JSON with fields: approved, issues, summary, "
+            "spec_compliance_notes, suggested_commit_message. Each issue must "
+            "include severity, category, file_path, description, and suggestion.",
+            "",
             f"**Language:** {input_data.language}",
             f"**Task description:** {input_data.task_description}",
         ]
 
         if input_data.task_requirements:
-            context_parts.extend(["", "**Task requirements:**", input_data.task_requirements])
+            parts.extend(["", "**Task requirements:**", input_data.task_requirements])
 
         if input_data.acceptance_criteria:
-            context_parts.extend(
+            parts.extend(
                 [
                     "",
                     "**Acceptance criteria (code MUST meet all of these):**",
@@ -84,7 +216,7 @@ class CodeReviewAgent:
             )
 
         if input_data.spec_content:
-            context_parts.extend(
+            parts.extend(
                 [
                     "",
                     "**Project specification (source of truth for the application):**",
@@ -95,7 +227,7 @@ class CodeReviewAgent:
             )
 
         if input_data.architecture:
-            context_parts.extend(
+            parts.extend(
                 [
                     "",
                     "**Architecture:**",
@@ -104,7 +236,7 @@ class CodeReviewAgent:
             )
 
         if input_data.existing_codebase:
-            context_parts.extend(
+            parts.extend(
                 [
                     "",
                     "**Existing codebase (before the agent's changes):**",
@@ -112,7 +244,7 @@ class CodeReviewAgent:
                 ]
             )
 
-        context_parts.extend(
+        parts.extend(
             [
                 "",
                 "**Code to review:**",
@@ -122,76 +254,4 @@ class CodeReviewAgent:
             ]
         )
 
-        prompt = CODE_REVIEW_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
-
-        # Parse issues
-        issues = []
-        for issue_data in data.get("issues") or []:
-            if isinstance(issue_data, dict) and issue_data.get("description"):
-                issues.append(
-                    CodeReviewIssue(
-                        severity=issue_data.get("severity", "high"),
-                        category=issue_data.get("category", "general"),
-                        file_path=issue_data.get("file_path", ""),
-                        description=issue_data.get("description", ""),
-                        suggestion=issue_data.get("suggestion", ""),
-                    )
-                )
-
-        # Determine approval based on issue severity
-        critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
-        raw_approved = bool(data.get("approved", False))
-        approved = raw_approved and len(critical_or_high) == 0
-
-        # Safety net: handle rejected-with-no-actionable-issues (prevents unresolvable loops)
-        if not approved and not critical_or_high:
-            summary_text = data.get("summary", "")
-            if issues:
-                # Has only minor/nit issues -- auto-approve since nothing blocking
-                logger.info(
-                    "CodeReview: overriding to approved=True (only %s minor/nit issues, no critical/high)",
-                    len(issues),
-                )
-                approved = True
-            elif summary_text and summary_text.strip():
-                # Rejected with zero issues but has a summary -- synthesize a major issue
-                # so the coding agent has something actionable to fix
-                logger.warning(
-                    "CodeReview: LLM returned approved=False with 0 issues -- "
-                    "synthesizing issue from summary: %s",
-                    summary_text[:200],
-                )
-                synthesized = CodeReviewIssue(
-                    severity="high",
-                    category="general",
-                    file_path="",
-                    description=f"Code review rejected: {summary_text}",
-                    suggestion="Address the concerns described in the review summary. "
-                    "Ensure the code meets all acceptance criteria and follows project conventions.",
-                )
-                issues.append(synthesized)
-                critical_or_high.append(synthesized)
-            else:
-                # No issues AND no summary -- LLM gave no useful feedback, auto-approve
-                logger.warning(
-                    "CodeReview: LLM returned approved=False with no issues and no summary -- "
-                    "auto-approving (no actionable feedback to give coding agent)"
-                )
-                approved = True
-
-        logger.info(
-            "CodeReview: done, approved=%s (raw_llm=%s), issues=%s (critical/high=%s)",
-            approved,
-            raw_approved,
-            len(issues),
-            len(critical_or_high),
-        )
-
-        return CodeReviewOutput(
-            approved=approved,
-            issues=issues,
-            summary=data.get("summary", ""),
-            spec_compliance_notes=data.get("spec_compliance_notes", ""),
-            suggested_commit_message=data.get("suggested_commit_message", ""),
-        )
+        return "\n".join(parts)

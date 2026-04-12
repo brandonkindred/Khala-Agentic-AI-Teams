@@ -19,7 +19,12 @@ class DevOpsTaskClarifierInput(BaseModel):
 
 
 class DevOpsTaskClarifierOutput(BaseModel):
-    approved_for_execution: bool = False
+    # Default True matches the legacy ``data.get("approved_for_execution", True)``
+    # semantics: absent the LLM explicitly flagging the task as incomplete,
+    # we assume approved. The agent's static gap-detection runs first and
+    # returns ``approved_for_execution=False`` explicitly when required
+    # fields are missing, so this default only bites after the LLM path.
+    approved_for_execution: bool = True
     checklist: List[str] = Field(default_factory=list)
     gaps: List[ClarificationGap] = Field(default_factory=list)
     clarification_requests: List[str] = Field(default_factory=list)

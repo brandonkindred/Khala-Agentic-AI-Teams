@@ -80,6 +80,7 @@
           <div class="nav-flyout"
                [id]="'nav-flyout-' + group.key"
                role="menu"
+               tabindex="-1"
                [attr.aria-label]="group.label"
                (mouseenter)="cancelClose()"
                (mouseleave)="scheduleClose()"

@@ -1,12 +1,26 @@
-"""QA Expert agent: bug detection, integration tests, live testing."""
+"""QA Expert agent: bug detection, integration tests, live testing.
+
+Built on the AWS Strands Agents SDK via ``llm_service.LLMClientModel``. The
+``LLMClient`` passed in at construction time is wrapped into a Strands
+``Model`` so the agent inherits retries, per-agent model routing, telemetry,
+and the dummy-client path for tests.
+
+The agent supports three request modes — ``default``, ``fix_build``, and
+``write_tests`` — each with a distinct system prompt. Because Strands
+``Agent`` fixes its ``system_prompt`` at construction time, we build one
+``Agent`` per mode up front and dispatch to the right one at call time.
+"""
 
 from __future__ import annotations
 
 import logging
+from typing import Dict
 
-from llm_service import LLMClient, LLMJsonParseError
+from strands import Agent
 
-from .models import BugReport, QAInput, QAOutput
+from llm_service import LLMClient, LLMClientModel
+
+from .models import QAInput, QAOutput
 from .prompts import QA_PROMPT, QA_PROMPT_FIX_BUILD, QA_PROMPT_WRITE_TESTS
 
 logger = logging.getLogger(__name__)
@@ -20,49 +34,52 @@ class QAExpertAgent:
 
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+        self._model = LLMClientModel(
+            llm_client,
+            agent_key="qa",
+            temperature=0.1,
+            think=True,
+        )
+        # One system prompt per request mode. A fresh Strands Agent is
+        # constructed per ``run()`` call in :meth:`run` using the selected
+        # persona; see the note there for why agents are not cached.
+        self._system_prompts: Dict[str, str] = {
+            "default": QA_PROMPT,
+            "fix_build": QA_PROMPT + "\n\n" + QA_PROMPT_FIX_BUILD,
+            "write_tests": QA_PROMPT + "\n\n" + QA_PROMPT_WRITE_TESTS,
+        }
 
     def run(self, input_data: QAInput) -> QAOutput:
         """Review code, fix bugs, and produce integration tests."""
+        mode = self._select_mode(input_data)
         logger.info(
             "QA: reviewing %s chars of code, mode=%s",
             len(input_data.code or ""),
-            input_data.request_mode or "default",
+            mode,
         )
-        base_prompt = QA_PROMPT
-        if input_data.request_mode == "fix_build" and input_data.build_errors:
-            base_prompt = QA_PROMPT + "\n\n" + QA_PROMPT_FIX_BUILD
-        elif input_data.request_mode == "write_tests":
-            base_prompt = QA_PROMPT + "\n\n" + QA_PROMPT_WRITE_TESTS
 
-        context_parts = [
-            f"**Language:** {input_data.language}",
-            "**Code to review:**",
-            "```",
-            input_data.code,
-            "```",
-        ]
-        if input_data.task_description:
-            context_parts.insert(2, f"**Task:** {input_data.task_description}")
-        if input_data.architecture:
-            context_parts.append(f"**Architecture:** {input_data.architecture.overview}")
-        if input_data.run_instructions:
-            context_parts.append(f"**Run instructions:** {input_data.run_instructions}")
-        if input_data.build_errors:
-            context_parts.append(f"**Build/compiler errors:**\n```\n{input_data.build_errors}\n```")
+        user_prompt = self._build_user_prompt(input_data)
 
-        prompt = base_prompt + "\n\n---\n\n" + "\n".join(context_parts)
+        # A fresh Strands Agent per call. Strands' Agent accumulates
+        # message history across invocations; reusing the same instance
+        # breaks the forced-tool-choice mechanism used by
+        # ``structured_output_model`` on the second call. Construction is
+        # cheap — it just wraps the cached model + system_prompt.
+        agent = Agent(model=self._model, system_prompt=self._system_prompts[mode])
+
         try:
-            data = self.llm.complete_json(prompt, temperature=0.1, think=True)
-        except LLMJsonParseError as e:
-            logger.warning(
-                "QA: LLM returned non-JSON output, returning fallback: %s",
-                e.response_preview[:200] if getattr(e, "response_preview", None) else str(e),
-            )
+            agent_result = agent(user_prompt, structured_output_model=QAOutput)
+            result = agent_result.structured_output
+            if not isinstance(result, QAOutput):
+                raise TypeError(
+                    f"Expected QAOutput, got {type(result).__name__ if result else 'None'}"
+                )
+        except Exception as exc:  # noqa: BLE001 — LLM/validation errors must not crash the run
+            logger.warning("QA: structured_output failed (%s); returning fallback", exc)
             return QAOutput(
                 bugs_found=[],
                 approved=False,
-                summary="QA could not parse model response; model returned non-JSON output.",
+                summary=f"QA could not parse model response: {exc}",
                 integration_tests="",
                 unit_tests="",
                 test_plan="",
@@ -71,47 +88,59 @@ class QAExpertAgent:
                 suggested_commit_message="",
             )
 
-        bugs = []
-        for b in data.get("bugs_found") or []:
-            if isinstance(b, dict) and b.get("description"):
-                # Prefer file_path + line_or_section for fix_build mode (more actionable)
-                loc = b.get("location", "")
-                if b.get("file_path"):
-                    line_part = b.get("line_or_section", "")
-                    loc = f"{b['file_path']}:{line_part}" if line_part else b["file_path"]
-                bugs.append(
-                    BugReport(
-                        severity=b.get("severity", "medium"),
-                        description=b["description"],
-                        location=loc,
-                        steps_to_reproduce=b.get("steps_to_reproduce", ""),
-                        expected_vs_actual=b.get("expected_vs_actual", ""),
-                        recommendation=b.get("recommendation", ""),
-                    )
-                )
+        # Re-derive ``approved`` from severities so a disagreement between the
+        # LLM's ``approved`` flag and the reported bug list is resolved in
+        # favor of the bug list.
+        critical_or_high = [b for b in result.bugs_found if b.severity in ("critical", "high")]
+        result.approved = len(critical_or_high) == 0
 
-        integration_tests = data.get("integration_tests") or ""
-        if integration_tests and "\\n" in integration_tests:
-            integration_tests = integration_tests.replace("\\n", "\n")
-        unit_tests = data.get("unit_tests") or ""
-        if unit_tests and "\\n" in unit_tests:
-            unit_tests = unit_tests.replace("\\n", "\n")
-        readme_content = data.get("readme_content") or ""
-        if readme_content and "\\n" in readme_content:
-            readme_content = readme_content.replace("\\n", "\n")
-
-        critical_bugs = [b for b in bugs if b.severity in ("critical", "high")]
-        approved = len(critical_bugs) == 0
-
-        logger.info("QA: done, %s issues found, approved=%s", len(bugs), approved)
-        return QAOutput(
-            bugs_found=bugs,
-            approved=approved,
-            integration_tests=integration_tests,
-            unit_tests=unit_tests,
-            test_plan=data.get("test_plan") or "",
-            summary=data.get("summary") or "",
-            live_test_notes=data.get("live_test_notes") or "",
-            readme_content=readme_content,
-            suggested_commit_message=data.get("suggested_commit_message") or "",
+        logger.info(
+            "QA: done, %s issues found, approved=%s",
+            len(result.bugs_found),
+            result.approved,
         )
+        return result
+
+    @staticmethod
+    def _select_mode(input_data: QAInput) -> str:
+        if input_data.request_mode == "fix_build" and input_data.build_errors:
+            return "fix_build"
+        if input_data.request_mode == "write_tests":
+            return "write_tests"
+        return "default"
+
+    @staticmethod
+    def _build_user_prompt(input_data: QAInput) -> str:
+        """Assemble the user-facing prompt.
+
+        The persona (``QA_PROMPT`` and its mode-specific addendum) lives on
+        the Strands ``Agent``'s system prompt, so the user prompt only
+        carries the code under review and its context. An explicit schema
+        hint (``bugs_found``, ``test_plan``, ...) makes the expected output
+        shape unambiguous for the LLM.
+        """
+        parts = [
+            "Review the following code for bugs and produce structured JSON with "
+            "fields: bugs_found, test_plan, unit_tests, integration_tests, "
+            "readme_content, summary, live_test_notes, suggested_commit_message.",
+            "",
+            f"**Language:** {input_data.language}",
+        ]
+        if input_data.task_description:
+            parts.append(f"**Task:** {input_data.task_description}")
+        parts.extend(
+            [
+                "**Code to review:**",
+                "```",
+                input_data.code,
+                "```",
+            ]
+        )
+        if input_data.architecture:
+            parts.append(f"**Architecture:** {input_data.architecture.overview}")
+        if input_data.run_instructions:
+            parts.append(f"**Run instructions:** {input_data.run_instructions}")
+        if input_data.build_errors:
+            parts.append(f"**Build/compiler errors:**\n```\n{input_data.build_errors}\n```")
+
+        return "\n".join(parts)

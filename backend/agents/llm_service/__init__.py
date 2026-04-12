@@ -6,6 +6,8 @@ Agents obtain a client via get_client(agent_key?) and use the LLMClient interfac
 and config (env vars, known context, per-agent defaults) are centralized here.
 """
 
+from typing import TYPE_CHECKING, Any
+
 from . import config as _config
 from .clients import DummyLLMClient, OllamaLLMClient
 from .compaction import compact_text
@@ -25,6 +27,31 @@ from .telemetry import get_recent_calls, get_usage_summary, record_llm_call
 from .tool_loop import complete_json_with_tool_loop
 from .util import call_llm_with_retries, extract_json_from_response
 
+# ``strands_adapter`` depends on the optional ``strands-agents`` package. Many
+# teams in this monorepo ship with a narrower requirements file that does NOT
+# include strands, and importing the adapter module eagerly would force every
+# team to install it just to use ``llm_service``. Resolve ``LLMClientModel``
+# and ``get_strands_model`` lazily via PEP 562 ``__getattr__`` so they only
+# trigger the strands import when a consumer actually asks for them.
+if TYPE_CHECKING:  # pragma: no cover - for type checkers only
+    from .strands_adapter import (  # noqa: F401
+        LLMClientModel,
+        get_strands_model,
+        run_json_via_strands,
+    )
+
+_LAZY_STRANDS_EXPORTS = {"LLMClientModel", "get_strands_model", "run_json_via_strands"}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_STRANDS_EXPORTS:
+        from . import strands_adapter  # noqa: PLC0415 - intentional lazy import
+
+        value = getattr(strands_adapter, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 def get_llm_config_summary() -> str:
     """Return a short summary of current LLM config (provider, model, etc.) for logging."""
@@ -39,7 +66,9 @@ __all__ = [
     "extract_json_from_response",
     "get_client",
     "get_llm_config_summary",
+    "get_strands_model",
     "LLMClient",
+    "LLMClientModel",
     "LLMError",
     "LLMRateLimitError",
     "LLMTemporaryError",

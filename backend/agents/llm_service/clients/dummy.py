@@ -157,6 +157,14 @@ class DummyLLMClient(LLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        # Pattern-match against the user prompt only. Callers (including
+        # Strands-migrated agents that hand their persona to the Strands
+        # ``Agent`` as a system prompt) must include the anchor tokens the
+        # branches below look for in the user prompt they build. Scanning
+        # ``system_prompt`` here was tried and reverted in commit <<CI fix>>
+        # because loose single-word branches (``"pipeline"``, ``"security"``)
+        # cross-contaminated other teams' prompts that happened to mention
+        # those words in their persona text.
         lowered = prompt.lower()
         DummyLLMClient._call_counter += 1
         self._request_count += 1
@@ -372,6 +380,26 @@ class DummyLLMClient(LLMClient):
                 "spec_compliance_notes": "Code aligns with task requirements.",
                 "suggested_commit_message": "",
             }
+        elif "bugs_found" in lowered and (
+            "integration_test" in lowered or "readme_content" in lowered or "test_plan" in lowered
+        ):
+            # Kept ABOVE the security/accessibility branches because QA
+            # prompts now include a shared REVIEW_PRIORITY_FRAMEWORK that
+            # mentions "security vulnerabilities". ``bugs_found`` is the
+            # anchor token — it's unique to the QA output contract and
+            # keeps the frontend agent (which mentions "integration_tests"
+            # in its prompt) from matching this branch accidentally.
+            return {
+                "bugs_found": [],
+                "integration_tests": "# Dummy integration test",
+                "unit_tests": "# Dummy unit tests",
+                "test_plan": "Dummy test plan",
+                "summary": "Dummy QA assessment",
+                "live_test_notes": "Dummy notes",
+                "readme_content": "# Dummy README",
+                "suggested_commit_message": "test: add integration tests",
+                "approved": True,
+            }
         elif "security" in lowered and "vulnerabilities" in lowered:
             return {"vulnerabilities": [], "summary": "No security issues found (dummy)"}
         elif "accessibility" in lowered and "wcag" in lowered and "issues" in lowered:
@@ -453,22 +481,6 @@ class DummyLLMClient(LLMClient):
                 "already_compliant": True,
                 "summary": "All code fully complies with Design by Contract.",
                 "suggested_commit_message": "docs(dbc): verify Design by Contract compliance",
-            }
-        elif (
-            "integration_test" in lowered
-            or "readme_content" in lowered
-            or ("bugs_found" in lowered and "test_plan" in lowered)
-        ):
-            return {
-                "bugs_found": [],
-                "integration_tests": "# Dummy integration test",
-                "unit_tests": "# Dummy unit tests",
-                "test_plan": "Dummy test plan",
-                "summary": "Dummy QA assessment",
-                "live_test_notes": "Dummy notes",
-                "readme_content": "# Dummy README",
-                "suggested_commit_message": "test: add integration tests",
-                "approved": True,
             }
         elif "acceptance_criteria" in lowered and "specification" in lowered:
             return {
@@ -618,10 +630,73 @@ class DummyLLMClient(LLMClient):
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Support tool-loop tests: first round issues a no-op git_status call, then structured JSON."""
+        """Support tool-loop tests and Strands structured-output flows.
+
+        Behavior, in order of precedence:
+
+        1. **Strands structured output**: when ``tools`` contains a tool whose
+           description marks it as a ``StructuredOutputTool`` (the sentinel
+           Strands' ``Agent`` adds when ``structured_output_model=...`` is
+           used), return a single tool call invoking that tool with the dict
+           produced by the normal ``complete_json`` pattern matcher. This
+           lets Strands-migrated agents run end-to-end against the dummy
+           client without changes.
+
+        2. **Legacy tool loop** (first round, ``tools`` provided): emit a
+           no-op ``git_status`` tool call. Test suites for
+           ``complete_json_with_tool_loop`` register a ``git_status`` handler
+           and expect this handoff.
+
+        3. **Follow-up rounds or no tools**: fall through to
+           ``complete_json`` using the flattened user + system prompts.
+        """
         self._request_count += 1
+        system_prompt = None
+        user_prompt = ""
+        for m in messages:
+            if m.get("role") == "system":
+                system_prompt = m.get("content")
+            elif m.get("role") == "user":
+                user_prompt = m.get("content") or ""
+
         has_tool_result = any(m.get("role") == "tool" for m in messages)
+
         if tools and not has_tool_result:
+            structured_tool = None
+            for t in tools:
+                fn = (t or {}).get("function") or {}
+                desc = (fn.get("description") or "").lower()
+                if "structuredoutputtool" in desc:
+                    structured_tool = fn
+                    break
+
+            if structured_tool is not None:
+                # Produce stub data via the pattern matcher and invoke the
+                # structured output tool with it. Strands will validate the
+                # arguments against the Pydantic schema attached to the tool.
+                data = self.complete_json(
+                    user_prompt,
+                    temperature=temperature,
+                    system_prompt=system_prompt,
+                    tools=None,
+                    think=think,
+                    **kwargs,
+                )
+                return {
+                    "__tool_calls__": [
+                        {
+                            "id": f"dummy_{structured_tool.get('name', 'structured')}",
+                            "type": "function",
+                            "function": {
+                                "name": structured_tool.get("name", "structured_output"),
+                                "arguments": data,
+                            },
+                        }
+                    ]
+                }
+
+            # Legacy path — tests that drive ``complete_json_with_tool_loop``
+            # rely on this first-round git_status handoff.
             return {
                 "__tool_calls__": [
                     {
@@ -631,13 +706,7 @@ class DummyLLMClient(LLMClient):
                     }
                 ]
             }
-        system_prompt = None
-        user_prompt = ""
-        for m in messages:
-            if m.get("role") == "system":
-                system_prompt = m.get("content")
-            elif m.get("role") == "user":
-                user_prompt = m.get("content") or ""
+
         return self.complete_json(
             user_prompt,
             temperature=temperature,
