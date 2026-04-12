@@ -35,6 +35,8 @@ _arch_dir = _team_dir / "architect-agents"
 if _arch_dir.exists() and str(_arch_dir) not in sys.path:
     sys.path.insert(0, str(_arch_dir))
 
+from strands import Agent  # noqa: E402
+
 from llm_service import (  # noqa: E402
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
     LLMError,
@@ -45,7 +47,6 @@ from llm_service import (  # noqa: E402
     get_client,
     get_strands_model,
 )
-from strands import Agent  # noqa: E402
 from software_engineering_team.shared.development_plan_writer import (  # noqa: E402
     write_architecture_plan,
     write_tech_lead_plan,

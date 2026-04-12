@@ -140,8 +140,9 @@ class FounderAgent:
     """Simulates a budget-conscious, speed-first, UX-obsessed startup founder."""
 
     def __init__(self) -> None:
-        from llm_service import get_strands_model
         from strands import Agent
+
+        from llm_service import get_strands_model
 
         self._agent = Agent(
             model=get_strands_model("user_agent_founder"),

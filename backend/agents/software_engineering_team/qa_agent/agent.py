@@ -13,12 +13,12 @@ The agent supports three request modes — ``default``, ``fix_build``, and
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Dict
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from .models import QAInput, QAOutput
 from .prompts import QA_PROMPT, QA_PROMPT_FIX_BUILD, QA_PROMPT_WRITE_TESTS

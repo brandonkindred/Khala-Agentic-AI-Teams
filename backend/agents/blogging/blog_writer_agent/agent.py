@@ -24,7 +24,6 @@ from shared.content_plan import (
 )
 from shared.content_profile import LengthPolicy
 from shared.errors import PlanningError
-
 from strands import Agent
 
 from llm_service import (
@@ -959,7 +958,6 @@ class BlogWriterAgent:
         revise_input: ReviseWriterInput,
     ) -> str:
         """Apply one feedback item to the draft. Returns revised draft or original on failure."""
-        revise_max_tokens = 32768
         prompt = self._build_revise_single_item_prompt(
             draft, item, item_index, total_items, style_guide_text, revise_input
         )
@@ -1076,7 +1074,6 @@ class BlogWriterAgent:
             revise_input,
         )
         current_draft = draft
-        revise_max_tokens = 32768
         for attempt in range(3):
             try:
                 raw_response = self._call_agent(

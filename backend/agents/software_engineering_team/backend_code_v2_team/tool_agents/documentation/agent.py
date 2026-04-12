@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List
+
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import (
     Microtask,
@@ -21,9 +25,6 @@ from ...prompts import (
     JAVA_CONVENTIONS,
     PYTHON_CONVENTIONS,
 )
-
-from llm_service import get_strands_model
-from strands import Agent
 
 logger = logging.getLogger(__name__)
 

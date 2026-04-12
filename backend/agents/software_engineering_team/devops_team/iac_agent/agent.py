@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import LLMClient
 
 from .models import IaCAgentInput, IaCAgentOutput
 from .prompts import IAC_AGENT_PROMPT

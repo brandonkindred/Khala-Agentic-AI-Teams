@@ -7,16 +7,16 @@ product context, and risk assessment.
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import Any, List, Optional
+
+from strands import Agent
+
+from llm_service import LLMClient, get_strands_model
 
 from .models import AutoAnswerResult, OpenQuestion, QuestionOption
 from .prompts import AUTO_ANSWER_PROMPT
-
-import json
-
-from llm_service import get_strands_model
-from strands import Agent
 
 logger = logging.getLogger(__name__)
 

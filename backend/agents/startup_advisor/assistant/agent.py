@@ -106,8 +106,9 @@ class StartupAdvisorAgent:
     """Conversational agent that provides startup advisory through probing dialogue."""
 
     def __init__(self) -> None:
-        from llm_service import get_strands_model
         from strands import Agent
+
+        from llm_service import get_strands_model
 
         self._agent = Agent(
             model=get_strands_model("startup_advisor"),

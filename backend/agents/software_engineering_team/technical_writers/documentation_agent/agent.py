@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-import json
+from strands import Agent
 
 from llm_service import get_strands_model
-from strands import Agent
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,

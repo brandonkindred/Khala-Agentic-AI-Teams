@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import logging
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import (
     ToolAgentInput,

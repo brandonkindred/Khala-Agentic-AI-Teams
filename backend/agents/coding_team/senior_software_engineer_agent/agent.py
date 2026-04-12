@@ -11,10 +11,11 @@ import re
 from pathlib import Path
 from typing import Any, Dict
 
+from strands import Agent
+
 from agent_git_tools import GIT_TOOL_DEFINITIONS, GitToolContext, build_git_tool_handlers
 from coding_team.models import StackSpec, Task
 from coding_team.senior_software_engineer_agent import prompts
-from strands import Agent
 
 logger = logging.getLogger(__name__)
 

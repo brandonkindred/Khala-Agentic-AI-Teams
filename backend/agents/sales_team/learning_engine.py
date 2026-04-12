@@ -18,7 +18,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import List, Optional
+
+from strands import Agent as StrandsAgent
+from strands_tools import python_repl
 
 from .models import DealOutcome, LearningInsights, StageOutcome
 from .outcome_store import (
@@ -29,9 +32,6 @@ from .outcome_store import (
 )
 
 logger = logging.getLogger(__name__)
-
-from strands import Agent as StrandsAgent
-from strands_tools import python_repl
 
 _LEARNING_TOOLS = [python_repl]
 

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import List, Optional
+from typing import List
+
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import (
     ToolAgentInput,
@@ -12,9 +16,6 @@ from ...models import (
     ToolAgentPhaseInput,
     ToolAgentPhaseOutput,
 )
-
-from llm_service import get_strands_model
-from strands import Agent
 
 logger = logging.getLogger(__name__)
 

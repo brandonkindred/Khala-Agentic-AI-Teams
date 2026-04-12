@@ -19,13 +19,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
 from shared.content_plan import ContentPlan
-
-import re
-
 from strands import Agent
 
 from .models import StoryElicitationResult, StoryGap

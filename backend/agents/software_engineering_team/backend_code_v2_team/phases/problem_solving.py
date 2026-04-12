@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import LLMClient, get_strands_model
 from software_engineering_team.shared.models import Task
 
 from ..models import (

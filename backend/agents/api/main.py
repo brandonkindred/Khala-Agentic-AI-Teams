@@ -16,7 +16,7 @@ from shared.content_plan import content_plan_to_outline_markdown
 from shared.content_profile import resolve_length_policy
 from shared.errors import PlanningError
 
-from llm_service import get_client, get_strands_model
+from llm_service import get_client
 
 _blogging_root = Path(__file__).resolve().parent.parent / "blogging"
 if str(_blogging_root) not in sys.path:

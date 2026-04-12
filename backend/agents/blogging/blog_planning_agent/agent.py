@@ -91,7 +91,7 @@ def _build_refine_prompt(inp: PlanningInput, previous: ContentPlan, feedback: st
 class BlogPlanningAgent:
     """Generates and refines a ContentPlan until acceptance criteria or max iterations."""
 
-    def __init__(self, llm_client: _Any) -> None:
+    def __init__(self, llm_client: Any) -> None:
         self._model = llm_client
 
     def _call_agent(self, prompt: str, system: str) -> str:

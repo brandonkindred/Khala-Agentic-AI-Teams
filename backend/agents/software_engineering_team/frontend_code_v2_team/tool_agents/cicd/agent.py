@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Dict, Optional
+from typing import Dict
 
-from ...models import ToolAgentInput, ToolAgentOutput, ToolAgentPhaseInput, ToolAgentPhaseOutput
+from strands import Agent
 
 from llm_service import get_strands_model
-from strands import Agent
+
+from ...models import ToolAgentInput, ToolAgentOutput, ToolAgentPhaseInput, ToolAgentPhaseOutput
 
 logger = logging.getLogger(__name__)
 

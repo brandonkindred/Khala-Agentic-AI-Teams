@@ -31,8 +31,9 @@ def complete_text_with_continuation(
     Does not require or parse JSON. Callers should use output_templates to parse
     the returned text.
     """
-    from llm_service import get_strands_model
     from strands import Agent
+
+    from llm_service import get_strands_model
 
     agent = Agent(model=get_strands_model(agent_name))
     result = agent(prompt)

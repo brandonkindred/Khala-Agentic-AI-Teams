@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-
 import logging
 from typing import Optional
 
@@ -13,9 +12,9 @@ from frontend_team_deprecated.models import (
     UIDesignerOutput,
     UXDesignerOutput,
 )
-
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import LLMClient
 
 from .models import FrontendArchitectInput
 from .prompts import FRONTEND_ARCHITECT_PROMPT

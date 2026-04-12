@@ -8,11 +8,11 @@ dummy-client path for tests.
 
 from __future__ import annotations
 
-import json
 import logging
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from .models import IntegrationInput, IntegrationOutput
 from .prompts import INTEGRATION_PROMPT

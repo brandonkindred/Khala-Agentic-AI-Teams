@@ -15,8 +15,11 @@ import re
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from strands import Agent
+
+from llm_service import get_client, get_strands_model
 from software_engineering_team.shared.context_sizing import (
     compute_pra_spec_review_spec_chars,
     compute_prd_snippet_chars,
@@ -58,9 +61,6 @@ from .prompts import (
     SPEC_REVIEW_PROMPT,
     SPEC_UPDATE_PROMPT,
 )
-
-from llm_service import get_client, get_strands_model
-from strands import Agent
 
 logger = logging.getLogger(__name__)
 

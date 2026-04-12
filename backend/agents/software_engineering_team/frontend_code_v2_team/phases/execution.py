@@ -11,8 +11,9 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import LLMClient, get_strands_model
 from software_engineering_team.shared.models import SystemArchitecture, Task
 
 from ..models import (

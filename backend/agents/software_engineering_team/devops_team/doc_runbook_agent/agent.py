@@ -10,9 +10,9 @@ from devops_team.models import (
     HandoffInfo,
     ReleaseReadiness,
 )
-
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import LLMClient
 
 from .models import DocumentationRunbookInput, DocumentationRunbookOutput
 from .prompts import DOC_RUNBOOK_PROMPT

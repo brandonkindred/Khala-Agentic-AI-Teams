@@ -7,7 +7,11 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
+
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import (
     ReviewIssue,
@@ -22,9 +26,6 @@ from ...prompts import (
     PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT,
     PYTHON_CONVENTIONS,
 )
-
-from llm_service import get_strands_model
-from strands import Agent
 
 logger = logging.getLogger(__name__)
 

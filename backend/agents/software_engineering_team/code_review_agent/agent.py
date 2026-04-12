@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import logging
 
-from llm_service import compact_text, get_client, get_strands_model
 from strands import Agent
+
+from llm_service import compact_text, get_client, get_strands_model
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_chunk_chars,
     compute_code_review_total_chars,

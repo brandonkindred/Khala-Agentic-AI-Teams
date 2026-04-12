@@ -7,8 +7,9 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List
 
-from llm_service import compact_text, get_client, get_strands_model
 from strands import Agent
+
+from llm_service import compact_text, get_client, get_strands_model
 from software_engineering_team.shared.models import (
     Task,
     TaskStatus,

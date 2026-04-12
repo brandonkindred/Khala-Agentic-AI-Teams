@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from llm_service import LLMJsonParseError, get_strands_model
-from strands import Agent
 from strands.models.ollama import OllamaModel
+
+from llm_service import LLMJsonParseError, get_strands_model
 
 # Backward compat: JSONExtractionFailure used by agents that catch parse failures
 JSONExtractionFailure = LLMJsonParseError

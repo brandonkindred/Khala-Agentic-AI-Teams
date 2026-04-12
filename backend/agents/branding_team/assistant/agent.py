@@ -128,8 +128,9 @@ class BrandingAssistantAgent:
 
     def __init__(self, llm=None):  # noqa: ANN001
         if llm is None:
-            from llm_service import get_strands_model
             from strands import Agent
+
+            from llm_service import get_strands_model
 
             self._agent = Agent(
                 model=get_strands_model("branding_assistant"),

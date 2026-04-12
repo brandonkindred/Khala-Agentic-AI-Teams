@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from build_fix_specialist.models import CodeEdit
+from strands import Agent
 
 from llm_service import get_strands_model
-from strands import Agent
 
 from .linter_runner import detect_linter, execute_linter
 from .models import LintIssue, LintToolInput, LintToolOutput

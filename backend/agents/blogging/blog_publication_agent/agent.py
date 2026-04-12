@@ -15,17 +15,16 @@ if TYPE_CHECKING:
     from blog_copy_editor_agent import BlogCopyEditorAgent
     from blog_writer_agent import BlogWriterAgent
 
+import json
+import re
+from typing import Any as _Any
+
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,
     TitleCandidate,
 )
-
-import json
-import re
-from typing import Any as _Any
-
 from strands import Agent
 
 from .models import (

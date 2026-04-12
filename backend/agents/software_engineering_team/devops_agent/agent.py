@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
-import json
-
-from llm_service import LLMClient, compact_text, get_client, get_strands_model
 from strands import Agent
+
+from llm_service import compact_text, get_client, get_strands_model
 from software_engineering_team.shared.prompt_utils import log_llm_prompt
 from software_engineering_team.shared.repo_utils import int_env as _int_env
 from software_engineering_team.shared.task_plan import TaskPlan

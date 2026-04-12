@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import logging
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from .models import ProblemSolverInput, ProblemSolverOutput
 from .prompts import PROBLEM_SOLVER_PROMPT

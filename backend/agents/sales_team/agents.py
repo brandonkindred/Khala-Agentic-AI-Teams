@@ -20,14 +20,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Strands SDK (hard dependency)
-# ---------------------------------------------------------------------------
-
 from strands import Agent as StrandsAgent
 from strands_tools import current_time, http_request, python_repl
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_TOOLS = [http_request, python_repl, current_time]
 
@@ -386,23 +382,6 @@ class ProspectorAgent:
             "Return a JSON array of prospect objects.",
             insights_context,
         )
-        stub = json.dumps(
-            [
-                {
-                    "company_name": "Acme Corp",
-                    "website": "https://acme.example.com",
-                    "contact_name": "Jane Smith",
-                    "contact_title": "VP of Sales",
-                    "contact_email": None,
-                    "linkedin_url": "https://linkedin.com/in/jane-smith-example",
-                    "company_size_estimate": "200–500",
-                    "industry": "SaaS",
-                    "icp_match_score": 0.85,
-                    "research_notes": "Recently raised Series B; hiring 10 AEs; uses Salesforce.",
-                    "trigger_events": ["Series B funding announced", "Headcount growing 40% YoY"],
-                }
-            ]
-        )
         return _call_agent(self._agent, prompt)
 
 
@@ -440,37 +419,6 @@ class OutreachAgent:
             "Return a JSON object with email_sequence, call_script, linkedin_message, sequence_rationale.",
             insights_context,
         )
-        stub = json.dumps(
-            {
-                "email_sequence": [
-                    {
-                        "day": 1,
-                        "subject_line": "{{company_name}} + [Product] — quick thought",
-                        "body": (
-                            "Hi {{contact_name}},\n\nSaw {{trigger_event}} — congrats on the momentum.\n\n"
-                            "We help [titles] at companies like yours [core outcome] without [key friction].\n\n"
-                            "Worth a 15-min call this week?"
-                        ),
-                        "personalization_tokens": [
-                            "{{company_name}}",
-                            "{{contact_name}}",
-                            "{{trigger_event}}",
-                        ],
-                        "call_to_action": "15-minute call this week",
-                    },
-                ],
-                "call_script": (
-                    "Hi {{contact_name}}, this is [SDR] from [Company]. "
-                    "I know I'm calling out of the blue — do you have 27 seconds? "
-                    "[Pause] We help [titles] solve [pain]. Is that on your radar?"
-                ),
-                "linkedin_message": (
-                    "Hi {{contact_name}}, noticed {{trigger_event}} — impressive growth. "
-                    "I work with similar [titles] on [outcome]. Would love to connect."
-                ),
-                "sequence_rationale": "Trigger-event hook chosen to maximize relevance and open rates.",
-            }
-        )
         return _call_agent(self._agent, prompt)
 
 
@@ -507,27 +455,6 @@ class LeadQualifierAgent:
             "recommended_action, disqualification_reason, qualification_notes.",
             insights_context,
         )
-        stub = json.dumps(
-            {
-                "bant": {"budget": 7, "authority": 6, "need": 9, "timeline": 6},
-                "meddic": {
-                    "metrics_identified": True,
-                    "economic_buyer_known": False,
-                    "decision_criteria_understood": True,
-                    "decision_process_mapped": False,
-                    "identify_pain": True,
-                    "champion_found": True,
-                },
-                "overall_score": 0.72,
-                "value_creation_level": 3,
-                "recommended_action": "Advance to Discovery — schedule 30-min discovery call",
-                "disqualification_reason": None,
-                "qualification_notes": (
-                    "Strong need and champion present. EB not yet identified — must multi-thread "
-                    "before proposal stage. Budget likely available but not confirmed."
-                ),
-            }
-        )
         return _call_agent(self._agent, prompt)
 
 
@@ -563,53 +490,6 @@ class NurtureAgent:
             "Return a JSON object with duration_days, touchpoints (array), "
             "re_engagement_triggers (array), content_recommendations (array).",
             insights_context,
-        )
-        stub = json.dumps(
-            {
-                "duration_days": duration_days,
-                "touchpoints": [
-                    {
-                        "day": 1,
-                        "channel": "email",
-                        "content_type": "educational article",
-                        "message": "Sharing a benchmark report on [pain area] that peers in your space found useful.",
-                        "goal": "Establish thought leadership and keep top of mind",
-                    },
-                    {
-                        "day": 14,
-                        "channel": "linkedin",
-                        "content_type": "case study snippet",
-                        "message": "Quick win: [Customer] reduced [metric] by 40% in 60 days with [Product].",
-                        "goal": "Introduce social proof at consideration stage",
-                    },
-                    {
-                        "day": 30,
-                        "channel": "email",
-                        "content_type": "ROI calculator",
-                        "message": "I built a quick calculator showing the cost of [pain] for a company your size.",
-                        "goal": "Move prospect from consideration to decision stage",
-                    },
-                    {
-                        "day": 60,
-                        "channel": "phone",
-                        "content_type": "check-in call",
-                        "message": "Following up to see if [trigger event or industry change] has shifted priorities.",
-                        "goal": "Re-qualify and determine readiness to advance",
-                    },
-                ],
-                "re_engagement_triggers": [
-                    "New funding round announced",
-                    "Leadership change in buying committee",
-                    "End-of-quarter budget release",
-                    "Competitor product incident",
-                ],
-                "content_recommendations": [
-                    "Industry benchmark report: [Pain area] in 2026",
-                    "Customer case study: How [Similar Company] solved [Pain]",
-                    "Blog post: 5 signs your [current solution] is costing you more than you think",
-                    "ROI calculator: Cost of [problem] for [company size] teams",
-                ],
-            }
         )
         return _call_agent(self._agent, prompt)
 
@@ -649,7 +529,7 @@ class DiscoveryAgent:
             "challenger_insight, demo_agenda, expected_objections, success_criteria_for_call.",
             insights_context,
         )
-        stub = json.dumps(
+        json.dumps(
             {
                 "spin_questions": {
                     "situation": [
@@ -740,7 +620,7 @@ class ProposalAgent:
             insights_context,
         )
         benefit = annual_cost_usd * 2.8
-        stub = json.dumps(
+        json.dumps(
             {
                 "executive_summary": (
                     f"This proposal outlines how {product_name} will help {{company_name}} achieve "
@@ -834,7 +714,7 @@ class CloserAgent:
             "urgency_framing, walk_away_criteria, emotional_intelligence_notes.",
             insights_context,
         )
-        stub = json.dumps(
+        json.dumps(
             {
                 "recommended_close_technique": "summary",
                 "close_script": (
@@ -918,7 +798,7 @@ class SalesCoachAgent:
             "top_priority_deals (array), recommended_next_actions (array), coaching_summary.",
             insights_context,
         )
-        stub = json.dumps(
+        json.dumps(
             {
                 "prospects_reviewed": 1,
                 "deal_risk_signals": [

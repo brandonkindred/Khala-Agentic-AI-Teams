@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List
+
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import (
     ReviewIssue,
@@ -14,9 +18,6 @@ from ...models import (
 )
 from ...output_templates import parse_problem_solving_single_issue_template, parse_review_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT, QA_TOOL_AGENT_REVIEW_PROMPT
-
-from llm_service import get_strands_model
-from strands import Agent
 
 logger = logging.getLogger(__name__)
 

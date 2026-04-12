@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import json
+import json as _json
 import logging
 import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import json as _json
-
-from llm_service import LLMClient, get_client, get_strands_model
 from strands import Agent
+
+from llm_service import get_client, get_strands_model
 from software_engineering_team.shared.context_sizing import (
     compute_existing_code_chars,
     compute_spec_content_chars,

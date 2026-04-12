@@ -94,8 +94,9 @@ def parse_spec_with_llm(spec_content: str, llm_client=None) -> ProductRequiremen
     """
     import json as _json
 
-    from llm_service import get_strands_model
     from strands import Agent
+
+    from llm_service import get_strands_model
 
     logger.info("Parsing spec with LLM (%s chars)", len(spec_content))
     system_prompt = """Parse the following software project specification into a structured format.

@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import json
-
 import logging
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from llm_service import LLMClient, LLMUnreachableAfterRetriesError, call_llm_with_retries
+from strands import Agent
+
+from llm_service import (
+    LLMClient,
+    LLMUnreachableAfterRetriesError,
+    call_llm_with_retries,
+    get_strands_model,
+)
 from software_engineering_team.shared.frontend_framework import resolve_frontend_framework
 from software_engineering_team.shared.job_store import LLM_UNREACHABLE_AFTER_RETRIES
 from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate

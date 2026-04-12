@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 from software_engineering_team.shared.models import Task
 
 from ..models import IntakeResult

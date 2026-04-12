@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict
 
-import json
+from strands import Agent
 
 from llm_service import LLMPermanentError, get_strands_model
-from strands import Agent
 from software_engineering_team.shared.models import (
     ArchitectureComponent,
     ProductRequirements,

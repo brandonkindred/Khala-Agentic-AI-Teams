@@ -24,8 +24,9 @@ class RepairExpertAgent:
         if llm_client is not None:
             self._agent = llm_client
         else:
-            from llm_service import get_strands_model
             from strands import Agent
+
+            from llm_service import get_strands_model
 
             self._agent = Agent(
                 model=get_strands_model("repair"),

@@ -12,7 +12,6 @@ from . import config as _config
 from .clients import DummyLLMClient, OllamaLLMClient
 from .compaction import compact_text
 from .factory import _clear_client_cache_for_testing, get_client
-from .strands_provider import _clear_strands_model_cache_for_testing, get_strands_model
 from .interface import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
     LLMClient,
@@ -24,6 +23,7 @@ from .interface import (
     LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
 )
+from .strands_provider import _clear_strands_model_cache_for_testing, get_strands_model
 from .telemetry import get_recent_calls, get_usage_summary, record_llm_call
 from .tool_loop import complete_json_with_tool_loop
 from .util import call_llm_with_retries, extract_json_from_response

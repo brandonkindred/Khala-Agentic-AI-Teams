@@ -344,8 +344,9 @@ class RecursiveProcessor(Generic[T]):
                 return process_fn(prompt)
             import json as _json
 
-            from llm_service import get_strands_model
             from strands import Agent as _Agent
+
+            from llm_service import get_strands_model
 
             _agent = _Agent(model=get_strands_model())
             _result = _agent(prompt)

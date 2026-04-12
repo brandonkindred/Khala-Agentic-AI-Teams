@@ -6,8 +6,9 @@ import json
 import logging
 from typing import List
 
-from llm_service import get_strands_model
 from strands import Agent
+
+from llm_service import get_strands_model
 
 from .models import DevOpsReviewInput, DevOpsReviewIssue, DevOpsReviewOutput
 from .prompts import DEVOPS_REVIEW_PROMPT

@@ -50,8 +50,9 @@ class TeamAssistantAgent:
         if llm is not None:
             self._llm = llm
         else:
-            from llm_service import get_strands_model
             from strands import Agent
+
+            from llm_service import get_strands_model
 
             self._llm = Agent(
                 model=get_strands_model(llm_agent_key or team_name),
