@@ -1840,9 +1840,7 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         )
 
     # 3 — Run paper trading session
-    # Lazy imports: yfinance and LLM client are heavy; deferring keeps app startup fast.
-    llm = get_client("paper_trading")
-    agent = PaperTradingAgent(llm_client=llm)
+    agent = PaperTradingAgent()
 
     try:
         session = agent.run_session(

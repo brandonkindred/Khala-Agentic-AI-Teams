@@ -848,8 +848,9 @@ class TechLeadAgent:
                         "**Repository README.md:** missing or empty (you MUST set should_update_docs to true).",
                     )
 
-                prompt = TECH_LEAD_TRIGGER_DOCS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-                data = self.llm.complete_json(prompt, temperature=0.1, think=True)
+                prompt = "\n".join(context_parts)
+                agent = Agent(model=self._model, system_prompt=TECH_LEAD_TRIGGER_DOCS_PROMPT)
+                data = _agent_json(agent, prompt)
                 should_update = bool(data.get("should_update_docs", False))
                 rationale = data.get("rationale", "")
 
