@@ -34,9 +34,13 @@ from .util import call_llm_with_retries, extract_json_from_response
 # and ``get_strands_model`` lazily via PEP 562 ``__getattr__`` so they only
 # trigger the strands import when a consumer actually asks for them.
 if TYPE_CHECKING:  # pragma: no cover - for type checkers only
-    from .strands_adapter import LLMClientModel, get_strands_model  # noqa: F401
+    from .strands_adapter import (  # noqa: F401
+        LLMClientModel,
+        get_strands_model,
+        run_json_via_strands,
+    )
 
-_LAZY_STRANDS_EXPORTS = {"LLMClientModel", "get_strands_model"}
+_LAZY_STRANDS_EXPORTS = {"LLMClientModel", "get_strands_model", "run_json_via_strands"}
 
 
 def __getattr__(name: str) -> Any:

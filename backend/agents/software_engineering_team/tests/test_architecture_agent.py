@@ -2,7 +2,6 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
@@ -89,10 +88,27 @@ def test_write_architecture_plan_includes_mermaid_diagrams(
 def test_architecture_agent_builds_synthetic_when_parse_fails(
     requirements: ProductRequirements,
 ) -> None:
-    """When LLM returns raw wrapper (parse failure), agent builds synthetic architecture."""
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {"content": "Here is some non-JSON text from the model"}
-    agent = ArchitectureExpertAgent(llm_client=mock_llm)
+    """When the LLM returns unparseable content, the agent builds a
+    synthetic architecture from requirements.
+
+    After the Wave 5 migration the LLM call routes through
+    ``run_json_via_strands``, which returns ``{}`` when the response text
+    can't be parsed as JSON. The agent's ``not data.get("overview")`` check
+    then triggers the synthetic-architecture fallback — same behavior as
+    pre-migration, but now driven by the helper's parse-failure path
+    rather than an ``LLMPermanentError``.
+    """
+
+    class _RawWrapperClient(DummyLLMClient):
+        def complete_json(
+            self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs
+        ):  # type: ignore[override]
+            # Return a dict that has *no* ``overview`` key — the agent's
+            # ``is_parse_failure`` check (``not data.get("overview")``)
+            # fires on this and triggers the synthetic fallback.
+            return {"content": "Here is some non-JSON text from the model"}
+
+    agent = ArchitectureExpertAgent(llm_client=_RawWrapperClient())
     result = agent.run(
         ArchitectureInput(requirements=requirements, technology_preferences=["Python", "FastAPI"])
     )
@@ -102,3 +118,21 @@ def test_architecture_agent_builds_synthetic_when_parse_fails(
     assert result.architecture.diagrams
     assert "client_server_architecture" in result.architecture.diagrams
     assert "security_architecture" in result.architecture.diagrams
+
+
+def test_architecture_agent_multiple_sequential_runs_on_same_instance(
+    requirements: ProductRequirements,
+) -> None:
+    """Regression: a single ``ArchitectureExpertAgent`` instance must
+    handle many sequential ``run()`` calls. Wave 5 migrations route every
+    LLM call through ``run_json_via_strands`` which builds a fresh Strands
+    ``Agent`` per call, so this regression is avoided by construction."""
+    agent = ArchitectureExpertAgent(llm_client=DummyLLMClient())
+    for i in range(3):
+        result = agent.run(
+            ArchitectureInput(
+                requirements=requirements, technology_preferences=["Python", "FastAPI"]
+            )
+        )
+        assert result.architecture.overview, f"run {i} missing overview"
+        assert len(result.architecture.components) >= 1, f"run {i} missing components"

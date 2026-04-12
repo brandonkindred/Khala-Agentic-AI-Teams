@@ -16,6 +16,7 @@ from llm_service.strands_adapter import (
     _strands_messages_to_openai,
     _tool_specs_to_openai,
     get_strands_model,
+    run_json_via_strands,
 )
 
 # ---------------------------------------------------------------------------
@@ -483,3 +484,73 @@ def test_stream_end_to_end_with_dummy_client_tool_loop() -> None:
         if "contentBlockStart" in e
     ]
     assert names == ["git_status"]
+
+
+# ---------------------------------------------------------------------------
+# run_json_via_strands — the Wave 5 helper for defensively-parsed agents
+# ---------------------------------------------------------------------------
+
+
+def test_run_json_via_strands_returns_dict_from_dummy_stub() -> None:
+    """Happy path: the helper routes through Strands + the dummy, returning
+    the dict the dummy's pattern-match branch emits."""
+    result = run_json_via_strands(
+        DummyLLMClient(),
+        system_prompt="You are a Software Architecture Expert.",
+        user_prompt=(
+            "Design an architecture. Produce JSON with keys: overview, "
+            "architecture_document, components, diagrams, decisions."
+        ),
+        agent_key="architecture",
+        temperature=0.1,
+    )
+    assert isinstance(result, dict)
+    assert "overview" in result
+    assert "components" in result
+    assert len(result["components"]) >= 1
+
+
+def test_run_json_via_strands_returns_empty_dict_on_exception() -> None:
+    """If the backing client raises, the helper returns ``{}`` instead of
+    propagating the exception — lets callers fall through to their
+    ``data.get(...)`` defaults."""
+
+    class _Broken(DummyLLMClient):
+        def chat_json_round(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
+            raise RuntimeError("simulated LLM failure")
+
+        def complete_json(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
+            raise RuntimeError("simulated LLM failure")
+
+    result = run_json_via_strands(
+        _Broken(),
+        system_prompt="Anything",
+        user_prompt="Anything",
+    )
+    assert result == {}
+
+
+def test_run_json_via_strands_multiple_sequential_calls_succeed() -> None:
+    """Regression: the helper constructs a fresh Strands Agent per call,
+    so sequential invocations on the same client instance must not
+    degrade. This is the Wave 1–4 state-leak guard applied to the Wave 5
+    helper path."""
+    client = DummyLLMClient()
+    for i in range(4):
+        # Architecture-shaped prompt — the user prompt carries the
+        # ``overview`` + ``components`` + ``architecture_document`` tokens
+        # the dummy routes on.
+        result = run_json_via_strands(
+            client,
+            system_prompt="You are a Software Architecture Expert.",
+            user_prompt=(
+                f"Design architecture batch {i}. Produce JSON with keys: "
+                "overview, architecture_document, components, diagrams, "
+                "decisions."
+            ),
+            agent_key="architecture",
+            temperature=0.1,
+        )
+        assert isinstance(result, dict), f"call {i} did not return a dict"
+        assert "overview" in result, f"call {i} missing overview key"
+        assert "components" in result, f"call {i} missing components key"

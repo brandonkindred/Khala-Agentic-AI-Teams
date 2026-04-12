@@ -50,7 +50,7 @@ from .interface import LLMClient
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["LLMClientModel", "get_strands_model"]
+__all__ = ["LLMClientModel", "get_strands_model", "run_json_via_strands"]
 
 
 # ---------------------------------------------------------------------------
@@ -394,3 +394,59 @@ def get_strands_model(
         max_tokens=max_tokens,
         think=think,
     )
+
+
+def run_json_via_strands(
+    client: LLMClient,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    agent_key: Optional[str] = None,
+    temperature: float = 0.0,
+    think: bool = False,
+) -> Dict[str, Any]:
+    """Single-shot LLM call through a fresh Strands ``Agent``, returning a
+    JSON-parsed dict.
+
+    Use this for agents whose downstream code does defensive ``data.get(...)``
+    parsing and does **not** want the strictness of ``structured_output_model``.
+    Wave 5 migrations (TechLeadAgent, ArchitectureExpertAgent) rely on this
+    because they have many distinct call shapes and extensive fallback logic
+    that would be fragile to encode as per-call Pydantic schemas.
+
+    A fresh ``LLMClientModel`` + ``Agent`` is constructed on every call to
+    avoid the Strands Agent message-history state leak that affected Wave
+    1–4 migrations (see ``befcf0d``). The function returns an empty dict
+    on any exception so callers can continue with their ``data.get(...)``
+    defaults — matching the pre-migration behavior.
+    """
+    from strands import Agent  # noqa: PLC0415 — keep Strands optional at module load
+
+    model = LLMClientModel(
+        client,
+        agent_key=agent_key,
+        temperature=temperature,
+        think=think,
+    )
+    agent = Agent(model=model, system_prompt=system_prompt)
+
+    try:
+        result = agent(user_prompt)
+    except Exception as exc:  # noqa: BLE001 — LLM/validation errors must not crash the run
+        logger.warning("run_json_via_strands: agent call failed: %s", exc)
+        return {}
+
+    message = getattr(result, "message", None) or {}
+    for block in message.get("content", []) or []:
+        if not isinstance(block, dict):
+            continue
+        text = block.get("text")
+        if not text:
+            continue
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
