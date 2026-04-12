@@ -12,6 +12,7 @@ from . import config as _config
 from .clients import DummyLLMClient, OllamaLLMClient
 from .compaction import compact_text
 from .factory import _clear_client_cache_for_testing, get_client
+from .strands_provider import _clear_strands_model_cache_for_testing, get_strands_model
 from .interface import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
     LLMClient,
@@ -60,11 +61,13 @@ def get_llm_config_summary() -> str:
 
 __all__ = [
     "_clear_client_cache_for_testing",
+    "_clear_strands_model_cache_for_testing",
     "complete_json_with_tool_loop",
     "call_llm_with_retries",
     "compact_text",
     "extract_json_from_response",
     "get_client",
+    "get_strands_model",
     "get_llm_config_summary",
     "get_strands_model",
     "LLMClient",
