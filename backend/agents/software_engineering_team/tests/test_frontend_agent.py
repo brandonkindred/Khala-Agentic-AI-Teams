@@ -29,7 +29,7 @@ def test_frontend_output_npm_packages_default() -> None:
 def test_frontend_agent_parses_npm_packages_from_llm() -> None:
     """Frontend agent parses npm_packages_to_install from LLM JSON and includes in output."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Added component",
         "files": {
@@ -52,7 +52,7 @@ def test_frontend_agent_parses_npm_packages_from_llm() -> None:
 def test_frontend_agent_npm_packages_empty_when_omitted() -> None:
     """When LLM omits npm_packages_to_install, output has empty list."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Added component",
         "files": {
@@ -69,7 +69,7 @@ def test_frontend_agent_npm_packages_empty_when_omitted() -> None:
 def test_frontend_agent_npm_packages_normalizes_non_list() -> None:
     """When LLM returns non-list npm_packages_to_install, it is normalized to list."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Added component",
         "files": {
@@ -105,7 +105,7 @@ def test_frontend_agent_rejects_segment_too_long() -> None:
     """Agent rejects path segments longer than 30 chars."""
     mock_llm = ConfigurableLLM()
     long_name = "a" * 35
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {
@@ -124,7 +124,7 @@ def test_frontend_agent_rejects_segment_too_long() -> None:
 def test_frontend_agent_rejects_sentence_like_name() -> None:
     """Agent rejects path segments that look like sentences (4+ hyphenated words)."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {
@@ -143,7 +143,7 @@ def test_frontend_agent_rejects_sentence_like_name() -> None:
 def test_frontend_agent_rejects_filler_words_in_path() -> None:
     """Agent rejects path segments with filler words like -the-, -with-."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {
@@ -162,7 +162,7 @@ def test_frontend_agent_rejects_filler_words_in_path() -> None:
 def test_frontend_agent_rejects_verb_prefix_in_path() -> None:
     """Agent rejects path segments starting with verbs like implement-."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {
@@ -181,7 +181,7 @@ def test_frontend_agent_rejects_verb_prefix_in_path() -> None:
 def test_frontend_agent_rejects_path_not_under_src() -> None:
     """Agent rejects files not under src/."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {
@@ -200,7 +200,7 @@ def test_frontend_agent_rejects_path_not_under_src() -> None:
 def test_frontend_agent_allows_known_angular_root_config_files() -> None:
     """Agent allows valid Angular root config files like tsconfig.spec.json."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Update tsconfig and component",
         "files": {
@@ -219,7 +219,7 @@ def test_frontend_agent_allows_known_angular_root_config_files() -> None:
 def test_frontend_agent_rejects_bad_extension() -> None:
     """Agent rejects non-browser file extensions."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {
@@ -238,7 +238,7 @@ def test_frontend_agent_rejects_bad_extension() -> None:
 def test_frontend_agent_rejects_empty_content() -> None:
     """Agent rejects files with empty content."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {
@@ -259,7 +259,7 @@ def test_frontend_agent_with_architecture() -> None:
     from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
 
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {"src/app/x.component.ts": "content"},
@@ -278,7 +278,7 @@ def test_frontend_agent_with_architecture() -> None:
             architecture=arch,
         )
     )
-    call_args = mock_llm.complete_json.call_args[0][0]
+    call_args = mock_llm.complete_json_mock.call_args[0][0]
     assert "Architecture" in call_args
     assert "Test arch" in call_args
     assert "UserService" in call_args
@@ -287,7 +287,7 @@ def test_frontend_agent_with_architecture() -> None:
 def test_frontend_agent_with_security_issues() -> None:
     """Agent includes security_issues in context when provided."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {"src/app/x.component.ts": "content"},
@@ -310,14 +310,14 @@ def test_frontend_agent_with_security_issues() -> None:
             ],
         )
     )
-    call_args = mock_llm.complete_json.call_args[0][0]
+    call_args = mock_llm.complete_json_mock.call_args[0][0]
     assert "Security issues" in call_args
 
 
 def test_frontend_agent_with_accessibility_issues() -> None:
     """Agent includes accessibility_issues in context when provided."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {"src/app/x.component.ts": "content"},
@@ -340,14 +340,14 @@ def test_frontend_agent_with_accessibility_issues() -> None:
             ],
         )
     )
-    call_args = mock_llm.complete_json.call_args[0][0]
+    call_args = mock_llm.complete_json_mock.call_args[0][0]
     assert "Accessibility" in call_args
 
 
 def test_frontend_agent_with_code_review_issues() -> None:
     """Agent includes code_review_issues in context when provided."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {"src/app/x.component.ts": "content"},
@@ -369,14 +369,14 @@ def test_frontend_agent_with_code_review_issues() -> None:
             ],
         )
     )
-    call_args = mock_llm.complete_json.call_args[0][0]
+    call_args = mock_llm.complete_json_mock.call_args[0][0]
     assert "Code review" in call_args
 
 
 def test_frontend_agent_includes_problem_solving_header_when_issues_present() -> None:
     """When code_review_issues are present, prompt includes PROBLEM-SOLVING MODE header."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Fixed",
         "files": {"src/app/x.component.ts": "content"},
@@ -400,7 +400,7 @@ def test_frontend_agent_includes_problem_solving_header_when_issues_present() ->
             ],
         )
     )
-    prompt = mock_llm.complete_json.call_args[0][0]
+    prompt = mock_llm.complete_json_mock.call_args[0][0]
     assert "PROBLEM-SOLVING MODE" in prompt
     assert "Frontend / Angular" in prompt
     assert "code review issues" in prompt
@@ -412,7 +412,7 @@ def test_frontend_agent_includes_problem_solving_header_when_issues_present() ->
 def test_frontend_agent_no_problem_solving_header_when_no_issues() -> None:
     """When no issues are present, prompt does not include PROBLEM-SOLVING MODE header."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Added",
         "files": {"src/app/x.component.ts": "content"},
@@ -421,7 +421,7 @@ def test_frontend_agent_no_problem_solving_header_when_no_issues() -> None:
     }
     agent = FrontendExpertAgent(llm_client=mock_llm)
     agent.run(FrontendInput(task_description="Add component", requirements=""))
-    prompt = mock_llm.complete_json.call_args[0][0]
+    prompt = mock_llm.complete_json_mock.call_args[0][0]
     assert "PROBLEM-SOLVING MODE" not in prompt
 
 
@@ -431,7 +431,7 @@ def test_frontend_agent_logs_llm_prompt(caplog: pytest.LogCaptureFixture) -> Non
 
     caplog.set_level(logging.INFO)
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Done",
         "files": {"src/app/x.component.ts": "content"},
@@ -454,7 +454,7 @@ def test_frontend_agent_logs_problem_solving_context_and_header_when_issues_pres
 
     caplog.set_level(logging.INFO)
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Fixed",
         "files": {"src/app/x.component.ts": "content"},
@@ -490,7 +490,7 @@ def test_frontend_agent_no_problem_solving_logs_when_no_issues(
 
     caplog.set_level(logging.INFO)
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Done",
         "files": {"src/app/x.component.ts": "content"},
@@ -508,7 +508,7 @@ def test_frontend_agent_no_problem_solving_logs_when_no_issues(
 def test_frontend_agent_with_qa_issues() -> None:
     """Agent includes qa_issues in context when provided."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {"src/app/x.component.ts": "content"},
@@ -530,7 +530,7 @@ def test_frontend_agent_with_qa_issues() -> None:
             ],
         )
     )
-    call_args = mock_llm.complete_json.call_args[0][0]
+    call_args = mock_llm.complete_json_mock.call_args[0][0]
     assert "QA issues" in call_args
     assert "Bug" in call_args
 
@@ -538,7 +538,7 @@ def test_frontend_agent_with_qa_issues() -> None:
 def test_frontend_agent_clarification_requests_non_list_normalized() -> None:
     """Agent normalizes non-list clarification_requests to list."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Need info",
         "files": {},
@@ -556,7 +556,7 @@ def test_frontend_agent_clarification_requests_non_list_normalized() -> None:
 def test_frontend_agent_needs_clarification() -> None:
     """Agent returns needs_clarification when LLM says so."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Need more info",
         "files": {},
@@ -576,7 +576,7 @@ def test_frontend_agent_all_files_rejected_raises_llm_permanent_error() -> None:
     from llm_service import LLMPermanentError
 
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "import { Component } from '@angular/core';\n@Component({selector: 'app-x', template: 'x'}) export class X {}",
         "summary": "Test",
         "files": {"wrong/path.ts": "content"},
@@ -591,7 +591,7 @@ def test_frontend_agent_all_files_rejected_raises_llm_permanent_error() -> None:
 def test_frontend_agent_unescapes_newlines_in_files() -> None:
     """Agent unescapes \\n in file contents."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Test",
         "files": {"src/app/x.component.ts": "line1\\nline2"},
@@ -636,7 +636,7 @@ def test_frontend_plan_task_returns_plan_markdown() -> None:
     from software_engineering_team.shared.models import Task, TaskType
 
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "feature_intent": "Add task list component",
         "what_changes": ["src/app/components/task-list/"],
         "algorithms_data_structures": "RxJS BehaviorSubject for list state",
@@ -665,7 +665,7 @@ def test_frontend_plan_task_returns_plan_markdown() -> None:
 def test_frontend_run_injects_task_plan_and_follow_instruction_into_prompt() -> None:
     """When task_plan is set, run() injects Implementation plan and follow-plan instruction into prompt."""
     mock_llm = ConfigurableLLM()
-    mock_llm.complete_json.return_value = {
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "summary": "Done",
         "files": {
@@ -683,7 +683,7 @@ def test_frontend_run_injects_task_plan_and_follow_instruction_into_prompt() -> 
             task_plan=plan_content,
         )
     )
-    prompt = mock_llm.complete_json.call_args[0][0]
+    prompt = mock_llm.complete_json_mock.call_args[0][0]
     assert "IMPLEMENTATION PLAN (follow this)" in prompt
     assert "Implement the task strictly according to" in prompt
     assert "realize every item under 'What changes' and 'Tests needed'" in prompt
