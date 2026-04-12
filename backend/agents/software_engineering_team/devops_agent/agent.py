@@ -235,6 +235,7 @@ class DevOpsExpertAgent:
             + ("..." if len(input_data.task_description) > 60 else ""),
         )
         context_parts = [
+            "Generate DevOps / pipeline / infrastructure artifacts for this task.",
             f"**Task:** {input_data.task_description}",
             f"**Requirements:** {input_data.requirements}",
         ]

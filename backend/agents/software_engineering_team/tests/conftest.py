@@ -56,6 +56,12 @@ class _TrackingMock:
     def assert_called(self):
         assert self.call_count > 0, "Expected to have been called"
 
+    def assert_not_called(self):
+        assert self.call_count == 0, f"Expected not to have been called, but was called {self.call_count} time(s)"
+
+    def assert_called_once(self):
+        assert self.call_count == 1, f"Expected to be called once, but was called {self.call_count} time(s)"
+
 
 _SENTINEL = object()
 

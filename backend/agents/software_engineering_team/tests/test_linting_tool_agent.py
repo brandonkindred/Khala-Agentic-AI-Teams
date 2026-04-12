@@ -216,7 +216,7 @@ def test_agent_run_lint_fails_and_produces_edits(tmp_path: Path) -> None:
     assert len(result.edits) == 1
     assert result.edits[0].file_path == "app/main.py"
     assert len(result.linter_issues) == 1
-    mock_llm.complete_json.assert_called_once()
+    mock_llm.complete_json_mock.assert_called_once()
 
 
 def test_agent_run_llm_failure_is_non_blocking(tmp_path: Path) -> None:
