@@ -65,6 +65,7 @@ class AnalysisAgent:
         Args:
             on_sub_phase: Optional callback ``(sub_phase: str) -> None`` for progress.
 
+
         Returns the final narrative string.
         """
         is_winning = metrics.annualized_return_pct > 8.0

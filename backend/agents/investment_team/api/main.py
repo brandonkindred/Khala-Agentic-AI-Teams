@@ -1026,6 +1026,7 @@ def _run_one_strategy_lab_cycle(
         signal_intelligence_brief=signal_brief_storage,
     )
 
+    # Persist to in-memory stores
     with _lock:
         _strategy_lab_records[lab_record_id] = record
         _strategies[strategy_id] = strategy
