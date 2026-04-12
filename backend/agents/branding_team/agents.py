@@ -1,12 +1,10 @@
-"""Agent implementations for the 5-phase branding strategy framework.
+"""Agent factory functions for the branding team Strands SDK pipeline.
 
-Phase 1 — Strategic Core: Brand Strategist
-Phase 2 — Narrative & Messaging: Brand Narrative Architect
-Phase 3 — Visual & Expressive Identity: Visual Identity Director
-Phase 4 — Experience & Channel Activation: Channel Activation Strategist
-Phase 5 — Governance & Evolution: Brand Governance Lead
+Each function returns a configured ``strands.Agent`` instance for use as a
+node in a ``GraphBuilder`` graph or ``Swarm``.  Agents are grouped by phase.
 
-Legacy agents (BrandComplianceAgent) are retained for brand-check functionality.
+``BrandComplianceAgent`` is the only non-Strands class; it runs
+outside the graph as a post-processing utility.
 """
 
 from __future__ import annotations
@@ -14,866 +12,574 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
+from strands import Agent
+
+from .graphs.shared import build_agent
 from .models import (
-    ApprovalWorkflow,
-    AudienceMessageMap,
-    AudienceSegment,
-    BrandArchetype,
-    BrandArchitectureRule,
     BrandCheckRequest,
     BrandCheckResult,
-    # Legacy models still used for backward-compat bridge
-    BrandCodification,
-    BrandDiscoveryAudit,
-    BrandHealthKPI,
-    BrandInActionExample,
     BrandingMission,
-    ChannelActivationOutput,
-    ChannelGuideline,
-    ColorEntry,
-    CoreValue,
-    CreativeRefinementPlan,
-    DesignSystemDefinition,
-    DifferentiationPillar,
-    ElevatorPitch,
-    GovernanceOutput,
-    LogoUsageRule,
-    MessagingPillar,
-    MoodBoardConcept,
-    NarrativeMessagingOutput,
-    PersonaProfile,
-    StrategicCoreOutput,
-    TypographySpec,
-    VisualIdentityOutput,
-    VoiceToneEntry,
-    WikiEntry,
-    WritingGuidelines,
 )
 
 # ===================================================================
-# Phase 1 — Strategic Core
+# Phase 1 — Strategic Core  (Graph: fan-out / fan-in)
 # ===================================================================
 
 
-@dataclass
-class StrategicCoreAgent:
-    """Defines the strategic foundation: purpose, positioning, values, audience, and differentiation."""
+def make_discovery_auditor() -> Agent:
+    return build_agent(
+        name="discovery_auditor",
+        description="Analyses current brand perception, SWOT, and stakeholder insights.",
+        system_prompt=(
+            "You are a Brand Discovery Analyst. Given a branding mission, produce a comprehensive "
+            "brand discovery audit. Include: current_brand_perception, market_position, strengths, "
+            "weaknesses, opportunities, threats, and stakeholder_insights. Be specific and grounded "
+            "in the company description and target audience provided. Output valid JSON matching the "
+            "BrandDiscoveryAudit schema."
+        ),
+    )
 
-    role: str = "Brand Strategist"
 
-    def execute(self, mission: BrandingMission) -> StrategicCoreOutput:
-        values = mission.values or ["trust", "clarity", "momentum"]
-        differentiators = mission.differentiators or ["domain expertise", "execution speed"]
+def make_purpose_vision_writer() -> Agent:
+    return build_agent(
+        name="purpose_vision_writer",
+        description="Crafts brand purpose, mission statement, and vision statement.",
+        system_prompt=(
+            "You are a Purpose & Vision Writer. Given a branding mission, write three things:\n"
+            "1. brand_purpose — why the company exists (one sentence)\n"
+            "2. mission_statement — what the company does for its audience (one sentence)\n"
+            "3. vision_statement — the aspirational future state (one sentence)\n"
+            "Be concise, inspiring, and specific to the company. Output valid JSON with these three keys."
+        ),
+    )
 
-        core_values = [
-            CoreValue(
-                value=v,
-                behavioral_definition=f"We demonstrate '{v}' in every customer interaction and internal decision.",
-                observable_behaviors=[
-                    f"Team members cite '{v}' when explaining trade-off decisions",
-                    f"Customer feedback explicitly references experiences aligned with '{v}'",
-                    f"Internal reviews evaluate work against the '{v}' standard",
-                ],
-            )
-            for v in values[:5]
-        ]
 
-        audience_segments = [
-            AudienceSegment(
-                name=mission.target_audience,
-                description=f"Primary buyers and users of {mission.company_name}'s offerings.",
-                pain_points=[
-                    "Inconsistent brand experiences across touchpoints",
-                    "Difficulty articulating differentiation to their own stakeholders",
-                    "Over-reliance on ad-hoc creative decisions",
-                ],
-                goals=[
-                    "Ship a cohesive brand experience across all channels",
-                    "Build lasting trust with their own customers",
-                    "Reduce time-to-market for brand-aligned assets",
-                ],
-                decision_drivers=[
-                    "Proven methodology and track record",
-                    "Speed of execution without sacrificing quality",
-                    "Depth of strategic thinking behind recommendations",
-                ],
-            ),
-        ]
+def make_values_articulator() -> Agent:
+    return build_agent(
+        name="values_articulator",
+        description="Defines core values with behavioral definitions and observable behaviors.",
+        system_prompt=(
+            "You are a Values Articulator. Given a branding mission with optional seed values, "
+            "produce a list of 3-5 core values. For each value provide:\n"
+            "- value: the value name\n"
+            "- behavioral_definition: what this value means in practice\n"
+            "- observable_behaviors: 2-3 concrete behaviors that demonstrate this value\n"
+            "Output valid JSON as a list of CoreValue objects."
+        ),
+    )
 
-        diff_pillars = [
-            DifferentiationPillar(
-                pillar=d,
-                proof_points=[
-                    f"Demonstrated {d.lower()} through measurable client outcomes",
-                    f"Case studies showing {d.lower()} as a decisive factor",
-                ],
-                competitive_context=f"Most competitors lack {d.lower()} as a core capability.",
-            )
-            for d in differentiators[:4]
-        ]
 
-        return StrategicCoreOutput(
-            brand_discovery=BrandDiscoveryAudit(
-                current_brand_perception=(
-                    f"{mission.company_name} is currently perceived as a capable player "
-                    f"in {mission.company_description.lower().rstrip('.')}."
-                ),
-                market_position="Emerging challenger with strong domain credibility.",
-                strengths=[d for d in differentiators[:3]],
-                weaknesses=[
-                    "Limited brand awareness outside core audience",
-                    "No formal brand governance",
-                ],
-                opportunities=[
-                    "Codify brand to unlock scalable marketing",
-                    "Differentiate through consistent brand experience",
-                ],
-                threats=[
-                    "Competitors investing heavily in brand",
-                    "Market commoditization without clear positioning",
-                ],
-                stakeholder_insights=[
-                    "Internal team alignment on values is strong but undocumented",
-                    "Customers value the relationship but can't articulate why we're different",
-                ],
-            ),
-            brand_purpose=(
-                f"{mission.company_name} exists to help {mission.target_audience} "
-                f"achieve transformative outcomes through {mission.company_description.lower().rstrip('.')}."
-            ),
-            mission_statement=(
-                f"To empower {mission.target_audience} by turning "
-                f"{mission.company_description.lower().rstrip('.')} into consistent, recognizable experiences "
-                f"that build trust and drive results."
-            ),
-            vision_statement=(
-                f"A world where every interaction with {mission.company_name} feels cohesive, intentional, "
-                f"and unmistakably aligned to our promise."
-            ),
-            core_values=core_values,
-            brand_promise=(
-                "Every customer touchpoint will feel cohesive, useful, and unmistakably aligned "
-                "to one unified brand system."
-            ),
-            positioning_statement=(
-                f"For {mission.target_audience} who need "
-                f"{mission.company_description.lower().rstrip('.')}, "
-                f"{mission.company_name} is the {differentiators[0].lower() if differentiators else 'partner'} "
-                f"that delivers {values[0].lower() if values else 'trust'} "
-                f"because {differentiators[-1].lower() if len(differentiators) > 1 else 'we execute with discipline'}."
-            ),
-            target_audience_segments=audience_segments,
-            differentiation_pillars=diff_pillars,
-        )
+def make_audience_segmenter() -> Agent:
+    return build_agent(
+        name="audience_segmenter",
+        description="Segments target audience with psychographic depth.",
+        system_prompt=(
+            "You are an Audience Segmenter. Given a branding mission, identify 1-3 target audience "
+            "segments. For each segment provide: name, description, pain_points (2-3), goals (2-3), "
+            "and decision_drivers (2-3). Ground your analysis in the company description and stated "
+            "target audience. Output valid JSON as a list of AudienceSegment objects."
+        ),
+    )
+
+
+def make_differentiation_mapper() -> Agent:
+    return build_agent(
+        name="differentiation_mapper",
+        description="Maps competitive differentiation pillars with proof points.",
+        system_prompt=(
+            "You are a Differentiation Mapper. Given a branding mission with optional differentiators, "
+            "produce 2-4 differentiation pillars. For each pillar provide:\n"
+            "- pillar: the differentiator name\n"
+            "- proof_points: 2-3 evidence items\n"
+            "- competitive_context: how competitors fall short here\n"
+            "Output valid JSON as a list of DifferentiationPillar objects."
+        ),
+    )
+
+
+def make_positioning_synthesizer() -> Agent:
+    return build_agent(
+        name="positioning_synthesizer",
+        description="Synthesises all Phase 1 fragments into positioning statement and brand promise.",
+        system_prompt=(
+            "You are a Positioning Synthesizer. You receive outputs from the discovery auditor, "
+            "purpose/vision writer, values articulator, audience segmenter, and differentiation "
+            "mapper. Synthesise them into:\n"
+            "1. positioning_statement — a single sentence following the format: "
+            "'For [audience] who need [need], [company] is the [differentiator] that delivers "
+            "[value] because [proof].'\n"
+            "2. brand_promise — a one-sentence commitment to the customer\n"
+            "Output valid JSON with these two keys."
+        ),
+    )
 
 
 # ===================================================================
-# Phase 2 — Narrative & Messaging
+# Phase 2 — Narrative & Messaging  (Swarm)
 # ===================================================================
 
 
-@dataclass
-class NarrativeMessagingAgent:
-    """Builds the verbal identity: story, archetypes, tagline, messaging framework, and personas."""
+def make_storyteller() -> Agent:
+    return build_agent(
+        name="Storyteller",
+        description="Crafts the brand story, hero narrative, and boilerplate variants.",
+        system_prompt=(
+            "You are a Brand Storyteller. Using the strategic core output and branding mission, "
+            "craft:\n"
+            "1. brand_story — a compelling 2-3 paragraph origin/purpose story\n"
+            "2. hero_narrative — a shorter, punchy version for hero sections\n"
+            "3. boilerplate_variants — 3 versions (short/medium/long) for press and bios\n\n"
+            "After completing your work, hand off to the ArchetypeAnalyst to define brand "
+            "archetypes that align with the story. If the ArchetypeAnalyst suggests revisions, "
+            "incorporate them."
+        ),
+    )
 
-    role: str = "Brand Narrative Architect"
 
-    def execute(
-        self, mission: BrandingMission, strategic_core: StrategicCoreOutput
-    ) -> NarrativeMessagingOutput:
-        values = [cv.value for cv in strategic_core.core_values] or ["trust", "clarity"]
-        primary_audience = mission.target_audience
+def make_archetype_analyst() -> Agent:
+    return build_agent(
+        name="ArchetypeAnalyst",
+        description="Selects brand archetypes with rationale and personality traits.",
+        system_prompt=(
+            "You are a Brand Archetype Analyst. Review the brand story and strategic core, then "
+            "select 1-2 brand archetypes (e.g. The Sage, The Creator, The Explorer). For each:\n"
+            "- archetype: name\n"
+            "- rationale: why this fits\n"
+            "- personality_traits: 3-5 traits\n\n"
+            "If the brand story doesn't align with the archetype, hand off back to the Storyteller "
+            "with specific revision suggestions. Otherwise, hand off to the TaglineWriter."
+        ),
+    )
 
-        brand_archetypes = [
-            BrandArchetype(
-                archetype="The Sage",
-                rationale=(
-                    f"Rooted in {mission.company_name}'s commitment to {values[0]} and strategic depth. "
-                    f"The Sage archetype communicates wisdom, expertise, and informed guidance."
-                ),
-                personality_traits=["knowledgeable", "trustworthy", "analytical", "clear-headed"],
-            ),
-            BrandArchetype(
-                archetype="The Creator",
-                rationale=(
-                    "Reflects the company's drive to build cohesive, intentional brand experiences "
-                    "from the ground up — craftsmanship as a core identity trait."
-                ),
-                personality_traits=["inventive", "detail-oriented", "visionary", "quality-focused"],
-            ),
-        ]
 
-        messaging_pillars = [
-            MessagingPillar(
-                pillar=dp.pillar,
-                key_message=f"We deliver {dp.pillar.lower()} that {primary_audience} can measure and trust.",
-                proof_points=dp.proof_points,
-            )
-            for dp in strategic_core.differentiation_pillars
-        ]
+def make_tagline_writer() -> Agent:
+    return build_agent(
+        name="TaglineWriter",
+        description="Creates tagline, tagline rationale, and elevator pitches.",
+        system_prompt=(
+            "You are a Tagline Writer. Using the brand story, archetypes, and strategic core, "
+            "produce:\n"
+            "1. tagline — a memorable brand tagline (max 8 words)\n"
+            "2. tagline_rationale — why this tagline works\n"
+            "3. elevator_pitches — three variants:\n"
+            "   - tier: '5-second', pitch: ...\n"
+            "   - tier: '30-second', pitch: ...\n"
+            "   - tier: '2-minute', pitch: ...\n\n"
+            "After completing, hand off to the MessageMapper."
+        ),
+    )
 
-        audience_maps = [
-            AudienceMessageMap(
-                audience_segment=seg.name,
-                primary_message=(
-                    f"{mission.company_name} helps {seg.name} achieve {seg.goals[0].lower() if seg.goals else 'their goals'} "
-                    f"through {strategic_core.differentiation_pillars[0].pillar.lower() if strategic_core.differentiation_pillars else 'proven expertise'}."
-                ),
-                supporting_messages=[
-                    f"Built on {values[0]} — not just promises, but measurable outcomes.",
-                    f"Trusted by {primary_audience} who demand rigor and results.",
-                ],
-                tone_adjustments=f"Lead with outcomes for {seg.name}; use proof points early.",
-            )
-            for seg in strategic_core.target_audience_segments
-        ]
 
-        personas = [
-            PersonaProfile(
-                name=f"Primary: {seg.name}",
-                role=seg.description,
-                demographics=f"Decision-makers in {primary_audience} organizations.",
-                psychographics=(
-                    "Values substance over flash. Skeptical of marketing hype. "
-                    "Responds to data, proof, and demonstrated expertise."
-                ),
-                goals=seg.goals,
-                frustrations=seg.pain_points,
-                media_habits=[
-                    "Industry publications and thought leadership",
-                    "Peer recommendations and case studies",
-                    "LinkedIn and professional communities",
-                ],
-                jobs_to_be_done=[
-                    f"Establish a brand that {primary_audience} trusts instinctively",
-                    "Reduce brand inconsistency across teams and channels",
-                    "Accelerate go-to-market with brand-aligned assets",
-                ],
-            )
-            for seg in strategic_core.target_audience_segments
-        ]
+def make_message_mapper() -> Agent:
+    return build_agent(
+        name="MessageMapper",
+        description="Builds messaging framework pillars and audience message maps.",
+        system_prompt=(
+            "You are a Message Mapper. Using all narrative context so far, produce:\n"
+            "1. messaging_framework — 3-4 messaging pillars, each with:\n"
+            "   - pillar, key_message, proof_points\n"
+            "2. audience_message_maps — one per audience segment, each with:\n"
+            "   - audience_segment, primary_message, supporting_messages, tone_adjustments\n\n"
+            "After completing, hand off to the PersonaBuilder."
+        ),
+    )
 
-        return NarrativeMessagingOutput(
-            brand_story=(
-                f"{mission.company_name} was founded on a simple belief: {primary_audience} deserve "
-                f"better than fragmented brand experiences. Through {mission.company_description.lower().rstrip('.')}, "
-                f"we turn strategic intent into cohesive reality."
-            ),
-            hero_narrative=(
-                f"You're a leader in {primary_audience}. You know your product is excellent — but your brand "
-                f"doesn't yet tell that story consistently. {mission.company_name} becomes your strategic partner, "
-                f"giving you the brand system that lets every touchpoint reinforce why you're the right choice."
-            ),
-            brand_archetypes=brand_archetypes,
-            tagline=f"{values[0].capitalize()}. Built to last." if values else "Built to last.",
-            tagline_rationale=(
-                f"Anchors the brand in its primary value ({values[0]}) while signaling durability and commitment. "
-                f"Works across marketing, product, and employer brand contexts."
-            ),
-            messaging_framework=messaging_pillars,
-            audience_message_maps=audience_maps,
-            elevator_pitches=[
-                ElevatorPitch(
-                    tier="5-second",
-                    pitch=f"{mission.company_name}: {values[0]} for {primary_audience}.",
-                ),
-                ElevatorPitch(
-                    tier="30-second",
-                    pitch=(
-                        f"{mission.company_name} helps {primary_audience} build brand experiences that are "
-                        f"cohesive, measurable, and aligned to a unified strategy."
-                    ),
-                ),
-                ElevatorPitch(
-                    tier="2-minute",
-                    pitch=(
-                        f"{mission.company_name} is a strategic brand partner for {primary_audience}. "
-                        f"We combine {', '.join(values[:3])} with a rigorous 5-phase methodology that takes "
-                        f"brands from strategic foundation through full market activation. Our clients don't "
-                        f"just get a logo — they get a complete brand system that every team member can "
-                        f"execute independently."
-                    ),
-                ),
-            ],
-            boilerplate_variants=[
-                (
-                    f"{mission.company_name} is a brand strategy partner for {primary_audience}, "
-                    f"specializing in {mission.company_description.lower().rstrip('.')}. "
-                    f"Founded on {values[0] if values else 'trust'}, we deliver brand systems that "
-                    f"scale with our clients."
-                ),
-                (
-                    f"At {mission.company_name}, we believe {primary_audience} deserve brand experiences "
-                    f"as rigorous as their products. We make that happen."
-                ),
-            ],
-            persona_profiles=personas,
-        )
+
+def make_persona_builder() -> Agent:
+    return build_agent(
+        name="PersonaBuilder",
+        description="Creates rich persona profiles with psychographic depth.",
+        system_prompt=(
+            "You are a Persona Builder. Using audience segments and brand narrative, create 2-3 "
+            "persona profiles. Each persona has: name, role, demographics, psychographics, goals, "
+            "frustrations, media_habits, jobs_to_be_done.\n\n"
+            "After completing, hand off to the VoicePrinciplesDrafter."
+        ),
+    )
+
+
+def make_voice_principles_drafter() -> Agent:
+    return build_agent(
+        name="VoicePrinciplesDrafter",
+        description="Defines writing guidelines: voice principles, style dos/donts, editorial bar.",
+        system_prompt=(
+            "You are a Voice Principles Drafter. Using the brand story, archetypes, and mission's "
+            "desired_voice, produce writing guidelines:\n"
+            "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
+            "2. style_dos — 3-4 writing best practices\n"
+            "3. style_donts — 3-4 things to avoid\n"
+            "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n\n"
+            "This is the final step in narrative development."
+        ),
+    )
 
 
 # ===================================================================
-# Phase 3 — Visual & Expressive Identity
+# Phase 3 — Visual & Expressive Identity  (Graph-of-Swarm)
 # ===================================================================
 
+# --- Diverge Swarm agents ---
 
-@dataclass
-class VisualIdentityAgent:
-    """Defines the visual and expressive identity system: logo, color, type, voice, and tone."""
 
-    role: str = "Visual Identity Director"
+def make_creative_director() -> Agent:
+    return build_agent(
+        name="CreativeDirector",
+        description="Coordinates moodboard ideation, dispatches conceptualists, reviews candidates.",
+        system_prompt=(
+            "You are a Creative Director leading visual identity exploration. Your job:\n"
+            "1. Brief each MoodBoardConceptualist with a distinct visual direction\n"
+            "2. Review their candidate moodboards\n"
+            "3. Request revisions if needed\n"
+            "4. Ensure at least 2-3 distinct candidates are produced\n\n"
+            "Hand off to each conceptualist in turn. Once all candidates are collected, "
+            "summarise the candidates and conclude."
+        ),
+    )
 
-    def execute(
-        self,
-        mission: BrandingMission,
-        strategic_core: StrategicCoreOutput,
-        narrative: NarrativeMessagingOutput,
-    ) -> VisualIdentityOutput:
-        values = [cv.value for cv in strategic_core.core_values] or ["trust", "clarity"]
-        primary_value = values[0] if values else "trust"
 
-        return VisualIdentityOutput(
-            logo_suite=[
-                LogoUsageRule(
-                    variant="primary",
-                    usage_context="Default usage on light backgrounds; marketing materials, website header.",
-                    minimum_size="24px height",
-                    clear_space="1x logo height on all sides",
-                ),
-                LogoUsageRule(
-                    variant="reversed",
-                    usage_context="Dark backgrounds; photo overlays.",
-                    minimum_size="24px height",
-                    clear_space="1x logo height on all sides",
-                ),
-                LogoUsageRule(
-                    variant="icon-only",
-                    usage_context="Favicons, app icons, social avatars, constrained spaces.",
-                    minimum_size="16px",
-                    clear_space="0.5x icon width on all sides",
-                ),
-                LogoUsageRule(
-                    variant="monochrome",
-                    usage_context="Single-color contexts: print, embroidery, watermarks.",
-                    minimum_size="24px height",
-                    clear_space="1x logo height on all sides",
-                ),
-            ],
-            color_palette=[
-                ColorEntry(
-                    name="Primary Deep",
-                    hex_value="#1A2B4A",
-                    usage="Primary backgrounds, headers, key CTAs",
-                    psychological_rationale=(
-                        f"Deep navy communicates depth, stability, and {primary_value} — "
-                        f"anchoring the brand's strategic authority."
-                    ),
-                ),
-                ColorEntry(
-                    name="Accent Bright",
-                    hex_value="#00B4D8",
-                    usage="CTAs, highlights, interactive elements, data emphasis",
-                    psychological_rationale=(
-                        "Electric cyan signals innovation and forward momentum without "
-                        "sacrificing professionalism."
-                    ),
-                ),
-                ColorEntry(
-                    name="Neutral Stone",
-                    hex_value="#E8E4DF",
-                    usage="Backgrounds, cards, content areas, breathing room",
-                    psychological_rationale=(
-                        "Warm neutral provides visual rest and approachability, "
-                        "balancing the authority of the primary palette."
-                    ),
-                ),
-                ColorEntry(
-                    name="Surface White",
-                    hex_value="#FAFAF8",
-                    usage="Content surfaces, text backgrounds, clean layouts",
-                    psychological_rationale="Near-white surface maintains readability and modern aesthetic.",
-                ),
-                ColorEntry(
-                    name="Critical Red",
-                    hex_value="#E63946",
-                    usage="Errors, destructive actions, urgent alerts only",
-                    psychological_rationale="Reserved for true alerts to preserve signal clarity.",
-                ),
-                ColorEntry(
-                    name="Success Green",
-                    hex_value="#2A9D8F",
-                    usage="Confirmations, success states, positive metrics",
-                    psychological_rationale="Teal-green signals growth and positive outcomes.",
-                ),
-            ],
-            typography_system=[
-                TypographySpec(
-                    role="display",
-                    font_family="Inter or equivalent geometric sans-serif",
-                    weight_range="600–800",
-                    usage_notes="Headlines, hero sections, major callouts. Tight tracking.",
-                ),
-                TypographySpec(
-                    role="body",
-                    font_family="Inter or equivalent geometric sans-serif",
-                    weight_range="400–500",
-                    usage_notes="All body copy. 16px base, 1.5 line-height for readability.",
-                ),
-                TypographySpec(
-                    role="caption",
-                    font_family="Inter or equivalent geometric sans-serif",
-                    weight_range="400",
-                    usage_notes="Labels, metadata, helper text. 12–14px, slightly increased tracking.",
-                ),
-                TypographySpec(
-                    role="monospace",
-                    font_family="JetBrains Mono or equivalent",
-                    weight_range="400–500",
-                    usage_notes="Code samples, technical content, data tables.",
-                ),
-            ],
-            iconography_style=(
-                "Line-based icons with 2px stroke weight, rounded caps. "
-                "Consistent 24px grid. Functional clarity over decoration."
-            ),
-            illustration_style=(
-                "Minimal, geometric illustrations using brand colors. "
-                "Flat with subtle depth through overlapping shapes. "
-                "Used to explain concepts, not for decoration."
-            ),
-            photography_direction=(
-                "Documentary-style photography: real people in real contexts. "
-                "Natural lighting, candid moments, professional but not sterile. "
-                "Focus on collaboration, outcomes, and craft."
-            ),
-            video_direction=(
-                "Clean transitions, steady camera, natural pacing. "
-                "Talking-head thought leadership and product walkthroughs. "
-                "Avoid stock footage and over-produced effects."
-            ),
-            motion_principles=[
-                "Subtle and purposeful — animation communicates state changes, not decoration",
-                "Duration: 150–300ms for micro-interactions, 400–600ms for transitions",
-                "Easing: ease-out for entrances, ease-in for exits",
-                "Respect prefers-reduced-motion for accessibility",
-            ],
-            data_visualization_style=(
-                "Use brand palette with semantic color mapping. "
-                "Lead with insight, not decoration. "
-                "Label directly on chart when possible; minimize legends."
-            ),
-            digital_adaptations=[
-                "Favicon: icon-only logo variant at 32x32 and 16x16",
-                "App icon: icon-only variant with primary-deep background, 1024x1024 master",
-                "OG image template: 1200x630, brand-deep background, white wordmark, tagline",
-                "Email header: 600px wide, primary wordmark on surface-white",
-            ],
-            voice_tone_spectrum=[
-                VoiceToneEntry(
-                    context="marketing",
-                    tone="Confident and clear. Lead with outcomes. Aspirational but grounded in proof.",
-                    examples=[
-                        "Your brand should work as hard as your product.",
-                        "We don't guess — we build on strategy.",
-                    ],
-                ),
-                VoiceToneEntry(
-                    context="product / UX",
-                    tone="Direct, helpful, concise. Guide without lecturing.",
-                    examples=[
-                        "Brand check complete. 2 items need attention.",
-                        "Your positioning statement has been updated.",
-                    ],
-                ),
-                VoiceToneEntry(
-                    context="support",
-                    tone="Empathetic and solution-oriented. Acknowledge, then resolve.",
-                    examples=[
-                        "We hear you — let's get this sorted.",
-                        "Here's what happened, and here's how we'll fix it.",
-                    ],
-                ),
-                VoiceToneEntry(
-                    context="internal / employer",
-                    tone="Transparent, collaborative, candid. Treat colleagues like adults.",
-                    examples=[
-                        "Here's the trade-off and why we chose this path.",
-                        "We're behind on this — here's the plan to catch up.",
-                    ],
-                ),
-            ],
-            language_dos=[
-                f"Use a {mission.desired_voice} voice across all channels",
-                "Lead with customer outcomes before product features",
-                "Prefer plain language over jargon",
-                "Use active voice and direct calls to action",
-                "Ground claims in proof points and examples",
-                "Keep paragraphs short and scannable",
-            ],
-            language_donts=[
-                "Do not overpromise or use unverifiable superlatives",
-                "Avoid inconsistent terminology for core offerings",
-                "Do not bury the key value proposition",
-                "Avoid passive constructions that dilute authority",
-                "Do not use more than one exclamation mark per asset",
-                "Avoid buzzwords without substantive meaning",
-            ],
-        )
+def make_moodboard_conceptualist(variant: str) -> Agent:
+    return build_agent(
+        name=f"MoodBoardConceptualist_{variant}",
+        description=f"Generates a {variant.lower()} visual direction moodboard concept.",
+        system_prompt=(
+            f"You are a MoodBoard Conceptualist specialising in {variant.lower()} visual "
+            f"directions. Given a brand's strategic core and narrative, create a moodboard concept "
+            f"with:\n"
+            f"- title: a name for this direction\n"
+            f"- visual_direction: overall aesthetic description\n"
+            f"- color_story: 3-4 color names/descriptions\n"
+            f"- typography_direction: font style recommendations\n"
+            f"- image_style: 3-4 image style descriptions\n\n"
+            f"Hand back to the CreativeDirector when done."
+        ),
+    )
+
+
+# --- Post-swarm Graph nodes ---
+
+
+def make_converge_decider() -> Agent:
+    return build_agent(
+        name="converge_decider",
+        description="Scores moodboard candidates and selects a winner.",
+        system_prompt=(
+            "You are a Creative Convergence Decider. You receive moodboard candidates from the "
+            "diverge phase plus the brand's strategic core and values. Score each candidate on:\n"
+            "- Audience resonance\n"
+            "- Distinctiveness vs competitors\n"
+            "- Cross-channel consistency\n"
+            "- Execution feasibility\n\n"
+            "Output: winning_candidate_title, scoring_criteria, scores_by_candidate (dict of "
+            "title→score), rationale, workshop_prompts (3 questions for stakeholders), and "
+            "decision_criteria used."
+        ),
+    )
+
+
+def make_logo_specifier() -> Agent:
+    return build_agent(
+        name="logo_specifier",
+        description="Defines logo suite with usage rules.",
+        system_prompt=(
+            "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
+            "suite. For each variant (primary, monochrome, icon-only, reversed), specify:\n"
+            "- variant, usage_context, minimum_size, clear_space\n"
+            "Output valid JSON as a list of LogoUsageRule objects."
+        ),
+    )
+
+
+def make_color_system_builder() -> Agent:
+    return build_agent(
+        name="color_system_builder",
+        description="Builds the brand color palette with psychological rationale.",
+        system_prompt=(
+            "You are a Color System Builder. Based on the winning moodboard direction, define "
+            "5-7 colors. For each: name, hex_value, usage (where to use it), and "
+            "psychological_rationale (why this color works for the brand). Include primary, "
+            "secondary, accent, surface, and critical colors. Output valid JSON as a list of "
+            "ColorEntry objects."
+        ),
+    )
+
+
+def make_typography_builder() -> Agent:
+    return build_agent(
+        name="typography_builder",
+        description="Defines the typography system.",
+        system_prompt=(
+            "You are a Typography Builder. Based on the winning moodboard direction, define a "
+            "typography system with 3-4 type roles (display, body, caption, code). For each:\n"
+            "- role, font_family, weight_range, usage_notes\n"
+            "Output valid JSON as a list of TypographySpec objects."
+        ),
+    )
+
+
+def make_iconography_director() -> Agent:
+    return build_agent(
+        name="iconography_director",
+        description="Defines iconography and illustration style.",
+        system_prompt=(
+            "You are an Iconography Director. Based on the winning moodboard, define:\n"
+            "1. iconography_style — describe the icon aesthetic (line weight, corner radius, fill)\n"
+            "2. illustration_style — describe the illustration approach (flat, isometric, etc.)\n"
+            "Output valid JSON with these two keys."
+        ),
+    )
+
+
+def make_photography_video_director() -> Agent:
+    return build_agent(
+        name="photography_video_director",
+        description="Defines photography direction, video direction, and motion principles.",
+        system_prompt=(
+            "You are a Photography & Video Director. Based on the winning moodboard, define:\n"
+            "1. photography_direction — shooting style, lighting, composition, subjects\n"
+            "2. video_direction — pacing, tone, visual style for video content\n"
+            "3. motion_principles — 3-4 principles for animation/motion design\n"
+            "Output valid JSON with these three keys."
+        ),
+    )
+
+
+def make_voice_tone_builder() -> Agent:
+    return build_agent(
+        name="voice_tone_builder",
+        description="Defines voice/tone spectrum and language dos/donts.",
+        system_prompt=(
+            "You are a Voice & Tone Builder. Using the brand narrative's writing guidelines and "
+            "the moodboard direction, define:\n"
+            "1. voice_tone_spectrum — for each context (marketing, support, legal, social, "
+            "internal), specify the tone and 2-3 examples\n"
+            "2. language_dos — 4-5 approved language patterns\n"
+            "3. language_donts — 4-5 language anti-patterns\n"
+            "Output valid JSON with these three keys."
+        ),
+    )
+
+
+def make_design_system_codifier() -> Agent:
+    return build_agent(
+        name="design_system_codifier",
+        description="Codifies the design system: principles, tokens, component standards.",
+        system_prompt=(
+            "You are a Design System Codifier. Based on the full visual identity work, produce:\n"
+            "1. design_principles — 3-4 guiding principles (e.g. 'Clarity over decoration')\n"
+            "2. foundation_tokens — 4-6 token categories (color, type, spacing, motion, etc.)\n"
+            "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)\n"
+            "Output valid JSON matching the DesignSystemDefinition schema."
+        ),
+    )
 
 
 # ===================================================================
-# Phase 4 — Experience & Channel Activation
+# Phase 4 — Experience & Channel Activation  (Graph: fan-out / fan-in)
 # ===================================================================
 
 
-@dataclass
-class ChannelActivationAgent:
-    """Defines how the brand shows up across every channel and touchpoint."""
+def make_brand_experience_principler() -> Agent:
+    return build_agent(
+        name="brand_experience_principler",
+        description="Defines brand experience principles, signature moments, and sensory elements.",
+        system_prompt=(
+            "You are a Brand Experience Architect. Define:\n"
+            "1. brand_experience_principles — 3-5 principles that govern every brand touchpoint\n"
+            "2. signature_moments — 3-5 key moments in the customer journey that should feel "
+            "distinctly on-brand\n"
+            "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable\n"
+            "Output valid JSON with these three keys."
+        ),
+    )
 
-    role: str = "Channel Activation Strategist"
 
-    def execute(
-        self,
-        mission: BrandingMission,
-        strategic_core: StrategicCoreOutput,
-        narrative: NarrativeMessagingOutput,
-        visual_identity: VisualIdentityOutput,
-    ) -> ChannelActivationOutput:
-        return ChannelActivationOutput(
-            brand_experience_principles=[
-                "Every touchpoint should feel intentional, not accidental",
-                "Consistency builds trust — deviations erode it exponentially",
-                "The brand speaks with one voice, adapted for context but never contradicting itself",
-                "Experiences should reduce cognitive load — make the next action obvious",
-                "Surprise and delight within the brand system, not outside it",
-            ],
-            signature_moments=[
-                "First interaction: the onboarding experience should feel like a guided strategy session",
-                "Deliverable handoff: every document and artifact should be unmistakably on-brand",
-                "Milestone celebration: mark project milestones with branded rituals (e.g., strategy-lock email)",
-                "Annual brand review: a structured retrospective with the client",
-            ],
-            sensory_elements=[
-                f"Visual: {visual_identity.color_palette[0].name if visual_identity.color_palette else 'brand'} palette as anchor",
-                "Sonic: no current audio brand — explore subtle UI sounds aligned with motion principles",
-                "Haptic: premium paper stock for physical deliverables, embossed covers",
-                "Spatial: consistent meeting room branding for in-person workshops",
-            ],
-            channel_guidelines=[
-                ChannelGuideline(
-                    channel="website",
-                    strategy="Primary conversion and credibility engine. Lead with outcomes and proof.",
-                    dos=[
-                        "Use hero sections with clear value propositions",
-                        "Include social proof above the fold",
-                        "Maintain brand typography and color system",
-                        "Provide clear navigation with minimal cognitive load",
-                    ],
-                    donts=[
-                        "Don't use stock photography of generic business scenes",
-                        "Don't bury case studies — surface them prominently",
-                        "Don't deviate from the approved color palette",
-                    ],
-                    content_types=["landing pages", "case studies", "blog posts", "product pages"],
-                    frequency_guidance="Major content refresh quarterly; blog cadence biweekly.",
-                ),
-                ChannelGuideline(
-                    channel="social media",
-                    strategy="Thought leadership and community building. Human voice, professional insights.",
-                    dos=[
-                        "Share insights and lessons, not just promotions",
-                        "Use brand visuals and templates consistently",
-                        "Engage authentically in comments and discussions",
-                    ],
-                    donts=[
-                        "Don't use trending memes that conflict with brand personality",
-                        "Don't post without visual brand alignment",
-                        "Don't auto-post identical content across platforms",
-                    ],
-                    content_types=[
-                        "thought leadership",
-                        "client highlights",
-                        "team culture",
-                        "industry commentary",
-                    ],
-                    frequency_guidance="LinkedIn: 3-4x/week. Twitter: daily. Instagram: 2-3x/week.",
-                ),
-                ChannelGuideline(
-                    channel="email",
-                    strategy="Relationship nurturing and conversion. Personalized, valuable, concise.",
-                    dos=[
-                        "Use branded email templates with consistent header/footer",
-                        "Personalize subject lines and content",
-                        "Include one clear CTA per email",
-                    ],
-                    donts=[
-                        "Don't send emails without brand-compliant formatting",
-                        "Don't overload with multiple CTAs",
-                        "Don't use ALL CAPS in subject lines",
-                    ],
-                    content_types=[
-                        "newsletters",
-                        "drip campaigns",
-                        "transactional",
-                        "event invitations",
-                    ],
-                    frequency_guidance="Newsletter: biweekly. Drip: event-triggered.",
-                ),
-                ChannelGuideline(
-                    channel="events and presentations",
-                    strategy="High-impact brand moments. Consistent deck templates, speaker talking points.",
-                    dos=[
-                        "Use the branded presentation template",
-                        "Open with the positioning statement or a relevant elevator pitch",
-                        "Leave attendees with branded takeaways",
-                    ],
-                    donts=[
-                        "Don't freestyle slides without the template",
-                        "Don't present data without brand-aligned visualization",
-                    ],
-                    content_types=["keynotes", "workshops", "webinars", "trade show booths"],
-                    frequency_guidance="As needed — every external presentation must be brand-reviewed.",
-                ),
-                ChannelGuideline(
-                    channel="partner and co-marketing",
-                    strategy="Protect brand integrity in shared contexts. Clear co-branding rules.",
-                    dos=[
-                        "Use co-branding guidelines for logo placement and hierarchy",
-                        "Maintain brand voice even in joint materials",
-                    ],
-                    donts=[
-                        "Don't allow partners to modify brand assets",
-                        "Don't subordinate brand identity in joint materials without approval",
-                    ],
-                    content_types=[
-                        "co-branded landing pages",
-                        "joint case studies",
-                        "partner directories",
-                    ],
-                    frequency_guidance="Per partnership agreement.",
-                ),
-                ChannelGuideline(
-                    channel="internal communications",
-                    strategy="Consistent internal brand reinforcement. Employees are brand ambassadors.",
-                    dos=[
-                        "Use internal templates for all-hands, memos, and updates",
-                        "Reinforce brand values in internal communications",
-                        "Make brand assets easily accessible to all team members",
-                    ],
-                    donts=[
-                        "Don't treat internal comms as brand-exempt",
-                        "Don't use off-brand templates for internal documents",
-                    ],
-                    content_types=[
-                        "all-hands decks",
-                        "internal newsletters",
-                        "onboarding materials",
-                        "Slack/Teams",
-                    ],
-                    frequency_guidance="All-hands: monthly. Internal newsletter: biweekly.",
-                ),
-            ],
-            brand_architecture=[
-                BrandArchitectureRule(
-                    entity="parent brand",
-                    relationship=f"{mission.company_name} is the master brand; all products exist under it.",
-                    naming_convention="[Company Name] + [Product Name] — e.g., 'Northstar Studio'",
-                    visual_treatment="Full logo suite; primary color palette.",
-                ),
-                BrandArchitectureRule(
-                    entity="sub-brand / product",
-                    relationship="Products are endorsed by the parent brand, not independent.",
-                    naming_convention="[Company Name] [Product] — no independent logos without approval.",
-                    visual_treatment="Parent logo + product name in secondary type. Same color system.",
-                ),
-            ],
-            naming_conventions=[
-                "Product names: one or two words, evocative, easy to pronounce globally",
-                "Feature names: descriptive, lowercase, no trademarked symbols unless registered",
-                "Campaign names: tied to a messaging pillar; reviewed by brand team before launch",
-            ],
-            terminology_glossary={
-                "brand system": "The complete set of strategic, verbal, visual, and experiential brand elements.",
-                "brand check": "A structured review to verify an asset is on-brand before publication.",
-                "positioning statement": "The concise declaration of who we serve, what we do, and why we're different.",
-                "narrative pillar": "A core theme that anchors all brand storytelling.",
-                "brand promise": "The singular commitment the brand makes to every customer.",
-            },
-            brand_in_action=[
-                BrandInActionExample(
-                    context="Homepage hero section",
-                    correct_example=(
-                        "Clean layout with positioning statement, proof point, and single CTA "
-                        "on brand-deep background with accent highlights."
-                    ),
-                    incorrect_example=(
-                        "Cluttered hero with multiple CTAs, stock photography, "
-                        "and copy that doesn't reference the positioning."
-                    ),
-                    rationale="First impression must reinforce positioning and reduce decision friction.",
-                ),
-                BrandInActionExample(
-                    context="Social media post",
-                    correct_example=(
-                        "Insight-led post with branded template, link to depth content, "
-                        "written in brand voice."
-                    ),
-                    incorrect_example=(
-                        "Promotional post with off-brand visuals, hashtag spam, "
-                        "and copy that doesn't match voice guidelines."
-                    ),
-                    rationale="Social is the highest-frequency brand touchpoint — consistency is critical.",
-                ),
-                BrandInActionExample(
-                    context="Client-facing document",
-                    correct_example=(
-                        "Branded template with company logo, consistent typography, "
-                        "professional layout, and clear section hierarchy."
-                    ),
-                    incorrect_example=(
-                        "Unbranded Word doc with inconsistent fonts, no logo, "
-                        "and informal language."
-                    ),
-                    rationale="Every deliverable is a brand moment. Off-brand documents erode trust.",
-                ),
-            ],
-        )
+def _make_channel_guide(channel: str, description: str) -> Agent:
+    return build_agent(
+        name=f"{channel}_guide",
+        description=f"Defines brand guidelines for the {channel} channel.",
+        system_prompt=(
+            f"You are a {channel.title()} Channel Specialist. Define guidelines for the "
+            f"{channel} channel:\n"
+            f"- channel: '{channel}'\n"
+            f"- strategy: overall approach for this channel\n"
+            f"- dos: 3-4 best practices\n"
+            f"- donts: 3-4 things to avoid\n"
+            f"- content_types: 3-5 recommended content formats\n"
+            f"- frequency_guidance: recommended cadence\n"
+            f"Context: {description}\n"
+            f"Output valid JSON matching the ChannelGuideline schema."
+        ),
+    )
+
+
+def make_website_guide() -> Agent:
+    return _make_channel_guide("website", "Company website, landing pages, product pages.")
+
+
+def make_social_guide() -> Agent:
+    return _make_channel_guide("social", "Social media platforms (LinkedIn, Twitter, Instagram).")
+
+
+def make_email_guide() -> Agent:
+    return _make_channel_guide("email", "Email marketing, newsletters, transactional emails.")
+
+
+def make_events_guide() -> Agent:
+    return _make_channel_guide("events", "Conferences, webinars, meetups, trade shows.")
+
+
+def make_partnerships_guide() -> Agent:
+    return _make_channel_guide("partnerships", "Co-branding, sponsorships, partner marketing.")
+
+
+def make_internal_guide() -> Agent:
+    return _make_channel_guide("internal", "Internal comms, employee branding, onboarding.")
+
+
+def make_brand_architecture_builder() -> Agent:
+    return build_agent(
+        name="brand_architecture_builder",
+        description="Defines brand architecture rules, naming conventions, and terminology.",
+        system_prompt=(
+            "You are a Brand Architecture Specialist. Define:\n"
+            "1. brand_architecture — rules for parent brand, sub-brands, product lines. Each "
+            "with: entity, relationship, naming_convention, visual_treatment\n"
+            "2. naming_conventions — 3-5 naming rules\n"
+            "3. terminology_glossary — 5-10 key terms with definitions (dict)\n"
+            "Output valid JSON with these three keys."
+        ),
+    )
+
+
+def make_brand_in_action_illustrator() -> Agent:
+    return build_agent(
+        name="brand_in_action_illustrator",
+        description="Creates brand-in-action do/don't examples.",
+        system_prompt=(
+            "You are a Brand-in-Action Illustrator. Create 3-5 applied examples showing correct "
+            "vs incorrect brand usage. Each example has:\n"
+            "- context: where this applies (e.g. 'sales deck header')\n"
+            "- correct_example: the on-brand version\n"
+            "- incorrect_example: the off-brand version\n"
+            "- rationale: why the correct version is better\n"
+            "Output valid JSON as a list of BrandInActionExample objects."
+        ),
+    )
 
 
 # ===================================================================
-# Phase 5 — Governance & Evolution
+# Phase 5 — Governance & Evolution  (Graph: fan-out / fan-in)
 # ===================================================================
 
 
-@dataclass
-class GovernanceAgent:
-    """Defines how the brand is sustained, measured, and evolved over time."""
+def make_ownership_definer() -> Agent:
+    return build_agent(
+        name="ownership_definer",
+        description="Defines brand ownership model and decision authority matrix.",
+        system_prompt=(
+            "You are a Brand Ownership Definer. Define:\n"
+            "1. ownership_model — who owns the brand (paragraph)\n"
+            "2. decision_authority — a dict mapping decision types to responsible roles "
+            "(e.g. 'logo_changes': 'Brand Director', 'campaign_messaging': 'Marketing Lead')\n"
+            "Output valid JSON with these two keys."
+        ),
+    )
 
-    role: str = "Brand Governance Lead"
 
-    def execute(
-        self, mission: BrandingMission, strategic_core: StrategicCoreOutput
-    ) -> GovernanceOutput:
-        return GovernanceOutput(
-            ownership_model=(
-                "Brand is owned cross-functionally: Strategy owns positioning and messaging; "
-                "Design owns visual identity and design system; Marketing owns channel activation; "
-                "Executive sponsor holds veto on strategic pivots."
-            ),
-            decision_authority={
-                "strategic pivot": "Executive sponsor + Brand Strategy lead (Phase 1 re-entry)",
-                "messaging update": "Brand Strategy lead + Content lead",
-                "visual identity change": "Design lead + Brand Strategy lead",
-                "channel-specific adaptation": "Channel owner + Design review",
-                "new product naming": "Brand Strategy lead + Product lead + Legal",
-                "campaign launch": "Channel owner + Brand review approval",
-            },
-            approval_workflows=[
-                ApprovalWorkflow(
-                    asset_type="marketing campaign",
-                    approvers=["Channel owner", "Brand Strategy lead", "Design review"],
-                    sla="5 business days",
-                    escalation_path="If no response in SLA → auto-escalate to executive sponsor.",
-                ),
-                ApprovalWorkflow(
-                    asset_type="product naming",
-                    approvers=["Brand Strategy lead", "Product lead", "Legal"],
-                    sla="10 business days",
-                    escalation_path="Legal must sign off before any public usage.",
-                ),
-                ApprovalWorkflow(
-                    asset_type="partner co-branding",
-                    approvers=["Brand Strategy lead", "Partnerships", "Design review"],
-                    sla="7 business days",
-                    escalation_path="No partner materials go live without brand approval.",
-                ),
-                ApprovalWorkflow(
-                    asset_type="social media content",
-                    approvers=["Social lead", "Content review (spot-check)"],
-                    sla="1 business day",
-                    escalation_path="Escalate controversial topics to Brand Strategy lead.",
-                ),
-            ],
-            agency_briefing_protocols=[
-                "All agency briefs must include: positioning statement, messaging pillars, voice guidelines, visual identity spec",
-                "Agencies receive read-only access to the brand system — no modification rights",
-                "Every agency deliverable is reviewed against brand compliance checklist before acceptance",
-                "Annual agency alignment workshop to recalibrate on brand direction",
-            ],
-            asset_management_guidance=[
-                "All brand assets stored in a single source-of-truth system (e.g., Brandfolder, Frontify)",
-                "Assets tagged by: type, channel, phase, approval status, version",
-                "Deprecated assets are archived, not deleted — maintain audit trail",
-                "Quarterly asset audit to remove outdated materials from active use",
-            ],
-            training_onboarding_plan=[
-                "New hire brand onboarding: 30-minute session in first week covering strategy, voice, and visual identity",
-                "Quarterly brand refresher for all customer-facing teams",
-                "Self-serve brand toolkit accessible from internal portal with templates and guidelines",
-                "Brand champion program: one person per team responsible for brand consistency",
-            ],
-            brand_health_kpis=[
-                BrandHealthKPI(
-                    metric="Brand awareness (aided)",
-                    measurement_method="Annual brand tracking survey",
-                    target="Increase 10% year-over-year",
-                    review_frequency="annually",
-                ),
-                BrandHealthKPI(
-                    metric="Brand consistency score",
-                    measurement_method="Quarterly audit of 20 random assets across channels",
-                    target="≥90% compliance with brand guidelines",
-                    review_frequency="quarterly",
-                ),
-                BrandHealthKPI(
-                    metric="Net Promoter Score (brand-attributed)",
-                    measurement_method="Post-interaction NPS survey",
-                    target="≥50",
-                    review_frequency="quarterly",
-                ),
-                BrandHealthKPI(
-                    metric="Employee brand comprehension",
-                    measurement_method="Internal quiz / survey",
-                    target="≥80% can articulate positioning and values",
-                    review_frequency="semi-annually",
-                ),
-            ],
-            tracking_methodology=(
-                "Blend of quantitative (surveys, analytics, compliance audits) and qualitative "
-                "(stakeholder interviews, social listening, customer feedback analysis). "
-                "Dashboard updated quarterly with trend analysis."
-            ),
-            review_trigger_points=[
-                "Major product launch or pivot",
-                "M&A activity (acquiring or being acquired)",
-                "Competitive landscape shift that threatens positioning",
-                "Brand health KPIs trending negative for two consecutive quarters",
-                "Leadership transition at executive level",
-                "Market expansion into new geography or vertical",
-            ],
-            evolution_framework=(
-                "Evolution (not revolution) is the default. Brand refreshes update visual and verbal "
-                "execution while preserving strategic core. A full rebrand (revolution) requires: "
-                "(1) documented failure of current positioning, (2) executive sponsor approval, "
-                "(3) full Phase 1 restart. The decision framework: if the strategic core is still "
-                "valid, evolve the expression. If the strategic core is broken, restart from Phase 1."
-            ),
-            version_control_cadence=(
-                "Brand system versioned with semantic versioning: major.minor.patch. "
-                "Major: strategic pivot or rebrand. Minor: new channel, updated messaging. "
-                "Patch: typo fixes, asset updates. Review cycle: quarterly minor review, "
-                "annual major review."
-            ),
-        )
+def make_approval_workflow_designer() -> Agent:
+    return build_agent(
+        name="approval_workflow_designer",
+        description="Designs approval workflows and agency briefing protocols.",
+        system_prompt=(
+            "You are an Approval Workflow Designer. Define:\n"
+            "1. approval_workflows — 3-5 workflows, each with: asset_type, approvers (list), "
+            "sla, escalation_path\n"
+            "2. agency_briefing_protocols — 3-5 protocols for briefing external agencies\n"
+            "Output valid JSON with these two keys."
+        ),
+    )
+
+
+def make_asset_wiki_planner() -> Agent:
+    return build_agent(
+        name="asset_wiki_planner",
+        description="Plans asset management and brand wiki backlog.",
+        system_prompt=(
+            "You are an Asset & Wiki Planner. Define:\n"
+            "1. asset_management_guidance — 3-5 guidelines for managing brand assets\n"
+            "2. wiki_backlog — 4-6 wiki entries, each with: title, summary, owners (list), "
+            "update_cadence. Cover: Brand North Star, Voice Playbook, Design System, Brand "
+            "Review Intake, Channel Playbook, Governance Charter.\n"
+            "Output valid JSON with these two keys."
+        ),
+    )
+
+
+def make_training_planner() -> Agent:
+    return build_agent(
+        name="training_planner",
+        description="Plans brand training and onboarding programmes.",
+        system_prompt=(
+            "You are a Training Planner. Define training_onboarding_plan — 4-6 training "
+            "initiatives for onboarding new team members and maintaining brand literacy. "
+            "Output valid JSON with a single key 'training_onboarding_plan' containing a list "
+            "of strings."
+        ),
+    )
+
+
+def make_kpi_designer() -> Agent:
+    return build_agent(
+        name="kpi_designer",
+        description="Designs brand health KPIs with tracking methodology.",
+        system_prompt=(
+            "You are a Brand KPI Designer. Define:\n"
+            "1. brand_health_kpis — 4-6 KPIs, each with: metric, measurement_method, target, "
+            "review_frequency\n"
+            "2. tracking_methodology — paragraph describing the measurement approach\n"
+            "3. review_trigger_points — 3-5 events that should trigger a brand health review\n"
+            "Output valid JSON with these three keys."
+        ),
+    )
+
+
+def make_evolution_framer() -> Agent:
+    return build_agent(
+        name="evolution_framer",
+        description="Defines the brand evolution framework and version control cadence.",
+        system_prompt=(
+            "You are a Brand Evolution Framer. Define:\n"
+            "1. evolution_framework — paragraph describing how the brand evolves over time\n"
+            "2. version_control_cadence — how often the brand system is formally reviewed "
+            "and versioned\n"
+            "Output valid JSON with these two keys."
+        ),
+    )
+
+
+def make_brand_rules_codifier() -> Agent:
+    return build_agent(
+        name="brand_rules_codifier",
+        description="Codifies top-level brand governance rules.",
+        system_prompt=(
+            "You are a Brand Rules Codifier. Using the full brand context (positioning, promise, "
+            "values, narrative, visual identity), produce brand_guidelines — a list of 5-8 "
+            "governance rules that everyone in the organisation must follow. Each rule is a "
+            "single clear sentence. Cover: identity usage, messaging hierarchy, approval gates, "
+            "asset management, and evolution. Output valid JSON with a single key "
+            "'brand_guidelines' containing a list of strings."
+        ),
+    )
 
 
 # ===================================================================
-# Brand compliance (retained from original)
+# Brand Compliance (outside the graph — post-processing utility)
 # ===================================================================
 
 
 @dataclass
 class BrandComplianceAgent:
-    """Fields requests to determine whether assets are on brand."""
+    """Evaluates whether assets are on-brand using keyword matching against mission values."""
 
     role: str = "Brand Compliance Reviewer"
 
@@ -920,180 +626,3 @@ class BrandComplianceAgent:
             )
 
         return results
-
-
-# ===================================================================
-# Legacy bridge agents — adapt new phase agents into old interface
-# ===================================================================
-
-
-@dataclass
-class BrandCodificationAgent:
-    """Legacy adapter: derives BrandCodification from StrategicCoreOutput."""
-
-    role: str = "Brand Strategist"
-
-    def codify(self, mission: BrandingMission) -> BrandCodification:
-        agent = StrategicCoreAgent()
-        core = agent.execute(mission)
-        return BrandCodification(
-            positioning_statement=core.positioning_statement,
-            brand_promise=core.brand_promise,
-            brand_personality_traits=[cv.value for cv in core.core_values[:4]],
-            narrative_pillars=[dp.pillar for dp in core.differentiation_pillars],
-        )
-
-
-@dataclass
-class MoodBoardIdeationAgent:
-    """Creates candidate brand-image mood boards (legacy interface)."""
-
-    role: str = "Brand Visual Ideation Lead"
-
-    def ideate(self, mission: BrandingMission) -> List[MoodBoardConcept]:
-        return [
-            MoodBoardConcept(
-                title="Modern Confidence",
-                visual_direction="Clean grids, product-in-context photography, generous whitespace",
-                color_story=["midnight blue", "electric cyan", "neutral stone"],
-                typography_direction="Geometric sans-serif with high readability",
-                image_style=["documentary-style people", "interface closeups", "subtle gradients"],
-            ),
-            MoodBoardConcept(
-                title="Human Craft",
-                visual_direction="Editorial layouts with warm contrast and tactile textures",
-                color_story=["charcoal", "terracotta", "cream"],
-                typography_direction="Humanist sans-serif paired with a restrained serif",
-                image_style=[
-                    "team collaboration scenes",
-                    "sketch-to-product narratives",
-                    "macro textures",
-                ],
-            ),
-        ]
-
-
-@dataclass
-class CreativeRefinementAgent:
-    """Facilitates iterative creative refinement and decision making (legacy interface)."""
-
-    role: str = "Creative Director"
-
-    def build_plan(self) -> CreativeRefinementPlan:
-        return CreativeRefinementPlan(
-            phases=[
-                "Diverge: review 2-3 mood boards and map them to audience perception goals",
-                "Converge: pick one primary direction and one fallback",
-                "Stress-test: apply direction to landing page, sales deck, and social post",
-                "Finalize: lock visual and narrative system in v1.0 brand standards",
-            ],
-            workshop_prompts=[
-                "What should prospects feel in the first 5 seconds?",
-                "Which direction best communicates credibility and momentum?",
-                "What elements are unique enough to own long-term?",
-            ],
-            decision_criteria=[
-                "Audience resonance",
-                "Distinctiveness vs competitors",
-                "Cross-channel consistency",
-                "Execution feasibility in 90 days",
-            ],
-        )
-
-
-@dataclass
-class BrandGuidelinesAgent:
-    """Defines writing, brand, and design-system guidelines (legacy interface)."""
-
-    role: str = "Brand Systems Architect"
-
-    def writing_guidelines(self, mission: BrandingMission) -> WritingGuidelines:
-        return WritingGuidelines(
-            voice_principles=[
-                f"Use a {mission.desired_voice} voice across channels",
-                "Lead with customer outcomes before product features",
-                "Prefer plain language over jargon",
-            ],
-            style_dos=[
-                "Use active voice and direct calls to action",
-                "Ground claims in proof points and examples",
-                "Keep paragraphs short and scannable",
-            ],
-            style_donts=[
-                "Do not overpromise or use unverifiable superlatives",
-                "Avoid inconsistent terminology for core offerings",
-                "Do not bury the key value proposition",
-            ],
-            editorial_quality_bar=[
-                "Every artifact must map to one narrative pillar",
-                "Every external asset receives tone and terminology QA",
-                "Every major launch includes a message hierarchy",
-            ],
-        )
-
-    def brand_guidelines(self, codification: BrandCodification) -> List[str]:
-        return [
-            f"Positioning: {codification.positioning_statement}",
-            f"Promise: {codification.brand_promise}",
-            "Identity system: logo spacing, color usage, and typography rules are mandatory.",
-            "Messaging hierarchy: promise -> pillar -> proof -> CTA.",
-            "Governance: route major campaign concepts through brand review before launch.",
-        ]
-
-    def design_system(self) -> DesignSystemDefinition:
-        return DesignSystemDefinition(
-            design_principles=[
-                "Clarity over decoration",
-                "Consistency at scale",
-                "Accessible by default",
-            ],
-            foundation_tokens=[
-                "Color tokens: primary/secondary/surface/critical",
-                "Type tokens: display/body/caption scales",
-                "Spacing tokens: 4-point base scale",
-                "Motion tokens: subtle and meaningful",
-            ],
-            component_standards=[
-                "Buttons: size variants, icon rules, and disabled states",
-                "Cards: elevation, border, and content density options",
-                "Navigation: desktop and mobile behavior patterns",
-            ],
-        )
-
-
-@dataclass
-class BrandWikiAgent:
-    """Builds and maintains an enterprise-ready brand wiki backlog (legacy interface)."""
-
-    role: str = "Knowledge Systems Manager"
-
-    def build_wiki_backlog(self, mission: BrandingMission) -> List[WikiEntry]:
-        return [
-            WikiEntry(
-                title="Brand North Star",
-                summary="Single source of truth for positioning, promise, and narrative pillars.",
-                owners=["Brand Strategy", "Executive Sponsor"],
-                update_cadence="quarterly",
-            ),
-            WikiEntry(
-                title="Voice & Writing Playbook",
-                summary="Examples, approved terminology, and do/don't patterns for all writers.",
-                owners=["Content Design", "Comms"],
-                update_cadence="monthly",
-            ),
-            WikiEntry(
-                title="Design System & UI Guidance",
-                summary="Token catalog, component rules, and accessibility requirements.",
-                owners=["Design Systems", "Frontend Platform"],
-                update_cadence="monthly",
-            ),
-            WikiEntry(
-                title="Brand Review Intake",
-                summary=(
-                    "Request template and SLA for checking whether campaigns, pages, and artifacts "
-                    "are on brand."
-                ),
-                owners=["Brand Operations"],
-                update_cadence="bi-weekly",
-            ),
-        ]

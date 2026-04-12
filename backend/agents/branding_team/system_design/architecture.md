@@ -37,12 +37,12 @@ briefed vs. exploratory vs. chat-first) can all reach a consistent
   completed *and* `human_review.approved` is true
   (`orchestrator.py:302-322`). Anything else returns
   `NEEDS_HUMAN_DECISION`.
-- **Backward-compatible output shape.** Legacy bridge agents
+- **Consolidated output shape.** Specialist agents
   (`BrandCodificationAgent`, `MoodBoardIdeationAgent`,
   `CreativeRefinementAgent`, `BrandGuidelinesAgent`, `BrandWikiAgent`)
-  still run on every pipeline execution so the legacy fields on
+  contribute to every pipeline execution so the fields on
   `TeamOutput` (`codification`, `mood_boards`, `brand_guidelines`,
-  `design_system`, `wiki_backlog`, etc.) stay populated for existing
+  `design_system`, `wiki_backlog`, etc.) stay populated for all
   consumers. See `orchestrator.py:141-145` and `orchestrator.py:196-203`.
 - **Composable external work via thin adapters.** Market research and
   design asset generation are delegated to sibling teams through HTTP
@@ -97,7 +97,7 @@ flowchart TB
         P4["Phase 4<br/>ChannelActivationAgent"]
         P5["Phase 5<br/>GovernanceAgent"]
         Compliance["BrandComplianceAgent"]
-        subgraph legacy [Legacy bridge agents]
+        subgraph specialists [Specialist agents]
             L1["BrandCodificationAgent"]
             L2["MoodBoardIdeationAgent"]
             L3["CreativeRefinementAgent"]
@@ -186,13 +186,13 @@ phase N's output is non-`None` (`orchestrator.py:207-234`). Gate status is
 tracked explicitly in the `PhaseGate` model so the UI can show stakeholders
 what they're approving (`models.py:370-375`).
 
-### 2. Why legacy bridge agents are kept
+### 2. Why specialist agents are retained in the pipeline
 
-The `TeamOutput` model still carries the legacy fields
+The `TeamOutput` model carries the specialist fields
 (`codification`, `mood_boards`, `creative_refinement`, `writing_guidelines`,
 `brand_guidelines`, `design_system`, `wiki_backlog`) and existing consumers
 (including `_build_brand_book`, the design adapter, and the session API)
-read them. Removing them would break those consumers. The legacy agents
+read them. Removing them would break those consumers. The specialist agents
 are therefore invoked unconditionally on every run
 (`orchestrator.py:196-203`) so every `TeamOutput` remains
 structurally identical regardless of which phases actually ran.
@@ -293,8 +293,8 @@ on import (`api/main.py:37-63`). All routes are traced with the
 | Run loop with dependency guards | `orchestrator.py:184-234` |
 | Status determination | `orchestrator.py:302-322` |
 | Brand book builder | `orchestrator.py:380-474` |
-| Legacy agents instantiated on run | `orchestrator.py:141-145` |
-| `TeamOutput` shape incl. legacy fields | `models.py:471-498` |
+| Specialist agents instantiated on run | `orchestrator.py:141-145` |
+| `TeamOutput` shape incl. specialist fields | `models.py:471-498` |
 | `Client` / `Brand` models | `models.py:514-528` |
 | SQLite schema (clients, brands) | `store.py:30-41` |
 | `BRANDING_DB_PATH` resolution | `db.py:11-19` |

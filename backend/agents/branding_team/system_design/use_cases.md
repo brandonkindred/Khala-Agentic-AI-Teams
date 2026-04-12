@@ -81,7 +81,7 @@ flowchart LR
      (`api/main.py:597`) with `human_approved=true`.
   2. Orchestrator executes all 5 phases in order
      (`orchestrator.py:186-234`).
-  3. Legacy bridge agents run alongside for backward-compatible fields
+  3. Specialist agents run alongside to produce supporting deliverables
      (`orchestrator.py:196-203`).
   4. `_build_brand_book` consolidates all outputs into a `BrandBook`
      (`orchestrator.py:288-298`, `orchestrator.py:380-474`).

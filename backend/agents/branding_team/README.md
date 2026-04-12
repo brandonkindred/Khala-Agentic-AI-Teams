@@ -269,7 +269,7 @@ curl -X POST http://localhost:8012/branding/clients/client_abc123.../brands/bran
 # => TeamOutput (codification, mood_boards, brand_guidelines, brand_book, design_asset_result, ...)
 ```
 
-**Backward compatibility:** `POST /branding/run` and `POST /branding/sessions` (and all session/question endpoints) are unchanged. Request bodies for `/branding/run` and session creation may optionally include `client_id` and `brand_id`; when both are provided, the run is associated with that brand and the result is stored as a new version.
+**API continuity:** `POST /branding/run` and `POST /branding/sessions` (and all session/question endpoints) are unchanged. Request bodies for `/branding/run` and session creation may optionally include `client_id` and `brand_id`; when both are provided, the run is associated with that brand and the result is stored as a new version.
 
 ## Outsourcing
 

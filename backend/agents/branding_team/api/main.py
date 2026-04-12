@@ -673,12 +673,19 @@ def request_design_assets_for_brand(client_id: str, brand_id: str) -> DesignAsse
         raise HTTPException(status_code=404, detail="Brand not found")
     from branding_team.adapters.design_assets import request_design_assets
 
-    codification = orchestrator.codifier.codify(brand.mission)
-    return request_design_assets(codification, brand.mission.company_name)
+    # Run Phase 1 to get strategic core for design asset request
+    from branding_team.models import HumanReview
+
+    phase1_result = orchestrator.run_phase(
+        mission=brand.mission,
+        phase=BrandPhase.STRATEGIC_CORE,
+        human_review=HumanReview(approved=True),
+    )
+    return request_design_assets(phase1_result.strategic_core, brand.mission.company_name)
 
 
 # ---------------------------------------------------------------------------
-# Legacy run endpoint
+# Direct run endpoint
 # ---------------------------------------------------------------------------
 
 
