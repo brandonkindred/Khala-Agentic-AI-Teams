@@ -114,6 +114,18 @@ class ConvergenceTracker:
         )
 
     # ------------------------------------------------------------------
+    # Snapshot (for parallel wave execution)
+    # ------------------------------------------------------------------
+
+    def snapshot(self) -> "ConvergenceTracker":
+        """Return a shallow copy suitable for isolated use in a parallel cycle."""
+        clone = ConvergenceTracker(window_size=self._window_size, max_history=self._max_history)
+        clone._signatures = list(self._signatures)
+        clone._failure_modes = Counter(self._failure_modes)
+        clone._asset_class_history = list(self._asset_class_history)
+        return clone
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
