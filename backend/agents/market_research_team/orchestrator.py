@@ -14,7 +14,9 @@ from .agents import (
     UXResearchAgent,
     _build_strands_agent,
     _call_agent,
+    _ensure_list,
     _parse_json,
+    _safe_float,
 )
 from .models import (
     HumanReview,
@@ -93,9 +95,9 @@ class MarketResearchOrchestrator:
 
         return MarketSignal(
             signal=data.get("signal", "Cross-interview theme consistency"),
-            confidence=min(1.0, max(0.0, float(data.get("confidence", 0.55)))),
-            evidence=data.get(
-                "evidence",
+            confidence=min(1.0, max(0.0, _safe_float(data.get("confidence"), 0.55))),
+            evidence=_ensure_list(
+                data.get("evidence"),
                 ["No repeated pains found yet; gather more interviews for consistency checks."],
             ),
         )

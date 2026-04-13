@@ -68,6 +68,33 @@ def _parse_json(raw: str, fallback: object) -> object:
         return fallback
 
 
+def _safe_float(value: object, default: float) -> float:
+    """Coerce *value* to float, returning *default* on any failure.
+
+    Handles None, non-numeric strings like ``"high"`` or ``"70%"``, and other
+    unexpected types that the LLM might emit instead of a number.
+    """
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _ensure_list(value: object, default: List[str]) -> List[str]:
+    """Ensure *value* is a ``list[str]``, wrapping or falling back as needed.
+
+    If the LLM returns a bare string instead of an array (schema drift), wrap
+    it in a single-element list so downstream Pydantic models don't reject it.
+    """
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, str) and value:
+        return [value]
+    return list(default)
+
+
 # ---------------------------------------------------------------------------
 # System prompts (encoding market research methodology)
 # ---------------------------------------------------------------------------
@@ -308,10 +335,10 @@ class UXResearchAgent:
 
         return InterviewInsight(
             source=source,
-            user_jobs=data.get("user_jobs", _DEFAULT_USER_JOBS),
-            pain_points=data.get("pain_points", _DEFAULT_PAIN_POINTS),
-            desired_outcomes=data.get("desired_outcomes", _DEFAULT_DESIRED_OUTCOMES),
-            direct_quotes=data.get("direct_quotes", []),
+            user_jobs=_ensure_list(data.get("user_jobs"), _DEFAULT_USER_JOBS),
+            pain_points=_ensure_list(data.get("pain_points"), _DEFAULT_PAIN_POINTS),
+            desired_outcomes=_ensure_list(data.get("desired_outcomes"), _DEFAULT_DESIRED_OUTCOMES),
+            direct_quotes=_ensure_list(data.get("direct_quotes"), []),
         )
 
 
@@ -346,8 +373,8 @@ class UserPsychologyAgent:
             signals.append(
                 MarketSignal(
                     signal=str(item.get("signal", "Unknown signal")),
-                    confidence=min(1.0, max(0.0, float(item.get("confidence", 0.5)))),
-                    evidence=item.get("evidence", []),
+                    confidence=min(1.0, max(0.0, _safe_float(item.get("confidence"), 0.5))),
+                    evidence=_ensure_list(item.get("evidence"), []),
                 )
             )
 
@@ -411,13 +438,13 @@ class MarketViabilityAgent:
 
         return ViabilityRecommendation(
             verdict=verdict,
-            confidence=min(1.0, max(0.0, float(data.get("confidence", 0.5)))),
-            rationale=data.get("rationale", [f"Mission concept: {mission.product_concept}."]),
-            suggested_next_experiments=data.get(
-                "suggested_next_experiments",
-                [
-                    "Run a concierge MVP with 3-5 target users for one core workflow.",
-                ],
+            confidence=min(1.0, max(0.0, _safe_float(data.get("confidence"), 0.5))),
+            rationale=_ensure_list(
+                data.get("rationale"), [f"Mission concept: {mission.product_concept}."]
+            ),
+            suggested_next_experiments=_ensure_list(
+                data.get("suggested_next_experiments"),
+                ["Run a concierge MVP with 3-5 target users for one core workflow."],
             ),
         )
 

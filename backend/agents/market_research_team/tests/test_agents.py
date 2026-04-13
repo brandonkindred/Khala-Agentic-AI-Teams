@@ -7,7 +7,9 @@ from market_research_team.agents import (
     TranscriptIngestionAgent,
     UserPsychologyAgent,
     UXResearchAgent,
+    _ensure_list,
     _parse_json,
+    _safe_float,
 )
 from market_research_team.models import InterviewInsight, MarketSignal, ResearchMission
 
@@ -240,3 +242,109 @@ def test_parse_json_returns_fallback_on_invalid_input() -> None:
     assert _parse_json("", {"default": True}) == {"default": True}
     assert _parse_json("not json", []) == []
     assert _parse_json(None, "fallback") == "fallback"
+
+
+# ---------------------------------------------------------------------------
+# _safe_float helper
+# ---------------------------------------------------------------------------
+
+
+def test_safe_float_valid_values() -> None:
+    assert _safe_float(0.75, 0.5) == 0.75
+    assert _safe_float(1, 0.5) == 1.0
+    assert _safe_float("0.8", 0.5) == 0.8
+
+
+def test_safe_float_non_numeric_returns_default() -> None:
+    assert _safe_float("high", 0.5) == 0.5
+    assert _safe_float("70%", 0.5) == 0.5
+    assert _safe_float(None, 0.3) == 0.3
+    assert _safe_float([], 0.5) == 0.5
+    assert _safe_float({}, 0.5) == 0.5
+
+
+# ---------------------------------------------------------------------------
+# _ensure_list helper
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_list_with_list_input() -> None:
+    assert _ensure_list(["a", "b"], ["default"]) == ["a", "b"]
+    assert _ensure_list([1, 2], ["default"]) == ["1", "2"]
+
+
+def test_ensure_list_with_scalar_string() -> None:
+    assert _ensure_list("single value", ["default"]) == ["single value"]
+
+
+def test_ensure_list_with_non_list_returns_default() -> None:
+    assert _ensure_list(None, ["fallback"]) == ["fallback"]
+    assert _ensure_list("", ["fallback"]) == ["fallback"]
+    assert _ensure_list(42, ["fallback"]) == ["fallback"]
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: LLM returns scalars instead of arrays
+# ---------------------------------------------------------------------------
+
+
+def test_ux_research_handles_scalar_fields(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            {
+                "user_jobs": "a single job",
+                "pain_points": "a single pain",
+                "desired_outcomes": "a single outcome",
+                "direct_quotes": "a single quote",
+            }
+        ),
+    )
+    insight = UXResearchAgent().analyze("src.txt", "transcript")
+    assert insight.user_jobs == ["a single job"]
+    assert insight.pain_points == ["a single pain"]
+    assert insight.desired_outcomes == ["a single outcome"]
+    assert insight.direct_quotes == ["a single quote"]
+
+
+def test_psychology_handles_non_numeric_confidence(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            [
+                {"signal": "Sig1", "confidence": "high", "evidence": ["e1"]},
+                {"signal": "Sig2", "confidence": None, "evidence": "scalar evidence"},
+            ]
+        ),
+    )
+    signals = UserPsychologyAgent().derive_signals([])
+    assert len(signals) >= 2
+    assert signals[0].confidence == 0.5  # default for "high"
+    assert signals[1].confidence == 0.5  # default for None
+    assert signals[1].evidence == ["scalar evidence"]  # wrapped scalar
+
+
+def test_viability_handles_scalar_rationale(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            {
+                "verdict": "promising_with_risks",
+                "confidence": "70%",
+                "rationale": "a single string rationale",
+                "suggested_next_experiments": "one experiment",
+            }
+        ),
+    )
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+    )
+    result = MarketViabilityAgent().recommend(
+        mission, [MarketSignal(signal="s1", confidence=0.5)], 1
+    )
+    assert result.verdict == "promising_with_risks"
+    assert result.confidence == 0.5  # "70%" is non-numeric → default
+    assert result.rationale == ["a single string rationale"]
+    assert result.suggested_next_experiments == ["one experiment"]
