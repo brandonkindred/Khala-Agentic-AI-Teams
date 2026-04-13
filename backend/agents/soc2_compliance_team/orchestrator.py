@@ -227,6 +227,14 @@ class SOC2AuditOrchestrator:
                 logger.exception("Report parsing failed")
         else:
             logger.warning("Report writer produced no output")
+            if not has_findings:
+                next_steps_document = NextStepsDocument(
+                    title="Next Steps for SOC2 Certification",
+                    introduction="The codebase audit found no material SOC2 compliance gaps.",
+                    steps=[],
+                    recommended_timeline="",
+                    raw_markdown="",
+                )
 
         return SOC2AuditResult(
             status="completed",

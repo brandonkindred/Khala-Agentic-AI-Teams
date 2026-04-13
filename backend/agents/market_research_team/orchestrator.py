@@ -96,12 +96,17 @@ def _parse_insights_from_text(text: str) -> List[InterviewInsight]:
     return []
 
 
+def _signal_name(raw: object) -> str:
+    """Coerce a signal name, defaulting to a sensible label when None or non-string."""
+    return str(raw) if isinstance(raw, str) else "Cross-interview theme consistency"
+
+
 def _parse_signals_from_text(text: str) -> List[MarketSignal]:
     """Parse psychology/consistency agent output into MarketSignal list."""
     data = _parse_json(text, [])
     if isinstance(data, dict):
         return [MarketSignal(
-            signal=str(data.get("signal", "Unknown")),
+            signal=_signal_name(data.get("signal")),
             confidence=min(1.0, max(0.0, _safe_float(data.get("confidence"), 0.5))),
             evidence=_ensure_list(data.get("evidence"), []),
         )]
@@ -110,7 +115,7 @@ def _parse_signals_from_text(text: str) -> List[MarketSignal]:
         for item in data:
             if isinstance(item, dict):
                 signals.append(MarketSignal(
-                    signal=str(item.get("signal", "Unknown")),
+                    signal=_signal_name(item.get("signal")),
                     confidence=min(1.0, max(0.0, _safe_float(item.get("confidence"), 0.5))),
                     evidence=_ensure_list(item.get("evidence"), []),
                 ))
