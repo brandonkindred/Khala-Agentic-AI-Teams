@@ -8,6 +8,9 @@ beautifulsoup4>=4.14,<5.0
 fastapi>=0.135,<1.0
 uvicorn[standard]>=0.44,<1.0
 playwright>=1.58,<2.0
+strands-agents>=1.35,<2.0
+strands-agents-tools>=0.4,<1.0
+ollama>=0.6,<1.0
 # Shared deps (llm_service, integration credentials, Temporal)
 cryptography>=46.0,<47.0
 psycopg[binary]>=3.3,<4.0
