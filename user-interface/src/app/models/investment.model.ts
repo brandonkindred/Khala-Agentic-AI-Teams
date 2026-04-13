@@ -604,6 +604,65 @@ export interface StrategyLabStreamEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Paper Trading Models
+// ---------------------------------------------------------------------------
+
+export type PaperTradingStatus = 'running' | 'completed' | 'failed';
+
+export type PaperTradingVerdict = 'ready_for_live' | 'not_performant';
+
+export interface PaperTradingComparison {
+  backtest_win_rate_pct: number;
+  paper_win_rate_pct: number;
+  backtest_annualized_return_pct: number;
+  paper_annualized_return_pct: number;
+  backtest_sharpe_ratio: number;
+  paper_sharpe_ratio: number;
+  backtest_max_drawdown_pct: number;
+  paper_max_drawdown_pct: number;
+  backtest_profit_factor: number;
+  paper_profit_factor: number;
+  win_rate_aligned: boolean;
+  return_aligned: boolean;
+  sharpe_aligned: boolean;
+  drawdown_aligned: boolean;
+  overall_aligned: boolean;
+}
+
+export interface PaperTradingSession {
+  session_id: string;
+  lab_record_id: string;
+  strategy: StrategySpec;
+  status: PaperTradingStatus;
+  initial_capital: number;
+  current_capital: number;
+  trades: TradeRecord[];
+  trade_decisions: Record<string, unknown>[];
+  result?: BacktestResult;
+  comparison?: PaperTradingComparison;
+  verdict?: PaperTradingVerdict;
+  divergence_analysis?: string;
+  symbols_traded: string[];
+  data_source: string;
+  data_period_start: string;
+  data_period_end: string;
+  started_at: string;
+  completed_at: string;
+}
+
+export interface PaperTradingResponse {
+  session: PaperTradingSession;
+  message: string;
+}
+
+export interface PaperTradingResultsResponse {
+  items: PaperTradingSession[];
+  count: number;
+  ready_for_live_count: number;
+  not_performant_count: number;
+}
+
+// ---------------------------------------------------------------------------
 // Financial Advisor (Chat) Models
 // ---------------------------------------------------------------------------
 

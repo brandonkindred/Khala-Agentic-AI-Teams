@@ -17,6 +17,7 @@ import { Subscription, timer, switchMap, takeWhile } from 'rxjs';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
 import type {
+  PaperTradingSession,
   QualityGateResult,
   StrategyLabRecord,
   StrategyLabResultsResponse,
@@ -143,9 +144,14 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
 
   @ViewChild('logContainer') logContainer?: ElementRef<HTMLElement>;
 
+  // Paper trading state
+  paperTradingSessions = new Map<string, PaperTradingSession[]>();
+  paperTradingInProgress = new Set<string>();
+
   ngOnInit(): void {
     this.loadResults();
     this.checkForActiveRun();
+    this.loadPaperTradingSessions();
   }
 
   ngOnDestroy(): void {

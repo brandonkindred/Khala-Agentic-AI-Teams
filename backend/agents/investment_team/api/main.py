@@ -38,6 +38,7 @@ from investment_team.models import (
     LiquidityNeeds,
     NetWorth,
     PaperTradingSession,
+    PaperTradingStatus,
     PaperTradingVerdict,
     PortfolioConstraints,
     PortfolioPosition,
@@ -1804,14 +1805,7 @@ class RunPaperTradingRequest(BaseModel):
     initial_capital: float = Field(default=100000.0, gt=0)
     transaction_cost_bps: float = Field(default=5.0, ge=0)
     slippage_bps: float = Field(default=2.0, ge=0)
-    min_trades: int = Field(default=50, ge=10, description="Minimum trades before evaluation")
-    lookback_days: int = Field(default=365, ge=30, description="Days of historical data to fetch")
-    max_evaluations: int = Field(
-        default=5000,
-        ge=100,
-        le=50000,
-        description="Cap on LLM evaluations to bound execution time.",
-    )
+    lookback_days: int = Field(default=365, ge=30, description="Days of recent market data to fetch")
 
 
 class PaperTradingResponse(BaseModel):
@@ -1831,10 +1825,10 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     """
     Run a paper trading session for a winning strategy using real market data.
 
-    Fetches live price data, uses the LLM to interpret the strategy's entry/exit rules
-    against each bar, simulates trade execution, and compares performance to the backtest.
-    Strategies that align with backtest expectations are flagged as ready for live testing.
-    Underperforming strategies receive a detailed divergence analysis.
+    Executes the strategy's generated Python code against recent market data in
+    the same subprocess sandbox used for backtesting.  Compares performance to the
+    backtest.  Strategies that align with backtest expectations are flagged as ready
+    for live testing.  Underperforming strategies receive a detailed divergence analysis.
     """
     from investment_team.market_data_service import MarketDataService
     from investment_team.paper_trading_agent import PaperTradingAgent
@@ -1859,6 +1853,15 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
 
     strategy = lab_record.strategy
     backtest_record = lab_record.backtest
+
+    # 1b — Extract strategy code (required for code-based paper trading)
+    strategy_code = lab_record.strategy_code or getattr(strategy, "strategy_code", None)
+    if not strategy_code:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Strategy '{request.lab_record_id}' has no generated strategy code. "
+            "Only strategies with executable code can be paper traded.",
+        )
 
     # 2 — Fetch real market data
     market_service = MarketDataService()
@@ -1888,12 +1891,12 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     try:
         session = agent.run_session(
             strategy=strategy,
+            strategy_code=strategy_code,
             backtest_record=backtest_record,
             market_data=market_data,
             initial_capital=request.initial_capital,
             transaction_cost_bps=request.transaction_cost_bps,
             slippage_bps=request.slippage_bps,
-            min_trades=request.min_trades,
         )
     except Exception as exc:
         logger.error("Paper trading session failed: %s", exc)
@@ -1905,29 +1908,27 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     with _lock:
         _paper_trading_sessions[session.session_id] = session
 
-    # 5 — Build response message (include a warning when min_trades was not reached)
+    # 5 — Build response message
     trade_count = len(session.trades)
-    shortfall = ""
-    if trade_count < request.min_trades:
-        shortfall = (
-            f" WARNING: Only {trade_count}/{request.min_trades} trades were completed "
-            f"(insufficient data or evaluation budget). Results may be unreliable."
-        )
 
-    if session.verdict == PaperTradingVerdict.READY_FOR_LIVE:
+    if session.status == PaperTradingStatus.FAILED:
+        message = (
+            f"Paper trading failed — strategy code could not be executed against recent data. "
+            f"See divergence_analysis for error details."
+        )
+    elif session.verdict == PaperTradingVerdict.READY_FOR_LIVE:
         message = (
             f"Paper trading completed with {trade_count} trades. "
             f"Performance aligns with backtest expectations — strategy is READY FOR LIVE TESTING."
-            f"{shortfall}"
         )
     elif session.verdict == PaperTradingVerdict.NOT_PERFORMANT:
         message = (
             f"Paper trading completed with {trade_count} trades. "
             f"Performance does NOT align with backtest expectations — strategy is NOT PERFORMANT "
-            f"with live data. See divergence_analysis for details.{shortfall}"
+            f"with live data. See divergence_analysis for details."
         )
     else:
-        message = f"Paper trading completed with {trade_count} trades.{shortfall}"
+        message = f"Paper trading completed with {trade_count} trades."
 
     return PaperTradingResponse(session=session, message=message)
 
