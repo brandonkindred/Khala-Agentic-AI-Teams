@@ -477,7 +477,7 @@ async def resume_job(team: str, job_id: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.patch(
             f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
-            json={"heartbeat": False, "fields": {"status": "running", "error": None}},
+            json={"heartbeat": True, "fields": {"status": "running", "error": None}},
         )
         resp.raise_for_status()
         return resp.json()
@@ -489,7 +489,7 @@ async def restart_job(team: str, job_id: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.patch(
             f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
-            json={"heartbeat": False, "fields": {"status": "pending", "error": None}},
+            json={"heartbeat": True, "fields": {"status": "pending", "error": None}},
         )
         resp.raise_for_status()
         return resp.json()
