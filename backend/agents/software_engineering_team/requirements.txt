@@ -1,3 +1,6 @@
+strands-agents>=1.35,<2.0
+strands-agents-tools>=0.4,<1.0
+ollama>=0.6,<1.0
 pydantic>=2.12,<3.0
 httpx>=0.28,<1.0
 PyYAML>=6.0,<7.0

@@ -6,6 +6,9 @@ cryptography>=46.0,<47.0
 docker>=7.1,<8.0
 psycopg2-binary>=2.9,<3.0
 redis>=7.4,<8.0
+strands-agents>=1.35,<2.0
+strands-agents-tools>=0.4,<1.0
+ollama>=0.6,<1.0
 
 # OpenTelemetry: shared_observability.init_otel runs at every startup
 opentelemetry-api>=1.41,<2.0
