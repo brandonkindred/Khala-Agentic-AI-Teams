@@ -1991,9 +1991,13 @@ class ProductRequirementsAnalysisAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
-        if llm_client is not None:
+        from strands.models.model import Model as _StrandsModel
+
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
             self._model = llm_client
         else:
+            # Always use a proper Strands Model — raw LLMClient (e.g. OllamaLLMClient)
+            # doesn't implement the Strands Model interface (stream/update_config/get_config).
             self._model = get_strands_model("product_analysis")
         # Keep LLMClient for context_sizing utilities
         self.llm = llm_client if llm_client is not None else get_client("product_analysis")
@@ -3176,7 +3180,7 @@ Previously Answered Questions:
         )
 
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
             if not raw or not raw.strip():
                 return []
             parsed = self._parse_llm_json(raw)
@@ -3235,7 +3239,7 @@ Previously Answered Questions:
             spec_excerpt=spec_content[:4000],
         )
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
             if not raw or not raw.strip():
                 return []
             parsed = self._parse_llm_json(raw)
@@ -3386,7 +3390,7 @@ Previously Answered Questions:
         )
 
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
             if not raw or not raw.strip():
                 return True, []  # On failure, consider complete to avoid blocking
             parsed = self._parse_llm_json(raw)
@@ -3737,7 +3741,7 @@ Previously Answered Questions:
         )
 
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
             if raw and raw.strip():
                 parsed = self._parse_llm_json(raw)
                 if isinstance(parsed, dict):
@@ -3956,7 +3960,7 @@ Previously Answered Questions:
         spec_excerpt = (spec_content or "")[:4000]
         prompt = CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT.format(spec_excerpt=spec_excerpt)
         try:
-            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
             if not raw or not raw.strip():
                 return _context_discovery_fallback_questions()
             # Try to extract JSON (allow optional markdown code fence)
@@ -4126,7 +4130,7 @@ Previously Answered Questions:
         )
         prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
         try:
-            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip())
+            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip())
             if not isinstance(raw, dict):
                 return list(open_questions)
             consolidated = raw.get("consolidated_questions", [])
@@ -4182,7 +4186,7 @@ Previously Answered Questions:
         questions_json = json.dumps(questions_payload, indent=2)
         prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
         try:
-            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip())
+            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip())
             if not isinstance(raw, dict):
                 return list(open_questions)
             aligned = raw.get("aligned_questions", [])
@@ -4228,7 +4232,7 @@ Previously Answered Questions:
             questions_json=questions_json,
         )
         try:
-            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip())
+            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip())
             if not isinstance(raw, dict):
                 return list(open_questions)
             recs = raw.get("recommendations", [])
@@ -4486,7 +4490,7 @@ Previously Answered Questions:
         )
 
         try:
-            updated_spec = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            updated_spec = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
         except Exception as e:
             logger.error("Failed to update spec with LLM: %s", e)
             return current_spec
@@ -4676,7 +4680,7 @@ Previously Answered Questions:
         )
 
         try:
-            prd_content = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            prd_content = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
         except Exception as e:
             logger.error("Failed to generate PRD with LLM: %s", e)
             return cleaned_spec
@@ -4741,7 +4745,7 @@ Previously Answered Questions:
         )
 
         try:
-            clarified_spec = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            clarified_spec = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
         except Exception as e:
             logger.error("Failed to clarify spec with LLM: %s", e)
             return current_spec
@@ -4785,7 +4789,7 @@ Previously Answered Questions:
             qa_source=qa_source,
         )
         try:
-            updated_spec = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
+            updated_spec = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
         except Exception as e:
             logger.error("Failed to update spec for consistency with LLM: %s", e)
             return current_spec

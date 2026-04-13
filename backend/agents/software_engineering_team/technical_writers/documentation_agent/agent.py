@@ -68,7 +68,8 @@ class DocumentationAgent:
         Postconditions:
             - self._model is set to a Strands model
         """
-        if llm_client is not None:
+        from strands.models.model import Model as _StrandsModel
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
             self._model = llm_client
         else:
             self._model = get_strands_model("documentation")

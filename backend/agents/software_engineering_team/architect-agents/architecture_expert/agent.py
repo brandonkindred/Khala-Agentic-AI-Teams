@@ -139,9 +139,13 @@ class ArchitectureExpertAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
-        if llm_client is not None:
+        from strands.models.model import Model as _StrandsModel
+
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
             _model = llm_client
         else:
+            # Always use a proper Strands Model — raw LLMClient doesn't implement
+            # the Strands Model interface (stream/update_config/get_config/stateful).
             _model = get_strands_model("architecture")
         self._agent = Agent(model=_model, system_prompt=ARCHITECTURE_PROMPT)
 

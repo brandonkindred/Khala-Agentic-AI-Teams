@@ -61,14 +61,20 @@ def complete_json_with_continuation(
     if client is not None and isinstance(client, _StrandsModel):
         model = client
     else:
-        model = get_strands_model(task_id, client=client)
+        model = get_strands_model(task_id)
     agent = Agent(
         model=model,
         system_prompt="You are a helpful assistant. Always respond with valid JSON only.",
+        callback_handler=None,
     )
     result = agent(prompt)
     raw = str(result).strip()
-    return json.loads(raw)
+    # Try bare json.loads first; fall back to extract_json_from_response for
+    # responses wrapped in markdown fences or prefixed with explanatory text.
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return extract_json_from_response(raw)
 
 
 __all__ = [
