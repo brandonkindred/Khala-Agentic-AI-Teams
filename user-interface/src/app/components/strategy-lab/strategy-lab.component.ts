@@ -103,6 +103,21 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   winningCount = 0;
   losingCount = 0;
 
+  // Per-card expand/collapse state (collapsed by default)
+  expandedCards = new Set<string>();
+
+  toggleCard(id: string): void {
+    if (this.expandedCards.has(id)) {
+      this.expandedCards.delete(id);
+    } else {
+      this.expandedCards.add(id);
+    }
+  }
+
+  isCardExpanded(id: string): boolean {
+    return this.expandedCards.has(id);
+  }
+
   // Per-card trade ledger state
   tradeLedgerPages: Record<string, number> = {};       // lab_record_id → current page index
   readonly PAGE_SIZE = 20;

@@ -237,7 +237,7 @@
         <mat-card class="strategy-card" [class.is-winning]="record.is_winning" [class.is-losing]="!record.is_winning">
 
           <!-- Card header -->
-          <mat-card-header class="strategy-card-header-row">
+          <mat-card-header class="strategy-card-header-row card-summary" (click)="toggleCard(record.lab_record_id)">
             <div mat-card-avatar class="strategy-avatar" [class.winning-avatar]="record.is_winning" [class.losing-avatar]="!record.is_winning">
               <mat-icon>{{ record.is_winning ? 'trending_up' : 'trending_down' }}</mat-icon>
             </div>
@@ -269,7 +269,7 @@
           <mat-card-content>
 
             <!-- Win/lose badge + key metrics -->
-            <div class="metrics-row">
+            <div class="metrics-row card-summary" (click)="toggleCard(record.lab_record_id)">
               <div class="outcome-badge" [class.winning-badge]="record.is_winning" [class.losing-badge]="!record.is_winning">
                 <mat-icon>{{ record.is_winning ? 'emoji_events' : 'close' }}</mat-icon>
                 {{ record.is_winning ? 'WINNING' : 'LOSING' }}
@@ -303,6 +303,11 @@
               </div>
             </div>
 
+            <mat-icon class="expand-chevron card-summary" (click)="toggleCard(record.lab_record_id)">
+              {{ isCardExpanded(record.lab_record_id) ? 'expand_less' : 'expand_more' }}
+            </mat-icon>
+
+            @if (isCardExpanded(record.lab_record_id)) {
             <mat-divider class="card-divider"></mat-divider>
 
             <!-- Analysis narrative -->
@@ -575,6 +580,7 @@
               }
 
             </mat-accordion>
+            }
 
           </mat-card-content>
         </mat-card>
