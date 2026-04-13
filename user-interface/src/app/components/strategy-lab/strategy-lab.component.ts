@@ -17,6 +17,7 @@ import { Subscription, timer, switchMap, takeWhile } from 'rxjs';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
 import type {
+  QualityGateResult,
   StrategyLabRecord,
   StrategyLabResultsResponse,
   StrategyLabRunStatus,
@@ -513,6 +514,30 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
 
   hasSignalBrief(record: StrategyLabRecord): boolean {
     return record.signal_intelligence_brief != null && Object.keys(record.signal_intelligence_brief).length > 0;
+  }
+
+  /**
+   * A failed gate is "remedied" if it failed in an earlier refinement round
+   * and the final round produced a passing result (i.e. `refinement_rounds > 0`
+   * and this gate's round is not the last one that ran).
+   */
+  isRemedied(gate: QualityGateResult, record: StrategyLabRecord): boolean {
+    if (gate.passed) return false;
+    const maxRound = record.refinement_rounds ?? 0;
+    if (maxRound === 0) return false;
+    // Gate failed in an earlier round — the strategy continued past it
+    return (gate.refinement_round ?? 0) < maxRound;
+  }
+
+  gateIcon(gate: QualityGateResult, record: StrategyLabRecord): string {
+    if (gate.passed) return 'check_circle';
+    if (this.isRemedied(gate, record)) return 'build_circle';
+    return gate.severity === 'critical' ? 'cancel' : 'warning';
+  }
+
+  gateSeverityClass(gate: QualityGateResult, record: StrategyLabRecord): string {
+    if (this.isRemedied(gate, record)) return 'gate-remedied';
+    return 'gate-' + gate.severity;
   }
 
   deleteRecord(record: StrategyLabRecord): void {

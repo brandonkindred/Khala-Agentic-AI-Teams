@@ -541,6 +541,7 @@ export interface QualityGateResult {
   passed: boolean;
   details: string;
   severity: 'info' | 'warning' | 'critical';
+  refinement_round?: number;
 }
 
 export interface StrategyLabCycleProgress {

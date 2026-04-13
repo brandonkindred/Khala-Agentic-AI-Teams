@@ -605,8 +605,17 @@
   &.gate-info .gate-icon { color: var(--kh-success); }
   &.gate-warning .gate-icon { color: var(--kh-warning); }
   &.gate-critical .gate-icon { color: var(--kh-error); }
+  &.gate-remedied .gate-icon { color: var(--kh-warning); }
   &.gate-warning { background: var(--kh-warning-subtle); }
   &.gate-critical { background: var(--kh-error-subtle); }
+  &.gate-remedied { background: var(--kh-warning-subtle); opacity: 0.75; }
+}
+
+.gate-remedied-label {
+  font-style: italic;
+  color: var(--kh-warning);
+  font-size: 0.75rem;
+  margin-left: 0.25rem;
 }
 
 // ── Strategy Code ──────────────────────────────────────────────────────────

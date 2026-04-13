@@ -564,10 +564,15 @@
                   </mat-expansion-panel-header>
                   <div class="gate-results">
                     @for (gate of record.quality_gate_results; track $index) {
-                      <div class="gate-result" [class]="'gate-' + gate.severity">
-                        <mat-icon class="gate-icon">{{ gate.passed ? 'check_circle' : (gate.severity === 'critical' ? 'cancel' : 'warning') }}</mat-icon>
+                      <div class="gate-result" [class]="gateSeverityClass(gate, record)">
+                        <mat-icon class="gate-icon">{{ gateIcon(gate, record) }}</mat-icon>
                         <span class="gate-name">{{ gate.gate_name }}</span>
-                        <span class="gate-detail">{{ gate.details }}</span>
+                        <span class="gate-detail">
+                          {{ gate.details }}
+                          @if (isRemedied(gate, record)) {
+                            <span class="gate-remedied-label">(remedied in round {{ (gate.refinement_round ?? 0) + 1 }})</span>
+                          }
+                        </span>
                       </div>
                     }
                   </div>

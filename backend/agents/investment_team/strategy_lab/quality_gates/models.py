@@ -14,3 +14,4 @@ class QualityGateResult(BaseModel):
     passed: bool
     details: str
     severity: Literal["info", "warning", "critical"]
+    refinement_round: int = 0

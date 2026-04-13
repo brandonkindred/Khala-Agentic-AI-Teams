@@ -132,10 +132,9 @@ class StrategyLabOrchestrator:
         # ── Phase 2: CODE REFINEMENT LOOP ─────────────────────────────
         # Iterate up to MAX_CODE_REFINEMENT_ROUNDS, refining the
         # generated code for correctness, performance, syntax errors,
-        # build errors, and runtime errors.  The code must pass all
-        # quality gates AND execute cleanly before we proceed to
-        # backtesting.
-        code_is_clean = False
+        # build errors, runtime errors, and backtest anomalies (zero
+        # trades, implausible returns, etc.).  The loop exits only when
+        # all quality gates pass AND the backtest produces sound results.
 
         for round_num in range(MAX_CODE_REFINEMENT_ROUNDS):
             round_gate_results: List[QualityGateResult] = []
@@ -146,6 +145,8 @@ class StrategyLabOrchestrator:
             code_gates = self.code_safety_checker.check(code)
             round_gate_results.extend(spec_gates)
             round_gate_results.extend(code_gates)
+            for g in round_gate_results:
+                g.refinement_round = round_num
             all_gate_results.extend(round_gate_results)
 
             checks_total = len(round_gate_results)
@@ -183,6 +184,7 @@ class StrategyLabOrchestrator:
                     all_gate_results.append(QualityGateResult(
                         gate_name="market_data", passed=False, severity="critical",
                         details=f"No market data available for asset class '{spec.asset_class}'.",
+                        refinement_round=round_num,
                     ))
                     break
                 total_bars = sum(len(bars) for bars in market_data.values())
@@ -200,6 +202,7 @@ class StrategyLabOrchestrator:
                 all_gate_results.append(QualityGateResult(
                     gate_name="code_execution", passed=False, severity="critical",
                     details=f"Execution failed ({exec_result.error_type}): {exec_result.stderr[:500]}",
+                    refinement_round=round_num,
                 ))
                 if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
                     emit("refining", {"sub_phase": "started", "refinement_round": round_num, "failure_phase": "execution"})
@@ -224,6 +227,7 @@ class StrategyLabOrchestrator:
                 all_gate_results.append(QualityGateResult(
                     gate_name="trade_validation", passed=False, severity="critical",
                     details=f"Invalid trade output: {ve}",
+                    refinement_round=round_num,
                 ))
                 if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
                     emit("refining", {"sub_phase": "started", "refinement_round": round_num, "failure_phase": "execution"})
@@ -242,31 +246,41 @@ class StrategyLabOrchestrator:
                 "execution_time": exec_result.execution_time_seconds,
             })
 
-            # Code passed all gates and executed cleanly
-            code_is_clean = True
-            break
-
-        # ── Phase 3: BACKTEST EVALUATION ──────────────────────────────
-        # Only reached when the code is proven to run without errors.
-        if code_is_clean and trades:
+            # ── 2e: BACKTEST EVALUATION ───────────────────────────────
+            # Code ran cleanly — now compute metrics and check for
+            # anomalies.  Critical anomalies (zero trades, implausible
+            # returns, etc.) trigger refinement while budget remains.
             metrics = compute_metrics(trades, config.initial_capital, config.start_date, config.end_date)
 
             anomaly_gates = self.anomaly_detector.check(metrics, trades)
+            for g in anomaly_gates:
+                g.refinement_round = round_num
             all_gate_results.extend(anomaly_gates)
 
             critical_anomalies = [g for g in anomaly_gates if not g.passed and g.severity == "critical"]
             if critical_anomalies:
-                logger.warning(
-                    "Backtest anomalies detected for %s: %s",
-                    spec.strategy_id,
-                    "; ".join(g.details for g in critical_anomalies),
-                )
-                # Results are anomalous but code executed correctly
-                execution_succeeded = True
-            else:
-                execution_succeeded = True
+                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
+                    emit("refining", {"sub_phase": "started", "refinement_round": round_num, "failure_phase": "evaluation"})
+                    failure_details = "\n".join(f"- {g.details}" for g in critical_anomalies)
+                    updates, code = self._refine(
+                        spec, code, "evaluation (backtest anomaly)",
+                        failure_details, metrics, refinement_attempts,
+                    )
+                    spec = self._apply_updates(spec, updates, code)
+                    changes = updates.get("changes_made", "anomaly fix")
+                    refinement_attempts.append(changes)
+                    emit("refining", {"sub_phase": "completed", "refinement_round": round_num, "changes_made": changes})
+                    continue
+                else:
+                    logger.warning("Max code refinement rounds reached on evaluation for %s", spec.strategy_id)
+                    execution_succeeded = True  # anomalous but code is correct
+                    break
 
-        # ── Phase 4: ANALYSIS ─────────────────────────────────────────
+            # All gates passed — code is clean and backtest is sound
+            execution_succeeded = True
+            break
+
+        # ── Phase 3: ANALYSIS ─────────────────────────────────────────
         narrative = ""
         if execution_succeeded and trades:
             emit("analyzing", {"sub_phase": "draft"})
@@ -293,7 +307,7 @@ class StrategyLabOrchestrator:
                 f"Last failure: {all_gate_results[-1].details if all_gate_results else 'unknown'}."
             )
 
-        # ── Phase 5: RECORD ───────────────────────────────────────────
+        # ── Phase 4: RECORD ───────────────────────────────────────────
         now_iso = datetime.now(timezone.utc).isoformat()
         is_winning = execution_succeeded and metrics.annualized_return_pct > WINNING_THRESHOLD
 
