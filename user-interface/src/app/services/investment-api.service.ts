@@ -31,6 +31,7 @@ import type {
   InvestmentJobsListResponse,
   DeleteStrategyLabRecordResponse,
   ClearStrategyLabStorageResponse,
+  RunPaperTradingRequest,
   PaperTradingResponse,
   PaperTradingResultsResponse,
   StartAdvisorSessionRequest,
@@ -262,10 +263,10 @@ export class InvestmentApiService {
   // Paper Trading
   // ---------------------------------------------------------------------------
 
-  startPaperTrade(labRecordId: string): Observable<PaperTradingResponse> {
+  runPaperTrading(request: RunPaperTradingRequest): Observable<PaperTradingResponse> {
     return this.http.post<PaperTradingResponse>(
       `${this.baseUrl}/strategy-lab/paper-trade`,
-      { lab_record_id: labRecordId }
+      request
     );
   }
 

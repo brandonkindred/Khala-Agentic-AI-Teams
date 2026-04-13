@@ -248,23 +248,6 @@
                 {{ record.created_at | date:'MMM d, y, h:mm a' }} &bull; {{ record.strategy.strategy_id }}
               </mat-card-subtitle>
             </div>
-            @if (record.is_winning && (record.strategy_code || record.strategy.strategy_code)) {
-              <button
-                mat-icon-button
-                type="button"
-                class="paper-trade-btn"
-                aria-label="Paper trade this strategy"
-                matTooltip="Paper Trade"
-                (click)="startPaperTrade(record); $event.stopPropagation()"
-                [disabled]="paperTradingInProgress.has(record.lab_record_id) || running"
-              >
-                @if (paperTradingInProgress.has(record.lab_record_id)) {
-                  <mat-spinner diameter="22"></mat-spinner>
-                } @else {
-                  <mat-icon>candlestick_chart</mat-icon>
-                }
-              </button>
-            }
             <button
               mat-icon-button
               type="button"
@@ -609,106 +592,108 @@
                 </mat-expansion-panel>
               }
 
-              <!-- Paper Trading panel -->
-              @if (hasPaperSessions(record.lab_record_id)) {
-                <mat-expansion-panel class="paper-trading-panel">
-                  <mat-expansion-panel-header>
-                    <mat-panel-title>
-                      <mat-icon class="panel-icon">candlestick_chart</mat-icon>
-                      Paper Trading
-                    </mat-panel-title>
-                    <mat-panel-description>
-                      {{ getPaperSessions(record.lab_record_id).length }} session(s)
-                    </mat-panel-description>
-                  </mat-expansion-panel-header>
-
-                  @for (ptSession of getPaperSessions(record.lab_record_id); track ptSession.session_id) {
-                    <div class="pt-session">
-                      <div class="pt-session-header">
-                        <span class="pt-session-id">{{ ptSession.session_id }}</span>
-                        <span class="pt-session-period">{{ ptSession.data_period_start | slice:0:10 }} — {{ ptSession.data_period_end | slice:0:10 }}</span>
-                        @if (ptSession.verdict === 'ready_for_live') {
-                          <span class="pt-verdict pt-verdict-ready">READY FOR LIVE</span>
-                        } @else if (ptSession.verdict === 'not_performant') {
-                          <span class="pt-verdict pt-verdict-not-performant">NOT PERFORMANT</span>
-                        } @else if (ptSession.status === 'failed') {
-                          <span class="pt-verdict pt-verdict-failed">FAILED</span>
-                        }
-                      </div>
-
-                      @if (ptSession.comparison) {
-                        <div class="pt-comparison">
-                          <div class="pt-metric-row">
-                            <span class="pt-metric-label">Win Rate</span>
-                            <span class="pt-metric-bt">{{ ptSession.comparison.backtest_win_rate_pct | number:'1.1-1' }}%</span>
-                            <span class="pt-metric-arrow">→</span>
-                            <span class="pt-metric-pt" [class.aligned]="ptSession.comparison.win_rate_aligned" [class.diverged]="!ptSession.comparison.win_rate_aligned">
-                              {{ ptSession.comparison.paper_win_rate_pct | number:'1.1-1' }}%
-                            </span>
-                            <mat-icon class="pt-align-icon" [class.aligned]="ptSession.comparison.win_rate_aligned" [class.diverged]="!ptSession.comparison.win_rate_aligned">
-                              {{ ptSession.comparison.win_rate_aligned ? 'check_circle' : 'cancel' }}
-                            </mat-icon>
-                          </div>
-                          <div class="pt-metric-row">
-                            <span class="pt-metric-label">Annual Return</span>
-                            <span class="pt-metric-bt">{{ ptSession.comparison.backtest_annualized_return_pct | number:'1.1-1' }}%</span>
-                            <span class="pt-metric-arrow">→</span>
-                            <span class="pt-metric-pt" [class.aligned]="ptSession.comparison.return_aligned" [class.diverged]="!ptSession.comparison.return_aligned">
-                              {{ ptSession.comparison.paper_annualized_return_pct | number:'1.1-1' }}%
-                            </span>
-                            <mat-icon class="pt-align-icon" [class.aligned]="ptSession.comparison.return_aligned" [class.diverged]="!ptSession.comparison.return_aligned">
-                              {{ ptSession.comparison.return_aligned ? 'check_circle' : 'cancel' }}
-                            </mat-icon>
-                          </div>
-                          <div class="pt-metric-row">
-                            <span class="pt-metric-label">Sharpe</span>
-                            <span class="pt-metric-bt">{{ ptSession.comparison.backtest_sharpe_ratio | number:'1.2-2' }}</span>
-                            <span class="pt-metric-arrow">→</span>
-                            <span class="pt-metric-pt" [class.aligned]="ptSession.comparison.sharpe_aligned" [class.diverged]="!ptSession.comparison.sharpe_aligned">
-                              {{ ptSession.comparison.paper_sharpe_ratio | number:'1.2-2' }}
-                            </span>
-                            <mat-icon class="pt-align-icon" [class.aligned]="ptSession.comparison.sharpe_aligned" [class.diverged]="!ptSession.comparison.sharpe_aligned">
-                              {{ ptSession.comparison.sharpe_aligned ? 'check_circle' : 'cancel' }}
-                            </mat-icon>
-                          </div>
-                          <div class="pt-metric-row">
-                            <span class="pt-metric-label">Max DD</span>
-                            <span class="pt-metric-bt">{{ ptSession.comparison.backtest_max_drawdown_pct | number:'1.1-1' }}%</span>
-                            <span class="pt-metric-arrow">→</span>
-                            <span class="pt-metric-pt" [class.aligned]="ptSession.comparison.drawdown_aligned" [class.diverged]="!ptSession.comparison.drawdown_aligned">
-                              {{ ptSession.comparison.paper_max_drawdown_pct | number:'1.1-1' }}%
-                            </span>
-                            <mat-icon class="pt-align-icon" [class.aligned]="ptSession.comparison.drawdown_aligned" [class.diverged]="!ptSession.comparison.drawdown_aligned">
-                              {{ ptSession.comparison.drawdown_aligned ? 'check_circle' : 'cancel' }}
-                            </mat-icon>
-                          </div>
-                          <div class="pt-metric-row">
-                            <span class="pt-metric-label">Profit Factor</span>
-                            <span class="pt-metric-bt">{{ ptSession.comparison.backtest_profit_factor | number:'1.2-2' }}</span>
-                            <span class="pt-metric-arrow">→</span>
-                            <span class="pt-metric-pt">{{ ptSession.comparison.paper_profit_factor | number:'1.2-2' }}</span>
-                          </div>
-                        </div>
-                      }
-
-                      @if (ptSession.divergence_analysis) {
-                        <div class="pt-divergence">
-                          <strong>Divergence Analysis</strong>
-                          <p>{{ ptSession.divergence_analysis }}</p>
-                        </div>
-                      }
-
-                      <div class="pt-session-footer">
-                        <span>{{ ptSession.trades.length }} trades</span>
-                        <span>{{ ptSession.symbols_traded.length }} symbols</span>
-                        <span>{{ ptSession.completed_at | date:'MMM d, y, h:mm a' }}</span>
-                      </div>
-                    </div>
-                  }
-                </mat-expansion-panel>
-              }
-
             </mat-accordion>
+            }
+
+            <!-- Paper Trading section (winning strategies only) -->
+            @if (record.is_winning) {
+              <mat-divider class="card-divider"></mat-divider>
+
+              <div class="paper-trading-section">
+                @if (getPaperSession(record); as session) {
+                  <!-- Paper trading results -->
+                  <div class="paper-trading-result">
+                    <div class="paper-verdict-row">
+                      <div class="paper-verdict-badge" [class.verdict-ready]="session.verdict === 'ready_for_live'" [class.verdict-not-performant]="session.verdict === 'not_performant'">
+                        <mat-icon>{{ session.verdict === 'ready_for_live' ? 'verified' : 'warning' }}</mat-icon>
+                        {{ verdictLabel(session.verdict ?? '') }}
+                      </div>
+                      <span class="paper-meta">
+                        {{ session.trades.length }} trades &bull;
+                        {{ session.data_period_start | slice:0:10 }} to {{ session.data_period_end | slice:0:10 }}
+                      </span>
+                      @if (paperTradingLabRecordId === record.lab_record_id) {
+                        <button mat-stroked-button class="rerun-paper-btn" disabled>
+                          <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
+                          Re-run
+                        </button>
+                      } @else {
+                        <button
+                          mat-stroked-button
+                          class="rerun-paper-btn"
+                          (click)="runPaperTrading(record)"
+                          [disabled]="paperTradingLabRecordId !== null || running"
+                        >
+                          <mat-icon>refresh</mat-icon>
+                          Re-run
+                        </button>
+                      }
+                    </div>
+
+                    <!-- Comparison table -->
+                    @if (session.comparison) {
+                      <div class="comparison-table-wrap">
+                        <table class="comparison-table">
+                          <thead>
+                            <tr>
+                              <th>Metric</th>
+                              <th>Backtest</th>
+                              <th>Paper</th>
+                              <th>Aligned</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            @for (m of comparisonMetrics(session.comparison); track m.label) {
+                              <tr>
+                                <td class="cmp-label">{{ m.label }}</td>
+                                <td class="num-cell">{{ m.backtest }}</td>
+                                <td class="num-cell">{{ m.paper }}</td>
+                                <td class="cmp-aligned">
+                                  <mat-icon [class.aligned-yes]="m.aligned" [class.aligned-no]="!m.aligned">
+                                    {{ m.aligned ? 'check_circle' : 'cancel' }}
+                                  </mat-icon>
+                                </td>
+                              </tr>
+                            }
+                          </tbody>
+                        </table>
+                      </div>
+                    }
+
+                    <!-- Divergence analysis (when not performant) -->
+                    @if (session.divergence_analysis) {
+                      <div class="divergence-analysis">
+                        <mat-icon class="narrative-icon">analytics</mat-icon>
+                        <p>{{ session.divergence_analysis }}</p>
+                      </div>
+                    }
+                  </div>
+                } @else {
+                  <!-- No paper trading yet — show button -->
+                  @if (paperTradingLabRecordId === record.lab_record_id) {
+                    <button
+                      mat-stroked-button
+                      color="primary"
+                      class="paper-trade-btn"
+                      disabled
+                    >
+                      <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
+                      <span>Running paper trading…</span>
+                    </button>
+                  } @else {
+                    <button
+                      mat-stroked-button
+                      color="primary"
+                      class="paper-trade-btn"
+                      (click)="runPaperTrading(record)"
+                      [disabled]="paperTradingLabRecordId !== null || running"
+                    >
+                      <mat-icon>candlestick_chart</mat-icon>
+                      <span>Paper Trade This Strategy</span>
+                    </button>
+                  }
+                }
+              </div>
             }
 
           </mat-card-content>

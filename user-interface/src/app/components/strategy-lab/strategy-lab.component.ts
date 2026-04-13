@@ -18,6 +18,7 @@ import { Subscription, timer, switchMap, takeWhile } from 'rxjs';
 import { InvestmentApiService } from '../../services/investment-api.service';
 import type {
   PaperTradingSession,
+  PaperTradingComparison,
   QualityGateResult,
   StrategyLabRecord,
   StrategyLabResultsResponse,
@@ -128,6 +129,12 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     'net_pnl', 'cumulative_pnl', 'outcome',
   ];
 
+  // Paper trading state
+  /** Lab record id currently being paper traded. */
+  paperTradingLabRecordId: string | null = null;
+  /** Paper trading sessions keyed by lab_record_id for quick lookup. */
+  paperTradingSessions: Record<string, PaperTradingSession> = {};
+
   // Run progress tracking
   activeRunId: string | null = null;
   runStatus: StrategyLabRunStatus | null = null;
@@ -141,14 +148,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
 
   @ViewChild('logContainer') logContainer?: ElementRef<HTMLElement>;
 
-  // Paper trading state
-  paperTradingSessions = new Map<string, PaperTradingSession[]>();
-  paperTradingInProgress = new Set<string>();
-
   ngOnInit(): void {
     this.loadResults();
+    this.loadPaperTradingResults();
     this.checkForActiveRun();
-    this.loadPaperTradingSessions();
   }
 
   ngOnDestroy(): void {
@@ -540,51 +543,6 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return 'gate-' + gate.severity;
   }
 
-  // ---------------------------------------------------------------------------
-  // Paper Trading
-  // ---------------------------------------------------------------------------
-
-  loadPaperTradingSessions(): void {
-    this.api.getPaperTradingResults().subscribe({
-      next: (res) => {
-        this.paperTradingSessions.clear();
-        for (const session of res.items) {
-          const existing = this.paperTradingSessions.get(session.lab_record_id) ?? [];
-          existing.push(session);
-          this.paperTradingSessions.set(session.lab_record_id, existing);
-        }
-      },
-    });
-  }
-
-  getPaperSessions(labRecordId: string): PaperTradingSession[] {
-    return this.paperTradingSessions.get(labRecordId) ?? [];
-  }
-
-  startPaperTrade(record: StrategyLabRecord): void {
-    const id = record.lab_record_id;
-    if (this.paperTradingInProgress.has(id)) return;
-    this.paperTradingInProgress.add(id);
-    this.error = null;
-
-    this.api.startPaperTrade(id).subscribe({
-      next: (res) => {
-        this.paperTradingInProgress.delete(id);
-        const existing = this.paperTradingSessions.get(id) ?? [];
-        existing.unshift(res.session);
-        this.paperTradingSessions.set(id, existing);
-      },
-      error: (err) => {
-        this.paperTradingInProgress.delete(id);
-        this.error = err?.error?.detail || err?.message || 'Paper trading failed.';
-      },
-    });
-  }
-
-  hasPaperSessions(labRecordId: string): boolean {
-    return (this.paperTradingSessions.get(labRecordId)?.length ?? 0) > 0;
-  }
-
   deleteRecord(record: StrategyLabRecord): void {
     const id = record.lab_record_id;
     const shortHyp = record.strategy.hypothesis.slice(0, 60) + (record.strategy.hypothesis.length > 60 ? '…' : '');
@@ -622,6 +580,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.api.clearStrategyLabStorage().subscribe({
       next: () => {
         this.clearingAll = false;
+        this.paperTradingSessions = {};
         this.loadResults();
       },
       error: (err) => {
@@ -629,5 +588,61 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         this.error = err?.error?.detail || err?.message || 'Failed to clear strategy lab data.';
       },
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Paper Trading
+  // ---------------------------------------------------------------------------
+
+  loadPaperTradingResults(): void {
+    this.api.getPaperTradingResults().subscribe({
+      next: (res) => {
+        const sessions: Record<string, PaperTradingSession> = {};
+        for (const s of res.items) {
+          // Keep the most recent session per lab record
+          if (!sessions[s.lab_record_id] || s.completed_at > sessions[s.lab_record_id].completed_at) {
+            sessions[s.lab_record_id] = s;
+          }
+        }
+        this.paperTradingSessions = sessions;
+      },
+    });
+  }
+
+  runPaperTrading(record: StrategyLabRecord): void {
+    this.error = null;
+    this.paperTradingLabRecordId = record.lab_record_id;
+    this.api.runPaperTrading({ lab_record_id: record.lab_record_id }).subscribe({
+      next: (res) => {
+        this.paperTradingLabRecordId = null;
+        this.paperTradingSessions[record.lab_record_id] = res.session;
+      },
+      error: (err) => {
+        this.paperTradingLabRecordId = null;
+        this.error = err?.error?.detail || err?.message || 'Paper trading failed.';
+      },
+    });
+  }
+
+  getPaperSession(record: StrategyLabRecord): PaperTradingSession | null {
+    return this.paperTradingSessions[record.lab_record_id] ?? null;
+  }
+
+  verdictLabel(verdict: string): string {
+    return verdict === 'ready_for_live' ? 'READY FOR LIVE' : 'NOT PERFORMANT';
+  }
+
+  verdictColor(verdict: string): string {
+    return verdict === 'ready_for_live' ? 'winning' : 'losing';
+  }
+
+  comparisonMetrics(c: PaperTradingComparison): { label: string; backtest: string; paper: string; aligned: boolean }[] {
+    return [
+      { label: 'Win Rate', backtest: c.backtest_win_rate_pct.toFixed(1) + '%', paper: c.paper_win_rate_pct.toFixed(1) + '%', aligned: c.win_rate_aligned },
+      { label: 'Annual Return', backtest: c.backtest_annualized_return_pct.toFixed(1) + '%', paper: c.paper_annualized_return_pct.toFixed(1) + '%', aligned: c.return_aligned },
+      { label: 'Sharpe', backtest: c.backtest_sharpe_ratio.toFixed(2), paper: c.paper_sharpe_ratio.toFixed(2), aligned: c.sharpe_aligned },
+      { label: 'Max Drawdown', backtest: c.backtest_max_drawdown_pct.toFixed(1) + '%', paper: c.paper_max_drawdown_pct.toFixed(1) + '%', aligned: c.drawdown_aligned },
+      { label: 'Profit Factor', backtest: c.backtest_profit_factor.toFixed(2), paper: c.paper_profit_factor.toFixed(2), aligned: c.overall_aligned },
+    ];
   }
 }

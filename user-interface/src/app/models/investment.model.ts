@@ -650,6 +650,16 @@ export interface PaperTradingSession {
   completed_at: string;
 }
 
+export interface RunPaperTradingRequest {
+  lab_record_id: string;
+  initial_capital?: number;
+  transaction_cost_bps?: number;
+  slippage_bps?: number;
+  min_trades?: number;
+  lookback_days?: number;
+  max_evaluations?: number;
+}
+
 export interface PaperTradingResponse {
   session: PaperTradingSession;
   message: string;
