@@ -1002,6 +1002,7 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     reset_job(job_id, str(repo_path), job_type="run_team")
+    update_job(job_id, status=JOB_STATUS_RUNNING, error=None)
 
     try:
         from software_engineering_team.temporal.client import is_temporal_enabled
