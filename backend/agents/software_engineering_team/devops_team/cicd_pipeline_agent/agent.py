@@ -6,7 +6,7 @@ import json
 
 from strands import Agent
 
-from llm_service import LLMClient
+from llm_service import LLMClient, get_strands_model
 
 from .models import CICDPipelineAgentInput, CICDPipelineAgentOutput
 from .prompts import CICD_PIPELINE_PROMPT
@@ -16,7 +16,11 @@ class CICDPipelineAgent:
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
-        self._model = llm_client
+        from strands.models.model import Model as _StrandsModel
+        if isinstance(llm_client, _StrandsModel):
+            self._model = llm_client
+        else:
+            self._model = get_strands_model("devops")
 
     def run(self, input_data: CICDPipelineAgentInput) -> CICDPipelineAgentOutput:
         spec = input_data.task_spec
