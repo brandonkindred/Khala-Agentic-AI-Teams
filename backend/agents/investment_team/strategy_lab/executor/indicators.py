@@ -32,7 +32,10 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    result = 100 - (100 / (1 + rs))
+    # When avg_loss is zero (sustained uptrend) RS is infinite → RSI = 100
+    result = result.fillna(np.where(avg_loss == 0, 100.0, np.nan))
+    return result
 
 
 def macd(
@@ -100,8 +103,14 @@ def adx(
     plus_dm = plus_dm.where(~mask_plus, 0)
     minus_dm = minus_dm.where(~mask_minus, 0)
 
-    atr_val = atr(high, low, close, period)
-    safe_atr = atr_val.replace(0, np.nan)
+    # Wilder-smoothed True Range (same smoothing as DM to keep ADX consistent)
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    atr_wilder = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    safe_atr = atr_wilder.replace(0, np.nan)
 
     plus_di = 100 * plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / safe_atr
     minus_di = 100 * minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / safe_atr
