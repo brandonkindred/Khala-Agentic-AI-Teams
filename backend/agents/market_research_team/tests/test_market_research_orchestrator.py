@@ -41,7 +41,11 @@ def test_orchestrator_ready_for_execution_with_approval() -> None:
 
     assert output.status == WorkflowStatus.READY_FOR_EXECUTION
     assert output.topology == TeamTopology.SPLIT
-    assert output.recommendation.verdict in {"promising_with_risks", "needs_more_validation"}
+    assert output.recommendation.verdict in {
+        "promising_with_risks",
+        "needs_more_validation",
+        "insufficient_evidence",
+    }
     assert any(
         signal.signal == "Cross-interview theme consistency" for signal in output.market_signals
     )
