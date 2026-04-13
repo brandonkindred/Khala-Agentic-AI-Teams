@@ -269,7 +269,10 @@
           <mat-card-content>
 
             <!-- Win/lose badge + key metrics -->
-            <div class="metrics-row card-summary" (click)="toggleCard(record.lab_record_id)">
+            <div class="metrics-row card-summary" role="button" tabindex="0"
+                 (click)="toggleCard(record.lab_record_id)"
+                 (keydown.enter)="toggleCard(record.lab_record_id)"
+                 (keydown.space)="toggleCard(record.lab_record_id); $event.preventDefault()">
               <div class="outcome-badge" [class.winning-badge]="record.is_winning" [class.losing-badge]="!record.is_winning">
                 <mat-icon>{{ record.is_winning ? 'emoji_events' : 'close' }}</mat-icon>
                 {{ record.is_winning ? 'WINNING' : 'LOSING' }}
