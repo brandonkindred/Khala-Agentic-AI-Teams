@@ -59,6 +59,9 @@ from investment_team.models import (
 from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
 from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
+from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
+from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 from shared_observability import init_otel, instrument_fastapi_app
 
@@ -1004,9 +1007,6 @@ def _strategy_lab_worker(
         publish(run_id, payload, event_type=event_type)
 
     try:
-        from investment_team.strategy_lab import StrategyLabOrchestrator
-        from investment_team.strategy_lab.quality_gates import ConvergenceTracker
-
         orchestrator = StrategyLabOrchestrator(convergence_tracker=ConvergenceTracker())
 
         config = BacktestConfig(
@@ -1090,7 +1090,6 @@ def _strategy_lab_worker(
 
         # ── Wave-based parallel execution ──────────────────────────────
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 
         primary_tracker = orchestrator.convergence_tracker
         max_parallel = request.max_parallel
