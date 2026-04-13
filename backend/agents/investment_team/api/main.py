@@ -1152,22 +1152,22 @@ def _strategy_lab_worker(
                         completed_indices.add(cn - 1)  # 0-based
                         wave_results.append((cn - 1, record))
 
-                        # Persist the highest contiguous completed index so
-                        # resume_strategy_lab_run can safely use it as the
-                        # start_cycle_offset without skipping failed cycles
-                        # or re-running already-finished ones.
+                        # Track the highest contiguous completed index for
+                        # resume_strategy_lab_run (start_cycle_offset), but
+                        # report the actual count for UI progress display.
                         contiguous = 0
                         while contiguous in completed_indices:
                             contiguous += 1
                         _update_run({
-                            "completed_cycles": contiguous,
+                            "completed_cycles": len(completed_ids),
+                            "contiguous_cycles": contiguous,
                             "completed_record_ids": list(completed_ids),
                             "current_cycle": None,
                         })
                         _publish("cycle_complete", {
                             "cycle_index": cn,
                             "record_id": record.lab_record_id,
-                            "completed_cycles": contiguous,
+                            "completed_cycles": len(completed_ids),
                         })
                     except HTTPException as exc:
                         if exc.status_code == 502:
@@ -1431,6 +1431,9 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         raise HTTPException(status_code=400, detail="Original request payload not available.")
 
     completed_cycles = state.get("completed_cycles", 0)
+    # contiguous_cycles tracks the highest unbroken sequence from index 0
+    # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
+    contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
     total_cycles = state.get("total_cycles", 10)
 
     with _lock:
@@ -1447,6 +1450,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         "started_at": state.get("started_at", _now()),
         "total_cycles": total_cycles,
         "completed_cycles": completed_cycles,
+        "contiguous_cycles": contiguous_cycles,
         "skipped_cycles": state.get("skipped_cycles", 0),
         "current_cycle": None,
         "completed_record_ids": state.get("completed_record_ids", []),
@@ -1463,7 +1467,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     thread = threading.Thread(
         target=_strategy_lab_worker,
         args=(run_id, request),
-        kwargs={"start_cycle_offset": completed_cycles},
+        kwargs={"start_cycle_offset": contiguous_cycles},
         name=f"strategy-lab-resume-{run_id}",
         daemon=True,
     )
@@ -1472,7 +1476,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     return StrategyLabRunStartResponse(
         run_id=run_id,
         total_cycles=total_cycles,
-        message=f"Run resumed from cycle {completed_cycles + 1} of {total_cycles}.",
+        message=f"Run resumed from cycle {contiguous_cycles + 1} of {total_cycles}.",
     )
 
 
