@@ -313,6 +313,12 @@
             @if (isCardExpanded(record.lab_record_id)) {
             <mat-divider class="card-divider"></mat-divider>
 
+            <!-- Hypothesis -->
+            <div class="hypothesis">
+              <mat-icon class="hypothesis-icon">lightbulb</mat-icon>
+              <p>{{ record.strategy.hypothesis }}</p>
+            </div>
+
             <!-- Analysis narrative -->
             <div class="narrative">
               <mat-icon class="narrative-icon">auto_stories</mat-icon>

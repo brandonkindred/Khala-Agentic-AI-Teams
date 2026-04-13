@@ -1,12 +1,12 @@
 """Strategy Lab Orchestrator — deterministic pipeline for code-generation backtesting.
 
-Replaces the LLM-per-bar backtesting model with:
+Pipeline:
 1. Strands Agent ideates strategy + generates Python code
-2. Quality gates validate strategy spec + code safety
-3. Subprocess sandbox executes the code against real OHLCV data
-4. Anomaly detector checks backtest results
-5. Refinement loop (up to 10 rounds) on failures
-6. Strands Agent generates post-backtest narrative
+2. Code refinement loop (up to 50 rounds): validate spec & code safety,
+   execute in sandbox, fix syntax/build/runtime errors until the code
+   runs cleanly and produces valid trade output
+3. Backtest evaluation: compute metrics and check for anomalies
+4. Strands Agent generates post-backtest narrative
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 PhaseCallback = Callable[[str, Dict[str, Any]], None]
 
-MAX_REFINEMENT_ROUNDS = 10
+MAX_CODE_REFINEMENT_ROUNDS = 50
 WINNING_THRESHOLD = 8.0
 
 
@@ -129,11 +129,18 @@ class StrategyLabOrchestrator:
         execution_succeeded = False
         market_data: Optional[Dict[str, List[OHLCVBar]]] = None
 
-        # ── Phase 2: REFINEMENT LOOP ──────────────────────────────────
-        for round_num in range(MAX_REFINEMENT_ROUNDS + 1):
+        # ── Phase 2: CODE REFINEMENT LOOP ─────────────────────────────
+        # Iterate up to MAX_CODE_REFINEMENT_ROUNDS, refining the
+        # generated code for correctness, performance, syntax errors,
+        # build errors, and runtime errors.  The code must pass all
+        # quality gates AND execute cleanly before we proceed to
+        # backtesting.
+        code_is_clean = False
+
+        for round_num in range(MAX_CODE_REFINEMENT_ROUNDS):
             round_gate_results: List[QualityGateResult] = []
 
-            # ── 2a: VALIDATE ──────────────────────────────────────────
+            # ── 2a: VALIDATE (spec + code safety) ────────────────────
             emit("validating", {"sub_phase": "started", "refinement_round": round_num})
             spec_gates = self.strategy_validator.validate(spec)
             code_gates = self.code_safety_checker.check(code)
@@ -150,7 +157,7 @@ class StrategyLabOrchestrator:
                     "sub_phase": "failed", "refinement_round": round_num,
                     "checks_passed": checks_passed, "checks_total": checks_total,
                 })
-                if round_num < MAX_REFINEMENT_ROUNDS:
+                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
                     emit("refining", {"sub_phase": "started", "refinement_round": round_num, "failure_phase": "validation"})
                     failure_details = "\n".join(f"- [{g.gate_name}] {g.details}" for g in critical_failures)
                     updates, code = self._refine(spec, code, "validation", failure_details, None, refinement_attempts)
@@ -160,7 +167,7 @@ class StrategyLabOrchestrator:
                     emit("refining", {"sub_phase": "completed", "refinement_round": round_num, "changes_made": changes})
                     continue
                 else:
-                    logger.warning("Max refinement rounds reached on validation for %s", spec.strategy_id)
+                    logger.warning("Max code refinement rounds reached on validation for %s", spec.strategy_id)
                     break
 
             emit("validating", {
@@ -168,7 +175,7 @@ class StrategyLabOrchestrator:
                 "checks_passed": checks_passed, "checks_total": checks_total,
             })
 
-            # ── 2b: FETCH DATA (once, reuse across refinement rounds) ─
+            # ── 2b: FETCH DATA (once, reuse across rounds) ───────────
             if market_data is None:
                 emit("executing", {"sub_phase": "fetching_data"})
                 market_data = self._fetch_market_data(spec, config)
@@ -185,7 +192,7 @@ class StrategyLabOrchestrator:
                     "bars_count": total_bars,
                 })
 
-            # ── 2c: EXECUTE ───────────────────────────────────────────
+            # ── 2c: EXECUTE (syntax / runtime correctness) ───────────
             emit("executing", {"sub_phase": "running_code", "refinement_round": round_num})
             exec_result = self.sandbox.run(code, market_data, config)
 
@@ -194,7 +201,7 @@ class StrategyLabOrchestrator:
                     gate_name="code_execution", passed=False, severity="critical",
                     details=f"Execution failed ({exec_result.error_type}): {exec_result.stderr[:500]}",
                 ))
-                if round_num < MAX_REFINEMENT_ROUNDS:
+                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
                     emit("refining", {"sub_phase": "started", "refinement_round": round_num, "failure_phase": "execution"})
                     failure_details = (
                         f"Error type: {exec_result.error_type}\n"
@@ -207,16 +214,10 @@ class StrategyLabOrchestrator:
                     emit("refining", {"sub_phase": "completed", "refinement_round": round_num, "changes_made": changes})
                     continue
                 else:
-                    logger.warning("Max refinement rounds reached on execution for %s", spec.strategy_id)
+                    logger.warning("Max code refinement rounds reached on execution for %s", spec.strategy_id)
                     break
 
-            emit("executing", {
-                "sub_phase": "completed",
-                "trades_count": len(exec_result.raw_trades),
-                "execution_time": exec_result.execution_time_seconds,
-            })
-
-            # ── 2d: BUILD TRADES + EVALUATE ───────────────────────────
+            # ── 2d: VALIDATE TRADE OUTPUT ─────────────────────────────
             try:
                 trades = build_trade_records(exec_result.raw_trades, config)
             except ValueError as ve:
@@ -224,7 +225,7 @@ class StrategyLabOrchestrator:
                     gate_name="trade_validation", passed=False, severity="critical",
                     details=f"Invalid trade output: {ve}",
                 ))
-                if round_num < MAX_REFINEMENT_ROUNDS:
+                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
                     emit("refining", {"sub_phase": "started", "refinement_round": round_num, "failure_phase": "execution"})
                     updates, code = self._refine(spec, code, "execution", str(ve), None, refinement_attempts)
                     spec = self._apply_updates(spec, updates, code)
@@ -234,36 +235,38 @@ class StrategyLabOrchestrator:
                     continue
                 else:
                     break
+
+            emit("executing", {
+                "sub_phase": "completed",
+                "trades_count": len(exec_result.raw_trades),
+                "execution_time": exec_result.execution_time_seconds,
+            })
+
+            # Code passed all gates and executed cleanly
+            code_is_clean = True
+            break
+
+        # ── Phase 3: BACKTEST EVALUATION ──────────────────────────────
+        # Only reached when the code is proven to run without errors.
+        if code_is_clean and trades:
             metrics = compute_metrics(trades, config.initial_capital, config.start_date, config.end_date)
 
             anomaly_gates = self.anomaly_detector.check(metrics, trades)
-            round_gate_results = anomaly_gates
             all_gate_results.extend(anomaly_gates)
 
             critical_anomalies = [g for g in anomaly_gates if not g.passed and g.severity == "critical"]
             if critical_anomalies:
-                if round_num < MAX_REFINEMENT_ROUNDS:
-                    emit("refining", {"sub_phase": "started", "refinement_round": round_num, "failure_phase": "evaluation"})
-                    failure_details = "\n".join(f"- {g.details}" for g in critical_anomalies)
-                    updates, code = self._refine(
-                        spec, code, "evaluation (backtest anomaly)",
-                        failure_details, metrics, refinement_attempts,
-                    )
-                    spec = self._apply_updates(spec, updates, code)
-                    changes = updates.get("changes_made", "anomaly fix")
-                    refinement_attempts.append(changes)
-                    emit("refining", {"sub_phase": "completed", "refinement_round": round_num, "changes_made": changes})
-                    continue
-                else:
-                    logger.warning("Max refinement rounds reached on evaluation for %s", spec.strategy_id)
-                    execution_succeeded = True  # We have results, just anomalous
-                    break
+                logger.warning(
+                    "Backtest anomalies detected for %s: %s",
+                    spec.strategy_id,
+                    "; ".join(g.details for g in critical_anomalies),
+                )
+                # Results are anomalous but code executed correctly
+                execution_succeeded = True
+            else:
+                execution_succeeded = True
 
-            # All gates passed
-            execution_succeeded = True
-            break
-
-        # ── Phase 3: ANALYSIS ─────────────────────────────────────────
+        # ── Phase 4: ANALYSIS ─────────────────────────────────────────
         narrative = ""
         if execution_succeeded and trades:
             emit("analyzing", {"sub_phase": "draft"})
@@ -290,7 +293,7 @@ class StrategyLabOrchestrator:
                 f"Last failure: {all_gate_results[-1].details if all_gate_results else 'unknown'}."
             )
 
-        # ── Phase 4: RECORD ───────────────────────────────────────────
+        # ── Phase 5: RECORD ───────────────────────────────────────────
         now_iso = datetime.now(timezone.utc).isoformat()
         is_winning = execution_succeeded and metrics.annualized_return_pct > WINNING_THRESHOLD
 
