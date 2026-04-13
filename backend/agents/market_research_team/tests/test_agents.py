@@ -195,6 +195,52 @@ def test_market_viability_invalid_verdict_defaults(monkeypatch) -> None:
     assert result.verdict == "needs_more_validation"
 
 
+def test_market_viability_non_hashable_verdict_defaults(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            {
+                "verdict": ["list", "not", "string"],
+                "confidence": 0.5,
+                "rationale": [],
+                "suggested_next_experiments": [],
+            }
+        ),
+    )
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+    )
+    result = MarketViabilityAgent().recommend(
+        mission, [MarketSignal(signal="s1", confidence=0.5)], 1
+    )
+    assert result.verdict == "needs_more_validation"
+
+
+def test_market_viability_null_verdict_defaults(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            {
+                "verdict": None,
+                "confidence": 0.5,
+                "rationale": [],
+                "suggested_next_experiments": [],
+            }
+        ),
+    )
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+    )
+    result = MarketViabilityAgent().recommend(
+        mission, [MarketSignal(signal="s1", confidence=0.5)], 1
+    )
+    assert result.verdict == "needs_more_validation"
+
+
 # ---------------------------------------------------------------------------
 # ResearchScriptAgent (Strands-powered)
 # ---------------------------------------------------------------------------

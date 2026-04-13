@@ -432,7 +432,8 @@ class MarketViabilityAgent:
             data = {}
 
         valid_verdicts = {"insufficient_evidence", "needs_more_validation", "promising_with_risks"}
-        verdict = data.get("verdict", "needs_more_validation")
+        raw_verdict = data.get("verdict")
+        verdict = str(raw_verdict) if isinstance(raw_verdict, str) else "needs_more_validation"
         if verdict not in valid_verdicts:
             verdict = "needs_more_validation"
 
