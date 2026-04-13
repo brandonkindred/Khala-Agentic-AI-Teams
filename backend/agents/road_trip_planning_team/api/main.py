@@ -79,6 +79,7 @@ def _run_pipeline(trip_request: PlanTripRequest) -> TripItinerary:
             end = text.rfind("}") + 1
             if start >= 0 and end > start:
                 data = json.loads(text[start:end])
+                data = _translate_itinerary_keys(data)
                 return TripItinerary.model_validate(data)
         except Exception as e:
             logger.warning("Failed to parse itinerary from graph output: %s", e)
@@ -91,6 +92,81 @@ def _run_pipeline(trip_request: PlanTripRequest) -> TripItinerary:
     )
 
 
+def _translate_itinerary_keys(data: dict) -> dict:
+    """Translate graph agent JSON keys to TripItinerary model fields.
+
+    The graph prompt uses natural-language keys (e.g. ``summary``,
+    ``date_label``, flat ``activities``) while the Pydantic model expects
+    ``overview``, ``date``, and split ``morning_activities`` /
+    ``afternoon_activities`` / ``evening_activities``.
+    """
+    # Top-level key renames
+    if "summary" in data and "overview" not in data:
+        data["overview"] = data.pop("summary")
+    if "packing_list" in data and "packing_suggestions" not in data:
+        data["packing_suggestions"] = data.pop("packing_list")
+    if isinstance(data.get("route_summary"), str):
+        data["route_summary"] = [data["route_summary"]]
+
+    # Per-day translations
+    for day in data.get("days") or []:
+        if not isinstance(day, dict):
+            continue
+        if "date_label" in day and "date" not in day:
+            day["date"] = day.pop("date_label")
+        if "day_notes" in day and "day_summary" not in day:
+            day["day_summary"] = day.pop("day_notes")
+
+        # Flatten nested driving object into flat fields
+        driving = day.pop("driving", None)
+        if isinstance(driving, dict):
+            if "from_location" in driving and "driving_from" not in day:
+                day["driving_from"] = driving["from_location"]
+            if "miles" in driving and "driving_distance_miles" not in day:
+                day["driving_distance_miles"] = driving["miles"]
+            if "hours" in driving and "driving_time_hours" not in day:
+                day["driving_time_hours"] = driving["hours"]
+
+        # Split flat activities list into morning/afternoon/evening
+        flat_activities = day.pop("activities", None)
+        if isinstance(flat_activities, list) and not (
+            day.get("morning_activities") or day.get("afternoon_activities")
+            or day.get("evening_activities")
+        ):
+            morning, afternoon, evening = [], [], []
+            for act in flat_activities:
+                if not isinstance(act, dict):
+                    continue
+                time_hint = (act.pop("time", "") or "").lower()
+                if "morning" in time_hint or "breakfast" in time_hint:
+                    morning.append(act)
+                elif "evening" in time_hint or "dinner" in time_hint or "night" in time_hint:
+                    evening.append(act)
+                else:
+                    afternoon.append(act)
+            day["morning_activities"] = morning
+            day["afternoon_activities"] = afternoon
+            day["evening_activities"] = evening
+
+        # Translate meals list into Activity-compatible dicts
+        meals = day.get("meals")
+        if isinstance(meals, list):
+            day["meals"] = [
+                {"name": m.get("venue") or m.get("name", ""), "description": m.get("notes", ""),
+                 "activity_type": m.get("meal_type", "dining")}
+                if isinstance(m, dict) else m
+                for m in meals
+            ]
+
+        # Translate accommodation object
+        acc = day.get("accommodation")
+        if isinstance(acc, dict):
+            if "type" in acc and "accommodation_type" not in acc:
+                acc["accommodation_type"] = acc.pop("type")
+            if "notes" in acc and "booking_tips" not in acc:
+                acc["booking_tips"] = acc.pop("notes")
+
+    return data
 @app.get("/health")
 async def health():
     """Health check for the Road Trip Planning team."""

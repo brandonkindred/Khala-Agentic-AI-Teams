@@ -110,8 +110,10 @@ def _parse_report_output(
         except Exception:
             findings_by_tsc[cat] = []
 
-    # Fall back to structured TSC results if the report writer didn't produce findings_by_tsc
-    if not findings_by_tsc:
+    # Fall back to structured TSC results if the report writer didn't
+    # produce usable findings_by_tsc (empty dict OR dict with all-empty lists)
+    has_any_findings = any(v for v in findings_by_tsc.values())
+    if not has_any_findings:
         for r in tsc_results:
             if r.findings:
                 findings_by_tsc[r.category.value] = r.findings
