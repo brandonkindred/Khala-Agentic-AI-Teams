@@ -920,6 +920,7 @@ def test_compare_performance_aligned() -> None:
     assert comparison.return_aligned is True
     assert comparison.sharpe_aligned is True
     assert comparison.drawdown_aligned is True
+    assert comparison.profit_factor_aligned is True
 
 
 def test_compare_performance_divergent() -> None:
@@ -949,6 +950,7 @@ def test_compare_performance_divergent() -> None:
     assert comparison.overall_aligned is False
     assert comparison.win_rate_aligned is False
     assert comparison.return_aligned is False
+    assert comparison.profit_factor_aligned is False
 
 
 def test_compare_performance_zero_backtest_drawdown() -> None:

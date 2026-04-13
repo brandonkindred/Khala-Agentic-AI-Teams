@@ -626,6 +626,7 @@ export interface PaperTradingComparison {
   return_aligned: boolean;
   sharpe_aligned: boolean;
   drawdown_aligned: boolean;
+  profit_factor_aligned: boolean;
   overall_aligned: boolean;
 }
 

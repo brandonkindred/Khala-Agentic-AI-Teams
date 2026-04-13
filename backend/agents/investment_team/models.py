@@ -396,6 +396,7 @@ class PaperTradingComparison(BaseModel):
     return_aligned: bool
     sharpe_aligned: bool
     drawdown_aligned: bool
+    profit_factor_aligned: bool = True
     overall_aligned: bool
 
 

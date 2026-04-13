@@ -628,12 +628,16 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return this.paperTradingSessions[record.lab_record_id] ?? null;
   }
 
-  verdictLabel(verdict: string): string {
-    return verdict === 'ready_for_live' ? 'READY FOR LIVE' : 'NOT PERFORMANT';
+  verdictLabel(verdict: string | undefined | null): string {
+    if (verdict === 'ready_for_live') return 'READY FOR LIVE';
+    if (verdict === 'not_performant') return 'NOT PERFORMANT';
+    return 'INCONCLUSIVE';
   }
 
-  verdictColor(verdict: string): string {
-    return verdict === 'ready_for_live' ? 'winning' : 'losing';
+  verdictColor(verdict: string | undefined | null): string {
+    if (verdict === 'ready_for_live') return 'winning';
+    if (verdict === 'not_performant') return 'losing';
+    return 'neutral';
   }
 
   comparisonMetrics(c: PaperTradingComparison): { label: string; backtest: string; paper: string; aligned: boolean }[] {
@@ -642,7 +646,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       { label: 'Annual Return', backtest: c.backtest_annualized_return_pct.toFixed(1) + '%', paper: c.paper_annualized_return_pct.toFixed(1) + '%', aligned: c.return_aligned },
       { label: 'Sharpe', backtest: c.backtest_sharpe_ratio.toFixed(2), paper: c.paper_sharpe_ratio.toFixed(2), aligned: c.sharpe_aligned },
       { label: 'Max Drawdown', backtest: c.backtest_max_drawdown_pct.toFixed(1) + '%', paper: c.paper_max_drawdown_pct.toFixed(1) + '%', aligned: c.drawdown_aligned },
-      { label: 'Profit Factor', backtest: c.backtest_profit_factor.toFixed(2), paper: c.paper_profit_factor.toFixed(2), aligned: c.overall_aligned },
+      { label: 'Profit Factor', backtest: c.backtest_profit_factor.toFixed(2), paper: c.paper_profit_factor.toFixed(2), aligned: c.profit_factor_aligned },
     ];
   }
 }

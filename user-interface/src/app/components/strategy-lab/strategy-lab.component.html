@@ -604,9 +604,12 @@
                   <!-- Paper trading results -->
                   <div class="paper-trading-result">
                     <div class="paper-verdict-row">
-                      <div class="paper-verdict-badge" [class.verdict-ready]="session.verdict === 'ready_for_live'" [class.verdict-not-performant]="session.verdict === 'not_performant'">
-                        <mat-icon>{{ session.verdict === 'ready_for_live' ? 'verified' : 'warning' }}</mat-icon>
-                        {{ verdictLabel(session.verdict ?? '') }}
+                      <div class="paper-verdict-badge"
+                           [class.verdict-ready]="session.verdict === 'ready_for_live'"
+                           [class.verdict-not-performant]="session.verdict === 'not_performant'"
+                           [class.verdict-inconclusive]="!session.verdict">
+                        <mat-icon>{{ session.verdict === 'ready_for_live' ? 'verified' : session.verdict === 'not_performant' ? 'warning' : 'help_outline' }}</mat-icon>
+                        {{ verdictLabel(session.verdict) }}
                       </div>
                       <span class="paper-meta">
                         {{ session.trades.length }} trades &bull;

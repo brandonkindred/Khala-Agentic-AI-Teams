@@ -274,6 +274,13 @@ class PaperTradingAgent:
         else:
             drawdown_aligned = paper_result.max_drawdown_pct <= 5.0
 
+        # Profit factor: within ±0.5 (or both above 1.0)
+        pf_diff = abs(paper_result.profit_factor - backtest_result.profit_factor)
+        if backtest_result.profit_factor >= 1.0 and paper_result.profit_factor >= 1.0:
+            profit_factor_aligned = pf_diff <= 0.5
+        else:
+            profit_factor_aligned = pf_diff <= 0.3
+
         overall = win_rate_aligned and return_aligned and sharpe_aligned and drawdown_aligned
 
         return PaperTradingComparison(
@@ -291,6 +298,7 @@ class PaperTradingAgent:
             return_aligned=return_aligned,
             sharpe_aligned=sharpe_aligned,
             drawdown_aligned=drawdown_aligned,
+            profit_factor_aligned=profit_factor_aligned,
             overall_aligned=overall,
         )
 

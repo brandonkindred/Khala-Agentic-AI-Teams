@@ -1220,6 +1220,11 @@
     background: #fff3e0;
     color: #e65100;
   }
+
+  &.verdict-inconclusive {
+    background: #e8eaf6;
+    color: #5c6bc0;
+  }
 }
 
 .paper-meta {
