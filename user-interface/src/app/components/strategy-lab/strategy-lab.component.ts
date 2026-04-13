@@ -42,11 +42,10 @@ interface ActivityLogEntry {
 }
 
 const STRATEGY_LAB_PHASES: PhaseDefinition[] = [
-  { id: 'ideating',   label: 'Ideate',   icon: 'psychology' },
-  { id: 'validating', label: 'Validate', icon: 'verified' },
-  { id: 'executing',  label: 'Execute',  icon: 'play_circle' },
-  { id: 'refining',   label: 'Refine',   icon: 'auto_fix_high' },
-  { id: 'analyzing',  label: 'Analyze',  icon: 'summarize' },
+  { id: 'ideating',     label: 'Ideate',    icon: 'psychology' },
+  { id: 'coding',       label: 'Code',      icon: 'code' },
+  { id: 'backtesting',  label: 'Backtest',  icon: 'play_circle' },
+  { id: 'analyzing',    label: 'Analyze',   icon: 'summarize' },
 ];
 
 /** Ordered phase IDs for determining completed/pending state. */
@@ -139,8 +138,6 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   readonly STRATEGY_LAB_PHASES = STRATEGY_LAB_PHASES;
   activityLog: ActivityLogEntry[] = [];
   private lastCycleIndex = -1;
-  /** Tracks whether the refine phase was actually entered during this cycle. */
-  private refinePhaseEntered = false;
 
   @ViewChild('logContainer') logContainer?: ElementRef<HTMLElement>;
 
@@ -231,11 +228,6 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       if (cycleIndex !== this.lastCycleIndex) {
         this.activityLog = [];
         this.lastCycleIndex = cycleIndex;
-        this.refinePhaseEntered = false;
-      }
-
-      if (phase === 'refining') {
-        this.refinePhaseEntered = true;
       }
 
       // Merge strategy from completed ideation into current_cycle
@@ -268,7 +260,6 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       this.runStatus.current_cycle = undefined;
       this.activityLog = [];
       this.lastCycleIndex = -1;
-      this.refinePhaseEntered = false;
       this.loadResults();
     }
 
@@ -396,10 +387,6 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     const currentIdx = PHASE_ORDER.indexOf(current);
     const phaseIdx = PHASE_ORDER.indexOf(phaseId);
     if (currentIdx < 0 || phaseIdx < 0) return false;
-    // Refine is only "completed" if it was entered AND we've moved past it
-    if (phaseId === 'refining') {
-      return this.refinePhaseEntered && currentIdx > phaseIdx;
-    }
     return phaseIdx < currentIdx;
   }
 
@@ -408,17 +395,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   isPhasePending(phaseId: string): boolean {
-    return !this.isPhaseCompleted(phaseId) && !this.isCurrentPhase(phaseId) && !this.isPhaseSkipped(phaseId);
-  }
-
-  isPhaseSkipped(phaseId: string): boolean {
-    // Refine is skipped (dashed) if we've passed it without entering it
-    if (phaseId !== 'refining') return false;
-    const current = this.runStatus?.current_cycle?.phase;
-    if (!current) return false;
-    const currentIdx = PHASE_ORDER.indexOf(current);
-    const refineIdx = PHASE_ORDER.indexOf('refining');
-    return currentIdx > refineIdx && !this.refinePhaseEntered;
+    return !this.isPhaseCompleted(phaseId) && !this.isCurrentPhase(phaseId);
   }
 
   getAssetClassIcon(assetClass: string): string {
@@ -466,21 +443,19 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         if (subPhase === 'started') return 'Ideating new trading strategy & generating code...';
         if (subPhase === 'completed') return `Strategy ideated \u2014 ${strategy?.asset_class ?? 'unknown'} asset class`;
         return 'Ideating...';
-      case 'validating':
+      case 'coding':
         if (subPhase === 'started') return 'Validating strategy spec and code safety...';
-        if (subPhase === 'completed') return `Validation passed (${data['checks_total'] ?? '?'} checks, ${data['checks_passed'] ?? '?'} passed)`;
+        if (subPhase === 'completed') return `Code validated (${data['checks_total'] ?? '?'} checks, ${data['checks_passed'] ?? '?'} passed)`;
         if (subPhase === 'failed') return `Validation failed (${(data['checks_total'] as number ?? 0) - (data['checks_passed'] as number ?? 0)} critical issue(s))`;
-        return 'Validating...';
-      case 'executing':
+        if (subPhase === 'refining') return `Refining code (round ${(round ?? 0) + 1}/10) \u2014 fixing ${data['failure_phase'] ?? 'issues'}...`;
+        if (subPhase === 'refined') return `Code refined \u2014 ${data['changes_made'] ?? 'code updated'}`;
+        return 'Coding...';
+      case 'backtesting':
         if (subPhase === 'fetching_data') return 'Fetching historical market data...';
         if (subPhase === 'data_loaded') return `Market data loaded (${data['symbols_count'] ?? '?'} symbols, ${(data['bars_count'] as number ?? 0).toLocaleString()} bars)`;
         if (subPhase === 'running_code') return 'Executing strategy backtest in sandbox...';
         if (subPhase === 'completed') return `Backtest complete \u2014 ${data['trades_count'] ?? '?'} trades in ${((data['execution_time'] as number) ?? 0).toFixed(1)}s`;
-        return 'Executing...';
-      case 'refining':
-        if (subPhase === 'started') return `Refining strategy code (round ${(round ?? 0) + 1}/10) \u2014 fixing ${data['failure_phase'] ?? 'issues'}...`;
-        if (subPhase === 'completed') return `Refinement complete \u2014 ${data['changes_made'] ?? 'code updated'}`;
-        return 'Refining...';
+        return 'Backtesting...';
       case 'analyzing':
         if (subPhase === 'draft') return 'Generating analysis narrative...';
         if (subPhase === 'review') return 'Self-reviewing analysis against metrics...';

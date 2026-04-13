@@ -533,7 +533,7 @@ export interface ClearStrategyLabStorageResponse {
 // Strategy Lab — real-time run tracking
 
 export type StrategyLabPhase =
-  | 'ideating' | 'validating' | 'executing' | 'refining'
+  | 'ideating' | 'coding' | 'backtesting'
   | 'analyzing' | 'complete';
 
 export interface QualityGateResult {

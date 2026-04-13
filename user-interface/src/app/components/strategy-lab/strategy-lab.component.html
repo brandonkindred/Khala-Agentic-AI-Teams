@@ -87,7 +87,6 @@
                  [class.completed]="isPhaseCompleted(phase.id)"
                  [class.current]="isCurrentPhase(phase.id)"
                  [class.pending]="isPhasePending(phase.id)"
-                 [class.skipped]="isPhaseSkipped(phase.id)"
                  [class.has-connector]="!last"
                  [class.next-completed]="!last && isPhaseCompleted(STRATEGY_LAB_PHASES[i + 1].id)">
               <div class="phase-node">

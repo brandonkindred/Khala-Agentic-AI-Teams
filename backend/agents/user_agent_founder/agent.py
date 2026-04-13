@@ -87,6 +87,23 @@ Be specific and opinionated. Cut anything that doesn't serve the core hypothesis
 Keep it concise — under 2000 words. No fluff, no hedging.
 """
 
+CHAT_PROMPT = """\
+You are Alex Chen, the startup founder. A user observing your test run has \
+sent you a message. Respond in character — budget-conscious, speed-first, \
+UX-obsessed.
+
+## Current Workflow Status
+{status}
+
+## Recent Decisions
+{recent_decisions}
+
+## User Message
+{message}
+
+Respond naturally and concisely. Stay in character.
+"""
+
 QUESTION_ANSWERING_PROMPT = """\
 The software engineering team building TaskFlow is asking you a question. \
 Answer it as the founder — budget-conscious, speed-first, UX-obsessed.
@@ -215,6 +232,21 @@ class FounderAgent:
         )
 
         return _parse_answer(self._call(prompt))
+
+    def chat(self, message: str, context: dict[str, Any]) -> str:
+        """Respond to a user chat message in the founder persona."""
+        recent = context.get("recent_decisions", "none yet")
+        if isinstance(recent, list):
+            recent = "\n".join(
+                f"- {d.get('question_text', '?')}: {d.get('answer_text', '?')}"
+                for d in recent[-5:]
+            ) or "none yet"
+        prompt = CHAT_PROMPT.format(
+            status=context.get("status", "unknown"),
+            recent_decisions=recent,
+            message=message,
+        )
+        return self._call(prompt)
 
 
 # ---------------------------------------------------------------------------

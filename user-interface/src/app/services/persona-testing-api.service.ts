@@ -8,6 +8,7 @@ import type {
   PersonaTestRun,
   PersonaTestRunDetail,
   PersonaDecision,
+  PersonaChatHistory,
   RunArtifacts,
 } from '../models';
 
@@ -56,5 +57,19 @@ export class PersonaTestingApiService {
 
   deleteJob(jobId: string): Observable<unknown> {
     return this.http.delete(`${this.baseUrl}/job/${encodeURIComponent(jobId)}`);
+  }
+
+  getChatHistory(runId: string, sinceId?: number): Observable<PersonaChatHistory> {
+    const params = sinceId ? `?since_id=${sinceId}` : '';
+    return this.http.get<PersonaChatHistory>(
+      `${this.baseUrl}/runs/${encodeURIComponent(runId)}/chat${params}`,
+    );
+  }
+
+  sendChatMessage(runId: string, message: string): Observable<PersonaChatHistory> {
+    return this.http.post<PersonaChatHistory>(
+      `${this.baseUrl}/runs/${encodeURIComponent(runId)}/chat`,
+      { message },
+    );
   }
 }

@@ -73,7 +73,7 @@ class StrategyLabOrchestrator:
         on_phase: Optional[PhaseCallback] = None,
         exclude_asset_classes: Optional[List[str]] = None,
     ) -> StrategyLabRecord:
-        """Run one full strategy lab cycle: ideate → validate → execute → analyze.
+        """Run one full strategy lab cycle: ideate → code → backtest → analyze.
 
         Returns a StrategyLabRecord with the final result.
         """
@@ -140,7 +140,7 @@ class StrategyLabOrchestrator:
             round_gate_results: List[QualityGateResult] = []
 
             # ── 2a: VALIDATE (spec + code safety) ────────────────────
-            emit("validating", {"sub_phase": "started", "refinement_round": round_num})
+            emit("coding", {"sub_phase": "started", "refinement_round": round_num})
             spec_gates = self.strategy_validator.validate(spec)
             code_gates = self.code_safety_checker.check(code)
             round_gate_results.extend(spec_gates)
@@ -154,31 +154,31 @@ class StrategyLabOrchestrator:
 
             critical_failures = [g for g in round_gate_results if not g.passed and g.severity == "critical"]
             if critical_failures:
-                emit("validating", {
+                emit("coding", {
                     "sub_phase": "failed", "refinement_round": round_num,
                     "checks_passed": checks_passed, "checks_total": checks_total,
                 })
                 if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
-                    emit("refining", {"sub_phase": "started", "refinement_round": round_num, "failure_phase": "validation"})
+                    emit("coding", {"sub_phase": "refining", "refinement_round": round_num, "failure_phase": "validation"})
                     failure_details = "\n".join(f"- [{g.gate_name}] {g.details}" for g in critical_failures)
                     updates, code = self._refine(spec, code, "validation", failure_details, None, refinement_attempts)
                     spec = self._apply_updates(spec, updates, code)
                     changes = updates.get("changes_made", "validation fix")
                     refinement_attempts.append(changes)
-                    emit("refining", {"sub_phase": "completed", "refinement_round": round_num, "changes_made": changes})
+                    emit("coding", {"sub_phase": "refined", "refinement_round": round_num, "changes_made": changes})
                     continue
                 else:
                     logger.warning("Max code refinement rounds reached on validation for %s", spec.strategy_id)
                     break
 
-            emit("validating", {
+            emit("coding", {
                 "sub_phase": "completed", "refinement_round": round_num,
                 "checks_passed": checks_passed, "checks_total": checks_total,
             })
 
             # ── 2b: FETCH DATA (once, reuse across rounds) ───────────
             if market_data is None:
-                emit("executing", {"sub_phase": "fetching_data"})
+                emit("backtesting", {"sub_phase": "fetching_data"})
                 market_data = self._fetch_market_data(spec, config)
                 if not market_data:
                     all_gate_results.append(QualityGateResult(
@@ -188,14 +188,14 @@ class StrategyLabOrchestrator:
                     ))
                     break
                 total_bars = sum(len(bars) for bars in market_data.values())
-                emit("executing", {
+                emit("backtesting", {
                     "sub_phase": "data_loaded",
                     "symbols_count": len(market_data),
                     "bars_count": total_bars,
                 })
 
             # ── 2c: EXECUTE (syntax / runtime correctness) ───────────
-            emit("executing", {"sub_phase": "running_code", "refinement_round": round_num})
+            emit("backtesting", {"sub_phase": "running_code", "refinement_round": round_num})
             exec_result = self.sandbox.run(code, market_data, config)
 
             if not exec_result.success:
@@ -205,7 +205,7 @@ class StrategyLabOrchestrator:
                     refinement_round=round_num,
                 ))
                 if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
-                    emit("refining", {"sub_phase": "started", "refinement_round": round_num, "failure_phase": "execution"})
+                    emit("coding", {"sub_phase": "refining", "refinement_round": round_num, "failure_phase": "execution"})
                     failure_details = (
                         f"Error type: {exec_result.error_type}\n"
                         f"stderr:\n{exec_result.stderr[:2000]}"
@@ -214,7 +214,7 @@ class StrategyLabOrchestrator:
                     spec = self._apply_updates(spec, updates, code)
                     changes = updates.get("changes_made", "execution fix")
                     refinement_attempts.append(changes)
-                    emit("refining", {"sub_phase": "completed", "refinement_round": round_num, "changes_made": changes})
+                    emit("coding", {"sub_phase": "refined", "refinement_round": round_num, "changes_made": changes})
                     continue
                 else:
                     logger.warning("Max code refinement rounds reached on execution for %s", spec.strategy_id)
@@ -230,17 +230,17 @@ class StrategyLabOrchestrator:
                     refinement_round=round_num,
                 ))
                 if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
-                    emit("refining", {"sub_phase": "started", "refinement_round": round_num, "failure_phase": "execution"})
+                    emit("coding", {"sub_phase": "refining", "refinement_round": round_num, "failure_phase": "execution"})
                     updates, code = self._refine(spec, code, "execution", str(ve), None, refinement_attempts)
                     spec = self._apply_updates(spec, updates, code)
                     changes = updates.get("changes_made", "trade validation fix")
                     refinement_attempts.append(changes)
-                    emit("refining", {"sub_phase": "completed", "refinement_round": round_num, "changes_made": changes})
+                    emit("coding", {"sub_phase": "refined", "refinement_round": round_num, "changes_made": changes})
                     continue
                 else:
                     break
 
-            emit("executing", {
+            emit("backtesting", {
                 "sub_phase": "completed",
                 "trades_count": len(exec_result.raw_trades),
                 "execution_time": exec_result.execution_time_seconds,
@@ -260,7 +260,7 @@ class StrategyLabOrchestrator:
             critical_anomalies = [g for g in anomaly_gates if not g.passed and g.severity == "critical"]
             if critical_anomalies:
                 if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
-                    emit("refining", {"sub_phase": "started", "refinement_round": round_num, "failure_phase": "evaluation"})
+                    emit("coding", {"sub_phase": "refining", "refinement_round": round_num, "failure_phase": "evaluation"})
                     failure_details = "\n".join(f"- {g.details}" for g in critical_anomalies)
                     updates, code = self._refine(
                         spec, code, "evaluation (backtest anomaly)",
@@ -269,7 +269,7 @@ class StrategyLabOrchestrator:
                     spec = self._apply_updates(spec, updates, code)
                     changes = updates.get("changes_made", "anomaly fix")
                     refinement_attempts.append(changes)
-                    emit("refining", {"sub_phase": "completed", "refinement_round": round_num, "changes_made": changes})
+                    emit("coding", {"sub_phase": "refined", "refinement_round": round_num, "changes_made": changes})
                     continue
                 else:
                     logger.warning("Max code refinement rounds reached on evaluation for %s", spec.strategy_id)
