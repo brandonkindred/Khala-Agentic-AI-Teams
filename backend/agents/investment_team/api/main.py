@@ -1092,12 +1092,26 @@ def _strategy_lab_worker(
         # ── Wave-based parallel execution ──────────────────────────────
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        _TERMINAL_STATUSES = frozenset({"cancelled", "failed", "interrupted"})
+
+        def _is_run_cancelled() -> bool:
+            """Check the job service for external cancellation."""
+            try:
+                client = _get_lab_run_job_client()
+                persisted = client.get_job(run_id)
+                if persisted:
+                    return persisted.get("status", "") in _TERMINAL_STATUSES
+            except Exception:
+                pass
+            return False
+
         primary_tracker = orchestrator.convergence_tracker
         max_parallel = request.max_parallel
         remaining = list(range(start_cycle_offset, request.batch_size))
         run_failed = False
+        run_cancelled = False
 
-        while remaining and not run_failed:
+        while remaining and not run_failed and not run_cancelled:
             wave_indices = remaining[:max_parallel]
             remaining = remaining[max_parallel:]
 
@@ -1194,7 +1208,17 @@ def _strategy_lab_worker(
                 ]
                 primary_tracker.record(record.strategy, gate_results)
 
+            # Check for external cancellation between waves
+            if not run_failed and _is_run_cancelled():
+                logger.info("Strategy lab run %s cancelled externally — stopping after wave", run_id)
+                run_cancelled = True
+
         if run_failed:
+            return
+
+        if run_cancelled:
+            _update_run({"status": "cancelled", "current_cycle": None})
+            _publish("error", {"detail": "Run cancelled by user"})
             return
 
         msg = f"Completed {len(completed_ids)} strategy lab cycle(s)."
