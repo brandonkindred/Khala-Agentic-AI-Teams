@@ -1,4 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { Router } from '@angular/router';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
@@ -8,6 +10,7 @@ import { AISystemsApiService } from '../../services/ai-systems-api.service';
 import { AgentProvisioningApiService } from '../../services/agent-provisioning-api.service';
 import { SocialMarketingApiService } from '../../services/social-marketing-api.service';
 import { InvestmentApiService } from '../../services/investment-api.service';
+import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
 import { JobsDashboardComponent } from './jobs-dashboard.component';
 
 describe('JobsDashboardComponent', () => {
@@ -48,16 +51,24 @@ describe('JobsDashboardComponent', () => {
     const investmentApi = {
       listStrategyLabJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
     };
+    const personaApi = {
+      listJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
+      cancelJob: vi.fn().mockReturnValue(of({ status: 'cancelled' })),
+      deleteJob: vi.fn().mockReturnValue(of({ deleted: 'true' })),
+    };
 
     await TestBed.configureTestingModule({
       imports: [JobsDashboardComponent],
       providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
         { provide: SoftwareEngineeringApiService, useValue: seApi },
         { provide: BloggingApiService, useValue: bloggingApi },
         { provide: AISystemsApiService, useValue: aiApi },
         { provide: AgentProvisioningApiService, useValue: provApi },
         { provide: SocialMarketingApiService, useValue: socialApi },
         { provide: InvestmentApiService, useValue: investmentApi },
+        { provide: PersonaTestingApiService, useValue: personaApi },
         { provide: Router, useValue: routerSpy },
       ],
     }).compileComponents();
