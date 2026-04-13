@@ -1513,6 +1513,23 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     )
 
 
+@app.delete(
+    "/strategy-lab/runs/{run_id}",
+    summary="Delete a strategy lab run",
+    description="Remove a strategy lab run from the job store and in-memory tracking.",
+)
+def delete_strategy_lab_run(run_id: str) -> Dict[str, Any]:
+    """Delete a strategy lab run by ID."""
+    with _lock:
+        _active_runs.pop(run_id, None)
+
+    client = _get_lab_run_job_client()
+    deleted = client.delete_job(run_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return {"job_id": run_id, "deleted": True}
+
+
 @app.get(
     "/strategy-lab/runs", response_model=ActiveRunsResponse, summary="List active strategy lab runs"
 )

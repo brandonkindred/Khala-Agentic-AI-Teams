@@ -50,6 +50,7 @@ describe('JobsDashboardComponent', () => {
     };
     const investmentApi = {
       listStrategyLabJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
+      deleteJob: vi.fn().mockReturnValue(of({ job_id: 'j1', deleted: true })),
     };
     const personaApi = {
       listJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
@@ -172,12 +173,14 @@ describe('JobsDashboardComponent', () => {
   });
 
   describe('canDeleteJob', () => {
-    it('returns true for software_engineering, blogging, agent_provisioning, ai_systems, social_marketing', () => {
+    it('returns true for all job sources', () => {
       expect(component.canDeleteJob({ unified: { source: 'software_engineering' } } as any)).toBe(true);
       expect(component.canDeleteJob({ unified: { source: 'blogging' } } as any)).toBe(true);
       expect(component.canDeleteJob({ unified: { source: 'agent_provisioning' } } as any)).toBe(true);
       expect(component.canDeleteJob({ unified: { source: 'ai_systems' } } as any)).toBe(true);
       expect(component.canDeleteJob({ unified: { source: 'social_marketing' } } as any)).toBe(true);
+      expect(component.canDeleteJob({ unified: { source: 'investment' } } as any)).toBe(true);
+      expect(component.canDeleteJob({ unified: { source: 'user_agent_founder' } } as any)).toBe(true);
     });
   });
 });

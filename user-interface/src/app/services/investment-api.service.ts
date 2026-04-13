@@ -220,6 +220,12 @@ export class InvestmentApiService {
     );
   }
 
+  deleteJob(runId: string): Observable<{ job_id: string; deleted: boolean }> {
+    return this.http.delete<{ job_id: string; deleted: boolean }>(
+      `${this.baseUrl}/strategy-lab/runs/${encodeURIComponent(runId)}`
+    );
+  }
+
   listStrategyLabJobs(runningOnly = false): Observable<InvestmentJobsListResponse> {
     return this.http.get<InvestmentJobsListResponse>(
       `${this.baseUrl}/strategy-lab/jobs`,

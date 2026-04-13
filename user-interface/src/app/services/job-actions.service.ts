@@ -84,6 +84,7 @@ export class JobActionsService {
       case 'ai_systems': return this.ai.deleteJob(jobId);
       case 'agent_provisioning': return this.prov.deleteJob(jobId);
       case 'social_marketing': return this.social.deleteJob(jobId);
+      case 'investment': return this.investment.deleteJob(jobId);
       case 'user_agent_founder': return this.persona.deleteJob(jobId);
       default: return this.generic.delete(SOURCE_TO_TEAM[source] ?? source, jobId);
     }
