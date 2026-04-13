@@ -8,7 +8,6 @@ Uses a Strands Graph for parallel agent execution:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import List
 

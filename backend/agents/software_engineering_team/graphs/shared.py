@@ -6,8 +6,6 @@ needs (workspace management, task context injection, etc.).
 
 from __future__ import annotations
 
-from typing import Any
-
 from strands import Agent
 
 from shared_graph import build_agent

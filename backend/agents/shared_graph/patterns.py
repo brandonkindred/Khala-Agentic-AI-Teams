@@ -13,7 +13,6 @@ from strands import Agent
 from strands.multiagent.graph import Graph, GraphBuilder
 from strands.multiagent.swarm import Swarm
 
-
 NodeType = Union[Agent, Graph, Swarm]
 
 

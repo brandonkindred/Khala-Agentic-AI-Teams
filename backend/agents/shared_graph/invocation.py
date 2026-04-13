@@ -13,7 +13,6 @@ import logging
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
-
 from strands.multiagent.graph import Graph
 
 logger = logging.getLogger(__name__)

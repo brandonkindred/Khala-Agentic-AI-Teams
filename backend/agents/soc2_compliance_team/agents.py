@@ -13,7 +13,6 @@ from typing import Any, Dict, List
 from strands import Agent
 
 from llm_service import compact_text
-
 from shared_graph import build_agent
 
 from .models import (
