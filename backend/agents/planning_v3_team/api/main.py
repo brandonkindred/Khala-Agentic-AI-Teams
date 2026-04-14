@@ -69,14 +69,12 @@ class SubmitAnswersRequest(BaseModel):
 
 
 def _get_llm():
-    """Return LLM client from central llm_service (or None if unavailable)."""
-    try:
-        from llm_service import get_client
+    """Return Strands-compatible model for the planning_v3 team."""
+    from strands import Agent
 
-        return get_client("planning_v3")
-    except Exception as e:
-        logger.warning("LLM not available: %s", e)
-        return None
+    from llm_service import get_strands_model
+
+    return Agent(model=get_strands_model("planning_v3"))
 
 
 def _run_workflow_background(

@@ -217,6 +217,24 @@ class PersonaListResponse(BaseModel):
     personas: list[PersonaInfo]
 
 
+class ChatMessageResponse(BaseModel):
+    message_id: int
+    role: str
+    content: str
+    message_type: str
+    metadata: Optional[dict[str, Any]] = None
+    timestamp: str
+
+
+class ChatHistoryResponse(BaseModel):
+    run_id: str
+    messages: list[ChatMessageResponse]
+
+
+class SendChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+
+
 class RunArtifactsResponse(BaseModel):
     run_id: str
     se_job_id: Optional[str] = None
@@ -281,6 +299,148 @@ def get_run_artifacts(run_id: str) -> RunArtifactsResponse:
         repo_path=run.repo_path,
         spec_content=run.spec_content,
     )
+
+
+# ---------------------------------------------------------------------------
+# Chat
+# ---------------------------------------------------------------------------
+
+
+@app.get("/runs/{run_id}/chat", response_model=ChatHistoryResponse)
+def get_chat_history(run_id: str, since_id: int = 0) -> ChatHistoryResponse:
+    """Get chat messages for a run, optionally only messages after since_id."""
+    store = get_founder_store()
+    run = store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    messages = store.get_chat_messages(run_id, since_id=since_id)
+    return ChatHistoryResponse(
+        run_id=run_id,
+        messages=[
+            ChatMessageResponse(
+                message_id=m.message_id,
+                role=m.role,
+                content=m.content,
+                message_type=m.message_type,
+                metadata=m.metadata,
+                timestamp=m.timestamp,
+            )
+            for m in messages
+        ],
+    )
+
+
+@app.post("/runs/{run_id}/chat", response_model=ChatHistoryResponse)
+def send_chat_message(run_id: str, request: SendChatRequest) -> ChatHistoryResponse:
+    """Send a message to the founder persona and get a response."""
+    store = get_founder_store()
+    run = store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    # Store user message
+    store.add_chat_message(run_id, "user", request.message, "chat")
+
+    # Build context for the persona
+    decisions = store.get_decisions(run_id)
+    context: dict[str, Any] = {
+        "status": run.status,
+        "recent_decisions": [
+            {"question_text": d.question_text, "answer_text": d.answer_text}
+            for d in decisions[-5:]
+        ],
+    }
+
+    # Get persona response
+    agent = get_founder_agent()
+    try:
+        response = agent.chat(request.message, context)
+    except Exception as exc:
+        logger.exception("Chat LLM call failed for run %s", run_id)
+        response = f"Sorry, I'm having trouble responding right now. ({str(exc)[:100]})"
+
+    store.add_chat_message(run_id, "assistant", response, "chat")
+
+    # Return recent messages
+    messages = store.get_chat_messages(run_id)
+    return ChatHistoryResponse(
+        run_id=run_id,
+        messages=[
+            ChatMessageResponse(
+                message_id=m.message_id,
+                role=m.role,
+                content=m.content,
+                message_type=m.message_type,
+                metadata=m.metadata,
+                timestamp=m.timestamp,
+            )
+            for m in messages
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Job management (centralized job service integration for Jobs Dashboard)
+# ---------------------------------------------------------------------------
+
+
+class FounderJobSummary(BaseModel):
+    job_id: str
+    status: str
+    label: str = "Persona: founder workflow"
+    current_phase: Optional[str] = None
+    created_at: Optional[str] = None
+    error: Optional[str] = None
+
+
+class FounderJobListResponse(BaseModel):
+    jobs: list[FounderJobSummary]
+
+
+@app.get("/jobs", response_model=FounderJobListResponse)
+def list_jobs(running_only: bool = False) -> FounderJobListResponse:
+    """List founder workflow jobs from the centralized job service."""
+    from job_service_client import JobServiceClient
+
+    client = JobServiceClient(team="user_agent_founder")
+    statuses = ["running", "pending"] if running_only else None
+    raw = client.list_jobs(statuses=statuses)
+    jobs = []
+    for j in raw:
+        data = j.get("data", j)
+        jobs.append(FounderJobSummary(
+            job_id=j.get("job_id", ""),
+            status=j.get("status", data.get("status", "unknown")),
+            label=data.get("label", "Persona: founder workflow"),
+            current_phase=data.get("current_phase"),
+            created_at=j.get("created_at", data.get("created_at")),
+            error=data.get("error"),
+        ))
+    return FounderJobListResponse(jobs=jobs)
+
+
+@app.post("/job/{job_id}/cancel")
+def cancel_job(job_id: str) -> dict[str, str]:
+    """Cancel a running founder workflow job."""
+    from job_service_client import JobServiceClient
+
+    client = JobServiceClient(team="user_agent_founder")
+    client.update_job(job_id, status="cancelled", error="Cancelled by user")
+    # Also update the Postgres store
+    store = get_founder_store()
+    store.update_run(job_id, status="failed", error="Cancelled by user")
+    return {"status": "cancelled", "job_id": job_id}
+
+
+@app.delete("/job/{job_id}")
+def delete_job(job_id: str) -> dict[str, str]:
+    """Delete a founder workflow job from the job service."""
+    from job_service_client import JobServiceClient
+
+    client = JobServiceClient(team="user_agent_founder")
+    client.delete_job(job_id)
+    return {"deleted": "true", "job_id": job_id}
 
 
 @app.get("/health")

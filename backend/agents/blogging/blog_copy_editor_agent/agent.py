@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
-from typing import Callable, Optional, Union
+from typing import Any, Callable, Optional, Union
 
-from llm_service import LLMClient, LLMJsonParseError, LLMTemporaryError
+from strands import Agent
 
 from .models import CopyEditorInput, CopyEditorOutput, FeedbackItem
 from .prompts import COPY_EDITOR_PROMPT
@@ -30,7 +31,7 @@ class BlogCopyEditorAgent:
 
     def __init__(
         self,
-        llm_client: LLMClient,
+        llm_client: Any,
         *,
         writing_style_guide_content: str = "",
         brand_spec_content: str = "",
@@ -41,7 +42,7 @@ class BlogCopyEditorAgent:
         Callers load writing style and brand spec files before instantiation and pass full contents here.
         """
         assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+        self._model = llm_client
         writing = (writing_style_guide_content or "").strip()
         brand = (brand_spec_content or "").strip()
         parts: list[str] = []
@@ -194,6 +195,7 @@ class BlogCopyEditorAgent:
 
         if on_llm_request:
             on_llm_request("Reviewing draft for style and clarity...")
+        agent = Agent(model=self._model, system_prompt=COPY_EDITOR_PROMPT)
         data = None
         base_prompt = prompt
         working_prompt = prompt
@@ -205,9 +207,13 @@ class BlogCopyEditorAgent:
         for llm_round in range(_MAX_COPY_EDITOR_LLM_ROUNDS):
             for json_attempt in range(2):
                 try:
-                    data = self.llm.complete_json(working_prompt, temperature=0.2, think=True)
+                    result = agent(working_prompt + "\n\nRespond with valid JSON only, no markdown fences.")
+                    raw = str(result).strip()
+                    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                    raw = re.sub(r"\s*```$", "", raw)
+                    data = json.loads(raw)
                     break
-                except LLMJsonParseError as e:
+                except (json.JSONDecodeError, TypeError) as e:
                     if json_attempt == 0:
                         logger.warning(
                             "Copy editor JSON parse failed (attempt 1), retrying with strict instruction: %s",
@@ -224,7 +230,7 @@ class BlogCopyEditorAgent:
                             "feedback_items": [],
                         }
                         break
-                except LLMTemporaryError as e:
+                except Exception as e:
                     if llm_round >= _MAX_COPY_EDITOR_LLM_ROUNDS - 1:
                         raise
                     wait = min(60.0, 15.0 * (llm_round + 1))

@@ -1,6 +1,6 @@
-# Contributing to Strands Agents
+# Contributing to Khala
 
-Thank you for your interest in contributing to Strands Agents. This document covers everything you need to effectively contribute: setup, code standards, workflows, and pull request guidelines.
+Thank you for your interest in contributing to Khala. This document covers everything you need to effectively contribute: setup, code standards, workflows, and pull request guidelines.
 
 ---
 
@@ -37,9 +37,9 @@ We recommend [NVM](https://github.com/nvm-sh/nvm) for Node.js. The UI uses `.nvm
 
 ```bash
 # Fork the repository on GitHub, then:
-git clone https://github.com/YOUR_USERNAME/strands-agents.git
-cd strands-agents
-git remote add upstream https://github.com/ORIGINAL_OWNER/strands-agents.git
+git clone https://github.com/YOUR_USERNAME/khala.git
+cd khala
+git remote add upstream https://github.com/ORIGINAL_OWNER/khala.git
 ```
 
 ### Branch Naming
@@ -331,4 +331,4 @@ Include:
 
 ---
 
-Thank you for contributing to Strands Agents.
+Thank you for contributing to Khala.

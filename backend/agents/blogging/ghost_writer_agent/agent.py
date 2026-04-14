@@ -19,19 +19,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
 from shared.content_plan import ContentPlan
-
-from llm_service.interface import (
-    LLMClient,
-    LLMJsonParseError,
-    LLMPermanentError,
-    LLMRateLimitError,
-    LLMTemporaryError,
-    LLMTruncatedError,
-)
+from strands import Agent
 
 from .models import StoryElicitationResult, StoryGap
 
@@ -206,8 +199,8 @@ class GhostWriterElicitationAgent:
       - Narrator: compiles vivid first-person narratives
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        self.llm_client = llm_client
+    def __init__(self, llm_client: Any) -> None:
+        self._model = llm_client
 
     # ------------------------------------------------------------------
     # Gap finding
@@ -277,8 +270,12 @@ class GhostWriterElicitationAgent:
         )
 
         try:
-            data = self.llm_client.complete_json(prompt, system_prompt=system)
-            # complete_json may return {"text": "[...]"} or a list directly
+            agent = Agent(model=self._model, system_prompt=system)
+            result = agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.")
+            raw = str(result).strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            data = json.loads(raw)
             if isinstance(data, dict):
                 for key in ("questions", "seeds", "text"):
                     if key in data and isinstance(data[key], list):
@@ -289,12 +286,8 @@ class GhostWriterElicitationAgent:
                 # Treat empty/whitespace-only items as failures — fall through to fallback
                 if all(cleaned):
                     return cleaned
-        except (LLMJsonParseError, LLMTruncatedError) as e:
-            logger.warning("Ghost writer batch seed generation parse error: %s", e)
-        except (LLMTemporaryError, LLMRateLimitError) as e:
-            logger.warning("Ghost writer batch seed generation transient error: %s", e)
-        except LLMPermanentError as e:
-            logger.warning("Ghost writer batch seed generation permanent error: %s", e)
+        except Exception as e:
+            logger.warning("Ghost writer batch seed generation error: %s", e)
 
         # Fallback: generate generic friendly seeds without LLM
         return [
@@ -307,11 +300,12 @@ class GhostWriterElicitationAgent:
         outline_text = self._plan_to_text(content_plan)
         prompt = f"Content plan:\n\n{outline_text}\n\nIdentify story gaps."
 
+        agent = Agent(model=self._model, system_prompt=_FIND_GAPS_SYSTEM)
         for attempt in range(2):
             try:
                 working_prompt = prompt if attempt == 0 else prompt + _JSON_RETRY_SUFFIX
-                response = self.llm_client.complete(working_prompt, system_prompt=_FIND_GAPS_SYSTEM)
-                raw = (response or "").strip()
+                result = agent(working_prompt)
+                raw = str(result).strip()
                 start = raw.find("[")
                 end = raw.rfind("]") + 1
                 if start == -1 or end == 0:
@@ -333,20 +327,17 @@ class GhostWriterElicitationAgent:
                     )
                 logger.info("Ghost writer: found %s story gap(s) via LLM", len(gaps))
                 return gaps
-            except LLMJsonParseError as e:
+            except (json.JSONDecodeError, TypeError) as e:
                 if attempt == 0:
                     logger.warning("Ghost writer gap-finding JSON parse failed, retrying: %s", e)
                     continue
                 logger.warning("Ghost writer gap-finding JSON parse failed after retry: %s", e)
                 return []
-            except (LLMTemporaryError, LLMRateLimitError) as e:
-                logger.warning("Ghost writer gap-finding transient error: %s", e)
+            except Exception as e:
+                logger.warning("Ghost writer gap-finding error: %s", e)
                 if attempt == 0:
                     time.sleep(2.0)
                     continue
-                return []
-            except LLMPermanentError as e:
-                logger.warning("Ghost writer gap-finding permanent error: %s", e)
                 return []
         return []
 
@@ -394,6 +385,10 @@ class GhostWriterElicitationAgent:
             for round_num in range(max_rounds):
                 # ── Wait for the user to respond (event-driven) ─────────
                 while is_waiting_for_story_input(job_id):
+                    # Liveness signal for the event-bus reaper: this consumer
+                    # may wait on human input for much longer than the idle
+                    # TTL, but is not actually abandoned.
+                    sub.touch()
                     job_data = get_blog_job(job_id)
                     if job_data and job_data.get("status") in ("failed", "cancelled"):
                         return StoryElicitationResult(
@@ -502,62 +497,49 @@ class GhostWriterElicitationAgent:
         gap: StoryGap,
         conversation: List[Dict[str, str]],
     ) -> Dict[str, Any]:
-        """Use the LLM evaluator to assess whether the conversation has enough material.
+        """Use the LLM evaluator to assess whether the conversation has enough material."""
+        system = (
+            _EVALUATE_SUFFICIENCY_SYSTEM
+            + f"\n\nSection: {gap.section_title}\nContext: {gap.section_context}"
+        )
 
-        Uses ``chat_json_round`` with native message history for proper role attribution,
-        and ``think=True`` for chain-of-thought reasoning.
-        """
-        messages: list[Dict[str, Any]] = [
-            {"role": "system", "content": _EVALUATE_SUFFICIENCY_SYSTEM},
-            {
-                "role": "system",
-                "content": f"Section: {gap.section_title}\nContext: {gap.section_context}",
-            },
-        ]
+        # Build a text representation of the conversation
+        conv_text = ""
         for msg in conversation:
-            role = "assistant" if msg["role"] == "agent" else "user"
-            messages.append({"role": role, "content": msg["content"]})
-        messages.append({
-            "role": "user",
-            "content": "Evaluate the conversation above. Respond with the JSON object only.",
-        })
+            role = "Ghost writer" if msg["role"] == "agent" else "Author"
+            conv_text += f"{role}: {msg['content']}\n"
+
+        prompt = (
+            conv_text
+            + "\nEvaluate the conversation above. Respond with the JSON object only, no markdown fences."
+        )
 
         default = {"sufficient": False, "no_experience": False, "story_context": None, "missing": None}
+        agent = Agent(model=self._model, system_prompt=system)
 
         for attempt in range(2):
             try:
-                result = self.llm_client.chat_json_round(messages, temperature=0.2, think=True)
-                if isinstance(result, dict):
-                    return result
+                working_prompt = prompt if attempt == 0 else prompt + _JSON_RETRY_SUFFIX
+                result = agent(working_prompt)
+                raw = str(result).strip()
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return data
                 return default
-            except LLMJsonParseError as e:
+            except (json.JSONDecodeError, TypeError) as e:
                 if attempt == 0:
                     logger.warning("Ghost writer evaluator JSON parse failed, retrying: %s", e)
-                    messages[-1]["content"] += _JSON_RETRY_SUFFIX
                     continue
                 logger.warning("Ghost writer evaluator JSON parse failed after retry: %s", e)
                 return default
-            except LLMTruncatedError as e:
-                # Try to parse partial content
-                if e.partial_content:
-                    try:
-                        start = e.partial_content.find("{")
-                        end = e.partial_content.rfind("}") + 1
-                        if start != -1 and end > start:
-                            return json.loads(e.partial_content[start:end])
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                logger.warning("Ghost writer evaluator truncated: %s", e)
-                return default
-            except (LLMTemporaryError, LLMRateLimitError) as e:
+            except Exception as e:
                 if attempt == 0:
-                    logger.warning("Ghost writer evaluator transient error, retrying: %s", e)
+                    logger.warning("Ghost writer evaluator error, retrying: %s", e)
                     time.sleep(2.0)
                     continue
-                logger.warning("Ghost writer evaluator transient error after retry: %s", e)
-                return default
-            except LLMPermanentError as e:
-                logger.warning("Ghost writer evaluator permanent error: %s", e)
+                logger.warning("Ghost writer evaluator error after retry: %s", e)
                 return default
         return default
 
@@ -595,13 +577,12 @@ class GhostWriterElicitationAgent:
         )
 
         try:
-            result = self.llm_client.complete(prompt, system_prompt=_INTERVIEWER_SYSTEM)
-            return (result or "").strip() or None
-        except (LLMTemporaryError, LLMRateLimitError, LLMJsonParseError, LLMTruncatedError) as e:
+            agent = Agent(model=self._model, system_prompt=_INTERVIEWER_SYSTEM)
+            result = agent(prompt)
+            raw = str(result).strip()
+            return raw or None
+        except Exception as e:
             logger.warning("Ghost writer interviewer failed: %s", e)
-            return None
-        except LLMPermanentError as e:
-            logger.warning("Ghost writer interviewer permanent error: %s", e)
             return None
 
     # ------------------------------------------------------------------
@@ -651,21 +632,17 @@ class GhostWriterElicitationAgent:
             "Compile the narrative now."
         )
 
+        agent = Agent(model=self._model, system_prompt=_NARRATOR_SYSTEM)
         for attempt in range(2):
             try:
-                return self.llm_client.complete(prompt, system_prompt=_NARRATOR_SYSTEM, think=True)
-            except (LLMTemporaryError, LLMRateLimitError) as e:
+                result = agent(prompt)
+                return str(result).strip() or None
+            except Exception as e:
                 if attempt == 0:
-                    logger.warning("Ghost writer narrator transient error, retrying: %s", e)
+                    logger.warning("Ghost writer narrator error, retrying: %s", e)
                     time.sleep(2.0)
                     continue
-                logger.warning("Ghost writer narrator transient error after retry: %s", e)
-                return None
-            except (LLMJsonParseError, LLMTruncatedError) as e:
-                logger.warning("Ghost writer narrator parse/truncation error: %s", e)
-                return None
-            except LLMPermanentError as e:
-                logger.warning("Ghost writer narrator permanent error: %s", e)
+                logger.warning("Ghost writer narrator error after retry: %s", e)
                 return None
         return None
 

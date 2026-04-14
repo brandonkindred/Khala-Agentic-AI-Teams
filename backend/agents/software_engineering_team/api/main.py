@@ -49,7 +49,6 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     delete_job,
     get_job,
     get_stale_after_seconds,
-    is_cancel_requested,
     list_jobs,
     mark_stale_jobs_failed,
     request_cancel,
@@ -1003,6 +1002,7 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     reset_job(job_id, str(repo_path), job_type="run_team")
+    update_job(job_id, status=JOB_STATUS_RUNNING, error=None)
 
     try:
         from software_engineering_team.temporal.client import is_temporal_enabled
@@ -1711,86 +1711,6 @@ def _run_backend_code_v2_background(
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
 
 
-def _run_planning_v2_background(
-    job_id: str,
-    repo_path: str,
-    spec_content: str,
-    inspiration_content: str,
-) -> None:
-    """Run planning-v2 workflow in a background thread."""
-    try:
-        from pathlib import Path as _Path
-
-        from planning_v2_team import PlanningV2TeamLead
-        from planning_v2_team.models import Phase
-
-        from llm_service import get_client
-
-        update_job(job_id, status="running")
-
-        phase_order = [p.value for p in Phase]
-
-        def _job_updater(**kwargs: Any) -> None:
-            completed_phases = []
-            current = kwargs.get("current_phase", "")
-            for p in phase_order:
-                if p == current:
-                    break
-                completed_phases.append(p)
-            update_job(job_id, completed_phases=completed_phases, **kwargs)
-
-        team_lead = PlanningV2TeamLead(get_client("backend"))
-        result = team_lead.run_workflow(
-            spec_content=spec_content,
-            repo_path=_Path(repo_path),
-            inspiration_content=inspiration_content or None,
-            job_updater=_job_updater,
-            job_id=job_id,
-        )
-
-        # Honor cancellation: if job was cancelled during execution, don't overwrite status
-        if is_cancel_requested(job_id):
-            logger.info(
-                "Planning-v2 workflow: cancellation detected, preserving cancelled state for job %s",
-                job_id,
-            )
-            return
-
-        final_status = "completed" if result.success else "failed"
-        phase_results: Dict[str, Any] = {}
-        if result.spec_review_result is not None:
-            phase_results["spec_review_result"] = result.spec_review_result.model_dump()
-        if result.planning_result is not None:
-            phase_results["planning_result"] = result.planning_result.model_dump()
-        if result.implementation_result is not None:
-            phase_results["implementation_result"] = result.implementation_result.model_dump()
-        if result.review_result is not None:
-            phase_results["review_result"] = result.review_result.model_dump()
-        if result.problem_solving_result is not None:
-            phase_results["problem_solving_result"] = result.problem_solving_result.model_dump()
-        if result.deliver_result is not None:
-            phase_results["deliver_result"] = result.deliver_result.model_dump()
-
-        update_job(
-            job_id,
-            status=final_status,
-            progress=100 if result.success else 90,
-            summary=result.summary,
-            error=result.failure_reason if not result.success else None,
-            current_phase=Phase.DELIVER.value,
-            phase_results=phase_results if phase_results else None,
-        )
-    except Exception as e:
-        logger.exception("Planning-v2 workflow failed")
-        # Honor cancellation: don't overwrite cancelled status with failed
-        if not is_cancel_requested(job_id):
-            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
-        else:
-            logger.info(
-                "Planning-v2 workflow: exception during cancelled job %s, preserving cancelled state",
-                job_id,
-            )
-
 
 @app.post(
     "/backend-code-v2/run",
@@ -1878,253 +1798,6 @@ def get_backend_code_v2_status(job_id: str) -> BackendCodeV2StatusResponse:
     )
 
 
-@app.post(
-    "/planning-v2/run",
-    response_model=PlanningV2RunResponse,
-    summary="Run planning-v2 agent",
-    description="Submit spec and repo path. Starts the planning-v2 6-phase workflow in the background. "
-    "Returns job_id. Poll GET /planning-v2/status/{job_id} for progress.",
-)
-def run_planning_v2(request: PlanningV2RunRequest) -> PlanningV2RunResponse:
-    """Start the planning-v2 team."""
-    repo = Path(request.repo_path)
-    if not repo.is_dir():
-        raise HTTPException(
-            status_code=400,
-            detail=f"repo_path does not exist or is not a directory: {request.repo_path}",
-        )
-
-    job_id = str(uuid.uuid4())
-    create_job(job_id, request.repo_path, job_type="planning_v2")
-
-    try:
-        from software_engineering_team.temporal.client import is_temporal_enabled
-        from software_engineering_team.temporal.constants import STANDALONE_TYPE_PLANNING
-        from software_engineering_team.temporal.start_workflow import start_standalone_workflow
-
-        if is_temporal_enabled():
-            start_standalone_workflow(
-                STANDALONE_TYPE_PLANNING,
-                job_id,
-                request.repo_path,
-                spec_content=request.spec_content,
-                inspiration_content=request.inspiration_content,
-            )
-        else:
-            thread = threading.Thread(
-                target=_run_planning_v2_background,
-                args=(
-                    job_id,
-                    request.repo_path,
-                    request.spec_content,
-                    request.inspiration_content or "",
-                ),
-            )
-            thread.daemon = True
-            thread.start()
-    except Exception as e:
-        logger.exception("Failed to start planning-v2 workflow")
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
-        raise HTTPException(status_code=503, detail=str(e)) from e
-
-    start_job_heartbeat_thread(job_id)
-
-    return PlanningV2RunResponse(
-        job_id=job_id,
-        status="running",
-        message="Planning-v2 workflow started. Poll GET /planning-v2/status/{job_id} for progress.",
-    )
-
-
-@app.get(
-    "/planning-v2/status/{job_id}",
-    response_model=PlanningV2StatusResponse,
-    summary="Get planning-v2 job status",
-    description="Returns current phase, progress, completed phases, and active roles.",
-)
-def get_planning_v2_status(job_id: str) -> PlanningV2StatusResponse:
-    """Get the status of a planning-v2 job."""
-    data = get_job(job_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    pending_questions_raw = data.get("pending_questions", [])
-    pending_questions = [
-        PendingQuestion(
-            id=q.get("id", ""),
-            question_text=q.get("question_text", ""),
-            context=q.get("context"),
-            options=[
-                QuestionOption(id=opt.get("id", ""), label=opt.get("label", ""))
-                for opt in q.get("options", [])
-            ],
-            required=q.get("required", False),
-        )
-        for q in pending_questions_raw
-    ]
-
-    return PlanningV2StatusResponse(
-        job_id=job_id,
-        status=data.get("status", JOB_STATUS_PENDING),
-        repo_path=data.get("repo_path"),
-        current_phase=data.get("current_phase"),
-        progress=data.get("progress", 0),
-        completed_phases=data.get("completed_phases", []),
-        active_roles=data.get("active_roles", []),
-        error=data.get("error"),
-        summary=data.get("summary"),
-        pending_questions=pending_questions,
-        waiting_for_answers=data.get("waiting_for_answers", False),
-        status_text=data.get("status_text"),
-    )
-
-
-@app.post(
-    "/planning-v2/{job_id}/answers",
-    response_model=PlanningV2StatusResponse,
-    summary="Submit answers to planning-v2 open questions",
-    description="Submit user answers to open questions identified during spec review. "
-    "The workflow will resume once all required questions are answered. "
-    "Each answer can select a predefined option or provide custom 'other' text.",
-)
-def submit_planning_v2_answers(
-    job_id: str, request: SubmitAnswersRequest
-) -> PlanningV2StatusResponse:
-    """Submit answers to open questions and resume planning-v2 workflow."""
-    data = get_job(job_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    if data.get("job_type") != "planning_v2":
-        raise HTTPException(
-            status_code=400,
-            detail="This endpoint is only for planning-v2 jobs.",
-        )
-
-    if not data.get("waiting_for_answers"):
-        raise HTTPException(
-            status_code=400,
-            detail="Job is not waiting for answers.",
-        )
-
-    pending_questions = data.get("pending_questions", [])
-    if not pending_questions:
-        raise HTTPException(status_code=400, detail="No pending questions to answer.")
-
-    pending_ids = {q["id"] for q in pending_questions}
-    required_ids = {q["id"] for q in pending_questions if q.get("required", True)}
-    answered_ids = {a.question_id for a in request.answers}
-
-    missing_required = required_ids - answered_ids
-    if missing_required:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing answers for required questions: {', '.join(sorted(missing_required))}",
-        )
-
-    invalid_ids = answered_ids - pending_ids
-    if invalid_ids:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown question IDs: {', '.join(sorted(invalid_ids))}",
-        )
-
-    for answer in request.answers:
-        if answer.selected_option_id == "other" and not answer.other_text:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Question {answer.question_id}: 'other' selected but no text provided.",
-            )
-
-    answers_dicts = [
-        {
-            "question_id": a.question_id,
-            "selected_option_id": a.selected_option_id,
-            "other_text": a.other_text,
-        }
-        for a in request.answers
-    ]
-    store_submit_answers(job_id, answers_dicts)
-
-    updated_data = get_job(job_id)
-    pending_questions_raw = updated_data.get("pending_questions", [])
-    pending_questions_response = [
-        PendingQuestion(
-            id=q.get("id", ""),
-            question_text=q.get("question_text", ""),
-            context=q.get("context"),
-            options=[
-                QuestionOption(id=opt.get("id", ""), label=opt.get("label", ""))
-                for opt in q.get("options", [])
-            ],
-            required=q.get("required", False),
-        )
-        for q in pending_questions_raw
-    ]
-
-    return PlanningV2StatusResponse(
-        job_id=job_id,
-        status=updated_data.get("status", "running"),
-        repo_path=updated_data.get("repo_path"),
-        current_phase=updated_data.get("current_phase"),
-        progress=updated_data.get("progress", 0),
-        completed_phases=updated_data.get("completed_phases", []),
-        active_roles=updated_data.get("active_roles", []),
-        error=updated_data.get("error"),
-        summary=updated_data.get("summary"),
-        pending_questions=pending_questions_response,
-        waiting_for_answers=updated_data.get("waiting_for_answers", False),
-        status_text=updated_data.get("status_text"),
-    )
-
-
-@app.get(
-    "/planning-v2/result/{job_id}",
-    response_model=PlanningV2ResultResponse,
-    summary="Get planning-v2 job result",
-    description="Returns phase results (spec_review, planning, implementation, review, problem_solving, deliver) when the job has finished. Returns 404 if job not found or result not yet available.",
-)
-def get_planning_v2_result(job_id: str) -> PlanningV2ResultResponse:
-    """Get the phase results of a completed planning-v2 job."""
-    data = get_job(job_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    status = data.get("status", JOB_STATUS_PENDING)
-    if status in ("pending", "running"):
-        raise HTTPException(
-            status_code=404, detail="Result not yet available; job still in progress"
-        )
-    phase_results = data.get("phase_results")
-    if phase_results is None:
-        phase_results = {}
-    return PlanningV2ResultResponse(
-        job_id=job_id,
-        status=status,
-        phase_results=phase_results,
-        summary=data.get("summary"),
-        error=data.get("error"),
-    )
-
-
-@app.get(
-    "/planning-v2/jobs",
-    response_model=RunningJobsResponse,
-    summary="List planning-v2 jobs",
-    description="Returns all planning-v2 jobs with status pending or running.",
-)
-def get_planning_v2_jobs() -> RunningJobsResponse:
-    """List running and pending planning-v2 jobs."""
-    raw = list_jobs(running_only=True, job_type="planning_v2")
-    jobs = [
-        RunningJobSummary(
-            job_id=item["job_id"],
-            status=item["status"],
-            repo_path=item.get("repo_path"),
-            job_type=item.get("job_type") or "planning_v2",
-        )
-        for item in raw
-    ]
-    return RunningJobsResponse(jobs=jobs)
 
 
 # ---------------------------------------------------------------------------
@@ -2232,80 +1905,6 @@ def auto_answer_run_team_question(
         )
 
 
-@app.post(
-    "/planning-v2/{job_id}/auto-answer/{question_id}",
-    response_model=AutoAnswerResponse,
-    summary="Auto-answer a pending question for planning-v2 job",
-    description="Use LLM to automatically answer a pending question based on industry best practices. "
-    "The answer is NOT automatically applied - review the response and submit via /answers endpoint.",
-)
-def auto_answer_planning_v2_question(
-    job_id: str,
-    question_id: str,
-    request: Optional[AutoAnswerRequest] = None,
-) -> AutoAnswerResponse:
-    """Auto-answer a pending question using LLM analysis."""
-    data = get_job(job_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    if data.get("job_type") != "planning_v2":
-        raise HTTPException(
-            status_code=400,
-            detail="This endpoint is only for planning-v2 jobs.",
-        )
-
-    pending_questions = data.get("pending_questions", [])
-    question_data = next((q for q in pending_questions if q.get("id") == question_id), None)
-    if not question_data:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Question {question_id} not found in pending questions.",
-        )
-
-    spec_content = _get_spec_content_for_job(data)
-    additional_context = request.spec_context if request else None
-
-    try:
-        from product_requirements_analysis_agent import get_auto_answer_for_job
-
-        from llm_service import get_client
-
-        llm = get_client("backend")
-        result = get_auto_answer_for_job(
-            llm=llm,
-            job_id=job_id,
-            question_id=question_id,
-            spec_content=spec_content,
-            additional_context=additional_context,
-        )
-
-        if not result:
-            raise HTTPException(
-                status_code=500,
-                detail="Auto-answer failed to produce a result.",
-            )
-
-        return AutoAnswerResponse(
-            question_id=result.question_id,
-            selected_option_id=result.selected_option_id,
-            selected_answer=result.selected_answer,
-            rationale=result.rationale,
-            confidence=result.confidence,
-            risks=result.risks,
-            applied=False,
-        )
-    except ImportError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Auto-answer module not available: {e}",
-        )
-    except Exception as e:
-        logger.exception("Auto-answer failed")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Auto-answer failed: {e}",
-        )
 
 
 def _get_spec_content_for_job(data: Dict[str, Any]) -> str:
@@ -2534,11 +2133,11 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
 # Project name: no spaces, only letters, numbers, hyphen, underscore
 PROJECT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 ENV_WORKSPACE_ROOT = "WORKSPACE_ROOT"
-DEFAULT_PROJECTS_DIR_NAME = "strands_projects"
+DEFAULT_PROJECTS_DIR_NAME = "khala_projects"
 
 
 def _get_projects_root() -> Path:
-    """Resolve the root directory for created projects. When WORKSPACE_ROOT is set, use it/projects; else tempdir/strands_projects."""
+    """Resolve the root directory for created projects. When WORKSPACE_ROOT is set, use it/projects; else tempdir/khala_projects."""
     workspace_root_str = os.environ.get(ENV_WORKSPACE_ROOT)
     if workspace_root_str:
         root = Path(workspace_root_str).resolve() / "projects"
@@ -2877,88 +2476,6 @@ def get_logs(
         return PlainTextResponse(content="(no log files found)\n", status_code=200)
     return PlainTextResponse(content="\n\n".join(parts))
 
-
-@app.get(
-    "/planning-v2/{job_id}/artifacts",
-    response_model=PlanningArtifactListResponse,
-    summary="List planning-v2 artifacts",
-    description="List artifact files in plan/planning_team/ for a planning-v2 job.",
-)
-def list_planning_v2_artifacts(job_id: str) -> PlanningArtifactListResponse:
-    """List planning artifacts for a planning-v2 job."""
-    data = get_job(job_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    repo_path = data.get("repo_path")
-    if not repo_path:
-        raise HTTPException(status_code=404, detail="Job has no repo_path")
-
-    plan_dir = Path(repo_path) / "plan" / "planning_team"
-    if not plan_dir.exists():
-        return PlanningArtifactListResponse(artifacts=[])
-
-    artifacts: list[PlanningArtifactMeta] = []
-    for f in sorted(plan_dir.iterdir()):
-        if f.is_file() and f.suffix in (".md", ".json"):
-            stat = f.stat()
-            sections: list[str] = []
-            if f.name == "planning_document.md":
-                try:
-                    from planning_v2_team.shared_planning_document import (
-                        list_sections as _list_sections,
-                    )
-
-                    sections = _list_sections(Path(repo_path))
-                except Exception:
-                    pass
-            artifacts.append(
-                PlanningArtifactMeta(
-                    name=f.name,
-                    size_bytes=stat.st_size,
-                    modified_at=datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z",
-                    sections=sections,
-                )
-            )
-    return PlanningArtifactListResponse(artifacts=artifacts)
-
-
-@app.get(
-    "/planning-v2/{job_id}/artifacts/{artifact_name}",
-    response_model=PlanningArtifactContentResponse,
-    summary="Get planning-v2 artifact content",
-    description="Return the content of a specific planning artifact file.",
-)
-def get_planning_v2_artifact_content(
-    job_id: str, artifact_name: str
-) -> PlanningArtifactContentResponse:
-    """Get the content of a planning artifact."""
-    if ".." in artifact_name or "/" in artifact_name or "\\" in artifact_name:
-        raise HTTPException(status_code=400, detail="Invalid artifact name")
-
-    data = get_job(job_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    repo_path = data.get("repo_path")
-    if not repo_path:
-        raise HTTPException(status_code=404, detail="Job has no repo_path")
-
-    artifact_path = Path(repo_path) / "plan" / "planning_team" / artifact_name
-    if not artifact_path.exists() or not artifact_path.is_file():
-        raise HTTPException(status_code=404, detail=f"Artifact '{artifact_name}' not found")
-
-    try:
-        content = artifact_path.read_text(encoding="utf-8")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read artifact: {e}")
-
-    content_type = "json" if artifact_name.endswith(".json") else "markdown"
-    return PlanningArtifactContentResponse(
-        name=artifact_name,
-        content=content,
-        content_type=content_type,
-    )
 
 
 @app.get("/health")

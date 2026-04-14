@@ -38,6 +38,7 @@ from investment_team.models import (
     LiquidityNeeds,
     NetWorth,
     PaperTradingSession,
+    PaperTradingStatus,
     PaperTradingVerdict,
     PortfolioConstraints,
     PortfolioPosition,
@@ -59,7 +60,9 @@ from investment_team.models import (
 from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
 from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
-from investment_team.strategy_ideation_agent import StrategyIdeationAgent
+from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
+from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 from shared_observability import init_otel, instrument_fastapi_app
 
@@ -815,7 +818,6 @@ def _run_real_data_backtest(
     # deferring keeps application startup fast and avoids loading these until needed.
     from investment_team.backtesting_agent import BacktestingAgent
     from investment_team.market_data_service import MarketDataService
-    from llm_service.factory import get_client
 
     market_service = MarketDataService()
     symbols = market_service.get_symbols_for_strategy(strategy)
@@ -839,8 +841,7 @@ def _run_real_data_backtest(
             detail="Failed to fetch historical market data. Please check the date range and try again.",
         )
 
-    llm = get_client("backtesting")
-    agent = BacktestingAgent(llm_client=llm)
+    agent = BacktestingAgent()
     return agent.run_backtest(strategy, config, market_data)
 
 
@@ -857,7 +858,13 @@ class RunStrategyLabRequest(BaseModel):
         default=10,
         ge=1,
         le=25,
-        description="Strategies to generate this run (one per sequential step; each step sees all prior results).",
+        description="Total strategies to generate this run.",
+    )
+    max_parallel: int = Field(
+        default=3,
+        ge=1,
+        le=6,
+        description="Max strategies to generate in parallel per wave.",
     )
 
 
@@ -900,139 +907,42 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
 
 
 def _run_one_strategy_lab_cycle(
-    agent: StrategyIdeationAgent,
     config: BacktestConfig,
+    orchestrator: "StrategyLabOrchestrator",
     *,
     precomputed_signal_brief: Optional[SignalIntelligenceBriefV1] = None,
     signal_brief_storage: Optional[Dict[str, Any]] = None,
     on_phase: Optional[Any] = None,
+    exclude_asset_classes: Optional[List[str]] = None,
 ) -> StrategyLabRecord:
-    """Single ideation → backtest → analysis; persists to store so the next cycle sees full history.
+    """Single ideation → validate → execute → refine → analyze cycle via the v2 orchestrator.
 
-    If all data providers fail for the ideated asset class, re-ideates for a different
-    asset class (up to one retry) rather than aborting the entire batch.
-
-    Args:
-        on_phase: Optional callback ``(phase: str, data: dict) -> None`` called at each
-            phase boundary to emit progress events.
+    The orchestrator handles the full code-generation + sandboxed-execution pipeline
+    internally, including up to 10 refinement rounds.
     """
-    def _emit(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
-        if on_phase:
-            on_phase(phase, data or {})
-
     with _lock:
         raw_prior = list(_strategy_lab_records.values())
 
     prior_records = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior]
     prior_records.sort(key=lambda r: r.created_at)
 
-    _emit("ideating")
-
-    try:
-        strategy_data, rationale = agent.ideate_strategy(
-            prior_results=prior_records,
-            precomputed_signal_brief=precomputed_signal_brief,
-        )
-    except Exception as exc:
-        logger.error("Strategy ideation failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Strategy ideation failed: {exc}") from exc
-
-    strategy, strategy_id = _build_strategy_from_ideation(strategy_data)
-    strategy_preview = {"asset_class": strategy.asset_class, "hypothesis": strategy.hypothesis}
-
-    _emit("fetching_data", {"strategy": strategy_preview})
-
-    try:
-        result, trades = _run_real_data_backtest(strategy, config)
-    except HTTPException as exc:
-        if exc.status_code != 502:
-            raise
-        failed_ac = strategy.asset_class
-        logger.warning(
-            "No market data for asset class %s (all providers failed); re-ideating with exclusion",
-            failed_ac,
-        )
-        _emit("ideating", {"retry": True, "excluded": failed_ac})
-        try:
-            strategy_data, rationale = agent.ideate_strategy(
-                prior_results=prior_records,
-                precomputed_signal_brief=precomputed_signal_brief,
-                exclude_asset_classes=[failed_ac],
-            )
-        except Exception as exc2:
-            raise HTTPException(
-                status_code=500, detail=f"Re-ideation after data failure failed: {exc2}"
-            ) from exc2
-
-        strategy, strategy_id = _build_strategy_from_ideation(strategy_data)
-        strategy_preview = {"asset_class": strategy.asset_class, "hypothesis": strategy.hypothesis}
-        _emit("fetching_data", {"strategy": strategy_preview, "retry": True})
-        result, trades = _run_real_data_backtest(strategy, config)
-
-    metrics_preview = {
-        "annualized_return_pct": round(result.annualized_return_pct, 2),
-        "sharpe_ratio": round(result.sharpe_ratio, 2),
-        "max_drawdown_pct": round(result.max_drawdown_pct, 2),
-        "win_rate_pct": round(result.win_rate_pct, 2),
-        "total_trades": len(trades),
-    }
-    _emit("analyzing", {"strategy": strategy_preview, "metrics": metrics_preview})
-
-    now = _now()
-    backtest_id = f"bt-lab-{uuid.uuid4().hex[:8]}"
-    backtest = BacktestRecord(
-        backtest_id=backtest_id,
-        strategy_id=strategy_id,
-        strategy=strategy,
+    record = orchestrator.run_cycle(
+        prior_records=prior_records,
         config=config,
-        submitted_by="strategy_ideation_agent",
-        submitted_at=now,
-        completed_at=now,
-        result=result,
-        notes=[],
-        trades=trades,
+        signal_brief=precomputed_signal_brief,
+        on_phase=on_phase,
+        exclude_asset_classes=exclude_asset_classes,
     )
 
-    is_winning = result.annualized_return_pct > 8.0
+    # Attach signal brief before persisting (PersistentDict serializes at assignment)
+    if signal_brief_storage and not record.signal_intelligence_brief:
+        record.signal_intelligence_brief = signal_brief_storage
 
-    lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
-    provisional_record = StrategyLabRecord(
-        lab_record_id=lab_record_id,
-        strategy=strategy,
-        backtest=backtest,
-        is_winning=is_winning,
-        strategy_rationale=rationale,
-        analysis_narrative="",
-        created_at=now,
-    )
-
-    try:
-        narrative = agent.analyze_result(provisional_record, rationale)
-    except Exception as exc:
-        logger.warning("Analysis narrative generation failed: %s", exc)
-        narrative = (
-            f"Strategy returned {result.annualized_return_pct:.1f}% annualized "
-            f"({'above' if is_winning else 'below'} the 8% winning threshold). "
-            f"Sharpe ratio: {result.sharpe_ratio:.2f}, max drawdown: {result.max_drawdown_pct:.1f}%."
-        )
-
-    record = StrategyLabRecord(
-        lab_record_id=lab_record_id,
-        strategy=strategy,
-        backtest=backtest,
-        is_winning=is_winning,
-        strategy_rationale=rationale,
-        analysis_narrative=narrative,
-        created_at=now,
-        signal_intelligence_brief=signal_brief_storage,
-    )
-
+    # Persist to in-memory stores
     with _lock:
-        _strategy_lab_records[lab_record_id] = record
-        _strategies[strategy_id] = strategy
-        _backtests[backtest_id] = backtest
-
-    _emit("complete", {"record_id": lab_record_id, "is_winning": is_winning, "metrics": metrics_preview})
+        _strategy_lab_records[record.lab_record_id] = record
+        _strategies[record.strategy.strategy_id] = record.strategy
+        _backtests[record.backtest.backtest_id] = record.backtest
 
     return record
 
@@ -1098,10 +1008,7 @@ def _strategy_lab_worker(
         publish(run_id, payload, event_type=event_type)
 
     try:
-        from llm_service.factory import get_client
-
-        llm = get_client("strategy_ideation")
-        agent = StrategyIdeationAgent(llm_client=llm)
+        orchestrator = StrategyLabOrchestrator(convergence_tracker=ConvergenceTracker())
 
         config = BacktestConfig(
             start_date=request.start_date,
@@ -1132,11 +1039,12 @@ def _strategy_lab_worker(
                 )
             with _lock:
                 raw_prior = list(_strategy_lab_records.values())
-            prior_for_brief = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior]
+            prior_for_brief = [
+                StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior
+            ]
             prior_for_brief.sort(key=lambda r: r.created_at)
 
-            llm_signal = get_client("signal_intelligence")
-            expert = SignalIntelligenceExpert(llm_signal)
+            expert = SignalIntelligenceExpert()
             t0 = datetime.now(tz=timezone.utc)
             try:
                 brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
@@ -1174,63 +1082,154 @@ def _strategy_lab_worker(
             }
 
         completed_ids: List[str] = []
+        completed_indices: set[int] = set()  # 0-based indices of completed cycles
         skipped = 0
         if start_cycle_offset > 0:
+            # Mark prior cycles as already completed for resume bookkeeping
+            completed_indices.update(range(start_cycle_offset))
             logger.info("Strategy lab worker resuming from cycle %d", start_cycle_offset + 1)
-        for i in range(start_cycle_offset, request.batch_size):
-            cycle_num = i + 1
 
-            def on_phase(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
-                cycle_data = {"cycle_index": cycle_num, "phase": phase, **(data or {})}
-                _update_run({"current_cycle": cycle_data})
-                _publish("progress", cycle_data)
+        # ── Wave-based parallel execution ──────────────────────────────
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        _TERMINAL_STATUSES = frozenset({"cancelled", "failed", "interrupted"})
+
+        def _is_run_cancelled() -> bool:
+            """Check the job service for external cancellation."""
             try:
-                record = _run_one_strategy_lab_cycle(
-                    agent,
-                    config,
-                    precomputed_signal_brief=precomputed_brief,
-                    signal_brief_storage=signal_brief_storage,
-                    on_phase=on_phase,
-                )
-                completed_ids.append(record.lab_record_id)
-                _update_run({
-                    "completed_cycles": len(completed_ids),
-                    "completed_record_ids": list(completed_ids),
-                    "current_cycle": None,
-                })
-                _publish("cycle_complete", {
-                    "cycle_index": cycle_num,
-                    "record_id": record.lab_record_id,
-                    "completed_cycles": len(completed_ids),
-                })
-            except HTTPException as exc:
-                if exc.status_code == 502:
-                    logger.warning(
-                        "Strategy lab cycle %d/%d skipped (no market data after fallback)",
-                        cycle_num, request.batch_size,
+                client = _get_lab_run_job_client()
+                persisted = client.get_job(run_id)
+                if persisted:
+                    return persisted.get("status", "") in _TERMINAL_STATUSES
+            except Exception:
+                pass
+            return False
+
+        primary_tracker = orchestrator.convergence_tracker
+        max_parallel = request.max_parallel
+        remaining = list(range(start_cycle_offset, request.batch_size))
+        run_failed = False
+        run_cancelled = False
+
+        while remaining and not run_failed and not run_cancelled:
+            wave_indices = remaining[:max_parallel]
+            remaining = remaining[max_parallel:]
+
+            wave_futures: Dict[Any, int] = {}
+            with ThreadPoolExecutor(max_workers=len(wave_indices), thread_name_prefix="strat-lab") as pool:
+                for i in wave_indices:
+                    cn = i + 1  # cycle_num (1-based)
+
+                    def _make_on_phase(_cn: int):
+                        def on_phase(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
+                            cycle_data = {"cycle_index": _cn, "phase": phase, **(data or {})}
+                            _update_run({"current_cycle": cycle_data})
+                            _publish("progress", cycle_data)
+                        return on_phase
+
+                    cycle_orchestrator = StrategyLabOrchestrator(
+                        convergence_tracker=primary_tracker.snapshot(),
                     )
-                    skipped += 1
-                    _update_run({"skipped_cycles": skipped, "current_cycle": None})
-                    _publish("cycle_skipped", {"cycle_index": cycle_num, "reason": "no_market_data"})
-                    continue
-                raise
-            except Exception as exc:
-                logger.exception("Strategy lab cycle %d/%d failed", cycle_num, request.batch_size)
-                _update_run({
-                    "status": "failed",
-                    "error": f"Cycle {cycle_num} failed: {exc}",
-                    "current_cycle": None,
-                })
-                _publish("error", {"detail": f"Cycle {cycle_num} failed: {exc}"})
-                return
+                    future = pool.submit(
+                        _run_one_strategy_lab_cycle,
+                        config,
+                        cycle_orchestrator,
+                        precomputed_signal_brief=precomputed_brief,
+                        signal_brief_storage=signal_brief_storage,
+                        on_phase=_make_on_phase(cn),
+                    )
+                    wave_futures[future] = cn
+
+                # Collect results from this wave.
+                # Each entry is (cycle_index_0based, record) so we can sort
+                # deterministically before updating the convergence tracker.
+                wave_results: List[tuple[int, StrategyLabRecord]] = []
+                for future in as_completed(wave_futures):
+                    cn = wave_futures[future]
+                    try:
+                        record = future.result()
+                        completed_ids.append(record.lab_record_id)
+                        completed_indices.add(cn - 1)  # 0-based
+                        wave_results.append((cn - 1, record))
+
+                        # Track the highest contiguous completed index for
+                        # resume_strategy_lab_run (start_cycle_offset), but
+                        # report the actual count for UI progress display.
+                        contiguous = 0
+                        while contiguous in completed_indices:
+                            contiguous += 1
+                        _update_run({
+                            "completed_cycles": len(completed_ids),
+                            "contiguous_cycles": contiguous,
+                            "completed_record_ids": list(completed_ids),
+                            "current_cycle": None,
+                        })
+                        _publish("cycle_complete", {
+                            "cycle_index": cn,
+                            "record_id": record.lab_record_id,
+                            "completed_cycles": len(completed_ids),
+                        })
+                    except HTTPException as exc:
+                        if exc.status_code == 502:
+                            logger.warning(
+                                "Strategy lab cycle %d/%d skipped (no market data after fallback)",
+                                cn, request.batch_size,
+                            )
+                            skipped += 1
+                            _update_run({"skipped_cycles": skipped, "current_cycle": None})
+                            _publish("cycle_skipped", {"cycle_index": cn, "reason": "no_market_data"})
+                        else:
+                            logger.exception("Strategy lab cycle %d/%d failed", cn, request.batch_size)
+                            _update_run({
+                                "status": "failed",
+                                "error": f"Cycle {cn} failed: {exc}",
+                                "current_cycle": None,
+                            })
+                            _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
+                            run_failed = True
+                    except Exception as exc:
+                        logger.exception("Strategy lab cycle %d/%d failed", cn, request.batch_size)
+                        _update_run({
+                            "status": "failed",
+                            "error": f"Cycle {cn} failed: {exc}",
+                            "current_cycle": None,
+                        })
+                        _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
+                        run_failed = True
+
+            # Merge wave results into the primary convergence tracker in
+            # deterministic cycle-index order so that stall/diversity
+            # directives are reproducible across runs with identical inputs.
+            wave_results.sort(key=lambda pair: pair[0])
+            for _idx, record in wave_results:
+                gate_results = [
+                    QualityGateResult(**g) if isinstance(g, dict) else g
+                    for g in record.quality_gate_results
+                ]
+                primary_tracker.record(record.strategy, gate_results)
+
+            # Check for external cancellation between waves
+            if not run_failed and _is_run_cancelled():
+                logger.info("Strategy lab run %s cancelled externally — stopping after wave", run_id)
+                run_cancelled = True
+
+        if run_failed:
+            return
+
+        if run_cancelled:
+            _update_run({"status": "cancelled", "current_cycle": None})
+            _publish("error", {"detail": "Run cancelled by user"})
+            return
 
         msg = f"Completed {len(completed_ids)} strategy lab cycle(s)."
         if skipped:
             msg += f" ({skipped} skipped due to unavailable market data)"
 
         _update_run({"status": "completed", "current_cycle": None})
-        _publish("complete", {"message": msg, "completed_count": len(completed_ids), "skipped_count": skipped})
+        _publish(
+            "complete",
+            {"message": msg, "completed_count": len(completed_ids), "skipped_count": skipped},
+        )
 
     except Exception as exc:
         logger.exception("Strategy lab worker failed for run %s", run_id)
@@ -1259,7 +1258,9 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     with _lock:
         active = [r for r in _active_runs.values() if r["status"] == "running"]
         if active:
-            raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+            raise HTTPException(
+                status_code=409, detail="A strategy lab run is already in progress."
+            )
 
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     now = _now()
@@ -1337,7 +1338,11 @@ class InvestmentJobsListResponse(BaseModel):
     jobs: List[InvestmentJobSummary] = Field(default_factory=list)
 
 
-@app.get("/strategy-lab/jobs", response_model=InvestmentJobsListResponse, summary="List strategy lab runs as jobs")
+@app.get(
+    "/strategy-lab/jobs",
+    response_model=InvestmentJobsListResponse,
+    summary="List strategy lab runs as jobs",
+)
 def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResponse:
     """Return strategy lab runs in a format compatible with the central Jobs Dashboard."""
     jobs: List[InvestmentJobSummary] = []
@@ -1354,14 +1359,16 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             total = state.get("total_cycles", 1)
             progress = int((completed / total) * 100) if total else 0
             label = hypothesis or f"Strategy batch ({completed}/{total})"
-            jobs.append(InvestmentJobSummary(
-                job_id=state["run_id"],
-                status=state["status"],
-                label=label,
-                progress=progress,
-                current_phase=phase,
-                created_at=state.get("started_at"),
-            ))
+            jobs.append(
+                InvestmentJobSummary(
+                    job_id=state["run_id"],
+                    status=state["status"],
+                    label=label,
+                    progress=progress,
+                    current_phase=phase,
+                    created_at=state.get("started_at"),
+                )
+            )
 
     # Persisted runs from job service (completed runs not in memory)
     try:
@@ -1376,14 +1383,16 @@ def list_strategy_lab_jobs(running_only: bool = False) -> InvestmentJobsListResp
             completed = data.get("completed_cycles", 0)
             total = data.get("total_cycles", 1)
             progress = int((completed / total) * 100) if total else 0
-            jobs.append(InvestmentJobSummary(
-                job_id=jid,
-                status=job.get("status", data.get("status", "completed")),
-                label=f"Strategy batch ({completed}/{total})",
-                progress=progress,
-                current_phase=None,
-                created_at=data.get("started_at"),
-            ))
+            jobs.append(
+                InvestmentJobSummary(
+                    job_id=jid,
+                    status=job.get("status", data.get("status", "completed")),
+                    label=f"Strategy batch ({completed}/{total})",
+                    progress=progress,
+                    current_phase=None,
+                    created_at=data.get("started_at"),
+                )
+            )
     except Exception as exc:
         logger.warning("Failed to load persisted strategy lab runs: %s", exc)
 
@@ -1422,12 +1431,17 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         raise HTTPException(status_code=400, detail="Original request payload not available.")
 
     completed_cycles = state.get("completed_cycles", 0)
+    # contiguous_cycles tracks the highest unbroken sequence from index 0
+    # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
+    contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
     total_cycles = state.get("total_cycles", 10)
 
     with _lock:
         active = [r for r in _active_runs.values() if r["status"] == "running"]
         if active:
-            raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+            raise HTTPException(
+                status_code=409, detail="A strategy lab run is already in progress."
+            )
 
     # Re-initialize in-memory state
     resumed_state = {
@@ -1436,6 +1450,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         "started_at": state.get("started_at", _now()),
         "total_cycles": total_cycles,
         "completed_cycles": completed_cycles,
+        "contiguous_cycles": contiguous_cycles,
         "skipped_cycles": state.get("skipped_cycles", 0),
         "current_cycle": None,
         "completed_record_ids": state.get("completed_record_ids", []),
@@ -1452,15 +1467,16 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     thread = threading.Thread(
         target=_strategy_lab_worker,
         args=(run_id, request),
-        kwargs={"start_cycle_offset": completed_cycles},
+        kwargs={"start_cycle_offset": contiguous_cycles},
         name=f"strategy-lab-resume-{run_id}",
         daemon=True,
     )
     thread.start()
 
     return StrategyLabRunStartResponse(
-        run_id=run_id, total_cycles=total_cycles,
-        message=f"Run resumed from cycle {completed_cycles + 1} of {total_cycles}.",
+        run_id=run_id,
+        total_cycles=total_cycles,
+        message=f"Run resumed from cycle {contiguous_cycles + 1} of {total_cycles}.",
     )
 
 
@@ -1489,7 +1505,9 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     with _lock:
         active = [r for r in _active_runs.values() if r["status"] == "running"]
         if active:
-            raise HTTPException(status_code=409, detail="A strategy lab run is already in progress.")
+            raise HTTPException(
+                status_code=409, detail="A strategy lab run is already in progress."
+            )
 
     request = RunStrategyLabRequest(**payload)
 
@@ -1518,16 +1536,87 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     thread.start()
 
     return StrategyLabRunStartResponse(
-        run_id=run_id, total_cycles=request.batch_size,
+        run_id=run_id,
+        total_cycles=request.batch_size,
         message="Run restarted from scratch.",
     )
 
 
-@app.get("/strategy-lab/runs", response_model=ActiveRunsResponse, summary="List active strategy lab runs")
-def list_strategy_lab_runs() -> ActiveRunsResponse:
-    """Return all tracked runs (active and recently completed, kept for 5 min after finish)."""
+@app.delete(
+    "/strategy-lab/runs/{run_id}",
+    summary="Delete a strategy lab run",
+    description="Remove a strategy lab run from the job store and in-memory tracking.",
+)
+def delete_strategy_lab_run(run_id: str) -> Dict[str, Any]:
+    """Delete a strategy lab run by ID."""
     with _lock:
-        runs = [_run_state_to_response(r) for r in _active_runs.values()]
+        _active_runs.pop(run_id, None)
+
+    client = _get_lab_run_job_client()
+    deleted = client.delete_job(run_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return {"job_id": run_id, "deleted": True}
+
+
+@app.get(
+    "/strategy-lab/runs", response_model=ActiveRunsResponse, summary="List active strategy lab runs"
+)
+def list_strategy_lab_runs() -> ActiveRunsResponse:
+    """Return all tracked runs (active and recently completed).
+
+    Merges in-memory state with persisted job-service state so that
+    running jobs are always visible — even after a page refresh that
+    races with server startup or after the in-memory entry is evicted.
+
+    Also reconciles: if an in-memory run says "running" but the job service
+    has it as terminal (cancelled/failed/completed), the in-memory state is
+    updated to match — this handles external cancellation via the generic
+    job proxy or the Jobs Dashboard.
+    """
+    _TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+
+    try:
+        client = _get_lab_run_job_client()
+
+        # Reconcile: if job service has a terminal status for a run we think
+        # is still active, update _active_runs so the UI sees the real state.
+        with _lock:
+            running_ids = [
+                rid for rid, r in _active_runs.items() if r.get("status") not in _TERMINAL
+            ]
+        for rid in running_ids:
+            try:
+                persisted = client.get_job(rid)
+                if persisted:
+                    js_status = persisted.get("status", "")
+                    if js_status in _TERMINAL:
+                        with _lock:
+                            if rid in _active_runs:
+                                _active_runs[rid]["status"] = js_status
+                                _active_runs[rid]["error"] = persisted.get("error") or persisted.get("data", {}).get("error")
+            except Exception:
+                pass
+
+        with _lock:
+            in_memory = {r["run_id"]: r for r in _active_runs.values()}
+
+        # Merge running/pending jobs from the persistent job service that
+        # may not be in _active_runs (e.g. after a server restart).
+        persisted_list = client.list_jobs(statuses=["running", "pending"])
+        for job in persisted_list:
+            rid = job.get("job_id") or job.get("run_id", "")
+            if rid and rid not in in_memory:
+                data = job.get("data", job)
+                data["run_id"] = rid
+                data.setdefault("status", job.get("status", "running"))
+                in_memory[rid] = data
+    except Exception:
+        logger.debug("Job service fallback failed for run listing", exc_info=True)
+        with _lock:
+            in_memory = {r["run_id"]: r for r in _active_runs.values()}
+
+    runs = [_run_state_to_response(r) for r in in_memory.values()]
     return ActiveRunsResponse(runs=runs)
 
 
@@ -1538,8 +1627,27 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
 )
 def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
     """Snapshot of a single run's progress. Use for polling when SSE is unavailable."""
+    _TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+
     with _lock:
         state = _active_runs.get(run_id)
+
+    # Reconcile with job service if in-memory state looks active
+    if state and state.get("status") not in _TERMINAL:
+        try:
+            client = _get_lab_run_job_client()
+            persisted = client.get_job(run_id)
+            if persisted:
+                js_status = persisted.get("status", "")
+                if js_status in _TERMINAL:
+                    with _lock:
+                        if run_id in _active_runs:
+                            _active_runs[run_id]["status"] = js_status
+                            _active_runs[run_id]["error"] = persisted.get("error") or persisted.get("data", {}).get("error")
+                            state = _active_runs[run_id]
+        except Exception:
+            pass
+
     if not state:
         state = _load_run_from_job_service(run_id)
     if not state:
@@ -1576,9 +1684,13 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
 
     # If the run is already terminal, send snapshot + done immediately.
     if state.get("status") in ("completed", "failed"):
+
         async def _terminal_gen():
-            yield _sse_line({"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")})
+            yield _sse_line(
+                {"type": "snapshot", **_run_state_to_response(state).model_dump(mode="json")}
+            )
             yield _sse_line({"type": "done"})
+
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
     async def event_generator():
@@ -1588,7 +1700,9 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
             with _lock:
                 current = _active_runs.get(run_id, {})
             if current:
-                yield _sse_line({"type": "snapshot", **_run_state_to_response(current).model_dump(mode="json")})
+                yield _sse_line(
+                    {"type": "snapshot", **_run_state_to_response(current).model_dump(mode="json")}
+                )
 
             deadline = time_mod.monotonic() + 4 * 3600  # 4-hour max
             while time_mod.monotonic() < deadline:
@@ -1732,7 +1846,7 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
 @app.delete("/strategy-lab/storage", response_model=ClearStrategyLabStorageResponse)
 def clear_strategy_lab_storage() -> ClearStrategyLabStorageResponse:
     """
-    Remove all persisted strategy lab data from the job service (Postgres ``strands_jobs.jobs``
+    Remove all persisted strategy lab data from the job service (Postgres ``khala_jobs.jobs``
     when ``JOB_SERVICE_URL`` is set, or local ``AGENT_CACHE`` files otherwise).
 
     Deletes:
@@ -1767,14 +1881,7 @@ class RunPaperTradingRequest(BaseModel):
     initial_capital: float = Field(default=100000.0, gt=0)
     transaction_cost_bps: float = Field(default=5.0, ge=0)
     slippage_bps: float = Field(default=2.0, ge=0)
-    min_trades: int = Field(default=50, ge=10, description="Minimum trades before evaluation")
-    lookback_days: int = Field(default=365, ge=30, description="Days of historical data to fetch")
-    max_evaluations: int = Field(
-        default=5000,
-        ge=100,
-        le=50000,
-        description="Cap on LLM evaluations to bound execution time.",
-    )
+    lookback_days: int = Field(default=365, ge=30, description="Days of recent market data to fetch")
 
 
 class PaperTradingResponse(BaseModel):
@@ -1794,14 +1901,13 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     """
     Run a paper trading session for a winning strategy using real market data.
 
-    Fetches live price data, uses the LLM to interpret the strategy's entry/exit rules
-    against each bar, simulates trade execution, and compares performance to the backtest.
-    Strategies that align with backtest expectations are flagged as ready for live testing.
-    Underperforming strategies receive a detailed divergence analysis.
+    Executes the strategy's generated Python code against recent market data in
+    the same subprocess sandbox used for backtesting.  Compares performance to the
+    backtest.  Strategies that align with backtest expectations are flagged as ready
+    for live testing.  Underperforming strategies receive a detailed divergence analysis.
     """
     from investment_team.market_data_service import MarketDataService
     from investment_team.paper_trading_agent import PaperTradingAgent
-    from llm_service.factory import get_client
 
     # 1 — Look up the winning strategy lab record
     with _lock:
@@ -1823,6 +1929,15 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
 
     strategy = lab_record.strategy
     backtest_record = lab_record.backtest
+
+    # 1b — Extract strategy code (required for code-based paper trading)
+    strategy_code = lab_record.strategy_code or getattr(strategy, "strategy_code", None)
+    if not strategy_code:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Strategy '{request.lab_record_id}' has no generated strategy code. "
+            "Only strategies with executable code can be paper traded.",
+        )
 
     # 2 — Fetch real market data
     market_service = MarketDataService()
@@ -1847,19 +1962,17 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         )
 
     # 3 — Run paper trading session
-    # Lazy imports: yfinance and LLM client are heavy; deferring keeps app startup fast.
-    llm = get_client("paper_trading")
-    agent = PaperTradingAgent(llm_client=llm)
+    agent = PaperTradingAgent()
 
     try:
         session = agent.run_session(
             strategy=strategy,
+            strategy_code=strategy_code,
             backtest_record=backtest_record,
             market_data=market_data,
             initial_capital=request.initial_capital,
             transaction_cost_bps=request.transaction_cost_bps,
             slippage_bps=request.slippage_bps,
-            min_trades=request.min_trades,
         )
     except Exception as exc:
         logger.error("Paper trading session failed: %s", exc)
@@ -1871,29 +1984,27 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     with _lock:
         _paper_trading_sessions[session.session_id] = session
 
-    # 5 — Build response message (include a warning when min_trades was not reached)
+    # 5 — Build response message
     trade_count = len(session.trades)
-    shortfall = ""
-    if trade_count < request.min_trades:
-        shortfall = (
-            f" WARNING: Only {trade_count}/{request.min_trades} trades were completed "
-            f"(insufficient data or evaluation budget). Results may be unreliable."
-        )
 
-    if session.verdict == PaperTradingVerdict.READY_FOR_LIVE:
+    if session.status == PaperTradingStatus.FAILED:
+        message = (
+            "Paper trading failed — strategy code could not be executed against recent data. "
+            "See divergence_analysis for error details."
+        )
+    elif session.verdict == PaperTradingVerdict.READY_FOR_LIVE:
         message = (
             f"Paper trading completed with {trade_count} trades. "
             f"Performance aligns with backtest expectations — strategy is READY FOR LIVE TESTING."
-            f"{shortfall}"
         )
     elif session.verdict == PaperTradingVerdict.NOT_PERFORMANT:
         message = (
             f"Paper trading completed with {trade_count} trades. "
             f"Performance does NOT align with backtest expectations — strategy is NOT PERFORMANT "
-            f"with live data. See divergence_analysis for details.{shortfall}"
+            f"with live data. See divergence_analysis for details."
         )
     else:
-        message = f"Paper trading completed with {trade_count} trades.{shortfall}"
+        message = f"Paper trading completed with {trade_count} trades."
 
     return PaperTradingResponse(session=session, message=message)
 

@@ -269,7 +269,7 @@ curl -X POST http://localhost:8012/branding/clients/client_abc123.../brands/bran
 # => TeamOutput (codification, mood_boards, brand_guidelines, brand_book, design_asset_result, ...)
 ```
 
-**Backward compatibility:** `POST /branding/run` and `POST /branding/sessions` (and all session/question endpoints) are unchanged. Request bodies for `/branding/run` and session creation may optionally include `client_id` and `brand_id`; when both are provided, the run is associated with that brand and the result is stored as a new version.
+**API continuity:** `POST /branding/run` and `POST /branding/sessions` (and all session/question endpoints) are unchanged. Request bodies for `/branding/run` and session creation may optionally include `client_id` and `brand_id`; when both are provided, the run is associated with that brand and the result is stored as a new version.
 
 ## Outsourcing
 
@@ -295,6 +295,6 @@ In addition to codification, mood boards, guidelines, design system, wiki backlo
 - Restarting the API clears active session state.
 - Each answer is applied immediately to the mission context, then the orchestrator reruns to refresh output artifacts.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

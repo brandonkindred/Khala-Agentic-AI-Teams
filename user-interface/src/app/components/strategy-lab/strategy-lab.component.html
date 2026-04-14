@@ -64,74 +64,104 @@
   @if (running && runStatus) {
     <div class="in-progress-section">
       <div class="progress-header">
-        <mat-icon>hourglass_top</mat-icon>
+        <mat-icon class="pulse-icon">hub</mat-icon>
         <span class="progress-title">
-          Running — Strategy {{ runStatus.completed_cycles + 1 }} of {{ runStatus.total_cycles }}
+          Strategy {{ runStatus.completed_cycles + 1 }} of {{ runStatus.total_cycles }}
         </span>
         @if (runStatus.skipped_cycles) {
           <span class="skipped-badge">{{ runStatus.skipped_cycles }} skipped</span>
         }
+        <span class="status-badge status-running">Running</span>
       </div>
 
-      <mat-progress-bar mode="determinate" [value]="progressPercent()"></mat-progress-bar>
+      <div class="progress-section">
+        <mat-progress-bar mode="determinate" [value]="progressPercent()"></mat-progress-bar>
+        <span class="progress-text">{{ progressPercent() }}%</span>
+      </div>
 
       @if (runStatus.current_cycle) {
-        <mat-card class="progress-card" [class]="'phase-border-' + runStatus.current_cycle.phase">
-          <mat-card-content>
-            <div class="phase-row">
-              <mat-chip [class]="'phase-chip-' + runStatus.current_cycle.phase">
-                {{ phaseLabel(runStatus.current_cycle.phase) }}
-              </mat-chip>
-              <span class="cycle-label">Cycle {{ runStatus.current_cycle.cycle_index }}</span>
+        <!-- Phase stepper -->
+        <div class="phase-stepper">
+          @for (phase of STRATEGY_LAB_PHASES; track phase.id; let i = $index; let last = $last) {
+            <div class="phase-step"
+                 [class.completed]="isPhaseCompleted(phase.id)"
+                 [class.current]="isCurrentPhase(phase.id)"
+                 [class.pending]="isPhasePending(phase.id)"
+                 [class.has-connector]="!last"
+                 [class.next-completed]="!last && isPhaseCompleted(STRATEGY_LAB_PHASES[i + 1].id)">
+              <div class="phase-node">
+                <mat-icon>{{ isPhaseCompleted(phase.id) ? 'check' : phase.icon }}</mat-icon>
+              </div>
+              <span class="phase-label">{{ phase.label }}</span>
             </div>
+          }
+        </div>
 
-            @if (runStatus.current_cycle.strategy) {
-              <div class="preview-rows">
-                <div class="preview-row">
-                  <span class="preview-label">Asset Class</span>
-                  <span class="preview-value">{{ runStatus.current_cycle.strategy.asset_class }}</span>
-                </div>
-                <div class="preview-row">
-                  <span class="preview-label">Hypothesis</span>
-                  <span class="preview-value hypothesis-text">{{ runStatus.current_cycle.strategy.hypothesis }}</span>
-                </div>
+        <!-- Strategy preview (once ideation completes) -->
+        @if (runStatus.current_cycle.strategy) {
+          <div class="strategy-preview">
+            <mat-icon class="preview-icon">{{ getAssetClassIcon(runStatus.current_cycle.strategy.asset_class) }}</mat-icon>
+            <div class="preview-text">
+              <span class="preview-asset">{{ runStatus.current_cycle.strategy.asset_class }}</span>
+              <span class="preview-hypothesis">{{ runStatus.current_cycle.strategy.hypothesis }}</span>
+            </div>
+          </div>
+        }
+
+        <!-- Live metrics (once available) -->
+        @if (runStatus.current_cycle.metrics) {
+          <div class="metrics-preview">
+            @if (runStatus.current_cycle.metrics.annualized_return_pct !== undefined) {
+              <div class="metric-chip" [class]="returnColor(runStatus.current_cycle.metrics.annualized_return_pct!)">
+                <span class="metric-value">{{ runStatus.current_cycle.metrics.annualized_return_pct | number:'1.1-1' }}%</span>
+                <span class="metric-label">Return pa</span>
               </div>
             }
-
-            @if (runStatus.current_cycle.metrics) {
-              <div class="metrics-preview">
-                @if (runStatus.current_cycle.metrics.annualized_return_pct !== undefined) {
-                  <div class="metric-chip" [class]="returnColor(runStatus.current_cycle.metrics.annualized_return_pct!)">
-                    <span class="metric-value">{{ runStatus.current_cycle.metrics.annualized_return_pct | number:'1.1-1' }}%</span>
-                    <span class="metric-label">Return pa</span>
-                  </div>
-                }
-                @if (runStatus.current_cycle.metrics.sharpe_ratio !== undefined) {
-                  <div class="metric-chip">
-                    <span class="metric-value">{{ runStatus.current_cycle.metrics.sharpe_ratio | number:'1.2-2' }}</span>
-                    <span class="metric-label">Sharpe</span>
-                  </div>
-                }
-                @if (runStatus.current_cycle.metrics.max_drawdown_pct !== undefined) {
-                  <div class="metric-chip">
-                    <span class="metric-value">{{ runStatus.current_cycle.metrics.max_drawdown_pct | number:'1.1-1' }}%</span>
-                    <span class="metric-label">Max DD</span>
-                  </div>
-                }
-                @if (runStatus.current_cycle.metrics.win_rate_pct !== undefined) {
-                  <div class="metric-chip">
-                    <span class="metric-value">{{ runStatus.current_cycle.metrics.win_rate_pct | number:'1.0-0' }}%</span>
-                    <span class="metric-label">Win Rate</span>
-                  </div>
-                }
+            @if (runStatus.current_cycle.metrics.sharpe_ratio !== undefined) {
+              <div class="metric-chip">
+                <span class="metric-value">{{ runStatus.current_cycle.metrics.sharpe_ratio | number:'1.2-2' }}</span>
+                <span class="metric-label">Sharpe</span>
               </div>
             }
-          </mat-card-content>
-        </mat-card>
+            @if (runStatus.current_cycle.metrics.max_drawdown_pct !== undefined) {
+              <div class="metric-chip">
+                <span class="metric-value">{{ runStatus.current_cycle.metrics.max_drawdown_pct | number:'1.1-1' }}%</span>
+                <span class="metric-label">Max DD</span>
+              </div>
+            }
+            @if (runStatus.current_cycle.metrics.win_rate_pct !== undefined) {
+              <div class="metric-chip">
+                <span class="metric-value">{{ runStatus.current_cycle.metrics.win_rate_pct | number:'1.0-0' }}%</span>
+                <span class="metric-label">Win Rate</span>
+              </div>
+            }
+          </div>
+        }
+
+        <!-- Activity log -->
+        @if (activityLog.length > 0) {
+          <div class="activity-log" #logContainer>
+            @for (entry of activityLog; track $index) {
+              <div class="log-entry" [class]="'log-' + entry.status">
+                <span class="log-time">{{ entry.time }}</span>
+                <span class="log-indicator">
+                  @if (entry.status === 'active') {
+                    <mat-spinner diameter="12"></mat-spinner>
+                  } @else if (entry.status === 'done') {
+                    <mat-icon>check_circle</mat-icon>
+                  } @else {
+                    <mat-icon>cancel</mat-icon>
+                  }
+                </span>
+                <span class="log-message">{{ entry.message }}</span>
+              </div>
+            }
+          </div>
+        }
       } @else {
         <div class="progress-waiting">
           <mat-spinner diameter="24"></mat-spinner>
-          <span>Preparing next strategy…</span>
+          <span>Preparing next strategy...</span>
         </div>
       }
     </div>
@@ -206,7 +236,7 @@
         <mat-card class="strategy-card" [class.is-winning]="record.is_winning" [class.is-losing]="!record.is_winning">
 
           <!-- Card header -->
-          <mat-card-header class="strategy-card-header-row">
+          <mat-card-header class="strategy-card-header-row card-summary" (click)="toggleCard(record.lab_record_id)">
             <div mat-card-avatar class="strategy-avatar" [class.winning-avatar]="record.is_winning" [class.losing-avatar]="!record.is_winning">
               <mat-icon>{{ record.is_winning ? 'trending_up' : 'trending_down' }}</mat-icon>
             </div>
@@ -238,7 +268,10 @@
           <mat-card-content>
 
             <!-- Win/lose badge + key metrics -->
-            <div class="metrics-row">
+            <div class="metrics-row card-summary" role="button" tabindex="0"
+                 (click)="toggleCard(record.lab_record_id)"
+                 (keydown.enter)="toggleCard(record.lab_record_id)"
+                 (keydown.space)="toggleCard(record.lab_record_id); $event.preventDefault()">
               <div class="outcome-badge" [class.winning-badge]="record.is_winning" [class.losing-badge]="!record.is_winning">
                 <mat-icon>{{ record.is_winning ? 'emoji_events' : 'close' }}</mat-icon>
                 {{ record.is_winning ? 'WINNING' : 'LOSING' }}
@@ -272,7 +305,18 @@
               </div>
             </div>
 
+            <mat-icon class="expand-chevron card-summary" (click)="toggleCard(record.lab_record_id)">
+              {{ isCardExpanded(record.lab_record_id) ? 'expand_less' : 'expand_more' }}
+            </mat-icon>
+
+            @if (isCardExpanded(record.lab_record_id)) {
             <mat-divider class="card-divider"></mat-divider>
+
+            <!-- Hypothesis -->
+            <div class="hypothesis">
+              <mat-icon class="hypothesis-icon">lightbulb</mat-icon>
+              <p>{{ record.strategy.hypothesis }}</p>
+            </div>
 
             <!-- Analysis narrative -->
             <div class="narrative">
@@ -502,7 +546,158 @@
 
               </mat-expansion-panel>
 
+              <!-- Quality Gates panel -->
+              @if (record.quality_gate_results && record.quality_gate_results.length > 0) {
+                <mat-expansion-panel>
+                  <mat-expansion-panel-header>
+                    <mat-panel-title>
+                      <mat-icon class="panel-icon">verified</mat-icon>
+                      Quality Gates
+                    </mat-panel-title>
+                    <mat-panel-description>
+                      {{ record.quality_gate_results.length }} check(s)
+                      @if (record.refinement_rounds) {
+                        &middot; {{ record.refinement_rounds }} refinement round(s)
+                      }
+                    </mat-panel-description>
+                  </mat-expansion-panel-header>
+                  <div class="gate-results">
+                    @for (gate of record.quality_gate_results; track $index) {
+                      <div class="gate-result" [class]="gateSeverityClass(gate, record)">
+                        <mat-icon class="gate-icon">{{ gateIcon(gate, record) }}</mat-icon>
+                        <span class="gate-name">{{ gate.gate_name }}</span>
+                        <span class="gate-detail">
+                          {{ gate.details }}
+                          @if (isRemedied(gate, record)) {
+                            <span class="gate-remedied-label">(remedied in round {{ (gate.refinement_round ?? 0) + 1 }})</span>
+                          }
+                        </span>
+                      </div>
+                    }
+                  </div>
+                </mat-expansion-panel>
+              }
+
+              <!-- Strategy Code panel -->
+              @if (record.strategy_code || record.strategy.strategy_code) {
+                <mat-expansion-panel>
+                  <mat-expansion-panel-header>
+                    <mat-panel-title>
+                      <mat-icon class="panel-icon">code</mat-icon>
+                      Strategy Code
+                    </mat-panel-title>
+                    <mat-panel-description>Generated Python backtest script</mat-panel-description>
+                  </mat-expansion-panel-header>
+                  <pre class="strategy-code">{{ record.strategy_code || record.strategy.strategy_code }}</pre>
+                </mat-expansion-panel>
+              }
+
             </mat-accordion>
+            }
+
+            <!-- Paper Trading section (winning strategies only) -->
+            @if (record.is_winning) {
+              <mat-divider class="card-divider"></mat-divider>
+
+              <div class="paper-trading-section">
+                @if (getPaperSession(record); as session) {
+                  <!-- Paper trading results -->
+                  <div class="paper-trading-result">
+                    <div class="paper-verdict-row">
+                      <div class="paper-verdict-badge"
+                           [class.verdict-ready]="session.verdict === 'ready_for_live'"
+                           [class.verdict-not-performant]="session.verdict === 'not_performant'"
+                           [class.verdict-inconclusive]="!session.verdict">
+                        <mat-icon>{{ session.verdict === 'ready_for_live' ? 'verified' : session.verdict === 'not_performant' ? 'warning' : 'help_outline' }}</mat-icon>
+                        {{ verdictLabel(session.verdict) }}
+                      </div>
+                      <span class="paper-meta">
+                        {{ session.trades.length }} trades &bull;
+                        {{ session.data_period_start | slice:0:10 }} to {{ session.data_period_end | slice:0:10 }}
+                      </span>
+                      @if (paperTradingLabRecordId === record.lab_record_id) {
+                        <button mat-stroked-button class="rerun-paper-btn" disabled>
+                          <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
+                          Re-run
+                        </button>
+                      } @else {
+                        <button
+                          mat-stroked-button
+                          class="rerun-paper-btn"
+                          (click)="runPaperTrading(record)"
+                          [disabled]="paperTradingLabRecordId !== null || running"
+                        >
+                          <mat-icon>refresh</mat-icon>
+                          Re-run
+                        </button>
+                      }
+                    </div>
+
+                    <!-- Comparison table -->
+                    @if (session.comparison) {
+                      <div class="comparison-table-wrap">
+                        <table class="comparison-table">
+                          <thead>
+                            <tr>
+                              <th>Metric</th>
+                              <th>Backtest</th>
+                              <th>Paper</th>
+                              <th>Aligned</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            @for (m of comparisonMetrics(session.comparison); track m.label) {
+                              <tr>
+                                <td class="cmp-label">{{ m.label }}</td>
+                                <td class="num-cell">{{ m.backtest }}</td>
+                                <td class="num-cell">{{ m.paper }}</td>
+                                <td class="cmp-aligned">
+                                  <mat-icon [class.aligned-yes]="m.aligned" [class.aligned-no]="!m.aligned">
+                                    {{ m.aligned ? 'check_circle' : 'cancel' }}
+                                  </mat-icon>
+                                </td>
+                              </tr>
+                            }
+                          </tbody>
+                        </table>
+                      </div>
+                    }
+
+                    <!-- Divergence analysis (when not performant) -->
+                    @if (session.divergence_analysis) {
+                      <div class="divergence-analysis">
+                        <mat-icon class="narrative-icon">analytics</mat-icon>
+                        <p>{{ session.divergence_analysis }}</p>
+                      </div>
+                    }
+                  </div>
+                } @else {
+                  <!-- No paper trading yet — show button -->
+                  @if (paperTradingLabRecordId === record.lab_record_id) {
+                    <button
+                      mat-stroked-button
+                      color="primary"
+                      class="paper-trade-btn"
+                      disabled
+                    >
+                      <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
+                      <span>Running paper trading…</span>
+                    </button>
+                  } @else {
+                    <button
+                      mat-stroked-button
+                      color="primary"
+                      class="paper-trade-btn"
+                      (click)="runPaperTrading(record)"
+                      [disabled]="paperTradingLabRecordId !== null || running"
+                    >
+                      <mat-icon>candlestick_chart</mat-icon>
+                      <span>Paper Trade This Strategy</span>
+                    </button>
+                  }
+                }
+              </div>
+            }
 
           </mat-card-content>
         </mat-card>

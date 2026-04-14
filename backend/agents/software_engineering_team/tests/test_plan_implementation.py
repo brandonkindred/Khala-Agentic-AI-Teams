@@ -109,6 +109,26 @@ def test_integration_agent_exists_and_runs() -> None:
     assert hasattr(result, "summary")
 
 
+def test_integration_agent_handles_multiple_sequential_runs() -> None:
+    """Regression: a single IntegrationAgent instance must handle many
+    sequential run() calls. Early Strands migrations cached a Strands
+    Agent instance in __init__ and reused it across calls, which broke
+    structured_output forced-tool-choice on the second call."""
+    from integration_team import IntegrationAgent, IntegrationInput
+
+    agent = IntegrationAgent(DummyLLMClient())
+    for i in range(3):
+        result = agent.run(
+            IntegrationInput(
+                backend_code=f"@app.get('/api/tasks/{i}')",
+                frontend_code=f"this.http.get('/api/tasks/{i}')",
+                spec_content=f"Task manager app v{i}",
+            )
+        )
+        assert hasattr(result, "passed"), f"run {i} did not return IntegrationOutput"
+        assert result.passed is True, f"run {i} should have passed cleanly"
+
+
 def test_acceptance_verifier_agent_exists_and_flags_unsatisfied() -> None:
     """Acceptance verifier can flag unsatisfied criteria."""
     from acceptance_verifier_agent import AcceptanceVerifierAgent, AcceptanceVerifierInput

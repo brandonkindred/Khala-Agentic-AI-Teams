@@ -1,10 +1,10 @@
 from ..models import CoverageSummary
 from ..models.phase_result import WCAGCoverageResult
 from ..tools import persist_artifact, update_wcag_checklist_xlsx
-from .base import ToolContext, tool
+from .base import ToolContext, a11y_phase
 
 
-@tool(context=True)
+@a11y_phase(context=True)
 def run_wcag_coverage(engagement_id: str, tool_context: ToolContext) -> dict:
     update_wcag_checklist_xlsx("wcag_checklist.xlsx", {"engagement": engagement_id})
     summary = CoverageSummary(

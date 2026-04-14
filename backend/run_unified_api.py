@@ -2,7 +2,7 @@
 """
 Unified API Server Launcher.
 
-Starts the unified API server that consolidates all Strands Agent team APIs
+Starts the unified API server that consolidates all Khala team APIs
 under a single entry point.
 
 Usage:
@@ -64,7 +64,7 @@ logger = logging.getLogger("unified_api_launcher")
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Start the Strands Agents Unified API Server",
+        description="Start the Khala Unified API Server",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Available team APIs (all mounted under /api/):
@@ -118,7 +118,7 @@ def main() -> None:
     args = parse_args()
 
     logger.info("=" * 60)
-    logger.info("Strands Agents Unified API Server")
+    logger.info("Khala Unified API Server")
     logger.info("=" * 60)
     logger.info("Host: %s", args.host)
     logger.info("Port: %d", args.port)

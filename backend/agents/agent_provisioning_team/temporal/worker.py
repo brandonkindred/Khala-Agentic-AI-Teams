@@ -9,6 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from temporalio.worker import Worker
+from temporalio.worker.workflow_sandbox import (
+    SandboxedWorkflowRunner,
+    SandboxRestrictions,
+)
 
 from agent_provisioning_team.temporal.activities import (
     compensate_activity_v2,
@@ -45,6 +49,14 @@ def create_agent_provisioning_worker(client: Optional[object] = None) -> Optiona
         _activity_executor = ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="agent-provisioning-temporal-activity"
         )
+    # Pass pydantic through the workflow sandbox so models with
+    # datetime fields (DeliverResult.finalized_at, etc.) don't trip
+    # pydantic-core's identity-based type check. See the longer
+    # explanation in shared_temporal/worker.py:_build_workflow_runner.
+    sandbox_restrictions = SandboxRestrictions.default.with_passthrough_modules(
+        "pydantic",
+        "pydantic_core",
+    )
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
@@ -58,6 +70,7 @@ def create_agent_provisioning_worker(client: Optional[object] = None) -> Optiona
         ],
         activity_executor=_activity_executor,
         max_concurrent_activities=8,
+        workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
     )
     logger.info("Agent Provisioning Temporal worker created for task queue %s", TASK_QUEUE)
     return worker

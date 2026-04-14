@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List
+
+from strands import Agent
 
 from coding_team.models import CodingTeamPlanInput
 from coding_team.tech_lead_agent import prompts
@@ -32,11 +35,24 @@ def _plan_text(plan: CodingTeamPlanInput) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
+def _agent_call_json(agent: Agent, prompt: str) -> Dict[str, Any]:
+    """Call a Strands Agent and parse the result as JSON."""
+    result = agent(prompt)
+    raw = str(result).strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    return json.loads(raw)
+
+
 class TechLeadAgent:
     """Tech Lead: given plan, produce tasks + stacks; groom tasks; suggest assignments; code review."""
 
-    def __init__(self, llm: Any) -> None:
-        self.llm = llm
+    def __init__(self, model: Any) -> None:
+        self._model = model
+        self._plan_agent = Agent(model=model, system_prompt=prompts.PLAN_TO_TASK_GRAPH_SYSTEM)
+        self._groom_agent = Agent(model=model, system_prompt=prompts.GROOM_TASK_SYSTEM)
+        self._assignment_agent = Agent(model=model, system_prompt=prompts.ASSIGNMENT_SYSTEM)
+        self._review_agent = Agent(model=model, system_prompt=prompts.CODE_REVIEW_SYSTEM)
 
     def run_plan_to_task_graph(self, plan: CodingTeamPlanInput) -> Dict[str, Any]:
         """
@@ -45,13 +61,9 @@ class TechLeadAgent:
         """
         plan_text = _plan_text(plan)
         user = prompts.PLAN_TO_TASK_GRAPH_USER.format(plan_text=plan_text)
+        user += "\n\nRespond with valid JSON only, no markdown fences."
         try:
-            data = self.llm.complete_json(
-                user,
-                temperature=0.2,
-                system_prompt=prompts.PLAN_TO_TASK_GRAPH_SYSTEM,
-                think=True,
-            )
+            data = _agent_call_json(self._plan_agent, user)
         except Exception as e:
             logger.warning("Tech Lead plan_to_task_graph LLM failed: %s", e)
             return {"tasks": [], "stacks": [{"name": "default", "tools_services": []}]}
@@ -96,13 +108,9 @@ class TechLeadAgent:
             task_dependencies=json.dumps(task_dependencies),
             plan_context=plan_context[:6000],
         )
+        user += "\n\nRespond with valid JSON only, no markdown fences."
         try:
-            data = self.llm.complete_json(
-                user,
-                temperature=0.2,
-                system_prompt=prompts.GROOM_TASK_SYSTEM,
-                think=True,
-            )
+            data = _agent_call_json(self._groom_agent, user)
         except Exception as e:
             logger.warning("Tech Lead groom_task LLM failed: %s", e)
             return {
@@ -134,13 +142,9 @@ class TechLeadAgent:
             ready_tasks=json.dumps(ready_tasks),
             free_agents=json.dumps(free_agents),
         )
+        user += "\n\nRespond with valid JSON only, no markdown fences."
         try:
-            data = self.llm.complete_json(
-                user,
-                temperature=0.1,
-                system_prompt=prompts.ASSIGNMENT_SYSTEM,
-                think=True,
-            )
+            data = _agent_call_json(self._assignment_agent, user)
         except Exception as e:
             logger.warning("Tech Lead assignments LLM failed: %s", e)
             return {"assignments": []}
@@ -167,13 +171,9 @@ class TechLeadAgent:
             acceptance_criteria=json.dumps(acceptance_criteria),
             changes_summary=changes_summary[:8000],
         )
+        user += "\n\nRespond with valid JSON only, no markdown fences."
         try:
-            data = self.llm.complete_json(
-                user,
-                temperature=0.1,
-                system_prompt=prompts.CODE_REVIEW_SYSTEM,
-                think=True,
-            )
+            data = _agent_call_json(self._review_agent, user)
         except Exception as e:
             logger.warning("Tech Lead code_review LLM failed: %s", e)
             return {"approved": False, "reason": "Review failed", "requested_changes": []}

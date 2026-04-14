@@ -1,15 +1,15 @@
-# Full stack: Postgres, Temporal, strands-agents (unified API), and Angular UI.
+# Full stack: Postgres, Temporal, khala (unified API), and Angular UI.
 # Run from repo root: docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
 # Ports: 5432 Postgres, 7233 Temporal gRPC, 8080 Temporal UI, 4201 Angular UI, 8888 Unified API (direct)
 #
 # Static IPs and extra_hosts avoid reliance on Podman's embedded DNS (which can timeout resolving service names).
-# Network "strands-stack" is external: create once with docker/ensure-network.sh (or see README) to avoid
+# Network "khala-stack" is external: create once with docker/ensure-network.sh (or see README) to avoid
 # repeated "IPAM option driver has changed" errors when using Podman with docker-compose.
 
 services:
   postgres:
     image: postgres:18
-    container_name: strands-stack-postgres
+    container_name: khala-stack-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -34,7 +34,7 @@ services:
 
   temporal:
     image: temporalio/auto-setup:1.24.2
-    container_name: strands-stack-temporal
+    container_name: khala-stack-temporal
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,7 +56,7 @@ services:
 
   temporal-ui:
     image: temporalio/ui:2.28.0
-    container_name: strands-stack-temporal-ui
+    container_name: khala-stack-temporal-ui
     depends_on:
       - temporal
     environment:
@@ -74,17 +74,17 @@ services:
     build:
       context: ../backend
       dockerfile: job_service/Dockerfile
-    image: strands-job-service
-    container_name: strands-job-service
+    image: khala-job-service
+    container_name: khala-job-service
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_USER: strands
-      POSTGRES_PASSWORD: strands
-      POSTGRES_DB: strands_jobs
+      POSTGRES_USER: khala
+      POSTGRES_PASSWORD: khala
+      POSTGRES_DB: khala_jobs
       PYTHONUNBUFFERED: "1"
     extra_hosts:
       - "postgres:172.28.0.2"
@@ -110,8 +110,8 @@ services:
     build:
       context: ../backend
       dockerfile: blogging_service/Dockerfile
-    image: strands-blogging-service
-    container_name: strands-blogging-service
+    image: khala-blogging-service
+    container_name: khala-blogging-service
     depends_on:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
@@ -156,8 +156,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8091" }
-    image: strands-se-service
-    container_name: strands-se-service
+    image: khala-se-service
+    container_name: khala-se-service
     depends_on:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
@@ -174,6 +174,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       TEMPORAL_ADDRESS: temporal:7233
       JOB_SERVICE_URL: http://job-service:8085
+      UNIFIED_API_BASE_URL: http://khala:8080
       AGENT_CACHE: /data/agents
       TEAM_MODULE: software_engineering_team.api.main
       TEAM_NAME: software_engineering_team
@@ -199,8 +200,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8092" }
-    image: strands-pa-service
-    container_name: strands-pa-service
+    image: khala-pa-service
+    container_name: khala-pa-service
     depends_on:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
@@ -229,8 +230,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8093" }
-    image: strands-market-research-service
-    container_name: strands-market-research-service
+    image: khala-market-research-service
+    container_name: khala-market-research-service
     depends_on:
       postgres: { condition: service_healthy }
       job-service: { condition: service_healthy }
@@ -258,8 +259,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8094" }
-    image: strands-soc2-service
-    container_name: strands-soc2-service
+    image: khala-soc2-service
+    container_name: khala-soc2-service
     depends_on:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
@@ -288,8 +289,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8095" }
-    image: strands-social-marketing-service
-    container_name: strands-social-marketing-service
+    image: khala-social-marketing-service
+    container_name: khala-social-marketing-service
     depends_on:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
@@ -318,8 +319,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8096" }
-    image: strands-branding-service
-    container_name: strands-branding-service
+    image: khala-branding-service
+    container_name: khala-branding-service
     depends_on:
       postgres: { condition: service_healthy }
       job-service: { condition: service_healthy }
@@ -347,8 +348,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8097" }
-    image: strands-agent-provisioning-service
-    container_name: strands-agent-provisioning-service
+    image: khala-agent-provisioning-service
+    container_name: khala-agent-provisioning-service
     depends_on:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
@@ -377,8 +378,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8098" }
-    image: strands-a11y-service
-    container_name: strands-a11y-service
+    image: khala-a11y-service
+    container_name: khala-a11y-service
     depends_on:
       postgres: { condition: service_healthy }
       job-service: { condition: service_healthy }
@@ -407,8 +408,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8099" }
-    image: strands-ai-systems-service
-    container_name: strands-ai-systems-service
+    image: khala-ai-systems-service
+    container_name: khala-ai-systems-service
     depends_on:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
@@ -437,8 +438,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8100" }
-    image: strands-investment-service
-    container_name: strands-investment-service
+    image: khala-investment-service
+    container_name: khala-investment-service
     depends_on:
       postgres: { condition: service_healthy }
       job-service: { condition: service_healthy }
@@ -466,8 +467,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8101" }
-    image: strands-nutrition-service
-    container_name: strands-nutrition-service
+    image: khala-nutrition-service
+    container_name: khala-nutrition-service
     depends_on:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
@@ -496,8 +497,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8102" }
-    image: strands-planning-v3-service
-    container_name: strands-planning-v3-service
+    image: khala-planning-v3-service
+    container_name: khala-planning-v3-service
     depends_on:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
@@ -526,8 +527,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8103" }
-    image: strands-coding-team-service
-    container_name: strands-coding-team-service
+    image: khala-coding-team-service
+    container_name: khala-coding-team-service
     depends_on:
       postgres: { condition: service_healthy }
       job-service: { condition: service_healthy }
@@ -555,8 +556,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8105" }
-    image: strands-sales-service
-    container_name: strands-sales-service
+    image: khala-sales-service
+    container_name: khala-sales-service
     depends_on:
       postgres: { condition: service_healthy }
       job-service: { condition: service_healthy }
@@ -584,8 +585,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8106" }
-    image: strands-road-trip-service
-    container_name: strands-road-trip-service
+    image: khala-road-trip-service
+    container_name: khala-road-trip-service
     depends_on:
       postgres: { condition: service_healthy }
       job-service: { condition: service_healthy }
@@ -613,8 +614,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8107" }
-    image: strands-startup-advisor-service
-    container_name: strands-startup-advisor-service
+    image: khala-startup-advisor-service
+    container_name: khala-startup-advisor-service
     depends_on:
       postgres: { condition: service_healthy }
       job-service: { condition: service_healthy }
@@ -642,8 +643,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8108" }
-    image: strands-agentic-team-provisioning-service
-    container_name: strands-agentic-team-provisioning-service
+    image: khala-agentic-team-provisioning-service
+    container_name: khala-agentic-team-provisioning-service
     depends_on:
       postgres: { condition: service_healthy }
       job-service: { condition: service_healthy }
@@ -671,8 +672,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8109" }
-    image: strands-user-agent-founder-service
-    container_name: strands-user-agent-founder-service
+    image: khala-user-agent-founder-service
+    container_name: khala-user-agent-founder-service
     depends_on:
       postgres: { condition: service_healthy }
       job-service: { condition: service_healthy }
@@ -700,8 +701,8 @@ services:
       context: ../backend
       dockerfile: team_service/Dockerfile
       args: { TEAM_PORT: "8110" }
-    image: strands-deepthought-service
-    container_name: strands-deepthought-service
+    image: khala-deepthought-service
+    container_name: khala-deepthought-service
     depends_on:
       postgres: { condition: service_healthy }
       job-service: { condition: service_healthy }
@@ -726,12 +727,12 @@ services:
 
   # ── Unified API (router/proxy) ──────────────────────────────────────────────
 
-  strands-agents:
+  khala:
     build:
       context: ../backend
       dockerfile: Dockerfile
-    image: strands-unified-api
-    container_name: strands-agents
+    image: khala-unified-api
+    container_name: khala
     depends_on:
       postgres: { condition: service_healthy }
       temporal: { condition: service_started }
@@ -843,12 +844,12 @@ services:
     build:
       context: ../user-interface
       dockerfile: Dockerfile
-    image: strands-ui
-    container_name: strands-ui
+    image: khala-ui
+    container_name: khala-ui
     ports:
       - "4201:80"
     depends_on:
-      strands-agents:
+      khala:
         condition: service_healthy
     extra_hosts:
       - "unified-api:172.28.0.6"
@@ -865,9 +866,9 @@ services:
 
   prometheus:
     image: prom/prometheus:v3.11.0
-    container_name: strands-stack-prometheus
+    container_name: khala-stack-prometheus
     depends_on:
-      strands-agents: { condition: service_healthy }
+      khala: { condition: service_healthy }
       job-service: { condition: service_healthy }
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -880,7 +881,7 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     extra_hosts:
-      - "strands-agents:172.28.0.6"
+      - "khala:172.28.0.6"
       - "job-service:172.28.0.5"
       - "blogging-service:172.28.0.8"
       - "se-service:172.28.0.9"
@@ -918,7 +919,7 @@ services:
 
   grafana:
     image: grafana/grafana:12.4.2
-    container_name: strands-stack-grafana
+    container_name: khala-stack-grafana
     depends_on:
       prometheus: { condition: service_healthy }
     environment:
@@ -948,7 +949,7 @@ services:
 
 networks:
   stack:
-    name: strands-stack
+    name: khala-stack
     external: true
 
 volumes:

@@ -7,14 +7,10 @@ automatically after every N deal outcomes are recorded. It:
 1. Loads all StageOutcome and DealOutcome records from the outcome store.
 2. Passes them to a Strands agent with a specialized analysis prompt.
 3. Parses the JSON response into a LearningInsights object.
-4. Falls back to heuristic computation (outcome_store.compute_heuristic_insights)
-   when the Strands SDK is not available.
-5. Persists the result to the outcome store so all agents can read it on the
+4. Persists the result to the outcome store so all agents can read it on the
    next pipeline run.
 
-The analysis prompt is grounded in the same sales methodologies used by the
-specialist agents — so the extracted patterns speak the same language as the
-agents that consume them.
+The strands SDK is a hard dependency. The system will fail fast if it is not installed.
 """
 
 from __future__ import annotations
@@ -22,11 +18,13 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import List, Optional
+
+from strands import Agent as StrandsAgent
+from strands_tools import python_repl
 
 from .models import DealOutcome, LearningInsights, StageOutcome
 from .outcome_store import (
-    compute_heuristic_insights,
     load_current_insights,
     load_deal_outcomes,
     load_stage_outcomes,
@@ -35,20 +33,7 @@ from .outcome_store import (
 
 logger = logging.getLogger(__name__)
 
-try:
-    from strands import Agent as StrandsAgent  # type: ignore[import]
-
-    try:
-        from strands_tools import python_repl  # type: ignore[import]
-
-        _LEARNING_TOOLS = [python_repl]
-    except ImportError:
-        _LEARNING_TOOLS = []
-
-    _HAS_STRANDS = True
-except ImportError:
-    _HAS_STRANDS = False
-    _LEARNING_TOOLS = []
+_LEARNING_TOOLS = [python_repl]
 
 _LEARNING_SYSTEM_PROMPT = """You are a Sales Analytics Expert who analyzes historical sales pipeline data
 to extract patterns that help sales teams improve their win rates and process efficiency.
@@ -166,14 +151,13 @@ class LearningEngine:
     Call `.refresh()` to run the analysis and persist updated insights.
     """
 
-    _agent: Any = field(default=None, init=False, repr=False)
+    _agent: StrandsAgent = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if _HAS_STRANDS:
-            self._agent = StrandsAgent(
-                system_prompt=_LEARNING_SYSTEM_PROMPT,
-                tools=_LEARNING_TOOLS,
-            )
+        self._agent = StrandsAgent(
+            system_prompt=_LEARNING_SYSTEM_PROMPT,
+            tools=_LEARNING_TOOLS,
+        )
 
     def refresh(
         self,
@@ -210,13 +194,9 @@ class LearningEngine:
             save_insights(empty)
             return empty
 
-        if self._agent is not None:
-            insights = self._run_with_strands(
-                stage_outcomes, deal_outcomes, current_version, n_analyzed
-            )
-        else:
-            logger.info("LearningEngine: Strands SDK not available — using heuristic analysis")
-            insights = compute_heuristic_insights(stage_outcomes, deal_outcomes, current_version)
+        insights = self._run_with_strands(
+            stage_outcomes, deal_outcomes, current_version, n_analyzed
+        )
 
         save_insights(insights)
         logger.info(
@@ -245,18 +225,15 @@ class LearningEngine:
             "Return a single JSON object with the insights schema defined in your system prompt. "
             "All insights must be grounded in the specific data above — no generic advice."
         )
-        try:
-            result = self._agent(prompt)
-            raw = result.message if hasattr(result, "message") else str(result)
-            insights = _parse_insights_json(raw.strip(), current_version, n_analyzed)
-            if insights:
-                return insights
-        except Exception as exc:
-            logger.error("LearningEngine Strands call failed: %s", exc, exc_info=True)
-
-        # Fall back to heuristics if Strands call or parse fails
-        logger.warning("LearningEngine: falling back to heuristic analysis after Strands failure")
-        return compute_heuristic_insights(stage_outcomes, deal_outcomes, current_version)
+        result = self._agent(prompt)
+        raw = str(result)
+        insights = _parse_insights_json(raw.strip(), current_version, n_analyzed)
+        if insights:
+            return insights
+        raise RuntimeError(
+            "LearningEngine: Strands agent returned unparseable output. "
+            f"Raw (first 300 chars): {raw[:300]}"
+        )
 
 
 def format_insights_for_prompt(insights: Optional[LearningInsights]) -> str:

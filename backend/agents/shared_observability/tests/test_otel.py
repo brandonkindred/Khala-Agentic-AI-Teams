@@ -93,7 +93,7 @@ def test_instrument_fastapi_app_attaches_server_spans(span_exporter) -> None:
     root = next((s for s in spans if s.name == "GET /ping"), None)
     assert root is not None, f"Expected 'GET /ping' span, got {[s.name for s in spans]}"
     resource_attrs = dict(root.resource.attributes)
-    assert resource_attrs.get("strands.team") == _TEAM_KEY
+    assert resource_attrs.get("khala.team") == _TEAM_KEY
     assert resource_attrs.get("service.name")  # set, any value from first init_otel
 
 
@@ -121,8 +121,8 @@ def test_llm_service_record_call_emits_otel_span(span_exporter) -> None:
     assert llm_spans, f"Expected at least one llm.call span, got {[s.name for s in spans]}"
 
     attributes = dict(llm_spans[0].attributes)
-    assert attributes["strands.team"] == _TEAM_KEY
-    assert attributes["strands.agent_key"] == "unit_test_agent"
+    assert attributes["khala.team"] == _TEAM_KEY
+    assert attributes["khala.agent_key"] == "unit_test_agent"
     assert attributes["llm.request.model"] == "test-model"
     assert attributes["llm.usage.total_tokens"] == 3
     assert attributes["llm.status"] == "success"

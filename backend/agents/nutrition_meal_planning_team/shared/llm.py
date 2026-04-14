@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient, LLMJsonParseError, get_client
+from strands.models.ollama import OllamaModel
+
+from llm_service import LLMJsonParseError, get_strands_model
 
 # Backward compat: JSONExtractionFailure used by agents that catch parse failures
 JSONExtractionFailure = LLMJsonParseError
 
 
-def get_llm_client(agent_key: str = "nutrition_meal_planning") -> LLMClient:
-    """Return LLM client for this team. Delegates to central llm_service."""
-    return get_client(agent_key)
+def get_llm_model(agent_key: str = "nutrition_meal_planning") -> OllamaModel:
+    """Return Strands model for this team. Delegates to central llm_service."""
+    return get_strands_model(agent_key)

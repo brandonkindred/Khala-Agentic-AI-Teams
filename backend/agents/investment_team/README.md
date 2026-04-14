@@ -74,7 +74,7 @@ flowchart LR
 - `DELETE /strategy-lab/storage` — purge strategy lab rows from the job service (lab records, `strat-lab-*` / `bt-lab-*` strategies and backtests, and all paper-trading sessions)
 - `GET /workflow/status`, `GET /workflow/queues`
 
-**Clearing strategy lab data in Postgres directly** (job DB `strands_jobs`, table `jobs`):
+**Clearing strategy lab data in Postgres directly** (job DB `khala_jobs`, table `jobs`):
 
 ```sql
 DELETE FROM jobs WHERE team = 'investment_strategy_lab_records';
@@ -172,6 +172,6 @@ The Investment Team API includes first-class backtesting endpoints so trading ag
 
 Stored `BacktestRecord` objects include strategy details, run configuration, and performance metrics (`total_return_pct`, `annualized_return_pct`, `volatility_pct`, `sharpe_ratio`, `max_drawdown_pct`, `win_rate_pct`, and `profit_factor`) so agents can compare what has been tried over time.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

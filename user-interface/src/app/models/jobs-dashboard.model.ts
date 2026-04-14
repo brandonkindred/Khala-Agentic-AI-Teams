@@ -8,6 +8,9 @@ import type { AISystemJobSummary } from './ai-systems.model';
 import type { ProvisionJobSummary } from './agent-provisioning.model';
 import type { MarketingJobListItem } from './social-marketing.model';
 import type { InvestmentJobSummary } from './investment.model';
+import type { SalesPipelineJobListItem } from './sales-team.model';
+import type { PlanningV3JobSummary } from './planning-v3.model';
+import type { GenericJobRecord } from '../services/generic-jobs-api.service';
 
 export type JobSource =
   | 'software_engineering'
@@ -15,7 +18,15 @@ export type JobSource =
   | 'ai_systems'
   | 'agent_provisioning'
   | 'social_marketing'
-  | 'investment';
+  | 'investment'
+  | 'user_agent_founder'
+  | 'soc2_compliance'
+  | 'personal_assistant'
+  | 'planning_v3'
+  | 'road_trip_planning'
+  | 'nutrition_meal_planning'
+  | 'coding_team'
+  | 'sales';
 
 export interface UnifiedJobSummary {
   jobId: string;
@@ -134,6 +145,66 @@ export function fromInvestmentJobSummary(s: InvestmentJobSummary): UnifiedJobSum
   };
 }
 
+export interface FounderJobSummary {
+  job_id: string;
+  status: string;
+  label?: string;
+  current_phase?: string;
+  created_at?: string;
+  error?: string;
+}
+
+export function fromFounderJobSummary(s: FounderJobSummary): UnifiedJobSummary {
+  return {
+    jobId: s.job_id,
+    status: s.status,
+    source: 'user_agent_founder',
+    label: s.label ?? 'Persona: founder workflow',
+    createdAt: s.created_at,
+    phase: s.current_phase,
+  };
+}
+
+export function fromSalesJobListItem(s: SalesPipelineJobListItem): UnifiedJobSummary {
+  return {
+    jobId: s.job_id,
+    status: s.status,
+    source: 'sales',
+    label: s.product_name || 'Sales pipeline',
+    createdAt: s.created_at,
+    progress: s.progress,
+    phase: s.current_stage,
+  };
+}
+
+export function fromPlanningV3JobSummary(s: PlanningV3JobSummary): UnifiedJobSummary {
+  return {
+    jobId: s.job_id,
+    status: s.status,
+    source: 'planning_v3',
+    label: getRepoName(s.repo_path) || 'Planning V3',
+    createdAt: undefined,
+    repoPath: s.repo_path,
+    phase: s.current_phase,
+  };
+}
+
+export function fromGenericJobRecord(source: JobSource, s: GenericJobRecord): UnifiedJobSummary {
+  // The job service flattens `data` into the top-level object, so fields like
+  // progress, current_phase, label, repo_path are top-level — not nested under `data`.
+  const r = s as unknown as Record<string, unknown>;
+  return {
+    jobId: s.job_id,
+    status: s.status,
+    source,
+    label: (r['label'] as string) ?? (r['repo_path'] as string) ?? s.job_id,
+    createdAt: s.created_at,
+    progress: r['progress'] as number | undefined,
+    phase: (r['current_phase'] as string) ?? (r['current_stage'] as string),
+    repoPath: r['repo_path'] as string | undefined,
+  };
+}
+
 /** Team display metadata for the Team column and navigation. */
 export const SOURCE_DISPLAY: Record<
   JobSource,
@@ -145,4 +216,12 @@ export const SOURCE_DISPLAY: Record<
   agent_provisioning: { label: 'Agent Provisioning', icon: 'settings', route: '/agent-provisioning' },
   social_marketing: { label: 'Social Marketing', icon: 'campaign', route: '/social-marketing' },
   investment: { label: 'Investment', icon: 'trending_up', route: '/investment/strategy-lab' },
+  user_agent_founder: { label: 'Persona Testing', icon: 'person_search', route: '/persona-testing' },
+  soc2_compliance: { label: 'SOC2 Compliance', icon: 'verified_user', route: '/soc2-compliance' },
+  personal_assistant: { label: 'Personal Assistant', icon: 'assistant', route: '/personal-assistant' },
+  planning_v3: { label: 'Planning V3', icon: 'description', route: '/software-engineering/planning-v3' },
+  road_trip_planning: { label: 'Road Trip', icon: 'directions_car', route: '/dashboard' },
+  nutrition_meal_planning: { label: 'Nutrition', icon: 'restaurant', route: '/nutrition' },
+  coding_team: { label: 'Coding Team', icon: 'terminal', route: '/software-engineering/coding-team' },
+  sales: { label: 'Sales', icon: 'storefront', route: '/sales' },
 };

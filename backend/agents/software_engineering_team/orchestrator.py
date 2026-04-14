@@ -35,8 +35,7 @@ _arch_dir = _team_dir / "architect-agents"
 if _arch_dir.exists() and str(_arch_dir) not in sys.path:
     sys.path.insert(0, str(_arch_dir))
 
-# Plan dir: kept in planning_team (also used by planning_consolidation; shared/plan_dir would require moving consolidation)
-from planning_team.plan_dir import ensure_plan_dir  # noqa: E402
+from strands import Agent  # noqa: E402
 
 from llm_service import (  # noqa: E402
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
@@ -46,6 +45,7 @@ from llm_service import (  # noqa: E402
     LLMRateLimitError,
     LLMTemporaryError,
     get_client,
+    get_strands_model,
 )
 from software_engineering_team.shared.development_plan_writer import (  # noqa: E402
     write_architecture_plan,
@@ -73,6 +73,7 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     update_task_state,
 )
 from software_engineering_team.shared.models import TaskUpdate  # noqa: E402
+from software_engineering_team.shared.plan_dir import ensure_plan_dir  # noqa: E402
 from software_engineering_team.shared.repo_utils import (  # noqa: E402
     read_repo_code,
     truncate_for_context,
@@ -1068,9 +1069,9 @@ def _try_build_fix_one_at_a_time(
             break
 
     try:
-        llm = get_client("build_fix_specialist")
+        _build_fix_model = get_strands_model("build_fix_specialist")
     except Exception as e:
-        logger.warning("Build fix: could not get LLM: %s", e)
+        logger.warning("Build fix: could not get model: %s", e)
         return False, result.error_summary if agent_type == "frontend" else (
             result.error_summary if "result" in dir() else "Build failed"
         )
@@ -1135,7 +1136,9 @@ def _try_build_fix_one_at_a_time(
                 current_code=relevant_code,
             )
         try:
-            raw = llm.complete_text(prompt, think=True)
+            _agent = Agent(model=_build_fix_model)
+            _result = _agent(prompt)
+            raw = str(_result).strip()
         except Exception as e:
             logger.warning(
                 "[%s] Build fix attempt %d/%d failed: LLM call error: %s. Next step -> Skipping to next issue",
@@ -2612,7 +2615,7 @@ def run_orchestrator(
 
         # Planning consolidation: master plan, risk register, ship checklist
         try:
-            from planning_team.planning_consolidation import run_planning_consolidation
+            from software_engineering_team.shared.planning_consolidation import run_planning_consolidation  # noqa: I001
 
             run_planning_consolidation(plan_dir, assignment, architecture, project_overview)
         except Exception as e:

@@ -1,0 +1,70 @@
+<mat-card class="chat-card">
+  <mat-card-header>
+    <mat-card-title>
+      <mat-icon>rocket_launch</mat-icon>
+      Founder Persona Chat
+    </mat-card-title>
+  </mat-card-header>
+
+  <mat-card-content>
+    @if (error) {
+      <p class="error-text">{{ error }}</p>
+    }
+    <div class="messages-container" #messagesContainer>
+      @if (messages.length === 0 && !sending) {
+        <div class="empty-state">
+          <mat-icon>chat_bubble_outline</mat-icon>
+          <p>No messages yet. The founder persona will log activity here as the workflow runs.</p>
+        </div>
+      }
+
+      @for (msg of messages; track msg.message_id) {
+        <div
+          class="message"
+          [class.user]="msg.role === 'user'"
+          [class.assistant]="msg.role === 'assistant'"
+          [class.system]="msg.role === 'system'"
+        >
+          @if (messageTypeIcon(msg.message_type); as icon) {
+            <mat-icon class="type-icon">{{ icon }}</mat-icon>
+          }
+          <div class="message-body">
+            <div class="message-content">{{ msg.content }}</div>
+            <div class="message-time">{{ formatTime(msg.timestamp) }}</div>
+          </div>
+        </div>
+      }
+
+      @if (sending) {
+        <div class="message assistant">
+          <div class="typing-indicator">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+      }
+    </div>
+
+    <form [formGroup]="form" (ngSubmit)="onSubmit()" class="input-form">
+      <mat-form-field appearance="outline" class="message-input">
+        <mat-label>Message the founder...</mat-label>
+        <input
+          matInput
+          formControlName="message"
+          [attr.aria-label]="'Chat message input'"
+          (keydown.enter)="$event.preventDefault(); onSubmit()"
+        />
+      </mat-form-field>
+      <button
+        mat-fab
+        color="primary"
+        type="submit"
+        [disabled]="form.invalid || sending"
+        [attr.aria-label]="'Send message'"
+      >
+        <mat-icon>send</mat-icon>
+      </button>
+    </form>
+  </mat-card-content>
+</mat-card>

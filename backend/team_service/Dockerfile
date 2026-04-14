@@ -26,6 +26,10 @@ COPY unified_api/medium_browser_login.py /app/unified_api/medium_browser_login.p
 # Generic entrypoint (configured via env vars at runtime)
 COPY team_service/entrypoint.py /app/entrypoint.py
 
+RUN adduser --disabled-password --gecos "" --uid 1000 appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app/agents:/app/agents/blogging:/app
 

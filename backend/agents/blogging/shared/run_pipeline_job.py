@@ -17,15 +17,36 @@ logger = logging.getLogger(__name__)
 
 
 # Base directory for run artifacts (must match api/main.py RUN_ARTIFACTS_BASE when used from API).
-# Honour BLOGGING_RUN_ARTIFACTS_ROOT so Docker can mount a persistent volume.
+# Resolution order (persistent first — /tmp is a last-resort fallback that
+# does NOT survive container restarts):
+#   1. $BLOGGING_RUN_ARTIFACTS_ROOT (explicit override)
+#   2. $AGENT_CACHE/blogging_team/runs (shared volume convention)
+#   3. tempfile.gettempdir()/blogging_runs (ephemeral — logs a loud warning)
+_tempfile_fallback_warned = False
+
+
 def _get_run_artifacts_base() -> Path:
+    global _tempfile_fallback_warned
     import os
     import tempfile
 
-    custom = os.environ.get("BLOGGING_RUN_ARTIFACTS_ROOT")
+    custom = os.environ.get("BLOGGING_RUN_ARTIFACTS_ROOT", "").strip()
     if custom:
         return Path(custom).expanduser().resolve()
-    return Path(tempfile.gettempdir()) / "blogging_runs"
+    agent_cache = os.environ.get("AGENT_CACHE", "").strip()
+    if agent_cache:
+        return Path(agent_cache).expanduser().resolve() / "blogging_team" / "runs"
+    fallback = Path(tempfile.gettempdir()) / "blogging_runs"
+    if not _tempfile_fallback_warned:
+        _tempfile_fallback_warned = True
+        logger.warning(
+            "Neither BLOGGING_RUN_ARTIFACTS_ROOT nor AGENT_CACHE is set — "
+            "run artifacts will be written to %s, which is NOT persistent across "
+            "process/container restarts. Set BLOGGING_RUN_ARTIFACTS_ROOT or AGENT_CACHE "
+            "to a mounted volume for production deployments.",
+            fallback,
+        )
+    return fallback
 
 
 def _format_audience_from_dict(audience: Any) -> Optional[str]:

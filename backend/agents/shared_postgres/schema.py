@@ -27,7 +27,7 @@ class TeamSchema:
             underscore-separated, e.g. ``"branding"``, ``"job_service"``.
         database: Optional Postgres database name. ``None`` means use the
             default ``POSTGRES_DB`` env var. Legacy services like
-            ``job_service`` override this to ``"strands_jobs"``.
+            ``job_service`` override this to ``"khala_jobs"``.
         statements: List of DDL strings to execute idempotently at
             startup. Each should be a ``CREATE TABLE IF NOT EXISTS`` /
             ``CREATE INDEX IF NOT EXISTS`` / ``ALTER TABLE ...`` string.

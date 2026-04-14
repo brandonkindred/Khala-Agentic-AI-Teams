@@ -40,6 +40,30 @@ class ProcessStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class TeamMode(str, Enum):
+    """Toggle between development and interactive testing."""
+
+    DEVELOPMENT = "development"
+    TESTING = "testing"
+
+
+class MessageRating(str, Enum):
+    """Thumbs-up / thumbs-down rating for a chat message."""
+
+    THUMBS_UP = "thumbs_up"
+    THUMBS_DOWN = "thumbs_down"
+
+
+class PipelineRunStatus(str, Enum):
+    """Lifecycle of an end-to-end pipeline test run."""
+
+    RUNNING = "running"
+    WAITING_FOR_INPUT = "waiting_for_input"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 # ---------------------------------------------------------------------------
 # Process building blocks
 # ---------------------------------------------------------------------------
@@ -140,6 +164,7 @@ class AgenticTeam(BaseModel):
     team_id: str = Field(..., description="Unique id (UUID)")
     name: str = Field(..., description="Team display name")
     description: str = Field(default="", description="Short description of what the team does")
+    mode: TeamMode = Field(default=TeamMode.DEVELOPMENT)
     agents: list[AgenticTeamAgent] = Field(
         default_factory=list, description="Named agents pool (Agent 1 … Agent N)"
     )
@@ -295,7 +320,9 @@ class RecommendedAgent(BaseModel):
     """An agent recommended for a process step."""
 
     agent_name: str = Field(..., description="Agent identifier")
-    source: str = Field(..., description="Where the recommendation came from: 'registry' or 'roster'")
+    source: str = Field(
+        ..., description="Where the recommendation came from: 'registry' or 'roster'"
+    )
     role: str = Field(default="", description="Suggested role for this agent")
     skills: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
@@ -326,3 +353,107 @@ class AgentEnvProvisionSummary(BaseModel):
     error_message: Optional[str] = None
     created_at: str = ""
     updated_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Interactive Testing Mode models
+# ---------------------------------------------------------------------------
+
+
+class TestChatSession(BaseModel):
+    """An interactive chat test session with a specific agent."""
+
+    session_id: str
+    team_id: str
+    agent_name: str
+    session_name: str = Field(default="")
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class TestChatMessage(BaseModel):
+    """A single message in a test chat session."""
+
+    message_id: str
+    session_id: str
+    role: str = Field(..., pattern=r"^(user|assistant)$")
+    content: str
+    rating: Optional[MessageRating] = None
+    created_at: str = ""
+
+
+class TestChatSessionDetail(BaseModel):
+    """Session with full message history and starter prompts."""
+
+    session: TestChatSession
+    messages: list[TestChatMessage] = Field(default_factory=list)
+    suggested_prompts: list[str] = Field(default_factory=list)
+
+
+class AgentQualityScore(BaseModel):
+    """Aggregated quality score for an agent based on chat ratings."""
+
+    agent_name: str
+    total_rated: int = 0
+    thumbs_up: int = 0
+    thumbs_down: int = 0
+    score_pct: float = Field(default=0.0, description="Percentage of positive ratings (0-100)")
+
+
+class PipelineStepResult(BaseModel):
+    """Output of a single step within a pipeline test run."""
+
+    step_id: str
+    step_name: str = ""
+    agent_name: str = ""
+    input: str = ""
+    output: str = ""
+    status: str = "pending"
+
+
+class TestPipelineRun(BaseModel):
+    """An end-to-end pipeline test run."""
+
+    run_id: str
+    team_id: str
+    process_id: str
+    status: PipelineRunStatus = PipelineRunStatus.RUNNING
+    current_step_id: Optional[str] = None
+    initial_input: Optional[str] = None
+    step_results: list[PipelineStepResult] = Field(default_factory=list)
+    human_prompt: Optional[str] = None
+    error: Optional[str] = None
+    started_at: str = ""
+    finished_at: Optional[str] = None
+
+
+# Test mode request DTOs
+
+
+class SetTeamModeRequest(BaseModel):
+    mode: TeamMode
+
+
+class CreateTestChatSessionRequest(BaseModel):
+    agent_name: str = Field(..., min_length=1)
+
+
+class RenameTestChatSessionRequest(BaseModel):
+    session_name: str = Field(..., min_length=1, max_length=200)
+
+
+class SendTestChatMessageRequest(BaseModel):
+    content: str = Field(..., min_length=1)
+
+
+class RateMessageRequest(BaseModel):
+    rating: MessageRating
+
+
+class StartPipelineRunRequest(BaseModel):
+    process_id: str = Field(..., min_length=1)
+    initial_input: Optional[str] = None
+
+
+class SubmitPipelineInputRequest(BaseModel):
+    input: str = Field(..., min_length=1)

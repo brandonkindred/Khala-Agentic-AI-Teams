@@ -1,6 +1,6 @@
 # Unified API server image. Matches backend Makefile: same deps, same run as `make deploy`.
 # Build from repo root: docker build -f backend/Dockerfile backend
-# Or from backend: docker build -t strands-unified-api .
+# Or from backend: docker build -t khala-unified-api .
 
 FROM python:3.11-slim
 
@@ -25,6 +25,10 @@ COPY run_unified_api.py /app/
 # Generate PA credential encryption key at build time so it persists across container runs
 RUN python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" > /app/pa_credential_key
 ENV PA_CREDENTIAL_KEY_FILE=/app/pa_credential_key
+
+RUN adduser --disabled-password --gecos "" --uid 1000 appuser \
+    && chown -R appuser:appuser /app
+USER appuser
 
 EXPOSE 8080
 

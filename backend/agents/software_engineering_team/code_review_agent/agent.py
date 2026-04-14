@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
-from llm_service import LLMClient, compact_text
+from strands import Agent
+
+from llm_service import compact_text, get_client, get_strands_model
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_chunk_chars,
     compute_code_review_total_chars,
@@ -25,9 +28,14 @@ class CodeReviewAgent:
     Returns approval or a list of issues that must be resolved.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
+            self._model = llm_client
+        else:
+            self._model = get_strands_model("code_review")
+        # Keep LLMClient for context_sizing utilities
+        self.llm = llm_client if llm_client is not None else get_client("code_review")
 
     def run(self, input_data: CodeReviewInput) -> CodeReviewOutput:
         """Review code and return approval or issues."""
@@ -122,8 +130,11 @@ class CodeReviewAgent:
             ]
         )
 
-        prompt = CODE_REVIEW_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
+        prompt = "\n".join(context_parts)
+        agent = Agent(model=self._model, system_prompt=CODE_REVIEW_PROMPT)
+        result = agent(prompt)
+        raw = str(result).strip()
+        data = json.loads(raw)
 
         # Parse issues
         issues = []

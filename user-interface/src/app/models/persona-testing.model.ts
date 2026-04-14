@@ -42,3 +42,19 @@ export interface RunArtifacts {
   repo_path?: string;
   spec_content?: string;
 }
+
+/** A chat message from the persona test run log or user interaction. */
+export interface PersonaChatMessage {
+  message_id: number;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  message_type: 'chat' | 'question_received' | 'answer_given' | 'status_update';
+  metadata?: Record<string, unknown>;
+  timestamp: string;
+}
+
+/** Chat history response from GET/POST /runs/{run_id}/chat. */
+export interface PersonaChatHistory {
+  run_id: string;
+  messages: PersonaChatMessage[];
+}

@@ -200,6 +200,7 @@ class StrategySpec(BaseModel):
     sizing_rules: List[str] = Field(default_factory=list)
     risk_limits: Dict[str, Any] = Field(default_factory=dict)
     speculative: bool = False
+    strategy_code: Optional[str] = None
     audit: AuditContext = Field(default_factory=AuditContext)
 
 
@@ -353,6 +354,9 @@ class StrategyLabRecord(BaseModel):
     strategy_rationale: str  # why the agent chose this strategy
     analysis_narrative: str  # LLM post-backtest analysis
     created_at: str
+    refinement_rounds: int = 0
+    quality_gate_results: List[Dict[str, Any]] = Field(default_factory=list)
+    strategy_code: Optional[str] = None
     signal_intelligence_brief: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Signal Intelligence Expert JSON (brief_version, themes, …) or skipped metadata; null for legacy rows.",
@@ -392,6 +396,7 @@ class PaperTradingComparison(BaseModel):
     return_aligned: bool
     sharpe_aligned: bool
     drawdown_aligned: bool
+    profit_factor_aligned: bool = True
     overall_aligned: bool
 
 

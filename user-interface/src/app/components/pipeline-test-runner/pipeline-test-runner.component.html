@@ -1,0 +1,190 @@
+<div class="pipeline-layout">
+  <!-- Left sidebar: process selector + run controls + history -->
+  <div class="sidebar">
+    <mat-card class="sidebar-card">
+      <mat-card-header>
+        <mat-card-title>
+          <mat-icon>account_tree</mat-icon>
+          Pipeline
+        </mat-card-title>
+      </mat-card-header>
+      <mat-card-content>
+        <!-- Process selector -->
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-label>Process</mat-label>
+          <mat-select [value]="selectedProcessId()" (selectionChange)="selectedProcessId.set($event.value)">
+            @for (process of team.processes; track process.process_id) {
+              <mat-option [value]="process.process_id">{{ process.name || 'Untitled' }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Initial input -->
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-label>Initial Input (optional)</mat-label>
+          <textarea
+            matInput
+            [value]="initialInput()"
+            (input)="initialInput.set($any($event.target).value)"
+            rows="3"
+            placeholder="Describe the scenario or trigger context..."
+          ></textarea>
+        </mat-form-field>
+
+        <!-- Run controls -->
+        <button
+          mat-raised-button
+          color="primary"
+          (click)="startRun()"
+          [disabled]="!selectedProcessId() || (activeRun() && !['completed', 'failed', 'cancelled'].includes(activeRun()!.status))"
+          class="full-width run-btn"
+        >
+          <mat-icon>play_arrow</mat-icon> Start Run
+        </button>
+
+        @if (activeRun(); as run) {
+          @if (run.status === 'running' || run.status === 'waiting_for_input') {
+            <button mat-stroked-button color="warn" (click)="cancelRun()" class="full-width cancel-btn">
+              <mat-icon>cancel</mat-icon> Cancel Run
+            </button>
+          }
+        }
+
+        <!-- Run history -->
+        <div class="runs-section">
+          <span class="runs-label">Run History</span>
+          @if (runs().length === 0) {
+            <p class="no-runs">No runs yet</p>
+          } @else {
+            <div class="runs-list">
+              @for (run of runs(); track run.run_id) {
+                <div
+                  class="run-item"
+                  [class.active]="activeRun()?.run_id === run.run_id"
+                  (click)="selectRun(run)"
+                  role="button"
+                  tabindex="0"
+                  (keydown.enter)="selectRun(run)"
+                >
+                  <mat-icon [class]="getStatusChipClass(run.status)">{{ getStepIcon(run.status) }}</mat-icon>
+                  <span class="run-time">{{ run.started_at | date:'short' }}</span>
+                </div>
+              }
+            </div>
+          }
+        </div>
+      </mat-card-content>
+    </mat-card>
+  </div>
+
+  <!-- Right panel: step progress -->
+  <div class="run-panel">
+    <mat-card class="run-card">
+      @if (activeRun(); as run) {
+        <mat-card-header>
+          <mat-card-title>
+            <mat-icon>play_circle</mat-icon>
+            Pipeline Run
+          </mat-card-title>
+          <span class="spacer"></span>
+          <mat-chip [class]="getStatusChipClass(run.status)">
+            {{ run.status.replace('_', ' ') | uppercase }}
+          </mat-chip>
+          @if (run.started_at) {
+            <span class="duration">{{ formatDuration(run) }}</span>
+          }
+        </mat-card-header>
+
+        <mat-card-content>
+          @if (error()) {
+            <p class="error-text">{{ error() }}</p>
+          }
+
+          <div class="step-list">
+            @for (step of getProcessSteps(); track step.step_id) {
+              @let result = getStepResult(step.step_id);
+              @let status = result?.status ?? 'pending';
+
+              <div class="step-card" [class]="getStepIconClass(status)">
+                <div class="step-header" (click)="toggleStep(step.step_id)" role="button" tabindex="0" (keydown.enter)="toggleStep(step.step_id)">
+                  <mat-icon [class]="getStepIconClass(status)">{{ getStepIcon(status) }}</mat-icon>
+                  <div class="step-info">
+                    <span class="step-name">{{ step.name }}</span>
+                    @if (step.agent_name) {
+                      <span class="step-agent">{{ step.agent_name }}</span>
+                    }
+                  </div>
+                  @if (result?.output) {
+                    <mat-icon class="expand-icon">
+                      {{ expandedStepId() === step.step_id ? 'expand_less' : 'expand_more' }}
+                    </mat-icon>
+                  }
+                </div>
+
+                <!-- WAIT step input form -->
+                @if (status === 'waiting_for_input' && run.status === 'waiting_for_input') {
+                  <div class="wait-input-card">
+                    <p class="wait-prompt">{{ run.human_prompt }}</p>
+                    <form [formGroup]="waitInputForm" (ngSubmit)="submitWaitInput()">
+                      <mat-form-field appearance="outline" class="full-width">
+                        <mat-label>Your input</mat-label>
+                        <textarea matInput formControlName="input" rows="3"></textarea>
+                      </mat-form-field>
+                      <button mat-raised-button color="primary" type="submit" [disabled]="waitInputForm.invalid">
+                        Submit & Continue
+                      </button>
+                    </form>
+                  </div>
+                }
+
+                <!-- Expanded output -->
+                @if (expandedStepId() === step.step_id && result?.output) {
+                  <div class="step-output">
+                    <pre>{{ result!.output }}</pre>
+                  </div>
+                }
+
+                <!-- One-line summary when collapsed -->
+                @if (expandedStepId() !== step.step_id && result?.output && status === 'completed') {
+                  <div class="step-summary">{{ result!.output | slice:0:120 }}{{ result!.output.length > 120 ? '...' : '' }}</div>
+                }
+
+                <!-- Error display -->
+                @if (status === 'failed' && result) {
+                  <div class="step-error">
+                    {{ result.output || 'Step failed' }}
+                  </div>
+                }
+              </div>
+            }
+          </div>
+
+          <!-- Final output for completed runs -->
+          @if (run.status === 'completed' && run.step_results.length > 0) {
+            <div class="final-output">
+              <h4><mat-icon>output</mat-icon> Final Output</h4>
+              <pre>{{ run.step_results[run.step_results.length - 1].output }}</pre>
+            </div>
+          }
+
+          <!-- Error for failed runs -->
+          @if (run.status === 'failed' && run.error) {
+            <div class="run-error">
+              <mat-icon>error</mat-icon>
+              <span>{{ run.error }}</span>
+            </div>
+          }
+        </mat-card-content>
+      } @else {
+        <!-- Empty state -->
+        <mat-card-content>
+          <div class="empty-state">
+            <mat-icon class="empty-icon">play_circle</mat-icon>
+            <h3>Run the pipeline to test the full agent workflow</h3>
+            <p>Select a process and click Start Run to see agents work through each step</p>
+          </div>
+        </mat-card-content>
+      }
+    </mat-card>
+  </div>
+</div>

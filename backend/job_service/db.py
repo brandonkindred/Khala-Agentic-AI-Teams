@@ -37,9 +37,9 @@ _pool: psycopg2.pool.ThreadedConnectionPool | None = None
 def _dsn() -> str:
     host = os.environ.get("POSTGRES_HOST", "localhost")
     port = os.environ.get("POSTGRES_PORT", "5432")
-    user = os.environ.get("POSTGRES_USER", "strands")
-    password = os.environ.get("POSTGRES_PASSWORD", "strands")
-    dbname = os.environ.get("POSTGRES_DB", "strands_jobs")
+    user = os.environ.get("POSTGRES_USER", "khala")
+    password = os.environ.get("POSTGRES_PASSWORD", "khala")
+    dbname = os.environ.get("POSTGRES_DB", "khala_jobs")
     return f"host={host} port={port} dbname={dbname} user={user} password={password}"
 
 

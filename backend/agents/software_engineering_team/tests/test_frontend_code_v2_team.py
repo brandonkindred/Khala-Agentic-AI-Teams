@@ -6,11 +6,25 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any, Optional
 from unittest.mock import MagicMock
 
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
+
+from llm_service.clients.dummy import DummyLLMClient  # noqa: E402
+
+
+class _TextStubClient(DummyLLMClient):
+    """Returns a canned text response through the Strands ``stream()`` path."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__()
+        self._text = text
+
+    def complete_json(self, prompt: str, *, temperature: float = 0.0, system_prompt: Optional[str] = None, tools: Optional[list] = None, think: bool = False, **kwargs: Any) -> Any:
+        return self._text
 
 from frontend_code_v2_team.models import (  # noqa: E402
     FrontendCodeV2WorkflowResult,
@@ -148,8 +162,7 @@ class TestPlanningPhase:
 
         from software_engineering_team.shared.models import Task, TaskStatus, TaskType
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = (
+        mock_llm = _TextStubClient(
             "## MICROTASKS ##\n## END MICROTASKS ##\n"
             "## LANGUAGE ##\ntypescript\n## END LANGUAGE ##\n"
             "## SUMMARY ##\nempty\n## END SUMMARY ##"

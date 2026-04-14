@@ -28,6 +28,30 @@ _worker_threads: dict[str, threading.Thread] = {}
 _activity_executors: dict[str, ThreadPoolExecutor] = {}
 
 
+def _build_workflow_runner() -> Any:
+    """Build a SandboxedWorkflowRunner that passes through pydantic.
+
+    Without this, pydantic schema generation for models that reference
+    ``datetime.datetime`` (e.g. ``Optional[datetime]`` fields) fails
+    inside the Temporal workflow sandbox: pydantic-core compares types
+    by identity and the sandboxed reimport of pydantic ends up with a
+    different ``datetime.datetime`` reference than pydantic-core's
+    compiled one, raising ``PydanticSchemaGenerationError``. Marking
+    ``pydantic``/``pydantic_core`` as pass-through loads them via the
+    real importer, so the datetime identity check succeeds.
+    """
+    from temporalio.worker.workflow_sandbox import (
+        SandboxedWorkflowRunner,
+        SandboxRestrictions,
+    )
+
+    restrictions = SandboxRestrictions.default.with_passthrough_modules(
+        "pydantic",
+        "pydantic_core",
+    )
+    return SandboxedWorkflowRunner(restrictions=restrictions)
+
+
 async def _run_worker_async(
     team: str,
     task_queue: str,
@@ -58,6 +82,7 @@ async def _run_worker_async(
         activities=list(activities),
         activity_executor=executor,
         max_concurrent_activities=max_concurrent_activities,
+        workflow_runner=_build_workflow_runner(),
     )
     logger.info("Temporal worker starting: team=%s task_queue=%s", team, task_queue)
     await worker.run()

@@ -1,9 +1,9 @@
 from ..models.phase_result import RetestResult
 from ..tools import persist_artifact
-from .base import ToolContext, tool
+from .base import ToolContext, a11y_phase
 
 
-@tool(context=True)
+@a11y_phase(context=True)
 def run_retest_cycle(engagement_id: str, tool_context: ToolContext) -> dict:
     output = {
         "engagement_id": engagement_id,

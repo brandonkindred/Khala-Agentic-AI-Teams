@@ -80,50 +80,56 @@
   padding: 12px;
 }
 
-// ── Nav Groups (collapsible) ────────────────────────────────────────────────
+// ── Nav Group Triggers (flyout on hover/focus) ──────────────────────────────
 
-.nav-group {
-  margin-bottom: 16px;
-
-  &:last-child {
-    margin-bottom: 0;
-  }
-}
-
-.nav-group-header {
+.nav-group-trigger {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
   padding: 12px 10px;
   min-height: 44px; // WCAG 2.5.8 touch target
-  cursor: pointer;
+  margin-bottom: 2px;
+  background: transparent;
+  border: none;
   border-radius: var(--kh-radius-md);
-  transition: background var(--kh-transition);
-  user-select: none;
-
-  &:hover {
-    background: var(--kh-glass);
-  }
+  cursor: pointer;
+  color: var(--kh-text-tertiary);
+  font-family: var(--kh-font-sans);
+  transition: background var(--kh-transition), color var(--kh-transition);
 
   .nav-group-label {
-    padding: 0;
     font-size: 0.6875rem;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.08em;
+    color: inherit;
+  }
+
+  .nav-group-chevron {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
     color: var(--kh-text-muted);
   }
-}
 
-.nav-group-chevron {
-  font-size: 16px;
-  width: 16px;
-  height: 16px;
-  color: var(--kh-text-muted);
-  transition: transform 200ms ease;
+  &:hover,
+  &:focus-visible {
+    background: var(--kh-glass);
+    color: var(--kh-text-secondary);
+  }
 
-  &.collapsed {
-    transform: rotate(-90deg);
+  &.active {
+    background: var(--kh-accent-muted);
+    color: var(--kh-accent-text);
+
+    .nav-group-label {
+      color: var(--kh-accent-text);
+    }
+
+    .nav-group-chevron {
+      color: var(--kh-accent);
+    }
   }
 }
 
@@ -380,6 +386,80 @@
   &:focus {
     top: 0;
   }
+}
+
+// ============================================================================
+// Nav Flyout (CDK overlay — rendered into <body>, must be top-level)
+// ============================================================================
+
+.nav-flyout {
+  min-width: 240px;
+  max-width: 320px;
+  padding: 12px;
+  background: var(--kh-surface-1);
+  border: 1px solid var(--kh-border);
+  border-radius: var(--kh-radius-lg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-flyout-title {
+  padding: 4px 10px 8px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--kh-text-muted);
+}
+
+.nav-flyout-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  min-height: 44px;
+  border-radius: var(--kh-radius-md);
+  text-decoration: none;
+  color: var(--kh-text-tertiary);
+  font-size: var(--kh-text-sm);
+  font-weight: 450;
+  font-family: var(--kh-font-sans);
+  transition: background var(--kh-transition), color var(--kh-transition);
+
+  mat-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    color: var(--kh-text-muted);
+    flex-shrink: 0;
+  }
+
+  &:hover {
+    background: var(--kh-glass-hover);
+    color: var(--kh-text-secondary);
+
+    mat-icon {
+      color: var(--kh-text-tertiary);
+    }
+  }
+
+  &.active {
+    background: var(--kh-accent-muted);
+    color: var(--kh-accent-text);
+
+    mat-icon {
+      color: var(--kh-accent);
+    }
+  }
+}
+
+.nav-flyout-link-nested {
+  margin-left: 16px;
+  padding-left: 18px;
+  border-left: 1px solid var(--kh-border-subtle);
+  border-radius: 0 var(--kh-radius-md) var(--kh-radius-md) 0;
 }
 
 // ============================================================================

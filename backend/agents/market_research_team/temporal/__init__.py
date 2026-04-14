@@ -17,10 +17,20 @@ from temporalio import activity, workflow
 @activity.defn(name="market_research_run_pipeline")
 def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     from market_research_team.api.main import RunMarketResearchRequest
+    from market_research_team.models import HumanReview, ResearchMission
     from market_research_team.orchestrator import MarketResearchOrchestrator
 
     req = RunMarketResearchRequest(**request)
-    result = MarketResearchOrchestrator().run(req)
+    mission = ResearchMission(
+        product_concept=req.product_concept,
+        target_users=req.target_users,
+        business_goal=req.business_goal,
+        topology=req.topology,
+        transcript_folder_path=req.transcript_folder_path,
+        transcripts=req.transcripts,
+    )
+    human_review = HumanReview(approved=req.human_approved, feedback=req.human_feedback)
+    result = MarketResearchOrchestrator().run(mission, human_review)
     if hasattr(result, "model_dump"):
         return result.model_dump()
     return result if isinstance(result, dict) else {"result": result}
@@ -43,6 +53,4 @@ ACTIVITIES = [run_pipeline_activity]
 from shared_temporal import is_temporal_enabled, start_team_worker  # noqa: E402
 
 if is_temporal_enabled():
-    start_team_worker(
-        "market_research", WORKFLOWS, ACTIVITIES, task_queue="market_research-queue"
-    )
+    start_team_worker("market_research", WORKFLOWS, ACTIVITIES, task_queue="market_research-queue")

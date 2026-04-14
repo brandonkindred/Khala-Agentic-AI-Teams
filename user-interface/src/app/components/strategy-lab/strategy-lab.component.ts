@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit, inject } from '@angular/core';
+import { Component, ElementRef, OnDestroy, OnInit, ViewChild, inject } from '@angular/core';
 import { CommonModule, DecimalPipe, DatePipe, CurrencyPipe, JsonPipe } from '@angular/common';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
@@ -17,6 +17,9 @@ import { Subscription, timer, switchMap, takeWhile } from 'rxjs';
 
 import { InvestmentApiService } from '../../services/investment-api.service';
 import type {
+  PaperTradingSession,
+  PaperTradingComparison,
+  QualityGateResult,
   StrategyLabRecord,
   StrategyLabResultsResponse,
   StrategyLabRunStatus,
@@ -27,12 +30,35 @@ import type {
 
 type FilterMode = 'all' | 'winning' | 'losing';
 
-const PHASE_LABELS: Record<string, string> = {
-  ideating: 'Ideating strategy…',
-  fetching_data: 'Fetching market data…',
-  backtesting: 'Running backtest…',
-  analyzing: 'Analyzing results…',
-  complete: 'Complete',
+interface PhaseDefinition {
+  id: string;
+  label: string;
+  icon: string;
+}
+
+interface ActivityLogEntry {
+  time: string;
+  status: 'active' | 'done' | 'error';
+  message: string;
+}
+
+const STRATEGY_LAB_PHASES: PhaseDefinition[] = [
+  { id: 'ideating',     label: 'Ideate',    icon: 'psychology' },
+  { id: 'coding',       label: 'Code',      icon: 'code' },
+  { id: 'backtesting',  label: 'Backtest',  icon: 'play_circle' },
+  { id: 'analyzing',    label: 'Analyze',   icon: 'summarize' },
+];
+
+/** Ordered phase IDs for determining completed/pending state. */
+const PHASE_ORDER = STRATEGY_LAB_PHASES.map(p => p.id);
+
+const ASSET_CLASS_ICONS: Record<string, string> = {
+  stocks: 'show_chart',
+  crypto: 'currency_bitcoin',
+  forex: 'currency_exchange',
+  commodities: 'oil_barrel',
+  futures: 'schedule',
+  options: 'tune',
 };
 
 @Component({
@@ -79,6 +105,21 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   winningCount = 0;
   losingCount = 0;
 
+  // Per-card expand/collapse state (collapsed by default)
+  expandedCards = new Set<string>();
+
+  toggleCard(id: string): void {
+    if (this.expandedCards.has(id)) {
+      this.expandedCards.delete(id);
+    } else {
+      this.expandedCards.add(id);
+    }
+  }
+
+  isCardExpanded(id: string): boolean {
+    return this.expandedCards.has(id);
+  }
+
   // Per-card trade ledger state
   tradeLedgerPages: Record<string, number> = {};       // lab_record_id → current page index
   readonly PAGE_SIZE = 20;
@@ -88,28 +129,60 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     'net_pnl', 'cumulative_pnl', 'outcome',
   ];
 
+  // Paper trading state
+  /** Lab record id currently being paper traded. */
+  paperTradingLabRecordId: string | null = null;
+  /** Paper trading sessions keyed by lab_record_id for quick lookup. */
+  paperTradingSessions: Record<string, PaperTradingSession> = {};
+
   // Run progress tracking
   activeRunId: string | null = null;
   runStatus: StrategyLabRunStatus | null = null;
   private sseSub: Subscription | null = null;
   private pollSub: Subscription | null = null;
 
+  // Phase stepper + activity log
+  readonly STRATEGY_LAB_PHASES = STRATEGY_LAB_PHASES;
+  activityLog: ActivityLogEntry[] = [];
+  private lastCycleIndex = -1;
+
+  @ViewChild('logContainer') logContainer?: ElementRef<HTMLElement>;
+
   ngOnInit(): void {
     this.loadResults();
+    this.loadPaperTradingResults();
     this.checkForActiveRun();
   }
 
   ngOnDestroy(): void {
     this.sseSub?.unsubscribe();
     this.pollSub?.unsubscribe();
+    this.activeRunCheckSub?.unsubscribe();
   }
 
   // ---------------------------------------------------------------------------
   // Active run detection (for navigate-away-and-back)
   // ---------------------------------------------------------------------------
 
+  private activeRunCheckSub: Subscription | null = null;
+
+  /**
+   * Poll for active runs a few times on page load so that a running job
+   * is always picked up — even if the first request races with the
+   * backend becoming ready or the in-memory cache being repopulated.
+   */
   private checkForActiveRun(): void {
-    this.api.getActiveRuns().subscribe({
+    // Poll up to 4 times (0s, 3s, 6s, 9s), stop as soon as we find one
+    // or if a run was started locally via runNewStrategy().
+    this.activeRunCheckSub?.unsubscribe();
+    let attempts = 0;
+    this.activeRunCheckSub = timer(0, 3000).pipe(
+      takeWhile(() => attempts < 4 && !this.running),
+      switchMap(() => {
+        attempts++;
+        return this.api.getActiveRuns();
+      }),
+    ).subscribe({
       next: (res) => {
         const active = res.runs.find((r) => r.status === 'running');
         if (active) {
@@ -117,6 +190,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
           this.runStatus = active;
           this.running = true;
           this.connectToStream(active.run_id);
+          this.activeRunCheckSub?.unsubscribe();
         }
       },
     });
@@ -149,18 +223,46 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     }
 
     if (event.type === 'progress' && this.runStatus) {
+      const cycleIndex = (event['cycle_index'] as number) ?? 0;
+      const phase = (event['phase'] as StrategyLabPhase) ?? 'ideating';
+      const subPhase = event['sub_phase'] as string | undefined;
+
+      // Reset activity log when a new cycle starts
+      if (cycleIndex !== this.lastCycleIndex) {
+        this.activityLog = [];
+        this.lastCycleIndex = cycleIndex;
+      }
+
+      // Merge strategy from completed ideation into current_cycle
+      const prevStrategy = this.runStatus.current_cycle?.strategy;
+      const newStrategy = event['strategy'] as { asset_class: string; hypothesis: string } | undefined;
+
       this.runStatus.current_cycle = {
-        cycle_index: (event['cycle_index'] as number) ?? 0,
-        phase: (event['phase'] as StrategyLabPhase) ?? 'ideating',
-        strategy: event['strategy'] as { asset_class: string; hypothesis: string } | undefined,
-        metrics: event['metrics'] as Record<string, number> | undefined,
+        cycle_index: cycleIndex,
+        phase,
+        sub_phase: subPhase,
+        refinement_round: event['refinement_round'] as number | undefined,
+        strategy: newStrategy ?? prevStrategy,
+        metrics: (event['metrics'] as Record<string, number> | undefined) ?? this.runStatus.current_cycle?.metrics,
+        checks_passed: event['checks_passed'] as number | undefined,
+        checks_total: event['checks_total'] as number | undefined,
+        symbols_count: event['symbols_count'] as number | undefined,
+        bars_count: event['bars_count'] as number | undefined,
+        trades_count: event['trades_count'] as number | undefined,
+        execution_time: event['execution_time'] as number | undefined,
+        failure_phase: event['failure_phase'] as string | undefined,
+        changes_made: event['changes_made'] as string | undefined,
+        is_winning: event['is_winning'] as boolean | undefined,
       };
+
+      this.addLogEntry(phase, subPhase, event);
     }
 
     if (event.type === 'cycle_complete' && this.runStatus) {
       this.runStatus.completed_cycles = (event['completed_cycles'] as number) ?? this.runStatus.completed_cycles + 1;
       this.runStatus.current_cycle = undefined;
-      // Refresh completed cards
+      this.activityLog = [];
+      this.lastCycleIndex = -1;
       this.loadResults();
     }
 
@@ -278,8 +380,93 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return 'losing';
   }
 
-  phaseLabel(phase: string): string {
-    return PHASE_LABELS[phase] ?? phase;
+  // ---------------------------------------------------------------------------
+  // Phase stepper state
+  // ---------------------------------------------------------------------------
+
+  isPhaseCompleted(phaseId: string): boolean {
+    const current = this.runStatus?.current_cycle?.phase;
+    if (!current) return false;
+    const currentIdx = PHASE_ORDER.indexOf(current);
+    const phaseIdx = PHASE_ORDER.indexOf(phaseId);
+    if (currentIdx < 0 || phaseIdx < 0) return false;
+    return phaseIdx < currentIdx;
+  }
+
+  isCurrentPhase(phaseId: string): boolean {
+    return this.runStatus?.current_cycle?.phase === phaseId;
+  }
+
+  isPhasePending(phaseId: string): boolean {
+    return !this.isPhaseCompleted(phaseId) && !this.isCurrentPhase(phaseId);
+  }
+
+  getAssetClassIcon(assetClass: string): string {
+    return ASSET_CLASS_ICONS[assetClass?.toLowerCase()] ?? 'trending_up';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Activity log
+  // ---------------------------------------------------------------------------
+
+  private addLogEntry(phase: string, subPhase: string | undefined, data: Record<string, unknown>): void {
+    const now = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    // Mark previous active entry as done (if it's still active when a new entry arrives)
+    for (let i = this.activityLog.length - 1; i >= 0; i--) {
+      if (this.activityLog[i].status === 'active') {
+        this.activityLog[i].status = 'done';
+        break;
+      }
+    }
+
+    const msg = this.buildLogMessage(phase, subPhase, data);
+    if (!msg) return;
+
+    const isTerminal = subPhase === 'completed' || subPhase === 'data_loaded';
+
+    this.activityLog.push({
+      time: now,
+      status: isTerminal ? 'done' : 'active',
+      message: msg,
+    });
+
+    // Auto-scroll the log container
+    setTimeout(() => {
+      this.logContainer?.nativeElement?.scrollTo({ top: 999999, behavior: 'smooth' });
+    }, 50);
+  }
+
+  private buildLogMessage(phase: string, subPhase: string | undefined, data: Record<string, unknown>): string {
+    const strategy = data['strategy'] as { asset_class?: string; hypothesis?: string } | undefined;
+    const round = data['refinement_round'] as number | undefined;
+
+    switch (phase) {
+      case 'ideating':
+        if (subPhase === 'started') return 'Ideating new trading strategy & generating code...';
+        if (subPhase === 'completed') return `Strategy ideated \u2014 ${strategy?.asset_class ?? 'unknown'} asset class`;
+        return 'Ideating...';
+      case 'coding':
+        if (subPhase === 'started') return 'Validating strategy spec and code safety...';
+        if (subPhase === 'completed') return `Code validated (${data['checks_total'] ?? '?'} checks, ${data['checks_passed'] ?? '?'} passed)`;
+        if (subPhase === 'failed') return `Validation failed (${(data['checks_total'] as number ?? 0) - (data['checks_passed'] as number ?? 0)} critical issue(s))`;
+        if (subPhase === 'refining') return `Refining code (round ${(round ?? 0) + 1}/10) \u2014 fixing ${data['failure_phase'] ?? 'issues'}...`;
+        if (subPhase === 'refined') return `Code refined \u2014 ${data['changes_made'] ?? 'code updated'}`;
+        return 'Coding...';
+      case 'backtesting':
+        if (subPhase === 'fetching_data') return 'Fetching historical market data...';
+        if (subPhase === 'data_loaded') return `Market data loaded (${data['symbols_count'] ?? '?'} symbols, ${(data['bars_count'] as number ?? 0).toLocaleString()} bars)`;
+        if (subPhase === 'running_code') return 'Executing strategy backtest in sandbox...';
+        if (subPhase === 'completed') return `Backtest complete \u2014 ${data['trades_count'] ?? '?'} trades in ${((data['execution_time'] as number) ?? 0).toFixed(1)}s`;
+        return 'Backtesting...';
+      case 'analyzing':
+        if (subPhase === 'draft') return 'Generating analysis narrative...';
+        if (subPhase === 'review') return 'Self-reviewing analysis against metrics...';
+        if (subPhase === 'completed') return `Analysis complete \u2014 ${data['is_winning'] ? 'WINNING' : 'LOSING'}`;
+        return 'Analyzing...';
+      default:
+        return `${phase} \u2014 ${subPhase ?? 'processing'}`;
+    }
   }
 
   progressPercent(): number {
@@ -332,6 +519,30 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     return record.signal_intelligence_brief != null && Object.keys(record.signal_intelligence_brief).length > 0;
   }
 
+  /**
+   * A failed gate is "remedied" if it failed in an earlier refinement round
+   * and the final round produced a passing result (i.e. `refinement_rounds > 0`
+   * and this gate's round is not the last one that ran).
+   */
+  isRemedied(gate: QualityGateResult, record: StrategyLabRecord): boolean {
+    if (gate.passed) return false;
+    const maxRound = record.refinement_rounds ?? 0;
+    if (maxRound === 0) return false;
+    // Gate failed in an earlier round — the strategy continued past it
+    return (gate.refinement_round ?? 0) < maxRound;
+  }
+
+  gateIcon(gate: QualityGateResult, record: StrategyLabRecord): string {
+    if (gate.passed) return 'check_circle';
+    if (this.isRemedied(gate, record)) return 'build_circle';
+    return gate.severity === 'critical' ? 'cancel' : 'warning';
+  }
+
+  gateSeverityClass(gate: QualityGateResult, record: StrategyLabRecord): string {
+    if (this.isRemedied(gate, record)) return 'gate-remedied';
+    return 'gate-' + gate.severity;
+  }
+
   deleteRecord(record: StrategyLabRecord): void {
     const id = record.lab_record_id;
     const shortHyp = record.strategy.hypothesis.slice(0, 60) + (record.strategy.hypothesis.length > 60 ? '…' : '');
@@ -369,6 +580,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.api.clearStrategyLabStorage().subscribe({
       next: () => {
         this.clearingAll = false;
+        this.paperTradingSessions = {};
         this.loadResults();
       },
       error: (err) => {
@@ -376,5 +588,65 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         this.error = err?.error?.detail || err?.message || 'Failed to clear strategy lab data.';
       },
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Paper Trading
+  // ---------------------------------------------------------------------------
+
+  loadPaperTradingResults(): void {
+    this.api.getPaperTradingResults().subscribe({
+      next: (res) => {
+        const sessions: Record<string, PaperTradingSession> = {};
+        for (const s of res.items) {
+          // Keep the most recent session per lab record
+          if (!sessions[s.lab_record_id] || s.completed_at > sessions[s.lab_record_id].completed_at) {
+            sessions[s.lab_record_id] = s;
+          }
+        }
+        this.paperTradingSessions = sessions;
+      },
+    });
+  }
+
+  runPaperTrading(record: StrategyLabRecord): void {
+    this.error = null;
+    this.paperTradingLabRecordId = record.lab_record_id;
+    this.api.runPaperTrading({ lab_record_id: record.lab_record_id }).subscribe({
+      next: (res) => {
+        this.paperTradingLabRecordId = null;
+        this.paperTradingSessions[record.lab_record_id] = res.session;
+      },
+      error: (err) => {
+        this.paperTradingLabRecordId = null;
+        this.error = err?.error?.detail || err?.message || 'Paper trading failed.';
+      },
+    });
+  }
+
+  getPaperSession(record: StrategyLabRecord): PaperTradingSession | null {
+    return this.paperTradingSessions[record.lab_record_id] ?? null;
+  }
+
+  verdictLabel(verdict: string | undefined | null): string {
+    if (verdict === 'ready_for_live') return 'READY FOR LIVE';
+    if (verdict === 'not_performant') return 'NOT PERFORMANT';
+    return 'INCONCLUSIVE';
+  }
+
+  verdictColor(verdict: string | undefined | null): string {
+    if (verdict === 'ready_for_live') return 'winning';
+    if (verdict === 'not_performant') return 'losing';
+    return 'neutral';
+  }
+
+  comparisonMetrics(c: PaperTradingComparison): { label: string; backtest: string; paper: string; aligned: boolean }[] {
+    return [
+      { label: 'Win Rate', backtest: c.backtest_win_rate_pct.toFixed(1) + '%', paper: c.paper_win_rate_pct.toFixed(1) + '%', aligned: c.win_rate_aligned },
+      { label: 'Annual Return', backtest: c.backtest_annualized_return_pct.toFixed(1) + '%', paper: c.paper_annualized_return_pct.toFixed(1) + '%', aligned: c.return_aligned },
+      { label: 'Sharpe', backtest: c.backtest_sharpe_ratio.toFixed(2), paper: c.paper_sharpe_ratio.toFixed(2), aligned: c.sharpe_aligned },
+      { label: 'Max Drawdown', backtest: c.backtest_max_drawdown_pct.toFixed(1) + '%', paper: c.paper_max_drawdown_pct.toFixed(1) + '%', aligned: c.drawdown_aligned },
+      { label: 'Profit Factor', backtest: c.backtest_profit_factor.toFixed(2), paper: c.paper_profit_factor.toFixed(2), aligned: c.profit_factor_aligned },
+    ];
   }
 }

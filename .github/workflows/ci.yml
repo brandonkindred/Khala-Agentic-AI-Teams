@@ -233,8 +233,8 @@ jobs:
   #
   # No extra secrets or variables required — GITHUB_TOKEN is used automatically.
   # Images are published to:
-  #   ghcr.io/<owner>/strands-agents
-  #   ghcr.io/<owner>/strands-ui
+  #   ghcr.io/<owner>/khala
+  #   ghcr.io/<owner>/khala-ui
 
   build-backend:
     name: Build Backend Docker image
@@ -261,7 +261,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/strands-agents
+          images: ghcr.io/${{ github.repository_owner }}/khala
           tags: |
             type=sha
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
@@ -290,9 +290,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - service: strands-blogging-service
+          - service: khala-blogging-service
             dockerfile: backend/blogging_service/Dockerfile
-          - service: strands-team-service
+          - service: khala-team-service
             dockerfile: backend/team_service/Dockerfile
     steps:
       - uses: actions/checkout@v4
@@ -353,7 +353,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/strands-ui
+          images: ghcr.io/${{ github.repository_owner }}/khala-ui
           tags: |
             type=sha
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}

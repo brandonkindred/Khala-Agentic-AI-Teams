@@ -4,13 +4,13 @@ from blog_research_agent.agent import ResearchAgent
 from blog_research_agent.agent_cache import AgentCache
 from blog_research_agent.models import ResearchBriefInput
 
-from llm_service import get_client  # or your own LLM client
+from llm_service import get_strands_model
 
 from . import _path_setup  # noqa: F401  # Add blogging to path when run from project root
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-llm_client = get_client("blog")
+llm_client = get_strands_model("blog")
 
 # Enable caching for checkpoint/resume capability
 cache = AgentCache(cache_dir=".agent_cache")

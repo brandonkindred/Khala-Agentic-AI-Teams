@@ -1,7 +1,8 @@
-"""
-Orchestrator for the AI Systems Team workflow.
+"""Orchestrator for the AI Systems Team workflow.
 
-Coordinates the execution of all phases to generate an AI agent system blueprint.
+Coordinates the execution of all phases via a Strands sequential Graph
+to generate an AI agent system blueprint. Supports skip-resume for
+completed phases.
 """
 
 import logging
@@ -23,9 +24,19 @@ from .phases import (
 
 logger = logging.getLogger(__name__)
 
+# Phase name to Phase enum mapping
+_PHASE_NAME_MAP = {
+    "spec_intake": Phase.SPEC_INTAKE,
+    "architecture": Phase.ARCHITECTURE,
+    "capabilities": Phase.CAPABILITIES,
+    "evaluation": Phase.EVALUATION,
+    "safety": Phase.SAFETY,
+    "build": Phase.BUILD,
+}
+
 
 class AISystemsOrchestrator:
-    """Orchestrates the AI system generation workflow."""
+    """Orchestrates the AI system generation workflow via a Strands Graph."""
 
     PHASE_ORDER: List[Phase] = [
         Phase.SPEC_INTAKE,
@@ -37,7 +48,6 @@ class AISystemsOrchestrator:
     ]
 
     def __init__(self) -> None:
-        """Initialize the orchestrator."""
         self._blueprints: Dict[str, AgentBlueprint] = {}
 
     def run_workflow(
@@ -49,20 +59,10 @@ class AISystemsOrchestrator:
         job_updater: Optional[Callable[..., None]] = None,
         resume_blueprint: Optional[AgentBlueprint] = None,
     ) -> AgentBlueprint:
-        """
-        Run the complete AI system generation workflow.
+        """Run the complete AI system generation workflow.
 
-        Args:
-            project_name: Name for the AI system project
-            spec_path: Path to the specification file
-            constraints: Additional constraints
-            output_dir: Directory to output artifacts
-            job_updater: Callback for progress updates
-            resume_blueprint: If provided, skip phases already in its
-                ``completed_phases`` list and reuse their results.
-
-        Returns:
-            AgentBlueprint with complete system design
+        Uses a Strands sequential Graph for phase orchestration. Completed
+        phases from ``resume_blueprint`` are skipped and their results reused.
         """
         logger.info("Starting AI system workflow for: %s", project_name)
 
@@ -79,7 +79,6 @@ class AISystemsOrchestrator:
         blueprint.success = False
 
         def _checkpoint() -> None:
-            """Persist partial blueprint to job store so resume can recover it."""
             if job_updater:
                 try:
                     job_updater(blueprint_snapshot=blueprint.model_dump(mode="json"))

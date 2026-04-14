@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,6 +25,46 @@ if TYPE_CHECKING:
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
+
+from llm_service.clients.dummy import DummyLLMClient  # noqa: E402
+
+
+class _TextStubClient(DummyLLMClient):
+    """Returns a canned text response through the Strands ``stream()`` path."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__()
+        self._text = text
+
+    def complete_json(self, prompt: str, *, temperature: float = 0.0, system_prompt: Optional[str] = None, tools: Optional[list] = None, think: bool = False, **kwargs: Any) -> Any:
+        return self._text
+
+
+class _ScriptedTextClient(DummyLLMClient):
+    """Returns different text responses on successive calls."""
+
+    def __init__(self, responses: list) -> None:
+        super().__init__()
+        self._responses = list(responses)
+        self._idx = 0
+
+    def complete_json(self, prompt: str, *, temperature: float = 0.0, system_prompt: Optional[str] = None, tools: Optional[list] = None, think: bool = False, **kwargs: Any) -> Any:
+        if self._idx < len(self._responses):
+            resp = self._responses[self._idx]
+            self._idx += 1
+            return resp
+        return self._responses[-1] if self._responses else ""
+
+
+class _CallableTextClient(DummyLLMClient):
+    """Calls a user-provided function to generate each response."""
+
+    def __init__(self, fn) -> None:
+        super().__init__()
+        self._fn = fn
+
+    def complete_json(self, prompt: str, *, temperature: float = 0.0, system_prompt: Optional[str] = None, tools: Optional[list] = None, think: bool = False, **kwargs: Any) -> Any:
+        return self._fn(prompt)
 
 
 def _create_test_task(task_type: str = "frontend") -> "Task":
@@ -125,16 +165,9 @@ class TestFrontendRunMicrotaskReview:
         mt = Microtask(id="mt-1", title="Test Microtask")
         files = {"src/app.ts": "const x = 1;"}
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = """
-## REVIEW_STATUS ##
-passed
-
-## ISSUES ##
-
-## SUMMARY ##
-No issues found.
-"""
+        mock_llm = _TextStubClient(
+            "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nNo issues found.\n"
+        )
 
         # Provide mock QA and security agents that return no issues
         # (without these, fail-closed gates correctly flag missing agents)
@@ -163,21 +196,9 @@ No issues found.
         mt = Microtask(id="mt-1", title="Test Microtask")
         files = {"src/app.ts": "const x = eval(input);"}
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = """
-## REVIEW_STATUS ##
-failed
-
-## ISSUES ##
-- source: security
-  severity: critical
-  description: Use of eval() is a security vulnerability
-  file_path: src/app.ts
-  recommendation: Remove eval and use safer alternatives
-
-## SUMMARY ##
-Critical security issue found.
-"""
+        mock_llm = _TextStubClient(
+            "## REVIEW_STATUS ##\nfailed\n\n## ISSUES ##\n---\nsource: security\nseverity: critical\ndescription: Use of eval() is a security vulnerability\nfile_path: src/app.ts\nrecommendation: Remove eval and use safer alternatives\n---\n## END ISSUES ##\n\n## SUMMARY ##\nCritical security issue found.\n## END SUMMARY ##"
+        )
 
         result = run_microtask_review(
             llm=mock_llm,
@@ -231,7 +252,6 @@ class TestFrontendRunExecutionWithReviewGates:
         mt = Microtask(id="mt-1", title="Create App", tool_agent=ToolAgentKind.GENERAL)
         planning_result = PlanningResult(microtasks=[mt], language="typescript")
 
-        mock_llm = MagicMock()
         _call_count = [0]
 
         def _side_effect(prompt: str) -> str:
@@ -245,7 +265,7 @@ class TestFrontendRunExecutionWithReviewGates:
             # All subsequent calls: reviews and documentation self-review
             return "\n## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nAll good.\n"
 
-        mock_llm.complete_text.side_effect = _side_effect
+        mock_llm = _CallableTextClient(_side_effect)
 
         config = MicrotaskReviewConfig(max_retries=1)
         deps = ReviewDependencies()
@@ -282,32 +302,10 @@ class TestFrontendRunExecutionWithReviewGates:
         mt = Microtask(id="mt-1", title="Failing Task", tool_agent=ToolAgentKind.GENERAL)
         planning_result = PlanningResult(microtasks=[mt], language="typescript")
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.side_effect = [
-            """
-## FILES ##
---- src/bad.ts ---
-const x = eval('danger');
----
-
-## SUMMARY ##
-Created code with security issue.
-""",
-            """
-## REVIEW_STATUS ##
-failed
-
-## ISSUES ##
-- source: security
-  severity: critical
-  description: eval is dangerous
-  file_path: src/bad.ts
-  recommendation: Fix it
-
-## SUMMARY ##
-Security issue found.
-""",
-        ]
+        mock_llm = _ScriptedTextClient([
+            "## FILES ##\n--- src/bad.ts ---\nconst x = eval('danger');\n---\n\n## SUMMARY ##\nCreated code with security issue.\n",
+            "## REVIEW_STATUS ##\nfailed\n\n## ISSUES ##\n---\nsource: security\nseverity: critical\ndescription: eval is dangerous\nfile_path: src/bad.ts\nrecommendation: Fix it\n---\n## END ISSUES ##\n\n## SUMMARY ##\nSecurity issue found.\n## END SUMMARY ##",
+        ])
 
         config = MicrotaskReviewConfig(max_retries=0, on_failure="stop")
         deps = ReviewDependencies()
@@ -367,16 +365,9 @@ class TestBackendRunMicrotaskReview:
         mt = Microtask(id="mt-1", title="Test Microtask")
         files = {"src/main.py": "print('hello')"}
 
-        mock_llm = MagicMock()
-        mock_llm.complete_text.return_value = """
-## REVIEW_STATUS ##
-passed
-
-## ISSUES ##
-
-## SUMMARY ##
-No issues found.
-"""
+        mock_llm = _TextStubClient(
+            "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nNo issues found.\n"
+        )
 
         result = run_microtask_review(
             llm=mock_llm,
@@ -437,40 +428,22 @@ class TestBackendRunExecutionWithReviewGates:
             call_count += 1
             if "mt-1" in str(planning_result.microtasks[0].id) and call_count <= 2:
                 if call_count == 1:
-                    return """
-## FILES ##
---- bad.py ---
-eval('bad')
----
-
-## SUMMARY ##
-Bad code.
-"""
+                    return (
+                        "## FILES ##\n--- bad.py ---\neval('bad')\n---\n\n"
+                        "## SUMMARY ##\nBad code.\n"
+                    )
                 else:
-                    return """
-## REVIEW_STATUS ##
-failed
+                    return (
+                        "## REVIEW_STATUS ##\nfailed\n\n"
+                        "## ISSUES ##\n---\nsource: security\nseverity: critical\ndescription: eval\n---\n## END ISSUES ##\n\n"
+                        "## SUMMARY ##\nFailed.\n## END SUMMARY ##"
+                    )
+            return (
+                "## FILES ##\n--- good.py ---\nprint('good')\n---\n\n"
+                "## SUMMARY ##\nGood code.\n"
+            )
 
-## ISSUES ##
-- source: security
-  severity: critical
-  description: eval
-
-## SUMMARY ##
-Failed.
-"""
-            return """
-## FILES ##
---- good.py ---
-print('good')
----
-
-## SUMMARY ##
-Good code.
-"""
-
-        mock_llm = MagicMock()
-        mock_llm.complete_text.side_effect = mock_complete_text
+        mock_llm = _CallableTextClient(mock_complete_text)
 
         config = MicrotaskReviewConfig(max_retries=0, on_failure="skip_continue")
         deps = ReviewDependencies()

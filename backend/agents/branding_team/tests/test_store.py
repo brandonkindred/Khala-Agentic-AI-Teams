@@ -9,15 +9,11 @@ from __future__ import annotations
 import pytest
 
 from branding_team.models import (
-    BrandCodification,
     BrandingMission,
     BrandPhase,
     BrandStatus,
-    CreativeRefinementPlan,
-    DesignSystemDefinition,
     TeamOutput,
     WorkflowStatus,
-    WritingGuidelines,
 )
 from branding_team.store import BrandingStore
 from branding_team.tests._fake_postgres import install_fake_postgres
@@ -109,15 +105,6 @@ def test_append_brand_version(fake_pg: dict) -> None:
         status=WorkflowStatus.READY_FOR_ROLLOUT,
         mission_summary="Done",
         current_phase=BrandPhase.COMPLETE,
-        codification=BrandCodification(
-            positioning_statement="We help everyone",
-            brand_promise="Quality",
-            brand_personality_traits=[],
-            narrative_pillars=[],
-        ),
-        creative_refinement=CreativeRefinementPlan(),
-        writing_guidelines=WritingGuidelines(),
-        design_system=DesignSystemDefinition(),
     )
     updated = store.append_brand_version(client.id, brand.id, output)
     assert updated is not None
@@ -141,24 +128,17 @@ def test_append_brand_version_persists_current_phase(fake_pg: dict) -> None:
     assert brand is not None
     assert brand.current_phase == BrandPhase.STRATEGIC_CORE
 
-    # Simulate a run that completed through governance
     output = TeamOutput(
         status=WorkflowStatus.READY_FOR_ROLLOUT,
         mission_summary="Governance done",
         current_phase=BrandPhase.GOVERNANCE,
-        codification=BrandCodification(positioning_statement="pos", brand_promise="promise"),
-        creative_refinement=CreativeRefinementPlan(),
-        writing_guidelines=WritingGuidelines(),
-        design_system=DesignSystemDefinition(),
     )
     store.append_brand_version(client.id, brand.id, output)
 
-    # Re-read from store — phase must match the output
     reloaded = store.get_brand(client.id, brand.id)
     assert reloaded is not None
     assert reloaded.current_phase == BrandPhase.GOVERNANCE
 
-    # Run again with COMPLETE
     output2 = output.model_copy(
         update={"current_phase": BrandPhase.COMPLETE, "mission_summary": "All done"}
     )

@@ -10,16 +10,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
-from llm_service import LLMClient
-from llm_service.interface import (
-    LLMError as LLMServiceError,
-)
-from llm_service.interface import (
-    LLMJsonParseError as LLMServiceJsonParseError,
-)
+from strands import Agent
 
 from .models import FactCheckReport
 from .prompts import FACT_CHECK_PROMPT
@@ -50,9 +45,9 @@ class BlogFactCheckAgent:
     Expert agent that verifies claims and flags risk. Gates on claims_status and risk_status.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
+    def __init__(self, llm_client: Any) -> None:
         assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+        self._model = llm_client
 
     def run(
         self,
@@ -94,6 +89,8 @@ class BlogFactCheckAgent:
         if on_llm_request:
             on_llm_request("Checking facts and claims...")
 
+        agent = Agent(model=self._model, system_prompt=FACT_CHECK_PROMPT.split("{draft}")[0].strip())
+
         data = None
         for attempt in range(_MAX_JSON_RETRIES):
             current_prompt = prompt
@@ -102,10 +99,15 @@ class BlogFactCheckAgent:
                     "\n\nCRITICAL: Your previous response contained invalid JSON. "
                     "Output ONLY a single valid JSON object. No code blocks or markdown in values."
                 )
+            current_prompt += "\n\nRespond with valid JSON only, no markdown fences."
             try:
-                data = self.llm.complete_json(current_prompt, temperature=0.1)
+                result = agent(current_prompt)
+                raw = str(result).strip()
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+                data = json.loads(raw)
                 break
-            except LLMServiceJsonParseError as e:
+            except (json.JSONDecodeError, TypeError) as e:
                 logger.warning(
                     "Fact-check JSON parse failed (attempt %d/%d): %s",
                     attempt + 1,
@@ -113,8 +115,6 @@ class BlogFactCheckAgent:
                     e,
                 )
                 continue
-            except (LLMServiceError, LLMError):
-                raise
             except Exception as e:
                 logger.error("Fact-check failed: %s", e)
                 raise FactCheckError(f"Fact-check failed: {e}", cause=e) from e
@@ -165,7 +165,7 @@ class BlogFactCheckAgent:
 
 def run_fact_check_from_work_dir(
     work_dir: Union[str, Path],
-    llm_client: LLMClient,
+    llm_client: Any,
     *,
     draft_artifact: str = "final.md",
 ) -> FactCheckReport:

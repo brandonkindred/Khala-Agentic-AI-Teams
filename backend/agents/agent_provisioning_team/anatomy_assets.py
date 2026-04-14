@@ -51,7 +51,7 @@ def get_anatomy_prompt_preamble() -> str:
         if names
         else "- (No PNG files found under design_assets/; add the canonical diagrams.)"
     )
-    return f"""You MUST align all outputs with the Strands Agent Provisioning canonical agent anatomy below.
+    return f"""You MUST align all outputs with the Khala Agent Provisioning canonical agent anatomy below.
 When creating or refining an AI agent, explicitly address: Input/Output, Agent core, Tools, Memory tiers,
 Prompt roles (System/User/Assistant), Security Guardrails, and Subagents (recursive INPUT/OUTPUT).
 

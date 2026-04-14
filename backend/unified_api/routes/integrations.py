@@ -579,7 +579,7 @@ async def slack_events(request: Request) -> Any:
 @router.post("/slack/commands")
 async def slack_commands(request: Request) -> Any:
     """
-    Receive Slack slash command payloads (/strands).
+    Receive Slack slash command payloads (/khala).
 
     Returns an immediate acknowledgment, then processes the command in a
     background thread and posts the result to response_url.

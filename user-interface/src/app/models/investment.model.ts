@@ -180,6 +180,7 @@ export interface StrategySpec {
   sizing_rules: string[];
   risk_limits: Record<string, unknown>;
   speculative: boolean;
+  strategy_code?: string;
   audit: AuditContext;
 }
 
@@ -483,6 +484,9 @@ export interface StrategyLabRecord {
   strategy_rationale: string;
   analysis_narrative: string;
   created_at: string;
+  refinement_rounds?: number;
+  quality_gate_results?: QualityGateResult[];
+  strategy_code?: string;
   /** Present on new runs: expert JSON or `{ skipped, skipped_reason }`. Legacy rows: undefined/null. */
   signal_intelligence_brief?: SignalIntelligenceBriefPayload;
 }
@@ -528,13 +532,34 @@ export interface ClearStrategyLabStorageResponse {
 
 // Strategy Lab — real-time run tracking
 
-export type StrategyLabPhase = 'ideating' | 'fetching_data' | 'backtesting' | 'analyzing' | 'complete';
+export type StrategyLabPhase =
+  | 'ideating' | 'coding' | 'backtesting'
+  | 'analyzing' | 'complete';
+
+export interface QualityGateResult {
+  gate_name: string;
+  passed: boolean;
+  details: string;
+  severity: 'info' | 'warning' | 'critical';
+  refinement_round?: number;
+}
 
 export interface StrategyLabCycleProgress {
   cycle_index: number;
   phase: StrategyLabPhase;
+  sub_phase?: string;
+  refinement_round?: number;
   strategy?: { asset_class: string; hypothesis: string };
   metrics?: Partial<BacktestResult>;
+  checks_passed?: number;
+  checks_total?: number;
+  symbols_count?: number;
+  bars_count?: number;
+  trades_count?: number;
+  execution_time?: number;
+  failure_phase?: string;
+  changes_made?: string;
+  is_winning?: boolean;
 }
 
 export interface StrategyLabRunStatus {
@@ -576,6 +601,76 @@ export interface InvestmentJobsListResponse {
 export interface StrategyLabStreamEvent {
   type: 'snapshot' | 'progress' | 'cycle_complete' | 'cycle_skipped' | 'complete' | 'error' | 'done';
   [key: string]: unknown;
+}
+
+// ---------------------------------------------------------------------------
+// Paper Trading Models
+// ---------------------------------------------------------------------------
+
+export type PaperTradingStatus = 'running' | 'completed' | 'failed';
+
+export type PaperTradingVerdict = 'ready_for_live' | 'not_performant';
+
+export interface PaperTradingComparison {
+  backtest_win_rate_pct: number;
+  paper_win_rate_pct: number;
+  backtest_annualized_return_pct: number;
+  paper_annualized_return_pct: number;
+  backtest_sharpe_ratio: number;
+  paper_sharpe_ratio: number;
+  backtest_max_drawdown_pct: number;
+  paper_max_drawdown_pct: number;
+  backtest_profit_factor: number;
+  paper_profit_factor: number;
+  win_rate_aligned: boolean;
+  return_aligned: boolean;
+  sharpe_aligned: boolean;
+  drawdown_aligned: boolean;
+  profit_factor_aligned: boolean;
+  overall_aligned: boolean;
+}
+
+export interface PaperTradingSession {
+  session_id: string;
+  lab_record_id: string;
+  strategy: StrategySpec;
+  status: PaperTradingStatus;
+  initial_capital: number;
+  current_capital: number;
+  trades: TradeRecord[];
+  trade_decisions: Record<string, unknown>[];
+  result?: BacktestResult;
+  comparison?: PaperTradingComparison;
+  verdict?: PaperTradingVerdict;
+  divergence_analysis?: string;
+  symbols_traded: string[];
+  data_source: string;
+  data_period_start: string;
+  data_period_end: string;
+  started_at: string;
+  completed_at: string;
+}
+
+export interface RunPaperTradingRequest {
+  lab_record_id: string;
+  initial_capital?: number;
+  transaction_cost_bps?: number;
+  slippage_bps?: number;
+  min_trades?: number;
+  lookback_days?: number;
+  max_evaluations?: number;
+}
+
+export interface PaperTradingResponse {
+  session: PaperTradingSession;
+  message: string;
+}
+
+export interface PaperTradingResultsResponse {
+  items: PaperTradingSession[];
+  count: number;
+  ready_for_live_count: number;
+  not_performant_count: number;
 }
 
 // ---------------------------------------------------------------------------

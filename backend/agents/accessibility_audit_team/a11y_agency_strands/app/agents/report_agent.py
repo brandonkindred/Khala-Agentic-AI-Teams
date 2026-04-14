@@ -7,10 +7,10 @@ from ..tools import (
     render_pdf,
     write_docx_from_template,
 )
-from .base import ToolContext, tool
+from .base import ToolContext, a11y_phase
 
 
-@tool(context=True)
+@a11y_phase(context=True)
 def run_reporting(engagement_id: str, findings: list[dict], tool_context: ToolContext) -> dict:
     backlog = export_backlog_csv(findings)
 

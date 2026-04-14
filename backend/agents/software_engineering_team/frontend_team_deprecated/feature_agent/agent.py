@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from llm_service import LLMClient, LLMUnreachableAfterRetriesError, call_llm_with_retries
+from strands import Agent
+
+from llm_service import (
+    LLMClient,
+    LLMUnreachableAfterRetriesError,
+    call_llm_with_retries,
+    get_strands_model,
+)
 from software_engineering_team.shared.frontend_framework import resolve_frontend_framework
 from software_engineering_team.shared.job_store import LLM_UNREACHABLE_AFTER_RETRIES
 from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
@@ -254,7 +262,10 @@ def _llm_allowed_extensions(llm_client: Any, extensions: set[str]) -> set[str]:
         "Allowed:"
     )
     try:
-        response = llm_client.complete_text(prompt, temperature=0.0, think=True)
+        from strands.models.model import Model as _StrandsModel
+
+        _model = llm_client if (llm_client is not None and isinstance(llm_client, _StrandsModel)) else get_strands_model()
+        response = (lambda _r: str(_r))(Agent(model=_model)(prompt, temperature=0.0)).strip()
         text = (response or "").strip().lower()
         if not text or "none" in text:
             return set()
@@ -286,7 +297,10 @@ def _llm_allowed_root_paths(llm_client: Any, paths: list[str]) -> set[str]:
         "Allowed paths:"
     )
     try:
-        response = llm_client.complete_text(prompt, temperature=0.0, think=True)
+        from strands.models.model import Model as _StrandsModel
+
+        _model = llm_client if (llm_client is not None and isinstance(llm_client, _StrandsModel)) else get_strands_model()
+        response = (lambda _r: str(_r))(Agent(model=_model)(prompt, temperature=0.0)).strip()
         text = (response or "").strip()
         if not text or "none" in text.lower():
             return set()
@@ -513,6 +527,7 @@ class FrontendExpertAgent:
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
+        self._model = llm_client
 
     def _plan_task(
         self,
@@ -571,7 +586,7 @@ class FrontendExpertAgent:
         log_llm_prompt(logger, "Frontend", "planning", (task.description or "")[:80], prompt)
         try:
             data = call_llm_with_retries(
-                lambda: self.llm.complete_json(prompt, temperature=0.2, think=True),
+                lambda: json.loads((lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()),
                 max_attempts=3,
                 backoff_base=2.0,
             )
@@ -814,7 +829,7 @@ class FrontendExpertAgent:
         raw_files = {}
         for attempt in range(2):
             data = call_llm_with_retries(
-                lambda: self.llm.complete_json(prompt, temperature=0.2, think=True),
+                lambda: json.loads((lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()),
                 max_attempts=3,
                 backoff_base=2.0,
             )

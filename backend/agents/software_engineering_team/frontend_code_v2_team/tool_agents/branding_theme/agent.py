@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, List, Optional
+from typing import List
+
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import (
     ToolAgentInput,
@@ -12,9 +16,6 @@ from ...models import (
     ToolAgentPhaseInput,
     ToolAgentPhaseOutput,
 )
-
-if TYPE_CHECKING:
-    from llm_service import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,11 @@ Respond with valid JSON only. No explanatory text outside JSON.
 class BrandingThemeToolAgent:
     """Branding/Theme tool agent: design system, tokens, component library planning."""
 
-    def __init__(self, llm: Optional["LLMClient"] = None) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+
+        self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
+        self.llm = llm  # kept for backward compat checks
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)
@@ -73,7 +77,7 @@ class BrandingThemeToolAgent:
 
     def plan(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Generate design system artifacts: component library, tokens, a11y, documentation."""
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(
                 recommendations=[
                     "Consider design tokens and theme compliance.",
@@ -87,7 +91,7 @@ class BrandingThemeToolAgent:
             spec_content=(inp.task_description or "")[:5000],
         )
         try:
-            raw = self.llm.complete_text(prompt, think=True)
+            raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
         except Exception as e:
             logger.warning("Branding/Theme plan LLM call failed: %s", e)
             return ToolAgentPhaseOutput(

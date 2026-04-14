@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
-from llm_service import LLMClient, LLMError, LLMJsonParseError
+from strands import Agent
 
 from ...models import (
     ClientProfile,
@@ -165,12 +166,12 @@ class NutritionChatAgent:
 
     def __init__(
         self,
-        llm: LLMClient,
+        model: Any,
         intake_agent: IntakeProfileAgent,
         nutritionist_agent: NutritionistAgent,
         meal_planning_agent: MealPlanningAgent,
     ) -> None:
-        self.llm = llm
+        self._agent = Agent(model=model, system_prompt=SYSTEM_PROMPT)
         self.intake_agent = intake_agent
         self.nutritionist_agent = nutritionist_agent
         self.meal_planning_agent = meal_planning_agent
@@ -241,17 +242,16 @@ class NutritionChatAgent:
             + "\n\n--- CONVERSATION HISTORY ---"
             + history_text
             + f"\n\n[user]: {user_message}"
-            + "\n\n--- YOUR RESPONSE (valid JSON only) ---"
+            + "\n\n--- YOUR RESPONSE (valid JSON only, no markdown fences) ---"
         )
 
         try:
-            data = self.llm.complete_json(
-                prompt,
-                temperature=0.4,
-                system_prompt=SYSTEM_PROMPT,
-                expected_keys=["message", "phase", "action"],
-            )
-        except (LLMJsonParseError, LLMError) as e:
+            result = self._agent(prompt)
+            raw = str(result).strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            data = json.loads(raw)
+        except Exception as e:
             logger.warning("Chat agent LLM call failed: %s", e)
             return {
                 "message": "I'm sorry, I had trouble processing that. Could you try rephrasing?",
@@ -263,7 +263,7 @@ class NutritionChatAgent:
             }
 
         # Normalize response
-        result: Dict[str, Any] = {
+        result_dict: Dict[str, Any] = {
             "message": data.get("message", ""),
             "phase": data.get("phase", phase),
             "action": data.get("action", "none"),
@@ -271,4 +271,4 @@ class NutritionChatAgent:
             "meal_plan_params": data.get("meal_plan_params"),
             "feedback_data": data.get("feedback_data"),
         }
-        return result
+        return result_dict

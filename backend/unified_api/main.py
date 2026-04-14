@@ -1,5 +1,5 @@
 """
-Unified API Server — reverse-proxy router for Strands Agent team microservices.
+Unified API Server — reverse-proxy router for Khala team microservices.
 
 Each agent team runs in its own container.  This server:
   1. Proxies ``/api/{team}/*`` requests to the team's container.
@@ -278,9 +278,9 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="Strands Agents Unified API",
+    title="Khala Unified API",
     description=(
-        "Reverse-proxy router for all Strands Agent team microservices. "
+        "Reverse-proxy router for all Khala team microservices. "
         "Each team runs in its own container; this server routes requests, "
         "hosts team assistant chat, and enforces the security gateway."
     ),
@@ -356,9 +356,9 @@ async def root() -> ApiInfoResponse:
         for key, config in TEAM_CONFIGS.items()
     ]
     return ApiInfoResponse(
-        name="Strands Agents Unified API",
+        name="Khala Unified API",
         version="1.0.0",
-        description="Reverse-proxy router for all Strands Agent team microservices",
+        description="Reverse-proxy router for all Khala team microservices",
         teams=teams,
         docs_url="/docs",
     )
@@ -405,3 +405,91 @@ async def list_teams() -> dict[str, Any]:
             "docs_url": f"{config.prefix}/docs" if registered else None,
         }
     return {"teams": teams}
+
+
+# ---------------------------------------------------------------------------
+# Generic job management (proxies to job-service for any team)
+# ---------------------------------------------------------------------------
+
+_JOB_SERVICE_URL = os.environ.get("JOB_SERVICE_URL", "http://job-service:8085")
+
+
+@app.get("/api/jobs/{team}", tags=["jobs"])
+async def list_team_jobs(team: str, running_only: bool = False) -> dict[str, Any]:
+    """List all jobs for a team via the job service."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        url = f"{_JOB_SERVICE_URL}/jobs/{team}"
+        if running_only:
+            url += "?statuses=pending&statuses=running"
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.json()
+
+
+@app.delete("/api/jobs/{team}/{job_id}", tags=["jobs"])
+async def delete_job(team: str, job_id: str) -> dict[str, Any]:
+    """Delete a job for any team. Works regardless of job status."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.delete(f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}")
+        resp.raise_for_status()
+        return resp.json()
+
+
+@app.post("/api/jobs/{team}/{job_id}/cancel", tags=["jobs"])
+async def cancel_job(team: str, job_id: str) -> dict[str, Any]:
+    """Force-cancel a running or pending job by setting its status to cancelled."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.patch(
+            f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
+            json={"heartbeat": False, "fields": {"status": "cancelled", "error": "Cancelled by user"}},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+@app.post("/api/jobs/{team}/{job_id}/interrupt", tags=["jobs"])
+async def interrupt_job(team: str, job_id: str) -> dict[str, Any]:
+    """Mark a job as interrupted (e.g. after detecting it's stale)."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.patch(
+            f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
+            json={"heartbeat": False, "fields": {"status": "interrupted", "error": "Marked interrupted by user"}},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+@app.post("/api/jobs/{team}/{job_id}/resume", tags=["jobs"])
+async def resume_job(team: str, job_id: str) -> dict[str, Any]:
+    """Reset a failed/interrupted/cancelled job back to running so its team can pick it up."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.patch(
+            f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
+            json={"heartbeat": True, "fields": {"status": "running", "error": None}},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+@app.post("/api/jobs/{team}/{job_id}/restart", tags=["jobs"])
+async def restart_job(team: str, job_id: str) -> dict[str, Any]:
+    """Reset a job to pending so its team re-executes it from scratch."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.patch(
+            f"{_JOB_SERVICE_URL}/jobs/{team}/{job_id}",
+            json={"heartbeat": True, "fields": {"status": "pending", "error": None}},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+@app.post("/api/jobs/{team}/mark-all-interrupted", tags=["jobs"])
+async def mark_all_interrupted(team: str) -> dict[str, Any]:
+    """Mark all running/pending jobs for a team as interrupted."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            f"{_JOB_SERVICE_URL}/jobs/{team}/mark-all-running-interrupted",
+            json={"reason": "Bulk interrupted by user"},
+        )
+        resp.raise_for_status()
+        return resp.json()

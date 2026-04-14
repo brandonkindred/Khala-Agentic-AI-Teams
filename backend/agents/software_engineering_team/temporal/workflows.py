@@ -18,7 +18,6 @@ with workflow.unsafe.imports_passed_through():
     from software_engineering_team.temporal.constants import (
         STANDALONE_TYPE_BACKEND,
         STANDALONE_TYPE_FRONTEND,
-        STANDALONE_TYPE_PLANNING,
         STANDALONE_TYPE_PRODUCT_ANALYSIS,
         TASK_QUEUE,
     )
@@ -159,14 +158,6 @@ class StandaloneJobWorkflow:
             await workflow.execute_activity(
                 _activities.run_backend_code_v2_activity,
                 args=[job_id, repo_path, task_dict, architecture_overview],
-                task_queue=TASK_QUEUE,
-                schedule_to_close_timeout=STANDALONE_TIMEOUT,
-                retry_policy=DEFAULT_RETRY_POLICY,
-            )
-        elif job_type == STANDALONE_TYPE_PLANNING and spec_content is not None:
-            await workflow.execute_activity(
-                _activities.run_planning_v2_activity,
-                args=[job_id, repo_path, spec_content, inspiration_content],
                 task_queue=TASK_QUEUE,
                 schedule_to_close_timeout=STANDALONE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY_POLICY,

@@ -1,9 +1,9 @@
 from ..models.phase_result import InfrastructureAuditResult
 from ..tools import persist_artifact
-from .base import ToolContext, tool
+from .base import ToolContext, a11y_phase
 
 
-@tool(context=True)
+@a11y_phase(context=True)
 def run_infrastructure_audit(target: str, tool_context: ToolContext) -> dict:
     output = {
         "target": target,

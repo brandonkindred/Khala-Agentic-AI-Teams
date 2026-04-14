@@ -15,18 +15,20 @@ import re
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from planning_v2_team.tool_agents.json_utils import (
-    default_decompose_by_sections,
-    parse_json_with_recovery,
-)
+from strands import Agent
 
+from llm_service import get_client, get_strands_model
 from software_engineering_team.shared.context_sizing import (
     compute_pra_spec_review_spec_chars,
     compute_prd_snippet_chars,
 )
 from software_engineering_team.shared.deduplication import dedupe_strings as _dedupe_items
+from software_engineering_team.shared.json_utils import (
+    default_decompose_by_sections,
+    parse_json_with_recovery,
+)
 
 from .models import (
     AnalysisPhase,
@@ -59,9 +61,6 @@ from .prompts import (
     SPEC_REVIEW_PROMPT,
     SPEC_UPDATE_PROMPT,
 )
-
-if TYPE_CHECKING:
-    from llm_service import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -1991,10 +1990,17 @@ class ProductRequirementsAnalysisAgent:
     The cycle (1-3) repeats until no open questions remain, then Spec Cleanup runs.
     """
 
-    def __init__(self, llm_client: "LLMClient") -> None:
-        if llm_client is None:
-            raise ValueError("llm_client is required")
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
+            self._model = llm_client
+        else:
+            # Always use a proper Strands Model — raw LLMClient (e.g. OllamaLLMClient)
+            # doesn't implement the Strands Model interface (stream/update_config/get_config).
+            self._model = get_strands_model("product_analysis")
+        # Keep LLMClient for context_sizing utilities
+        self.llm = llm_client if llm_client is not None else get_client("product_analysis")
 
     def _has_existing_pra_artifacts(self, repo_path: Path) -> bool:
         """Return True if plan/product_analysis has prior PRA output we can resume from."""
@@ -3174,7 +3180,7 @@ Previously Answered Questions:
         )
 
         try:
-            raw = self.llm.complete_text(prompt, think=True)
+            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
             if not raw or not raw.strip():
                 return []
             parsed = self._parse_llm_json(raw)
@@ -3233,7 +3239,7 @@ Previously Answered Questions:
             spec_excerpt=spec_content[:4000],
         )
         try:
-            raw = self.llm.complete_text(prompt, think=True)
+            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
             if not raw or not raw.strip():
                 return []
             parsed = self._parse_llm_json(raw)
@@ -3384,7 +3390,7 @@ Previously Answered Questions:
         )
 
         try:
-            raw = self.llm.complete_text(prompt, think=True)
+            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
             if not raw or not raw.strip():
                 return True, []  # On failure, consider complete to avoid blocking
             parsed = self._parse_llm_json(raw)
@@ -3735,7 +3741,7 @@ Previously Answered Questions:
         )
 
         try:
-            raw = self.llm.complete_text(prompt, think=True)
+            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
             if raw and raw.strip():
                 parsed = self._parse_llm_json(raw)
                 if isinstance(parsed, dict):
@@ -3954,7 +3960,7 @@ Previously Answered Questions:
         spec_excerpt = (spec_content or "")[:4000]
         prompt = CONTEXT_CONSTRAINTS_QUESTIONS_PROMPT.format(spec_excerpt=spec_excerpt)
         try:
-            raw = self.llm.complete_text(prompt, think=True)
+            raw = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
             if not raw or not raw.strip():
                 return _context_discovery_fallback_questions()
             # Try to extract JSON (allow optional markdown code fence)
@@ -4124,7 +4130,7 @@ Previously Answered Questions:
         )
         prompt = CONSOLIDATE_QUESTIONS_PROMPT.format(questions_json=questions_json)
         try:
-            raw = self.llm.complete_json(prompt, temperature=0.1)
+            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip())
             if not isinstance(raw, dict):
                 return list(open_questions)
             consolidated = raw.get("consolidated_questions", [])
@@ -4180,7 +4186,7 @@ Previously Answered Questions:
         questions_json = json.dumps(questions_payload, indent=2)
         prompt = REVIEW_QUESTIONS_ALIGNMENT_PROMPT.format(questions_json=questions_json)
         try:
-            raw = self.llm.complete_json(prompt, temperature=0.1)
+            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip())
             if not isinstance(raw, dict):
                 return list(open_questions)
             aligned = raw.get("aligned_questions", [])
@@ -4226,7 +4232,7 @@ Previously Answered Questions:
             questions_json=questions_json,
         )
         try:
-            raw = self.llm.complete_json(prompt, temperature=0.1)
+            raw = json.loads((lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip())
             if not isinstance(raw, dict):
                 return list(open_questions)
             recs = raw.get("recommendations", [])
@@ -4484,7 +4490,7 @@ Previously Answered Questions:
         )
 
         try:
-            updated_spec = self.llm.complete_text(prompt, think=True)
+            updated_spec = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
         except Exception as e:
             logger.error("Failed to update spec with LLM: %s", e)
             return current_spec
@@ -4674,7 +4680,7 @@ Previously Answered Questions:
         )
 
         try:
-            prd_content = self.llm.complete_text(prompt, think=True)
+            prd_content = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
         except Exception as e:
             logger.error("Failed to generate PRD with LLM: %s", e)
             return cleaned_spec
@@ -4739,7 +4745,7 @@ Previously Answered Questions:
         )
 
         try:
-            clarified_spec = self.llm.complete_text(prompt, think=True)
+            clarified_spec = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
         except Exception as e:
             logger.error("Failed to clarify spec with LLM: %s", e)
             return current_spec
@@ -4783,7 +4789,7 @@ Previously Answered Questions:
             qa_source=qa_source,
         )
         try:
-            updated_spec = self.llm.complete_text(prompt, think=True)
+            updated_spec = (lambda _r: str(_r))(Agent(model=self._model, callback_handler=None)(prompt)).strip()
         except Exception as e:
             logger.error("Failed to update spec for consistency with LLM: %s", e)
             return current_spec

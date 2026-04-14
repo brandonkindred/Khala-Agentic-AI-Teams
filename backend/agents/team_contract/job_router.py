@@ -51,7 +51,7 @@ def create_job_router(team: str) -> APIRouter:
         POST /jobs           — Create a new job
         GET  /jobs           — List jobs (with optional status filter)
         GET  /jobs/{job_id}  — Get job status
-        DELETE /jobs/{job_id} — Cancel a job
+        DELETE /jobs/{job_id} — Delete a job
     """
     router = APIRouter(prefix="/jobs", tags=[f"{team}-jobs"])
 
@@ -92,14 +92,13 @@ def create_job_router(team: str) -> APIRouter:
         return job
 
     @router.delete("/{job_id}")
-    def cancel_job(job_id: str) -> Dict[str, Any]:
-        """Cancel a running job."""
+    def delete_job(job_id: str) -> Dict[str, Any]:
+        """Delete a job from the store."""
         manager = _get_manager()
-        job = manager.get_job(job_id)
-        if not job:
+        deleted = manager.delete_job(job_id)
+        if not deleted:
             raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-        manager.update_job(job_id, status="cancelled")
-        return {"job_id": job_id, "cancelled": True}
+        return {"job_id": job_id, "deleted": True}
 
     class _ResumeRequest(BaseModel):
         key: Optional[str] = None

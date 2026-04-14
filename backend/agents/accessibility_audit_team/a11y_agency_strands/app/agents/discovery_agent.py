@@ -1,22 +1,21 @@
 from ..models import ClientProfile, SamplingPlan, ScopeDefinition
 from ..models.phase_result import DiscoveryResult
 from ..tools import collect_client_discovery, persist_artifact
-from .base import StubAgent, ToolContext, tool
+from .base import ToolContext, a11y_phase
 
 
-@tool(context=True)
+@a11y_phase(context=True)
 def run_discovery(raw_answers: dict, tool_context: ToolContext) -> dict:
     source = collect_client_discovery(
         raw_answers, tool_context.invocation_state.get("questionnaire", {})
     )
-    specialist = StubAgent(name="discovery")
-    client = specialist.invoke(
+    # TODO: Phase 3 — replace with strands.Agent
+    client = ClientProfile.model_validate(
         {
             "organization": source.get("organization", "Unknown"),
             "goals": source.get("goals", []),
             "business_metrics": source.get("business_metrics", []),
-        },
-        structured_output_model=ClientProfile,
+        }
     )
     scope = ScopeDefinition(
         conformance_target=source.get("conformance_target", "WCAG 2.2 AA"),

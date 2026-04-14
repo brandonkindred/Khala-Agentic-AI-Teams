@@ -12,7 +12,7 @@ from pathlib import Path
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 from shared.style_loader import load_style_file
 
-from llm_service import get_client
+from llm_service import get_strands_model
 
 from . import _path_setup  # noqa: F401  # Add blogging to path when run from project root
 
@@ -46,7 +46,7 @@ Implementing LLM observability is non-negotiable for any serious enterprise AI i
 
 
 def main() -> None:
-    llm_client = get_client("blog")
+    llm_client = get_strands_model("blog")
 
     writing_style_content = load_style_file(STYLE_GUIDE_PATH, "writing style guide")
     brand_spec_content = load_style_file(BRAND_SPEC_PROMPT_PATH, "brand spec prompt")

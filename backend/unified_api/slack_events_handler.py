@@ -6,7 +6,7 @@ Supports:
 - URL verification challenge (required for Slack app setup)
 - app_mention events (bot @mentioned in a channel)
 - message.im events (DMs to the bot)
-- /strands slash command (team switching, help, reset, messages)
+- /khala slash command (team switching, help, reset, messages)
 - Signature verification via HMAC-SHA256
 
 All message processing runs in background threads to meet Slack's 3-second
@@ -446,26 +446,26 @@ def _build_team_list_text() -> str:
     lines = ["*Available Teams:*\n"]
     for key, info in sorted(registry.items(), key=lambda x: x[1]["name"]):
         lines.append(f"• `{key}` — *{info['name']}*: {info['description']}")
-    lines.append("\n_Switch with: `/strands team <name>`_")
+    lines.append("\n_Switch with: `/khala team <name>`_")
     return "\n".join(lines)
 
 
 def _build_help_text() -> str:
-    """Build help text for the /strands command."""
+    """Build help text for the /khala command."""
     return (
-        "*Strands Assistant — Slash Commands*\n\n"
-        "• `/strands <message>` — Send a message to your current team's assistant\n"
-        "• `/strands team list` — List all available teams\n"
-        "• `/strands team <name>` — Switch to a different team\n"
-        "• `/strands reset` — Start a fresh conversation with current team\n"
-        "• `/strands status` — Show your current team\n"
-        "• `/strands help` — Show this help message\n"
+        "*Khala Assistant — Slash Commands*\n\n"
+        "• `/khala <message>` — Send a message to your current team's assistant\n"
+        "• `/khala team list` — List all available teams\n"
+        "• `/khala team <name>` — Switch to a different team\n"
+        "• `/khala reset` — Start a fresh conversation with current team\n"
+        "• `/khala status` — Show your current team\n"
+        "• `/khala help` — Show this help message\n"
     )
 
 
 def process_slash_command(form_data: dict[str, str]) -> dict[str, Any]:
     """
-    Process a /strands slash command.
+    Process a /khala slash command.
 
     Returns an immediate response dict for Slack. For messages that require
     assistant processing, spawns a background thread and posts the result
@@ -483,15 +483,15 @@ def process_slash_command(form_data: dict[str, str]) -> dict[str, Any]:
     slack_user_id = str(form_data.get("user_id", "")).strip()
     response_url = str(form_data.get("response_url", "")).strip()
 
-    # /strands help
+    # /khala help
     if not text or text.lower() == "help":
         return {"response_type": "ephemeral", "text": _build_help_text()}
 
-    # /strands team list
+    # /khala team list
     if text.lower() in ("team list", "teams", "team"):
         return {"response_type": "ephemeral", "text": _build_team_list_text()}
 
-    # /strands team <name>
+    # /khala team <name>
     if text.lower().startswith("team "):
         team_raw = text[5:].strip()
         if team_raw.lower() == "list":
@@ -507,10 +507,10 @@ def process_slash_command(form_data: dict[str, str]) -> dict[str, Any]:
             }
         return {
             "response_type": "ephemeral",
-            "text": f"Unknown team: `{team_raw}`. Use `/strands team list` to see available teams.",
+            "text": f"Unknown team: `{team_raw}`. Use `/khala team list` to see available teams.",
         }
 
-    # /strands reset
+    # /khala reset
     if text.lower() == "reset":
         current_team = get_user_team(slack_user_id)
         reset_conversation(slack_user_id, current_team)
@@ -521,7 +521,7 @@ def process_slash_command(form_data: dict[str, str]) -> dict[str, Any]:
             "text": f"Conversation reset for *{name}*. Your next message starts fresh.",
         }
 
-    # /strands status
+    # /khala status
     if text.lower() == "status":
         current_team = get_user_team(slack_user_id)
         registry = get_available_teams()
@@ -531,7 +531,7 @@ def process_slash_command(form_data: dict[str, str]) -> dict[str, Any]:
             "text": f"Current team: *{info.get('name', current_team)}*\n_{info.get('description', '')}_",
         }
 
-    # /strands <message> — send to current team assistant in background
+    # /khala <message> — send to current team assistant in background
     def _process_in_background() -> None:
         try:
             registry = get_available_teams()

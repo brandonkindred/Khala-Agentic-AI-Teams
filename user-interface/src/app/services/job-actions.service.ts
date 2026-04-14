@@ -1,12 +1,12 @@
 /**
  * Unified job action dispatcher.
  *
- * Consolidates the per-team API routing for stop, resume, restart, and delete
- * into a single service so the Jobs Dashboard doesn't need a switch statement
- * per action per team.
+ * Routes stop, resume, restart, and delete through per-team API services
+ * when the team exposes dedicated endpoints.  Falls back to the generic
+ * job management proxy (/api/jobs/{team}/{id}) for teams that don't.
  */
 import { Injectable, inject } from '@angular/core';
-import { Observable, EMPTY } from 'rxjs';
+import { Observable } from 'rxjs';
 
 import type { JobSource } from '../models';
 import { SoftwareEngineeringApiService } from './software-engineering-api.service';
@@ -15,6 +15,27 @@ import { AISystemsApiService } from './ai-systems-api.service';
 import { AgentProvisioningApiService } from './agent-provisioning-api.service';
 import { SocialMarketingApiService } from './social-marketing-api.service';
 import { InvestmentApiService } from './investment-api.service';
+import { PersonaTestingApiService } from './persona-testing-api.service';
+import { SalesApiService } from './sales-api.service';
+import { GenericJobsApiService } from './generic-jobs-api.service';
+
+/** Map JobSource values to the job-service team name used in /api/jobs/{team}. */
+const SOURCE_TO_TEAM: Record<string, string> = {
+  software_engineering: 'software_engineering_team',
+  blogging: 'blogging_team',
+  ai_systems: 'ai_systems_team',
+  agent_provisioning: 'agent_provisioning_team',
+  social_marketing: 'social_media_marketing_team',
+  investment: 'investment_strategy_lab_runs',
+  user_agent_founder: 'user_agent_founder',
+  soc2_compliance: 'soc2_compliance_team',
+  personal_assistant: 'personal_assistant_team',
+  planning_v3: 'planning_v3_team',
+  road_trip_planning: 'road_trip_planning_team',
+  nutrition_meal_planning: 'nutrition_meal_planning_team',
+  coding_team: 'coding_team',
+  sales: 'sales_team',
+};
 
 @Injectable({ providedIn: 'root' })
 export class JobActionsService {
@@ -24,6 +45,9 @@ export class JobActionsService {
   private readonly prov = inject(AgentProvisioningApiService);
   private readonly social = inject(SocialMarketingApiService);
   private readonly investment = inject(InvestmentApiService);
+  private readonly persona = inject(PersonaTestingApiService);
+  private readonly sales = inject(SalesApiService);
+  private readonly generic = inject(GenericJobsApiService);
 
   stop(source: JobSource, jobId: string): Observable<unknown> {
     switch (source) {
@@ -32,7 +56,9 @@ export class JobActionsService {
       case 'ai_systems': return this.ai.cancelJob(jobId);
       case 'agent_provisioning': return this.prov.cancelJob(jobId);
       case 'social_marketing': return this.social.cancelJob(jobId);
-      default: return EMPTY;
+      case 'user_agent_founder': return this.persona.cancelJob(jobId);
+      case 'sales': return this.sales.cancelJob(jobId);
+      default: return this.generic.cancel(SOURCE_TO_TEAM[source] ?? source, jobId);
     }
   }
 
@@ -44,7 +70,7 @@ export class JobActionsService {
       case 'agent_provisioning': return this.prov.resumeJob(jobId);
       case 'social_marketing': return this.social.resumeJob(jobId);
       case 'investment': return this.investment.resumeRun(jobId);
-      default: return EMPTY;
+      default: return this.generic.resume(SOURCE_TO_TEAM[source] ?? source, jobId);
     }
   }
 
@@ -56,7 +82,7 @@ export class JobActionsService {
       case 'agent_provisioning': return this.prov.restartJob(jobId);
       case 'social_marketing': return this.social.restartJob(jobId);
       case 'investment': return this.investment.restartRun(jobId);
-      default: return EMPTY;
+      default: return this.generic.restart(SOURCE_TO_TEAM[source] ?? source, jobId);
     }
   }
 
@@ -67,7 +93,10 @@ export class JobActionsService {
       case 'ai_systems': return this.ai.deleteJob(jobId);
       case 'agent_provisioning': return this.prov.deleteJob(jobId);
       case 'social_marketing': return this.social.deleteJob(jobId);
-      default: return EMPTY;
+      case 'investment': return this.investment.deleteJob(jobId);
+      case 'user_agent_founder': return this.persona.deleteJob(jobId);
+      case 'sales': return this.sales.deleteJob(jobId);
+      default: return this.generic.delete(SOURCE_TO_TEAM[source] ?? source, jobId);
     }
   }
 }

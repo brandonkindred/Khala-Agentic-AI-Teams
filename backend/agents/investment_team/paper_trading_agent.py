@@ -1,22 +1,27 @@
 """
-Paper Trading Agent — runs simulated live trading using LLM to interpret strategy rules against real market data.
+Paper Trading Agent — validates strategy code against recent/live market data.
 
-Delegates the bar-walking simulation to :class:`TradeSimulationEngine` and adds
-paper-trading-specific features: performance comparison, divergence analysis, and
-verdict generation.
+Runs the same Python strategy code through the :class:`SandboxRunner` subprocess
+sandbox that backtesting uses, but against *recent* market data instead of
+historical.  When results diverge from the backtest, an LLM agent reviews both
+sets of trades and produces a factual analysis explaining why.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Dict, List
 
-from llm_service.interface import LLMClient
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from .market_data_service import OHLCVBar
 from .models import (
+    BacktestConfig,
     BacktestRecord,
     BacktestResult,
     PaperTradingComparison,
@@ -26,24 +31,15 @@ from .models import (
     StrategySpec,
     TradeRecord,
 )
-from .trade_simulator import (
-    OpenPosition,
-    TradeSimulationEngine,
-    compute_metrics,
-    evaluate_bar,
-)
+from .strategy_lab.executor.sandbox_runner import SandboxRunner
+from .strategy_lab.executor.trade_builder import build_trade_records
+from .trade_simulator import compute_metrics
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
-
-_EVALUATE_SYSTEM = (
-    "You are an expert quantitative trader executing a swing trading strategy. "
-    "You evaluate daily price bars against the strategy's entry and exit rules to decide whether to trade. "
-    "Be disciplined — only trade when the rules are clearly met by the price data."
-)
 
 _DIVERGENCE_SYSTEM = (
     "You are a quantitative trading analyst specializing in strategy validation. "
@@ -91,11 +87,14 @@ Write a thorough analysis covering:
 2. **Trade Pattern Analysis**: Compare entry/exit patterns between backtest and paper trading
 3. **Root Cause Hypotheses**: Why paper trading underperforms (overfitting, regime change, \
 lookahead bias, market microstructure, data quality differences, etc.)
-4. **Actionable Improvements**: Specific changes to strategy rules, signals, or risk management \
-that could improve future live-data performance
+4. **Strategy Weaknesses**: Specific issues found (overfitting indicators, data sensitivity, etc.)
+5. **Improvement Suggestions**: Actionable changes for the strategy code that could improve \
+future live-data performance
 
 Return ONLY a JSON object with no markdown:
-{{"analysis": "your full analysis here"}}
+{{"analysis": "your full analysis here", \
+"strategy_weaknesses": ["weakness1", "weakness2"], \
+"improvement_suggestions": ["suggestion1", "suggestion2"]}}
 """
 
 
@@ -120,25 +119,30 @@ def _format_trades_table(trades: List[TradeRecord]) -> str:
 
 
 class PaperTradingAgent:
-    """
-    Runs paper trading sessions by walking through real market data bar-by-bar,
-    using the LLM to interpret strategy entry/exit rules, and simulating trade execution.
-    """
+    """Runs paper trading by executing strategy code against recent market data."""
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        self._divergence_agent = (
+            llm_client
+            if llm_client is not None
+            else Agent(
+                model=get_strands_model("paper_trading"),
+                system_prompt=_DIVERGENCE_SYSTEM,
+            )
+        )
+        self._sandbox = SandboxRunner()
 
     def run_session(
         self,
         strategy: StrategySpec,
+        strategy_code: str,
         backtest_record: BacktestRecord,
         market_data: Dict[str, List[OHLCVBar]],
         initial_capital: float = 100_000.0,
         transaction_cost_bps: float = 5.0,
         slippage_bps: float = 2.0,
-        min_trades: int = 50,
     ) -> PaperTradingSession:
-        """Walk through market data bar-by-bar, making LLM-driven trade decisions."""
+        """Run strategy code against recent market data in the subprocess sandbox."""
         session_id = f"pt-{uuid.uuid4().hex[:8]}"
         now = datetime.now(tz=timezone.utc).isoformat()
 
@@ -151,9 +155,6 @@ class PaperTradingAgent:
         data_end = all_dates[-1] if all_dates else ""
 
         data_source = "yahoo_finance"
-
-        # Count total available bars to warn if min_trades may not be reachable
-        total_bars = sum(len(bars) for bars in market_data.values())
 
         session = PaperTradingSession(
             session_id=session_id,
@@ -169,44 +170,53 @@ class PaperTradingAgent:
             started_at=now,
         )
 
-        # Run simulation via shared engine
-        engine = TradeSimulationEngine(
+        # Build config for sandbox execution
+        config = BacktestConfig(
+            start_date=data_start,
+            end_date=data_end,
             initial_capital=initial_capital,
             transaction_cost_bps=transaction_cost_bps,
             slippage_bps=slippage_bps,
+            benchmark_symbol="SPY",
+            rebalance_frequency="daily",
         )
 
-        def evaluate(
-            symbol: str,
-            bar: OHLCVBar,
-            recent: List[OHLCVBar],
-            position: Optional[OpenPosition],
-            capital: float,
-        ) -> Dict[str, Any]:
-            return self._evaluate_bar(strategy, symbol, bar, recent, position, capital)
+        # Run strategy code in sandbox (same as backtesting)
+        exec_result = self._sandbox.run(strategy_code, market_data, config)
 
-        sim = engine.run(market_data, evaluate, max_trades=min_trades, record_decisions=True)
-
-        if total_bars > 0 and len(sim.trades) < min_trades:
+        if not exec_result.success:
             logger.warning(
-                "Paper trading session completed with only %d/%d requested trades "
-                "(%d bars available across %d symbols).",
-                len(sim.trades),
-                min_trades,
-                total_bars,
-                len(market_data),
+                "Paper trading sandbox execution failed: %s — %s",
+                exec_result.error_type,
+                exec_result.stderr[:500],
             )
+            session.status = PaperTradingStatus.FAILED
+            session.divergence_analysis = (
+                f"Strategy code execution failed ({exec_result.error_type}): "
+                f"{exec_result.stderr[:500]}"
+            )
+            session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+            return session
 
-        # Populate session from simulation result
-        session.trades = sim.trades
-        session.trade_decisions = sim.decisions
-        session.current_capital = sim.final_capital
+        # Build trade records (same as backtesting)
+        try:
+            trades = build_trade_records(exec_result.raw_trades, config)
+        except ValueError as exc:
+            logger.warning("Paper trading trade builder failed: %s", exc)
+            session.status = PaperTradingStatus.FAILED
+            session.divergence_analysis = f"Trade record construction failed: {exc}"
+            session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+            return session
+
+        # Populate session from execution result
+        session.trades = trades
+        session.current_capital = initial_capital + sum(t.net_pnl for t in trades)
         session.completed_at = datetime.now(tz=timezone.utc).isoformat()
 
-        if sim.trades:
-            first_date = sim.trades[0].entry_date
-            last_date = sim.trades[-1].exit_date
-            session.result = compute_metrics(sim.trades, initial_capital, first_date, last_date)
+        if trades:
+            first_date = trades[0].entry_date
+            last_date = trades[-1].exit_date
+            session.result = compute_metrics(trades, initial_capital, first_date, last_date)
             session.comparison = self.compare_performance(session.result, backtest_record.result)
 
             if session.comparison.overall_aligned:
@@ -223,30 +233,18 @@ class PaperTradingAgent:
                         f"backtest: {backtest_record.result.win_rate_pct:.1f}%. "
                         f"Automated analysis unavailable."
                     )
+        else:
+            # No trades produced — strategy generated no signals on recent data
+            session.verdict = PaperTradingVerdict.NOT_PERFORMANT
+            session.divergence_analysis = (
+                "Strategy code produced zero trades on the recent market data period "
+                f"({data_start} to {data_end}). This may indicate overfitting to "
+                "historical patterns, or the strategy's entry conditions are not met "
+                "in the current market regime."
+            )
 
         session.status = PaperTradingStatus.COMPLETED
         return session
-
-    def _evaluate_bar(
-        self,
-        strategy: StrategySpec,
-        symbol: str,
-        current_bar: OHLCVBar,
-        recent_bars: List[OHLCVBar],
-        open_position: Optional[OpenPosition],
-        capital: float,
-    ) -> Dict[str, Any]:
-        """Ask LLM to evaluate whether entry/exit rules are met for this bar."""
-        return evaluate_bar(
-            self.llm.complete_json,
-            strategy,
-            _EVALUATE_SYSTEM,
-            symbol,
-            current_bar,
-            recent_bars,
-            open_position,
-            capital,
-        )
 
     @staticmethod
     def compare_performance(
@@ -254,10 +252,10 @@ class PaperTradingAgent:
         backtest_result: BacktestResult,
     ) -> PaperTradingComparison:
         """Compare paper trading metrics against backtest expectations with tolerances."""
-        # Win rate: within ±10 percentage points
+        # Win rate: within +/-10 percentage points
         win_rate_aligned = abs(paper_result.win_rate_pct - backtest_result.win_rate_pct) <= 10.0
 
-        # Annualized return: within ±40% relative (or ±3pp absolute for small values)
+        # Annualized return: within +/-40% relative (or +/-3pp absolute for small values)
         bt_ret = backtest_result.annualized_return_pct
         pt_ret = paper_result.annualized_return_pct
         if abs(bt_ret) > 5.0:
@@ -265,7 +263,7 @@ class PaperTradingAgent:
         else:
             return_aligned = abs(pt_ret - bt_ret) <= 3.0
 
-        # Sharpe: within ±0.3
+        # Sharpe: within +/-0.3
         sharpe_aligned = abs(paper_result.sharpe_ratio - backtest_result.sharpe_ratio) <= 0.3
 
         # Max drawdown: paper drawdown no more than 1.5x backtest drawdown
@@ -275,6 +273,13 @@ class PaperTradingAgent:
             )
         else:
             drawdown_aligned = paper_result.max_drawdown_pct <= 5.0
+
+        # Profit factor: within ±0.5 (or both above 1.0)
+        pf_diff = abs(paper_result.profit_factor - backtest_result.profit_factor)
+        if backtest_result.profit_factor >= 1.0 and paper_result.profit_factor >= 1.0:
+            profit_factor_aligned = pf_diff <= 0.5
+        else:
+            profit_factor_aligned = pf_diff <= 0.3
 
         overall = win_rate_aligned and return_aligned and sharpe_aligned and drawdown_aligned
 
@@ -293,6 +298,7 @@ class PaperTradingAgent:
             return_aligned=return_aligned,
             sharpe_aligned=sharpe_aligned,
             drawdown_aligned=drawdown_aligned,
+            profit_factor_aligned=profit_factor_aligned,
             overall_aligned=overall,
         )
 
@@ -338,10 +344,7 @@ class PaperTradingAgent:
             pt_trades_text=_format_trades_table(pt_trades_sample),
         )
 
-        data = self.llm.complete_json(
-            prompt,
-            temperature=0.3,
-            system_prompt=_DIVERGENCE_SYSTEM,
-            think=True,
-        )
+        result = self._divergence_agent(prompt)
+        raw = str(result).strip()
+        data = json.loads(raw)
         return str(data.get("analysis", "Divergence analysis not available."))

@@ -170,18 +170,18 @@ def _ensure_otel_instruments() -> None:
     try:
         from shared_observability import get_meter, get_tracer
 
-        _otel_tracer = get_tracer("strands.llm_service")
-        meter = get_meter("strands.llm_service")
+        _otel_tracer = get_tracer("khala.llm_service")
+        meter = get_meter("khala.llm_service")
         _otel_llm_calls = meter.create_counter(
-            "strands.llm.calls",
-            description="Total LLM calls made by a Strands team/agent",
+            "khala.llm.calls",
+            description="Total LLM calls made by a Khala team/agent",
         )
         _otel_llm_tokens = meter.create_counter(
-            "strands.llm.tokens",
+            "khala.llm.tokens",
             description="Total tokens consumed by LLM calls (prompt + completion)",
         )
         _otel_llm_latency = meter.create_histogram(
-            "strands.llm.latency_ms",
+            "khala.llm.latency_ms",
             description="LLM call latency in milliseconds",
             unit="ms",
         )
@@ -200,9 +200,9 @@ def _emit_otel_llm_span(record: LLMCallRecord) -> None:
         return
     try:
         attributes = {
-            "strands.team": record.team or "unknown",
-            "strands.agent_key": record.agent_key or "unknown",
-            "strands.caller_tag": record.caller_tag or "",
+            "khala.team": record.team or "unknown",
+            "khala.agent_key": record.agent_key or "unknown",
+            "khala.caller_tag": record.caller_tag or "",
             "llm.vendor": "ollama",
             "llm.request.model": record.model or "unknown",
             "llm.usage.prompt_tokens": record.prompt_tokens,
@@ -214,7 +214,7 @@ def _emit_otel_llm_span(record: LLMCallRecord) -> None:
         if record.error_type:
             attributes["llm.error_type"] = record.error_type
         if record.job_id:
-            attributes["strands.job_id"] = record.job_id
+            attributes["khala.job_id"] = record.job_id
 
         span_name = f"llm.call {record.agent_key or 'agent'}"
         span = _otel_tracer.start_span(span_name, attributes=attributes)

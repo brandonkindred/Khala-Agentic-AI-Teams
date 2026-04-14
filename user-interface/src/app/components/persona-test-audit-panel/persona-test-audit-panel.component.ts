@@ -10,6 +10,7 @@ import { MatCardModule } from '@angular/material/card';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
+import { PersonaChatComponent } from '../persona-chat/persona-chat.component';
 import type { PersonaTestRunDetail, PersonaDecision, RunArtifacts } from '../../models';
 
 const POLL_MS = 10_000;
@@ -27,6 +28,7 @@ const TERMINAL_STATUSES = ['completed', 'failed'];
     MatCardModule,
     MatExpansionModule,
     MatProgressBarModule,
+    PersonaChatComponent,
   ],
   templateUrl: './persona-test-audit-panel.component.html',
   styleUrl: './persona-test-audit-panel.component.scss',

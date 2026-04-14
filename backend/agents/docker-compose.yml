@@ -6,12 +6,12 @@
 version: "3.8"
 
 services:
-  strands-unified-api:
+  khala-unified-api:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: strands-unified-api
-    container_name: strands-unified-api
+    image: khala-unified-api
+    container_name: khala-unified-api
     ports:
       - "8080:8080"
     environment:

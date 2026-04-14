@@ -1,10 +1,10 @@
 # Unified API Server
 
-The Unified API Server consolidates all Strands Agent team APIs under a single entry point, providing a consistent interface for accessing all platform capabilities.
+The Unified API Server consolidates all Khala team APIs under a single entry point, providing a consistent interface for accessing all platform capabilities.
 
 ## Overview
 
-Instead of running multiple API servers on different ports, the unified server mounts all 19 team APIs under namespaced prefixes on a single port (default: 8080). Teams can also be deployed as standalone microservices; when a `*_SERVICE_URL` env var is set for a team, the unified API proxies requests to that external service instead of mounting in-process.
+Instead of running multiple API servers on different ports, the unified server mounts all 20 team APIs under namespaced prefixes on a single port (default: 8080). Teams can also be deployed as standalone microservices; when a `*_SERVICE_URL` env var is set for a team, the unified API proxies requests to that external service instead of mounting in-process.
 
 ```mermaid
 graph TB
@@ -32,6 +32,8 @@ graph TB
             RoadTrip["/api/road-trip-planning"]
             AgenticProv["/api/agentic-team-provisioning"]
             StartupAdv["/api/startup-advisor"]
+            UAFounder["/api/user-agent-founder"]
+            Deep["/api/deepthought"]
         end
     end
     
@@ -100,6 +102,8 @@ Execution stays in agent code (e.g. `agent_git_tools` + `GitToolContext`); these
 | Road Trip Planning | `/api/road-trip-planning` | `/api/road-trip-planning/docs` |
 | Agentic Team Provisioning | `/api/agentic-team-provisioning` | `/api/agentic-team-provisioning/docs` |
 | Startup Advisor | `/api/startup-advisor` | `/api/startup-advisor/docs` |
+| User Agent Founder | `/api/user-agent-founder` | `/api/user-agent-founder/docs` |
+| Deepthought | `/api/deepthought` | `/api/deepthought/docs` |
 
 ### Team configuration hierarchy (`config.py`)
 
@@ -201,7 +205,7 @@ If a team API fails to import (missing dependencies, configuration errors), the 
 
 ```
 2024-01-15 10:00:00 [WARNING] unified_api: Could not mount Investment Team API: No module named 'investment_team'
-2024-01-15 10:00:00 [INFO] unified_api: Mounted 18/19 team APIs
+2024-01-15 10:00:00 [INFO] unified_api: Mounted 19/20 team APIs
 ```
 
 ## Example Usage
@@ -350,7 +354,7 @@ Software Engineering jobs are stored under `{cache_dir}/software_engineering_tea
 1. Ensure the UI talks to the same server that is running the job (e.g. unified API on port 8080).
 2. Set **AGENT_CACHE** to an absolute path and restart the server so job creation and listing use the same directory regardless of CWD:
    ```bash
-   export AGENT_CACHE=/var/lib/strands/agent_cache
+   export AGENT_CACHE=/var/lib/khala/agent_cache
    python run_unified_api.py
    ```
 3. Verify the list endpoint: `GET http://localhost:8080/api/software-engineering/run-team/jobs`. If it returns `{ "jobs": [] }` while a job is running elsewhere, the backend is reading from a different store (different process or CWD). Check server logs for the line `Software engineering job store path: ...` to see which directory is used.
@@ -381,6 +385,6 @@ app.add_middleware(
 )
 ```
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../README.md) monorepo (Unified API, Angular UI, and full team index).

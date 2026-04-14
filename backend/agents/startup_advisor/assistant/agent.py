@@ -105,13 +105,15 @@ def _parse_response(raw: str) -> tuple[str, dict[str, Any], list[str], dict[str,
 class StartupAdvisorAgent:
     """Conversational agent that provides startup advisory through probing dialogue."""
 
-    def __init__(self, llm=None) -> None:  # noqa: ANN001
-        if llm is None:
-            from llm_service import get_client
+    def __init__(self) -> None:
+        from strands import Agent
 
-            self._llm = get_client("startup_advisor")
-        else:
-            self._llm = llm
+        from llm_service import get_strands_model
+
+        self._agent = Agent(
+            model=get_strands_model("startup_advisor"),
+            system_prompt=SYSTEM_PROMPT,
+        )
 
     def respond(
         self,
@@ -143,26 +145,8 @@ class StartupAdvisorAgent:
             user_message=user_message,
         )
 
-        try:
-            raw = self._llm.complete(
-                prompt,
-                temperature=0.5,
-                system_prompt=SYSTEM_PROMPT,
-                think=True,
-            )
-        except Exception:
-            logger.exception("LLM call failed for startup advisor")
-            return (
-                "I'm here to help with your startup. Could you tell me about what you're building and what stage you're at?",
-                {},
-                [
-                    "What stage is your startup at?",
-                    "What's your biggest challenge right now?",
-                    "Tell me about your target customers.",
-                ],
-                None,
-            )
-
+        result = self._agent(prompt)
+        raw = str(result).strip()
         return _parse_response(raw)
 
 

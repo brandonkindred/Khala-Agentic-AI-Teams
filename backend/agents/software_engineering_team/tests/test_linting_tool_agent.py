@@ -9,6 +9,8 @@ from linting_tool_agent import LintingToolAgent, LintIssue, LintToolInput, LintT
 from linting_tool_agent.linter_runner import detect_linter, parse_lint_output
 from linting_tool_agent.models import LintExecutionResult, LintPlan
 
+from software_engineering_team.tests.conftest import ConfigurableLLM
+
 # ---------------------------------------------------------------------------
 # Model construction and serialization
 # ---------------------------------------------------------------------------
@@ -165,7 +167,7 @@ def test_parse_eslint_output() -> None:
 
 def test_agent_run_lint_passes(tmp_path: Path) -> None:
     """When lint passes, agent returns success with no edits."""
-    mock_llm = MagicMock()
+    mock_llm = ConfigurableLLM()
     agent = LintingToolAgent(mock_llm)
 
     with (
@@ -178,7 +180,7 @@ def test_agent_run_lint_passes(tmp_path: Path) -> None:
     assert result.execution_result.success is True
     assert result.edits == []
     assert "passed" in result.summary.lower()
-    mock_llm.complete_json.assert_not_called()
+    mock_llm.complete_json_mock.assert_not_called()
 
 
 def test_agent_run_lint_fails_and_produces_edits(tmp_path: Path) -> None:
@@ -186,8 +188,8 @@ def test_agent_run_lint_fails_and_produces_edits(tmp_path: Path) -> None:
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "main.py").write_text("import os\nprint('hello')\n")
 
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm.complete_json_mock.return_value = {
         "edits": [
             {
                 "file_path": "app/main.py",
@@ -214,7 +216,7 @@ def test_agent_run_lint_fails_and_produces_edits(tmp_path: Path) -> None:
     assert len(result.edits) == 1
     assert result.edits[0].file_path == "app/main.py"
     assert len(result.linter_issues) == 1
-    mock_llm.complete_json.assert_called_once()
+    mock_llm.complete_json_mock.assert_called_once()
 
 
 def test_agent_run_llm_failure_is_non_blocking(tmp_path: Path) -> None:
@@ -222,8 +224,8 @@ def test_agent_run_llm_failure_is_non_blocking(tmp_path: Path) -> None:
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "main.py").write_text("import os\n")
 
-    mock_llm = MagicMock()
-    mock_llm.complete_json.side_effect = Exception("LLM unavailable")
+    mock_llm = ConfigurableLLM()
+    mock_llm.complete_json_mock.side_effect = Exception("LLM unavailable")
 
     agent = LintingToolAgent(mock_llm)
 
@@ -274,9 +276,9 @@ def test_backend_workflow_calls_linting_tool_agent(tmp_path: Path) -> None:
         ["git", "checkout", "-b", "development"], cwd=tmp_path, check=True, capture_output=True
     )
 
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.side_effect = [
+    mock_llm = ConfigurableLLM()
+    mock_llm._max_context_tokens = 16384
+    mock_llm.complete_json_mock.side_effect = [
         # Planning step
         {
             "feature_intent": "Test",

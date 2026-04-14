@@ -1,6 +1,7 @@
 """Tests for SOC2 audit orchestrator and pipeline."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -29,7 +30,9 @@ def test_load_repo_context_invalid_path() -> None:
 def test_run_soc2_audit_dummy(tmp_path: Path) -> None:
     """Full audit with DummyLLM completes and returns next_steps when no findings."""
     (tmp_path / "app.py").write_text("# placeholder")
-    result = run_soc2_audit(tmp_path, llm_client=DummyLLMClient())
+    dummy = DummyLLMClient()
+    with patch("shared_graph.agent_factory.get_strands_model", return_value=dummy):
+        result = run_soc2_audit(tmp_path)
     assert isinstance(result, SOC2AuditResult)
     assert result.status == "completed"
     assert result.repo_path == str(tmp_path.resolve())
