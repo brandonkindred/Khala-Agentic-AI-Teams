@@ -1,10 +1,10 @@
 # Unified API Server
 
-The Unified API Server consolidates all Strands Agent team APIs under a single entry point, providing a consistent interface for accessing all platform capabilities.
+The Unified API Server consolidates all Khala team APIs under a single entry point, providing a consistent interface for accessing all platform capabilities.
 
 ## Overview
 
-Instead of running multiple API servers on different ports, the unified server mounts all 19 team APIs under namespaced prefixes on a single port (default: 8080). Teams can also be deployed as standalone microservices; when a `*_SERVICE_URL` env var is set for a team, the unified API proxies requests to that external service instead of mounting in-process.
+Instead of running multiple API servers on different ports, the unified server mounts all 20 team APIs under namespaced prefixes on a single port (default: 8080). Teams can also be deployed as standalone microservices; when a `*_SERVICE_URL` env var is set for a team, the unified API proxies requests to that external service instead of mounting in-process.
 
 ```mermaid
 graph TB
@@ -32,6 +32,8 @@ graph TB
             RoadTrip["/api/road-trip-planning"]
             AgenticProv["/api/agentic-team-provisioning"]
             StartupAdv["/api/startup-advisor"]
+            UAFounder["/api/user-agent-founder"]
+            Deep["/api/deepthought"]
         end
     end
     
@@ -100,6 +102,8 @@ Execution stays in agent code (e.g. `agent_git_tools` + `GitToolContext`); these
 | Road Trip Planning | `/api/road-trip-planning` | `/api/road-trip-planning/docs` |
 | Agentic Team Provisioning | `/api/agentic-team-provisioning` | `/api/agentic-team-provisioning/docs` |
 | Startup Advisor | `/api/startup-advisor` | `/api/startup-advisor/docs` |
+| User Agent Founder | `/api/user-agent-founder` | `/api/user-agent-founder/docs` |
+| Deepthought | `/api/deepthought` | `/api/deepthought/docs` |
 
 ### Team configuration hierarchy (`config.py`)
 
@@ -201,7 +205,7 @@ If a team API fails to import (missing dependencies, configuration errors), the 
 
 ```
 2024-01-15 10:00:00 [WARNING] unified_api: Could not mount Investment Team API: No module named 'investment_team'
-2024-01-15 10:00:00 [INFO] unified_api: Mounted 18/19 team APIs
+2024-01-15 10:00:00 [INFO] unified_api: Mounted 19/20 team APIs
 ```
 
 ## Example Usage
@@ -350,14 +354,14 @@ Software Engineering jobs are stored under `{cache_dir}/software_engineering_tea
 1. Ensure the UI talks to the same server that is running the job (e.g. unified API on port 8080).
 2. Set **AGENT_CACHE** to an absolute path and restart the server so job creation and listing use the same directory regardless of CWD:
    ```bash
-   export AGENT_CACHE=/var/lib/strands/agent_cache
+   export AGENT_CACHE=/var/lib/khala/agent_cache
    python run_unified_api.py
    ```
 3. Verify the list endpoint: `GET http://localhost:8080/api/software-engineering/run-team/jobs`. If it returns `{ "jobs": [] }` while a job is running elsewhere, the backend is reading from a different store (different process or CWD). Check server logs for the line `Software engineering job store path: ...` to see which directory is used.
 
 ### Slack integration (Phase 1)
 
-- **Integrations API:** `GET /api/integrations` lists configured integrations. **Slack:** `GET/PUT /api/integrations/slack`, OAuth connect/disconnect — configure via UI in `webhook` or `bot` mode; `SLACK_WEBHOOK_URL` remains a webhook fallback env var. **Shared Google browser login:** `GET/PUT/DELETE /api/integrations/google-browser-login` — one **Fernet-encrypted** Gmail/Google email+password for **all** integrations that use “Sign in with Google” via Playwright (**Postgres only** when `POSTGRES_HOST` is set, e.g. Docker; **not** stored in SQLite; `PUT` returns 503 without Postgres). **Medium (blogging stats):** `GET/PUT /api/integrations/medium`, optional `GET /api/integrations/medium/oauth/google/connect` + callback, `POST/DELETE /api/integrations/medium/session` for manual `storage_state` at `${INTEGRATIONS_BROWSER_SESSION_ROOT:-$AGENT_CACHE/integrations/browser_sessions}/medium/storage_state.json`, and `POST /api/integrations/medium/session/browser-login` to capture Medium using the **shared** Google credentials (`playwright install chromium` on the API host). Stats **auto-login** when the session file is missing if shared credentials exist.
+- **Integrations API:** `GET /api/integrations` lists configured integrations. **Slack:** `GET/PUT /api/integrations/slack`, OAuth connect/disconnect — configure via UI in `webhook` or `bot` mode; `SLACK_WEBHOOK_URL` remains a webhook fallback env var. **Shared Google browser login:** `GET/PUT/DELETE /api/integrations/google-browser-login` — one **Fernet-encrypted** Gmail/Google email+password for **all** integrations that use “Sign in with Google” via Playwright (**Postgres only** when `POSTGRES_HOST` is set, e.g. Docker; `PUT` returns 503 without Postgres). **Medium (blogging stats):** `GET/PUT /api/integrations/medium`, optional `GET /api/integrations/medium/oauth/google/connect` + callback, `POST/DELETE /api/integrations/medium/session` for manual `storage_state` at `${INTEGRATIONS_BROWSER_SESSION_ROOT:-$AGENT_CACHE/integrations/browser_sessions}/medium/storage_state.json`, and `POST /api/integrations/medium/session/browser-login` to capture Medium using the **shared** Google credentials (`playwright install chromium` on the API host). Stats **auto-login** when the session file is missing if shared credentials exist.
 - **Manual E2E checklist:** (1) Start unified API and Angular UI. (2) Open **Integrations**, enable Slack, paste a valid Incoming Webhook URL, save. (3) Run a software-engineering job (or planning-v2 / product-analysis) that produces open questions; confirm a message appears in the Slack channel with a link to the UI. (4) Send a message to the Personal Assistant; confirm the assistant reply appears in the same Slack channel.
 
 ### Phase 2: Inbound from Slack (optional)
@@ -381,6 +385,6 @@ app.add_middleware(
 )
 ```
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../README.md) monorepo (Unified API, Angular UI, and full team index).

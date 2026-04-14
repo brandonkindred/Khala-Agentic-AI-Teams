@@ -1,0 +1,201 @@
+<div class="chat-layout">
+  <!-- Left sidebar: agent selector + quality + sessions -->
+  <div class="sidebar">
+    <mat-card class="sidebar-card">
+      <mat-card-header>
+        <mat-card-title>
+          <mat-icon>smart_toy</mat-icon>
+          Agent
+        </mat-card-title>
+      </mat-card-header>
+      <mat-card-content>
+        <!-- Agent selector -->
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-label>Select Agent</mat-label>
+          <mat-select [value]="selectedAgent()?.agent_name" (selectionChange)="selectAgent(team.agents[$event.value])">
+            @for (agent of team.agents; track agent.agent_name; let i = $index) {
+              <mat-option [value]="i">{{ agent.agent_name }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+
+        <!-- Quality score -->
+        @if (selectedAgent(); as agent) {
+          @let score = getScoreForAgent(agent.agent_name);
+          <div class="quality-section">
+            <span class="quality-label">Quality</span>
+            @if (score && score.total_rated > 0) {
+              <div class="quality-badge" [class]="scoreColor(score)">
+                <span class="quality-pct">{{ score.score_pct | number:'1.0-0' }}% positive</span>
+                <span class="quality-count">{{ score.total_rated }} rated</span>
+              </div>
+              <div class="quality-bar">
+                <div class="quality-fill" [class]="scoreColor(score)" [style.width.%]="score.score_pct"></div>
+              </div>
+            } @else {
+              <div class="quality-badge neutral">
+                <span>No ratings yet</span>
+              </div>
+            }
+          </div>
+        }
+
+        <!-- Sessions -->
+        <div class="sessions-section">
+          <span class="sessions-label">Sessions</span>
+          @if (sessions().length === 0) {
+            <p class="no-sessions">No sessions yet</p>
+          } @else {
+            <div class="session-list">
+              @for (session of sessions(); track session.session_id) {
+                <div
+                  class="session-item"
+                  [class.active]="activeSession()?.session_id === session.session_id"
+                  (click)="openSession(session.session_id)"
+                  role="button"
+                  tabindex="0"
+                  (keydown.enter)="openSession(session.session_id)"
+                >
+                  @if (renamingSessionId() === session.session_id) {
+                    <form [formGroup]="renameForm" (ngSubmit)="confirmRename(session.session_id)" class="rename-form">
+                      <input
+                        matInput
+                        formControlName="name"
+                        (click)="$event.stopPropagation()"
+                        (keydown.escape)="cancelRename()"
+                        class="rename-input"
+                      />
+                      <button mat-icon-button type="submit" (click)="$event.stopPropagation()">
+                        <mat-icon>check</mat-icon>
+                      </button>
+                    </form>
+                  } @else {
+                    <span class="session-name">{{ session.session_name || formatTime(session.created_at) || 'New Session' }}</span>
+                    <button mat-icon-button (click)="$event.stopPropagation(); startRename(session)" matTooltip="Rename" class="session-action">
+                      <mat-icon>edit</mat-icon>
+                    </button>
+                    <button mat-icon-button (click)="$event.stopPropagation(); deleteSession(session.session_id)" matTooltip="Delete" class="session-action">
+                      <mat-icon>delete</mat-icon>
+                    </button>
+                  }
+                </div>
+              }
+            </div>
+          }
+          <button mat-stroked-button (click)="createSession()" class="new-session-btn">
+            <mat-icon>add</mat-icon> New Session
+          </button>
+          @if (activeSession()) {
+            <button mat-stroked-button (click)="exportSession()" class="export-btn">
+              <mat-icon>download</mat-icon> Export
+            </button>
+          }
+        </div>
+      </mat-card-content>
+    </mat-card>
+  </div>
+
+  <!-- Right panel: chat -->
+  <div class="chat-panel">
+    <mat-card class="chat-card">
+      @if (selectedAgent(); as agent) {
+        <mat-card-header>
+          <mat-card-title>
+            <mat-icon>smart_toy</mat-icon>
+            Chat: {{ agent.agent_name }}
+          </mat-card-title>
+        </mat-card-header>
+      }
+
+      <mat-card-content>
+        @if (error()) {
+          <p class="error-text">{{ error() }}</p>
+        }
+
+        @if (!selectedAgent()) {
+          <!-- Empty state: no agent selected -->
+          <div class="empty-state">
+            <mat-icon class="empty-icon">smart_toy</mat-icon>
+            <h3>Select an agent to start testing</h3>
+            <p>Choose an agent from the roster to evaluate their responses</p>
+          </div>
+        } @else if (!activeSession() && sessions().length === 0) {
+          <!-- Empty state: no sessions -->
+          <div class="empty-state">
+            <mat-icon class="empty-icon">chat</mat-icon>
+            <h3>Start chatting with {{ selectedAgent()!.agent_name }}</h3>
+            <p>Evaluate their responses and rate quality</p>
+            <button mat-raised-button color="primary" (click)="createSession()">Start Chat</button>
+          </div>
+        } @else {
+          <!-- Messages container -->
+          <div class="messages-container" #messagesContainer>
+            @for (msg of messages(); track msg.message_id) {
+              <div class="message" [class.user]="msg.role === 'user'" [class.assistant]="msg.role === 'assistant'">
+                <div class="message-content">{{ msg.content }}</div>
+                <div class="message-time">{{ formatTime(msg.created_at) }}</div>
+                @if (msg.role === 'assistant' && !msg.message_id.startsWith('temp-')) {
+                  <div class="rating-buttons">
+                    <button
+                      mat-icon-button
+                      (click)="rateMessage(msg.message_id, 'thumbs_up')"
+                      [class.active-up]="msg.rating === 'thumbs_up'"
+                      aria-label="Rate response as helpful"
+                    >
+                      <mat-icon>thumb_up</mat-icon>
+                    </button>
+                    <button
+                      mat-icon-button
+                      (click)="rateMessage(msg.message_id, 'thumbs_down')"
+                      [class.active-down]="msg.rating === 'thumbs_down'"
+                      aria-label="Rate response as unhelpful"
+                    >
+                      <mat-icon>thumb_down</mat-icon>
+                    </button>
+                  </div>
+                }
+              </div>
+            }
+
+            @if (loading()) {
+              <div class="message assistant">
+                <div class="typing-indicator">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </div>
+              </div>
+            }
+          </div>
+
+          <!-- Input form -->
+          <form [formGroup]="form" (ngSubmit)="onSubmit()" class="input-form">
+            <mat-form-field appearance="outline" class="message-input">
+              <mat-label>Type your message...</mat-label>
+              <input
+                matInput
+                formControlName="message"
+                aria-label="Message input"
+                (keydown.enter)="$event.preventDefault(); onSubmit()"
+              />
+            </mat-form-field>
+            <button mat-fab color="primary" type="submit" [disabled]="form.invalid || loading()" aria-label="Send message">
+              <mat-icon>send</mat-icon>
+            </button>
+          </form>
+
+          <!-- Suggested starter prompts -->
+          @if (suggestedPrompts().length > 0 && messages().length === 0) {
+            <div class="suggested-prompts">
+              @for (prompt of suggestedPrompts(); track prompt) {
+                <button mat-stroked-button (click)="onSuggestedPrompt(prompt)" [disabled]="loading()">
+                  {{ prompt }}
+                </button>
+              }
+            </div>
+          }
+        }
+      </mat-card-content>
+    </mat-card>
+  </div>
+</div>

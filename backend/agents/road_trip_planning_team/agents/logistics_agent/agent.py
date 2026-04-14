@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
-from llm_service import LLMClient, LLMJsonParseError
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import LogisticsPlan, RoutePlan, TravelerGroupProfile, TripRequest
 
@@ -36,8 +39,15 @@ Output only valid JSON."""
 class LogisticsAgent:
     """Produces accommodation recommendations, packing lists, and travel tips for the trip."""
 
-    def __init__(self, llm: LLMClient) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        self._agent = (
+            llm
+            if llm is not None
+            else Agent(
+                model=get_strands_model("road_trip_planning"),
+                system_prompt=SYSTEM_PROMPT,
+            )
+        )
 
     def run(
         self,
@@ -66,14 +76,10 @@ class LogisticsAgent:
         )
 
         try:
-            data = self.llm.complete_json(
-                prompt,
-                temperature=0.3,
-                system_prompt=SYSTEM_PROMPT,
-                expected_keys=["stop_logistics", "packing_suggestions", "travel_tips"],
-                think=True,
-            )
-        except LLMJsonParseError as e:
+            result = self._agent(prompt)
+            raw = str(result).strip()
+            data = json.loads(raw)
+        except Exception as e:
             logger.warning("LogisticsAgent JSON parse failed: %s", e)
             return LogisticsPlan(
                 packing_suggestions=["Sunscreen", "Snacks", "Water bottles", "First aid kit"],

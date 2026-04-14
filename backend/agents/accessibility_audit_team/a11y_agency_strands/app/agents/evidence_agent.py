@@ -1,10 +1,10 @@
 from ..models import EvidenceBundle
 from ..models.phase_result import EvidenceResult
 from ..tools import capture_dom_snippet, capture_screenshot, persist_artifact
-from .base import ToolContext, tool
+from .base import ToolContext, a11y_phase
 
 
-@tool(context=True)
+@a11y_phase(context=True)
 def run_evidence_curation(finding_id: str, target: str, tool_context: ToolContext) -> dict:
     bundle = EvidenceBundle(
         finding_id=finding_id,

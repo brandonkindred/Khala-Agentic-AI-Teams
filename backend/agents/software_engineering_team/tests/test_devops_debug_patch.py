@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from typing import Any, Dict, List, Optional
 
 from devops_team.infra_debug_agent import (
     IaCDebugInput,
@@ -12,6 +12,58 @@ from devops_team.infra_debug_agent import (
 )
 from devops_team.infra_patch_agent import IaCPatchInput, InfraPatchAgent
 
+from llm_service.clients.dummy import DummyLLMClient
+
+
+class _StubClient(DummyLLMClient):
+    """Returns a canned response for every ``complete_json``.
+
+    Routes transparently through the Strands adapter path
+    (``chat_json_round`` → ``StructuredOutputTool`` detection → the
+    ``complete_json`` override below)."""
+
+    def __init__(self, response: Dict[str, Any]) -> None:
+        super().__init__()
+        self._response = response
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        return self._response
+
+
+class _ScriptedClient(DummyLLMClient):
+    """Returns a different canned response on each ``complete_json`` call."""
+
+    def __init__(self, responses: List[Dict[str, Any]]) -> None:
+        super().__init__()
+        self._responses = list(responses)
+        self._idx = 0
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if self._idx < len(self._responses):
+            resp = self._responses[self._idx]
+            self._idx += 1
+            return resp
+        return self._responses[-1] if self._responses else {}
+
+
 # ---------------------------------------------------------------------------
 # Debug Agent tests
 # ---------------------------------------------------------------------------
@@ -19,21 +71,22 @@ from devops_team.infra_patch_agent import IaCPatchInput, InfraPatchAgent
 
 class TestInfraDebugAgent:
     def test_classifies_syntax_error(self) -> None:
-        mock_llm = MagicMock()
-        mock_llm.complete_json.return_value = {
-            "errors": [
-                {
-                    "error_type": "syntax",
-                    "tool": "terraform",
-                    "file_path": "main.tf",
-                    "line_number": 10,
-                    "error_message": "Missing closing brace",
-                }
-            ],
-            "summary": "Syntax error in main.tf",
-            "fixable": True,
-        }
-        agent = InfraDebugAgent(llm_client=mock_llm)
+        client = _StubClient(
+            {
+                "errors": [
+                    {
+                        "error_type": "syntax",
+                        "tool": "terraform",
+                        "file_path": "main.tf",
+                        "line_number": 10,
+                        "error_message": "Missing closing brace",
+                    }
+                ],
+                "summary": "Syntax error in main.tf",
+                "fixable": True,
+            }
+        )
+        agent = InfraDebugAgent(llm_client=client)
         result = agent.run(
             IaCDebugInput(
                 execution_output="Error: Missing closing brace at main.tf:10",
@@ -47,13 +100,14 @@ class TestInfraDebugAgent:
         assert result.fixable
 
     def test_classifies_unknown_error(self) -> None:
-        mock_llm = MagicMock()
-        mock_llm.complete_json.return_value = {
-            "errors": [{"error_type": "unknown", "error_message": "Unexpected"}],
-            "summary": "Unknown error",
-            "fixable": False,
-        }
-        agent = InfraDebugAgent(llm_client=mock_llm)
+        client = _StubClient(
+            {
+                "errors": [{"error_type": "unknown", "error_message": "Unexpected"}],
+                "summary": "Unknown error",
+                "fixable": False,
+            }
+        )
+        agent = InfraDebugAgent(llm_client=client)
         result = agent.run(
             IaCDebugInput(
                 execution_output="Something went wrong",
@@ -66,15 +120,16 @@ class TestInfraDebugAgent:
         assert not result.fixable
 
     def test_sets_fixable_true_for_all_syntax_validation(self) -> None:
-        mock_llm = MagicMock()
-        mock_llm.complete_json.return_value = {
-            "errors": [
-                {"error_type": "syntax", "error_message": "bad syntax"},
-                {"error_type": "validation", "error_message": "bad value"},
-            ],
-            "summary": "Two fixable errors",
-        }
-        agent = InfraDebugAgent(llm_client=mock_llm)
+        client = _StubClient(
+            {
+                "errors": [
+                    {"error_type": "syntax", "error_message": "bad syntax"},
+                    {"error_type": "validation", "error_message": "bad value"},
+                ],
+                "summary": "Two fixable errors",
+            }
+        )
+        agent = InfraDebugAgent(llm_client=client)
         result = agent.run(
             IaCDebugInput(
                 execution_output="errors",
@@ -86,16 +141,17 @@ class TestInfraDebugAgent:
         assert result.fixable
 
     def test_sets_fixable_false_when_runtime_present(self) -> None:
-        mock_llm = MagicMock()
-        mock_llm.complete_json.return_value = {
-            "errors": [
-                {"error_type": "syntax", "error_message": "bad syntax"},
-                {"error_type": "runtime", "error_message": "timeout"},
-            ],
-            "summary": "Mixed errors",
-            "fixable": False,
-        }
-        agent = InfraDebugAgent(llm_client=mock_llm)
+        client = _StubClient(
+            {
+                "errors": [
+                    {"error_type": "syntax", "error_message": "bad syntax"},
+                    {"error_type": "runtime", "error_message": "timeout"},
+                ],
+                "summary": "Mixed errors",
+                "fixable": False,
+            }
+        )
+        agent = InfraDebugAgent(llm_client=client)
         result = agent.run(
             IaCDebugInput(
                 execution_output="errors",
@@ -114,20 +170,21 @@ class TestInfraDebugAgent:
 
 class TestInfraPatchAgent:
     def test_produces_patched_artifacts(self) -> None:
-        mock_llm = MagicMock()
-        mock_llm.complete_json.return_value = {
-            "patched_artifacts": {
-                "main.tf": 'resource "aws_s3_bucket" "b" {\n  bucket = "my-bucket"\n}\n',
-            },
-            "summary": "Fixed missing brace",
-            "edits_applied": 1,
-        }
+        client = _StubClient(
+            {
+                "patched_artifacts": {
+                    "main.tf": 'resource "aws_s3_bucket" "b" {\n  bucket = "my-bucket"\n}\n',
+                },
+                "summary": "Fixed missing brace",
+                "edits_applied": 1,
+            }
+        )
         debug_out = IaCDebugOutput(
             errors=[IaCExecutionError(error_type="syntax", error_message="Missing brace")],
             summary="Syntax error",
             fixable=True,
         )
-        agent = InfraPatchAgent(llm_client=mock_llm)
+        agent = InfraPatchAgent(llm_client=client)
         result = agent.run(
             IaCPatchInput(
                 debug_output=debug_out,
@@ -140,13 +197,23 @@ class TestInfraPatchAgent:
         assert result.edits_applied == 1
 
     def test_returns_empty_when_not_fixable(self) -> None:
+        """The patch agent short-circuits on ``fixable=False`` and never
+        calls the LLM — verified by a trip-wire client that raises if
+        ``complete_json`` is invoked."""
         debug_out = IaCDebugOutput(
             errors=[IaCExecutionError(error_type="permissions", error_message="Access denied")],
             summary="Not fixable",
             fixable=False,
         )
-        mock_llm = MagicMock()
-        agent = InfraPatchAgent(llm_client=mock_llm)
+
+        class _TripWire(DummyLLMClient):
+            def complete_json(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
+                raise AssertionError("LLM must not be called when debug_output.fixable is False")
+
+            def chat_json_round(self, *a: Any, **kw: Any) -> Dict[str, Any]:  # type: ignore[override]
+                raise AssertionError("LLM must not be called when debug_output.fixable is False")
+
+        agent = InfraPatchAgent(llm_client=_TripWire())
         result = agent.run(
             IaCPatchInput(
                 debug_output=debug_out,
@@ -154,7 +221,6 @@ class TestInfraPatchAgent:
             )
         )
         assert not result.patched_artifacts
-        mock_llm.complete_json.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -167,69 +233,61 @@ class TestDevOpsPipelineDebugPatchLoop:
         """Execution always fails -> loop must stop at MAX_INFRA_FIX_ITERATIONS."""
         from devops_team.orchestrator import DevOpsTeamLeadAgent
 
-        mock_llm = MagicMock()
-        mock_llm.complete_json.side_effect = [
-            # Task clarifier
-            {"approved_for_execution": True, "clarification_requests": []},
-            # IaC agent
-            {"artifacts": {"main.tf": "resource {}"}, "summary": "infra"},
-            # CICD
-            {"artifacts": {}, "summary": "cicd", "pipeline_yaml": ""},
-            # Deployment
-            {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ""},
-            # Debug agent (will be called up to 3 times)
-            {
-                "errors": [{"error_type": "syntax", "error_message": "bad"}],
-                "summary": "err",
-                "fixable": True,
-            },
-            {
-                "patched_artifacts": {"main.tf": "resource { }"},
-                "summary": "fix",
-                "edits_applied": 1,
-            },
-            {
-                "errors": [{"error_type": "syntax", "error_message": "bad"}],
-                "summary": "err",
-                "fixable": True,
-            },
-            {
-                "patched_artifacts": {"main.tf": "resource { }"},
-                "summary": "fix",
-                "edits_applied": 1,
-            },
-            {
-                "errors": [{"error_type": "syntax", "error_message": "bad"}],
-                "summary": "err",
-                "fixable": True,
-            },
-            {
-                "patched_artifacts": {"main.tf": "resource { }"},
-                "summary": "fix",
-                "edits_applied": 1,
-            },
-            # DevSecOps review
-            {"approved": True, "summary": "ok", "findings": []},
-            # Change review
-            {"approved": True, "summary": "ok"},
-            # Test validation
-            {"quality_gates": {}, "summary": "ok"},
-            # Doc runbook
-            {
-                "files": {},
-                "completion_package": {
-                    "task_id": "t1",
-                    "status": "completed",
-                    "files_changed": [],
-                    "quality_gates": {},
-                    "notes": [],
+        client = _ScriptedClient(
+            [
+                # Task clarifier
+                {"approved_for_execution": True, "clarification_requests": []},
+                # IaC agent
+                {"artifacts": {"main.tf": "resource {}"}, "summary": "infra"},
+                # CICD
+                {"artifacts": {}, "summary": "cicd", "pipeline_yaml": ""},
+                # Deployment
+                {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ""},
+                # Debug agent (will be called up to 3 times)
+                {
+                    "errors": [{"error_type": "syntax", "error_message": "bad"}],
+                    "summary": "err",
+                    "fixable": True,
                 },
-            },
-        ]
+                {
+                    "patched_artifacts": {"main.tf": "resource { }"},
+                    "summary": "fix",
+                    "edits_applied": 1,
+                },
+                {
+                    "errors": [{"error_type": "syntax", "error_message": "bad"}],
+                    "summary": "err",
+                    "fixable": True,
+                },
+                {
+                    "patched_artifacts": {"main.tf": "resource { }"},
+                    "summary": "fix",
+                    "edits_applied": 1,
+                },
+                {
+                    "errors": [{"error_type": "syntax", "error_message": "bad"}],
+                    "summary": "err",
+                    "fixable": True,
+                },
+                {
+                    "patched_artifacts": {"main.tf": "resource { }"},
+                    "summary": "fix",
+                    "edits_applied": 1,
+                },
+                # DevSecOps review
+                {"approved": True, "summary": "ok", "findings": []},
+                # Change review
+                {"approved": True, "summary": "ok"},
+                # Test validation
+                {"quality_gates": {}, "summary": "ok"},
+                # Doc runbook
+                {"files": {}, "summary": "doc ok"},
+            ]
+        )
 
-        agent = DevOpsTeamLeadAgent(llm_client=mock_llm)
+        agent = DevOpsTeamLeadAgent(llm_client=client)
 
-        def always_fail_exec(repo_str, artifacts):
+        def always_fail_exec(repo_str: str, artifacts: Dict[str, str]) -> List[Dict[str, Any]]:
             return [
                 {
                     "tool": "terraform",
@@ -271,48 +329,40 @@ class TestDevOpsPipelineDebugPatchLoop:
         """Execution fails once, patch fixes it, second execution succeeds."""
         from devops_team.orchestrator import DevOpsTeamLeadAgent
 
-        mock_llm = MagicMock()
-        mock_llm.complete_json.side_effect = [
-            {"approved_for_execution": True, "clarification_requests": []},
-            {"artifacts": {"main.tf": "resource {"}, "summary": "infra"},
-            {"artifacts": {}, "summary": "cicd", "pipeline_yaml": ""},
-            {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ""},
-            # Debug
-            {
-                "errors": [{"error_type": "syntax", "error_message": "missing brace"}],
-                "summary": "err",
-                "fixable": True,
-            },
-            # Patch
-            {
-                "patched_artifacts": {"main.tf": "resource {}"},
-                "summary": "fixed",
-                "edits_applied": 1,
-            },
-            # DevSecOps review
-            {"approved": True, "summary": "ok", "findings": []},
-            # Change review
-            {"approved": True, "summary": "ok"},
-            # Test validation
-            {"quality_gates": {}, "summary": "ok"},
-            # Doc runbook
-            {
-                "files": {},
-                "completion_package": {
-                    "task_id": "t1",
-                    "status": "completed",
-                    "files_changed": [],
-                    "quality_gates": {},
-                    "notes": [],
+        client = _ScriptedClient(
+            [
+                {"approved_for_execution": True, "clarification_requests": []},
+                {"artifacts": {"main.tf": "resource {"}, "summary": "infra"},
+                {"artifacts": {}, "summary": "cicd", "pipeline_yaml": ""},
+                {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ""},
+                # Debug
+                {
+                    "errors": [{"error_type": "syntax", "error_message": "missing brace"}],
+                    "summary": "err",
+                    "fixable": True,
                 },
-            },
-        ]
+                # Patch
+                {
+                    "patched_artifacts": {"main.tf": "resource {}"},
+                    "summary": "fixed",
+                    "edits_applied": 1,
+                },
+                # DevSecOps review
+                {"approved": True, "summary": "ok", "findings": []},
+                # Change review
+                {"approved": True, "summary": "ok"},
+                # Test validation
+                {"quality_gates": {}, "summary": "ok"},
+                # Doc runbook
+                {"files": {}, "summary": "doc ok"},
+            ]
+        )
 
-        agent = DevOpsTeamLeadAgent(llm_client=mock_llm)
+        agent = DevOpsTeamLeadAgent(llm_client=client)
 
         call_count = [0]
 
-        def exec_tools(repo_str, artifacts):
+        def exec_tools(repo_str: str, artifacts: Dict[str, str]) -> List[Dict[str, Any]]:
             call_count[0] += 1
             if call_count[0] == 1:
                 return [

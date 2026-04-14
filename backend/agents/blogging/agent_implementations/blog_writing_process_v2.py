@@ -58,7 +58,7 @@ from shared.style_loader import append_guidelines, load_style_file
 from temporalio.exceptions import CancelledError
 from validators.runner import run_validators_from_work_dir
 
-from llm_service import OllamaLLMClient, get_client
+from llm_service import OllamaLLMClient, get_strands_model
 from llm_service.interface import LLMClient
 
 from . import _path_setup  # noqa: F401
@@ -636,7 +636,7 @@ def run_pipeline(
                 logger.warning("Failed to update job status: %s", e)
 
     if llm_client is None:
-        llm_client = get_client("blog")
+        llm_client = get_strands_model("blog")
 
     if length_policy is None:
         length_policy = resolve_length_policy(

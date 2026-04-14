@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import Dict, List
+
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import (
     ReviewIssue,
@@ -15,9 +19,6 @@ from ...models import (
 )
 from ...output_templates import parse_problem_solving_single_issue_template
 from ...prompts import PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT
-
-if TYPE_CHECKING:
-    from llm_service import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +96,11 @@ def _run_frontend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
 class BuildSpecialistAdapterAgent:
     """Identifies all build issues in review and fixes them one at a time in problem_solve."""
 
-    def __init__(self, llm: Optional["LLMClient"] = None) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+
+        self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
+        self.llm = llm  # kept for backward compat checks
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)
@@ -128,7 +132,7 @@ class BuildSpecialistAdapterAgent:
 
     def problem_solve(self, inp: ToolAgentPhaseInput) -> ToolAgentPhaseOutput:
         """Fix build-related issues one at a time. Only fixes issues with source build or build_specialist."""
-        if not self.llm:
+        if not self._model:
             return ToolAgentPhaseOutput(summary="Build Specialist problem_solve skipped (no LLM).")
         build_issues = [
             i
@@ -150,7 +154,7 @@ class BuildSpecialistAdapterAgent:
                 current_code=relevant_code,
             )
             try:
-                raw = self.llm.complete_text(prompt, think=True)
+                raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
             except Exception as e:
                 logger.warning(
                     "Build Specialist fix for issue %s failed: %s",

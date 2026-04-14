@@ -85,7 +85,7 @@ Include:
 Add `market_research_team/` to the directory tree and table:
 
 ```
-strands-agents/
+khala/
 ├── api/                            # Blog research-and-review HTTP API
 ├── blogging/                       # Blogging agent suite
 ├── software_engineering_team/      # Full software dev team simulation

@@ -34,9 +34,21 @@ SCHEMA = TeamSchema(
         )""",
         """CREATE INDEX IF NOT EXISTS idx_user_agent_founder_decisions_run
             ON user_agent_founder_decisions(run_id)""",
+        """CREATE TABLE IF NOT EXISTS user_agent_founder_chat_messages (
+            id             BIGSERIAL PRIMARY KEY,
+            run_id         TEXT NOT NULL,
+            role           TEXT NOT NULL,
+            content        TEXT NOT NULL,
+            message_type   TEXT NOT NULL DEFAULT 'chat',
+            metadata       JSONB,
+            timestamp      TIMESTAMPTZ NOT NULL
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_uaf_chat_messages_run
+            ON user_agent_founder_chat_messages(run_id)""",
     ],
     table_names=[
         "user_agent_founder_runs",
         "user_agent_founder_decisions",
+        "user_agent_founder_chat_messages",
     ],
 )

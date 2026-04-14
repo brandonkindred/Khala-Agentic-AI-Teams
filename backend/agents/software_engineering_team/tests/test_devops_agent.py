@@ -6,15 +6,17 @@ from unittest.mock import MagicMock
 
 from devops_agent.agent import DevOpsExpertAgent, _gather_codebase_context
 
+from software_engineering_team.tests.conftest import ConfigurableLLM
+
 
 def test_devops_run_workflow_calls_plan_task_without_error() -> None:
     """run_workflow calls _plan_task and completes without AttributeError."""
     import subprocess
     import tempfile
 
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.side_effect = [
+    mock_llm = ConfigurableLLM()
+    mock_llm._max_context_tokens = 16384
+    mock_llm.complete_json_mock.side_effect = [
         {
             "feature_intent": "Containerize",
             "what_changes": ["Dockerfile"],
@@ -52,14 +54,14 @@ def test_devops_run_workflow_calls_plan_task_without_error() -> None:
             task_id="devops-frontend",
         )
     assert result.success
-    assert mock_llm.complete_json.call_count >= 1
+    assert mock_llm.complete_json_mock.call_count >= 1
 
 
 def test_devops_plan_task_returns_plan_markdown() -> None:
     """_plan_task parses LLM JSON and returns plan markdown."""
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm._max_context_tokens = 16384
+    mock_llm.complete_json_mock.return_value = {
         "feature_intent": "Containerize the backend for build and deploy",
         "what_changes": ["Dockerfile", ".github/workflows/ci.yml"],
         "algorithms_data_structures": "Multi-stage Docker build; non-root user in container",

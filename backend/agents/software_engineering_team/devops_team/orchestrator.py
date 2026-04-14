@@ -11,11 +11,11 @@ from llm_service import LLMClient
 from software_engineering_team.shared.repo_writer import NO_FILES_TO_WRITE_MSG, write_agent_output
 
 from .change_review_agent import ChangeReviewAgent, ChangeReviewInput
-from .cicd_pipeline_agent import CICDPipelineAgent, CICDPipelineAgentInput
-from .deployment_strategy_agent import DeploymentStrategyAgent, DeploymentStrategyAgentInput
+from .cicd_pipeline_agent import CICDPipelineAgent
+from .deployment_strategy_agent import DeploymentStrategyAgent
 from .devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
 from .doc_runbook_agent import DocumentationRunbookAgent, DocumentationRunbookInput
-from .iac_agent import IaCAgentInput, InfrastructureAsCodeAgent
+from .iac_agent import InfrastructureAsCodeAgent
 from .models import (
     CriterionTrace,
     DevOpsCompletionPackage,
@@ -28,6 +28,7 @@ from .models import (
     ReleaseReadiness,
     SubtaskContract,
 )
+from .phase2_graph import run_phase2_parallel
 
 DEVOPS_REQUIRED_GATE_NAMES = [
     "iac_validate",
@@ -366,21 +367,29 @@ class DevOpsTeamLeadAgent:
         subtask_contracts = self._build_subtask_contracts(task_spec)
         logger.info("DevOps team pipeline: %d subtask contracts generated", len(subtask_contracts))
 
-        # Phase 2: change design / implementation
-        logger.info("DevOps team pipeline: phase 2 - change design")
+        # Phase 2: change design / implementation (3-way parallel fan-out)
+        logger.info("DevOps team pipeline: phase 2 - change design (parallel)")
         repo_summary = self.repo_navigator_tool.run(
             RepoNavigatorInput(repo_path=str(repo_path))
         ).summary
-        iac_result = self.iac_agent.run(
-            IaCAgentInput(task_spec=task_spec, repo_summary=repo_summary)
-        )
-        cicd_result = self.cicd_agent.run(CICDPipelineAgentInput(task_spec=task_spec))
-        deploy_result = self.deployment_agent.run(DeploymentStrategyAgentInput(task_spec=task_spec))
+        # Enable parallel execution unless the backing LLM client is a
+        # DummyLLMClient (or subclass) — scripted test clients use a shared
+        # sequential response list that breaks under concurrent access.
+        from llm_service.clients.dummy import DummyLLMClient as _Dummy  # noqa: PLC0415
 
-        aggregated_artifacts: Dict[str, str] = {}
-        aggregated_artifacts.update(iac_result.artifacts)
-        aggregated_artifacts.update(cicd_result.artifacts)
-        aggregated_artifacts.update(deploy_result.artifacts)
+        use_parallel = not isinstance(self.llm, _Dummy)
+        phase2 = run_phase2_parallel(
+            self.iac_agent,
+            self.cicd_agent,
+            self.deployment_agent,
+            task_spec,
+            repo_summary=repo_summary,
+            parallel=use_parallel,
+        )
+        iac_result = phase2["iac_result"]
+        cicd_result = phase2["cicd_result"]
+        deploy_result = phase2["deploy_result"]
+        aggregated_artifacts: Dict[str, str] = phase2["aggregated_artifacts"]
 
         if write_changes and aggregated_artifacts:
             ok, msg = write_agent_output(

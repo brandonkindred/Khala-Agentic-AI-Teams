@@ -1,22 +1,25 @@
-"""SQLite-backed store for clients and brands with versioning.
+"""Postgres-backed store for clients and brands with versioning.
 
-When instantiated with no arguments (``BrandingStore()``), uses an isolated
-in-memory SQLite database — each instance gets its own fresh DB, which keeps
-unit tests isolated without any special setup.
+Data is persisted in the shared Khala Postgres instance via
+``shared_postgres.get_conn``. DDL lives in ``branding_team.postgres`` and
+is registered from the team's FastAPI lifespan.
 
-The production singleton (``get_default_store()``) passes a file path so all
-worker processes share the same on-disk database via SQLite WAL mode.
+Every public method is wrapped in ``@timed_query`` so slow reads and
+writes surface as structured log lines.
 """
 
 from __future__ import annotations
 
-import contextlib
-import sqlite3
-import threading
+import logging
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import List, Optional
 from uuid import uuid4
+
+from psycopg.rows import dict_row
+from psycopg.types.json import Json
+
+from shared_postgres import get_conn
+from shared_postgres.metrics import timed_query
 
 from .models import (
     Brand,
@@ -27,88 +30,48 @@ from .models import (
     TeamOutput,
 )
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS clients (
-    id   TEXT PRIMARY KEY,
-    data TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS brands (
-    id        TEXT PRIMARY KEY,
-    client_id TEXT NOT NULL,
-    data      TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_brands_client ON brands(client_id);
-"""
+logger = logging.getLogger(__name__)
+
+_STORE = "branding"
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _now_iso() -> str:
+    return datetime.now(tz=timezone.utc).isoformat()
 
 
 class BrandingStore:
-    """SQLite-backed store for clients and brands."""
+    """Postgres-backed store for clients and brands.
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
-        self._lock = threading.Lock()
-        if db_path is None:
-            # Per-instance in-memory DB — isolated for unit tests.
-            self._file_path: Optional[str] = None
-            self._mem_conn: Optional[sqlite3.Connection] = sqlite3.connect(
-                ":memory:", check_same_thread=False
-            )
-            self._mem_conn.row_factory = sqlite3.Row
-            self._mem_conn.executescript(_SCHEMA)
-            self._mem_conn.commit()
-        else:
-            self._file_path = str(db_path)
-            self._mem_conn = None
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            self._init_file_schema()
+    The constructor takes no arguments — the Postgres DSN is read from
+    the ``POSTGRES_*`` env vars by ``shared_postgres.get_conn``. The
+    store itself is stateless; the pool is owned by shared_postgres.
+    """
 
-    def _init_file_schema(self) -> None:
-        conn = sqlite3.connect(self._file_path, timeout=15)  # type: ignore[arg-type]
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(_SCHEMA)
-        conn.commit()
-        conn.close()
-
-    @contextlib.contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
-        if self._mem_conn is not None:
-            with self._lock:
-                self._mem_conn.row_factory = sqlite3.Row
-                yield self._mem_conn
-                self._mem_conn.commit()
-        else:
-            conn = sqlite3.connect(self._file_path, check_same_thread=False, timeout=15)  # type: ignore[arg-type]
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.row_factory = sqlite3.Row
-            try:
-                yield conn
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
+    def __init__(self) -> None:
+        # Stateless; the connection pool lives inside shared_postgres.
+        pass
 
     # ------------------------------------------------------------------
     # Clients
     # ------------------------------------------------------------------
 
+    @timed_query(store=_STORE, op="get_client")
     def get_client(self, client_id: str) -> Optional[Client]:
-        with self._db() as conn:
-            row = conn.execute("SELECT data FROM clients WHERE id = ?", (client_id,)).fetchone()
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT data FROM branding_clients WHERE id = %s", (client_id,))
+            row = cur.fetchone()
         if row is None:
             return None
-        return Client.model_validate_json(row[0])
+        return Client.model_validate(row["data"])
 
+    @timed_query(store=_STORE, op="list_clients")
     def list_clients(self) -> List[Client]:
-        with self._db() as conn:
-            rows = conn.execute("SELECT data FROM clients").fetchall()
-        return [Client.model_validate_json(r[0]) for r in rows]
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT data FROM branding_clients")
+            rows = cur.fetchall()
+        return [Client.model_validate(r["data"]) for r in rows]
 
+    @timed_query(store=_STORE, op="create_client")
     def create_client(
         self,
         name: str,
@@ -116,7 +79,7 @@ class BrandingStore:
         notes: Optional[str] = None,
     ) -> Client:
         client_id = f"client_{uuid4().hex[:12]}"
-        now = _now()
+        now = _now_iso()
         client = Client(
             id=client_id,
             name=name,
@@ -125,10 +88,10 @@ class BrandingStore:
             contact_info=contact_info,
             notes=notes,
         )
-        with self._db() as conn:
-            conn.execute(
-                "INSERT INTO clients (id, data) VALUES (?, ?)",
-                (client_id, client.model_dump_json()),
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO branding_clients (id, data) VALUES (%s, %s)",
+                (client_id, Json(client.model_dump(mode="json"))),
             )
         return client
 
@@ -136,34 +99,41 @@ class BrandingStore:
     # Brands
     # ------------------------------------------------------------------
 
+    @timed_query(store=_STORE, op="get_brand")
     def get_brand(self, client_id: str, brand_id: str) -> Optional[Brand]:
-        with self._db() as conn:
-            row = conn.execute(
-                "SELECT data FROM brands WHERE id = ? AND client_id = ?",
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s",
                 (brand_id, client_id),
-            ).fetchone()
+            )
+            row = cur.fetchone()
         if row is None:
             return None
-        return Brand.model_validate_json(row[0])
+        return Brand.model_validate(row["data"])
 
+    @timed_query(store=_STORE, op="list_brands_for_client")
     def list_brands_for_client(self, client_id: str) -> List[Brand]:
-        with self._db() as conn:
-            rows = conn.execute(
-                "SELECT data FROM brands WHERE client_id = ?", (client_id,)
-            ).fetchall()
-        return [Brand.model_validate_json(r[0]) for r in rows]
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT data FROM branding_brands WHERE client_id = %s",
+                (client_id,),
+            )
+            rows = cur.fetchall()
+        return [Brand.model_validate(r["data"]) for r in rows]
 
+    @timed_query(store=_STORE, op="create_brand")
     def create_brand(
         self,
         client_id: str,
         mission: BrandingMission,
         name: Optional[str] = None,
     ) -> Optional[Brand]:
-        with self._db() as conn:
-            if conn.execute("SELECT 1 FROM clients WHERE id = ?", (client_id,)).fetchone() is None:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM branding_clients WHERE id = %s", (client_id,))
+            if cur.fetchone() is None:
                 return None
             brand_id = f"brand_{uuid4().hex[:12]}"
-            now = _now()
+            now = _now_iso()
             brand = Brand(
                 id=brand_id,
                 client_id=client_id,
@@ -176,12 +146,13 @@ class BrandingStore:
                 created_at=now,
                 updated_at=now,
             )
-            conn.execute(
-                "INSERT INTO brands (id, client_id, data) VALUES (?, ?, ?)",
-                (brand_id, client_id, brand.model_dump_json()),
+            cur.execute(
+                "INSERT INTO branding_brands (id, client_id, data) VALUES (%s, %s, %s)",
+                (brand_id, client_id, Json(brand.model_dump(mode="json"))),
             )
         return brand
 
+    @timed_query(store=_STORE, op="update_brand")
     def update_brand(
         self,
         client_id: str,
@@ -191,15 +162,16 @@ class BrandingStore:
         name: Optional[str] = None,
         conversation_id: Optional[str] = None,
     ) -> Optional[Brand]:
-        with self._db() as conn:
-            row = conn.execute(
-                "SELECT data FROM brands WHERE id = ? AND client_id = ?",
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s",
                 (brand_id, client_id),
-            ).fetchone()
+            )
+            row = cur.fetchone()
             if row is None:
                 return None
-            brand = Brand.model_validate_json(row[0])
-            updates: dict = {"updated_at": _now()}
+            brand = Brand.model_validate(row["data"])
+            updates: dict = {"updated_at": _now_iso()}
             if mission is not None:
                 updates["mission"] = mission
             if status is not None:
@@ -209,27 +181,29 @@ class BrandingStore:
             if conversation_id is not None:
                 updates["conversation_id"] = conversation_id
             updated = brand.model_copy(update=updates)
-            conn.execute(
-                "UPDATE brands SET data = ? WHERE id = ? AND client_id = ?",
-                (updated.model_dump_json(), brand_id, client_id),
+            cur.execute(
+                "UPDATE branding_brands SET data = %s WHERE id = %s AND client_id = %s",
+                (Json(updated.model_dump(mode="json")), brand_id, client_id),
             )
         return updated
 
+    @timed_query(store=_STORE, op="append_brand_version")
     def append_brand_version(
         self,
         client_id: str,
         brand_id: str,
         output: TeamOutput,
     ) -> Optional[Brand]:
-        with self._db() as conn:
-            row = conn.execute(
-                "SELECT data FROM brands WHERE id = ? AND client_id = ?",
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s",
                 (brand_id, client_id),
-            ).fetchone()
+            )
+            row = cur.fetchone()
             if row is None:
                 return None
-            brand = Brand.model_validate_json(row[0])
-            now = _now()
+            brand = Brand.model_validate(row["data"])
+            now = _now_iso()
             new_version = brand.version + 1
             history_entry = BrandVersionSummary(
                 version=new_version,
@@ -245,24 +219,23 @@ class BrandingStore:
                     "updated_at": now,
                 }
             )
-            conn.execute(
-                "UPDATE brands SET data = ? WHERE id = ? AND client_id = ?",
-                (updated.model_dump_json(), brand_id, client_id),
+            cur.execute(
+                "UPDATE branding_brands SET data = %s WHERE id = %s AND client_id = %s",
+                (Json(updated.model_dump(mode="json")), brand_id, client_id),
             )
         return updated
 
 
 # ---------------------------------------------------------------------------
-# Singleton — file-backed for production, shared across all worker processes.
+# Lazy singleton
 # ---------------------------------------------------------------------------
 
 _default_store: Optional[BrandingStore] = None
 
 
 def get_default_store() -> BrandingStore:
+    """Return the process-wide store, instantiating on first call."""
     global _default_store
     if _default_store is None:
-        from .db import get_db_path
-
-        _default_store = BrandingStore(db_path=get_db_path())
+        _default_store = BrandingStore()
     return _default_store

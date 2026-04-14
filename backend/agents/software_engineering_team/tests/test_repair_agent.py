@@ -1,10 +1,37 @@
 """Unit tests for the Repair Expert agent and crash handling."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agent_repair_team.agent import RepairExpertAgent
 from agent_repair_team.models import RepairInput, RepairOutput
+
+
+class _FakeAgentResult:
+    """Wraps a dict so ``str(result)`` returns a JSON string.
+
+    ``RepairExpertAgent`` stores its ``llm_client`` as ``self._agent`` and
+    calls ``self._agent(prompt)``; the agent then does ``str(result).strip()``
+    and ``json.loads(raw)``. This class satisfies that contract without
+    requiring a live LLM.
+    """
+
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    def __str__(self) -> str:
+        return json.dumps(self._data)
+
+
+class _CallableLLMStub:
+    """A callable that returns ``_FakeAgentResult`` wrapping canned data."""
+
+    def __init__(self, response: dict) -> None:
+        self._response = response
+
+    def __call__(self, prompt, **kwargs):
+        return _FakeAgentResult(self._response)
 
 
 def test_repair_agent_suggests_import_fix_for_name_error() -> None:
@@ -14,19 +41,19 @@ def test_repair_agent_suggests_import_fix_for_name_error() -> None:
     x = compute_spec_content_chars(spec)
 NameError: name 'compute_spec_content_chars' is not defined
 """
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.return_value = {
-        "suggested_fixes": [
-            {
-                "file_path": "backend_agent/agent.py",
-                "line_start": 1,
-                "line_end": 15,
-                "replacement_content": "from software_engineering_team.shared.context_sizing import compute_existing_code_chars, compute_spec_content_chars\n",
-            }
-        ],
-        "summary": "Added missing import for compute_spec_content_chars",
-    }
+    mock_llm = _CallableLLMStub(
+        {
+            "suggested_fixes": [
+                {
+                    "file_path": "backend_agent/agent.py",
+                    "line_start": 1,
+                    "line_end": 15,
+                    "replacement_content": "from software_engineering_team.shared.context_sizing import compute_existing_code_chars, compute_spec_content_chars\n",
+                }
+            ],
+            "summary": "Added missing import for compute_spec_content_chars",
+        }
+    )
     agent = RepairExpertAgent(llm_client=mock_llm)
     result = agent.run(
         RepairInput(
@@ -48,12 +75,12 @@ NameError: name 'compute_spec_content_chars' is not defined
 
 def test_repair_agent_returns_empty_when_no_fix() -> None:
     """Repair agent returns empty suggested_fixes when it cannot determine a fix."""
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.return_value = {
-        "suggested_fixes": [],
-        "summary": "Unable to determine fix: ambiguous error",
-    }
+    mock_llm = _CallableLLMStub(
+        {
+            "suggested_fixes": [],
+            "summary": "Unable to determine fix: ambiguous error",
+        }
+    )
     agent = RepairExpertAgent(llm_client=mock_llm)
     result = agent.run(
         RepairInput(

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from llm_service import LLMClient
+import json
+
+from strands import Agent
+
+from llm_service import LLMClient, get_strands_model
 
 from .models import CICDPipelineAgentInput, CICDPipelineAgentOutput
 from .prompts import CICD_PIPELINE_PROMPT
@@ -12,6 +16,11 @@ class CICDPipelineAgent:
     def __init__(self, llm_client: LLMClient) -> None:
         assert llm_client is not None, "llm_client is required"
         self.llm = llm_client
+        from strands.models.model import Model as _StrandsModel
+        if isinstance(llm_client, _StrandsModel):
+            self._model = llm_client
+        else:
+            self._model = get_strands_model("devops")
 
     def run(self, input_data: CICDPipelineAgentInput) -> CICDPipelineAgentOutput:
         spec = input_data.task_spec
@@ -23,9 +32,9 @@ class CICDPipelineAgent:
             f"acceptance_criteria={spec.acceptance_criteria}\n"
             f"existing_pipeline={input_data.existing_pipeline[:4000]}\n"
         )
-        data = self.llm.complete_json(
+        data = json.loads(str(Agent(model=self._model)(
             CICD_PIPELINE_PROMPT + "\n\n---\n\n" + context, temperature=0.1, think=True
-        )
+        )).strip())
         return CICDPipelineAgentOutput(
             artifacts=data.get("artifacts") or {},
             pipeline_job_graph_summary=data.get("pipeline_job_graph_summary", ""),

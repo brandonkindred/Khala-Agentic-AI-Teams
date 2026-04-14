@@ -1,8 +1,8 @@
 """Tests for the Product Requirements Analysis agent."""
 
-import json
 import logging
 from pathlib import Path
+from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,6 +25,65 @@ from product_requirements_analysis_agent.models import (
     ToolGapAnalysis,
     ToolRecommendation,
 )
+
+from llm_service.clients.dummy import DummyLLMClient
+
+
+class _StubClient(DummyLLMClient):
+    """Returns a canned response for every ``complete_json`` call.
+
+    Routes transparently through the Strands adapter path
+    (``stream()`` → ``complete_json`` override below). For PRA tests,
+    this replaces the pre-migration ``MagicMock().complete_json.return_value = {...}``
+    pattern. When the response is a dict, ``stream()`` JSON-serializes it so the
+    Strands Agent returns JSON text that calling code can parse. When the response
+    is a string, ``stream()`` passes it through as-is (for prompts expecting
+    plain markdown/text)."""
+
+    def __init__(self, response) -> None:
+        super().__init__()
+        self._response = response
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        return self._response
+
+
+class _TrackingStubClient(DummyLLMClient):
+    """Returns a canned response and tracks calls for assertions.
+
+    Supports call_count, last_prompt, and all_prompts for tests that
+    previously inspected ``llm.complete_json.call_count`` or ``call_args``."""
+
+    def __init__(self, response) -> None:
+        super().__init__()
+        self._response = response
+        self.call_count = 0
+        self.last_prompt: Optional[str] = None
+        self.all_prompts: list = []
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        self.call_count += 1
+        self.last_prompt = prompt
+        self.all_prompts.append(prompt)
+        return self._response
 
 
 def test_format_answered_questions_for_prompt_empty() -> None:
@@ -122,14 +181,14 @@ def test_has_existing_pra_artifacts_false_when_dir_missing(tmp_path: Path) -> No
 def test_run_spec_review_invokes_llm_once(tmp_path: Path) -> None:
     """_run_spec_review performs a single LLM call (whole-spec review, no chunking)."""
     (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
-    llm = MagicMock()
-    llm.get_max_context_tokens.return_value = 16384
-    llm.complete_json.return_value = {
-        "issues": [],
-        "gaps": [],
-        "open_questions": [],
-        "summary": "Done",
-    }
+    llm = _TrackingStubClient(
+        {
+            "issues": [],
+            "gaps": [],
+            "open_questions": [],
+            "summary": "Done",
+        }
+    )
     agent = ProductRequirementsAnalysisAgent(llm)
     agent._context_files = {}
     result, updated_spec = agent._run_spec_review(
@@ -137,7 +196,7 @@ def test_run_spec_review_invokes_llm_once(tmp_path: Path) -> None:
         repo_path=tmp_path,
         answered_questions=None,
     )
-    assert llm.complete_json.call_count == 1
+    assert llm.call_count == 1
     assert result.summary == "Done"
     assert updated_spec == "# My Spec\n\n## Section\nContent"
 
@@ -145,14 +204,14 @@ def test_run_spec_review_invokes_llm_once(tmp_path: Path) -> None:
 def test_run_spec_review_includes_qa_in_prompt(tmp_path: Path) -> None:
     """When answered_questions is non-empty, the prompt passed to the LLM contains Q&A text."""
     (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
-    llm = MagicMock()
-    llm.get_max_context_tokens.return_value = 16384
-    llm.complete_json.return_value = {
-        "issues": [],
-        "gaps": [],
-        "open_questions": [],
-        "summary": "Done",
-    }
+    llm = _TrackingStubClient(
+        {
+            "issues": [],
+            "gaps": [],
+            "open_questions": [],
+            "summary": "Done",
+        }
+    )
     agent = ProductRequirementsAnalysisAgent(llm)
     agent._context_files = {}
     answered = [
@@ -167,8 +226,7 @@ def test_run_spec_review_includes_qa_in_prompt(tmp_path: Path) -> None:
         repo_path=tmp_path,
         answered_questions=answered,
     )
-    call_args = llm.complete_json.call_args
-    prompt = call_args[0][0]
+    prompt = llm.last_prompt
     assert "Where to deploy?" in prompt
     assert "Kubernetes" in prompt
     assert "Previously Answered" in prompt or "Current session answers" in prompt
@@ -181,14 +239,14 @@ def test_run_spec_review_includes_qa_file_in_prompt(tmp_path: Path) -> None:
     qa_file.write_text(
         "# Q&A History\n\n## Iteration 1\n\n### OAuth provider?\n**Answer:** GitHub\n\n"
     )
-    llm = MagicMock()
-    llm.get_max_context_tokens.return_value = 16384
-    llm.complete_json.return_value = {
-        "issues": [],
-        "gaps": [],
-        "open_questions": [],
-        "summary": "Done",
-    }
+    llm = _TrackingStubClient(
+        {
+            "issues": [],
+            "gaps": [],
+            "open_questions": [],
+            "summary": "Done",
+        }
+    )
     agent = ProductRequirementsAnalysisAgent(llm)
     agent._context_files = {}
     agent._run_spec_review(
@@ -196,8 +254,7 @@ def test_run_spec_review_includes_qa_file_in_prompt(tmp_path: Path) -> None:
         repo_path=tmp_path,
         answered_questions=None,
     )
-    call_args = llm.complete_json.call_args
-    prompt = call_args[0][0]
+    prompt = llm.last_prompt
     assert "OAuth provider?" in prompt
     assert "GitHub" in prompt
 
@@ -207,8 +264,7 @@ def test_update_spec_writes_versioned_file(tmp_path: Path) -> None:
     (tmp_path / "plan" / "product_analysis").mkdir(parents=True)
     (tmp_path / "plan" / "product_analysis" / "updated_spec_v6.md").write_text("# v6")
 
-    llm = MagicMock()
-    llm.complete_text.return_value = "# Updated spec content"
+    llm = _StubClient("# Updated spec content")
 
     agent = ProductRequirementsAnalysisAgent(llm)
     answered = [
@@ -670,44 +726,45 @@ def test_build_specialist_collaboration_plan_recommends_ui_arch_and_risk_agents(
 
 def test_consolidate_open_questions_parses_llm_output_into_open_questions() -> None:
     """_consolidate_open_questions should parse valid LLM JSON into List[OpenQuestion] with expected shape."""
-    llm = MagicMock()
-    llm.complete_json.return_value = {
-        "consolidated_questions": [
-            {
-                "id": "auth_approach",
-                "question_text": "Which authentication approach do you want?",
-                "context": "Spec does not specify auth.",
-                "category": "security",
-                "priority": "high",
-                "allow_multiple": False,
-                "constraint_domain": "auth",
-                "constraint_layer": 2,
-                "depends_on": None,
-                "blocking": True,
-                "owner": "user",
-                "section_impact": ["Technical Approach"],
-                "due_date": "2026-03-06",
-                "status": "open",
-                "asked_via": ["web_ui"],
-                "options": [
-                    {
-                        "id": "opt_oauth",
-                        "label": "OAuth (e.g. Google)",
-                        "is_default": True,
-                        "rationale": "Simple",
-                        "confidence": 0.8,
-                    },
-                    {
-                        "id": "opt_sso",
-                        "label": "Enterprise SSO",
-                        "is_default": False,
-                        "rationale": "Enterprise",
-                        "confidence": 0.5,
-                    },
-                ],
-            }
-        ]
-    }
+    llm = _StubClient(
+        {
+            "consolidated_questions": [
+                {
+                    "id": "auth_approach",
+                    "question_text": "Which authentication approach do you want?",
+                    "context": "Spec does not specify auth.",
+                    "category": "security",
+                    "priority": "high",
+                    "allow_multiple": False,
+                    "constraint_domain": "auth",
+                    "constraint_layer": 2,
+                    "depends_on": None,
+                    "blocking": True,
+                    "owner": "user",
+                    "section_impact": ["Technical Approach"],
+                    "due_date": "2026-03-06",
+                    "status": "open",
+                    "asked_via": ["web_ui"],
+                    "options": [
+                        {
+                            "id": "opt_oauth",
+                            "label": "OAuth (e.g. Google)",
+                            "is_default": True,
+                            "rationale": "Simple",
+                            "confidence": 0.8,
+                        },
+                        {
+                            "id": "opt_sso",
+                            "label": "Enterprise SSO",
+                            "is_default": False,
+                            "rationale": "Enterprise",
+                            "confidence": 0.5,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
     agent = ProductRequirementsAnalysisAgent(llm)
     q1 = OpenQuestion(
         id="q1",
@@ -734,37 +791,38 @@ def test_consolidate_open_questions_parses_llm_output_into_open_questions() -> N
 
 def test_review_question_answer_alignment_parses_llm_output_and_preserves_ids() -> None:
     """_review_question_answer_alignment should return List[OpenQuestion] with same ids when LLM returns valid aligned_questions."""
-    llm = MagicMock()
-    llm.complete_json.return_value = {
-        "aligned_questions": [
-            {
-                "id": "infra_q",
-                "question_text": "What platform category for deployment?",
-                "context": "Spec does not specify.",
-                "category": "infrastructure",
-                "priority": "high",
-                "allow_multiple": False,
-                "constraint_domain": "infrastructure",
-                "constraint_layer": 1,
-                "depends_on": None,
-                "blocking": True,
-                "owner": "user",
-                "section_impact": [],
-                "due_date": "",
-                "status": "open",
-                "asked_via": ["web_ui"],
-                "options": [
-                    {
-                        "id": "opt_paas",
-                        "label": "PaaS (Heroku, Render)",
-                        "is_default": True,
-                        "rationale": "",
-                        "confidence": 0.7,
-                    },
-                ],
-            }
-        ]
-    }
+    llm = _StubClient(
+        {
+            "aligned_questions": [
+                {
+                    "id": "infra_q",
+                    "question_text": "What platform category for deployment?",
+                    "context": "Spec does not specify.",
+                    "category": "infrastructure",
+                    "priority": "high",
+                    "allow_multiple": False,
+                    "constraint_domain": "infrastructure",
+                    "constraint_layer": 1,
+                    "depends_on": None,
+                    "blocking": True,
+                    "owner": "user",
+                    "section_impact": [],
+                    "due_date": "",
+                    "status": "open",
+                    "asked_via": ["web_ui"],
+                    "options": [
+                        {
+                            "id": "opt_paas",
+                            "label": "PaaS (Heroku, Render)",
+                            "is_default": True,
+                            "rationale": "",
+                            "confidence": 0.7,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
     agent = ProductRequirementsAnalysisAgent(llm)
     q = OpenQuestion(
         id="infra_q",
@@ -1182,8 +1240,7 @@ def test_extract_sop_decisions_from_spec_empty_spec() -> None:
 
 def test_extract_sop_decisions_from_spec_success() -> None:
     """LLM returns valid decisions; verify SOPDecision parsing."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "extracted_decisions": [
                 {
@@ -1212,8 +1269,7 @@ def test_extract_sop_decisions_from_spec_success() -> None:
 
 def test_extract_sop_decisions_from_spec_low_confidence_filtered() -> None:
     """Low-confidence extractions should be filtered out."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "extracted_decisions": [
                 {"sop_id": "P1.deploy.a", "decision": "Cloud", "confidence": 0.95},
@@ -1229,8 +1285,12 @@ def test_extract_sop_decisions_from_spec_low_confidence_filtered() -> None:
 
 def test_extract_sop_decisions_from_spec_llm_failure() -> None:
     """LLM failure should return empty list, not raise."""
-    llm = MagicMock()
-    llm.complete_text.side_effect = RuntimeError("LLM unavailable")
+
+    class _FailingClient(DummyLLMClient):
+        def complete_json(self, prompt, **kwargs):
+            raise RuntimeError("LLM unavailable")
+
+    llm = _FailingClient()
     agent = ProductRequirementsAnalysisAgent(llm)
     decisions = agent._extract_sop_decisions_from_spec("Some spec content")
     assert decisions == []
@@ -1379,8 +1439,7 @@ def test_sop_models_basic() -> None:
 
 def test_assess_sub_phase_gaps_complete() -> None:
     """When LLM reports sub-phase as complete, returns (True, [])."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": True,
             "completeness_rationale": "All deployment aspects covered.",
@@ -1408,8 +1467,7 @@ def test_assess_sub_phase_gaps_complete() -> None:
 
 def test_assess_sub_phase_gaps_incomplete_with_follow_ups() -> None:
     """When LLM reports gaps, returns (False, [OpenQuestion, ...])."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Missing region info.",
@@ -1472,8 +1530,7 @@ def test_assess_sub_phase_gaps_incomplete_with_follow_ups() -> None:
 
 def test_assess_sub_phase_gaps_malformed_json() -> None:
     """Malformed LLM JSON should degrade gracefully to (True, [])."""
-    llm = MagicMock()
-    llm.complete_text.return_value = "This is not valid JSON at all"
+    llm = _StubClient("This is not valid JSON at all")
     agent = ProductRequirementsAnalysisAgent(llm)
     is_complete, follow_ups = agent._assess_sub_phase_gaps(
         SOPSubPhase.DEPLOYMENT,
@@ -1487,8 +1544,12 @@ def test_assess_sub_phase_gaps_malformed_json() -> None:
 
 def test_assess_sub_phase_gaps_llm_exception() -> None:
     """LLM exception should degrade gracefully to (True, [])."""
-    llm = MagicMock()
-    llm.complete_text.side_effect = RuntimeError("LLM unavailable")
+
+    class _FailingClient(DummyLLMClient):
+        def complete_json(self, prompt, **kwargs):
+            raise RuntimeError("LLM unavailable")
+
+    llm = _FailingClient()
     agent = ProductRequirementsAnalysisAgent(llm)
     is_complete, follow_ups = agent._assess_sub_phase_gaps(
         SOPSubPhase.SECURITY,
@@ -1502,8 +1563,7 @@ def test_assess_sub_phase_gaps_llm_exception() -> None:
 
 def test_assess_sub_phase_gaps_duplicate_ids_skipped() -> None:
     """Follow-up questions with IDs already in decisions_map are skipped with a warning."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Gaps remain.",
@@ -1588,8 +1648,7 @@ def test_assess_sub_phase_gaps_duplicate_ids_skipped() -> None:
 
 def test_assess_sub_phase_gaps_all_dupes_returns_empty_follow_ups() -> None:
     """When all LLM questions are duplicates, follow_ups is empty (loop will exit)."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Gaps remain.",
@@ -1623,8 +1682,7 @@ def test_assess_sub_phase_gaps_all_dupes_returns_empty_follow_ups() -> None:
 
 def test_assess_sub_phase_gaps_options_padded_to_min_3() -> None:
     """When LLM returns < 3 options, they are padded to at least 3."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Gaps.",
@@ -1662,8 +1720,7 @@ def test_assess_sub_phase_gaps_options_padded_to_min_3() -> None:
 
 def test_assess_sub_phase_gaps_exactly_one_default() -> None:
     """After option padding/parsing, exactly one option has is_default=True."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Gaps.",
@@ -1707,8 +1764,7 @@ def test_assess_sub_phase_gaps_exactly_one_default() -> None:
 
 def test_assess_sub_phase_gaps_no_defaults_sets_first() -> None:
     """When LLM returns no default option, the first option becomes default."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _StubClient(
         {
             "is_complete": False,
             "completeness_rationale": "Gaps.",
@@ -1754,8 +1810,7 @@ def test_assess_sub_phase_gaps_no_defaults_sets_first() -> None:
 
 def test_assess_sub_phase_gaps_empty_llm_response() -> None:
     """Empty LLM response should degrade gracefully to (True, [])."""
-    llm = MagicMock()
-    llm.complete_text.return_value = ""
+    llm = _StubClient("")
     agent = ProductRequirementsAnalysisAgent(llm)
     is_complete, follow_ups = agent._assess_sub_phase_gaps(
         SOPSubPhase.BUDGET,
@@ -1769,8 +1824,7 @@ def test_assess_sub_phase_gaps_empty_llm_response() -> None:
 
 def test_assess_sub_phase_gaps_passes_existing_ids_to_prompt() -> None:
     """Verify that existing question IDs are passed to the LLM prompt."""
-    llm = MagicMock()
-    llm.complete_text.return_value = json.dumps(
+    llm = _TrackingStubClient(
         {"is_complete": True, "completeness_rationale": "Done.", "follow_up_questions": []}
     )
     agent = ProductRequirementsAnalysisAgent(llm)
@@ -1789,9 +1843,9 @@ def test_assess_sub_phase_gaps_passes_existing_ids_to_prompt() -> None:
         {"P1.deploy.a": "AWS", "P1.deploy.b": "ECS"},
     )
     # The prompt should contain the existing question IDs
-    call_args = llm.complete_text.call_args[0][0]
-    assert "P1.deploy.a" in call_args
-    assert "P1.deploy.b" in call_args
+    prompt = llm.last_prompt
+    assert "P1.deploy.a" in prompt
+    assert "P1.deploy.b" in prompt
 
 
 def test_max_gap_rounds_constant() -> None:

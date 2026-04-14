@@ -24,12 +24,9 @@ from shared.content_plan import (
 )
 from shared.content_profile import LengthPolicy
 from shared.errors import PlanningError
+from strands import Agent
 
 from llm_service import (
-    LLMClient,
-    LLMJsonParseError,
-    LLMTemporaryError,
-    LLMTruncatedError,
     compact_text,
 )
 
@@ -146,7 +143,7 @@ class BlogWriterAgent:
 
     def __init__(
         self,
-        llm_client: LLMClient,
+        llm_client: Any,
         *,
         writing_style_guide_content: str = "",
         brand_spec_content: str = "",
@@ -157,7 +154,7 @@ class BlogWriterAgent:
         Callers load writing style and brand spec files before instantiation and pass full contents here.
         """
         assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+        self._model = llm_client
         self._writing_style_prompt = (writing_style_guide_content or "").strip()
         self._brand_spec_prompt = (brand_spec_content or "").strip()
         parts: list[str] = []
@@ -166,6 +163,19 @@ class BlogWriterAgent:
         if self._writing_style_prompt:
             parts.append("--- WRITING STYLE GUIDE ---\n" + self._writing_style_prompt)
         self._style_prompt = "\n\n".join(parts)
+
+    def _call_agent(self, prompt: str, system_prompt: str = "") -> str:
+        """Call a Strands Agent and return the raw text result."""
+        agent = Agent(model=self._model, system_prompt=system_prompt or WRITING_SYSTEM_PROMPT)
+        result = agent(prompt)
+        return str(result).strip()
+
+    def _call_agent_json(self, prompt: str, system_prompt: str = "") -> dict:
+        """Call a Strands Agent and parse JSON from the result."""
+        raw = self._call_agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.", system_prompt)
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        return json.loads(raw)
 
     def _assert_guidelines_present(self) -> None:
         """Require both brand and writing guideline inputs before drafting/revising."""
@@ -257,25 +267,17 @@ class BlogWriterAgent:
             if on_llm_request:
                 on_llm_request("Planning: generating structured plan...")
             try:
-                data = self.llm.complete_json(
-                    prompt,
-                    temperature=0.25,
-                    system_prompt=system,
-                    think=True,
-                )
+                data = self._call_agent_json(prompt, system_prompt=system)
                 if isinstance(data, dict) and data:
                     return data, parse_retries
-            except (LLMJsonParseError, TypeError, ValueError) as e:
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
                 last_err = e
                 parse_retries += 1
-                logger.warning("complete_json failed (attempt %s): %s", attempt + 1, e)
+                logger.warning("JSON parse failed (attempt %s): %s", attempt + 1, e)
             try:
-                raw = self.llm.complete(
+                raw = self._call_agent(
                     prompt + "\n\nRespond with a single JSON object only, no markdown fences.",
-                    temperature=0.25,
-                    system_prompt=system,
-                    think=True,
-                )
+                    system_prompt=system)
                 data = parse_json_object(raw)
                 return data, parse_retries
             except (json.JSONDecodeError, TypeError, ValueError) as e:
@@ -432,13 +434,9 @@ class BlogWriterAgent:
             "then the full fixed blog post in Markdown."
         )
         try:
-            raw = self.llm.complete(
+            raw = self._call_agent(
                 prompt,
-                temperature=0.1,
-                max_tokens=32768,
-                system_prompt=WRITING_SYSTEM_PROMPT,
-                think=False,
-            )
+                system_prompt=WRITING_SYSTEM_PROMPT)
             fixed = _extract_draft_after_marker(raw)
             if fixed and fixed.strip():
                 logger.info("Deterministic self-check: fixed %s violations", len(violations))
@@ -450,12 +448,9 @@ class BlogWriterAgent:
     def _llm_self_review(self, draft: str) -> str:
         """Run a focused LLM self-review for subjective violations. Returns cleaned draft."""
         try:
-            raw = self.llm.complete(
+            raw = self._call_agent(
                 f"Review this draft:\n\n{draft}",
-                temperature=0.1,
-                system_prompt=SELF_REVIEW_PROMPT,
-                think=True,
-            )
+                system_prompt=SELF_REVIEW_PROMPT)
             cleaned = raw.strip()
             # Extract JSON array
             start = cleaned.find("[")
@@ -483,13 +478,9 @@ class BlogWriterAgent:
                 '---\nUse this format: first line {{"draft": 0}}, then ---DRAFT---, '
                 "then the full fixed blog post in Markdown."
             )
-            raw_fix = self.llm.complete(
+            raw_fix = self._call_agent(
                 fix_prompt,
-                temperature=0.1,
-                max_tokens=32768,
-                system_prompt=WRITING_SYSTEM_PROMPT,
-                think=True,
-            )
+                system_prompt=WRITING_SYSTEM_PROMPT)
             fixed = _extract_draft_after_marker(raw_fix)
             if fixed and fixed.strip():
                 logger.info("LLM self-review: applied fixes, new length=%s", len(fixed.strip()))
@@ -525,7 +516,7 @@ class BlogWriterAgent:
         """
         self._assert_guidelines_present()
         outline = draft_input.outline_for_prompt().strip()
-        outline = compact_text(outline, COMPACT_OUTLINE_CHARS, self.llm, "content plan")
+        outline = compact_text(outline, COMPACT_OUTLINE_CHARS, self._model, "content plan")
         if not outline:
             logger.warning("Empty content plan; returning minimal draft.")
             return WriterOutput(draft="# Draft\n\nAdd a content plan to generate a draft.")
@@ -623,21 +614,18 @@ class BlogWriterAgent:
         # complete_json() forces a single JSON object, so the model would output only {"draft": 0} and we'd get no content.
         draft = ""
         try:
-            raw_response = self.llm.complete(
+            raw_response = self._call_agent(
                 prompt,
-                temperature=0.2,
-                system_prompt=WRITING_SYSTEM_PROMPT,
-                think=True,
-            )
+                system_prompt=WRITING_SYSTEM_PROMPT)
             draft = _extract_draft_after_marker(raw_response)
-        except (LLMJsonParseError, LLMTruncatedError) as e:
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
             logger.warning("Draft complete() failed: %s; trying complete_json fallback.", e)
             try:
-                data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+                data = self._call_agent_json(prompt)
                 raw_draft = data.get("draft")
                 if isinstance(raw_draft, str) and raw_draft.strip():
                     draft = raw_draft.strip()
-            except (LLMJsonParseError, LLMTruncatedError):
+            except (json.JSONDecodeError, TypeError, ValueError):
                 pass
 
         if not draft:
@@ -682,7 +670,7 @@ class BlogWriterAgent:
         feedback_block = "\n\n".join(feedback_lines)
 
         cp = compact_text(
-            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self.llm, "content plan"
+            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self._model, "content plan"
         )
         prompt_parts = [
             REVISION_TASK_INSTRUCTIONS,
@@ -807,7 +795,7 @@ class BlogWriterAgent:
             for i, item in enumerate(feedback_items, start=1)
         ]
         cp = compact_text(
-            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self.llm, "content plan"
+            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self._model, "content plan"
         )
         parts = [
             "Analyse ALL feedback items and create a structured revision plan for this draft.",
@@ -853,12 +841,9 @@ class BlogWriterAgent:
     ) -> RevisionPlan:
         prompt = self._build_revision_plan_prompt(draft, feedback_items, revise_input)
         try:
-            data = self.llm.complete_json(
+            data = self._call_agent_json(
                 prompt,
-                temperature=0.1,
-                system_prompt=WRITING_SYSTEM_PROMPT,
-                think=True,
-            )
+                system_prompt=WRITING_SYSTEM_PROMPT)
             if not data or not isinstance(data, dict):
                 return RevisionPlan(summary="Planning produced no output.", changes=[], risks=[])
             return RevisionPlan(
@@ -872,8 +857,8 @@ class BlogWriterAgent:
             logger.warning("Structured revision planning failed: %s — falling back to unstructured", e)
             # Graceful degradation: try plain-text plan
             try:
-                plain = self.llm.complete(
-                    prompt, temperature=0.1, system_prompt=WRITING_SYSTEM_PROMPT, think=True
+                plain = self._call_agent(
+                    prompt, system_prompt=WRITING_SYSTEM_PROMPT
                 )
                 return RevisionPlan(summary=(plain or "").strip(), changes=[], risks=[])
             except Exception:
@@ -896,7 +881,7 @@ class BlogWriterAgent:
         )
         feedback_line = self._format_feedback_item_line(item, 1)
         cp = compact_text(
-            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self.llm, "content plan"
+            revise_input.outline_for_prompt(), COMPACT_OUTLINE_CHARS, self._model, "content plan"
         )
         prompt_parts = [
             REVISION_TASK_INSTRUCTIONS,
@@ -973,23 +958,18 @@ class BlogWriterAgent:
         revise_input: ReviseWriterInput,
     ) -> str:
         """Apply one feedback item to the draft. Returns revised draft or original on failure."""
-        revise_max_tokens = 32768
         prompt = self._build_revise_single_item_prompt(
             draft, item, item_index, total_items, style_guide_text, revise_input
         )
         for attempt in range(2):
             try:
-                raw_response = self.llm.complete(
+                raw_response = self._call_agent(
                     prompt,
-                    temperature=0.2,
-                    max_tokens=revise_max_tokens,
-                    system_prompt=WRITING_SYSTEM_PROMPT,
-                    think=True,
-                )
+                    system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     return revised.strip()
-            except LLMTemporaryError:
+            except Exception:
                 logger.warning(
                     "Revise item %s/%s: transient error (attempt %s/2); retrying.",
                     item_index,
@@ -997,17 +977,17 @@ class BlogWriterAgent:
                     attempt + 1,
                 )
                 time.sleep(2.0 + attempt)
-            except (LLMJsonParseError, LLMTruncatedError) as e:
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
                 logger.warning("Revise item %s/%s: %s; retrying.", item_index, total_items, e)
         # Fallback
         try:
-            data = self.llm.complete_json(
-                prompt, temperature=0.2, max_tokens=revise_max_tokens, think=True
+            data = self._call_agent_json(
+                prompt
             )
             raw_draft = data.get("draft") if data else None
             if isinstance(raw_draft, str) and raw_draft.strip():
                 return raw_draft.strip()
-        except (LLMJsonParseError, LLMTruncatedError):
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
         logger.warning(
             "Revise item %s/%s: could not produce revision; keeping draft as-is.",
@@ -1094,37 +1074,32 @@ class BlogWriterAgent:
             revise_input,
         )
         current_draft = draft
-        revise_max_tokens = 32768
         for attempt in range(3):
             try:
-                raw_response = self.llm.complete(
+                raw_response = self._call_agent(
                     prompt,
-                    temperature=0.2,
-                    max_tokens=revise_max_tokens,
-                    system_prompt=WRITING_SYSTEM_PROMPT,
-                    think=True,
-                )
+                    system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     current_draft = revised.strip()
                     break
-            except LLMTemporaryError:
+            except Exception:
                 logger.warning(
                     "Batch revise transient error (attempt %s/3); retrying.",
                     attempt + 1,
                 )
                 time.sleep(2.0 * (2**attempt))
-            except (LLMJsonParseError, LLMTruncatedError) as e:
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
                 logger.warning("Batch revise failed (attempt %s/3): %s", attempt + 1, e)
         if current_draft == draft:
             try:
-                data = self.llm.complete_json(
-                    prompt, temperature=0.2, max_tokens=revise_max_tokens, think=True
+                data = self._call_agent_json(
+                    prompt
                 )
                 raw_draft = data.get("draft") if data else None
                 if isinstance(raw_draft, str) and raw_draft.strip():
                     current_draft = raw_draft.strip()
-            except (LLMJsonParseError, LLMTruncatedError):
+            except (json.JSONDecodeError, TypeError, ValueError):
                 pass
 
         logger.info(
@@ -1153,12 +1128,9 @@ class BlogWriterAgent:
             draft=draft,
         )
         try:
-            raw = self.llm.complete(
+            raw = self._call_agent(
                 prompt,
-                temperature=0.1,
-                system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.",
-                think=True,
-            )
+                system_prompt="You are a careful writing assistant that identifies areas of genuine uncertainty.")
             cleaned = raw.strip()
             start = cleaned.find("[")
             end = cleaned.rfind("]") + 1
@@ -1204,11 +1176,8 @@ class BlogWriterAgent:
             current_guidelines=current_guidelines,
         )
         try:
-            data = self.llm.complete_json(
-                prompt,
-                temperature=0.1,
-                think=True,
-            )
+            data = self._call_agent_json(
+                prompt)
             if not isinstance(data, dict):
                 return []
             if not data.get("has_guideline_updates"):
@@ -1341,31 +1310,28 @@ class BlogWriterAgent:
         current_draft = draft
         for attempt in range(3):
             try:
-                raw_response = self.llm.complete(
+                raw_response = self._call_agent(
                     prompt,
-                    temperature=0.2,
-                    system_prompt=WRITING_SYSTEM_PROMPT,
-                    think=True,
-                )
+                    system_prompt=WRITING_SYSTEM_PROMPT)
                 revised = _extract_draft_after_marker(raw_response)
                 if revised and revised.strip():
                     current_draft = revised.strip()
                     break
-            except LLMTemporaryError:
+            except Exception:
                 logger.warning(
                     "User-feedback revision transient error (attempt %s/3); retrying.", attempt + 1
                 )
                 time.sleep(2.0 * (2**attempt))
-            except (LLMJsonParseError, LLMTruncatedError) as e:
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
                 logger.warning("User-feedback revision failed (attempt %s/3): %s", attempt + 1, e)
 
         if current_draft == draft:
             try:
-                data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+                data = self._call_agent_json(prompt)
                 raw_draft = data.get("draft") if data else None
                 if isinstance(raw_draft, str) and raw_draft.strip():
                     current_draft = raw_draft.strip()
-            except (LLMJsonParseError, LLMTruncatedError):
+            except (json.JSONDecodeError, TypeError, ValueError):
                 pass
 
         logger.info("User-feedback revision complete, final length=%s", len(current_draft))
@@ -1404,11 +1370,8 @@ class BlogWriterAgent:
             persistent_issues=persistent_text,
         )
         try:
-            summary = self.llm.complete(
-                prompt,
-                temperature=0.1,
-                think=False,
-            )
+            summary = self._call_agent(
+                prompt)
             return (summary or "").strip()
         except Exception as e:
             logger.warning("Escalation summary generation failed: %s", e)

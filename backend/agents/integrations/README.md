@@ -115,6 +115,6 @@ response = service.call(
 
 This keeps MCP tool interaction behind one interface while still allowing provider-specific tool catalogs in config.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

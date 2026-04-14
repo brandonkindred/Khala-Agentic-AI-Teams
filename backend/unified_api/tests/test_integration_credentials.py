@@ -1,27 +1,22 @@
 """Unit tests for unified_api.integration_credentials.
 
-After PR 1 of the SQLite → Postgres migration this module is a thin
-shim around ``postgres_encrypted_credentials`` plus a one-shot migration
-helper. The tests here cover:
+This module is a thin shim around ``postgres_encrypted_credentials``; the
+tests cover:
 
-* Fernet key management (unchanged from the pre-migration module).
+* Fernet key management.
 * The ``get_credential`` / ``set_credential`` / ``delete_credential`` /
   ``delete_service_credentials`` delegation to the ``pg_*`` functions.
-* ``migrate_sqlite_to_postgres_once`` idempotency, empty-SQLite, and
-  Postgres-disabled short-circuits.
 
-These tests never touch a real Postgres — they monkey-patch
-``shared_postgres.get_conn`` and the ``pg_*`` functions to keep the
-suite fast and self-contained. Integration coverage with a live
-``postgres:16`` service runs in the ``test-shared-postgres`` CI job.
+These tests never touch a real Postgres — they monkey-patch the ``pg_*``
+functions to keep the suite fast and self-contained. Integration
+coverage with a live ``postgres:16`` service runs in the
+``test-shared-postgres`` CI job.
 """
 
 from __future__ import annotations
 
 import importlib
-import sqlite3
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -42,7 +37,7 @@ def _reload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 # ---------------------------------------------------------------------------
-# Key management (unchanged from pre-migration module)
+# Key management
 # ---------------------------------------------------------------------------
 
 
@@ -177,213 +172,3 @@ def test_delete_service_credentials_delegates(tmp_path: Path, monkeypatch: pytes
 
     mod.delete_service_credentials("slack")
     assert captured == ["slack"]
-
-
-# ---------------------------------------------------------------------------
-# migrate_sqlite_to_postgres_once
-# ---------------------------------------------------------------------------
-
-
-def _write_legacy_sqlite(tmp_path: Path, mod, rows: list[tuple[str, str, str]]) -> Path:
-    """Create a legacy SQLite file at ``$AGENT_CACHE/integration_credentials.db``.
-
-    Each row is ``(service, key, plaintext_value)`` — the helper
-    encrypts with the reloaded module's Fernet key and writes the row.
-    """
-    db_path = tmp_path / "integration_credentials.db"
-    fernet = mod.get_integration_fernet()
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS service_integrations (
-            service TEXT NOT NULL,
-            key TEXT NOT NULL,
-            value TEXT NOT NULL,
-            PRIMARY KEY (service, key)
-        )
-        """
-    )
-    for service, key, plaintext in rows:
-        encrypted = fernet.encrypt(plaintext.encode()).decode()
-        conn.execute(
-            "INSERT INTO service_integrations (service, key, value) VALUES (?, ?, ?)",
-            (service, key, encrypted),
-        )
-    conn.commit()
-    conn.close()
-    return db_path
-
-
-class _FakeCursor:
-    def __init__(self, marker_present: bool = False) -> None:
-        self.executed: list[tuple[str, tuple]] = []
-        self._marker_present = marker_present
-        self._last_fetch: tuple | None = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def execute(self, sql: str, params: tuple = ()):
-        self.executed.append((sql, params))
-        if sql.strip().startswith("SELECT 1 FROM migration_markers"):
-            self._last_fetch = (1,) if self._marker_present else None
-
-    def fetchone(self):
-        return self._last_fetch
-
-
-class _FakeConn:
-    def __init__(self, cursor: _FakeCursor) -> None:
-        self._cursor = cursor
-
-    def cursor(self):
-        return self._cursor
-
-
-def _fake_get_conn_factory(cursor: _FakeCursor):
-    @contextmanager
-    def _fake_get_conn(database=None):
-        yield _FakeConn(cursor)
-
-    return _fake_get_conn
-
-
-def test_migrate_skipped_when_postgres_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("POSTGRES_HOST", raising=False)
-    mod = _reload(tmp_path, monkeypatch)
-    # Presence of a SQLite file does not matter when Postgres is off.
-    _write_legacy_sqlite(tmp_path, mod, [("slack", "client_id", "opaque-value")])
-    result = mod.migrate_sqlite_to_postgres_once()
-    assert result == {"status": "skipped", "reason": "postgres_disabled"}
-
-
-def test_migrate_skipped_when_sqlite_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("POSTGRES_HOST", "localhost")
-    mod = _reload(tmp_path, monkeypatch)
-    result = mod.migrate_sqlite_to_postgres_once()
-    assert result == {"status": "skipped", "reason": "no_sqlite_file"}
-
-
-def test_migrate_happy_path_writes_rows_and_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("POSTGRES_HOST", "localhost")
-    mod = _reload(tmp_path, monkeypatch)
-
-    _write_legacy_sqlite(
-        tmp_path,
-        mod,
-        [
-            ("slack", "client_id", "opaque-slack-client-id"),
-            ("slack", "client_secret", "opaque-slack-client-secret"),
-            ("medium", "refresh_token", "opaque-medium-refresh-token"),
-        ],
-    )
-
-    cursor = _FakeCursor(marker_present=False)
-    import shared_postgres
-
-    monkeypatch.setattr(shared_postgres, "get_conn", _fake_get_conn_factory(cursor))
-
-    # Observe the bulk helper so we can verify decrypted plaintexts round-trip.
-    import unified_api.postgres_encrypted_credentials as pg_mod
-
-    upserted_rows: list[tuple[str, str, str]] = []
-
-    def _bulk(cur, rows):
-        rows_list = list(rows)
-        # Decrypt each ciphertext to verify plaintext survived the round-trip.
-        fernet = mod.get_integration_fernet()
-        for service, key, ciphertext in rows_list:
-            plaintext = fernet.decrypt(ciphertext.encode()).decode()
-            upserted_rows.append((service, key, plaintext))
-            cur.execute(
-                "INSERT INTO encrypted_integration_credentials (service, credential_key, ciphertext, updated_at) "
-                "VALUES (%s, %s, %s, NOW())",
-                (service, key, ciphertext),
-            )
-        return len(rows_list)
-
-    monkeypatch.setattr(pg_mod, "pg_upsert_credentials_bulk", _bulk)
-
-    result = mod.migrate_sqlite_to_postgres_once()
-    assert result == {"status": "migrated", "rows": 3}
-
-    plaintexts = {(s, k): v for s, k, v in upserted_rows}
-    assert plaintexts[("slack", "client_id")] == "opaque-slack-client-id"
-    assert plaintexts[("slack", "client_secret")] == "opaque-slack-client-secret"
-    assert plaintexts[("medium", "refresh_token")] == "opaque-medium-refresh-token"
-
-    # The marker INSERT must be issued AFTER the bulk upsert.
-    marker_calls = [(sql, params) for sql, params in cursor.executed if "INSERT INTO migration_markers" in sql]
-    assert len(marker_calls) == 1
-    assert marker_calls[0][1][0] == "integration_credentials_v1"
-
-
-def test_migrate_idempotent_when_marker_present(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Second run short-circuits inside the same transaction when the marker exists."""
-    monkeypatch.setenv("POSTGRES_HOST", "localhost")
-    mod = _reload(tmp_path, monkeypatch)
-    _write_legacy_sqlite(tmp_path, mod, [("slack", "client_id", "opaque-value")])
-
-    cursor = _FakeCursor(marker_present=True)
-    import shared_postgres
-
-    monkeypatch.setattr(shared_postgres, "get_conn", _fake_get_conn_factory(cursor))
-
-    import unified_api.postgres_encrypted_credentials as pg_mod
-
-    bulk_called = {"count": 0}
-    monkeypatch.setattr(
-        pg_mod,
-        "pg_upsert_credentials_bulk",
-        lambda cur, rows: bulk_called.__setitem__("count", bulk_called["count"] + 1) or 0,
-    )
-
-    result = mod.migrate_sqlite_to_postgres_once()
-    assert result == {"status": "skipped", "reason": "marker_present"}
-    assert bulk_called["count"] == 0
-
-
-def test_migrate_skips_corrupt_row_without_aborting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("POSTGRES_HOST", "localhost")
-    mod = _reload(tmp_path, monkeypatch)
-
-    # Write one valid row, one un-decryptable row directly.
-    db_path = tmp_path / "integration_credentials.db"
-    fernet = mod.get_integration_fernet()
-    conn = sqlite3.connect(str(db_path))
-    conn.execute("CREATE TABLE service_integrations (service TEXT, key TEXT, value TEXT, PRIMARY KEY (service, key))")
-    conn.execute(
-        "INSERT INTO service_integrations VALUES (?, ?, ?)",
-        ("slack", "client_id", fernet.encrypt(b"opaque-good-row").decode()),
-    )
-    conn.execute(
-        "INSERT INTO service_integrations VALUES (?, ?, ?)",
-        ("slack", "client_secret", "not-a-valid-fernet-ciphertext"),
-    )
-    conn.commit()
-    conn.close()
-
-    rows = mod._read_sqlite_rows(db_path)
-    assert rows == [("slack", "client_id", "opaque-good-row")]
-
-
-def test_migrate_empty_sqlite_still_writes_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A legacy SQLite file with zero rows still records the marker."""
-    monkeypatch.setenv("POSTGRES_HOST", "localhost")
-    mod = _reload(tmp_path, monkeypatch)
-    _write_legacy_sqlite(tmp_path, mod, [])  # file exists, no rows
-
-    cursor = _FakeCursor(marker_present=False)
-    import shared_postgres
-
-    monkeypatch.setattr(shared_postgres, "get_conn", _fake_get_conn_factory(cursor))
-
-    result = mod.migrate_sqlite_to_postgres_once()
-    assert result == {"status": "skipped", "reason": "empty_sqlite"}
-
-    marker_inserts = [(sql, params) for sql, params in cursor.executed if "INSERT INTO migration_markers" in sql]
-    assert len(marker_inserts) == 1
-    assert marker_inserts[0][1][0] == "integration_credentials_v1"

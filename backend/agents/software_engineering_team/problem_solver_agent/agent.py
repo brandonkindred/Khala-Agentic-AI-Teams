@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
-from llm_service import LLMClient
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from .models import ProblemSolverInput, ProblemSolverOutput
 from .prompts import PROBLEM_SOLVER_PROMPT
@@ -15,9 +18,14 @@ logger = logging.getLogger(__name__)
 class ProblemSolverAgent:
     """Specialist that provides plan/execute/review/test guidance for bug fixing."""
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
+            _model = llm_client
+        else:
+            _model = get_strands_model("problem_solver")
+        self._agent = Agent(model=_model, system_prompt=PROBLEM_SOLVER_PROMPT)
 
     def run(self, input_data: ProblemSolverInput) -> ProblemSolverOutput:
         """Generate a bounded specialist recommendation for a bug-fix cycle."""
@@ -41,8 +49,10 @@ class ProblemSolverAgent:
                 ]
             )
 
-        prompt = PROBLEM_SOLVER_PROMPT + "\n\n---\n\n" + "\n".join(context)
-        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
+        prompt = "\n".join(context)
+        result = self._agent(prompt)
+        raw = str(result).strip()
+        data = json.loads(raw)
         return ProblemSolverOutput(
             plan=str(data.get("plan", "")),
             execution_steps=str(data.get("execution_steps", "")),

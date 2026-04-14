@@ -45,55 +45,64 @@
         </div>
       }
 
-      <!-- Collapsible nav groups -->
-      @for (group of navGroups; track trackByGroupKey($index, group)) {
-        <div class="nav-group">
-          <div class="nav-group-header"
-               #navFocusable
-               role="button"
-               tabindex="0"
-               [attr.aria-expanded]="!navState.isCollapsed(group.key)"
-               [attr.aria-controls]="'nav-group-' + group.key"
-               (click)="navState.toggleGroup(group.key)"
-               (keydown.enter)="navState.toggleGroup(group.key)"
-               (keydown.space)="navState.toggleGroup(group.key); $event.preventDefault()">
-            <span class="nav-group-label">{{ group.label }}</span>
-            <mat-icon class="nav-group-chevron" [class.collapsed]="navState.isCollapsed(group.key)" aria-hidden="true">
-              expand_more
-            </mat-icon>
-          </div>
-
-          <div [id]="'nav-group-' + group.key"
-               role="group"
-               [attr.aria-label]="group.label"
-               [@collapse]="navState.isCollapsed(group.key) ? 'closed' : 'open'">
-            @for (item of group.items; track trackByItemId($index, item)) {
-              <div class="nav-link-row">
-                <a #navFocusable
-                   [routerLink]="item.route"
-                   routerLinkActive="active"
-                   [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
-                   class="nav-link"
-                   [class.nav-link-nested]="item.nested"
-                   [attr.aria-current]="isActive(item.route) ? 'page' : null">
-                  <mat-icon>{{ item.icon }}</mat-icon>
-                  <span>{{ item.label }}</span>
-                </a>
-                @if (!item.nested) {
-                  <button mat-icon-button
-                          class="nav-link-star"
-                          (click)="navState.toggleFavorite(item.id); $event.stopPropagation(); $event.preventDefault()"
-                          [attr.aria-label]="navState.isFavorite(item.id) ? 'Unpin ' + item.label + ' from favorites' : 'Pin ' + item.label + ' to favorites'"
-                          [attr.aria-pressed]="navState.isFavorite(item.id)">
-                    <mat-icon>{{ navState.isFavorite(item.id) ? 'star' : 'star_border' }}</mat-icon>
-                  </button>
-                }
-              </div>
-            }
-          </div>
-        </div>
+      <!-- Nav group triggers (flyout on hover/focus) -->
+      @for (group of navGroups; track group.key) {
+        <button #trigger
+                #navFocusable
+                type="button"
+                class="nav-group-trigger"
+                [class.active]="isGroupActive(group)"
+                [attr.aria-expanded]="activeGroup()?.key === group.key"
+                aria-haspopup="menu"
+                [attr.aria-controls]="'nav-flyout-' + group.key"
+                (mouseenter)="openFlyout(group, trigger)"
+                (focus)="openFlyout(group, trigger)"
+                (mouseleave)="scheduleClose()"
+                (blur)="scheduleClose()"
+                (click)="openFlyout(group, trigger)">
+          <span class="nav-group-label">{{ group.label }}</span>
+          <mat-icon class="nav-group-chevron" aria-hidden="true">chevron_right</mat-icon>
+        </button>
       }
     </nav>
+
+    <!-- Shared CDK flyout overlay — re-points at whichever trigger is active. -->
+    @if (activeOrigin(); as origin) {
+      <ng-template
+        cdkConnectedOverlay
+        [cdkConnectedOverlayOrigin]="origin"
+        [cdkConnectedOverlayOpen]="!!activeGroup()"
+        [cdkConnectedOverlayPositions]="flyoutPositions"
+        [cdkConnectedOverlayPush]="true"
+        [cdkConnectedOverlayHasBackdrop]="false"
+        (overlayOutsideClick)="closeFlyout()">
+        @if (activeGroup(); as group) {
+          <div class="nav-flyout"
+               [id]="'nav-flyout-' + group.key"
+               role="menu"
+               tabindex="-1"
+               [attr.aria-label]="group.label"
+               (mouseenter)="cancelClose()"
+               (mouseleave)="scheduleClose()"
+               (keydown.escape)="closeFlyout(true)">
+            <div class="nav-flyout-title">{{ group.label }}</div>
+            @for (item of group.items; track trackByItemId($index, item)) {
+              <a [routerLink]="item.route"
+                 routerLinkActive="active"
+                 [routerLinkActiveOptions]="{ exact: item.exact ?? false }"
+                 class="nav-flyout-link"
+                 [class.nav-flyout-link-nested]="item.nested"
+                 role="menuitem"
+                 [attr.aria-current]="isActive(item.route) ? 'page' : null"
+                 (click)="closeFlyout()">
+                <mat-icon>{{ item.icon }}</mat-icon>
+                <span>{{ item.label }}</span>
+              </a>
+            }
+          </div>
+        }
+      </ng-template>
+    }
 
     <div class="sidenav-footer">
       <div class="footer-content">

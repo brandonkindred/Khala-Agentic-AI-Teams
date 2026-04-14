@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,6 +20,61 @@ from devops_team.models import (
 )
 from devops_team.orchestrator import DEVOPS_REQUIRED_GATE_NAMES, ENV_POLICY
 from devops_team.task_clarifier import DevOpsTaskClarifierAgent, DevOpsTaskClarifierInput
+
+from llm_service.clients.dummy import DummyLLMClient
+
+
+class _StubClient(DummyLLMClient):
+    """DummyLLMClient subclass returning a single canned response for every
+    ``complete_json`` call. Routes transparently through the Strands adapter
+    path (``chat_json_round`` → ``StructuredOutputTool`` detection → the
+    complete_json override below)."""
+
+    def __init__(self, response: Dict[str, Any]) -> None:
+        super().__init__()
+        self._response = response
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        return self._response
+
+
+class _ScriptedClient(DummyLLMClient):
+    """DummyLLMClient subclass returning a different canned response on each
+    ``complete_json`` call. Replaces the Wave 1/2/3 pre-migration pattern of
+    ``mock.complete_json.side_effect = [...]`` for scripted DevOps pipelines."""
+
+    def __init__(self, responses: List[Dict[str, Any]]) -> None:
+        super().__init__()
+        self._responses = list(responses)
+        self._idx = 0
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if self._idx < len(self._responses):
+            resp = self._responses[self._idx]
+            self._idx += 1
+            return resp
+        # After the scripted list is exhausted, fall back to the last entry
+        # so extra pipeline steps don't crash the test.
+        return self._responses[-1] if self._responses else {}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -62,43 +118,46 @@ def _base_task_spec(**overrides) -> DevOpsTaskSpec:
     return DevOpsTaskSpec(**defaults)
 
 
-def _mock_llm_for_happy_path() -> MagicMock:
-    mock = MagicMock()
-    mock.complete_json.side_effect = [
-        {"approved_for_execution": True, "checklist": []},
-        {
-            "artifacts": {"infra/main.tf": "resource {}"},
-            "summary": "iac ok",
-            "destructive_changes_detected": False,
-        },
-        {
-            "artifacts": {".github/workflows/ci.yml": "on: push"},
-            "summary": "cicd ok",
-            "required_gates_present": True,
-        },
-        {
-            "artifacts": {"deploy/values.yaml": "replicas: 2"},
-            "summary": "deploy ok",
-            "strategy": "rolling",
-            "rollback_plan": ["helm rollback"],
-        },
-        # Debug agent (execution tools fail because terraform CLI is not installed)
-        {
-            "errors": [{"error_type": "runtime", "error_message": "terraform not found"}],
-            "summary": "cli missing",
-            "fixable": False,
-        },
-        {"approved": True, "findings": [], "summary": "sec ok"},
-        {"approved": True, "findings": [], "summary": "review ok"},
-        {
-            "approved": True,
-            "quality_gates": {"iac_validate": "pass", "policy_checks": "pass"},
-            "acceptance_trace": [],
-            "summary": "validation ok",
-        },
-        {"files": {"docs/runbook.md": "# Runbook"}, "summary": "doc ok"},
-    ]
-    return mock
+def _scripted_llm_for_happy_path() -> _ScriptedClient:
+    """Script a full DevOps pipeline run: one response per sub-agent call in
+    orchestrator order (task_clarifier, iac, cicd, deployment, infra_debug,
+    devsecops, change_review, test_validation, doc_runbook)."""
+    return _ScriptedClient(
+        [
+            {"approved_for_execution": True, "checklist": []},
+            {
+                "artifacts": {"infra/main.tf": "resource {}"},
+                "summary": "iac ok",
+                "destructive_changes_detected": False,
+            },
+            {
+                "artifacts": {".github/workflows/ci.yml": "on: push"},
+                "summary": "cicd ok",
+                "required_gates_present": True,
+            },
+            {
+                "artifacts": {"deploy/values.yaml": "replicas: 2"},
+                "summary": "deploy ok",
+                "strategy": "rolling",
+                "rollback_plan": ["helm rollback"],
+            },
+            # Debug agent (execution tools fail because terraform CLI is not installed)
+            {
+                "errors": [{"error_type": "runtime", "error_message": "terraform not found"}],
+                "summary": "cli missing",
+                "fixable": False,
+            },
+            {"approved": True, "findings": [], "summary": "sec ok"},
+            {"approved": True, "findings": [], "summary": "review ok"},
+            {
+                "approved": True,
+                "quality_gates": {"iac_validate": "pass", "policy_checks": "pass"},
+                "acceptance_trace": [],
+                "summary": "validation ok",
+            },
+            {"files": {"docs/runbook.md": "# Runbook"}, "summary": "doc ok"},
+        ]
+    )
 
 
 # ===========================================================================
@@ -365,13 +424,14 @@ class TestTaskClarifier:
         assert any("outcome" in r.lower() for r in out.clarification_requests)
 
     def test_approves_complete_spec(self) -> None:
-        mock_llm = MagicMock()
-        mock_llm.complete_json.return_value = {
-            "approved_for_execution": True,
-            "checklist": [],
-            "gaps": [],
-        }
-        agent = DevOpsTaskClarifierAgent(mock_llm)
+        client = _StubClient(
+            {
+                "approved_for_execution": True,
+                "checklist": [],
+                "gaps": [],
+            }
+        )
+        agent = DevOpsTaskClarifierAgent(client)
         spec = _base_task_spec()
         out = agent.run(DevOpsTaskClarifierInput(task_spec=spec))
         assert out.approved_for_execution
@@ -513,14 +573,15 @@ class TestInfrastructureAsCodeAgent:
     def test_run_returns_artifacts(self) -> None:
         from devops_team.iac_agent import IaCAgentInput, InfrastructureAsCodeAgent
 
-        mock = MagicMock()
-        mock.complete_json.return_value = {
-            "artifacts": {"infra/main.tf": "resource {}"},
-            "summary": "created main.tf",
-            "destructive_changes_detected": False,
-            "blast_radius_notes": [],
-        }
-        agent = InfrastructureAsCodeAgent(mock)
+        client = _StubClient(
+            {
+                "artifacts": {"infra/main.tf": "resource {}"},
+                "summary": "created main.tf",
+                "destructive_changes_detected": False,
+                "blast_radius_notes": [],
+            }
+        )
+        agent = InfrastructureAsCodeAgent(client)
         out = agent.run(IaCAgentInput(task_spec=_base_task_spec()))
         assert "infra/main.tf" in out.artifacts
         assert not out.destructive_changes_detected
@@ -528,14 +589,15 @@ class TestInfrastructureAsCodeAgent:
     def test_handles_destructive_flag(self) -> None:
         from devops_team.iac_agent import IaCAgentInput, InfrastructureAsCodeAgent
 
-        mock = MagicMock()
-        mock.complete_json.return_value = {
-            "artifacts": {},
-            "summary": "destructive",
-            "destructive_changes_detected": True,
-            "blast_radius_notes": ["Drops RDS instance"],
-        }
-        agent = InfrastructureAsCodeAgent(mock)
+        client = _StubClient(
+            {
+                "artifacts": {},
+                "summary": "destructive",
+                "destructive_changes_detected": True,
+                "blast_radius_notes": ["Drops RDS instance"],
+            }
+        )
+        agent = InfrastructureAsCodeAgent(client)
         out = agent.run(IaCAgentInput(task_spec=_base_task_spec()))
         assert out.destructive_changes_detected
         assert len(out.blast_radius_notes) == 1
@@ -545,14 +607,15 @@ class TestCICDPipelineAgent:
     def test_run_returns_artifacts(self) -> None:
         from devops_team.cicd_pipeline_agent import CICDPipelineAgent, CICDPipelineAgentInput
 
-        mock = MagicMock()
-        mock.complete_json.return_value = {
-            "artifacts": {".github/workflows/ci.yml": "on: push"},
-            "pipeline_job_graph_summary": "build -> test -> deploy",
-            "required_gates_present": True,
-            "summary": "pipeline created",
-        }
-        agent = CICDPipelineAgent(mock)
+        client = _StubClient(
+            {
+                "artifacts": {".github/workflows/ci.yml": "on: push"},
+                "pipeline_job_graph_summary": "build -> test -> deploy",
+                "required_gates_present": True,
+                "summary": "pipeline created",
+            }
+        )
+        agent = CICDPipelineAgent(client)
         out = agent.run(CICDPipelineAgentInput(task_spec=_base_task_spec()))
         assert ".github/workflows/ci.yml" in out.artifacts
         assert out.required_gates_present
@@ -565,16 +628,17 @@ class TestDeploymentStrategyAgent:
             DeploymentStrategyAgentInput,
         )
 
-        mock = MagicMock()
-        mock.complete_json.return_value = {
-            "artifacts": {"deploy/values.yaml": "replicas: 2"},
-            "strategy": "rolling",
-            "rollback_plan": ["helm rollback"],
-            "health_checks": ["/healthz"],
-            "rollout_timeout_minutes": 10,
-            "summary": "deployment ok",
-        }
-        agent = DeploymentStrategyAgent(mock)
+        client = _StubClient(
+            {
+                "artifacts": {"deploy/values.yaml": "replicas: 2"},
+                "strategy": "rolling",
+                "rollback_plan": ["helm rollback"],
+                "health_checks": ["/healthz"],
+                "rollout_timeout_minutes": 10,
+                "summary": "deployment ok",
+            }
+        )
+        agent = DeploymentStrategyAgent(client)
         out = agent.run(DeploymentStrategyAgentInput(task_spec=_base_task_spec()))
         assert out.strategy == "rolling"
         assert len(out.rollback_plan) == 1
@@ -585,21 +649,22 @@ class TestDevSecOpsReviewAgent:
     def test_blocks_on_high_severity(self) -> None:
         from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
 
-        mock = MagicMock()
-        mock.complete_json.return_value = {
-            "approved": False,
-            "findings": [
-                {
-                    "finding_id": "F1",
-                    "severity": "high",
-                    "area": "iam",
-                    "issue": "wildcard",
-                    "blocking": True,
-                }
-            ],
-            "summary": "blocked",
-        }
-        agent = DevSecOpsReviewAgent(mock)
+        client = _StubClient(
+            {
+                "approved": False,
+                "findings": [
+                    {
+                        "finding_id": "F1",
+                        "severity": "high",
+                        "area": "iam",
+                        "issue": "wildcard",
+                        "blocking": True,
+                    }
+                ],
+                "summary": "blocked",
+            }
+        )
+        agent = DevSecOpsReviewAgent(client)
         out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
         assert not out.approved
         assert len(out.findings) == 1
@@ -608,9 +673,8 @@ class TestDevSecOpsReviewAgent:
     def test_approves_clean_artifacts(self) -> None:
         from devops_team.devsecops_review_agent import DevSecOpsReviewAgent, DevSecOpsReviewInput
 
-        mock = MagicMock()
-        mock.complete_json.return_value = {"approved": True, "findings": [], "summary": "all good"}
-        agent = DevSecOpsReviewAgent(mock)
+        client = _StubClient({"approved": True, "findings": [], "summary": "all good"})
+        agent = DevSecOpsReviewAgent(client)
         out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
         assert out.approved
 
@@ -622,14 +686,15 @@ class TestDevOpsTestValidationAgent:
             DevOpsTestValidationInput,
         )
 
-        mock = MagicMock()
-        mock.complete_json.return_value = {
-            "approved": True,
-            "quality_gates": {"iac_validate": "pass", "pipeline_lint": "pass"},
-            "acceptance_trace": [],
-            "summary": "ok",
-        }
-        agent = DevOpsTestValidationAgent(mock)
+        client = _StubClient(
+            {
+                "approved": True,
+                "quality_gates": {"iac_validate": "pass", "pipeline_lint": "pass"},
+                "acceptance_trace": [],
+                "summary": "ok",
+            }
+        )
+        agent = DevOpsTestValidationAgent(client)
         out = agent.run(
             DevOpsTestValidationInput(
                 acceptance_criteria=["test"],
@@ -645,13 +710,14 @@ class TestDevOpsTestValidationAgent:
             DevOpsTestValidationInput,
         )
 
-        mock = MagicMock()
-        mock.complete_json.return_value = {
-            "approved": True,
-            "quality_gates": {"iac_validate": "fail"},
-            "summary": "failed",
-        }
-        agent = DevOpsTestValidationAgent(mock)
+        client = _StubClient(
+            {
+                "approved": True,
+                "quality_gates": {"iac_validate": "fail"},
+                "summary": "failed",
+            }
+        )
+        agent = DevOpsTestValidationAgent(client)
         out = agent.run(DevOpsTestValidationInput(acceptance_criteria=[], tool_results={}))
         assert not out.approved
 
@@ -660,24 +726,29 @@ class TestChangeReviewAgent:
     def test_approves(self) -> None:
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
-        mock = MagicMock()
-        mock.complete_json.return_value = {"approved": True, "findings": [], "summary": "ok"}
-        agent = ChangeReviewAgent(mock)
+        client = _StubClient({"approved": True, "findings": [], "summary": "ok"})
+        agent = ChangeReviewAgent(client)
         out = agent.run(ChangeReviewInput(task_description="test", artifacts={}))
         assert out.approved
 
     def test_blocks_on_finding(self) -> None:
         from devops_team.change_review_agent import ChangeReviewAgent, ChangeReviewInput
 
-        mock = MagicMock()
-        mock.complete_json.return_value = {
-            "approved": True,
-            "findings": [
-                {"finding_id": "F1", "severity": "medium", "blocking": True, "issue": "brittle"}
-            ],
-            "summary": "blocked",
-        }
-        agent = ChangeReviewAgent(mock)
+        client = _StubClient(
+            {
+                "approved": True,
+                "findings": [
+                    {
+                        "finding_id": "F1",
+                        "severity": "medium",
+                        "blocking": True,
+                        "issue": "brittle",
+                    }
+                ],
+                "summary": "blocked",
+            }
+        )
+        agent = ChangeReviewAgent(client)
         out = agent.run(ChangeReviewInput(task_description="test", artifacts={}))
         assert not out.approved
 
@@ -689,12 +760,13 @@ class TestDocumentationRunbookAgent:
             DocumentationRunbookInput,
         )
 
-        mock = MagicMock()
-        mock.complete_json.return_value = {
-            "files": {"docs/runbook.md": "# Runbook"},
-            "summary": "done",
-        }
-        agent = DocumentationRunbookAgent(mock)
+        client = _StubClient(
+            {
+                "files": {"docs/runbook.md": "# Runbook"},
+                "summary": "done",
+            }
+        )
+        agent = DocumentationRunbookAgent(client)
         out = agent.run(
             DocumentationRunbookInput(
                 task_id="DO-1",
@@ -714,7 +786,7 @@ class TestDocumentationRunbookAgent:
 
 class TestDevOpsTeamLeadAgentIntegration:
     def test_happy_path_run_workflow(self) -> None:
-        mock_llm = _mock_llm_for_happy_path()
+        mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
@@ -750,7 +822,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert result.completion_package.handoff is not None
 
     def test_happy_path_direct_run(self) -> None:
-        mock_llm = _mock_llm_for_happy_path()
+        mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec()
         pkg = agent.run(spec)
@@ -758,6 +830,37 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert pkg.status == "completed"
         assert len(pkg.acceptance_criteria_trace) == 2
         assert pkg.release_readiness.deployment_strategy == "rolling"
+
+    def test_multiple_sequential_runs_on_same_lead_agent(self) -> None:
+        """Regression guard for the fresh-Strands-Agent-per-call fix.
+
+        A single ``DevOpsTeamLeadAgent`` instance constructs all 10 DevOps
+        sub-agents in ``__init__`` and reuses them across pipeline runs.
+        An earlier migration bug cached the Strands ``Agent`` instance on
+        each sub-agent and reused it across calls, which broke
+        ``structured_output_model`` forced-tool-choice on the second call.
+        This test runs the full pipeline twice on the same lead-agent
+        instance — the second run exercises every cached sub-agent for a
+        second time, which is exactly the failure mode that bug caused."""
+        import itertools
+
+        # Chain two happy-path scripts together so one client can serve
+        # both pipeline runs without having to be swapped mid-run.
+        chained = _ScriptedClient(
+            list(
+                itertools.chain.from_iterable(
+                    [
+                        [r for r in _scripted_llm_for_happy_path()._responses],
+                        [r for r in _scripted_llm_for_happy_path()._responses],
+                    ]
+                )
+            )
+        )
+        agent = DevOpsTeamLeadAgent(chained)
+        for i in range(2):
+            pkg = agent.run(_base_task_spec())
+            assert pkg.status == "completed", f"iter {i}: {pkg.status}"
+            assert pkg.task_id == "DO-2207"
 
     def test_blocked_by_clarifier(self) -> None:
         mock_llm = MagicMock()
@@ -781,22 +884,33 @@ class TestDevOpsTeamLeadAgentIntegration:
             agent.run(spec)
 
     def test_blocked_by_security_review(self) -> None:
-        mock_llm = MagicMock()
-        mock_llm.complete_json.side_effect = [
-            {"approved_for_execution": True},
-            {"artifacts": {}, "summary": "iac"},
-            {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
-            {"artifacts": {}, "summary": "deploy", "strategy": "rolling", "rollback_plan": ["rb"]},
-            {
-                "approved": False,
-                "findings": [
-                    {"finding_id": "F1", "severity": "high", "blocking": True, "issue": "bad iam"}
-                ],
-                "summary": "blocked",
-            },
-            {"approved": True, "findings": [], "summary": "ok"},
-            {"approved": True, "quality_gates": {"iac_validate": "pass"}, "summary": "ok"},
-        ]
+        mock_llm = _ScriptedClient(
+            [
+                {"approved_for_execution": True},
+                {"artifacts": {}, "summary": "iac"},
+                {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
+                {
+                    "artifacts": {},
+                    "summary": "deploy",
+                    "strategy": "rolling",
+                    "rollback_plan": ["rb"],
+                },
+                {
+                    "approved": False,
+                    "findings": [
+                        {
+                            "finding_id": "F1",
+                            "severity": "high",
+                            "blocking": True,
+                            "issue": "bad iam",
+                        }
+                    ],
+                    "summary": "blocked",
+                },
+                {"approved": True, "findings": [], "summary": "ok"},
+                {"approved": True, "quality_gates": {"iac_validate": "pass"}, "summary": "ok"},
+            ]
+        )
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
             result = agent.run_workflow(
@@ -811,7 +925,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert result.completion_package.status == "blocked"
 
     def test_completion_package_has_acceptance_trace(self) -> None:
-        mock_llm = _mock_llm_for_happy_path()
+        mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec()
         pkg = agent.run(spec)
@@ -821,7 +935,7 @@ class TestDevOpsTeamLeadAgentIntegration:
             assert len(trace.implementation_refs) > 0
 
     def test_completion_package_has_release_readiness(self) -> None:
-        mock_llm = _mock_llm_for_happy_path()
+        mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec()
         pkg = agent.run(spec)
@@ -829,7 +943,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert "manual_prod_approval" in pkg.release_readiness.required_approvals
 
     def test_completion_package_has_git_operations(self) -> None:
-        mock_llm = _mock_llm_for_happy_path()
+        mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec()
         pkg = agent.run(spec)
@@ -839,14 +953,14 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert pkg.git_operations.merge.target_branch == "development"
 
     def test_completion_package_files_changed(self) -> None:
-        mock_llm = _mock_llm_for_happy_path()
+        mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec()
         pkg = agent.run(spec)
         assert len(pkg.files_changed) > 0
 
     def test_quality_gates_in_completion(self) -> None:
-        mock_llm = _mock_llm_for_happy_path()
+        mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec()
         pkg = agent.run(spec)
@@ -854,7 +968,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert "change_review" in pkg.quality_gates
 
     def test_build_verifier_failure(self) -> None:
-        mock_llm = _mock_llm_for_happy_path()
+        mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
             subprocess.run(["git", "init"], cwd=tmp, capture_output=True, check=False)
@@ -893,7 +1007,7 @@ class TestDevOpsTeamLeadAgentIntegration:
 
 class TestBackwardCompatibility:
     def test_run_workflow_accepts_legacy_args(self) -> None:
-        mock_llm = _mock_llm_for_happy_path()
+        mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
             subprocess.run(["git", "init"], cwd=tmp, capture_output=True, check=False)

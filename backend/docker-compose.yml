@@ -6,8 +6,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: strands-unified-api
-    container_name: strands-unified-api
+    image: khala-unified-api
+    container_name: khala-unified-api
     ports:
       - "8080:8080"
     environment:
@@ -29,8 +29,8 @@ services:
     build:
       context: ../user-interface
       dockerfile: Dockerfile
-    image: strands-ui
-    container_name: strands-ui
+    image: khala-ui
+    container_name: khala-ui
     ports:
       - "4200:80"
     depends_on:

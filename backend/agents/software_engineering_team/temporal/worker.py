@@ -23,7 +23,6 @@ from software_engineering_team.temporal.activities import (
     run_backend_code_v2_activity,
     run_frontend_code_v2_activity,
     run_orchestrator_activity,
-    run_planning_v2_activity,
     run_product_analysis_activity,
 )
 from software_engineering_team.temporal.client import (
@@ -73,7 +72,6 @@ def create_se_worker(client: Optional[object] = None) -> Optional[Worker]:
             retry_failed_activity,
             run_frontend_code_v2_activity,
             run_backend_code_v2_activity,
-            run_planning_v2_activity,
             run_product_analysis_activity,
         ],
         activity_executor=_activity_executor,

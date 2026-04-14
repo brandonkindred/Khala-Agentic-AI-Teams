@@ -3,21 +3,33 @@ Adapter: maps Planning V3 handoff package to inputs expected by Tech Lead and Ar
 
 Used by the software engineering orchestrator after planning_v3_team.orchestrator.run_workflow()
 to produce ProductRequirements, project_overview dict, and optional open_questions/assumptions.
-Output type is PlanningV2AdapterResult so the rest of the pipeline (Tech Lead, Architecture)
-remains unchanged.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from planning_v2_adapter import PlanningV2AdapterResult
-
-from software_engineering_team.shared.models import ProductRequirements
+from software_engineering_team.shared.models import PlanningHierarchy, ProductRequirements
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PlanningV2AdapterResult:
+    """Result of adapting a planning workflow for Tech Lead and Architecture."""
+
+    requirements: ProductRequirements
+    project_overview: Dict[str, Any]
+    open_questions: List[str]
+    assumptions: List[str]
+    hierarchy: Optional[PlanningHierarchy] = field(default=None)
+    final_spec_content: Optional[str] = field(default=None)
+    architecture_overview: Optional[str] = field(default=None)
+    shared_planning_doc_path: Optional[str] = field(default=None)
+
 
 __all__ = ["adapt_planning_v3_result", "PlanningV2AdapterResult"]
 

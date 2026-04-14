@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 TEAM_POSTGRES_MODULES: dict[str, str] = {
     # unified_api owns the shared encrypted credentials table.
     "unified_api": "unified_api.postgres",
-    # job_service owns the ``jobs`` table in the ``strands_jobs`` DB.
+    # job_service owns the ``jobs`` table in the ``khala_jobs`` DB.
     "job_service": "job_service.postgres",
     # Teams with persistence being moved to Postgres.
     "branding": "branding_team.postgres",

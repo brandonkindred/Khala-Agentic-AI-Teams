@@ -1,4 +1,4 @@
-# Slack App Manifest for Strands Assistant
+# Slack App Manifest for Khala Assistant
 # ==========================================
 #
 # How to use:
@@ -6,14 +6,14 @@
 #   2. Click "Create New App" → "From a manifest"
 #   3. Select your workspace
 #   4. Choose YAML tab and paste this file's contents
-#   5. Replace {YOUR_DOMAIN} with your actual public domain (e.g. strands.example.com)
+#   5. Replace {YOUR_DOMAIN} with your actual public domain (e.g. khala.example.com)
 #   6. Click "Create"
 #
 # After creating:
 #   1. Go to "Basic Information" → copy the **Signing Secret**
 #   2. Go to "OAuth & Permissions" → "Install to Workspace" → authorize
 #   3. Copy the **Bot User OAuth Token** (xoxb-...)
-#   4. Save both in Strands:
+#   4. Save both in Khala:
 #      PUT /api/integrations/slack
 #      {
 #        "enabled": true,
@@ -33,14 +33,14 @@
 # The app will then respond to:
 #   - DMs (message the bot directly)
 #   - @mentions (mention the bot in any channel it's in)
-#   - /strands slash command (team switching, help, messages)
+#   - /khala slash command (team switching, help, messages)
 
 display_information:
-  name: Strands Assistant
+  name: Khala Assistant
   description: AI-powered multi-team assistant — chat with any specialist team (SE, blogging, market research, and more)
   background_color: "#1a1a2e"
   long_description: |
-    Strands Assistant connects your Slack workspace to the Strands Agents platform,
+    Khala Assistant connects your Slack workspace to the Khala platform,
     giving you access to 13+ specialist AI team assistants directly from Slack.
 
     Available teams:
@@ -58,16 +58,16 @@ display_information:
     • Agent Provisioning — set up agent environments
     • Sales Team — full B2B sales pod
 
-    Switch teams anytime with /strands team <name> or just DM the bot.
+    Switch teams anytime with /khala team <name> or just DM the bot.
 
 features:
   bot_user:
-    display_name: Strands Assistant
+    display_name: Khala Assistant
     always_online: true
   slash_commands:
-    - command: /strands
+    - command: /khala
       url: https://{YOUR_DOMAIN}/api/integrations/slack/commands
-      description: Interact with Strands agent teams
+      description: Interact with Khala agent teams
       usage_hint: "[message] or team [name] or help or reset or status"
       should_escape: false
 

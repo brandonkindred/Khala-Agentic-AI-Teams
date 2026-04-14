@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import logging
 
-from llm_service import LLMClient
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import (
     ToolAgentInput,
@@ -39,8 +41,10 @@ produce the required files (auth modules, middleware, permission models, etc.).
 class AuthToolAgent:
     """Produces authentication and authorization code and configurations."""
 
-    def __init__(self, llm: LLMClient) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+
+        self._model = llm if (llm is not None and isinstance(llm, _StrandsModel)) else get_strands_model()
 
     def run(self, inp: ToolAgentInput) -> ToolAgentOutput:
         return self.execute(inp)
@@ -52,7 +56,7 @@ class AuthToolAgent:
             existing_code=inp.existing_code[:4000] if inp.existing_code else "(none)",
         )
         logger.info("Auth: running for microtask %s", inp.microtask.id)
-        raw = self.llm.complete_text(prompt, think=True)
+        raw = (lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip()
         data = parse_files_and_summary_template(raw)
         return ToolAgentOutput(
             files=data.get("files") or {},

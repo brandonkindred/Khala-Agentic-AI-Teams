@@ -2,13 +2,23 @@
 Dummy LLM client for tests and environments without an LLM.
 
 Returns heuristic stub responses matching SE team prompts so existing tests keep passing.
+Also implements the ``strands.models.model.Model`` ABC so it can be passed directly to
+``strands.Agent(model=DummyLLMClient())`` in tests without requiring a live Ollama server.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+from collections.abc import AsyncIterable
 from typing import Any, Dict, Optional
+
+from strands.models.model import Model
+from strands.types.content import Message as StrandsMessage
+from strands.types.content import SystemContentBlock
+from strands.types.streaming import StreamEvent
+from strands.types.tools import ToolChoice, ToolSpec
 
 from ..interface import LLMClient
 
@@ -111,13 +121,114 @@ def _extract_name_from_hint(hint: str, separator: str = "-", max_length: int = 2
     return result or f"item{separator}1"
 
 
-class DummyLLMClient(LLMClient):
-    """No-op implementation for tests and environments without an LLM."""
+class DummyLLMClient(LLMClient, Model):
+    """No-op implementation for tests and environments without an LLM.
+
+    Also implements the Strands ``Model`` ABC so tests can pass this directly
+    to ``strands.Agent(model=DummyLLMClient())``.
+    """
 
     _call_counter: int = 0
 
     def __init__(self) -> None:
         self._request_count = 0
+        self._model_config: dict[str, Any] = {}
+
+    # -----------------------------------------------------------------------
+    # strands.models.model.Model ABC implementation
+    # -----------------------------------------------------------------------
+
+    def update_config(self, **model_config: Any) -> None:
+        self._model_config.update(model_config)
+
+    def get_config(self) -> dict[str, Any]:
+        return dict(self._model_config)
+
+    def structured_output(
+        self,
+        output_model: type,
+        prompt: list,
+        system_prompt: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        raise NotImplementedError("DummyLLMClient.structured_output is not implemented for tests")
+
+    async def stream(
+        self,
+        messages: list[StrandsMessage],
+        tool_specs: list[ToolSpec] | None = None,
+        system_prompt: str | None = None,
+        *,
+        tool_choice: ToolChoice | None = None,
+        system_prompt_content: list[SystemContentBlock] | None = None,
+        invocation_state: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterable[StreamEvent]:
+        """Yield a minimal stream that the Strands Agent event loop can process.
+
+        When ``tool_specs`` contains a StructuredOutputTool (added by Strands
+        when ``structured_output_model=...`` is used), yields a tool-use event
+        invoking that tool with data from the ``complete_json`` pattern matcher.
+        Otherwise yields a plain text response.
+        """
+        # Extract user text from the last user message
+        user_text = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                for block in msg.get("content", []):
+                    if isinstance(block, dict) and "text" in block:
+                        user_text = block["text"]
+                        break
+                    elif isinstance(block, str):
+                        user_text = block
+                        break
+                break
+
+        # Route through the existing complete_json pattern matcher for rich responses
+        response_data = self.complete_json(user_text, system_prompt=system_prompt)
+        response_text = json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
+
+        # Check if Strands is requesting structured output via a tool
+        structured_tool_name = None
+        if tool_specs:
+            for spec in tool_specs:
+                desc = (spec.get("description") or "").lower()
+                if "structuredoutputtool" in desc or "structured_output" in desc:
+                    structured_tool_name = spec.get("name", "structured_output")
+                    break
+
+        yield {"messageStart": {"role": "assistant"}}
+
+        if structured_tool_name:
+            # Yield a tool-use block so Strands' structured output flow works
+            tool_use_id = f"dummy_tool_{structured_tool_name}"
+            yield {
+                "contentBlockStart": {
+                    "contentBlockIndex": 0,
+                    "start": {
+                        "toolUse": {"toolUseId": tool_use_id, "name": structured_tool_name},
+                    },
+                },
+            }
+            yield {
+                "contentBlockDelta": {
+                    "contentBlockIndex": 0,
+                    "delta": {"toolUse": {"input": response_text}},
+                },
+            }
+            yield {"contentBlockStop": {"contentBlockIndex": 0}}
+        else:
+            yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
+            yield {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": response_text}}}
+            yield {"contentBlockStop": {"contentBlockIndex": 0}}
+
+        yield {
+            "messageStop": {"stopReason": "tool_use" if structured_tool_name else "end_turn"},
+            "metadata": {
+                "usage": {"inputTokens": len(user_text) // 4, "outputTokens": len(response_text) // 4, "totalTokens": (len(user_text) + len(response_text)) // 4},
+                "metrics": {"latencyMs": 1},
+            },
+        }
 
     @property
     def request_count(self) -> int:
@@ -157,6 +268,14 @@ class DummyLLMClient(LLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        # Pattern-match against the user prompt only. Callers (including
+        # Strands-migrated agents that hand their persona to the Strands
+        # ``Agent`` as a system prompt) must include the anchor tokens the
+        # branches below look for in the user prompt they build. Scanning
+        # ``system_prompt`` here was tried and reverted in commit <<CI fix>>
+        # because loose single-word branches (``"pipeline"``, ``"security"``)
+        # cross-contaminated other teams' prompts that happened to mention
+        # those words in their persona text.
         lowered = prompt.lower()
         DummyLLMClient._call_counter += 1
         self._request_count += 1
@@ -332,7 +451,18 @@ class DummyLLMClient(LLMClient):
                     "Criterion 3: Error states display meaningful messages",
                 ],
             }
-        elif ("execution_order" in lowered or "task_assignments" in lowered) and "tasks" in lowered:
+        elif (
+            ("execution_order" in lowered or "task_assignments" in lowered)
+            and "tasks" in lowered
+        ) or (
+            # Strands-migrated Tech Lead: user prompt has product context
+            # while execution_order / initiative → epic → story keywords
+            # live in the system prompt.
+            system_prompt
+            and "execution_order" in system_prompt.lower()
+            and "initiative" in system_prompt.lower()
+            and "**product title:**" in lowered
+        ):
             return {
                 "tasks": [
                     {
@@ -364,12 +494,44 @@ class DummyLLMClient(LLMClient):
                 "requirement_task_mapping": [],
                 "clarification_questions": [],
             }
+        elif "bugs_found" in lowered and (
+            "integration_test" in lowered or "readme_content" in lowered or "test_plan" in lowered
+        ):
+            # Kept ABOVE code-review catch-all and security/accessibility
+            # branches because QA prompts now include a shared
+            # REVIEW_PRIORITY_FRAMEWORK that mentions "security
+            # vulnerabilities", and QA user prompts also contain
+            # "code to review" which would match the code-review catch-all.
+            # ``bugs_found`` is the anchor token — it's unique to the QA
+            # output contract.
+            return {
+                "bugs_found": [],
+                "integration_tests": "# Dummy integration test",
+                "unit_tests": "# Dummy unit tests",
+                "test_plan": "Dummy test plan",
+                "summary": "Dummy QA assessment",
+                "live_test_notes": "Dummy notes",
+                "readme_content": "# Dummy README",
+                "suggested_commit_message": "test: add integration tests",
+                "approved": True,
+            }
         elif "senior code reviewer" in lowered and ("approved" in lowered or "issues" in lowered):
             return {
                 "approved": True,
                 "issues": [],
                 "summary": "Code review passed (dummy).",
                 "spec_compliance_notes": "Code aligns with task requirements.",
+                "suggested_commit_message": "",
+            }
+        elif ("code to review" in lowered or "review this code" in lowered or "chunk" in lowered) and (
+            "approved" not in lowered or len(lowered) > 200
+        ):
+            # Catch-all for code review / chunk review prompts routed through Strands
+            return {
+                "approved": True,
+                "issues": [],
+                "summary": "Code review passed (dummy).",
+                "spec_compliance_notes": "",
                 "suggested_commit_message": "",
             }
         elif "security" in lowered and "vulnerabilities" in lowered:
@@ -453,22 +615,6 @@ class DummyLLMClient(LLMClient):
                 "already_compliant": True,
                 "summary": "All code fully complies with Design by Contract.",
                 "suggested_commit_message": "docs(dbc): verify Design by Contract compliance",
-            }
-        elif (
-            "integration_test" in lowered
-            or "readme_content" in lowered
-            or ("bugs_found" in lowered and "test_plan" in lowered)
-        ):
-            return {
-                "bugs_found": [],
-                "integration_tests": "# Dummy integration test",
-                "unit_tests": "# Dummy unit tests",
-                "test_plan": "Dummy test plan",
-                "summary": "Dummy QA assessment",
-                "live_test_notes": "Dummy notes",
-                "readme_content": "# Dummy README",
-                "suggested_commit_message": "test: add integration tests",
-                "approved": True,
             }
         elif "acceptance_criteria" in lowered and "specification" in lowered:
             return {
@@ -618,10 +764,73 @@ class DummyLLMClient(LLMClient):
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Support tool-loop tests: first round issues a no-op git_status call, then structured JSON."""
+        """Support tool-loop tests and Strands structured-output flows.
+
+        Behavior, in order of precedence:
+
+        1. **Strands structured output**: when ``tools`` contains a tool whose
+           description marks it as a ``StructuredOutputTool`` (the sentinel
+           Strands' ``Agent`` adds when ``structured_output_model=...`` is
+           used), return a single tool call invoking that tool with the dict
+           produced by the normal ``complete_json`` pattern matcher. This
+           lets Strands-migrated agents run end-to-end against the dummy
+           client without changes.
+
+        2. **Legacy tool loop** (first round, ``tools`` provided): emit a
+           no-op ``git_status`` tool call. Test suites for
+           ``complete_json_with_tool_loop`` register a ``git_status`` handler
+           and expect this handoff.
+
+        3. **Follow-up rounds or no tools**: fall through to
+           ``complete_json`` using the flattened user + system prompts.
+        """
         self._request_count += 1
+        system_prompt = None
+        user_prompt = ""
+        for m in messages:
+            if m.get("role") == "system":
+                system_prompt = m.get("content")
+            elif m.get("role") == "user":
+                user_prompt = m.get("content") or ""
+
         has_tool_result = any(m.get("role") == "tool" for m in messages)
+
         if tools and not has_tool_result:
+            structured_tool = None
+            for t in tools:
+                fn = (t or {}).get("function") or {}
+                desc = (fn.get("description") or "").lower()
+                if "structuredoutputtool" in desc:
+                    structured_tool = fn
+                    break
+
+            if structured_tool is not None:
+                # Produce stub data via the pattern matcher and invoke the
+                # structured output tool with it. Strands will validate the
+                # arguments against the Pydantic schema attached to the tool.
+                data = self.complete_json(
+                    user_prompt,
+                    temperature=temperature,
+                    system_prompt=system_prompt,
+                    tools=None,
+                    think=think,
+                    **kwargs,
+                )
+                return {
+                    "__tool_calls__": [
+                        {
+                            "id": f"dummy_{structured_tool.get('name', 'structured')}",
+                            "type": "function",
+                            "function": {
+                                "name": structured_tool.get("name", "structured_output"),
+                                "arguments": data,
+                            },
+                        }
+                    ]
+                }
+
+            # Legacy path — tests that drive ``complete_json_with_tool_loop``
+            # rely on this first-round git_status handoff.
             return {
                 "__tool_calls__": [
                     {
@@ -631,13 +840,7 @@ class DummyLLMClient(LLMClient):
                     }
                 ]
             }
-        system_prompt = None
-        user_prompt = ""
-        for m in messages:
-            if m.get("role") == "system":
-                system_prompt = m.get("content")
-            elif m.get("role") == "user":
-                user_prompt = m.get("content") or ""
+
         return self.complete_json(
             user_prompt,
             temperature=temperature,

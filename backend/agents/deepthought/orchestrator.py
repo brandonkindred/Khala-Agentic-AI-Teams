@@ -41,9 +41,14 @@ class DeepthoughtOrchestrator:
         if llm is not None:
             self._llm = llm
         else:
-            from llm_service import get_client
+            from strands import Agent
 
-            self._llm = get_client("deepthought")
+            from llm_service import get_strands_model
+
+            self._llm = Agent(
+                model=get_strands_model("deepthought"),
+                system_prompt=CLASSIFY_QUESTION_SYSTEM_PROMPT,
+            )
 
         self._agent_budget = agent_budget
         self._result_cache = result_cache if result_cache is not None else _global_result_cache

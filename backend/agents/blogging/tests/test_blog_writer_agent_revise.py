@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from typing import Any
 
 from blog_copy_editor_agent.models import FeedbackItem
 from blog_writer_agent import BlogWriterAgent, ReviseWriterInput
-from blog_writer_agent.prompts import WRITING_SYSTEM_PROMPT
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,
     TitleCandidate,
 )
+
+from llm_service import DummyLLMClient
 
 
 def _minimal_plan() -> ContentPlan:
@@ -31,19 +32,38 @@ def _minimal_plan() -> ContentPlan:
     )
 
 
+class _ReviseTrackingLLM(DummyLLMClient):
+    """A DummyLLMClient subclass that tracks calls and returns canned responses for the revise flow.
+
+    The first call (revision plan) returns a structured JSON plan.
+    Subsequent calls (apply revision) return a hybrid draft format.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._call_index = 0
+        self.captured_prompts: list[str] = []
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict:
+        self._request_count += 1
+        self._call_index += 1
+        self.captured_prompts.append(prompt)
+        if self._call_index == 1:
+            # First call: revision plan
+            return {
+                "summary": "Fix opening hook and tighten section two.",
+                "changes": [
+                    {"section": "intro", "feedback_ids": [1], "action": "rewrite", "rationale": "Weak opening."},
+                    {"section": "section two", "feedback_ids": [2], "action": "rephrase", "rationale": "Drags."},
+                ],
+                "risks": [],
+            }
+        # Subsequent calls: return draft
+        return {"draft": "# Revised title\n\nBody here."}
+
+
 def test_revise_generates_plan_then_applies_all_feedback() -> None:
-    llm = MagicMock()
-    # complete_json is called first to generate the structured revision plan
-    llm.complete_json.return_value = {
-        "summary": "Fix opening hook and tighten section two.",
-        "changes": [
-            {"section": "intro", "feedback_ids": [1], "action": "rewrite", "rationale": "Weak opening."},
-            {"section": "section two", "feedback_ids": [2], "action": "rephrase", "rationale": "Drags."},
-        ],
-        "risks": [],
-    }
-    # complete is called to apply the revision plan
-    llm.complete.return_value = '{"draft": 0}\n---DRAFT---\n# Revised title\n\nBody here.\n'
+    llm = _ReviseTrackingLLM()
     agent = BlogWriterAgent(
         llm_client=llm,
         writing_style_guide_content="Use short paragraphs.",
@@ -71,26 +91,19 @@ def test_revise_generates_plan_then_applies_all_feedback() -> None:
     )
     out = agent.revise(inp)
 
-    # One complete_json call for the revision plan, one complete call to apply it
-    assert llm.complete_json.call_count == 1
-    assert llm.complete.call_count == 1
+    # At least 2 calls: one for the revision plan, one to apply it
+    assert len(llm.captured_prompts) >= 2
 
-    # Plan call includes all feedback items
-    plan_prompt = llm.complete_json.call_args_list[0][0][0]
+    # First call (plan) includes all feedback items
+    plan_prompt = llm.captured_prompts[0]
     assert "Opening is weak." in plan_prompt
     assert "Section two drags." in plan_prompt
 
-    # Apply call includes both the revision plan and the feedback
-    apply_prompt = llm.complete.call_args_list[0][0][0]
+    # Second call (apply) includes both the revision plan and the feedback
+    apply_prompt = llm.captured_prompts[1]
     assert "REVISION PLAN (execute this plan before writing):" in apply_prompt
     assert "COPY EDITOR FEEDBACK (apply every numbered item below):" in apply_prompt
     assert "Section two drags." in apply_prompt
-
-    # Plan call uses low temperature; apply call uses slightly higher
-    assert llm.complete_json.call_args_list[0].kwargs.get("system_prompt") == WRITING_SYSTEM_PROMPT
-    assert llm.complete_json.call_args_list[0].kwargs.get("temperature") == 0.1
-    assert llm.complete.call_args_list[0].kwargs.get("system_prompt") == WRITING_SYSTEM_PROMPT
-    assert llm.complete.call_args_list[0].kwargs.get("temperature") == 0.2
 
     assert "# Revised title" in out.draft
     assert "Body here." in out.draft

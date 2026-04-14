@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from llm_service import LLMClient
+from strands import Agent
+
+from llm_service import get_strands_model
 from software_engineering_team.shared.git_utils import (
     DEVELOPMENT_BRANCH,
     checkout_branch,
@@ -58,18 +61,18 @@ class DocumentationAgent:
         - Git branches are always cleaned up, even on failure
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
+    def __init__(self, llm_client=None) -> None:
         """
         Initialize the Documentation agent.
 
-        Preconditions:
-            - llm_client is not None
-
         Postconditions:
-            - self.llm is set to the provided client
+            - self._model is set to a Strands model
         """
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+        from strands.models.model import Model as _StrandsModel
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
+            self._model = llm_client
+        else:
+            self._model = get_strands_model("documentation")
 
     def run(self, input_data: DocumentationInput) -> DocumentationOutput:
         """
@@ -215,8 +218,11 @@ class DocumentationAgent:
             readme_prompt = DOCUMENTATION_README_PROMPT
             if getattr(input_data, "is_final_review", False):
                 readme_prompt = readme_prompt + DOCUMENTATION_FINAL_REVIEW_SUFFIX
-            prompt = readme_prompt + "\n\n---\n\n" + "\n".join(readme_context)
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            prompt = "\n".join(readme_context)
+            agent = Agent(model=self._model, system_prompt=readme_prompt)
+            result = agent(prompt)
+            raw = str(result).strip()
+            data = json.loads(raw)
 
             readme_content = data.get("readme_content", "")
             readme_changed = bool(data.get("readme_changed", False))
@@ -296,8 +302,11 @@ class DocumentationAgent:
             contrib_prompt = DOCUMENTATION_CONTRIBUTORS_PROMPT
             if getattr(input_data, "is_final_review", False):
                 contrib_prompt = contrib_prompt + DOCUMENTATION_CONTRIBUTORS_FINAL_REVIEW_SUFFIX
-            prompt = contrib_prompt + "\n\n---\n\n" + "\n".join(contrib_context)
-            data = self.llm.complete_json(prompt, temperature=0.2)
+            prompt = "\n".join(contrib_context)
+            agent = Agent(model=self._model, system_prompt=contrib_prompt)
+            result = agent(prompt)
+            raw = str(result).strip()
+            data = json.loads(raw)
 
             contributors_content = data.get("contributors_content", "")
             contributors_changed = bool(data.get("contributors_changed", False))

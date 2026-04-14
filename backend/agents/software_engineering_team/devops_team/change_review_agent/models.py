@@ -14,6 +14,9 @@ class ChangeReviewInput(BaseModel):
 
 
 class ChangeReviewOutput(BaseModel):
-    approved: bool = False
+    # Default True matches the legacy ``data.get("approved", not blocking)``
+    # semantics: absent the LLM explicitly flagging approved=False, the
+    # agent's post-processing re-derives approval from blocking findings.
+    approved: bool = True
     findings: List[ReviewFinding] = Field(default_factory=list)
     summary: str = ""

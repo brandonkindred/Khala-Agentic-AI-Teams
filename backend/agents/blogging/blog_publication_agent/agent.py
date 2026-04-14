@@ -15,14 +15,17 @@ if TYPE_CHECKING:
     from blog_copy_editor_agent import BlogCopyEditorAgent
     from blog_writer_agent import BlogWriterAgent
 
+import json
+import re
+from typing import Any as _Any
+
 from shared.content_plan import (
     ContentPlan,
     ContentPlanSection,
     RequirementsAnalysis,
     TitleCandidate,
 )
-
-from llm_service import LLMClient
+from strands import Agent
 
 from .models import (
     ApprovalResult,
@@ -75,7 +78,7 @@ class BlogPublicationAgent:
 
     def __init__(
         self,
-        llm_client: LLMClient,
+        llm_client: _Any,
         *,
         blog_posts_root: Optional[str | Path] = None,
         max_revision_loops: int = 500,
@@ -88,7 +91,7 @@ class BlogPublicationAgent:
         assert llm_client is not None, "llm_client is required"
         assert max_revision_loops >= 1, "max_revision_loops must be >= 1"
 
-        self.llm = llm_client
+        self._model = llm_client
         self.blog_posts_root = Path(blog_posts_root or self._default_blog_posts_root())
         self.pending_dir = self.blog_posts_root / "pending"
         self.max_revision_loops = max_revision_loops
@@ -233,7 +236,12 @@ class BlogPublicationAgent:
             latest_feedback=latest_feedback,
         )
 
-        data = self.llm.complete_json(prompt, temperature=0.2)
+        agent = Agent(model=self._model, system_prompt="You help analyze rejection feedback for blog posts.")
+        result = agent(prompt + "\n\nRespond with valid JSON only, no markdown fences.")
+        raw = str(result).strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        data = json.loads(raw)
 
         ready_to_revise = bool(data.get("ready_to_revise", False))
         questions = data.get("questions") or []
@@ -280,10 +288,15 @@ class BlogPublicationAgent:
 
         human_feedback_text = "\n".join(f"- {f}" for f in meta.rejection_feedback)
 
-        data = self.llm.complete_json(
-            CONVERT_FEEDBACK_TO_EDITOR_PROMPT.format(feedback=human_feedback_text),
-            temperature=0.2,
+        convert_agent = Agent(model=self._model, system_prompt="You convert rejection feedback into structured editor feedback.")
+        convert_result = convert_agent(
+            CONVERT_FEEDBACK_TO_EDITOR_PROMPT.format(feedback=human_feedback_text)
+            + "\n\nRespond with valid JSON only, no markdown fences."
         )
+        convert_raw = str(convert_result).strip()
+        convert_raw = re.sub(r"^```(?:json)?\s*", "", convert_raw)
+        convert_raw = re.sub(r"\s*```$", "", convert_raw)
+        data = json.loads(convert_raw)
 
         feedback_data = data.get("feedback_items") or []
         human_feedback_items: list[FeedbackItem] = []

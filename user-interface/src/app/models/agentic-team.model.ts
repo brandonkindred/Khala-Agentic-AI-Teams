@@ -71,6 +71,7 @@ export interface AgenticTeam {
   team_id: string;
   name: string;
   description: string;
+  mode?: TeamMode;
   agents: AgenticTeamAgent[];
   processes: ProcessDefinition[];
   created_at: string;
@@ -166,4 +167,67 @@ export interface AgentEnvProvisionSummary {
   error_message?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// Interactive Testing Mode
+// ---------------------------------------------------------------------------
+
+export type TeamMode = 'development' | 'testing';
+export type MessageRating = 'thumbs_up' | 'thumbs_down';
+export type PipelineRunStatus = 'running' | 'waiting_for_input' | 'completed' | 'failed' | 'cancelled';
+
+export interface TestChatSession {
+  session_id: string;
+  team_id: string;
+  agent_name: string;
+  session_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TestChatMessage {
+  message_id: string;
+  session_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  rating: MessageRating | null;
+  created_at: string;
+}
+
+export interface TestChatSessionDetail {
+  session: TestChatSession;
+  messages: TestChatMessage[];
+  suggested_prompts: string[];
+}
+
+export interface AgentQualityScore {
+  agent_name: string;
+  total_rated: number;
+  thumbs_up: number;
+  thumbs_down: number;
+  score_pct: number;
+}
+
+export interface PipelineStepResult {
+  step_id: string;
+  step_name: string;
+  agent_name: string;
+  input: string;
+  output: string;
+  status: string;
+}
+
+export interface TestPipelineRun {
+  run_id: string;
+  team_id: string;
+  process_id: string;
+  status: PipelineRunStatus;
+  current_step_id: string | null;
+  initial_input: string | null;
+  step_results: PipelineStepResult[];
+  human_prompt: string | null;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
 }

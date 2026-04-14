@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import json as _json
 import logging
 import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from llm_service import LLMClient
+from strands import Agent
+
+from llm_service import get_client, get_strands_model
 from software_engineering_team.shared.context_sizing import (
     compute_existing_code_chars,
     compute_spec_content_chars,
@@ -585,9 +588,14 @@ class BackendExpertAgent:
         - ``run()`` never modifies the repository; ``run_workflow()`` does.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
+            self._model = llm_client
+        else:
+            self._model = get_strands_model("backend")
+        # Keep LLMClient for context_sizing / compact_text utilities
+        self.llm = llm_client if llm_client is not None else get_client("backend")
 
     def _plan_task(
         self,
@@ -638,7 +646,7 @@ class BackendExpertAgent:
         prompt = BACKEND_PLANNING_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
         log_llm_prompt(logger, "Backend", "planning", (task.description or "")[:80], prompt)
         try:
-            data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+            data = _json.loads((lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip())
             plan = TaskPlan.from_llm_json(data)
             return (plan.to_markdown(), False)
         except Exception as e:
@@ -2886,7 +2894,7 @@ class BackendExpertAgent:
         code = ""
         tests = ""
         for attempt in range(4):
-            data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+            data = _json.loads((lambda _r: str(_r))(Agent(model=self._model)(prompt)).strip())
             code = data.get("code", "")
             if code and "\\n" in code:
                 code = code.replace("\\n", "\n")

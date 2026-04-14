@@ -388,6 +388,6 @@ from shared.sla_best_practices import (
 4. **Logging**: Use the shared logging configuration for consistent output
 5. **Git operations**: Always use `git_utils` for repository operations to ensure consistency
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../../README.md) monorepo (Unified API, Angular UI, and full team index).

@@ -30,7 +30,7 @@ This team defines and operationalizes an enterprise brand system through a coord
 
 - **One client, many brands.** Each client has an `id` and `name`; each brand belongs to one client and has a mission (company name, description, target audience, etc.), status (`draft` | `active` | `evolving` | `archived`), and versioned run history.
 - **Lifecycle:** Create a client → create one or more brands (with mission) → **run** the orchestrator for a brand (output is stored as a new version) → **evolve** by updating the brand’s mission or status and re-running. The team can also **request market research** or **request design assets** for a brand; results are returned (and optionally attached to the brand context).
-- **Persistence:** Clients and brands are stored in an in-memory store (thread-safe). Restarting the API clears the store; the design allows swapping to SQLite/Postgres later without changing the API surface.
+- **Persistence:** Clients, brands, and conversations are stored in the shared Khala Postgres instance via ``shared_postgres`` (no SQLite fallback). Tables: ``branding_clients``, ``branding_brands``, ``branding_sessions``, ``branding_conversations``, ``branding_conv_messages``.
 
 ## Agent setup and flow
 
@@ -269,7 +269,7 @@ curl -X POST http://localhost:8012/branding/clients/client_abc123.../brands/bran
 # => TeamOutput (codification, mood_boards, brand_guidelines, brand_book, design_asset_result, ...)
 ```
 
-**Backward compatibility:** `POST /branding/run` and `POST /branding/sessions` (and all session/question endpoints) are unchanged. Request bodies for `/branding/run` and session creation may optionally include `client_id` and `brand_id`; when both are provided, the run is associated with that brand and the result is stored as a new version.
+**API continuity:** `POST /branding/run` and `POST /branding/sessions` (and all session/question endpoints) are unchanged. Request bodies for `/branding/run` and session creation may optionally include `client_id` and `brand_id`; when both are provided, the run is associated with that brand and the result is stored as a new version.
 
 ## Outsourcing
 
@@ -295,6 +295,6 @@ In addition to codification, mood boards, guidelines, design system, wiki backlo
 - Restarting the API clears active session state.
 - Each answer is applied immediately to the mission context, then the orchestrator reruns to refresh output artifacts.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

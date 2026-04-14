@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# Shared / legacy models
+# Shared models
 # ---------------------------------------------------------------------------
 
 
@@ -216,6 +216,8 @@ class NarrativeMessagingOutput(BaseModel):
     elevator_pitches: List[ElevatorPitch] = Field(default_factory=list)
     boilerplate_variants: List[str] = Field(default_factory=list)
     persona_profiles: List[PersonaProfile] = Field(default_factory=list)
+    # Voice and writing guidelines (from BrandGuidelinesAgent)
+    writing_guidelines: "WritingGuidelines" = Field(default_factory=lambda: WritingGuidelines())
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +276,16 @@ class VisualIdentityOutput(BaseModel):
     voice_tone_spectrum: List[VoiceToneEntry] = Field(default_factory=list)
     language_dos: List[str] = Field(default_factory=list)
     language_donts: List[str] = Field(default_factory=list)
+    # Mood board candidates (from MoodBoardIdeationAgent)
+    mood_board_candidates: List["MoodBoardConcept"] = Field(default_factory=list)
+    # Creative refinement decision (from CreativeRefinementAgent)
+    creative_refinement: "CreativeRefinementDecision" = Field(
+        default_factory=lambda: CreativeRefinementDecision()
+    )
+    # Design system definition (from BrandGuidelinesAgent)
+    design_system: "DesignSystemDefinition" = Field(
+        default_factory=lambda: DesignSystemDefinition()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +372,10 @@ class GovernanceOutput(BaseModel):
     review_trigger_points: List[str] = Field(default_factory=list)
     evolution_framework: str = ""
     version_control_cadence: str = ""
+    # Brand governance rules (from BrandGuidelinesAgent)
+    brand_guidelines: List[str] = Field(default_factory=list)
+    # Knowledge-base backlog (from BrandWikiAgent)
+    wiki_backlog: List["WikiEntry"] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -418,15 +434,8 @@ class BrandBook(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Legacy-compatible flat models (still used by compliance, wiki, etc.)
+# Shared models (used as sub-models inside phase outputs)
 # ---------------------------------------------------------------------------
-
-
-class BrandCodification(BaseModel):
-    positioning_statement: str
-    brand_promise: str
-    brand_personality_traits: List[str] = Field(default_factory=list)
-    narrative_pillars: List[str] = Field(default_factory=list)
 
 
 class MoodBoardConcept(BaseModel):
@@ -437,8 +446,13 @@ class MoodBoardConcept(BaseModel):
     image_style: List[str] = Field(default_factory=list)
 
 
-class CreativeRefinementPlan(BaseModel):
-    phases: List[str] = Field(default_factory=list)
+class CreativeRefinementDecision(BaseModel):
+    """Phase 3 converge node output: which moodboard direction won and why."""
+
+    winning_candidate_title: str = ""
+    scoring_criteria: List[str] = Field(default_factory=list)
+    scores_by_candidate: Dict[str, float] = Field(default_factory=dict)
+    rationale: str = ""
     workshop_prompts: List[str] = Field(default_factory=list)
     decision_criteria: List[str] = Field(default_factory=list)
 
@@ -464,7 +478,7 @@ class WikiEntry(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Team output — now includes phased outputs alongside legacy fields
+# Team output — all phase outputs plus cross-cutting results
 # ---------------------------------------------------------------------------
 
 
@@ -481,16 +495,7 @@ class TeamOutput(BaseModel):
     channel_activation: Optional[ChannelActivationOutput] = None
     governance: Optional[GovernanceOutput] = None
 
-    # Legacy fields (populated from phase outputs for backward compatibility)
-    codification: BrandCodification = Field(
-        default_factory=lambda: BrandCodification(positioning_statement="", brand_promise="")
-    )
-    mood_boards: List[MoodBoardConcept] = Field(default_factory=list)
-    creative_refinement: CreativeRefinementPlan = Field(default_factory=CreativeRefinementPlan)
-    writing_guidelines: WritingGuidelines = Field(default_factory=WritingGuidelines)
-    brand_guidelines: List[str] = Field(default_factory=list)
-    design_system: DesignSystemDefinition = Field(default_factory=DesignSystemDefinition)
-    wiki_backlog: List[WikiEntry] = Field(default_factory=list)
+    # Non-phase outputs
     brand_checks: List[BrandCheckResult] = Field(default_factory=list)
     human_feedback: Optional[str] = None
     competitive_snapshot: Optional[CompetitiveSnapshot] = None

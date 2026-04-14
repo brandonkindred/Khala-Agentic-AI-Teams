@@ -18,7 +18,7 @@ from agentic_team_provisioning.models import (
     StepType,
     TriggerType,
 )
-from llm_service import get_client
+from llm_service import get_strands_model
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ Step types: action, decision, parallel_split, parallel_join, wait, subprocess.
 
 ### Infrastructure (automatic)
 - **File System** for assets.
-- **SQLite Database** for form data.
+- **Postgres** for form data.
 - **Job Service** for job lifecycle.
 
 ## Your responsibilities
@@ -334,10 +334,14 @@ class ProcessDesignerAgent:
             conversation_parts.append(f"{prefix}: {m['content']}")
         prompt = "\n\n".join(conversation_parts)
 
-        client = get_client(agent_key="agentic_team_provisioning")
-        response = client.complete(prompt, system_prompt=system_prompt)
+        from strands import Agent
 
-        raw_text: str = response if isinstance(response, str) else response.get("content", "")
+        agent = Agent(
+            model=get_strands_model("agentic_team_provisioning"),
+            system_prompt=system_prompt,
+        )
+        result = agent(prompt)
+        raw_text = str(result).strip()
 
         # Parse structured blocks
         process_data = _parse_process_json(raw_text)

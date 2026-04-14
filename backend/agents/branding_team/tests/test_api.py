@@ -43,7 +43,7 @@ def test_answer_question_updates_session_and_output() -> None:
     assert answer.status_code == 200
     answered = answer.json()
     assert any(item["id"] == question_id for item in answered["answered_questions"])
-    assert answered["latest_output"]["brand_guidelines"]
+    assert answered["latest_output"]["strategic_core"] is not None
 
 
 def test_unknown_session_404() -> None:
@@ -143,8 +143,6 @@ def test_post_brands_run_returns_team_output() -> None:
     assert run_resp.status_code == 200
     out = run_resp.json()
     assert "status" in out
-    assert "codification" in out
-    assert "brand_guidelines" in out
     assert "brand_book" in out
     assert "current_phase" in out
     assert "phase_gates" in out

@@ -74,7 +74,7 @@ flowchart LR
 - `DELETE /strategy-lab/storage` — purge strategy lab rows from the job service (lab records, `strat-lab-*` / `bt-lab-*` strategies and backtests, and all paper-trading sessions)
 - `GET /workflow/status`, `GET /workflow/queues`
 
-**Clearing strategy lab data in Postgres directly** (job DB `strands_jobs`, table `jobs`):
+**Clearing strategy lab data in Postgres directly** (job DB `khala_jobs`, table `jobs`):
 
 ```sql
 DELETE FROM jobs WHERE team = 'investment_strategy_lab_records';
@@ -176,10 +176,14 @@ Stored `BacktestRecord` objects include strategy details, run configuration, and
 
 Engineer-facing architecture details live under [`system_design/`](./system_design/README.md):
 
-- [`strategy_lab_pipeline.md`](./system_design/strategy_lab_pipeline.md) — full per-cycle pipeline (`ideating → fetching_data → analyzing → paper_trading? → complete`), phase events, winner gate, skip paths.
+- [`architecture.md`](./system_design/architecture.md) — C4 container view.
+- [`system_design.md`](./system_design/system_design.md) — component view + domain model class diagram.
+- [`use_cases.md`](./system_design/use_cases.md) — use-case diagram grouped by actor and track.
+- [`flow_charts.md`](./system_design/flow_charts.md) — sequence/state diagrams for advisor, Strategy Lab batch, promotion gate, orchestrator mode.
+- [`strategy_lab_pipeline.md`](./system_design/strategy_lab_pipeline.md) — per-cycle pipeline (`ideating → fetching_data → analyzing → paper_trading? → complete`), phase events, winner gate, skip paths.
 - [`paper_trading_integration.md`](./system_design/paper_trading_integration.md) — paper trading as an integrated cycle step: winner gate, config, failure contract, linkage to `StrategyLabRecord`.
 - [`trade_record_schema.md`](./system_design/trade_record_schema.md) — every `TradeRecord` field, including bid vs fill prices and order-type fields used for post-hoc execution analysis.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

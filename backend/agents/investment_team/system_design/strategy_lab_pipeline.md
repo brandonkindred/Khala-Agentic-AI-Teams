@@ -67,6 +67,7 @@ UI clients should treat unknown phase names as opaque and ignore them.
 | `not_winning` | Backtest `annualized_return_pct <= 8.0` — paper trading never runs. |
 | `disabled` | `RunStrategyLabRequest.paper_trading_enabled = false` — explicit opt-out. |
 | `no_market_data` | `MarketDataService` could not fetch live OHLCV data for the strategy's asset class — retry later. |
+| `no_strategy_code` | The orchestrator produced a winning record but no compilable `strategy_code` (e.g. refinement loop exhausted) — nothing to execute in the sandbox. |
 
 ## Failure isolation
 

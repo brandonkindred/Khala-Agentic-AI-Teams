@@ -1,34 +1,46 @@
 # Backend Agents
 
-This directory contains the Strands agent-team implementations and their APIs.
+This directory contains the Khala agent-team implementations and their APIs.
 
 ## Directory structure
 
 ```text
 backend/agents/
+├── accessibility_audit_team/
+├── agent_git_tools/                   # Shared Git tooling for agents
+├── agent_llm_tools_service/           # LLM tools discovery service
+├── agent_provisioning_team/
+├── agent_repair_team/                 # Agent crash recovery
+├── agentic_team_provisioning/         # Conversational team/process creation (see README.md)
+├── ai_systems_team/
+├── analytics/                         # Analytics utilities
 ├── api/                               # Legacy blog research-and-review API package
 ├── blogging/
-├── software_engineering_team/
-├── coding_team/
-├── planning_v3_team/
-├── personal_assistant_team/
-├── social_media_marketing_team/
-├── market_research_team/
-├── soc2_compliance_team/
 ├── branding_team/
-├── agent_provisioning_team/
-├── agentic_team_provisioning/         # Conversational team/process creation (see README.md)
-├── accessibility_audit_team/
-├── ai_systems_team/
+├── coding_team/
+├── continuation_logs/                 # Continuation log storage
+├── deepthought/                       # Recursive self-organising agent
+├── docker/                            # Agents-only Docker assets
+├── integrations/                      # Shared integrations layer used across teams
 ├── investment_team/
+├── llm_service/                       # Centralized LLM client (Ollama, dummy)
+├── market_research_team/
 ├── nutrition_meal_planning_team/
+├── personal_assistant_team/
+├── planning_v3_team/
+├── plans/                             # Planning artifacts
 ├── road_trip_planning_team/
 ├── sales_team/
+├── shared_observability/              # Shared observability (Prometheus, logging)
+├── shared_postgres/                   # Shared Postgres utilities
+├── shared_temporal/                   # Shared Temporal workflow utilities
+├── soc2_compliance_team/
+├── social_media_marketing_team/
+├── software_engineering_team/
 ├── startup_advisor/                   # Persistent conversational startup advisor
-├── agent_repair_team/                 # Agent crash recovery
-├── integrations/                      # Shared integrations layer used across teams
-├── llm_service/                       # Centralized LLM client (Ollama, dummy)
-├── docker/                            # Agents-only Docker assets
+├── team_assistant/                    # Team assistant utilities
+├── team_contract/                     # Team contract definitions
+├── user_agent_founder/                # Autonomous startup founder agent
 ├── shared_job_management.py           # Shared job state helpers
 ├── job_service_client.py              # HTTP client for centralized job service
 ├── Dockerfile
@@ -44,7 +56,7 @@ From `backend/`:
 python run_unified_api.py
 ```
 
-This mounts all 19 enabled team APIs behind one server on port `8080` by default.
+This mounts all 20 enabled team APIs behind one server on port `8080` by default.
 
 ## Running individual team APIs
 
@@ -85,12 +97,14 @@ For team-specific setup and env vars, use each team's README.
 - `sales_team/README.md`
 - `startup_advisor/README.md`
 - `agentic_team_provisioning/README.md`
+- `user_agent_founder/README.md`
+- `deepthought/README.md`
 - `llm_service/README.md`
 
 ## Shared integrations
 
 `integrations/` provides provider-neutral integration contracts and routing that can be reused by any team.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../README.md) monorepo (Unified API, Angular UI, and full team index).

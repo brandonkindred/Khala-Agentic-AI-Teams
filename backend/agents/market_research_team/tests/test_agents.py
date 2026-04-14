@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from market_research_team.agents import (
@@ -6,8 +7,15 @@ from market_research_team.agents import (
     TranscriptIngestionAgent,
     UserPsychologyAgent,
     UXResearchAgent,
+    _ensure_list,
+    _parse_json,
+    _safe_float,
 )
 from market_research_team.models import InterviewInsight, MarketSignal, ResearchMission
+
+# ---------------------------------------------------------------------------
+# TranscriptIngestionAgent (unchanged — pure I/O, no LLM)
+# ---------------------------------------------------------------------------
 
 
 def test_transcript_ingestion_loads_inline_and_folder(tmp_path: Path) -> None:
@@ -43,27 +51,44 @@ def test_transcript_ingestion_handles_missing_folder() -> None:
     assert TranscriptIngestionAgent().load_transcripts(mission) == []
 
 
-def test_ux_research_extracts_expected_fields_and_fallbacks() -> None:
-    transcript = (
-        '"I need this fixed"\n'
-        "I am trying to speed up onboarding.\n"
-        "Main pain is handoffs across teams.\n"
-        "Desired outcome is fewer escalations."
-    )
-    insight = UXResearchAgent().analyze("source.txt", transcript)
+# ---------------------------------------------------------------------------
+# UXResearchAgent (Strands-powered)
+# ---------------------------------------------------------------------------
+
+
+def test_ux_research_extracts_fields_from_llm_response() -> None:
+    agent = UXResearchAgent()
+    insight = agent.analyze("source.txt", "Some transcript about user pain and jobs.")
+
     assert insight.source == "source.txt"
-    assert insight.user_jobs
-    assert insight.pain_points
-    assert insight.desired_outcomes
-    assert insight.direct_quotes
-
-    fallback = UXResearchAgent().analyze("source2.txt", "just neutral text")
-    assert fallback.user_jobs[0].startswith("Identify the core user job")
-    assert fallback.pain_points[0].startswith("Validate top workflow frictions")
-    assert fallback.desired_outcomes[0].startswith("Confirm measurable success")
+    assert isinstance(insight.user_jobs, list)
+    assert len(insight.user_jobs) >= 1
+    assert isinstance(insight.pain_points, list)
+    assert len(insight.pain_points) >= 1
+    assert isinstance(insight.desired_outcomes, list)
+    assert isinstance(insight.direct_quotes, list)
 
 
-def test_user_psychology_signals_with_and_without_insights() -> None:
+def test_ux_research_fallback_on_bad_llm_response(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: "not valid json at all",
+    )
+    agent = UXResearchAgent()
+    insight = agent.analyze("source.txt", "neutral text")
+
+    assert insight.source == "source.txt"
+    assert insight.user_jobs[0].startswith("Identify the core user job")
+    assert insight.pain_points[0].startswith("Validate top workflow frictions")
+    assert insight.desired_outcomes[0].startswith("Confirm measurable success")
+
+
+# ---------------------------------------------------------------------------
+# UserPsychologyAgent (Strands-powered)
+# ---------------------------------------------------------------------------
+
+
+def test_user_psychology_returns_signals() -> None:
     insights = [
         InterviewInsight(
             source="a",
@@ -72,48 +97,300 @@ def test_user_psychology_signals_with_and_without_insights() -> None:
         )
     ]
     signals = UserPsychologyAgent().derive_signals(insights)
-    assert len(signals) == 2
-    assert signals[0].signal == "User pain urgency"
-    assert signals[1].signal == "Adoption motivation clarity"
-
-    empty_signals = UserPsychologyAgent().derive_signals([])
-    assert empty_signals[0].evidence[0].startswith("No direct pain")
-    assert empty_signals[1].evidence[0].startswith("No clear desired")
+    assert len(signals) >= 2
+    assert all(isinstance(s, MarketSignal) for s in signals)
+    assert all(0.0 <= s.confidence <= 1.0 for s in signals)
 
 
-def test_market_viability_recommendation_branches() -> None:
+def test_user_psychology_handles_empty_insights() -> None:
+    signals = UserPsychologyAgent().derive_signals([])
+    assert len(signals) >= 2
+    assert all(isinstance(s, MarketSignal) for s in signals)
+
+
+def test_user_psychology_pads_to_minimum_two_signals(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            [{"signal": "Only one", "confidence": 0.6, "evidence": ["e1"]}]
+        ),
+    )
+    signals = UserPsychologyAgent().derive_signals([])
+    assert len(signals) >= 2
+
+
+# ---------------------------------------------------------------------------
+# MarketViabilityAgent (Strands-powered)
+# ---------------------------------------------------------------------------
+
+
+def test_market_viability_insufficient_evidence_no_llm() -> None:
     mission = ResearchMission(
         product_concept="Concept",
         target_users="Users",
         business_goal="Goal",
     )
-    agent = MarketViabilityAgent()
+    result = MarketViabilityAgent().recommend(mission, [], 0)
+    assert result.verdict == "insufficient_evidence"
+    assert result.confidence == 0.3
 
-    insufficient = agent.recommend(mission, [], 0)
-    assert insufficient.verdict == "insufficient_evidence"
-    assert insufficient.confidence == 0.3
 
-    low = agent.recommend(
-        mission,
-        [MarketSignal(signal="s1", confidence=0.5), MarketSignal(signal="s2", confidence=0.7)],
-        1,
+def test_market_viability_with_signals() -> None:
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
     )
-    assert low.verdict == "needs_more_validation"
+    signals = [
+        MarketSignal(signal="s1", confidence=0.7, evidence=["e1"]),
+        MarketSignal(signal="s2", confidence=0.8, evidence=["e2"]),
+    ]
+    result = MarketViabilityAgent().recommend(mission, signals, 2)
+    assert result.verdict in {
+        "insufficient_evidence",
+        "needs_more_validation",
+        "promising_with_risks",
+    }
+    assert 0.0 <= result.confidence <= 1.0
+    assert isinstance(result.rationale, list)
+    assert isinstance(result.suggested_next_experiments, list)
 
-    high = agent.recommend(
-        mission,
-        [MarketSignal(signal="s1", confidence=0.9), MarketSignal(signal="s2", confidence=0.8)],
-        2,
+
+def test_market_viability_fallback_on_bad_response(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: "broken json",
     )
-    assert high.verdict == "promising_with_risks"
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+    )
+    result = MarketViabilityAgent().recommend(
+        mission, [MarketSignal(signal="s1", confidence=0.5)], 1
+    )
+    assert result.verdict == "needs_more_validation"
 
 
-def test_research_script_builder_includes_business_goal() -> None:
+def test_market_viability_invalid_verdict_defaults(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            {
+                "verdict": "INVALID_VALUE",
+                "confidence": 0.5,
+                "rationale": [],
+                "suggested_next_experiments": [],
+            }
+        ),
+    )
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+    )
+    result = MarketViabilityAgent().recommend(
+        mission, [MarketSignal(signal="s1", confidence=0.5)], 1
+    )
+    assert result.verdict == "needs_more_validation"
+
+
+def test_market_viability_non_hashable_verdict_defaults(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            {
+                "verdict": ["list", "not", "string"],
+                "confidence": 0.5,
+                "rationale": [],
+                "suggested_next_experiments": [],
+            }
+        ),
+    )
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+    )
+    result = MarketViabilityAgent().recommend(
+        mission, [MarketSignal(signal="s1", confidence=0.5)], 1
+    )
+    assert result.verdict == "needs_more_validation"
+
+
+def test_market_viability_null_verdict_defaults(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            {
+                "verdict": None,
+                "confidence": 0.5,
+                "rationale": [],
+                "suggested_next_experiments": [],
+            }
+        ),
+    )
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+    )
+    result = MarketViabilityAgent().recommend(
+        mission, [MarketSignal(signal="s1", confidence=0.5)], 1
+    )
+    assert result.verdict == "needs_more_validation"
+
+
+# ---------------------------------------------------------------------------
+# ResearchScriptAgent (Strands-powered)
+# ---------------------------------------------------------------------------
+
+
+def test_research_script_builder_returns_scripts() -> None:
     mission = ResearchMission(
         product_concept="Concept",
         target_users="Users",
         business_goal="prioritizing roadmap items",
     )
     scripts = ResearchScriptAgent().build_scripts(mission)
+    assert isinstance(scripts, list)
+    assert len(scripts) >= 1
+    assert all(isinstance(s, str) for s in scripts)
+
+
+def test_research_script_builder_fallback_on_bad_response(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: "not json",
+    )
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+    )
+    scripts = ResearchScriptAgent().build_scripts(mission)
+    assert isinstance(scripts, list)
     assert len(scripts) == 3
-    assert "prioritizing roadmap items" in scripts[0]
+
+
+# ---------------------------------------------------------------------------
+# _parse_json helper
+# ---------------------------------------------------------------------------
+
+
+def test_parse_json_strips_markdown_fences() -> None:
+    raw = '```json\n{"key": "value"}\n```'
+    result = _parse_json(raw, {})
+    assert result == {"key": "value"}
+
+
+def test_parse_json_returns_fallback_on_invalid_input() -> None:
+    assert _parse_json("", {"default": True}) == {"default": True}
+    assert _parse_json("not json", []) == []
+    assert _parse_json(None, "fallback") == "fallback"
+
+
+# ---------------------------------------------------------------------------
+# _safe_float helper
+# ---------------------------------------------------------------------------
+
+
+def test_safe_float_valid_values() -> None:
+    assert _safe_float(0.75, 0.5) == 0.75
+    assert _safe_float(1, 0.5) == 1.0
+    assert _safe_float("0.8", 0.5) == 0.8
+
+
+def test_safe_float_non_numeric_returns_default() -> None:
+    assert _safe_float("high", 0.5) == 0.5
+    assert _safe_float("70%", 0.5) == 0.5
+    assert _safe_float(None, 0.3) == 0.3
+    assert _safe_float([], 0.5) == 0.5
+    assert _safe_float({}, 0.5) == 0.5
+
+
+# ---------------------------------------------------------------------------
+# _ensure_list helper
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_list_with_list_input() -> None:
+    assert _ensure_list(["a", "b"], ["default"]) == ["a", "b"]
+    assert _ensure_list([1, 2], ["default"]) == ["1", "2"]
+
+
+def test_ensure_list_with_scalar_string() -> None:
+    assert _ensure_list("single value", ["default"]) == ["single value"]
+
+
+def test_ensure_list_with_non_list_returns_default() -> None:
+    assert _ensure_list(None, ["fallback"]) == ["fallback"]
+    assert _ensure_list("", ["fallback"]) == ["fallback"]
+    assert _ensure_list(42, ["fallback"]) == ["fallback"]
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: LLM returns scalars instead of arrays
+# ---------------------------------------------------------------------------
+
+
+def test_ux_research_handles_scalar_fields(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            {
+                "user_jobs": "a single job",
+                "pain_points": "a single pain",
+                "desired_outcomes": "a single outcome",
+                "direct_quotes": "a single quote",
+            }
+        ),
+    )
+    insight = UXResearchAgent().analyze("src.txt", "transcript")
+    assert insight.user_jobs == ["a single job"]
+    assert insight.pain_points == ["a single pain"]
+    assert insight.desired_outcomes == ["a single outcome"]
+    assert insight.direct_quotes == ["a single quote"]
+
+
+def test_psychology_handles_non_numeric_confidence(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            [
+                {"signal": "Sig1", "confidence": "high", "evidence": ["e1"]},
+                {"signal": "Sig2", "confidence": None, "evidence": "scalar evidence"},
+            ]
+        ),
+    )
+    signals = UserPsychologyAgent().derive_signals([])
+    assert len(signals) >= 2
+    assert signals[0].confidence == 0.5  # default for "high"
+    assert signals[1].confidence == 0.5  # default for None
+    assert signals[1].evidence == ["scalar evidence"]  # wrapped scalar
+
+
+def test_viability_handles_scalar_rationale(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "market_research_team.agents._call_agent",
+        lambda agent, prompt: json.dumps(
+            {
+                "verdict": "promising_with_risks",
+                "confidence": "70%",
+                "rationale": "a single string rationale",
+                "suggested_next_experiments": "one experiment",
+            }
+        ),
+    )
+    mission = ResearchMission(
+        product_concept="Concept",
+        target_users="Users",
+        business_goal="Goal",
+    )
+    result = MarketViabilityAgent().recommend(
+        mission, [MarketSignal(signal="s1", confidence=0.5)], 1
+    )
+    assert result.verdict == "promising_with_risks"
+    assert result.confidence == 0.5  # "70%" is non-numeric → default
+    assert result.rationale == ["a single string rationale"]
+    assert result.suggested_next_experiments == ["one experiment"]

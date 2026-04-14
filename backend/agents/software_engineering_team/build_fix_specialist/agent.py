@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import List
 
-from llm_service import LLMClient
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from .models import BuildFixInput, BuildFixOutput, CodeEdit
 from .prompts import BUILD_FIX_SPECIALIST_PROMPT
@@ -19,9 +22,14 @@ class BuildFixSpecialistAgent:
     Used when full regeneration has failed 2+ times with the same error.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
+            _model = llm_client
+        else:
+            _model = get_strands_model("build_fix_specialist")
+        self._agent = Agent(model=_model, system_prompt=BUILD_FIX_SPECIALIST_PROMPT)
 
     def run(self, input_data: BuildFixInput) -> BuildFixOutput:
         """Produce minimal edits to fix the build error."""
@@ -56,8 +64,10 @@ class BuildFixSpecialistAgent:
         if input_data.task_description:
             context_parts.insert(0, f"**Task context:** {input_data.task_description}\n")
 
-        prompt = BUILD_FIX_SPECIALIST_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.0, think=True)
+        prompt = "\n".join(context_parts)
+        result = self._agent(prompt)
+        raw = str(result).strip()
+        data = json.loads(raw)
 
         edits: List[CodeEdit] = []
         for e in data.get("edits") or []:

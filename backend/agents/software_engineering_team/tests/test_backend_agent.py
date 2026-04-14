@@ -21,6 +21,8 @@ from backend_agent.agent import (
 )
 from backend_agent.models import BackendInput
 
+from software_engineering_team.tests.conftest import ConfigurableLLM
+
 
 def test_problem_solver_cycle_constant_defaults_to_twenty() -> None:
     """Problem solver cycle budget is bounded and defaults to a sane range around 20."""
@@ -162,8 +164,8 @@ def test_build_code_review_issues_for_missing_test_routes_returns_targeted_issue
 
 def test_backend_agent_includes_problem_solving_header_when_issues_present() -> None:
     """When code_review_issues are present, prompt includes PROBLEM-SOLVING MODE header."""
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "language": "python",
         "summary": "Fixed",
@@ -187,7 +189,7 @@ def test_backend_agent_includes_problem_solving_header_when_issues_present() -> 
             ],
         )
     )
-    prompt = mock_llm.complete_json.call_args[0][0]
+    prompt = mock_llm.complete_json_mock.call_args[0][0]
     assert "PROBLEM-SOLVING MODE" in prompt
     assert "Backend" in prompt
     assert "code review issues" in prompt
@@ -199,8 +201,8 @@ def test_backend_agent_includes_problem_solving_header_when_issues_present() -> 
 
 def test_backend_agent_no_problem_solving_header_when_no_issues() -> None:
     """When no issues are present, prompt does not include PROBLEM-SOLVING MODE header."""
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "language": "python",
         "summary": "Implemented",
@@ -215,7 +217,7 @@ def test_backend_agent_no_problem_solving_header_when_no_issues() -> None:
             requirements="",
         )
     )
-    prompt = mock_llm.complete_json.call_args[0][0]
+    prompt = mock_llm.complete_json_mock.call_args[0][0]
     assert "PROBLEM-SOLVING MODE" not in prompt
 
 
@@ -224,8 +226,8 @@ def test_backend_agent_logs_llm_prompt(caplog: pytest.LogCaptureFixture) -> None
     import logging
 
     caplog.set_level(logging.INFO)
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "language": "python",
         "summary": "Done",
@@ -248,8 +250,8 @@ def test_backend_agent_logs_problem_solving_context_and_header_when_issues_prese
     import logging
 
     caplog.set_level(logging.INFO)
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "language": "python",
         "summary": "Fixed",
@@ -286,8 +288,8 @@ def test_backend_agent_no_problem_solving_logs_when_no_issues(
     import logging
 
     caplog.set_level(logging.INFO)
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "language": "python",
         "summary": "Done",
@@ -307,8 +309,8 @@ def test_backend_agent_content_only_with_code_block_raises_llm_permanent_error()
     """When LLM returns only content (no files dict), backend raises LLMPermanentError (fail fast)."""
     from llm_service import LLMPermanentError
 
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm.complete_json_mock.return_value = {
         "content": "```\napp/main.py\nprint(1)\n```",
     }
     agent = BackendExpertAgent(llm_client=mock_llm)
@@ -320,8 +322,8 @@ def test_backend_agent_content_only_raises_llm_permanent_error() -> None:
     """When LLM returns only content with no files/code, agent raises LLMPermanentError (fail fast)."""
     from llm_service import LLMPermanentError
 
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {"content": "no code blocks here at all"}
+    mock_llm = ConfigurableLLM()
+    mock_llm.complete_json_mock.return_value = {"content": "no code blocks here at all"}
     agent = BackendExpertAgent(llm_client=mock_llm)
     with pytest.raises(LLMPermanentError, match="no files"):
         agent.run(BackendInput(task_description="Add", requirements=""))
@@ -331,9 +333,9 @@ def test_backend_plan_task_returns_plan_markdown() -> None:
     """_plan_task parses LLM JSON and returns (plan_text, False)."""
     from software_engineering_team.shared.models import Task, TaskType
 
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm._max_context_tokens = 16384
+    mock_llm.complete_json_mock.return_value = {
         "feature_intent": "Add CRUD for tasks",
         "what_changes": ["app/routers/tasks.py", "app/models/task.py"],
         "algorithms_data_structures": "Use dict for O(1) lookup",
@@ -365,9 +367,9 @@ def test_regenerate_with_issues_passes_task_plan_to_backend_input(tmp_path: Path
     """_regenerate_with_issues passes task_plan through to BackendInput when provided."""
     from unittest.mock import patch
 
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm._max_context_tokens = 16384
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "language": "python",
         "summary": "Fixed",
@@ -405,9 +407,9 @@ def test_regenerate_with_issues_passes_task_plan_to_backend_input(tmp_path: Path
 
 def test_backend_run_injects_task_plan_and_follow_instruction_into_prompt() -> None:
     """When task_plan is set, run() injects Implementation plan and follow-plan instruction into prompt."""
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm._max_context_tokens = 16384
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "language": "python",
         "summary": "Done",
@@ -424,7 +426,7 @@ def test_backend_run_injects_task_plan_and_follow_instruction_into_prompt() -> N
             task_plan=plan_content,
         )
     )
-    prompt = mock_llm.complete_json.call_args[0][0]
+    prompt = mock_llm.complete_json_mock.call_args[0][0]
     assert "IMPLEMENTATION PLAN (follow this)" in prompt
     assert "Implement the task strictly according to" in prompt
     assert "realize every item under 'What changes' and 'Tests needed'" in prompt
@@ -482,9 +484,9 @@ def test_run_workflow_exits_at_five_same_build_failures_and_notifies_tech_lead(
     )
     same_error = "ImportError: No module named 'foo'"
 
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.side_effect = [
+    mock_llm = ConfigurableLLM()
+    mock_llm._max_context_tokens = 16384
+    mock_llm.complete_json_mock.side_effect = [
         {
             "feature_intent": "Add health",
             "what_changes": ["app/main.py"],
@@ -617,9 +619,9 @@ def test_run_workflow_invokes_build_fix_specialist_when_same_build_fails_twice(
     )
     same_error = "ImportError: No module named 'foo'"
 
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.side_effect = [
+    mock_llm = ConfigurableLLM()
+    mock_llm._max_context_tokens = 16384
+    mock_llm.complete_json_mock.side_effect = [
         {
             "feature_intent": "Add health",
             "what_changes": ["app/main.py"],
@@ -745,9 +747,9 @@ def test_run_workflow_skips_specialist_when_none(tmp_path: Path) -> None:
         },
     )
 
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.side_effect = [
+    mock_llm = ConfigurableLLM()
+    mock_llm._max_context_tokens = 16384
+    mock_llm.complete_json_mock.side_effect = [
         {
             "feature_intent": "Add",
             "what_changes": ["app/main.py"],
@@ -807,8 +809,8 @@ def test_run_workflow_skips_specialist_when_none(tmp_path: Path) -> None:
 
 def test_backend_agent_includes_specialist_tooling_plan_in_prompt() -> None:
     """When specialist_tooling_plan is provided, prompt includes Backend Agent V2 specialist coordination block."""
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "language": "python",
         "summary": "Implemented",
@@ -827,7 +829,7 @@ def test_backend_agent_includes_specialist_tooling_plan_in_prompt() -> None:
             },
         )
     )
-    prompt = mock_llm.complete_json.call_args[0][0]
+    prompt = mock_llm.complete_json_mock.call_args[0][0]
     assert "BACKEND AGENT V2 SPECIALIST TOOLING PLAN" in prompt
     assert "devops, api, quality_review, qa, data_engineering, auth_security" in prompt
     assert "enforce RBAC" in prompt
@@ -835,8 +837,8 @@ def test_backend_agent_includes_specialist_tooling_plan_in_prompt() -> None:
 
 def test_backend_agent_includes_specialist_findings_in_prompt() -> None:
     """When specialist_findings are provided, prompt includes specialist constraints block."""
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {
+    mock_llm = ConfigurableLLM()
+    mock_llm.complete_json_mock.return_value = {
         "code": "",
         "language": "python",
         "summary": "Implemented",
@@ -855,7 +857,7 @@ def test_backend_agent_includes_specialist_findings_in_prompt() -> None:
             },
         )
     )
-    prompt = mock_llm.complete_json.call_args[0][0]
+    prompt = mock_llm.complete_json_mock.call_args[0][0]
     assert "SPECIALIST FINDINGS / CONSTRAINTS" in prompt
     assert "add tasks.owner_id index" in prompt
     assert "preserve security and correctness first" in prompt
@@ -904,9 +906,9 @@ def test_run_workflow_uses_problem_solver_agent_on_build_failure(tmp_path: Path)
         },
     )
 
-    mock_llm = MagicMock()
-    mock_llm.get_max_context_tokens.return_value = 16384
-    mock_llm.complete_json.side_effect = [
+    mock_llm = ConfigurableLLM()
+    mock_llm._max_context_tokens = 16384
+    mock_llm.complete_json_mock.side_effect = [
         {
             "feature_intent": "Fix build",
             "what_changes": ["app/main.py"],

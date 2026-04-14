@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List
 
 from build_fix_specialist.models import CodeEdit
+from strands import Agent
 
-from llm_service import LLMClient
+from llm_service import get_strands_model
 
 from .linter_runner import detect_linter, execute_linter
 from .models import LintIssue, LintToolInput, LintToolOutput
@@ -30,13 +32,18 @@ class LintingToolAgent:
         3. **Review** -- use an LLM to produce minimal ``CodeEdit`` fixes for violations.
 
     Invariants:
-        - ``self.llm`` is always a valid ``LLMClient``.
+        - ``self._agent`` is always a valid Strands ``Agent``.
         - ``run()`` never modifies the repository; callers apply returned edits.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
+            _model = llm_client
+        else:
+            _model = get_strands_model("linting_tool_agent")
+        self._agent = Agent(model=_model, system_prompt=LINT_FIX_PROMPT)
 
     def run(self, input_data: LintToolInput) -> LintToolOutput:
         """Execute the full lint pipeline: plan -> execute -> review.
@@ -145,16 +152,16 @@ class LintingToolAgent:
         )
 
         prompt = (
-            LINT_FIX_PROMPT
-            + "\n\n---\n\n"
-            + "**Lint violations to fix:**\n"
+            "**Lint violations to fix:**\n"
             + issues_block
             + "\n\n**Affected files (current code):**\n"
             + affected_code
         )
 
         try:
-            data: Dict[str, Any] = self.llm.complete_json(prompt, temperature=0.0)
+            result = self._agent(prompt)
+            raw = str(result).strip()
+            data: Dict[str, Any] = json.loads(raw)
         except Exception as err:
             logger.warning("Lint fix LLM call failed (non-blocking): %s", err)
             return []

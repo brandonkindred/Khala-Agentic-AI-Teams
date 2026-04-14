@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict
 
-from llm_service import LLMClient, LLMPermanentError
+from strands import Agent
+
+from llm_service import LLMPermanentError, get_strands_model
 from software_engineering_team.shared.models import (
     ArchitectureComponent,
     ProductRequirements,
@@ -135,9 +138,16 @@ class ArchitectureExpertAgent:
     reference when implementing or validating changes.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
+            _model = llm_client
+        else:
+            # Always use a proper Strands Model — raw LLMClient doesn't implement
+            # the Strands Model interface (stream/update_config/get_config/stateful).
+            _model = get_strands_model("architecture")
+        self._agent = Agent(model=_model, system_prompt=ARCHITECTURE_PROMPT)
 
     def run(self, input_data: ArchitectureInput) -> ArchitectureOutput:
         """Design system architecture from requirements."""
@@ -195,10 +205,12 @@ class ArchitectureExpertAgent:
                 ["", "**Technology Preferences:**", ", ".join(input_data.technology_preferences)]
             )
 
-        prompt = ARCHITECTURE_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
+        prompt = "\n".join(context_parts)
 
         try:
-            data: Dict[str, Any] = self.llm.complete_json(prompt, temperature=0.2, think=True) or {}
+            result = self._agent(prompt)
+            raw = str(result).strip()
+            data: Dict[str, Any] = json.loads(raw) or {}
         except LLMPermanentError:
             logger.warning(
                 "Architecture Expert: LLM returned non-JSON response, falling back to synthetic architecture"

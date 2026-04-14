@@ -7,7 +7,9 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List
 
-from llm_service import LLMClient, compact_text
+from strands import Agent
+
+from llm_service import compact_text, get_client, get_strands_model
 from software_engineering_team.shared.models import (
     Task,
     TaskStatus,
@@ -37,6 +39,13 @@ from .prompts import (
 logger = logging.getLogger(__name__)
 
 
+def _agent_json(agent: Agent, prompt: str) -> dict:
+    """Call a Strands Agent and parse the result as JSON."""
+    result = agent(prompt)
+    raw = str(result).strip()
+    return json.loads(raw)
+
+
 class TechLeadAgent:
     """
     Staff-level Tech Lead that bridges product management and engineering.
@@ -45,19 +54,21 @@ class TechLeadAgent:
     and devops engineers.
     """
 
-    def __init__(self, llm_client: LLMClient) -> None:
-        assert llm_client is not None, "llm_client is required"
-        self.llm = llm_client
+    def __init__(self, llm_client=None) -> None:
+        from strands.models.model import Model as _StrandsModel
+        if llm_client is not None and isinstance(llm_client, _StrandsModel):
+            self._model = llm_client
+        else:
+            self._model = get_strands_model("tech_lead")
+        # Keep an LLMClient reference for context_sizing utilities
+        self.llm = llm_client if llm_client is not None else get_client("tech_lead")
 
     def _analyze_codebase(self, existing_codebase: str) -> str:
         """Analyze the existing codebase to understand what already exists."""
         logger.info("Tech Lead: Analyzing existing codebase (%s chars)", len(existing_codebase))
-        prompt = (
-            TECH_LEAD_ANALYZE_CODEBASE_PROMPT
-            + "\n\n---\n\n**EXISTING CODEBASE:**\n"
-            + existing_codebase
-        )
-        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
+        prompt = "**EXISTING CODEBASE:**\n" + existing_codebase
+        agent = Agent(model=self._model, system_prompt=TECH_LEAD_ANALYZE_CODEBASE_PROMPT)
+        data = _agent_json(agent, prompt)
         return json.dumps(data, indent=2)
 
     def _read_plan_artifacts(self, repo_path: str) -> str:
@@ -257,7 +268,8 @@ class TechLeadAgent:
             codebase_analysis = self._analyze_codebase(existing_codebase)
 
         prompt = self._build_planning_prompt(input_data, codebase_analysis)
-        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+        agent = Agent(model=self._model, system_prompt=TECH_LEAD_PROMPT)
+        data = _agent_json(agent, prompt)
 
         if data.get("spec_clarification_needed"):
             clarification_questions = data.get("clarification_questions") or []
@@ -463,7 +475,7 @@ class TechLeadAgent:
                 ]
             )
 
-        return TECH_LEAD_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
+        return "\n".join(context_parts)
 
     def refine_task(
         self,
@@ -506,8 +518,9 @@ class TechLeadAgent:
                 ]
             )
 
-        prompt = TECH_LEAD_REFINE_TASK_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+        prompt = "\n".join(context_parts)
+        agent = Agent(model=self._model, system_prompt=TECH_LEAD_REFINE_TASK_PROMPT)
+        data = _agent_json(agent, prompt)
 
         return Task(
             id=task.id,
@@ -557,8 +570,9 @@ class TechLeadAgent:
         if architecture:
             context_parts.extend(["", "**Architecture:**", architecture.overview])
 
-        prompt = TECH_LEAD_EVALUATE_QA_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+        prompt = "\n".join(context_parts)
+        agent = Agent(model=self._model, system_prompt=TECH_LEAD_EVALUATE_QA_PROMPT)
+        data = _agent_json(agent, prompt)
 
         tasks = []
         for t in data.get("tasks") or []:
@@ -622,8 +636,9 @@ class TechLeadAgent:
                 str(requirement_task_mapping), max_mapping, self.llm, "requirement-task mapping"
             ),
         ]
-        prompt = TECH_LEAD_SHOULD_RUN_SECURITY_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.1, think=True)
+        prompt = "\n".join(context_parts)
+        agent = Agent(model=self._model, system_prompt=TECH_LEAD_SHOULD_RUN_SECURITY_PROMPT)
+        data = _agent_json(agent, prompt)
         run_security = bool(data.get("run_security", False))
         logger.info("Tech Lead: run_security=%s (%s)", run_security, data.get("rationale", "")[:80])
         return run_security
@@ -728,8 +743,9 @@ class TechLeadAgent:
                 ]
             )
 
-        prompt = TECH_LEAD_REVIEW_PROGRESS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-        data = self.llm.complete_json(prompt, temperature=0.2, think=True)
+        prompt = "\n".join(context_parts)
+        agent = Agent(model=self._model, system_prompt=TECH_LEAD_REVIEW_PROGRESS_PROMPT)
+        data = _agent_json(agent, prompt)
 
         new_tasks: List[Task] = []
         for t in data.get("tasks") or []:
@@ -837,8 +853,9 @@ class TechLeadAgent:
                         "**Repository README.md:** missing or empty (you MUST set should_update_docs to true).",
                     )
 
-                prompt = TECH_LEAD_TRIGGER_DOCS_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-                data = self.llm.complete_json(prompt, temperature=0.1, think=True)
+                prompt = "\n".join(context_parts)
+                agent = Agent(model=self._model, system_prompt=TECH_LEAD_TRIGGER_DOCS_PROMPT)
+                data = _agent_json(agent, prompt)
                 should_update = bool(data.get("should_update_docs", False))
                 rationale = data.get("rationale", "")
 

@@ -48,7 +48,6 @@ from job_service_client import (  # noqa: E402
     RESUMABLE_STATUSES,
     validate_job_for_action,
 )
-from llm_service import OllamaLLMClient  # noqa: E402
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 try:
@@ -132,13 +131,26 @@ class _QuietAccessFilter(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(_QuietAccessFilter())
 
 # Base directory for run artifacts (when work_dir is requested).
-# Honour BLOGGING_RUN_ARTIFACTS_ROOT so Docker can mount a persistent volume.
-_custom_artifacts_root = os.environ.get("BLOGGING_RUN_ARTIFACTS_ROOT")
-RUN_ARTIFACTS_BASE = (
-    Path(_custom_artifacts_root).expanduser().resolve()
-    if _custom_artifacts_root
-    else Path(tempfile.gettempdir()) / "blogging_runs"
-)
+# Resolution order (persistent first — /tmp is a last-resort fallback that
+# does NOT survive container restarts):
+#   1. $BLOGGING_RUN_ARTIFACTS_ROOT (explicit override)
+#   2. $AGENT_CACHE/blogging_team/runs (shared volume convention)
+#   3. tempfile.gettempdir()/blogging_runs (ephemeral — logs a loud warning)
+_custom_artifacts_root = os.environ.get("BLOGGING_RUN_ARTIFACTS_ROOT", "").strip()
+_agent_cache_root = os.environ.get("AGENT_CACHE", "").strip()
+if _custom_artifacts_root:
+    RUN_ARTIFACTS_BASE = Path(_custom_artifacts_root).expanduser().resolve()
+elif _agent_cache_root:
+    RUN_ARTIFACTS_BASE = Path(_agent_cache_root).expanduser().resolve() / "blogging_team" / "runs"
+else:
+    RUN_ARTIFACTS_BASE = Path(tempfile.gettempdir()) / "blogging_runs"
+    logger.warning(
+        "Neither BLOGGING_RUN_ARTIFACTS_ROOT nor AGENT_CACHE is set — "
+        "run artifacts will be written to %s, which is NOT persistent across "
+        "process/container restarts. Set BLOGGING_RUN_ARTIFACTS_ROOT or AGENT_CACHE "
+        "to a mounted volume for production deployments.",
+        RUN_ARTIFACTS_BASE,
+    )
 
 
 def _run_blogging_service_shutdown() -> None:
@@ -247,18 +259,6 @@ def _format_audience(audience: Optional[Union[AudienceDetails, str]]) -> str:
     if audience.other:
         parts.append(audience.other)
     return "; ".join(parts) if parts else ""
-
-
-# Shared LLM client (initialized on first request or at startup)
-_llm_client: Optional[OllamaLLMClient] = None
-
-
-def _get_llm_client() -> OllamaLLMClient:
-    """Get or create the shared LLM client."""
-    global _llm_client
-    if _llm_client is None:
-        _llm_client = OllamaLLMClient()
-    return _llm_client
 
 
 class FullPipelineRequest(BaseModel):
@@ -990,6 +990,11 @@ def stream_job_status(job_id: str) -> StreamingResponse:
 
             deadline = time.monotonic() + 4 * 3600  # 4-hour max connection
             while time.monotonic() < deadline:
+                # Liveness signal for the event-bus reaper: this consumer is
+                # still reading, so don't evict the subscription even if the
+                # job is quiet for longer than the idle TTL.
+                sub.touch()
+
                 # Drain all queued events
                 sent_terminal = False
                 while sub.events:

@@ -87,6 +87,23 @@ Be specific and opinionated. Cut anything that doesn't serve the core hypothesis
 Keep it concise — under 2000 words. No fluff, no hedging.
 """
 
+CHAT_PROMPT = """\
+You are Alex Chen, the startup founder. A user observing your test run has \
+sent you a message. Respond in character — budget-conscious, speed-first, \
+UX-obsessed.
+
+## Current Workflow Status
+{status}
+
+## Recent Decisions
+{recent_decisions}
+
+## User Message
+{message}
+
+Respond naturally and concisely. Stay in character.
+"""
+
 QUESTION_ANSWERING_PROMPT = """\
 The software engineering team building TaskFlow is asking you a question. \
 Answer it as the founder — budget-conscious, speed-first, UX-obsessed.
@@ -139,31 +156,48 @@ def _parse_answer(raw: str) -> dict[str, Any]:
 class FounderAgent:
     """Simulates a budget-conscious, speed-first, UX-obsessed startup founder."""
 
-    def __init__(self, llm=None) -> None:  # noqa: ANN001
-        if llm is None:
-            from llm_service import get_client
+    def __init__(self) -> None:
+        from strands import Agent
 
-            self._llm = get_client("user_agent_founder")
-        else:
-            self._llm = llm
+        from llm_service import get_strands_model
+
+        self._agent = Agent(
+            model=get_strands_model("user_agent_founder"),
+            system_prompt=FOUNDER_SYSTEM_PROMPT,
+        )
+
+    def _call(self, prompt: str, *, max_retries: int = 3) -> str:
+        """Invoke the Strands agent and extract text.
+
+        Retries on transient LLM provider errors (500s, timeouts, connection
+        resets) with exponential backoff.
+        """
+        import time as _time
+
+        for attempt in range(max_retries + 1):
+            try:
+                result = self._agent(prompt)
+                return str(result).strip()
+            except Exception as exc:
+                exc_text = str(exc).lower()
+                is_transient = any(k in exc_text for k in (
+                    "500", "502", "503", "504",
+                    "internal server error", "service unavailable",
+                    "timeout", "connection", "reset",
+                ))
+                if is_transient and attempt < max_retries:
+                    wait = 2 ** attempt * 5  # 5s, 10s, 20s
+                    logger.warning(
+                        "LLM call failed (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1, max_retries + 1, wait, str(exc)[:200],
+                    )
+                    _time.sleep(wait)
+                    continue
+                raise
 
     def generate_spec(self) -> str:
-        """Generate the TaskFlow product specification.
-
-        Returns:
-            Markdown spec content.
-        """
-        try:
-            raw = self._llm.complete(
-                SPEC_GENERATION_PROMPT,
-                temperature=0.6,
-                system_prompt=FOUNDER_SYSTEM_PROMPT,
-                think=True,
-            )
-            return raw.strip()
-        except Exception:
-            logger.exception("LLM call failed during spec generation")
-            raise
+        """Generate the TaskFlow product specification."""
+        return self._call(SPEC_GENERATION_PROMPT)
 
     def answer_question(self, question: dict[str, Any]) -> dict[str, Any]:
         """Answer a pending question from the SE team.
@@ -197,29 +231,22 @@ class FounderAgent:
             options_text=options_text,
         )
 
-        try:
-            raw = self._llm.complete(
-                prompt,
-                temperature=0.4,
-                system_prompt=FOUNDER_SYSTEM_PROMPT,
-                think=True,
-            )
-            return _parse_answer(raw)
-        except Exception:
-            logger.exception("LLM call failed during question answering")
-            # Fall back to the default option if available
-            for opt in options:
-                if opt.get("is_default"):
-                    return {
-                        "selected_option_id": opt["id"],
-                        "other_text": None,
-                        "rationale": "LLM unavailable; selected the default option.",
-                    }
-            return {
-                "selected_option_id": "other",
-                "other_text": "Go with the simplest, cheapest option that ships fastest.",
-                "rationale": "LLM unavailable; falling back to founder's core values.",
-            }
+        return _parse_answer(self._call(prompt))
+
+    def chat(self, message: str, context: dict[str, Any]) -> str:
+        """Respond to a user chat message in the founder persona."""
+        recent = context.get("recent_decisions", "none yet")
+        if isinstance(recent, list):
+            recent = "\n".join(
+                f"- {d.get('question_text', '?')}: {d.get('answer_text', '?')}"
+                for d in recent[-5:]
+            ) or "none yet"
+        prompt = CHAT_PROMPT.format(
+            status=context.get("status", "unknown"),
+            recent_decisions=recent,
+            message=message,
+        )
+        return self._call(prompt)
 
 
 # ---------------------------------------------------------------------------

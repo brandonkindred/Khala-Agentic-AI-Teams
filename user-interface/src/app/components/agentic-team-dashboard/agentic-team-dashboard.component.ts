@@ -8,10 +8,12 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatListModule } from '@angular/material/list';
 import { MatChipsModule } from '@angular/material/chips';
+import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { ProcessDesignerChatComponent } from '../process-designer-chat/process-designer-chat.component';
+import { AgenticTeamTestPanelComponent } from '../agentic-team-test-panel/agentic-team-test-panel.component';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
-import type { AgenticTeamSummary, AgenticTeam } from '../../models';
+import type { AgenticTeamSummary, AgenticTeam, TeamMode } from '../../models';
 
 @Component({
   selector: 'app-agentic-team-dashboard',
@@ -26,7 +28,9 @@ import type { AgenticTeamSummary, AgenticTeam } from '../../models';
     MatIconModule,
     MatListModule,
     MatChipsModule,
+    MatButtonToggleModule,
     ProcessDesignerChatComponent,
+    AgenticTeamTestPanelComponent,
     DashboardShellComponent,
   ],
   templateUrl: './agentic-team-dashboard.component.html',
@@ -38,6 +42,7 @@ export class AgenticTeamDashboardComponent implements OnInit {
 
   teams = signal<AgenticTeamSummary[]>([]);
   selectedTeam = signal<AgenticTeam | null>(null);
+  viewMode = signal<TeamMode>('development');
   showCreateForm = signal(false);
   creating = signal(false);
   error = signal<string | null>(null);
@@ -87,8 +92,20 @@ export class AgenticTeamDashboardComponent implements OnInit {
 
   selectTeam(teamId: string): void {
     this.api.getTeam(teamId).subscribe({
-      next: (res) => this.selectedTeam.set(res.team),
+      next: (res) => {
+        this.selectedTeam.set(res.team);
+        this.viewMode.set(res.team.mode ?? 'development');
+      },
       error: (err) => this.error.set(err?.error?.detail ?? 'Failed to load team'),
+    });
+  }
+
+  onModeChange(newMode: TeamMode): void {
+    const team = this.selectedTeam();
+    if (!team) return;
+    this.viewMode.set(newMode);
+    this.api.setTeamMode(team.team_id, newMode).subscribe({
+      error: (err) => this.error.set(err?.error?.detail ?? 'Failed to change mode'),
     });
   }
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Create the strands-stack network if it doesn't exist (required for compose when using external network).
-# Run once before first 'podman compose up' or after 'podman network rm strands-stack'.
+# Create the khala-stack network if it doesn't exist (required for compose when using external network).
+# Run once before first 'podman compose up' or after 'podman network rm khala-stack'.
 # Prevents repeated "IPAM option driver has changed" errors with Podman + docker-compose.
 
 set -e
 
-NETWORK_NAME="${1:-strands-stack}"
+NETWORK_NAME="${1:-khala-stack}"
 SUBNET="${2:-172.28.0.0/24}"
 
 if command -v podman &>/dev/null; then

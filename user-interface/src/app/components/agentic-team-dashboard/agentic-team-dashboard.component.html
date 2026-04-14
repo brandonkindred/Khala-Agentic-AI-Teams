@@ -27,7 +27,20 @@
     </mat-chip-set>
   </div>
 
-  <app-process-designer-chat [team]="team" />
+  <mat-button-toggle-group [value]="viewMode()" (change)="onModeChange($event.value)" class="mode-toggle">
+    <mat-button-toggle value="development">
+      <mat-icon>design_services</mat-icon> Design
+    </mat-button-toggle>
+    <mat-button-toggle value="testing">
+      <mat-icon>science</mat-icon> Test
+    </mat-button-toggle>
+  </mat-button-toggle-group>
+
+  @if (viewMode() === 'development') {
+    <app-process-designer-chat [team]="team" />
+  } @else {
+    <app-agentic-team-test-panel [team]="team" />
+  }
 
 } @else {
 

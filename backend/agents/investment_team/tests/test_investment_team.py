@@ -922,6 +922,7 @@ def test_compare_performance_aligned() -> None:
     assert comparison.return_aligned is True
     assert comparison.sharpe_aligned is True
     assert comparison.drawdown_aligned is True
+    assert comparison.profit_factor_aligned is True
 
 
 def test_compare_performance_divergent() -> None:
@@ -951,6 +952,7 @@ def test_compare_performance_divergent() -> None:
     assert comparison.overall_aligned is False
     assert comparison.win_rate_aligned is False
     assert comparison.return_aligned is False
+    assert comparison.profit_factor_aligned is False
 
 
 def test_compare_performance_zero_backtest_drawdown() -> None:
@@ -1258,32 +1260,12 @@ def test_trade_record_backward_compat_defaults() -> None:
 # ---------------------------------------------------------------------------
 # Strategy Lab cycle — paper-trading step gating
 # ---------------------------------------------------------------------------
-
-
-class _FakeIdeationAgent:
-    """Minimal stand-in for StrategyIdeationAgent used by cycle tests."""
-
-    def ideate_strategy(
-        self,
-        *,
-        prior_results=None,
-        precomputed_signal_brief=None,
-        exclude_asset_classes=None,
-    ):
-        strategy_data = {
-            "asset_class": "equities",
-            "hypothesis": "test",
-            "signal_definition": "sig",
-            "entry_rules": ["e1"],
-            "exit_rules": ["x1"],
-            "sizing_rules": ["s1"],
-            "risk_limits": {},
-            "speculative": False,
-        }
-        return strategy_data, "rationale"
-
-    def analyze_result(self, record, rationale):
-        return "narrative"
+#
+# The cycle is now orchestrator-based: ``orchestrator.run_cycle(...)`` produces
+# a complete StrategyLabRecord, and the paper-trading step runs *after* that
+# based on ``record.is_winning``. These tests stub the orchestrator to return
+# a pre-built record so we can assert the paper-trading gating/failure
+# contract without spinning up real code generation + sandbox execution.
 
 
 class _InMemoryDict:
@@ -1335,54 +1317,27 @@ def _cycle_models():
     return cycle_models
 
 
-def _losing_backtest_result():
+def _backtest_result(*, winning: bool) -> Any:
     m = _cycle_models()
+    if winning:
+        return m.BacktestResult(
+            total_return_pct=50.0,
+            annualized_return_pct=20.0,  # > 8% threshold
+            volatility_pct=10.0,
+            sharpe_ratio=1.5,
+            max_drawdown_pct=8.0,
+            win_rate_pct=60.0,
+            profit_factor=2.0,
+        )
     return m.BacktestResult(
         total_return_pct=-5.0,
-        annualized_return_pct=-2.0,  # below 8% threshold → not winning
+        annualized_return_pct=-2.0,  # below 8% threshold
         volatility_pct=10.0,
         sharpe_ratio=-0.2,
         max_drawdown_pct=10.0,
         win_rate_pct=40.0,
         profit_factor=0.5,
     )
-
-
-def _winning_backtest_result():
-    m = _cycle_models()
-    return m.BacktestResult(
-        total_return_pct=50.0,
-        annualized_return_pct=20.0,  # above 8% → winning
-        volatility_pct=10.0,
-        sharpe_ratio=1.5,
-        max_drawdown_pct=8.0,
-        win_rate_pct=60.0,
-        profit_factor=2.0,
-    )
-
-
-def _cycle_trade_record(**overrides) -> Any:
-    """Build a TradeRecord using the same module path the cycle uses."""
-    m = _cycle_models()
-    defaults = dict(
-        trade_num=1,
-        entry_date="2023-01-01",
-        exit_date="2023-01-02",
-        symbol="X",
-        side="long",
-        entry_price=100.0,
-        exit_price=105.0,
-        shares=1,
-        position_value=100.0,
-        gross_pnl=5.0,
-        net_pnl=4.9,
-        return_pct=5.0,
-        hold_days=1,
-        outcome="win",
-        cumulative_pnl=4.9,
-    )
-    defaults.update(overrides)
-    return m.TradeRecord(**defaults)
 
 
 def _cycle_backtest_config() -> Any:
@@ -1397,25 +1352,73 @@ def _cycle_backtest_config() -> Any:
     )
 
 
+def _make_lab_record(
+    *,
+    winning: bool,
+    strategy_code: str = "def strategy(): pass\n",
+) -> Any:
+    """Build a pre-assembled StrategyLabRecord for cycle tests to stub the orchestrator."""
+    m = _cycle_models()
+    config = _cycle_backtest_config()
+    strategy = m.StrategySpec(
+        strategy_id="strat-lab-test",
+        authored_by="strategy_ideation_agent",
+        asset_class="equities",
+        hypothesis="test",
+        signal_definition="sig",
+        entry_rules=["e1"],
+        exit_rules=["x1"],
+        sizing_rules=["s1"],
+        risk_limits={},
+        speculative=False,
+    )
+    backtest = m.BacktestRecord(
+        backtest_id="bt-lab-test",
+        strategy_id=strategy.strategy_id,
+        strategy=strategy,
+        config=config,
+        submitted_by="strategy_ideation_agent",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T00:01:00Z",
+        result=_backtest_result(winning=winning),
+        notes=[],
+        trades=[],
+    )
+    return m.StrategyLabRecord(
+        lab_record_id="lab-test",
+        strategy=strategy,
+        backtest=backtest,
+        is_winning=winning,
+        strategy_rationale="rationale",
+        analysis_narrative="narrative",
+        created_at="2024-01-01T00:01:00Z",
+        strategy_code=strategy_code,
+    )
+
+
+class _FakeOrchestrator:
+    """Stand-in for StrategyLabOrchestrator.run_cycle() in cycle tests."""
+
+    def __init__(self, record) -> None:
+        self._record = record
+
+    def run_cycle(
+        self,
+        *,
+        prior_records=None,
+        config=None,
+        signal_brief=None,
+        on_phase=None,
+        exclude_asset_classes=None,
+    ):
+        return self._record
+
+
 def test_cycle_skips_paper_trading_when_strategy_loses(monkeypatch) -> None:
     """Losing strategy: cycle must record paper_trading_status='skipped' (not_winning) and never call the helper."""
     from investment_team.api import main as api_main
 
     _install_inmemory_stores(monkeypatch)
-
-    losing_trade = _cycle_trade_record(
-        exit_price=99.0,
-        gross_pnl=-1.0,
-        net_pnl=-1.1,
-        return_pct=-1.0,
-        outcome="loss",
-        cumulative_pnl=-1.1,
-    )
-    monkeypatch.setattr(
-        api_main,
-        "_run_real_data_backtest",
-        lambda strategy, config: (_losing_backtest_result(), [losing_trade]),
-    )
 
     paper_calls: List[bool] = []
 
@@ -1430,9 +1433,10 @@ def test_cycle_skips_paper_trading_when_strategy_loses(monkeypatch) -> None:
     def capture_phase(phase: str, data=None) -> None:
         phases.append(phase)
 
+    losing_record = _make_lab_record(winning=False)
     record = api_main._run_one_strategy_lab_cycle(
-        _FakeIdeationAgent(),
         _cycle_backtest_config(),
+        _FakeOrchestrator(losing_record),
         on_phase=capture_phase,
         paper_trading_enabled=True,
     )
@@ -1453,20 +1457,15 @@ def test_cycle_skips_paper_trading_when_disabled(monkeypatch) -> None:
 
     _install_inmemory_stores(monkeypatch)
 
-    monkeypatch.setattr(
-        api_main,
-        "_run_real_data_backtest",
-        lambda strategy, config: (_winning_backtest_result(), [_cycle_trade_record()]),
-    )
-
     def _should_not_be_called(**kwargs):
         raise AssertionError("Paper trading must not run when disabled")
 
     monkeypatch.setattr(api_main, "_run_paper_trading_step", _should_not_be_called)
 
+    winning_record = _make_lab_record(winning=True)
     record = api_main._run_one_strategy_lab_cycle(
-        _FakeIdeationAgent(),
         _cycle_backtest_config(),
+        _FakeOrchestrator(winning_record),
         paper_trading_enabled=False,
     )
 
@@ -1476,18 +1475,36 @@ def test_cycle_skips_paper_trading_when_disabled(monkeypatch) -> None:
     assert record.paper_trading_session_id is None
 
 
+def test_cycle_skips_paper_trading_when_strategy_code_missing(monkeypatch) -> None:
+    """Orchestrator returned a winning record with no strategy_code: skip gracefully."""
+    from investment_team.api import main as api_main
+
+    _install_inmemory_stores(monkeypatch)
+
+    def _should_not_be_called(**kwargs):
+        raise AssertionError("Paper trading must not run without strategy_code")
+
+    monkeypatch.setattr(api_main, "_run_paper_trading_step", _should_not_be_called)
+
+    record_no_code = _make_lab_record(winning=True, strategy_code="")
+    record_no_code.strategy_code = None
+
+    record = api_main._run_one_strategy_lab_cycle(
+        _cycle_backtest_config(),
+        _FakeOrchestrator(record_no_code),
+        paper_trading_enabled=True,
+    )
+
+    assert record.paper_trading_status == "skipped"
+    assert record.paper_trading_skipped_reason == "no_strategy_code"
+
+
 def test_cycle_runs_paper_trading_for_winners(monkeypatch) -> None:
     """Winning strategy with paper_trading_enabled=True: helper runs and session_id is stored."""
     from investment_team.api import main as api_main
 
     m = _cycle_models()
     _install_inmemory_stores(monkeypatch)
-
-    monkeypatch.setattr(
-        api_main,
-        "_run_real_data_backtest",
-        lambda strategy, config: (_winning_backtest_result(), [_cycle_trade_record()]),
-    )
 
     captured_kwargs: Dict[str, Any] = {}
 
@@ -1513,13 +1530,12 @@ def test_cycle_runs_paper_trading_for_winners(monkeypatch) -> None:
 
     monkeypatch.setattr(api_main, "_run_paper_trading_step", fake_paper_step)
 
+    winning_record = _make_lab_record(winning=True, strategy_code="def run(): return []\n")
     record = api_main._run_one_strategy_lab_cycle(
-        _FakeIdeationAgent(),
         _cycle_backtest_config(),
+        _FakeOrchestrator(winning_record),
         paper_trading_enabled=True,
-        paper_trading_min_trades=15,
         paper_trading_lookback_days=200,
-        paper_trading_max_evaluations=1500,
     )
 
     assert record.is_winning is True
@@ -1529,11 +1545,9 @@ def test_cycle_runs_paper_trading_for_winners(monkeypatch) -> None:
     assert record.paper_trading_skipped_reason is None
     assert record.paper_trading_error is None
 
-    # Cycle forwarded paper-trade knobs to the helper
-    assert captured_kwargs["min_trades"] == 15
+    # Cycle forwarded lookback_days and inherited execution assumptions from config
     assert captured_kwargs["lookback_days"] == 200
-    assert captured_kwargs["max_evaluations"] == 1500
-    # And inherited execution assumptions from the backtest config
+    assert captured_kwargs["strategy_code"] == "def run(): return []\n"
     assert captured_kwargs["initial_capital"] == 100_000.0
     assert captured_kwargs["transaction_cost_bps"] == 5.0
     assert captured_kwargs["slippage_bps"] == 2.0
@@ -1545,20 +1559,15 @@ def test_cycle_records_paper_trading_failure_as_non_fatal(monkeypatch) -> None:
 
     _install_inmemory_stores(monkeypatch)
 
-    monkeypatch.setattr(
-        api_main,
-        "_run_real_data_backtest",
-        lambda strategy, config: (_winning_backtest_result(), [_cycle_trade_record()]),
-    )
-
     def boom(**kwargs):
-        raise RuntimeError("simulated LLM outage")
+        raise RuntimeError("simulated sandbox crash")
 
     monkeypatch.setattr(api_main, "_run_paper_trading_step", boom)
 
+    winning_record = _make_lab_record(winning=True)
     record = api_main._run_one_strategy_lab_cycle(
-        _FakeIdeationAgent(),
         _cycle_backtest_config(),
+        _FakeOrchestrator(winning_record),
         paper_trading_enabled=True,
     )
 
@@ -1566,7 +1575,7 @@ def test_cycle_records_paper_trading_failure_as_non_fatal(monkeypatch) -> None:
     assert record.is_winning is True
     assert record.paper_trading_status == "failed"
     assert record.paper_trading_error is not None
-    assert "simulated LLM outage" in record.paper_trading_error
+    assert "simulated sandbox crash" in record.paper_trading_error
     assert record.paper_trading_session_id is None
 
 
@@ -1576,20 +1585,15 @@ def test_cycle_records_paper_trading_no_market_data_as_skipped(monkeypatch) -> N
 
     _install_inmemory_stores(monkeypatch)
 
-    monkeypatch.setattr(
-        api_main,
-        "_run_real_data_backtest",
-        lambda strategy, config: (_winning_backtest_result(), [_cycle_trade_record()]),
-    )
-
     def no_data(**kwargs):
         raise api_main._PaperTradingDataUnavailable("providers exhausted")
 
     monkeypatch.setattr(api_main, "_run_paper_trading_step", no_data)
 
+    winning_record = _make_lab_record(winning=True)
     record = api_main._run_one_strategy_lab_cycle(
-        _FakeIdeationAgent(),
         _cycle_backtest_config(),
+        _FakeOrchestrator(winning_record),
         paper_trading_enabled=True,
     )
 

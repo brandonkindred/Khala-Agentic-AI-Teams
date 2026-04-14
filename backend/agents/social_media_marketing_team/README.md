@@ -282,6 +282,6 @@ print(result.content_plan.total_required_posts if result.content_plan else 0)
 - Job storage is in-memory; restart clears job history.
 - Human approval is required before campaign testing/execution planning is finalized.
 
-## Strands platform
+## Khala platform
 
-This package is part of the [Strands Agents](../../../README.md) monorepo (Unified API, Angular UI, and full team index).
+This package is part of the [Khala](../../../README.md) monorepo (Unified API, Angular UI, and full team index).

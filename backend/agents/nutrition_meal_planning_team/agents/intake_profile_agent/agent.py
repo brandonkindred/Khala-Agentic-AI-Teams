@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, Optional
 
-from llm_service import LLMClient, LLMError, LLMJsonParseError
+from strands import Agent
 
 from ...models import ClientProfile, ProfileUpdateRequest
 
@@ -62,8 +63,8 @@ Output only valid JSON matching the structure above, with no markdown or explana
 class IntakeProfileAgent:
     """Validates and completes client profile from structured input using LLM."""
 
-    def __init__(self, llm: LLMClient) -> None:
-        self.llm = llm
+    def __init__(self, model: Any) -> None:
+        self._agent = Agent(model=model, system_prompt=SYSTEM_PROMPT)
 
     def run(
         self,
@@ -87,26 +88,20 @@ class IntakeProfileAgent:
             + "\n\nRequested updates (partial):\n"
             + json.dumps(update_dict, indent=2)
             + "\n\nProduce a single complete client profile JSON. Preserve any existing fields not being updated; merge updates; fill missing with defaults."
+            + "\n\nRespond with valid JSON only, no markdown fences."
         )
 
         try:
-            data = self.llm.complete_json(
-                prompt,
-                temperature=0.2,
-                system_prompt=SYSTEM_PROMPT,
-                expected_keys=[
-                    "household",
-                    "dietary_needs",
-                    "allergies_and_intolerances",
-                    "lifestyle",
-                    "preferences",
-                    "goals",
-                ],
-            )
-        except LLMJsonParseError as e:
+            result = self._agent(prompt)
+            raw = str(result).strip()
+            # Strip markdown code fences if present
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as e:
             logger.warning("Intake profile JSON extraction failed: %s", e)
             return _merge_profile_structural(client_id, current_profile, update)
-        except LLMError as e:
+        except Exception as e:
             logger.warning("Intake profile LLM call failed, using structural merge: %s", e)
             return _merge_profile_structural(client_id, current_profile, update)
 

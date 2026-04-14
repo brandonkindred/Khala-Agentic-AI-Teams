@@ -14,6 +14,7 @@ slow reads and writes surface as structured log lines.
 
 from __future__ import annotations
 
+import json as _json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -77,6 +78,17 @@ class StoredDecision:
     question_text: str
     answer_text: str
     rationale: str
+    timestamp: str
+
+
+@dataclass
+class StoredChatMessage:
+    message_id: int
+    run_id: str
+    role: str
+    content: str
+    message_type: str
+    metadata: dict[str, Any] | None
     timestamp: str
 
 
@@ -215,6 +227,56 @@ class FounderRunStore:
                 "FROM user_agent_founder_runs ORDER BY created_at DESC"
             )
             return [_row_to_run(r) for r in cur.fetchall()]
+
+    # ── Chat messages ─────────────────────────────────────────────────
+
+    @timed_query(store=_STORE, op="add_chat_message")
+    def add_chat_message(
+        self,
+        run_id: str,
+        role: str,
+        content: str,
+        message_type: str = "chat",
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        ts = datetime.now(tz=timezone.utc)
+        meta_json = _json.dumps(metadata) if metadata else None
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO user_agent_founder_chat_messages "
+                "(run_id, role, content, message_type, metadata, timestamp) "
+                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                (run_id, role, content, message_type, meta_json, ts),
+            )
+            row = cur.fetchone()
+            return int(row[0])
+
+    @timed_query(store=_STORE, op="get_chat_messages")
+    def get_chat_messages(
+        self,
+        run_id: str,
+        since_id: int = 0,
+        limit: int = 200,
+    ) -> list[StoredChatMessage]:
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, run_id, role, content, message_type, metadata, timestamp "
+                "FROM user_agent_founder_chat_messages "
+                "WHERE run_id = %s AND id > %s ORDER BY id LIMIT %s",
+                (run_id, since_id, limit),
+            )
+            return [
+                StoredChatMessage(
+                    message_id=int(r["id"]),
+                    run_id=r["run_id"],
+                    role=r["role"],
+                    content=r["content"],
+                    message_type=r["message_type"],
+                    metadata=r["metadata"],
+                    timestamp=_row_ts(r["timestamp"]),
+                )
+                for r in cur.fetchall()
+            ]
 
 
 # ---------------------------------------------------------------------------

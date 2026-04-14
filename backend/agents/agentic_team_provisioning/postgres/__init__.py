@@ -1,8 +1,7 @@
 """Postgres schema for the agentic team provisioning team.
 
-Ports ``backend/agents/agentic_team_provisioning/assistant/store.py`` and
-``backend/agents/agentic_team_provisioning/infrastructure.py`` (currently
-SQLite) to Postgres. Registered from the team's FastAPI lifespan.
+Registered from the team's FastAPI lifespan. Tables are prefixed with
+``agentic_`` to avoid collisions in the shared ``POSTGRES_DB``.
 """
 
 from __future__ import annotations
@@ -69,8 +68,7 @@ SCHEMA = TeamSchema(
             PRIMARY KEY (team_id, stable_key)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_agentic_env_provisions_team ON agentic_env_provisions(team_id)",
-        # infrastructure.py — form_data (namespaced so a future migration
-        # can move per-team SQLite form stores into the shared DB).
+        # infrastructure.py — form_data partitioned by team_id.
         """CREATE TABLE IF NOT EXISTS agentic_form_data (
             record_id  TEXT PRIMARY KEY,
             team_id    TEXT NOT NULL,
@@ -81,6 +79,40 @@ SCHEMA = TeamSchema(
         )""",
         "CREATE INDEX IF NOT EXISTS idx_agentic_form_data_team ON agentic_form_data(team_id)",
         "CREATE INDEX IF NOT EXISTS idx_agentic_form_data_key ON agentic_form_data(form_key)",
+        # --- Interactive Testing Mode tables ---
+        "ALTER TABLE agentic_teams ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'development'",
+        """CREATE TABLE IF NOT EXISTS agentic_test_chat_sessions (
+            session_id   TEXT PRIMARY KEY,
+            team_id      TEXT NOT NULL REFERENCES agentic_teams(team_id),
+            agent_name   TEXT NOT NULL,
+            session_name TEXT NOT NULL DEFAULT '',
+            created_at   TIMESTAMPTZ NOT NULL,
+            updated_at   TIMESTAMPTZ NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_agentic_test_chat_sessions_team ON agentic_test_chat_sessions(team_id)",
+        """CREATE TABLE IF NOT EXISTS agentic_test_chat_messages (
+            message_id  TEXT PRIMARY KEY,
+            session_id  TEXT NOT NULL REFERENCES agentic_test_chat_sessions(session_id) ON DELETE CASCADE,
+            role        TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            rating      TEXT,
+            created_at  TIMESTAMPTZ NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_agentic_test_chat_messages_session ON agentic_test_chat_messages(session_id)",
+        """CREATE TABLE IF NOT EXISTS agentic_test_pipeline_runs (
+            run_id          TEXT PRIMARY KEY,
+            team_id         TEXT NOT NULL REFERENCES agentic_teams(team_id),
+            process_id      TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'running',
+            current_step_id TEXT,
+            initial_input   TEXT,
+            step_results    JSONB NOT NULL DEFAULT '[]'::jsonb,
+            human_prompt    TEXT,
+            error           TEXT,
+            started_at      TIMESTAMPTZ NOT NULL,
+            finished_at     TIMESTAMPTZ
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_agentic_test_pipeline_runs_team ON agentic_test_pipeline_runs(team_id, started_at DESC)",
     ],
     table_names=[
         "agentic_teams",
@@ -90,5 +122,8 @@ SCHEMA = TeamSchema(
         "agentic_team_agents",
         "agentic_env_provisions",
         "agentic_form_data",
+        "agentic_test_chat_sessions",
+        "agentic_test_chat_messages",
+        "agentic_test_pipeline_runs",
     ],
 )

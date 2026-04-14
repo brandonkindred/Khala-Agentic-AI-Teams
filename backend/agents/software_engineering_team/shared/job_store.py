@@ -340,6 +340,13 @@ def is_cancel_requested(
     job_id: str,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
 ) -> bool:
-    """Check if cancellation has been requested for a job."""
+    """Check if cancellation has been requested for a job.
+
+    Checks both the ``cancel_requested`` flag (set by the dedicated SE cancel
+    endpoint) and ``status == "cancelled"`` (set by the generic job proxy when
+    cancellation comes through the Jobs Dashboard).
+    """
     data = _client(cache_dir).get_job(job_id)
-    return bool(data.get("cancel_requested", False)) if data else False
+    if not data:
+        return False
+    return bool(data.get("cancel_requested", False)) or data.get("status") == "cancelled"

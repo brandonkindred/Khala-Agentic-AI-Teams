@@ -38,6 +38,7 @@ from investment_team.models import (
     LiquidityNeeds,
     NetWorth,
     PaperTradingSession,
+    PaperTradingStatus,
     PaperTradingVerdict,
     PortfolioConstraints,
     PortfolioPosition,
@@ -59,7 +60,9 @@ from investment_team.models import (
 from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
 from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
-from investment_team.strategy_ideation_agent import StrategyIdeationAgent
+from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+from investment_team.strategy_lab.quality_gates.convergence_tracker import ConvergenceTracker
+from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 from shared_observability import init_otel, instrument_fastapi_app
 
@@ -815,7 +818,6 @@ def _run_real_data_backtest(
     # deferring keeps application startup fast and avoids loading these until needed.
     from investment_team.backtesting_agent import BacktestingAgent
     from investment_team.market_data_service import MarketDataService
-    from llm_service.factory import get_client
 
     market_service = MarketDataService()
     symbols = market_service.get_symbols_for_strategy(strategy)
@@ -839,8 +841,7 @@ def _run_real_data_backtest(
             detail="Failed to fetch historical market data. Please check the date range and try again.",
         )
 
-    llm = get_client("backtesting")
-    agent = BacktestingAgent(llm_client=llm)
+    agent = BacktestingAgent()
     return agent.run_backtest(strategy, config, market_data)
 
 
@@ -854,25 +855,23 @@ class _PaperTradingDataUnavailable(Exception):
 def _run_paper_trading_step(
     *,
     strategy: StrategySpec,
+    strategy_code: str,
     backtest_record: BacktestRecord,
     initial_capital: float,
     transaction_cost_bps: float,
     slippage_bps: float,
-    min_trades: int,
     lookback_days: int,
-    max_evaluations: int,
 ) -> PaperTradingSession:
     """Run a paper-trading session inside a strategy lab cycle.
 
-    Mirrors the body of ``POST /strategy-lab/paper-trade`` but parameterized for
-    in-process use from ``_run_one_strategy_lab_cycle``. Raises
+    Fetches recent market data and executes the orchestrator-generated
+    ``strategy_code`` through the ``PaperTradingAgent``'s sandbox. Raises
     ``_PaperTradingDataUnavailable`` when no market data is available (caller
     converts to a non-fatal ``skipped`` outcome). Any other exception should
     propagate so the cycle records a ``failed`` status with the error message.
     """
     from investment_team.market_data_service import MarketDataService
     from investment_team.paper_trading_agent import PaperTradingAgent
-    from llm_service.factory import get_client
 
     market_service = MarketDataService()
     symbols = market_service.get_symbols_for_strategy(strategy)
@@ -891,17 +890,15 @@ def _run_paper_trading_step(
             "Failed to fetch market data for paper trading from external sources."
         )
 
-    llm = get_client("paper_trading")
-    agent = PaperTradingAgent(llm_client=llm)
+    agent = PaperTradingAgent()
     return agent.run_session(
         strategy=strategy,
+        strategy_code=strategy_code,
         backtest_record=backtest_record,
         market_data=market_data,
         initial_capital=initial_capital,
         transaction_cost_bps=transaction_cost_bps,
         slippage_bps=slippage_bps,
-        min_trades=min_trades,
-        max_evaluations=max_evaluations,
     )
 
 
@@ -918,7 +915,13 @@ class RunStrategyLabRequest(BaseModel):
         default=10,
         ge=1,
         le=25,
-        description="Strategies to generate this run (one per sequential step; each step sees all prior results).",
+        description="Total strategies to generate this run.",
+    )
+    max_parallel: int = Field(
+        default=3,
+        ge=1,
+        le=6,
+        description="Max strategies to generate in parallel per wave.",
     )
     # Paper-trading step (only runs when a cycle's backtest is flagged as winning)
     paper_trading_enabled: bool = Field(
@@ -928,24 +931,10 @@ class RunStrategyLabRequest(BaseModel):
             "cycle. Losing strategies always skip paper trading regardless of this flag."
         ),
     )
-    paper_trading_min_trades: int = Field(
-        default=20,
-        ge=1,
-        description="Minimum trades to target before evaluating the paper-trading session.",
-    )
     paper_trading_lookback_days: int = Field(
         default=365,
         ge=30,
         description="Days of recent market data to fetch for paper trading.",
-    )
-    paper_trading_max_evaluations: int = Field(
-        default=2000,
-        ge=100,
-        le=20000,
-        description=(
-            "Cap on LLM evaluations during paper trading to bound cycle cost. Lower than "
-            "the standalone endpoint's default (5000) since this runs per winning cycle."
-        ),
     )
 
 
@@ -988,38 +977,34 @@ def _build_strategy_from_ideation(strategy_data: Dict[str, Any]) -> tuple[Strate
 
 
 def _run_one_strategy_lab_cycle(
-    agent: StrategyIdeationAgent,
     config: BacktestConfig,
+    orchestrator: "StrategyLabOrchestrator",
     *,
     precomputed_signal_brief: Optional[SignalIntelligenceBriefV1] = None,
     signal_brief_storage: Optional[Dict[str, Any]] = None,
     on_phase: Optional[Any] = None,
+    exclude_asset_classes: Optional[List[str]] = None,
     paper_trading_enabled: bool = True,
-    paper_trading_min_trades: int = 20,
     paper_trading_lookback_days: int = 365,
-    paper_trading_max_evaluations: int = 2000,
 ) -> StrategyLabRecord:
-    """Single ideation → backtest → analysis → (paper-trading) cycle.
+    """Single ideation → validate → execute → refine → analyze (+ paper-trading) cycle via the v2 orchestrator.
 
-    Persists to store so the next cycle sees full history. If all data providers
-    fail for the ideated asset class, re-ideates for a different asset class
-    (up to one retry) rather than aborting the entire batch.
+    The orchestrator handles the full code-generation + sandboxed-execution pipeline
+    internally, including up to 10 refinement rounds.
 
-    The paper-trading step only runs when the backtest flags the strategy as
-    winning (``annualized_return_pct > 8.0``). Losing strategies record
+    After the orchestrator returns a complete ``StrategyLabRecord``, the paper-trading
+    step runs only when the record is flagged as winning
+    (``record.is_winning``). Losing strategies record
     ``paper_trading_status = "skipped"`` with reason ``"not_winning"`` and never
-    consume paper-trade LLM budget. Paper-trading failures are non-fatal: the
-    cycle still persists a valid winning record with ``paper_trading_status =
-    "failed"`` and the error message.
+    consume paper-trade budget. Paper-trading failures are non-fatal: the cycle
+    still persists the winning record with ``paper_trading_status = "failed"``
+    and the error message.
 
     Args:
-        on_phase: Optional callback ``(phase: str, data: dict) -> None`` called at each
-            phase boundary to emit progress events.
         paper_trading_enabled: Opt-out flag; when False, every winning strategy
             records ``paper_trading_status = "skipped"`` with reason ``"disabled"``.
-        paper_trading_min_trades: Forwarded to the paper-trading engine.
-        paper_trading_lookback_days: Forwarded to ``MarketDataService.fetch_multi_symbol``.
-        paper_trading_max_evaluations: Caps LLM evaluations during the paper-trading step.
+        paper_trading_lookback_days: Forwarded to ``MarketDataService.fetch_multi_symbol``
+            when the paper-trading step runs.
     """
 
     def _emit(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
@@ -1032,130 +1017,57 @@ def _run_one_strategy_lab_cycle(
     prior_records = [StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior]
     prior_records.sort(key=lambda r: r.created_at)
 
-    _emit("ideating")
-
-    try:
-        strategy_data, rationale = agent.ideate_strategy(
-            prior_results=prior_records,
-            precomputed_signal_brief=precomputed_signal_brief,
-        )
-    except Exception as exc:
-        logger.error("Strategy ideation failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Strategy ideation failed: {exc}") from exc
-
-    strategy, strategy_id = _build_strategy_from_ideation(strategy_data)
-    strategy_preview = {"asset_class": strategy.asset_class, "hypothesis": strategy.hypothesis}
-
-    _emit("fetching_data", {"strategy": strategy_preview})
-
-    try:
-        result, trades = _run_real_data_backtest(strategy, config)
-    except HTTPException as exc:
-        if exc.status_code != 502:
-            raise
-        failed_ac = strategy.asset_class
-        logger.warning(
-            "No market data for asset class %s (all providers failed); re-ideating with exclusion",
-            failed_ac,
-        )
-        _emit("ideating", {"retry": True, "excluded": failed_ac})
-        try:
-            strategy_data, rationale = agent.ideate_strategy(
-                prior_results=prior_records,
-                precomputed_signal_brief=precomputed_signal_brief,
-                exclude_asset_classes=[failed_ac],
-            )
-        except Exception as exc2:
-            raise HTTPException(
-                status_code=500, detail=f"Re-ideation after data failure failed: {exc2}"
-            ) from exc2
-
-        strategy, strategy_id = _build_strategy_from_ideation(strategy_data)
-        strategy_preview = {"asset_class": strategy.asset_class, "hypothesis": strategy.hypothesis}
-        _emit("fetching_data", {"strategy": strategy_preview, "retry": True})
-        result, trades = _run_real_data_backtest(strategy, config)
-
-    metrics_preview = {
-        "annualized_return_pct": round(result.annualized_return_pct, 2),
-        "sharpe_ratio": round(result.sharpe_ratio, 2),
-        "max_drawdown_pct": round(result.max_drawdown_pct, 2),
-        "win_rate_pct": round(result.win_rate_pct, 2),
-        "total_trades": len(trades),
-    }
-    _emit("analyzing", {"strategy": strategy_preview, "metrics": metrics_preview})
-
-    now = _now()
-    backtest_id = f"bt-lab-{uuid.uuid4().hex[:8]}"
-    backtest = BacktestRecord(
-        backtest_id=backtest_id,
-        strategy_id=strategy_id,
-        strategy=strategy,
+    record = orchestrator.run_cycle(
+        prior_records=prior_records,
         config=config,
-        submitted_by="strategy_ideation_agent",
-        submitted_at=now,
-        completed_at=now,
-        result=result,
-        notes=[],
-        trades=trades,
+        signal_brief=precomputed_signal_brief,
+        on_phase=on_phase,
+        exclude_asset_classes=exclude_asset_classes,
     )
 
-    is_winning = result.annualized_return_pct > 8.0
-
-    lab_record_id = f"lab-{uuid.uuid4().hex[:8]}"
-    provisional_record = StrategyLabRecord(
-        lab_record_id=lab_record_id,
-        strategy=strategy,
-        backtest=backtest,
-        is_winning=is_winning,
-        strategy_rationale=rationale,
-        analysis_narrative="",
-        created_at=now,
-    )
-
-    try:
-        narrative = agent.analyze_result(provisional_record, rationale)
-    except Exception as exc:
-        logger.warning("Analysis narrative generation failed: %s", exc)
-        narrative = (
-            f"Strategy returned {result.annualized_return_pct:.1f}% annualized "
-            f"({'above' if is_winning else 'below'} the 8% winning threshold). "
-            f"Sharpe ratio: {result.sharpe_ratio:.2f}, max drawdown: {result.max_drawdown_pct:.1f}%."
-        )
+    # Attach signal brief before persisting (PersistentDict serializes at assignment)
+    if signal_brief_storage and not record.signal_intelligence_brief:
+        record.signal_intelligence_brief = signal_brief_storage
 
     # --- Paper-trading step (gated on winning backtest) -------------------
-    paper_session_id: Optional[str] = None
-    paper_status: Optional[str] = None
-    paper_skipped_reason: Optional[str] = None
-    paper_error: Optional[str] = None
-    paper_verdict: Optional[PaperTradingVerdict] = None
-
-    if not is_winning:
-        paper_status = "skipped"
-        paper_skipped_reason = "not_winning"
+    # Only winners proceed to paper trading; failures are non-fatal so the
+    # valid backtest record is still persisted. The standalone
+    # /strategy-lab/paper-trade endpoint can be used to retry later.
+    strategy_preview = {
+        "asset_class": record.strategy.asset_class,
+        "hypothesis": record.strategy.hypothesis,
+    }
+    if not record.is_winning:
+        record.paper_trading_status = "skipped"
+        record.paper_trading_skipped_reason = "not_winning"
         _emit("paper_trading_skipped", {"reason": "not_winning"})
     elif not paper_trading_enabled:
-        paper_status = "skipped"
-        paper_skipped_reason = "disabled"
+        record.paper_trading_status = "skipped"
+        record.paper_trading_skipped_reason = "disabled"
         _emit("paper_trading_skipped", {"reason": "disabled"})
+    elif not record.strategy_code:
+        # Orchestrator didn't produce runnable strategy code; nothing to paper-trade
+        record.paper_trading_status = "skipped"
+        record.paper_trading_skipped_reason = "no_strategy_code"
+        _emit("paper_trading_skipped", {"reason": "no_strategy_code"})
     else:
         _emit("paper_trading", {"strategy": strategy_preview})
         try:
             session = _run_paper_trading_step(
-                strategy=strategy,
-                backtest_record=backtest,
+                strategy=record.strategy,
+                strategy_code=record.strategy_code,
+                backtest_record=record.backtest,
                 initial_capital=config.initial_capital,
                 transaction_cost_bps=config.transaction_cost_bps,
                 slippage_bps=config.slippage_bps,
-                min_trades=paper_trading_min_trades,
                 lookback_days=paper_trading_lookback_days,
-                max_evaluations=paper_trading_max_evaluations,
             )
-            session.lab_record_id = lab_record_id
+            session.lab_record_id = record.lab_record_id
             with _lock:
                 _paper_trading_sessions[session.session_id] = session
-            paper_session_id = session.session_id
-            paper_status = "completed"
-            paper_verdict = session.verdict
+            record.paper_trading_session_id = session.session_id
+            record.paper_trading_status = "completed"
+            record.paper_trading_verdict = session.verdict
             _emit(
                 "paper_trading_complete",
                 {
@@ -1166,46 +1078,20 @@ def _run_one_strategy_lab_cycle(
             )
         except _PaperTradingDataUnavailable as exc:
             logger.warning("Paper trading step skipped due to missing market data: %s", exc)
-            paper_status = "skipped"
-            paper_skipped_reason = "no_market_data"
+            record.paper_trading_status = "skipped"
+            record.paper_trading_skipped_reason = "no_market_data"
             _emit("paper_trading_skipped", {"reason": "no_market_data", "detail": str(exc)[:200]})
         except Exception as exc:
             logger.warning("Paper trading step failed (non-fatal): %s", exc)
-            paper_status = "failed"
-            paper_error = str(exc)[:500]
-            _emit("paper_trading_failed", {"detail": paper_error})
+            record.paper_trading_status = "failed"
+            record.paper_trading_error = str(exc)[:500]
+            _emit("paper_trading_failed", {"detail": record.paper_trading_error})
 
-    record = StrategyLabRecord(
-        lab_record_id=lab_record_id,
-        strategy=strategy,
-        backtest=backtest,
-        is_winning=is_winning,
-        strategy_rationale=rationale,
-        analysis_narrative=narrative,
-        created_at=now,
-        signal_intelligence_brief=signal_brief_storage,
-        paper_trading_session_id=paper_session_id,
-        paper_trading_status=paper_status,
-        paper_trading_skipped_reason=paper_skipped_reason,
-        paper_trading_error=paper_error,
-        paper_trading_verdict=paper_verdict,
-    )
-
+    # Persist to in-memory stores
     with _lock:
-        _strategy_lab_records[lab_record_id] = record
-        _strategies[strategy_id] = strategy
-        _backtests[backtest_id] = backtest
-
-    _emit(
-        "complete",
-        {
-            "record_id": lab_record_id,
-            "is_winning": is_winning,
-            "metrics": metrics_preview,
-            "paper_trading_status": paper_status,
-            "paper_trading_verdict": paper_verdict.value if paper_verdict else None,
-        },
-    )
+        _strategy_lab_records[record.lab_record_id] = record
+        _strategies[record.strategy.strategy_id] = record.strategy
+        _backtests[record.backtest.backtest_id] = record.backtest
 
     return record
 
@@ -1271,10 +1157,7 @@ def _strategy_lab_worker(
         publish(run_id, payload, event_type=event_type)
 
     try:
-        from llm_service.factory import get_client
-
-        llm = get_client("strategy_ideation")
-        agent = StrategyIdeationAgent(llm_client=llm)
+        orchestrator = StrategyLabOrchestrator(convergence_tracker=ConvergenceTracker())
 
         config = BacktestConfig(
             start_date=request.start_date,
@@ -1310,8 +1193,7 @@ def _strategy_lab_worker(
             ]
             prior_for_brief.sort(key=lambda r: r.created_at)
 
-            llm_signal = get_client("signal_intelligence")
-            expert = SignalIntelligenceExpert(llm_signal)
+            expert = SignalIntelligenceExpert()
             t0 = datetime.now(tz=timezone.utc)
             try:
                 brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
@@ -1349,70 +1231,146 @@ def _strategy_lab_worker(
             }
 
         completed_ids: List[str] = []
+        completed_indices: set[int] = set()  # 0-based indices of completed cycles
         skipped = 0
         if start_cycle_offset > 0:
+            # Mark prior cycles as already completed for resume bookkeeping
+            completed_indices.update(range(start_cycle_offset))
             logger.info("Strategy lab worker resuming from cycle %d", start_cycle_offset + 1)
-        for i in range(start_cycle_offset, request.batch_size):
-            cycle_num = i + 1
 
-            def on_phase(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
-                cycle_data = {"cycle_index": cycle_num, "phase": phase, **(data or {})}
-                _update_run({"current_cycle": cycle_data})
-                _publish("progress", cycle_data)
+        # ── Wave-based parallel execution ──────────────────────────────
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        _TERMINAL_STATUSES = frozenset({"cancelled", "failed", "interrupted"})
+
+        def _is_run_cancelled() -> bool:
+            """Check the job service for external cancellation."""
             try:
-                record = _run_one_strategy_lab_cycle(
-                    agent,
-                    config,
-                    precomputed_signal_brief=precomputed_brief,
-                    signal_brief_storage=signal_brief_storage,
-                    on_phase=on_phase,
-                    paper_trading_enabled=request.paper_trading_enabled,
-                    paper_trading_min_trades=request.paper_trading_min_trades,
-                    paper_trading_lookback_days=request.paper_trading_lookback_days,
-                    paper_trading_max_evaluations=request.paper_trading_max_evaluations,
-                )
-                completed_ids.append(record.lab_record_id)
-                _update_run(
-                    {
-                        "completed_cycles": len(completed_ids),
-                        "completed_record_ids": list(completed_ids),
-                        "current_cycle": None,
-                    }
-                )
-                _publish(
-                    "cycle_complete",
-                    {
-                        "cycle_index": cycle_num,
-                        "record_id": record.lab_record_id,
-                        "completed_cycles": len(completed_ids),
-                    },
-                )
-            except HTTPException as exc:
-                if exc.status_code == 502:
-                    logger.warning(
-                        "Strategy lab cycle %d/%d skipped (no market data after fallback)",
-                        cycle_num,
-                        request.batch_size,
+                client = _get_lab_run_job_client()
+                persisted = client.get_job(run_id)
+                if persisted:
+                    return persisted.get("status", "") in _TERMINAL_STATUSES
+            except Exception:
+                pass
+            return False
+
+        primary_tracker = orchestrator.convergence_tracker
+        max_parallel = request.max_parallel
+        remaining = list(range(start_cycle_offset, request.batch_size))
+        run_failed = False
+        run_cancelled = False
+
+        while remaining and not run_failed and not run_cancelled:
+            wave_indices = remaining[:max_parallel]
+            remaining = remaining[max_parallel:]
+
+            wave_futures: Dict[Any, int] = {}
+            with ThreadPoolExecutor(max_workers=len(wave_indices), thread_name_prefix="strat-lab") as pool:
+                for i in wave_indices:
+                    cn = i + 1  # cycle_num (1-based)
+
+                    def _make_on_phase(_cn: int):
+                        def on_phase(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
+                            cycle_data = {"cycle_index": _cn, "phase": phase, **(data or {})}
+                            _update_run({"current_cycle": cycle_data})
+                            _publish("progress", cycle_data)
+                        return on_phase
+
+                    cycle_orchestrator = StrategyLabOrchestrator(
+                        convergence_tracker=primary_tracker.snapshot(),
                     )
-                    skipped += 1
-                    _update_run({"skipped_cycles": skipped, "current_cycle": None})
-                    _publish(
-                        "cycle_skipped", {"cycle_index": cycle_num, "reason": "no_market_data"}
+                    future = pool.submit(
+                        _run_one_strategy_lab_cycle,
+                        config,
+                        cycle_orchestrator,
+                        precomputed_signal_brief=precomputed_brief,
+                        signal_brief_storage=signal_brief_storage,
+                        on_phase=_make_on_phase(cn),
+                        paper_trading_enabled=request.paper_trading_enabled,
+                        paper_trading_lookback_days=request.paper_trading_lookback_days,
                     )
-                    continue
-                raise
-            except Exception as exc:
-                logger.exception("Strategy lab cycle %d/%d failed", cycle_num, request.batch_size)
-                _update_run(
-                    {
-                        "status": "failed",
-                        "error": f"Cycle {cycle_num} failed: {exc}",
-                        "current_cycle": None,
-                    }
-                )
-                _publish("error", {"detail": f"Cycle {cycle_num} failed: {exc}"})
-                return
+                    wave_futures[future] = cn
+
+                # Collect results from this wave.
+                # Each entry is (cycle_index_0based, record) so we can sort
+                # deterministically before updating the convergence tracker.
+                wave_results: List[tuple[int, StrategyLabRecord]] = []
+                for future in as_completed(wave_futures):
+                    cn = wave_futures[future]
+                    try:
+                        record = future.result()
+                        completed_ids.append(record.lab_record_id)
+                        completed_indices.add(cn - 1)  # 0-based
+                        wave_results.append((cn - 1, record))
+
+                        # Track the highest contiguous completed index for
+                        # resume_strategy_lab_run (start_cycle_offset), but
+                        # report the actual count for UI progress display.
+                        contiguous = 0
+                        while contiguous in completed_indices:
+                            contiguous += 1
+                        _update_run({
+                            "completed_cycles": len(completed_ids),
+                            "contiguous_cycles": contiguous,
+                            "completed_record_ids": list(completed_ids),
+                            "current_cycle": None,
+                        })
+                        _publish("cycle_complete", {
+                            "cycle_index": cn,
+                            "record_id": record.lab_record_id,
+                            "completed_cycles": len(completed_ids),
+                        })
+                    except HTTPException as exc:
+                        if exc.status_code == 502:
+                            logger.warning(
+                                "Strategy lab cycle %d/%d skipped (no market data after fallback)",
+                                cn, request.batch_size,
+                            )
+                            skipped += 1
+                            _update_run({"skipped_cycles": skipped, "current_cycle": None})
+                            _publish("cycle_skipped", {"cycle_index": cn, "reason": "no_market_data"})
+                        else:
+                            logger.exception("Strategy lab cycle %d/%d failed", cn, request.batch_size)
+                            _update_run({
+                                "status": "failed",
+                                "error": f"Cycle {cn} failed: {exc}",
+                                "current_cycle": None,
+                            })
+                            _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
+                            run_failed = True
+                    except Exception as exc:
+                        logger.exception("Strategy lab cycle %d/%d failed", cn, request.batch_size)
+                        _update_run({
+                            "status": "failed",
+                            "error": f"Cycle {cn} failed: {exc}",
+                            "current_cycle": None,
+                        })
+                        _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
+                        run_failed = True
+
+            # Merge wave results into the primary convergence tracker in
+            # deterministic cycle-index order so that stall/diversity
+            # directives are reproducible across runs with identical inputs.
+            wave_results.sort(key=lambda pair: pair[0])
+            for _idx, record in wave_results:
+                gate_results = [
+                    QualityGateResult(**g) if isinstance(g, dict) else g
+                    for g in record.quality_gate_results
+                ]
+                primary_tracker.record(record.strategy, gate_results)
+
+            # Check for external cancellation between waves
+            if not run_failed and _is_run_cancelled():
+                logger.info("Strategy lab run %s cancelled externally — stopping after wave", run_id)
+                run_cancelled = True
+
+        if run_failed:
+            return
+
+        if run_cancelled:
+            _update_run({"status": "cancelled", "current_cycle": None})
+            _publish("error", {"detail": "Run cancelled by user"})
+            return
 
         msg = f"Completed {len(completed_ids)} strategy lab cycle(s)."
         if skipped:
@@ -1624,6 +1582,9 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         raise HTTPException(status_code=400, detail="Original request payload not available.")
 
     completed_cycles = state.get("completed_cycles", 0)
+    # contiguous_cycles tracks the highest unbroken sequence from index 0
+    # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
+    contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
     total_cycles = state.get("total_cycles", 10)
 
     with _lock:
@@ -1640,6 +1601,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         "started_at": state.get("started_at", _now()),
         "total_cycles": total_cycles,
         "completed_cycles": completed_cycles,
+        "contiguous_cycles": contiguous_cycles,
         "skipped_cycles": state.get("skipped_cycles", 0),
         "current_cycle": None,
         "completed_record_ids": state.get("completed_record_ids", []),
@@ -1656,7 +1618,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     thread = threading.Thread(
         target=_strategy_lab_worker,
         args=(run_id, request),
-        kwargs={"start_cycle_offset": completed_cycles},
+        kwargs={"start_cycle_offset": contiguous_cycles},
         name=f"strategy-lab-resume-{run_id}",
         daemon=True,
     )
@@ -1665,7 +1627,7 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     return StrategyLabRunStartResponse(
         run_id=run_id,
         total_cycles=total_cycles,
-        message=f"Run resumed from cycle {completed_cycles + 1} of {total_cycles}.",
+        message=f"Run resumed from cycle {contiguous_cycles + 1} of {total_cycles}.",
     )
 
 
@@ -1731,13 +1693,81 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     )
 
 
+@app.delete(
+    "/strategy-lab/runs/{run_id}",
+    summary="Delete a strategy lab run",
+    description="Remove a strategy lab run from the job store and in-memory tracking.",
+)
+def delete_strategy_lab_run(run_id: str) -> Dict[str, Any]:
+    """Delete a strategy lab run by ID."""
+    with _lock:
+        _active_runs.pop(run_id, None)
+
+    client = _get_lab_run_job_client()
+    deleted = client.delete_job(run_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return {"job_id": run_id, "deleted": True}
+
+
 @app.get(
     "/strategy-lab/runs", response_model=ActiveRunsResponse, summary="List active strategy lab runs"
 )
 def list_strategy_lab_runs() -> ActiveRunsResponse:
-    """Return all tracked runs (active and recently completed, kept for 5 min after finish)."""
-    with _lock:
-        runs = [_run_state_to_response(r) for r in _active_runs.values()]
+    """Return all tracked runs (active and recently completed).
+
+    Merges in-memory state with persisted job-service state so that
+    running jobs are always visible — even after a page refresh that
+    races with server startup or after the in-memory entry is evicted.
+
+    Also reconciles: if an in-memory run says "running" but the job service
+    has it as terminal (cancelled/failed/completed), the in-memory state is
+    updated to match — this handles external cancellation via the generic
+    job proxy or the Jobs Dashboard.
+    """
+    _TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+
+    try:
+        client = _get_lab_run_job_client()
+
+        # Reconcile: if job service has a terminal status for a run we think
+        # is still active, update _active_runs so the UI sees the real state.
+        with _lock:
+            running_ids = [
+                rid for rid, r in _active_runs.items() if r.get("status") not in _TERMINAL
+            ]
+        for rid in running_ids:
+            try:
+                persisted = client.get_job(rid)
+                if persisted:
+                    js_status = persisted.get("status", "")
+                    if js_status in _TERMINAL:
+                        with _lock:
+                            if rid in _active_runs:
+                                _active_runs[rid]["status"] = js_status
+                                _active_runs[rid]["error"] = persisted.get("error") or persisted.get("data", {}).get("error")
+            except Exception:
+                pass
+
+        with _lock:
+            in_memory = {r["run_id"]: r for r in _active_runs.values()}
+
+        # Merge running/pending jobs from the persistent job service that
+        # may not be in _active_runs (e.g. after a server restart).
+        persisted_list = client.list_jobs(statuses=["running", "pending"])
+        for job in persisted_list:
+            rid = job.get("job_id") or job.get("run_id", "")
+            if rid and rid not in in_memory:
+                data = job.get("data", job)
+                data["run_id"] = rid
+                data.setdefault("status", job.get("status", "running"))
+                in_memory[rid] = data
+    except Exception:
+        logger.debug("Job service fallback failed for run listing", exc_info=True)
+        with _lock:
+            in_memory = {r["run_id"]: r for r in _active_runs.values()}
+
+    runs = [_run_state_to_response(r) for r in in_memory.values()]
     return ActiveRunsResponse(runs=runs)
 
 
@@ -1748,8 +1778,27 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
 )
 def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
     """Snapshot of a single run's progress. Use for polling when SSE is unavailable."""
+    _TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+
     with _lock:
         state = _active_runs.get(run_id)
+
+    # Reconcile with job service if in-memory state looks active
+    if state and state.get("status") not in _TERMINAL:
+        try:
+            client = _get_lab_run_job_client()
+            persisted = client.get_job(run_id)
+            if persisted:
+                js_status = persisted.get("status", "")
+                if js_status in _TERMINAL:
+                    with _lock:
+                        if run_id in _active_runs:
+                            _active_runs[run_id]["status"] = js_status
+                            _active_runs[run_id]["error"] = persisted.get("error") or persisted.get("data", {}).get("error")
+                            state = _active_runs[run_id]
+        except Exception:
+            pass
+
     if not state:
         state = _load_run_from_job_service(run_id)
     if not state:
@@ -1948,7 +1997,7 @@ def delete_strategy_lab_record(lab_record_id: str) -> DeleteStrategyLabRecordRes
 @app.delete("/strategy-lab/storage", response_model=ClearStrategyLabStorageResponse)
 def clear_strategy_lab_storage() -> ClearStrategyLabStorageResponse:
     """
-    Remove all persisted strategy lab data from the job service (Postgres ``strands_jobs.jobs``
+    Remove all persisted strategy lab data from the job service (Postgres ``khala_jobs.jobs``
     when ``JOB_SERVICE_URL`` is set, or local ``AGENT_CACHE`` files otherwise).
 
     Deletes:
@@ -1983,14 +2032,7 @@ class RunPaperTradingRequest(BaseModel):
     initial_capital: float = Field(default=100000.0, gt=0)
     transaction_cost_bps: float = Field(default=5.0, ge=0)
     slippage_bps: float = Field(default=2.0, ge=0)
-    min_trades: int = Field(default=50, ge=10, description="Minimum trades before evaluation")
-    lookback_days: int = Field(default=365, ge=30, description="Days of historical data to fetch")
-    max_evaluations: int = Field(
-        default=5000,
-        ge=100,
-        le=50000,
-        description="Cap on LLM evaluations to bound execution time.",
-    )
+    lookback_days: int = Field(default=365, ge=30, description="Days of recent market data to fetch")
 
 
 class PaperTradingResponse(BaseModel):
@@ -2010,14 +2052,13 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     """
     Run a paper trading session for a winning strategy using real market data.
 
-    Fetches live price data, uses the LLM to interpret the strategy's entry/exit rules
-    against each bar, simulates trade execution, and compares performance to the backtest.
-    Strategies that align with backtest expectations are flagged as ready for live testing.
-    Underperforming strategies receive a detailed divergence analysis.
+    Executes the strategy's generated Python code against recent market data in
+    the same subprocess sandbox used for backtesting.  Compares performance to the
+    backtest.  Strategies that align with backtest expectations are flagged as ready
+    for live testing.  Underperforming strategies receive a detailed divergence analysis.
     """
     from investment_team.market_data_service import MarketDataService
     from investment_team.paper_trading_agent import PaperTradingAgent
-    from llm_service.factory import get_client
 
     # 1 — Look up the winning strategy lab record
     with _lock:
@@ -2039,6 +2080,15 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
 
     strategy = lab_record.strategy
     backtest_record = lab_record.backtest
+
+    # 1b — Extract strategy code (required for code-based paper trading)
+    strategy_code = lab_record.strategy_code or getattr(strategy, "strategy_code", None)
+    if not strategy_code:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Strategy '{request.lab_record_id}' has no generated strategy code. "
+            "Only strategies with executable code can be paper traded.",
+        )
 
     # 2 — Fetch real market data
     market_service = MarketDataService()
@@ -2063,20 +2113,17 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         )
 
     # 3 — Run paper trading session
-    # Lazy imports: yfinance and LLM client are heavy; deferring keeps app startup fast.
-    llm = get_client("paper_trading")
-    agent = PaperTradingAgent(llm_client=llm)
+    agent = PaperTradingAgent()
 
     try:
         session = agent.run_session(
             strategy=strategy,
+            strategy_code=strategy_code,
             backtest_record=backtest_record,
             market_data=market_data,
             initial_capital=request.initial_capital,
             transaction_cost_bps=request.transaction_cost_bps,
             slippage_bps=request.slippage_bps,
-            min_trades=request.min_trades,
-            max_evaluations=request.max_evaluations,
         )
     except Exception as exc:
         logger.error("Paper trading session failed: %s", exc)
@@ -2088,29 +2135,27 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     with _lock:
         _paper_trading_sessions[session.session_id] = session
 
-    # 5 — Build response message (include a warning when min_trades was not reached)
+    # 5 — Build response message
     trade_count = len(session.trades)
-    shortfall = ""
-    if trade_count < request.min_trades:
-        shortfall = (
-            f" WARNING: Only {trade_count}/{request.min_trades} trades were completed "
-            f"(insufficient data or evaluation budget). Results may be unreliable."
-        )
 
-    if session.verdict == PaperTradingVerdict.READY_FOR_LIVE:
+    if session.status == PaperTradingStatus.FAILED:
+        message = (
+            "Paper trading failed — strategy code could not be executed against recent data. "
+            "See divergence_analysis for error details."
+        )
+    elif session.verdict == PaperTradingVerdict.READY_FOR_LIVE:
         message = (
             f"Paper trading completed with {trade_count} trades. "
             f"Performance aligns with backtest expectations — strategy is READY FOR LIVE TESTING."
-            f"{shortfall}"
         )
     elif session.verdict == PaperTradingVerdict.NOT_PERFORMANT:
         message = (
             f"Paper trading completed with {trade_count} trades. "
             f"Performance does NOT align with backtest expectations — strategy is NOT PERFORMANT "
-            f"with live data. See divergence_analysis for details.{shortfall}"
+            f"with live data. See divergence_analysis for details."
         )
     else:
-        message = f"Paper trading completed with {trade_count} trades.{shortfall}"
+        message = f"Paper trading completed with {trade_count} trades."
 
     return PaperTradingResponse(session=session, message=message)
 

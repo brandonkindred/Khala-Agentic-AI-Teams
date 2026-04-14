@@ -327,8 +327,8 @@ def initialize_new_repo(
     _run_git(path, ["git", "config", "commit.gpgsign", "false"])
     # Set a default local identity so commits work even when no global git config is set
     # (e.g. in CI environments). Local config is repo-scoped and does not affect global settings.
-    _run_git(path, ["git", "config", "user.email", "agent@strands-agents.local"])
-    _run_git(path, ["git", "config", "user.name", "Strands Agent"])
+    _run_git(path, ["git", "config", "user.email", "agent@khala.local"])
+    _run_git(path, ["git", "config", "user.name", "Khala Agent"])
 
     # 2. .gitignore, README.md, CONTRIBUTORS.md, docs/ (only if missing)
     gitignore_path = path / ".gitignore"

@@ -1,4 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { provideHttpClient } from '@angular/common/http';
+import { provideHttpClientTesting } from '@angular/common/http/testing';
 import { Router } from '@angular/router';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
@@ -8,6 +10,11 @@ import { AISystemsApiService } from '../../services/ai-systems-api.service';
 import { AgentProvisioningApiService } from '../../services/agent-provisioning-api.service';
 import { SocialMarketingApiService } from '../../services/social-marketing-api.service';
 import { InvestmentApiService } from '../../services/investment-api.service';
+import { PersonaTestingApiService } from '../../services/persona-testing-api.service';
+import { SalesApiService } from '../../services/sales-api.service';
+import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
+import { CodingTeamApiService } from '../../services/coding-team-api.service';
+import { GenericJobsApiService } from '../../services/generic-jobs-api.service';
 import { JobsDashboardComponent } from './jobs-dashboard.component';
 
 describe('JobsDashboardComponent', () => {
@@ -47,17 +54,46 @@ describe('JobsDashboardComponent', () => {
     };
     const investmentApi = {
       listStrategyLabJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
+      deleteJob: vi.fn().mockReturnValue(of({ job_id: 'j1', deleted: true })),
+    };
+    const personaApi = {
+      listJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
+      cancelJob: vi.fn().mockReturnValue(of({ status: 'cancelled' })),
+      deleteJob: vi.fn().mockReturnValue(of({ deleted: 'true' })),
+    };
+    const salesApi = {
+      listPipelineJobs: vi.fn().mockReturnValue(of([])),
+      cancelJob: vi.fn().mockReturnValue(of({})),
+      deleteJob: vi.fn().mockReturnValue(of({})),
+    };
+    const planningV3Api = {
+      getJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
+    };
+    const codingTeamApi = {};
+    const genericJobsApi = {
+      listJobs: vi.fn().mockReturnValue(of({ jobs: [] })),
+      cancel: vi.fn().mockReturnValue(of({})),
+      resume: vi.fn().mockReturnValue(of({})),
+      restart: vi.fn().mockReturnValue(of({})),
+      delete: vi.fn().mockReturnValue(of({})),
     };
 
     await TestBed.configureTestingModule({
       imports: [JobsDashboardComponent],
       providers: [
+        provideHttpClient(),
+        provideHttpClientTesting(),
         { provide: SoftwareEngineeringApiService, useValue: seApi },
         { provide: BloggingApiService, useValue: bloggingApi },
         { provide: AISystemsApiService, useValue: aiApi },
         { provide: AgentProvisioningApiService, useValue: provApi },
         { provide: SocialMarketingApiService, useValue: socialApi },
         { provide: InvestmentApiService, useValue: investmentApi },
+        { provide: PersonaTestingApiService, useValue: personaApi },
+        { provide: SalesApiService, useValue: salesApi },
+        { provide: PlanningV3ApiService, useValue: planningV3Api },
+        { provide: CodingTeamApiService, useValue: codingTeamApi },
+        { provide: GenericJobsApiService, useValue: genericJobsApi },
         { provide: Router, useValue: routerSpy },
       ],
     }).compileComponents();
@@ -73,6 +109,24 @@ describe('JobsDashboardComponent', () => {
 
   it('should have SOURCE_DISPLAY', () => {
     expect(component.SOURCE_DISPLAY).toBeDefined();
+  });
+
+  it('SOURCE_DISPLAY includes all 14 sources', () => {
+    const sources = Object.keys(component.SOURCE_DISPLAY);
+    expect(sources).toContain('software_engineering');
+    expect(sources).toContain('blogging');
+    expect(sources).toContain('ai_systems');
+    expect(sources).toContain('agent_provisioning');
+    expect(sources).toContain('social_marketing');
+    expect(sources).toContain('investment');
+    expect(sources).toContain('user_agent_founder');
+    expect(sources).toContain('soc2_compliance');
+    expect(sources).toContain('personal_assistant');
+    expect(sources).toContain('planning_v3');
+    expect(sources).toContain('road_trip_planning');
+    expect(sources).toContain('nutrition_meal_planning');
+    expect(sources).toContain('coding_team');
+    expect(sources).toContain('sales');
   });
 
   it('getJobTypeInfo returns info for software_engineering job', () => {
@@ -114,59 +168,76 @@ describe('JobsDashboardComponent', () => {
   });
 
   describe('canResumeJob', () => {
-    const seJob = (status: string) =>
-      ({ unified: { source: 'software_engineering', jobId: 'j1', status }, seDetail: null } as any);
+    const makeJob = (status: string, source = 'software_engineering') =>
+      ({ unified: { source, jobId: 'j1', status }, seDetail: null } as any);
 
-    it('returns true for failed status', () => {
-      expect(component.canResumeJob(seJob('failed'))).toBe(true);
+    it('returns true for failed, interrupted, agent_crash, cancelled', () => {
+      expect(component.canResumeJob(makeJob('failed'))).toBe(true);
+      expect(component.canResumeJob(makeJob('interrupted'))).toBe(true);
+      expect(component.canResumeJob(makeJob('agent_crash'))).toBe(true);
+      expect(component.canResumeJob(makeJob('cancelled'))).toBe(true);
     });
-    it('returns false for cancelled status', () => {
-      expect(component.canResumeJob(seJob('cancelled'))).toBe(false);
+    it('returns false for running, pending, completed', () => {
+      expect(component.canResumeJob(makeJob('running'))).toBe(false);
+      expect(component.canResumeJob(makeJob('pending'))).toBe(false);
+      expect(component.canResumeJob(makeJob('completed'))).toBe(false);
     });
-    it('returns true for agent_crash status', () => {
-      expect(component.canResumeJob(seJob('agent_crash'))).toBe(true);
-    });
-    it('returns false for running status', () => {
-      expect(component.canResumeJob(seJob('running'))).toBe(false);
-    });
-    it('returns false for pending status', () => {
-      expect(component.canResumeJob(seJob('pending'))).toBe(false);
-    });
-    it('returns false for completed status', () => {
-      expect(component.canResumeJob(seJob('completed'))).toBe(false);
-    });
-    it('returns false for non-resumable source', () => {
-      const job = { unified: { source: 'market_research', jobId: 'j1', status: 'failed' }, seDetail: null } as any;
-      expect(component.canResumeJob(job)).toBe(false);
+    it('works for any source — no allowlist', () => {
+      expect(component.canResumeJob(makeJob('failed', 'soc2_compliance'))).toBe(true);
+      expect(component.canResumeJob(makeJob('failed', 'sales'))).toBe(true);
+      expect(component.canResumeJob(makeJob('failed', 'nutrition_meal_planning'))).toBe(true);
+      expect(component.canResumeJob(makeJob('failed', 'coding_team'))).toBe(true);
     });
   });
 
   describe('canStopJob', () => {
-    it('returns true for software_engineering when pending or running', () => {
-      expect(component.canStopJob({ unified: { source: 'software_engineering', status: 'pending' }, seDetail: null } as any)).toBe(true);
-      expect(component.canStopJob({ unified: { source: 'software_engineering', status: 'running' }, seDetail: null } as any)).toBe(true);
+    const makeJob = (status: string, source = 'software_engineering') =>
+      ({ unified: { source, status }, seDetail: null } as any);
+
+    it('returns true for running or pending regardless of source', () => {
+      expect(component.canStopJob(makeJob('running', 'software_engineering'))).toBe(true);
+      expect(component.canStopJob(makeJob('pending', 'blogging'))).toBe(true);
+      expect(component.canStopJob(makeJob('running', 'investment'))).toBe(true);
+      expect(component.canStopJob(makeJob('running', 'soc2_compliance'))).toBe(true);
+      expect(component.canStopJob(makeJob('running', 'sales'))).toBe(true);
+      expect(component.canStopJob(makeJob('pending', 'planning_v3'))).toBe(true);
     });
-    it('returns true for blogging when pending or running', () => {
-      expect(component.canStopJob({ unified: { source: 'blogging', status: 'pending' }, seDetail: null } as any)).toBe(true);
-      expect(component.canStopJob({ unified: { source: 'blogging', status: 'running' }, seDetail: null } as any)).toBe(true);
+    it('returns false for non-active statuses', () => {
+      expect(component.canStopJob(makeJob('completed'))).toBe(false);
+      expect(component.canStopJob(makeJob('failed'))).toBe(false);
+      expect(component.canStopJob(makeJob('cancelled'))).toBe(false);
     });
-    it('returns true for agent_provisioning, ai_systems, social_marketing when pending or running', () => {
-      expect(component.canStopJob({ unified: { source: 'agent_provisioning', status: 'running' }, seDetail: null } as any)).toBe(true);
-      expect(component.canStopJob({ unified: { source: 'ai_systems', status: 'pending' }, seDetail: null } as any)).toBe(true);
-      expect(component.canStopJob({ unified: { source: 'social_marketing', status: 'running' }, seDetail: null } as any)).toBe(true);
+  });
+
+  describe('canRestartJob', () => {
+    const makeJob = (status: string, source = 'blogging') =>
+      ({ unified: { source, status }, seDetail: null } as any);
+
+    it('returns true for terminal statuses regardless of source', () => {
+      expect(component.canRestartJob(makeJob('completed'))).toBe(true);
+      expect(component.canRestartJob(makeJob('failed'))).toBe(true);
+      expect(component.canRestartJob(makeJob('cancelled'))).toBe(true);
+      expect(component.canRestartJob(makeJob('interrupted'))).toBe(true);
+      expect(component.canRestartJob(makeJob('agent_crash'))).toBe(true);
+      expect(component.canRestartJob(makeJob('failed', 'road_trip_planning'))).toBe(true);
+      expect(component.canRestartJob(makeJob('completed', 'personal_assistant'))).toBe(true);
     });
-    it('returns false when status is not pending or running', () => {
-      expect(component.canStopJob({ unified: { source: 'blogging', status: 'completed' }, seDetail: null } as any)).toBe(false);
+    it('returns false for running or pending', () => {
+      expect(component.canRestartJob(makeJob('running'))).toBe(false);
+      expect(component.canRestartJob(makeJob('pending'))).toBe(false);
     });
   });
 
   describe('canDeleteJob', () => {
-    it('returns true for software_engineering, blogging, agent_provisioning, ai_systems, social_marketing', () => {
-      expect(component.canDeleteJob({ unified: { source: 'software_engineering' } } as any)).toBe(true);
-      expect(component.canDeleteJob({ unified: { source: 'blogging' } } as any)).toBe(true);
-      expect(component.canDeleteJob({ unified: { source: 'agent_provisioning' } } as any)).toBe(true);
-      expect(component.canDeleteJob({ unified: { source: 'ai_systems' } } as any)).toBe(true);
-      expect(component.canDeleteJob({ unified: { source: 'social_marketing' } } as any)).toBe(true);
+    it('returns true for terminal job statuses', () => {
+      expect(component.canDeleteJob({ unified: { source: 'software_engineering', status: 'completed' } } as any)).toBe(true);
+      expect(component.canDeleteJob({ unified: { source: 'soc2_compliance', status: 'failed' } } as any)).toBe(true);
+      expect(component.canDeleteJob({ unified: { source: 'coding_team', status: 'cancelled' } } as any)).toBe(true);
+    });
+
+    it('returns false for running or pending jobs', () => {
+      expect(component.canDeleteJob({ unified: { source: 'software_engineering', status: 'running' } } as any)).toBe(false);
+      expect(component.canDeleteJob({ unified: { source: 'sales', status: 'pending' } } as any)).toBe(false);
     });
   });
 });

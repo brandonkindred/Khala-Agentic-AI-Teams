@@ -152,3 +152,17 @@
     }
   }
 }
+
+.mode-toggle {
+  margin-bottom: 16px;
+
+  mat-button-toggle {
+    mat-icon {
+      margin-right: 4px;
+      font-size: 18px;
+      width: 18px;
+      height: 18px;
+      vertical-align: middle;
+    }
+  }
+}

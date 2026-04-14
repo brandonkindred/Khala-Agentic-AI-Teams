@@ -87,13 +87,13 @@ def _parse_retry_config() -> tuple[int, float, float]:
 
     Backoff is exponential: wait initial * 2^attempt after each failure (first retry ~initial seconds).
     """
-    raw_retries = os.environ.get(llm_config.ENV_LLM_MAX_RETRIES) or "6"
+    raw_retries = os.environ.get(llm_config.ENV_LLM_MAX_RETRIES) or "10"
     raw_initial = os.environ.get(llm_config.ENV_LLM_BACKOFF_BASE) or "2"
     raw_max = os.environ.get(llm_config.ENV_LLM_BACKOFF_MAX) or "120"
     try:
         max_retries = max(0, int(raw_retries))
     except ValueError:
-        max_retries = 6
+        max_retries = 10
     try:
         initial_backoff = float(raw_initial)
     except ValueError:

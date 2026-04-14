@@ -128,11 +128,16 @@ class BrandingAssistantAgent:
 
     def __init__(self, llm=None):  # noqa: ANN001
         if llm is None:
-            from llm_service import get_client
+            from strands import Agent
 
-            self._llm = get_client("branding_assistant")
+            from llm_service import get_strands_model
+
+            self._agent = Agent(
+                model=get_strands_model("branding_assistant"),
+                system_prompt=SYSTEM_PROMPT,
+            )
         else:
-            self._llm = llm
+            self._agent = llm
 
     def respond(
         self,
@@ -179,12 +184,8 @@ class BrandingAssistantAgent:
         )
 
         try:
-            raw = self._llm.complete(
-                prompt,
-                temperature=0.5,
-                system_prompt=SYSTEM_PROMPT,
-                think=True,
-            )
+            result = self._agent(prompt)
+            raw = str(result).strip()
         except Exception:
             reply_text = "I'm here to help build your brand. Could you tell me your company name and what you do?"
             suggested_questions = [

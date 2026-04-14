@@ -1,0 +1,1 @@
+"""Accessibility audit team graphs."""

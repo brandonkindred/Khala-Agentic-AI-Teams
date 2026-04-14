@@ -7,15 +7,45 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict
+
+from strands import Agent
 
 from agent_git_tools import GIT_TOOL_DEFINITIONS, GitToolContext, build_git_tool_handlers
 from coding_team.models import StackSpec, Task
 from coding_team.senior_software_engineer_agent import prompts
-from llm_service.tool_loop import complete_json_with_tool_loop
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json_response(raw: str) -> Dict[str, Any]:
+    """Parse a JSON response from an agent, stripping markdown fences if present."""
+    raw = raw.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    return json.loads(raw)
+
+
+def _build_strands_tools(handlers: Dict[str, Any], tool_definitions: list) -> list:
+    """Convert git tool definitions + handlers into Strands-compatible tool callables."""
+    tools = []
+    for tool_def in tool_definitions:
+        func_info = tool_def.get("function", {})
+        name = func_info.get("name")
+        if name and name in handlers:
+            handler = handlers[name]
+
+            def make_tool(n, h, desc, params):
+                def tool_fn(**kwargs):
+                    return h(kwargs)
+                tool_fn.__name__ = n
+                tool_fn.__doc__ = desc
+                return tool_fn
+
+            tools.append(make_tool(name, handler, func_info.get("description", ""), func_info.get("parameters", {})))
+    return tools
 
 
 class SeniorSWEAgent:
@@ -28,7 +58,7 @@ class SeniorSWEAgent:
     def __init__(self, agent_id: str, stack_spec: StackSpec, llm: Any) -> None:
         self.agent_id = agent_id
         self.stack_spec = stack_spec
-        self.llm = llm
+        self._model = llm
 
     def run_implement(
         self,
@@ -72,23 +102,23 @@ class SeniorSWEAgent:
                     allow_merge_to_default_branch=False,
                 )
                 handlers = build_git_tool_handlers(ctx)
-                data = complete_json_with_tool_loop(
-                    self.llm,
-                    user_prompt=user,
+                strands_tools = _build_strands_tools(handlers, GIT_TOOL_DEFINITIONS)
+                agent = Agent(
+                    model=self._model,
                     system_prompt=system,
-                    tools=GIT_TOOL_DEFINITIONS,
-                    tool_handlers=handlers,
-                    max_rounds=16,
-                    temperature=0.2,
-                    think=True,
+                    tools=strands_tools,
                 )
+                result = agent(user + "\n\nWhen done, respond with valid JSON only, no markdown fences.")
+                raw = str(result).strip()
+                data = _parse_json_response(raw)
             else:
-                data = self.llm.complete_json(
-                    user,
-                    temperature=0.2,
+                agent = Agent(
+                    model=self._model,
                     system_prompt=prompts.IMPLEMENT_TASK_SYSTEM,
-                    think=True,
                 )
+                result = agent(user + "\n\nRespond with valid JSON only, no markdown fences.")
+                raw = str(result).strip()
+                data = _parse_json_response(raw)
         except Exception as e:
             logger.warning("Senior SWE implement LLM failed: %s", e)
             return {

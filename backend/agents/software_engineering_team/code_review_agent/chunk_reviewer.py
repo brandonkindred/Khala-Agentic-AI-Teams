@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import List, Optional
 
-from llm_service import LLMClient, compact_text
+from strands import Agent
+
+from llm_service import LLMClient, compact_text, get_strands_model
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_chunk_chars,
@@ -102,8 +105,16 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
         ]
     )
 
-    prompt = CODE_REVIEW_PROMPT + "\n\n---\n\n" + "\n".join(context_parts)
-    data = llm.complete_json(prompt, temperature=0.1, think=True)
+    prompt = "\n".join(context_parts)
+    # Use the injected LLM client as model when available (it implements Model);
+    # fall back to get_strands_model for production.
+    from strands.models.model import Model as _StrandsModel
+
+    _model = llm if isinstance(llm, _StrandsModel) else get_strands_model("code_review")
+    agent = Agent(model=_model, system_prompt=CODE_REVIEW_PROMPT)
+    result = agent(prompt)
+    raw = str(result).strip()
+    data = json.loads(raw)
 
     issues = []
     for issue_data in data.get("issues") or []:

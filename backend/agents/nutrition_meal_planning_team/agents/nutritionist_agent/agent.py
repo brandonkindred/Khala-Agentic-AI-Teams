@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import datetime, timezone
+from typing import Any
 
-from llm_service import LLMClient, LLMError, LLMJsonParseError
+from strands import Agent
 
 from ...models import ClientProfile, DailyTargets, NutritionPlan
 
@@ -26,8 +29,8 @@ Do NOT recommend specific recipes or meals. Only targets and guidelines. Use evi
 class NutritionistAgent:
     """Produces NutritionPlan from ClientProfile using LLM."""
 
-    def __init__(self, llm: LLMClient) -> None:
-        self.llm = llm
+    def __init__(self, model: Any) -> None:
+        self._agent = Agent(model=model, system_prompt=SYSTEM_PROMPT)
 
     def run(self, profile: ClientProfile) -> NutritionPlan:
         """Generate nutrition plan from client profile."""
@@ -35,21 +38,15 @@ class NutritionistAgent:
             "Client profile:\n"
             + profile.model_dump_json(indent=2)
             + "\n\nProduce the nutrition plan JSON (daily_targets, balance_guidelines, foods_to_emphasize, foods_to_avoid, notes)."
+            + "\n\nRespond with valid JSON only, no markdown fences."
         )
         try:
-            data = self.llm.complete_json(
-                prompt,
-                temperature=0.3,
-                system_prompt=SYSTEM_PROMPT,
-                think=True,
-                expected_keys=[
-                    "daily_targets",
-                    "balance_guidelines",
-                    "foods_to_emphasize",
-                    "foods_to_avoid",
-                ],
-            )
-        except (LLMJsonParseError, LLMError) as e:
+            result = self._agent(prompt)
+            raw = str(result).strip()
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            data = json.loads(raw)
+        except Exception as e:
             logger.warning("Nutritionist LLM call failed, returning empty plan: %s", e)
             return NutritionPlan(generated_at=datetime.now(timezone.utc).isoformat())
 

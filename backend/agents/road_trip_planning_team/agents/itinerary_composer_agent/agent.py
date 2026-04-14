@@ -7,7 +7,9 @@ import logging
 from datetime import datetime, timezone
 from typing import List
 
-from llm_service import LLMClient, LLMJsonParseError
+from strands import Agent
+
+from llm_service import get_strands_model
 
 from ...models import (
     Accommodation,
@@ -62,8 +64,15 @@ Output only valid JSON."""
 class ItineraryComposerAgent:
     """Assembles the final day-by-day itinerary from all specialist agent outputs."""
 
-    def __init__(self, llm: LLMClient) -> None:
-        self.llm = llm
+    def __init__(self, llm=None) -> None:
+        self._agent = (
+            llm
+            if llm is not None
+            else Agent(
+                model=get_strands_model("road_trip_planning"),
+                system_prompt=SYSTEM_PROMPT,
+            )
+        )
 
     def run(
         self,
@@ -120,14 +129,10 @@ class ItineraryComposerAgent:
         )
 
         try:
-            data = self.llm.complete_json(
-                prompt,
-                temperature=0.4,
-                system_prompt=SYSTEM_PROMPT,
-                expected_keys=["title", "days", "total_days"],
-                think=True,
-            )
-        except LLMJsonParseError as e:
+            result = self._agent(prompt)
+            raw = str(result).strip()
+            data = json.loads(raw)
+        except Exception as e:
             logger.warning("ItineraryComposerAgent JSON parse failed: %s", e)
             return self._build_fallback_itinerary(trip, route, group_profile, logistics)
 

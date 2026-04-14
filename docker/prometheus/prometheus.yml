@@ -1,5 +1,5 @@
-# Prometheus scrape config for the Strands stack.
-# All targets use container DNS names on the strands-stack network. The
+# Prometheus scrape config for the Khala stack.
+# All targets use container DNS names on the khala-stack network. The
 # prometheus service declares matching extra_hosts entries in docker-compose.yml
 # so DNS resolution does not depend on Podman's embedded DNS.
 global:
@@ -7,7 +7,7 @@ global:
   scrape_timeout: 10s
   evaluation_interval: 15s
   external_labels:
-    stack: strands
+    stack: khala
 
 scrape_configs:
   - job_name: prometheus
@@ -17,7 +17,7 @@ scrape_configs:
   - job_name: unified-api
     metrics_path: /metrics
     static_configs:
-      - targets: ["strands-agents:8080"]
+      - targets: ["khala:8080"]
         labels: { service: unified-api, component: router }
 
   - job_name: job-service

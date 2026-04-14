@@ -26,19 +26,25 @@ paper trading.
 
 ## Configuration
 
-`RunStrategyLabRequest` ([`api/main.py`](../api/main.py)) accepts
-four paper-trading-specific fields:
+`RunStrategyLabRequest` ([`api/main.py`](../api/main.py)) accepts two
+paper-trading-specific fields:
 
 | Field | Default | Meaning |
 |---|---|---|
 | `paper_trading_enabled` | `true` | Opt-out flag. When `false`, every winning strategy records `paper_trading_status="skipped"` with reason `"disabled"`. |
-| `paper_trading_min_trades` | `20` | Target minimum number of completed paper trades before the session stops. The engine still obeys its own evaluation cap; a shortfall is logged but is not a failure. |
 | `paper_trading_lookback_days` | `365` | Days of recent OHLCV data fetched for paper trading. |
-| `paper_trading_max_evaluations` | `2000` | LLM evaluation budget for the paper-trading engine. Lower than the standalone endpoint's `5000` default because this runs per winning cycle. |
 
 `initial_capital`, `transaction_cost_bps`, and `slippage_bps` are
 inherited from the top-level request so paper trading uses the same
 execution assumptions as the backtest.
+
+The paper-trading step runs the orchestrator-generated
+`StrategyLabRecord.strategy_code` through `PaperTradingAgent`'s subprocess
+sandbox — the same runner used by the backtest — so there is no
+LLM-per-bar evaluation cost to bound. If the orchestrator did not
+produce strategy code (e.g. the refinement loop exhausted without a
+compilable strategy), the step is skipped with reason
+`"no_strategy_code"`.
 
 ## Record linkage
 
@@ -62,7 +68,8 @@ every exception raised by the step and records it:
 | Failure mode | Record state |
 |---|---|
 | Market data unavailable | `paper_trading_status = "skipped"`, `paper_trading_skipped_reason = "no_market_data"` |
-| Any other exception | `paper_trading_status = "failed"`, `paper_trading_error = "<exception text, truncated>"` |
+| Orchestrator produced no strategy code | `paper_trading_status = "skipped"`, `paper_trading_skipped_reason = "no_strategy_code"` |
+| Any other exception (e.g. sandbox crash) | `paper_trading_status = "failed"`, `paper_trading_error = "<exception text, truncated>"` |
 
 Either way, the `StrategyLabRecord` persists with `is_winning=True` so
 the user can re-run paper trading manually via
@@ -84,11 +91,10 @@ list):
 `POST /strategy-lab/paper-trade` is intentionally preserved. Use it to:
 
 - Retry paper trading on a record that originally recorded
-  `paper_trading_status="skipped"` (reason `"no_market_data"`) or
-  `paper_trading_status="failed"`.
+  `paper_trading_status="skipped"` (reason `"no_market_data"` or
+  `"no_strategy_code"`) or `paper_trading_status="failed"`.
 - Run a second paper-trading session against a winning record with
-  different parameters (longer lookback, higher evaluation budget,
-  stricter `min_trades`).
+  different parameters (e.g. a longer `lookback_days`).
 
 The cycle-level `paper_trading_session_id` continues to point at the
 session produced during the cycle; each manual invocation writes an

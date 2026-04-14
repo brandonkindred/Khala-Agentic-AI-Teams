@@ -1,9 +1,9 @@
 from ..models.phase_result import RemediationResult
 from ..tools import create_jira_issues, persist_artifact
-from .base import ToolContext, tool
+from .base import ToolContext, a11y_phase
 
 
-@tool(context=True)
+@a11y_phase(context=True)
 def run_remediation_planning(findings: list[dict], tool_context: ToolContext) -> dict:
     tickets = create_jira_issues(findings)
     roadmap = {

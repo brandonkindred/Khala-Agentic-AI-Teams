@@ -22,11 +22,9 @@ ACTIVITY_RUN_ORCHESTRATOR = "run_orchestrator"
 ACTIVITY_RETRY_FAILED = "retry_failed"
 ACTIVITY_FRONTEND_CODE_V2 = "run_frontend_code_v2"
 ACTIVITY_BACKEND_CODE_V2 = "run_backend_code_v2"
-ACTIVITY_PLANNING_V2 = "run_planning_v2"
 ACTIVITY_PRODUCT_ANALYSIS = "run_product_analysis"
 
 # Standalone job types (for StandaloneJobWorkflow)
 STANDALONE_TYPE_FRONTEND = "frontend-code-v2"
 STANDALONE_TYPE_BACKEND = "backend-code-v2"
-STANDALONE_TYPE_PLANNING = "planning-v2"
 STANDALONE_TYPE_PRODUCT_ANALYSIS = "product-analysis"

@@ -50,9 +50,14 @@ class TeamAssistantAgent:
         if llm is not None:
             self._llm = llm
         else:
-            from llm_service import get_client
+            from strands import Agent
 
-            self._llm = get_client(llm_agent_key or team_name)
+            from llm_service import get_strands_model
+
+            self._llm = Agent(
+                model=get_strands_model(llm_agent_key or team_name),
+                system_prompt=system_prompt,
+            )
 
     def respond(
         self,
@@ -76,23 +81,8 @@ class TeamAssistantAgent:
             "Respond with the JSON object as specified in your instructions."
         )
 
-        try:
-            raw = self._llm.complete(
-                prompt,
-                temperature=0.5,
-                system_prompt=self.system_prompt,
-                think=True,
-            )
-        except Exception:
-            logger.exception("LLM call failed for %s assistant", self.team_name)
-            return (
-                f"I'm here to help you get started with {self.team_name}. "
-                "Could you tell me a bit about what you need?",
-                {},
-                self.default_suggested_questions[:3],
-                None,
-            )
-
+        result = self._llm(prompt)
+        raw = str(result).strip()
         return _parse_response(raw)
 
     def check_readiness(self, context: dict[str, Any]) -> tuple[bool, list[str]]:
