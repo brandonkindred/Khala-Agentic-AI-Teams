@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from agentic_team_provisioning.tests._fake_postgres import install_fake_postgres
+
 
 @pytest.fixture(autouse=True)
 def _isolate_agent_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -17,7 +19,12 @@ def _isolate_agent_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     infra_mod._infra_cache.clear()
 
 
-def test_provision_team_creates_directories(tmp_path: Path) -> None:
+@pytest.fixture
+def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
+    return install_fake_postgres(monkeypatch)
+
+
+def test_provision_team_creates_directories(tmp_path: Path, fake_pg: dict) -> None:
     from agentic_team_provisioning.infrastructure import provision_team
 
     infra = provision_team("test-team-1")
@@ -26,21 +33,7 @@ def test_provision_team_creates_directories(tmp_path: Path) -> None:
     assert infra.base_dir == tmp_path / "provisioned_teams" / "test-team-1"
 
 
-def test_provision_team_creates_database(tmp_path: Path) -> None:
-    from agentic_team_provisioning.infrastructure import provision_team
-
-    infra = provision_team("test-team-2")
-    assert infra.db_path.is_file()
-    # Verify the form_data table exists
-    import sqlite3
-
-    conn = sqlite3.connect(str(infra.db_path))
-    cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='form_data'")
-    assert cursor.fetchone() is not None
-    conn.close()
-
-
-def test_provision_team_is_idempotent(tmp_path: Path) -> None:
+def test_provision_team_is_idempotent(tmp_path: Path, fake_pg: dict) -> None:
     from agentic_team_provisioning.infrastructure import provision_team
 
     infra1 = provision_team("test-team-3")
@@ -48,7 +41,7 @@ def test_provision_team_is_idempotent(tmp_path: Path) -> None:
     assert infra1.base_dir == infra2.base_dir
 
 
-def test_get_team_infrastructure_caching(tmp_path: Path) -> None:
+def test_get_team_infrastructure_caching(tmp_path: Path, fake_pg: dict) -> None:
     from agentic_team_provisioning.infrastructure import get_team_infrastructure
 
     infra1 = get_team_infrastructure("test-team-4")
@@ -56,7 +49,7 @@ def test_get_team_infrastructure_caching(tmp_path: Path) -> None:
     assert infra1 is infra2
 
 
-def test_form_store_crud(tmp_path: Path) -> None:
+def test_form_store_crud(tmp_path: Path, fake_pg: dict) -> None:
     from agentic_team_provisioning.infrastructure import provision_team
 
     infra = provision_team("test-team-5")
@@ -93,10 +86,31 @@ def test_form_store_crud(tmp_path: Path) -> None:
     assert store.get_records("intake") == []
 
 
-def test_form_store_nonexistent_record(tmp_path: Path) -> None:
+def test_form_store_nonexistent_record(tmp_path: Path, fake_pg: dict) -> None:
     from agentic_team_provisioning.infrastructure import provision_team
 
     infra = provision_team("test-team-6")
     assert infra.form_store.get_record("nonexistent") is None
     assert not infra.form_store.update_record("nonexistent", {"x": 1})
     assert not infra.form_store.delete_record("nonexistent")
+
+
+def test_form_store_is_scoped_by_team_id(tmp_path: Path, fake_pg: dict) -> None:
+    """A team's form store never sees another team's rows."""
+    from agentic_team_provisioning.infrastructure import provision_team
+
+    infra_a = provision_team("team-a")
+    infra_b = provision_team("team-b")
+
+    rec_a = infra_a.form_store.create_record("intake", {"who": "a"})
+    rec_b = infra_b.form_store.create_record("intake", {"who": "b"})
+
+    # Reads scoped by team
+    assert [r["record_id"] for r in infra_a.form_store.get_records("intake")] == [
+        rec_a["record_id"]
+    ]
+    assert [r["record_id"] for r in infra_b.form_store.get_records("intake")] == [
+        rec_b["record_id"]
+    ]
+    # B's record is invisible to A
+    assert infra_a.form_store.get_record(rec_b["record_id"]) is None

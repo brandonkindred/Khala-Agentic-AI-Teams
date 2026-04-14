@@ -21,7 +21,7 @@ The API layer is the only external surface. It exposes five interaction categori
 | **Questions for User** | Team → Actor | Pending questions that need human input before work continues |
 | **Job Status** | Team ↔ Actor | Create/poll/list jobs and their progress |
 | **Assets** | Actor ↔ File System | Upload/download files for the team (stored on disk) |
-| **Form Information** | Actor ↔ Database | Structured data records per form key (stored in SQLite) |
+| **Form Information** | Actor ↔ Database | Structured data records per form key (stored in Khala Postgres, partitioned by team_id) |
 
 The API layer does **not** contain business logic; it delegates to the Orchestrator Agent.
 
@@ -85,7 +85,7 @@ Processes reference agents **by name** — every agent mentioned in a step must 
 | Resource | Backing | Purpose |
 |----------|---------|---------|
 | **File System** | `$AGENT_CACHE/provisioned_teams/{team_id}/assets/` | Team assets (uploaded files, generated artifacts) |
-| **Database** | `$AGENT_CACHE/provisioned_teams/{team_id}/team.db` | Form data records (SQLite, WAL mode) |
+| **Database** | Shared Khala Postgres `agentic_form_data` table (partitioned by `team_id`) | Form data records |
 | **Job Service** | `JobServiceClient(team="provisioned_{team_id}")` | Job lifecycle tracking |
 
 ---

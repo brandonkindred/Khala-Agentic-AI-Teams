@@ -4,8 +4,9 @@ Integrations store: file-backed persistence for integration config (e.g. Slack).
 Non-sensitive config (enabled, mode, channels, notification toggles, OAuth team info)
 is stored in JSON at {AGENT_CACHE}/integrations.json.
 
-Sensitive OAuth credentials (client_id, client_secret) are stored in an encrypted
-SQLite database via integration_credentials.py — never in the JSON file.
+Sensitive OAuth credentials (client_id, client_secret) are stored encrypted in the
+Khala Postgres ``encrypted_integration_credentials`` table via
+``integration_credentials.py`` — never in the JSON file.
 
 JSON structure (integrations.json):
 {

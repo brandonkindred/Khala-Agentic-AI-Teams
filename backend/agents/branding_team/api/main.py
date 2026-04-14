@@ -2,24 +2,21 @@
 
 from __future__ import annotations
 
-import contextlib
-import json
 import logging
-import sqlite3
-import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException
+from psycopg.rows import dict_row
+from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
 from branding_team.assistant import get_conversation_store
 from branding_team.assistant.agent import BrandingAssistantAgent
 from branding_team.assistant.store import _default_mission
-from branding_team.db import get_db_path as _get_db_path
 from branding_team.models import (
     Brand,
     BrandCheckRequest,
@@ -35,6 +32,8 @@ from branding_team.orchestrator import BrandingTeamOrchestrator
 from branding_team.postgres import SCHEMA as BRANDING_POSTGRES_SCHEMA
 from branding_team.store import get_default_store
 from shared_observability import init_otel, instrument_fastapi_app
+from shared_postgres import get_conn
+from shared_postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
@@ -219,19 +218,11 @@ class BrandingSession:
     latest_output: TeamOutput
 
 
-_SESSION_SCHEMA = """
-CREATE TABLE IF NOT EXISTS branding_sessions (
-    session_id   TEXT PRIMARY KEY,
-    session_json TEXT NOT NULL
-);
-"""
-
-
 def _session_to_dict(session: BrandingSession) -> dict:
     return {
-        "mission": session.mission.model_dump(),
-        "questions": [q.model_dump() for q in session.questions],
-        "latest_output": session.latest_output.model_dump(),
+        "mission": session.mission.model_dump(mode="json"),
+        "questions": [q.model_dump(mode="json") for q in session.questions],
+        "latest_output": session.latest_output.model_dump(mode="json"),
     }
 
 
@@ -244,87 +235,49 @@ def _session_from_dict(d: dict) -> BrandingSession:
 
 
 class BrandingSessionStore:
-    """SQLite-backed session store — survives worker restarts and is shared
-    across all worker processes via WAL-mode SQLite.
+    """Postgres-backed session store — shared across worker processes."""
 
-    Pass ``db_path=None`` (default) for an isolated in-memory database, which
-    is useful when the class is instantiated directly in tests.
-    """
-
-    def __init__(self, db_path: Optional[str] = None) -> None:
-        self._lock = threading.Lock()
-        if db_path is None:
-            self._file_path: Optional[str] = None
-            self._mem_conn: Optional[sqlite3.Connection] = sqlite3.connect(
-                ":memory:", check_same_thread=False
-            )
-            self._mem_conn.row_factory = sqlite3.Row
-            self._mem_conn.executescript(_SESSION_SCHEMA)
-            self._mem_conn.commit()
-        else:
-            self._file_path = str(db_path)
-            self._mem_conn = None
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            _conn = sqlite3.connect(self._file_path, timeout=15)
-            _conn.execute("PRAGMA journal_mode=WAL")
-            _conn.executescript(_SESSION_SCHEMA)
-            _conn.commit()
-            _conn.close()
-
-    @contextlib.contextmanager
-    def _db(self) -> Iterator[sqlite3.Connection]:
-        if self._mem_conn is not None:
-            with self._lock:
-                self._mem_conn.row_factory = sqlite3.Row
-                yield self._mem_conn
-                self._mem_conn.commit()
-        else:
-            conn = sqlite3.connect(self._file_path, check_same_thread=False, timeout=15)  # type: ignore[arg-type]
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.row_factory = sqlite3.Row
-            try:
-                yield conn
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
-
+    @timed_query(store="branding_sessions", op="create")
     def create(
         self, mission: BrandingMission, latest_output: TeamOutput
-    ) -> Tuple[str, BrandingSession]:
+    ) -> tuple[str, BrandingSession]:
         questions = _build_open_questions(mission)
         session_id = str(uuid4())
         session = BrandingSession(mission=mission, questions=questions, latest_output=latest_output)
-        with self._db() as conn:
-            conn.execute(
-                "INSERT INTO branding_sessions (session_id, session_json) VALUES (?, ?)",
-                (session_id, json.dumps(_session_to_dict(session))),
+        now = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO branding_sessions (session_id, session_json, updated_at) "
+                "VALUES (%s, %s, %s)",
+                (session_id, Json(_session_to_dict(session)), now),
             )
         return session_id, session
 
+    @timed_query(store="branding_sessions", op="get")
     def get(self, session_id: str) -> Optional[BrandingSession]:
-        with self._db() as conn:
-            row = conn.execute(
-                "SELECT session_json FROM branding_sessions WHERE session_id = ?",
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT session_json FROM branding_sessions WHERE session_id = %s",
                 (session_id,),
-            ).fetchone()
+            )
+            row = cur.fetchone()
         if row is None:
             return None
-        return _session_from_dict(json.loads(row[0]))
+        return _session_from_dict(row["session_json"])
 
+    @timed_query(store="branding_sessions", op="save")
     def save(self, session_id: str, session: BrandingSession) -> None:
         """Persist mutations to an existing session."""
-        with self._db() as conn:
-            conn.execute(
-                "UPDATE branding_sessions SET session_json = ? WHERE session_id = ?",
-                (json.dumps(_session_to_dict(session)), session_id),
+        now = datetime.now(tz=timezone.utc)
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE branding_sessions SET session_json = %s, updated_at = %s "
+                "WHERE session_id = %s",
+                (Json(_session_to_dict(session)), now, session_id),
             )
 
 
-session_store = BrandingSessionStore(db_path=_get_db_path())
+session_store = BrandingSessionStore()
 
 
 # ---------------------------------------------------------------------------

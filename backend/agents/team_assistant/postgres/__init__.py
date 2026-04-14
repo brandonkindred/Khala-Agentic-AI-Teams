@@ -1,9 +1,8 @@
 """Postgres schema for the generic team assistant conversation store.
 
-Ports ``backend/agents/team_assistant/store.py`` (currently SQLite) to
-Postgres. The assistant sub-apps are hosted in-process by the unified
-API, so this schema is registered from the unified_api lifespan when
-the team_assistant module is imported for mounting.
+The assistant sub-apps are hosted in-process by the unified API, so this
+schema is registered from the unified_api lifespan when the
+team_assistant module is imported for mounting.
 """
 
 from __future__ import annotations
@@ -16,8 +15,7 @@ SCHEMA = TeamSchema(
     statements=[
         # NOTE: ``team_key`` partitions conversations across the many
         # assistant sub-apps mounted by ``unified_api``. Without this
-        # column all assistants would share a single global pool — the
-        # legacy SQLite layer kept one ``{team_key}.db`` per assistant.
+        # column all assistants would share a single global pool.
         """CREATE TABLE IF NOT EXISTS team_assistant_conversations (
             conversation_id TEXT PRIMARY KEY,
             team_key        TEXT NOT NULL,

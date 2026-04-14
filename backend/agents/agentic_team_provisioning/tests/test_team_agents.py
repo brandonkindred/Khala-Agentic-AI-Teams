@@ -1,8 +1,18 @@
 """Tests for team agents pool (store + LLM parsing)."""
 
+from __future__ import annotations
+
+import pytest
+
 from agentic_team_provisioning.assistant.agent import _parse_agents_json
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agentic_team_provisioning.models import AgenticTeamAgent
+from agentic_team_provisioning.tests._fake_postgres import install_fake_postgres
+
+
+@pytest.fixture
+def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
+    return install_fake_postgres(monkeypatch)
 
 
 def test_parse_agents_json_valid():
@@ -20,8 +30,8 @@ def test_parse_agents_json_bad_json():
     assert _parse_agents_json(text) is None
 
 
-def test_save_and_load_team_agents(tmp_path):
-    store = AgenticTeamStore(db_path=str(tmp_path / "t.db"))
+def test_save_and_load_team_agents(fake_pg: dict):
+    store = AgenticTeamStore()
     team = store.create_team(name="T", description="")
 
     agents = [
@@ -36,8 +46,8 @@ def test_save_and_load_team_agents(tmp_path):
     assert loaded[1].agent_name == "Agent B"
 
 
-def test_save_team_agents_replaces(tmp_path):
-    store = AgenticTeamStore(db_path=str(tmp_path / "t2.db"))
+def test_save_team_agents_replaces(fake_pg: dict):
+    store = AgenticTeamStore()
     team = store.create_team(name="T2", description="")
 
     store.save_team_agents(
@@ -58,8 +68,8 @@ def test_save_team_agents_replaces(tmp_path):
     assert "New2" in names
 
 
-def test_get_team_includes_agents(tmp_path):
-    store = AgenticTeamStore(db_path=str(tmp_path / "t3.db"))
+def test_get_team_includes_agents(fake_pg: dict):
+    store = AgenticTeamStore()
     team = store.create_team(name="T3", description="")
     store.save_team_agents(
         team.team_id,

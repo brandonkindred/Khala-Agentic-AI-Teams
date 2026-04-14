@@ -74,7 +74,7 @@ Step types: action, decision, parallel_split, parallel_join, wait, subprocess.
 
 ### Infrastructure (automatic)
 - **File System** for assets.
-- **SQLite Database** for form data.
+- **Postgres** for form data.
 - **Job Service** for job lifecycle.
 
 ## Your responsibilities

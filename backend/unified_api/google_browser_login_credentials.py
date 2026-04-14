@@ -5,8 +5,8 @@ Used by any integration where the user signs in with Google on a third-party sit
 Same credentials apply to all such integrations — store once under this service.
 
 **Storage:** Postgres table ``encrypted_integration_credentials`` only (when ``POSTGRES_HOST`` is set,
-e.g. Docker Compose). User/password are **never** written to the encrypted SQLite credential store.
-Without Postgres this feature is unavailable (local API dev without ``POSTGRES_HOST`` cannot save credentials).
+e.g. Docker Compose). Without Postgres this feature is unavailable (local API dev without
+``POSTGRES_HOST`` cannot save credentials).
 
 Legacy: previously stored under service ``medium_google_browser``; reads fall back and migrate
 when Postgres is enabled.

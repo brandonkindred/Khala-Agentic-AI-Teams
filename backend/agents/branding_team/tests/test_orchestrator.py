@@ -8,6 +8,8 @@ return a canned result and verify the orchestrator correctly assembles
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from branding_team import (
     BrandingMission,
     BrandingTeamOrchestrator,
@@ -34,6 +36,12 @@ from branding_team.models import (
     WikiEntry,
     WritingGuidelines,
 )
+from branding_team.tests._fake_postgres import install_fake_postgres
+
+
+@pytest.fixture(autouse=False)
+def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
+    return install_fake_postgres(monkeypatch)
 
 
 def _mission() -> BrandingMission:
@@ -333,7 +341,7 @@ def test_design_assets_integration() -> None:
     assert result.design_asset_result.status == "pending"
 
 
-def test_run_with_store_appends_version() -> None:
+def test_run_with_store_appends_version(fake_pg) -> None:
     from branding_team.store import BrandingStore
 
     store = BrandingStore()

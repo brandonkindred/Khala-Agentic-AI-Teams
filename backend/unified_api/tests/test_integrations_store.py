@@ -137,11 +137,9 @@ def test_set_and_get_slack_credentials_encrypted(tmp_path: Path, monkeypatch: py
 def test_credentials_encrypted_at_rest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Credential ciphertexts handed to the Postgres store never contain plaintext.
 
-    This replaces the pre-PR-1 test that inspected the SQLite
-    ``service_integrations`` table directly. Now we inspect the
-    in-memory fake backing ``pg_set_credential`` (which preserves the
-    Fernet ciphertext verbatim) and assert the raw value never contains
-    the plaintext.
+    Inspects the in-memory fake backing ``pg_set_credential`` (which
+    preserves the Fernet ciphertext verbatim) and asserts the raw value
+    never contains the plaintext.
     """
     store, _ = _reload_modules(tmp_path, monkeypatch)
     cred_store = _install_fake_pg_credentials(monkeypatch)

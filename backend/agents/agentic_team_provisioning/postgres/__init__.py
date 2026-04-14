@@ -1,8 +1,7 @@
 """Postgres schema for the agentic team provisioning team.
 
-Ports ``backend/agents/agentic_team_provisioning/assistant/store.py`` and
-``backend/agents/agentic_team_provisioning/infrastructure.py`` (currently
-SQLite) to Postgres. Registered from the team's FastAPI lifespan.
+Registered from the team's FastAPI lifespan. Tables are prefixed with
+``agentic_`` to avoid collisions in the shared ``POSTGRES_DB``.
 """
 
 from __future__ import annotations
@@ -69,8 +68,7 @@ SCHEMA = TeamSchema(
             PRIMARY KEY (team_id, stable_key)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_agentic_env_provisions_team ON agentic_env_provisions(team_id)",
-        # infrastructure.py — form_data (namespaced so a future migration
-        # can move per-team SQLite form stores into the shared DB).
+        # infrastructure.py — form_data partitioned by team_id.
         """CREATE TABLE IF NOT EXISTS agentic_form_data (
             record_id  TEXT PRIMARY KEY,
             team_id    TEXT NOT NULL,

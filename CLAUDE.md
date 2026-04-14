@@ -208,11 +208,10 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 | `SE_WORKSPACE_DIR` | Root for software-engineering team per-job workspaces |
 | `AGENT_CACHE` | Shared cache root for all teams (Docker: `/data/agents`); each team namespaces under `{team_name}/` |
 | `UNIFIED_API_PORT` / `UNIFIED_API_HOST` | Bind address/port for the Unified API (default `0.0.0.0:8080`) |
-| `POSTGRES_HOST` (and `POSTGRES_PORT`/`USER`/`PASSWORD`/`DB`) | When set, enables Postgres-backed stores (job state, encrypted integration credentials, etc.); without it the platform falls back to local SQLite where supported |
+| `POSTGRES_HOST` (and `POSTGRES_PORT`/`USER`/`PASSWORD`/`DB`) | Required for migrated teams (blogging, branding, team_assistant, startup_advisor, user_agent_founder, agentic_team_provisioning, unified_api credentials). Enables Postgres-backed stores via `shared_postgres`; no SQLite fallback |
 | `ARCHITECT_MODEL_SPECIALIST` / `ARCHITECT_MODEL_ORCHESTRATOR` | Per-role model overrides for the AI Systems team |
 | `ALPHA_VANTAGE_API_KEY` / `FRED_API_KEY` | Market data providers used by the Investment Strategy Lab |
 | `STRATEGY_LAB_MARKET_DATA_*` | Strategy Lab market-data cache/timeout/provider tuning |
-| `BRANDING_DB_PATH` / `STARTUP_ADVISOR_DB_PATH` / `USER_AGENT_FOUNDER_DB_PATH` | Local SQLite paths for those teams when Postgres is not configured |
 | `AUTHOR_PROFILE_PATH` | Path to user/author profile YAML injected into blogging prompts. Falls back to `$AGENT_CACHE/author_profile.yaml`, then to the bundled example. See `backend/agents/blogging/author_profile/`. |
 | `AUTHOR_PROFILE_STRICT` | When `true`, missing/invalid profile raises instead of falling back to the bundled example. Recommended for production. |
 

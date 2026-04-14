@@ -30,7 +30,7 @@ This team defines and operationalizes an enterprise brand system through a coord
 
 - **One client, many brands.** Each client has an `id` and `name`; each brand belongs to one client and has a mission (company name, description, target audience, etc.), status (`draft` | `active` | `evolving` | `archived`), and versioned run history.
 - **Lifecycle:** Create a client → create one or more brands (with mission) → **run** the orchestrator for a brand (output is stored as a new version) → **evolve** by updating the brand’s mission or status and re-running. The team can also **request market research** or **request design assets** for a brand; results are returned (and optionally attached to the brand context).
-- **Persistence:** Clients and brands are stored in an in-memory store (thread-safe). Restarting the API clears the store; the design allows swapping to SQLite/Postgres later without changing the API surface.
+- **Persistence:** Clients, brands, and conversations are stored in the shared Khala Postgres instance via ``shared_postgres`` (no SQLite fallback). Tables: ``branding_clients``, ``branding_brands``, ``branding_sessions``, ``branding_conversations``, ``branding_conv_messages``.
 
 ## Agent setup and flow
 

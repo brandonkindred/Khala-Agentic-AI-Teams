@@ -1,23 +1,10 @@
 """
 Encrypted credential store for service integrations (OAuth client IDs and secrets).
 
-As of PR 1 of the SQLite → Postgres migration this module is a **thin
-compatibility shim** around ``postgres_encrypted_credentials``:
-
-- The Fernet key management (``_load_or_create_key``,
-  ``get_integration_fernet``) still lives here because both the legacy
-  SQLite path and the Postgres path depend on the same key material and
-  we want exactly one place that touches ``INTEGRATION_ENCRYPTION_KEY``
-  / ``$AGENT_CACHE/integration.key``.
-- The CRUD surface (``get_credential``, ``set_credential``,
-  ``delete_credential``, ``delete_service_credentials``) now delegates
-  to ``pg_*`` functions against the Postgres
-  ``encrypted_integration_credentials`` table.
-- ``migrate_sqlite_to_postgres_once`` is an opt-in one-shot helper gated
-  by ``INTEGRATIONS_MIGRATE_SQLITE=1`` that lifts existing rows out of
-  an old ``$AGENT_CACHE/integration_credentials.db`` into Postgres.
-  Idempotency is guarded by a ``migration_markers`` row rather than a
-  file rename so re-runs are safe.
+This module is the thin public API used by the rest of the unified API.
+The Fernet key management lives here; all CRUD delegates to the Postgres
+store in ``postgres_encrypted_credentials`` (the ``encrypted_integration_credentials``
+table in Khala Postgres).
 
 Security notes:
   * The Fernet key file is persisted at ``$AGENT_CACHE/integration.key``
@@ -42,9 +29,6 @@ from cryptography.fernet import Fernet
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CACHE_DIR = ".agent_cache"
-
-# Name of the one-shot SQLite→Postgres migration marker row.
-_MIGRATION_MARKER = "integration_credentials_v1"
 
 
 # ---------------------------------------------------------------------------
@@ -140,133 +124,3 @@ def delete_service_credentials(service: str) -> None:
     from unified_api.postgres_encrypted_credentials import pg_delete_service_credentials
 
     pg_delete_service_credentials(service)
-
-
-# ---------------------------------------------------------------------------
-# One-shot SQLite → Postgres migration helper
-# ---------------------------------------------------------------------------
-
-
-def _legacy_sqlite_path() -> Path:
-    cache_dir = os.getenv("AGENT_CACHE", _DEFAULT_CACHE_DIR)
-    return Path(cache_dir) / "integration_credentials.db"
-
-
-def _read_sqlite_rows(db_path: Path) -> list[tuple[str, str, str]]:
-    """Read ``(service, key, decrypted_plaintext)`` tuples from the legacy SQLite file.
-
-    Returns an empty list if the file is missing, the table is absent,
-    or every row fails to decrypt. Rows whose individual decrypt fails
-    are logged at WARNING and skipped so one corrupt row doesn't block
-    the rest of the migration.
-    """
-    import sqlite3
-
-    if not db_path.exists():
-        return []
-
-    fernet = _get_fernet()
-    out: list[tuple[str, str, str]] = []
-    try:
-        conn = sqlite3.connect(str(db_path))
-        try:
-            rows = conn.execute("SELECT service, key, value FROM service_integrations").fetchall()
-        except sqlite3.OperationalError as e:
-            # Table missing or schema mismatch — nothing to migrate.
-            logger.info("Legacy SQLite credentials table not found (%s); skipping migration", e)
-            return []
-        finally:
-            conn.close()
-    except sqlite3.Error as e:
-        logger.warning("Could not open legacy SQLite credentials file %s: %s", db_path, e)
-        return []
-
-    for service, key, encrypted in rows:
-        if not isinstance(encrypted, str) or not encrypted:
-            continue
-        try:
-            plaintext = fernet.decrypt(encrypted.encode()).decode()
-        except Exception as e:
-            logger.warning(
-                "Skipping corrupt/un-decryptable legacy credential %s/%s: %s",
-                service,
-                key,
-                e,
-            )
-            continue
-        out.append((service, key, plaintext))
-    return out
-
-
-def migrate_sqlite_to_postgres_once() -> dict[str, int | bool | str]:
-    """Lift credentials from the legacy SQLite store into Postgres, once.
-
-    Behaviour:
-      * No-op and returns ``{"status": "skipped", "reason": ...}`` when
-        Postgres is disabled, when the legacy SQLite file is missing, or
-        when the ``migration_markers`` row already exists.
-      * Otherwise opens a **single** ``shared_postgres.get_conn()``
-        transaction, re-encrypts each row with the current Fernet key,
-        upserts them via ``pg_upsert_credentials_bulk``, and inserts the
-        ``integration_credentials_v1`` marker row in the **same**
-        transaction so re-runs are idempotent and crashes mid-migration
-        don't leave half-migrated state.
-
-    Returns a small status dict suitable for logging:
-      ``{"status": "migrated", "rows": N}`` on success,
-      ``{"status": "skipped", "reason": "..."}`` when no work happened.
-    """
-    # Import late so tests and linters don't force a shared_postgres
-    # import chain.
-    from shared_postgres import get_conn, is_postgres_enabled
-    from unified_api.postgres_encrypted_credentials import pg_upsert_credentials_bulk
-
-    if not is_postgres_enabled():
-        return {"status": "skipped", "reason": "postgres_disabled"}
-
-    db_path = _legacy_sqlite_path()
-    if not db_path.exists():
-        return {"status": "skipped", "reason": "no_sqlite_file"}
-
-    fernet = _get_fernet()
-    plaintext_rows = _read_sqlite_rows(db_path)
-    if not plaintext_rows:
-        # Nothing to migrate, but still record the marker so we don't
-        # re-read the SQLite file on every startup.
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO migration_markers (name, applied_at, detail) "
-                "VALUES (%s, NOW(), %s) ON CONFLICT (name) DO NOTHING",
-                (_MIGRATION_MARKER, "0 rows (empty sqlite)"),
-            )
-        return {"status": "skipped", "reason": "empty_sqlite"}
-
-    # Re-encrypt once outside the transaction so the connection is held
-    # for the shortest possible window.
-    encrypted_rows = [
-        (service, key, fernet.encrypt(plaintext.encode()).decode()) for service, key, plaintext in plaintext_rows
-    ]
-
-    with get_conn() as conn, conn.cursor() as cur:
-        # Short-circuit inside the same connection: if another process
-        # wrote the marker between is_postgres_enabled() and now, bail.
-        cur.execute(
-            "SELECT 1 FROM migration_markers WHERE name = %s",
-            (_MIGRATION_MARKER,),
-        )
-        if cur.fetchone() is not None:
-            return {"status": "skipped", "reason": "marker_present"}
-
-        applied = pg_upsert_credentials_bulk(cur, encrypted_rows)
-        cur.execute(
-            "INSERT INTO migration_markers (name, applied_at, detail) "
-            "VALUES (%s, NOW(), %s) ON CONFLICT (name) DO NOTHING",
-            (_MIGRATION_MARKER, f"{applied} rows"),
-        )
-
-    logger.info(
-        "integration_credentials SQLite → Postgres: migrated %d row(s) from %s",
-        applied,
-        db_path,
-    )
-    return {"status": "migrated", "rows": applied}

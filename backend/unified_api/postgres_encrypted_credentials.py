@@ -2,12 +2,8 @@
 Postgres-backed encrypted integration secrets (Fernet).
 
 The canonical store for Slack/Medium/Google-browser-login credentials.
-Historically this coexisted with a SQLite store in
-``integration_credentials.py``; that SQLite path is being retired in PR 1
-of the SQLite → Postgres migration and this module is now authoritative.
-
-The ``encrypted_integration_credentials`` table is created at unified_api
-startup by ``shared_postgres.register_team_schemas`` (see
+Uses the ``encrypted_integration_credentials`` table which is created at
+unified_api startup by ``shared_postgres.register_team_schemas`` (see
 ``unified_api/postgres/__init__.py``) — no per-call DDL here.
 
 Every public operation is wrapped in ``@timed_query`` so production can
@@ -21,7 +17,6 @@ import logging
 import os
 import threading
 import urllib.parse
-from collections.abc import Iterable
 
 from shared_postgres.metrics import timed_query
 from unified_api.integration_credentials import get_integration_fernet
@@ -151,10 +146,8 @@ def pg_delete_credential(service: str, key: str) -> None:
 def pg_delete_service_credentials(service: str) -> None:
     """Remove every credential row for ``service``.
 
-    Used by the unified_api legacy ``delete_service_credentials`` shim so
-    callers of the pre-migration SQLite API behave identically against
-    Postgres. Silent no-op when Postgres is disabled or psycopg is
-    missing, matching the pattern of ``pg_delete_credential``.
+    Silent no-op when Postgres is disabled or psycopg is missing,
+    matching the pattern of ``pg_delete_credential``.
     """
     if not postgres_credentials_enabled():
         return
@@ -171,32 +164,3 @@ def pg_delete_service_credentials(service: str) -> None:
                 )
         except Exception as e:
             logger.warning("Postgres service credential delete failed (%s): %s", service, e)
-
-
-def pg_upsert_credentials_bulk(
-    cur,
-    rows: Iterable[tuple[str, str, str]],
-) -> int:
-    """Upsert ``(service, key, encrypted_ciphertext)`` rows on an existing cursor.
-
-    Takes a ``psycopg`` cursor rather than opening a new connection so
-    the caller can compose the upsert with other work in a single
-    transaction — the one-shot SQLite → Postgres migration helper uses
-    this to insert credentials and the ``migration_markers`` row in the
-    same transaction.
-
-    Returns the number of rows upserted.
-    """
-    count = 0
-    for service, key, ciphertext in rows:
-        cur.execute(
-            """
-                    INSERT INTO encrypted_integration_credentials (service, credential_key, ciphertext, updated_at)
-                    VALUES (%s, %s, %s, NOW())
-                    ON CONFLICT (service, credential_key)
-                    DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = NOW()
-                    """,
-            (service, key, ciphertext),
-        )
-        count += 1
-    return count
