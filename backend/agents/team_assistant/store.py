@@ -149,8 +149,28 @@ class TeamAssistantConversationStore:
     def add_artifact(
         self, conversation_id: str, artifact_type: str, title: str, payload: dict[str, Any]
     ) -> int:
+        """Attach an artifact to ``conversation_id``.
+
+        Returns the new artifact's ``id``, or ``0`` when the conversation
+        either does not exist or belongs to a different ``team_key``. The
+        existence check is scoped by ``(conversation_id, team_key)`` so a
+        stale or leaked ID from another team cannot mutate this team's
+        data — matching the defensive pattern used by ``append_message``.
+        """
         ts = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM team_assistant_conversations "
+                "WHERE conversation_id = %s AND team_key = %s",
+                (conversation_id, self._team_key),
+            )
+            if cur.fetchone() is None:
+                logger.warning(
+                    "add_artifact: conversation_id=%s not owned by team_key=%s; dropping artifact",
+                    conversation_id,
+                    self._team_key,
+                )
+                return 0
             cur.execute(
                 "INSERT INTO team_assistant_conv_artifacts "
                 "(conversation_id, artifact_type, title, payload_json, created_at) "
