@@ -195,7 +195,7 @@ File: `backend/agents/user_agent_founder/api/main.py`
 |---|---|---|
 | `GET` | `/testable-teams` | `{teams: [{team_key, display_name}]}` — derived from `targets.ADAPTERS` keys joined against `TEAM_CONFIGS` for display names. |
 
-**Start test — breaking change to `/start`**:
+**Start test — additive change to `/start`** (no breaking change):
 
 ```python
 class StartRunRequest(BaseModel):
@@ -204,14 +204,28 @@ class StartRunRequest(BaseModel):
     project_name: Optional[str] = None                   # default computed server-side
 ```
 
-`POST /start` now:
-1. Loads the persona row (404 if missing).
-2. Resolves the adapter via `get_adapter(target_team_key)` (400 if unsupported).
-3. Computes `project_name` if absent (slugified persona name + `-mvp`, max ~40 chars, matches SE's `project_name` validation).
-4. `store.create_run(persona_id, target_team_key, project_name)`.
-5. Spawns the background thread with `agent = FounderAgent(persona.system_prompt, persona.spec_generation_prompt)` and `adapter`.
+The endpoint must accept **no body at all** (existing clients post `{}` or nothing) in addition to a full payload. FastAPI treats a plain `StartRunRequest` parameter as a required body, so the handler wraps it as optional and coalesces server-side:
 
-Defaults preserve backward compatibility: an empty POST body still works and still runs the builtin founder against SE.
+```python
+from fastapi import Body
+
+@app.post("/start", response_model=StartRunResponse)
+def start_founder_workflow(
+    request: Optional[StartRunRequest] = Body(default=None),
+) -> StartRunResponse:
+    req = request or StartRunRequest()
+    # ... use req.persona_id, req.target_team_key, req.project_name
+```
+
+`POST /start` then:
+1. Loads the persona row (404 if missing).
+2. Resolves the adapter via `get_adapter(req.target_team_key)` (400 if unsupported).
+3. Mints a new `run_id = uuid4().hex` up front.
+4. Computes `project_name` if absent: **`<slugified-persona-name>-<run_id[:8]>`** — e.g., `startup-founder-3f9a2b1c`. Slug is lowercase `[a-z0-9-]`, truncated so the full name fits SE's `project_name` rule (alphanumeric + hyphens/underscores, reasonable length). The 8-char run-id suffix guarantees uniqueness across repeat runs so the SE `start-from-spec` "project already exists" guard never trips on the default; a user-supplied `project_name` is used verbatim (no suffix appended).
+5. `store.create_run(run_id, persona_id, target_team_key, project_name)`.
+6. Spawns the background thread with `agent = FounderAgent(persona.system_prompt, persona.spec_generation_prompt)` and `adapter`.
+
+Backward compatibility: an empty POST body (no JSON / no `Content-Type`) still parses as `request=None` → defaults to the builtin founder against SE, with a unique `project_name` minted per run so consecutive no-body calls don't collide.
 
 **Status / list endpoints**: extend `RunStatusResponse`, `RunSummaryResponse` with `persona_id`, `target_team_key`, `project_name` (all `Optional[str]`). No breaking change — new fields are additive.
 
@@ -331,7 +345,9 @@ Reuse the pattern from `BrandingDashboardComponent` (client/brand create forms v
 2. Start Postgres per `CLAUDE.md` dev instructions and run `python run_unified_api.py`. Confirm on startup: logs show `persona startup-founder seeded (builtin)` on first run, no-op on subsequent runs.
 3. `curl http://localhost:8080/api/user-agent-founder/personas` returns the builtin. `curl -X POST .../personas -d '{"name":"QA","description":"...","icon":"bug_report","system_prompt":"…","spec_generation_prompt":"…"}'` creates a user persona. `PUT` / `DELETE` on `startup-founder` return 403.
 4. `curl http://localhost:8080/api/user-agent-founder/testable-teams` → `{"teams":[{"team_key":"software_engineering","display_name":"Software Engineering"}]}`.
-5. `curl -X POST .../start -d '{"persona_id":"startup-founder","target_team_key":"software_engineering"}'` returns a `run_id`, `/status/{run_id}` progresses through `generating_spec → submitting_analysis → …` just as before. Empty-body `POST /start` also still works (backward-compat defaults).
+5. `curl -X POST .../start -d '{"persona_id":"startup-founder","target_team_key":"software_engineering"}'` returns a `run_id`, `/status/{run_id}` progresses through `generating_spec → submitting_analysis → …` just as before. Then verify the two backward-compat / default-uniqueness paths:
+   a. `curl -X POST .../start` with **no body and no `Content-Type`** returns 200 with a new `run_id` (empty body defaults to builtin persona + SE), proving the optional-`Body(default=None)` wrapping.
+   b. Immediately repeat `curl -X POST .../start` (still no body) — the second call also returns 200 and advances past `submitting_analysis` without hitting SE's "project already exists" guard, proving the computed `project_name` carries the per-run suffix.
 6. Existing runs queried via `/runs` show `persona_id="startup-founder"`, `target_team_key="software_engineering"` from the backfill.
 
 **Frontend**
