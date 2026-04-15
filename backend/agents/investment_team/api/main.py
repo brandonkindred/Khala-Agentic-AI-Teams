@@ -1289,11 +1289,17 @@ def _strategy_lab_worker(
             )
 
         with _lock:
-            completed_ids: List[str] = list(
-                _active_runs.get(run_id, {}).get("completed_record_ids") or []
-            )
+            _run_state_snapshot = _active_runs.get(run_id, {})
+            completed_ids: List[str] = list(_run_state_snapshot.get("completed_record_ids") or [])
+            # Carry forward skipped count on resume: resume_strategy_lab_run
+            # repopulates _active_runs[run_id]["skipped_cycles"] with the
+            # persisted pre-crash value, and run_strategy_lab seeds it to 0
+            # for fresh runs. Without this load the first post-resume
+            # _update_run({"skipped_cycles": ...}) would overwrite the
+            # persisted counter with only the new-since-resume count, making
+            # /strategy-lab/jobs and UI progress move backward.
+            skipped: int = int(_run_state_snapshot.get("skipped_cycles") or 0)
         completed_indices: set[int] = set(range(start_cycle_offset))
-        skipped = 0
         completed_batches = start_batch_idx
         primary_tracker = orchestrator.convergence_tracker
         run_failed = False
