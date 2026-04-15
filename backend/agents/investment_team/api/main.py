@@ -666,7 +666,13 @@ def validate_strategy(
 
 @app.post("/backtests", response_model=RunBacktestResponse)
 def run_backtest(request: RunBacktestRequest) -> RunBacktestResponse:
-    """Run a backtest using real historical market data and LLM-driven trade decisions."""
+    """Run a backtest using real historical market data.
+
+    Executes the strategy's generated Python script in a sandbox when
+    ``strategy.strategy_code`` is present (the normal Strategy Lab path);
+    falls back to LLM-driven bar-by-bar evaluation only for legacy
+    strategies that have no generated code.
+    """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
 
@@ -816,17 +822,23 @@ def _run_real_data_backtest(
     config: BacktestConfig,
 ) -> tuple[BacktestResult, List[TradeRecord]]:
     """
-    Run a backtest using real historical market data and LLM-driven trade decisions.
+    Run a backtest using real historical market data.
 
     Fetches OHLCV data from Yahoo Finance (all asset classes including crypto)
-    for the backtest period, then walks through bars chronologically with the LLM
-    interpreting the strategy's entry/exit rules to decide trades.
+    for the backtest period, then:
+
+    * If ``strategy.strategy_code`` is populated (the normal Strategy Lab
+      path), executes that generated Python script once in a subprocess
+      sandbox — the same execution path used by the Strategy Lab
+      orchestrator and paper-trading step — and derives metrics from the
+      resulting trade list.
+    * Otherwise (legacy strategies with no generated code), falls back to
+      the slower LLM-driven bar-by-bar evaluation via ``BacktestingAgent``.
 
     Returns (BacktestResult, trade_ledger).
     """
     # Lazy imports: yfinance is slow to import and the LLM client has side-effects;
     # deferring keeps application startup fast and avoids loading these until needed.
-    from investment_team.backtesting_agent import BacktestingAgent
     from investment_team.market_data_service import MarketDataService
 
     market_service = MarketDataService()
@@ -851,6 +863,68 @@ def _run_real_data_backtest(
             detail="Failed to fetch historical market data. Please check the date range and try again.",
         )
 
+    # Preferred path: run the Strategy Lab-generated Python script in the
+    # sandbox.  This matches the orchestrator's and paper-trading agent's
+    # execution path, so backtest metrics are reproducible and consistent
+    # across endpoints.
+    if strategy.strategy_code:
+        from investment_team.strategy_lab.executor import (
+            SandboxRunner,
+            build_trade_records,
+        )
+        from investment_team.trade_simulator import compute_metrics
+
+        total_bars = sum(len(bars) for bars in market_data.values())
+        logger.info(
+            "Executing generated strategy script in sandbox for %s (%d symbols, %d bars)",
+            strategy.strategy_id,
+            len(market_data),
+            total_bars,
+        )
+
+        exec_result = SandboxRunner().run(strategy.strategy_code, market_data, config)
+
+        if not exec_result.success:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Strategy code execution failed ({exec_result.error_type}): "
+                    f"{exec_result.stderr[:500]}"
+                ),
+            )
+
+        try:
+            trades = build_trade_records(exec_result.raw_trades, config)
+        except (ValueError, TypeError) as exc:
+            # ``build_trade_records`` raises ``ValueError`` for invalid sides and
+            # ``TypeError`` when numeric coercion fails (e.g. ``entry_price`` is
+            # ``None`` or a non-numeric type).  Both are user-facing output-shape
+            # errors, not server failures — surface as 422 so the caller sees
+            # the actual problem instead of a generic 500.
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid trade output from strategy code: {exc}",
+            ) from exc
+
+        result = compute_metrics(trades, config.initial_capital, config.start_date, config.end_date)
+
+        logger.info(
+            "Sandbox backtest complete for %s: %d trades, execution %.2fs",
+            strategy.strategy_id,
+            len(trades),
+            exec_result.execution_time_seconds,
+        )
+        return result, trades
+
+    # Fallback: legacy strategies with no generated code.  This is slow and
+    # expensive (one LLM call per bar); any Strategy Lab-generated
+    # strategy will take the sandbox path above.
+    from investment_team.backtesting_agent import BacktestingAgent
+
+    logger.warning(
+        "Strategy %s has no strategy_code; falling back to LLM-per-bar backtest",
+        strategy.strategy_id,
+    )
     agent = BacktestingAgent()
     return agent.run_backtest(strategy, config, market_data)
 
