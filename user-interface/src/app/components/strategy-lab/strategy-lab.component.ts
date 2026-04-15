@@ -605,14 +605,11 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       next: (res) => {
         const sessions: Record<string, PaperTradingSession> = {};
         for (const s of res.items) {
-          // Keep the most recent session per lab record. Running sessions win
-          // over older completed ones so we can resume polling below.
+          // Keep the newest session per lab record, using started_at as the
+          // recency key (completed_at is empty for still-running sessions, so
+          // relying on it would systematically lose to older completed ones).
           const existing = sessions[s.lab_record_id];
-          if (!existing) {
-            sessions[s.lab_record_id] = s;
-          } else if (s.status === 'running' && existing.status !== 'running') {
-            sessions[s.lab_record_id] = s;
-          } else if (existing.status !== 'running' && (s.completed_at || '') > (existing.completed_at || '')) {
+          if (!existing || this.paperSessionRecencyKey(s) > this.paperSessionRecencyKey(existing)) {
             sessions[s.lab_record_id] = s;
           }
         }
@@ -625,6 +622,11 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         }
       },
     });
+  }
+
+  /** Sortable recency key for a paper-trading session. */
+  private paperSessionRecencyKey(s: PaperTradingSession): string {
+    return s.started_at || s.completed_at || '';
   }
 
   runPaperTrading(record: StrategyLabRecord): void {

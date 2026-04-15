@@ -2033,7 +2033,10 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     with _lock:
         _paper_trading_sessions[session_id] = running_session
 
-    # 3 — Kick off background worker (market data fetch + sandbox + divergence analysis)
+    # 3 — Kick off background worker (market data fetch + sandbox + divergence analysis).
+    # Non-daemon so graceful shutdown (SIGTERM) waits for in-flight work to finalize the
+    # session status instead of leaving it stuck in "running". Orphaned sessions from
+    # hard kills are recovered on startup (see _recover_orphaned_paper_trading_sessions).
     thread = threading.Thread(
         target=_run_paper_trading_background,
         args=(
@@ -2048,7 +2051,7 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             request.slippage_bps,
         ),
         name=f"paper-trade-{session_id}",
-        daemon=True,
+        daemon=False,
     )
     thread.start()
 
@@ -2099,6 +2102,54 @@ def get_paper_trading_session(session_id: str) -> PaperTradingResponse:
 
     session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
     return PaperTradingResponse(session=session)
+
+
+@app.on_event("startup")
+def _recover_orphaned_paper_trading_sessions() -> None:
+    """Mark sessions left in ``running`` status by a previous process as ``failed``.
+
+    The paper-trade worker runs in a non-daemon thread so graceful shutdowns wait
+    for it, but SIGKILL/crashes can still orphan a session. Without this recovery
+    pass, such sessions would sit in ``running`` forever and clients would poll
+    indefinitely with no terminal transition.
+    """
+    try:
+        with _lock:
+            raw_sessions = list(_paper_trading_sessions.values())
+    except Exception:
+        logger.debug("Paper-trade recovery: could not enumerate sessions", exc_info=True)
+        return
+
+    now_iso = datetime.now(tz=timezone.utc).isoformat()
+    recovered = 0
+    for raw in raw_sessions:
+        try:
+            session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+        except Exception:
+            continue
+        if session.status != PaperTradingStatus.RUNNING:
+            continue
+        session.status = PaperTradingStatus.FAILED
+        session.completed_at = now_iso
+        session.divergence_analysis = (
+            "Paper trading did not complete — the worker process exited before finalizing "
+            "the session. Re-run the paper trade from the Strategy Lab."
+        )
+        try:
+            with _lock:
+                _paper_trading_sessions[session.session_id] = session
+            recovered += 1
+        except Exception:
+            logger.exception(
+                "Paper-trade recovery: failed to persist failed status for %s",
+                session.session_id,
+            )
+
+    if recovered:
+        logger.info(
+            "Paper-trade recovery: marked %d orphaned running session(s) as failed",
+            recovered,
+        )
 
 
 # ---------------------------------------------------------------------------
