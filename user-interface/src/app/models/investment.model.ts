@@ -498,8 +498,14 @@ export interface RunStrategyLabRequest {
   benchmark_symbol?: string;
   transaction_cost_bps?: number;
   slippage_bps?: number;
-  /** Strategies to generate this run (sequential; default 10). */
+  /** Strategies to generate per batch (sequential; default 10, max 25). */
   batch_size?: number;
+  /**
+   * Number of batches to run back-to-back (default 1, max 10). Each batch
+   * ideates with full context of every strategy from prior batches and
+   * refreshes the signal-intelligence brief.
+   */
+  batch_count?: number;
 }
 
 export interface StrategyLabRunResponse {
@@ -572,6 +578,14 @@ export interface StrategyLabRunStatus {
   current_cycle?: StrategyLabCycleProgress;
   completed_record_ids: string[];
   error?: string;
+  /** Strategies-per-batch (default 1 for legacy single-batch runs). */
+  batch_size?: number;
+  /** Number of batches in the run (default 1). */
+  batch_count?: number;
+  /** Number of batches completed so far. */
+  completed_batches?: number;
+  /** 1-indexed currently-running batch, or null between batches. */
+  current_batch?: number | null;
 }
 
 export interface StrategyLabRunStartResponse {
@@ -599,7 +613,16 @@ export interface InvestmentJobsListResponse {
 }
 
 export interface StrategyLabStreamEvent {
-  type: 'snapshot' | 'progress' | 'cycle_complete' | 'cycle_skipped' | 'complete' | 'error' | 'done';
+  type:
+    | 'snapshot'
+    | 'progress'
+    | 'cycle_complete'
+    | 'cycle_skipped'
+    | 'batch_start'
+    | 'batch_complete'
+    | 'complete'
+    | 'error'
+    | 'done';
   [key: string]: unknown;
 }
 

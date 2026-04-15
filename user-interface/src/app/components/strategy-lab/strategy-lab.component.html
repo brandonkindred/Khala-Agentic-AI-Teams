@@ -27,6 +27,32 @@
           <span>{{ clearingAll ? 'Clearing…' : 'Clear all' }}</span>
         </button>
       }
+      <mat-form-field appearance="outline" class="batch-input">
+        <mat-label>Strategies / batch</mat-label>
+        <input
+          matInput
+          type="number"
+          [(ngModel)]="batchSize"
+          [min]="BATCH_SIZE_MIN"
+          [max]="BATCH_SIZE_MAX"
+          [disabled]="running || loading || clearingAll"
+          aria-label="Strategies per batch"
+        />
+        <mat-hint>{{ BATCH_SIZE_MIN }}–{{ BATCH_SIZE_MAX }}</mat-hint>
+      </mat-form-field>
+      <mat-form-field appearance="outline" class="batch-input">
+        <mat-label>Batches</mat-label>
+        <input
+          matInput
+          type="number"
+          [(ngModel)]="batchCount"
+          [min]="BATCH_COUNT_MIN"
+          [max]="BATCH_COUNT_MAX"
+          [disabled]="running || loading || clearingAll"
+          aria-label="Number of batches"
+        />
+        <mat-hint>{{ BATCH_COUNT_MIN }}–{{ BATCH_COUNT_MAX }}; each new batch learns from prior batches</mat-hint>
+      </mat-form-field>
       <button
         mat-raised-button
         color="primary"
@@ -45,7 +71,7 @@
           } @else if (running) {
             Starting…
           } @else {
-            Run New Strategies (10)
+            {{ runButtonLabel() }}
           }
         </span>
       </button>
@@ -66,6 +92,10 @@
       <div class="progress-header">
         <mat-icon class="pulse-icon">hub</mat-icon>
         <span class="progress-title">
+          @if (runStatus.batch_count && runStatus.batch_count > 1) {
+            Batch {{ runStatus.current_batch ?? (runStatus.completed_batches ?? 0) + 1 }}
+            of {{ runStatus.batch_count }} —
+          }
           Strategy {{ runStatus.completed_cycles + 1 }} of {{ runStatus.total_cycles }}
         </span>
         @if (runStatus.skipped_cycles) {

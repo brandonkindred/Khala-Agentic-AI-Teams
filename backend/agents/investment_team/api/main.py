@@ -191,6 +191,12 @@ class StrategyLabRunStatusResponse(BaseModel):
     current_cycle: Optional[StrategyLabCycleProgress] = None
     completed_record_ids: List[str] = Field(default_factory=list)
     error: Optional[str] = None
+    # Multi-batch progress (batch_count > 1 runs N batches sequentially; each batch
+    # generates ``batch_size`` strategies; ``total_cycles == batch_size * batch_count``).
+    batch_size: int = 1
+    batch_count: int = 1
+    completed_batches: int = 0
+    current_batch: Optional[int] = None
 
 
 class ActiveRunsResponse(BaseModel):
@@ -212,6 +218,10 @@ def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusRespons
         current_cycle=StrategyLabCycleProgress(**cc) if cc else None,
         completed_record_ids=state.get("completed_record_ids", []),
         error=state.get("error"),
+        batch_size=state.get("batch_size", state.get("total_cycles", 1)),
+        batch_count=state.get("batch_count", 1),
+        completed_batches=state.get("completed_batches", 0),
+        current_batch=state.get("current_batch"),
     )
 
 
@@ -915,13 +925,22 @@ class RunStrategyLabRequest(BaseModel):
         default=10,
         ge=1,
         le=25,
-        description="Total strategies to generate this run.",
+        description="Strategies to generate per batch (each batch sees all prior batches' results).",
+    )
+    batch_count: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description=(
+            "Number of batches to run back-to-back. Each new batch ideates with full context "
+            "of every strategy from prior batches and refreshes the signal-intelligence brief."
+        ),
     )
     max_parallel: int = Field(
         default=3,
         ge=1,
         le=6,
-        description="Max strategies to generate in parallel per wave.",
+        description="Max strategies to generate in parallel per wave (within a batch).",
     )
     # Paper-trading step (only runs when a cycle's backtest is flagged as winning)
     paper_trading_enabled: bool = Field(
@@ -1142,7 +1161,16 @@ def _load_run_from_job_service(run_id: str) -> Optional[Dict[str, Any]]:
 def _strategy_lab_worker(
     run_id: str, request: RunStrategyLabRequest, *, start_cycle_offset: int = 0
 ) -> None:
-    """Background worker that executes the strategy lab batch and publishes progress via SSE."""
+    """Background worker that executes the strategy lab batch and publishes progress via SSE.
+
+    Runs ``request.batch_count`` batches sequentially. Each batch generates
+    ``request.batch_size`` strategies, executed in waves of up to
+    ``request.max_parallel`` cycles in parallel via a ThreadPoolExecutor.
+    Between batches the signal-intelligence brief is regenerated so each new
+    batch's strategies are informed by every prior batch's persisted records.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from investment_team.api.job_event_bus import cleanup_job, publish
 
     def _update_run(updates: Dict[str, Any]) -> None:
@@ -1168,78 +1196,74 @@ def _strategy_lab_worker(
             slippage_bps=request.slippage_bps,
         )
 
-        precomputed_brief: Optional[SignalIntelligenceBriefV1] = None
-        signal_brief_storage: Optional[Dict[str, Any]] = None
-        provider: Optional[FreeTierMarketDataProvider] = None
+        batch_size = request.batch_size
+        batch_count = request.batch_count
+        total_cycles = batch_size * batch_count
+        max_parallel = request.max_parallel
 
-        if _strategy_lab_signal_expert_enabled():
+        def _compute_signal_brief() -> tuple[
+            Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]
+        ]:
+            """Build the per-batch signal brief over all currently-persisted prior records.
+
+            Called at the start of every batch so that batch N+1 sees results from
+            batches 1..N (and prior runs).
+            """
+            if not _strategy_lab_signal_expert_enabled():
+                return None, {"skipped": True, "skipped_reason": "signal_expert_disabled"}
+
             provider = FreeTierMarketDataProvider()
             try:
-                market_ctx = provider.fetch_context(
-                    StrategyLabDataRequest(benchmark_symbol=request.benchmark_symbol)
-                )
-            except Exception as exc:
-                logger.warning("Market data fetch failed: %s", exc)
-                market_ctx = MarketLabContext(
-                    fetched_at=_now(),
-                    degraded=True,
-                    degraded_reason=str(exc),
-                    sources_used=[],
-                )
-            with _lock:
-                raw_prior = list(_strategy_lab_records.values())
-            prior_for_brief = [
-                StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior
-            ]
-            prior_for_brief.sort(key=lambda r: r.created_at)
+                try:
+                    market_ctx = provider.fetch_context(
+                        StrategyLabDataRequest(benchmark_symbol=request.benchmark_symbol)
+                    )
+                except Exception as exc:
+                    logger.warning("Market data fetch failed: %s", exc)
+                    market_ctx = MarketLabContext(
+                        fetched_at=_now(),
+                        degraded=True,
+                        degraded_reason=str(exc),
+                        sources_used=[],
+                    )
+                with _lock:
+                    raw_prior = list(_strategy_lab_records.values())
+                prior_for_brief = [
+                    StrategyLabRecord(**r) if isinstance(r, dict) else r for r in raw_prior
+                ]
+                prior_for_brief.sort(key=lambda r: r.created_at)
 
-            expert = SignalIntelligenceExpert()
-            t0 = datetime.now(tz=timezone.utc)
-            try:
-                brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
-                precomputed_brief = brief
-                signal_brief_storage = brief.model_dump(mode="json")
-                prov_text = market_ctx.as_prompt_text()
-                signal_brief_storage["brief_provenance"] = {
-                    "expert": "signal_intelligence_v1",
-                    "market_snapshot_hash": hashlib.sha256(prov_text.encode()).hexdigest()[:16],
-                    "market_fetched_at": market_ctx.fetched_at,
-                    "market_degraded": market_ctx.degraded,
-                    "duration_ms": int((datetime.now(tz=timezone.utc) - t0).total_seconds() * 1000),
-                }
-                logger.info(
-                    "signal_intelligence brief_version=%s len=%s degraded_market=%s",
-                    signal_brief_storage.get("brief_version"),
-                    len(str(signal_brief_storage)),
-                    market_ctx.degraded,
-                )
-            except Exception as exc:
-                logger.warning("Signal intelligence expert failed: %s", exc)
-                precomputed_brief = None
-                signal_brief_storage = {
-                    "skipped": True,
-                    "skipped_reason": "expert_failed",
-                    "error": str(exc)[:500],
-                }
+                expert = SignalIntelligenceExpert()
+                t0 = datetime.now(tz=timezone.utc)
+                try:
+                    brief = expert.produce_signal_brief(prior_for_brief, market_ctx)
+                    storage = brief.model_dump(mode="json")
+                    prov_text = market_ctx.as_prompt_text()
+                    storage["brief_provenance"] = {
+                        "expert": "signal_intelligence_v1",
+                        "market_snapshot_hash": hashlib.sha256(prov_text.encode()).hexdigest()[:16],
+                        "market_fetched_at": market_ctx.fetched_at,
+                        "market_degraded": market_ctx.degraded,
+                        "duration_ms": int(
+                            (datetime.now(tz=timezone.utc) - t0).total_seconds() * 1000
+                        ),
+                    }
+                    logger.info(
+                        "signal_intelligence brief_version=%s len=%s degraded_market=%s",
+                        storage.get("brief_version"),
+                        len(str(storage)),
+                        market_ctx.degraded,
+                    )
+                    return brief, storage
+                except Exception as exc:
+                    logger.warning("Signal intelligence expert failed: %s", exc)
+                    return None, {
+                        "skipped": True,
+                        "skipped_reason": "expert_failed",
+                        "error": str(exc)[:500],
+                    }
             finally:
-                if provider is not None:
-                    provider.close()
-        else:
-            signal_brief_storage = {
-                "skipped": True,
-                "skipped_reason": "signal_expert_disabled",
-            }
-
-        completed_ids: List[str] = []
-        completed_indices: set[int] = set()  # 0-based indices of completed cycles
-        skipped = 0
-        if start_cycle_offset > 0:
-            # Mark prior cycles as already completed for resume bookkeeping
-            completed_indices.update(range(start_cycle_offset))
-            logger.info("Strategy lab worker resuming from cycle %d", start_cycle_offset + 1)
-
-        # ── Wave-based parallel execution ──────────────────────────────
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+                provider.close()
 
         _TERMINAL_STATUSES = frozenset({"cancelled", "failed", "interrupted"})
 
@@ -1254,132 +1278,226 @@ def _strategy_lab_worker(
                 pass
             return False
 
+        # Resume support: derive starting batch + within-batch index from the flat offset.
+        start_batch_idx, start_within_batch = divmod(start_cycle_offset, batch_size)
+        if start_cycle_offset > 0:
+            logger.info(
+                "Strategy lab worker resuming from cycle %d (batch %d, step %d)",
+                start_cycle_offset + 1,
+                start_batch_idx + 1,
+                start_within_batch + 1,
+            )
+
+        with _lock:
+            completed_ids: List[str] = list(
+                _active_runs.get(run_id, {}).get("completed_record_ids") or []
+            )
+        completed_indices: set[int] = set(range(start_cycle_offset))
+        skipped = 0
+        completed_batches = start_batch_idx
         primary_tracker = orchestrator.convergence_tracker
-        max_parallel = request.max_parallel
-        remaining = list(range(start_cycle_offset, request.batch_size))
         run_failed = False
         run_cancelled = False
 
-        while remaining and not run_failed and not run_cancelled:
-            wave_indices = remaining[:max_parallel]
-            remaining = remaining[max_parallel:]
+        for batch_idx in range(start_batch_idx, batch_count):
+            if run_failed or run_cancelled:
+                break
 
-            wave_futures: Dict[Any, int] = {}
-            with ThreadPoolExecutor(max_workers=len(wave_indices), thread_name_prefix="strat-lab") as pool:
-                for i in wave_indices:
-                    cn = i + 1  # cycle_num (1-based)
+            batch_num = batch_idx + 1
+            within_start = start_within_batch if batch_idx == start_batch_idx else 0
 
-                    def _make_on_phase(_cn: int):
-                        def on_phase(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
-                            cycle_data = {"cycle_index": _cn, "phase": phase, **(data or {})}
-                            _update_run({"current_cycle": cycle_data})
-                            _publish("progress", cycle_data)
-                        return on_phase
+            _update_run({"current_batch": batch_num, "completed_batches": completed_batches})
+            _publish(
+                "batch_start",
+                {
+                    "batch_index": batch_num,
+                    "total_batches": batch_count,
+                    "batch_size": batch_size,
+                    "completed_batches": completed_batches,
+                },
+            )
 
-                    cycle_orchestrator = StrategyLabOrchestrator(
-                        convergence_tracker=primary_tracker.snapshot(),
-                    )
-                    future = pool.submit(
-                        _run_one_strategy_lab_cycle,
-                        config,
-                        cycle_orchestrator,
-                        precomputed_signal_brief=precomputed_brief,
-                        signal_brief_storage=signal_brief_storage,
-                        on_phase=_make_on_phase(cn),
-                        paper_trading_enabled=request.paper_trading_enabled,
-                        paper_trading_lookback_days=request.paper_trading_lookback_days,
-                    )
-                    wave_futures[future] = cn
+            # Refresh the signal-intelligence brief at the start of every batch so the
+            # next batch's strategies are informed by every prior batch's results.
+            precomputed_brief, signal_brief_storage = _compute_signal_brief()
 
-                # Collect results from this wave.
-                # Each entry is (cycle_index_0based, record) so we can sort
-                # deterministically before updating the convergence tracker.
-                wave_results: List[tuple[int, StrategyLabRecord]] = []
-                for future in as_completed(wave_futures):
-                    cn = wave_futures[future]
-                    try:
-                        record = future.result()
-                        completed_ids.append(record.lab_record_id)
-                        completed_indices.add(cn - 1)  # 0-based
-                        wave_results.append((cn - 1, record))
+            # Wave-based parallel execution within this batch.
+            # Cycle indices are global (1-based across the whole run): for batch B
+            # they range from (B-1) * batch_size + 1 to B * batch_size.
+            batch_start_cycle = batch_idx * batch_size  # 0-based
+            remaining = list(
+                range(batch_start_cycle + within_start, batch_start_cycle + batch_size)
+            )
 
-                        # Track the highest contiguous completed index for
-                        # resume_strategy_lab_run (start_cycle_offset), but
-                        # report the actual count for UI progress display.
-                        contiguous = 0
-                        while contiguous in completed_indices:
-                            contiguous += 1
-                        _update_run({
-                            "completed_cycles": len(completed_ids),
-                            "contiguous_cycles": contiguous,
-                            "completed_record_ids": list(completed_ids),
-                            "current_cycle": None,
-                        })
-                        _publish("cycle_complete", {
-                            "cycle_index": cn,
-                            "record_id": record.lab_record_id,
-                            "completed_cycles": len(completed_ids),
-                        })
-                    except HTTPException as exc:
-                        if exc.status_code == 502:
-                            logger.warning(
-                                "Strategy lab cycle %d/%d skipped (no market data after fallback)",
-                                cn, request.batch_size,
+            while remaining and not run_failed and not run_cancelled:
+                wave_indices = remaining[:max_parallel]
+                remaining = remaining[max_parallel:]
+
+                wave_futures: Dict[Any, int] = {}
+                with ThreadPoolExecutor(
+                    max_workers=len(wave_indices), thread_name_prefix="strat-lab"
+                ) as pool:
+                    for i in wave_indices:
+                        cn = i + 1  # cycle_num (1-based, global)
+
+                        def _make_on_phase(_cn: int):
+                            def on_phase(phase: str, data: Optional[Dict[str, Any]] = None) -> None:
+                                cycle_data = {
+                                    "cycle_index": _cn,
+                                    "phase": phase,
+                                    **(data or {}),
+                                }
+                                _update_run({"current_cycle": cycle_data})
+                                _publish("progress", cycle_data)
+
+                            return on_phase
+
+                        cycle_orchestrator = StrategyLabOrchestrator(
+                            convergence_tracker=primary_tracker.snapshot(),
+                        )
+                        future = pool.submit(
+                            _run_one_strategy_lab_cycle,
+                            config,
+                            cycle_orchestrator,
+                            precomputed_signal_brief=precomputed_brief,
+                            signal_brief_storage=signal_brief_storage,
+                            on_phase=_make_on_phase(cn),
+                            paper_trading_enabled=request.paper_trading_enabled,
+                            paper_trading_lookback_days=request.paper_trading_lookback_days,
+                        )
+                        wave_futures[future] = cn
+
+                    # Collect results from this wave.
+                    wave_results: List[tuple[int, StrategyLabRecord]] = []
+                    for future in as_completed(wave_futures):
+                        cn = wave_futures[future]
+                        try:
+                            record = future.result()
+                            completed_ids.append(record.lab_record_id)
+                            completed_indices.add(cn - 1)  # 0-based
+                            wave_results.append((cn - 1, record))
+
+                            # Track the highest contiguous completed index for
+                            # resume support; report the actual count for UI.
+                            contiguous = 0
+                            while contiguous in completed_indices:
+                                contiguous += 1
+                            _update_run(
+                                {
+                                    "completed_cycles": len(completed_ids),
+                                    "contiguous_cycles": contiguous,
+                                    "completed_record_ids": list(completed_ids),
+                                    "current_cycle": None,
+                                }
                             )
-                            skipped += 1
-                            _update_run({"skipped_cycles": skipped, "current_cycle": None})
-                            _publish("cycle_skipped", {"cycle_index": cn, "reason": "no_market_data"})
-                        else:
-                            logger.exception("Strategy lab cycle %d/%d failed", cn, request.batch_size)
-                            _update_run({
-                                "status": "failed",
-                                "error": f"Cycle {cn} failed: {exc}",
-                                "current_cycle": None,
-                            })
+                            _publish(
+                                "cycle_complete",
+                                {
+                                    "cycle_index": cn,
+                                    "record_id": record.lab_record_id,
+                                    "completed_cycles": len(completed_ids),
+                                    "batch_index": batch_num,
+                                },
+                            )
+                        except HTTPException as exc:
+                            if exc.status_code == 502:
+                                logger.warning(
+                                    "Strategy lab cycle %d/%d skipped (no market data after fallback)",
+                                    cn,
+                                    total_cycles,
+                                )
+                                skipped += 1
+                                _update_run({"skipped_cycles": skipped, "current_cycle": None})
+                                _publish(
+                                    "cycle_skipped",
+                                    {
+                                        "cycle_index": cn,
+                                        "reason": "no_market_data",
+                                        "batch_index": batch_num,
+                                    },
+                                )
+                            else:
+                                logger.exception(
+                                    "Strategy lab cycle %d/%d failed", cn, total_cycles
+                                )
+                                _update_run(
+                                    {
+                                        "status": "failed",
+                                        "error": f"Cycle {cn} failed: {exc}",
+                                        "current_cycle": None,
+                                    }
+                                )
+                                _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
+                                run_failed = True
+                        except Exception as exc:
+                            logger.exception("Strategy lab cycle %d/%d failed", cn, total_cycles)
+                            _update_run(
+                                {
+                                    "status": "failed",
+                                    "error": f"Cycle {cn} failed: {exc}",
+                                    "current_cycle": None,
+                                }
+                            )
                             _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
                             run_failed = True
-                    except Exception as exc:
-                        logger.exception("Strategy lab cycle %d/%d failed", cn, request.batch_size)
-                        _update_run({
-                            "status": "failed",
-                            "error": f"Cycle {cn} failed: {exc}",
-                            "current_cycle": None,
-                        })
-                        _publish("error", {"detail": f"Cycle {cn} failed: {exc}"})
-                        run_failed = True
 
-            # Merge wave results into the primary convergence tracker in
-            # deterministic cycle-index order so that stall/diversity
-            # directives are reproducible across runs with identical inputs.
-            wave_results.sort(key=lambda pair: pair[0])
-            for _idx, record in wave_results:
-                gate_results = [
-                    QualityGateResult(**g) if isinstance(g, dict) else g
-                    for g in record.quality_gate_results
-                ]
-                primary_tracker.record(record.strategy, gate_results)
+                # Merge wave results into the primary convergence tracker in
+                # deterministic cycle-index order so that stall/diversity
+                # directives are reproducible across runs with identical inputs.
+                wave_results.sort(key=lambda pair: pair[0])
+                for _idx, record in wave_results:
+                    gate_results = [
+                        QualityGateResult(**g) if isinstance(g, dict) else g
+                        for g in record.quality_gate_results
+                    ]
+                    primary_tracker.record(record.strategy, gate_results)
 
-            # Check for external cancellation between waves
-            if not run_failed and _is_run_cancelled():
-                logger.info("Strategy lab run %s cancelled externally — stopping after wave", run_id)
-                run_cancelled = True
+                # Check for external cancellation between waves
+                if not run_failed and _is_run_cancelled():
+                    logger.info(
+                        "Strategy lab run %s cancelled externally — stopping after wave",
+                        run_id,
+                    )
+                    run_cancelled = True
+
+            if run_failed or run_cancelled:
+                break
+
+            completed_batches = batch_num
+            _update_run({"completed_batches": completed_batches, "current_batch": None})
+            _publish(
+                "batch_complete",
+                {
+                    "batch_index": batch_num,
+                    "total_batches": batch_count,
+                    "completed_batches": completed_batches,
+                },
+            )
 
         if run_failed:
             return
 
         if run_cancelled:
-            _update_run({"status": "cancelled", "current_cycle": None})
+            _update_run({"status": "cancelled", "current_cycle": None, "current_batch": None})
             _publish("error", {"detail": "Run cancelled by user"})
             return
 
-        msg = f"Completed {len(completed_ids)} strategy lab cycle(s)."
+        msg = (
+            f"Completed {len(completed_ids)} strategy lab cycle(s) across {batch_count} batch(es)."
+        )
         if skipped:
             msg += f" ({skipped} skipped due to unavailable market data)"
 
-        _update_run({"status": "completed", "current_cycle": None})
+        _update_run({"status": "completed", "current_cycle": None, "current_batch": None})
         _publish(
             "complete",
-            {"message": msg, "completed_count": len(completed_ids), "skipped_count": skipped},
+            {
+                "message": msg,
+                "completed_count": len(completed_ids),
+                "skipped_count": skipped,
+                "completed_batches": completed_batches,
+                "total_batches": batch_count,
+            },
         )
 
     except Exception as exc:
@@ -1415,18 +1533,23 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
 
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     now = _now()
+    total_cycles = request.batch_size * request.batch_count
 
     initial_state = {
         "run_id": run_id,
         "status": "running",
         "started_at": now,
-        "total_cycles": request.batch_size,
+        "total_cycles": total_cycles,
         "completed_cycles": 0,
         "skipped_cycles": 0,
         "current_cycle": None,
         "completed_record_ids": [],
         "error": None,
         "request_payload": request.model_dump(),
+        "batch_size": request.batch_size,
+        "batch_count": request.batch_count,
+        "completed_batches": 0,
+        "current_batch": None,
     }
     with _lock:
         _active_runs[run_id] = initial_state
@@ -1440,7 +1563,7 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     )
     thread.start()
 
-    return StrategyLabRunStartResponse(run_id=run_id, total_cycles=request.batch_size)
+    return StrategyLabRunStartResponse(run_id=run_id, total_cycles=total_cycles)
 
 
 @app.get("/strategy-lab/results", response_model=StrategyLabResultsResponse)
@@ -1585,7 +1708,9 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
     # contiguous_cycles tracks the highest unbroken sequence from index 0
     # — safe to use as the resume offset (won't skip gaps or re-run finished cycles).
     contiguous_cycles = state.get("contiguous_cycles", completed_cycles)
-    total_cycles = state.get("total_cycles", 10)
+    request = RunStrategyLabRequest(**payload)
+    total_cycles = request.batch_size * request.batch_count
+    completed_batches, _within = divmod(contiguous_cycles, request.batch_size)
 
     with _lock:
         active = [r for r in _active_runs.values() if r["status"] == "running"]
@@ -1607,13 +1732,14 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         "completed_record_ids": state.get("completed_record_ids", []),
         "error": None,
         "request_payload": payload,
+        "batch_size": request.batch_size,
+        "batch_count": request.batch_count,
+        "completed_batches": completed_batches,
+        "current_batch": None,
     }
     with _lock:
         _active_runs[run_id] = resumed_state
     _persist_run_state(run_id, resumed_state)
-
-    request = RunStrategyLabRequest(**payload)
-    request.batch_size = total_cycles  # keep original total
 
     thread = threading.Thread(
         target=_strategy_lab_worker,
@@ -1661,18 +1787,23 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
             )
 
     request = RunStrategyLabRequest(**payload)
+    total_cycles = request.batch_size * request.batch_count
 
     restarted_state = {
         "run_id": run_id,
         "status": "running",
         "started_at": _now(),
-        "total_cycles": request.batch_size,
+        "total_cycles": total_cycles,
         "completed_cycles": 0,
         "skipped_cycles": 0,
         "current_cycle": None,
         "completed_record_ids": [],
         "error": None,
         "request_payload": payload,
+        "batch_size": request.batch_size,
+        "batch_count": request.batch_count,
+        "completed_batches": 0,
+        "current_batch": None,
     }
     with _lock:
         _active_runs[run_id] = restarted_state
@@ -1688,7 +1819,7 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
     return StrategyLabRunStartResponse(
         run_id=run_id,
-        total_cycles=request.batch_size,
+        total_cycles=total_cycles,
         message="Run restarted from scratch.",
     )
 
@@ -1745,7 +1876,9 @@ def list_strategy_lab_runs() -> ActiveRunsResponse:
                         with _lock:
                             if rid in _active_runs:
                                 _active_runs[rid]["status"] = js_status
-                                _active_runs[rid]["error"] = persisted.get("error") or persisted.get("data", {}).get("error")
+                                _active_runs[rid]["error"] = persisted.get(
+                                    "error"
+                                ) or persisted.get("data", {}).get("error")
             except Exception:
                 pass
 
@@ -1794,7 +1927,9 @@ def get_strategy_lab_run_status(run_id: str) -> StrategyLabRunStatusResponse:
                     with _lock:
                         if run_id in _active_runs:
                             _active_runs[run_id]["status"] = js_status
-                            _active_runs[run_id]["error"] = persisted.get("error") or persisted.get("data", {}).get("error")
+                            _active_runs[run_id]["error"] = persisted.get("error") or persisted.get(
+                                "data", {}
+                            ).get("error")
                             state = _active_runs[run_id]
         except Exception:
             pass
@@ -2032,7 +2167,9 @@ class RunPaperTradingRequest(BaseModel):
     initial_capital: float = Field(default=100000.0, gt=0)
     transaction_cost_bps: float = Field(default=5.0, ge=0)
     slippage_bps: float = Field(default=2.0, ge=0)
-    lookback_days: int = Field(default=365, ge=30, description="Days of recent market data to fetch")
+    lookback_days: int = Field(
+        default=365, ge=30, description="Days of recent market data to fetch"
+    )
 
 
 class PaperTradingResponse(BaseModel):

@@ -1,8 +1,11 @@
 import { Component, ElementRef, OnDestroy, OnInit, ViewChild, inject } from '@angular/core';
 import { CommonModule, DecimalPipe, DatePipe, CurrencyPipe, JsonPipe } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatChipsModule } from '@angular/material/chips';
@@ -70,9 +73,12 @@ const ASSET_CLASS_ICONS: Record<string, string> = {
     DatePipe,
     CurrencyPipe,
     JsonPipe,
+    FormsModule,
     MatCardModule,
     MatButtonModule,
     MatIconModule,
+    MatFormFieldModule,
+    MatInputModule,
     MatProgressSpinnerModule,
     MatProgressBarModule,
     MatChipsModule,
@@ -96,6 +102,14 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   error: string | null = null;
   /** Lab record id currently being deleted (disables actions on that card). */
   deletingLabRecordId: string | null = null;
+
+  // User-configurable batch settings (mirror backend Field bounds).
+  readonly BATCH_SIZE_MIN = 1;
+  readonly BATCH_SIZE_MAX = 25;
+  readonly BATCH_COUNT_MIN = 1;
+  readonly BATCH_COUNT_MAX = 10;
+  batchSize = 10;
+  batchCount = 1;
 
   filter: FilterMode = 'all';
   results: StrategyLabResultsResponse | null = null;
@@ -219,7 +233,22 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         current_cycle: event['current_cycle'] ?? this.runStatus.current_cycle,
         completed_record_ids: event['completed_record_ids'] ?? this.runStatus.completed_record_ids,
         error: event['error'] ?? this.runStatus.error,
+        batch_size: event['batch_size'] ?? this.runStatus.batch_size,
+        batch_count: event['batch_count'] ?? this.runStatus.batch_count,
+        completed_batches: event['completed_batches'] ?? this.runStatus.completed_batches,
+        current_batch: event['current_batch'] ?? this.runStatus.current_batch,
       });
+    }
+
+    if (event.type === 'batch_start' && this.runStatus) {
+      this.runStatus.current_batch = (event['batch_index'] as number) ?? this.runStatus.current_batch;
+      this.runStatus.batch_count = (event['total_batches'] as number) ?? this.runStatus.batch_count;
+      this.runStatus.completed_batches = (event['completed_batches'] as number) ?? this.runStatus.completed_batches;
+    }
+
+    if (event.type === 'batch_complete' && this.runStatus) {
+      this.runStatus.completed_batches = (event['completed_batches'] as number) ?? this.runStatus.completed_batches;
+      this.runStatus.current_batch = null;
     }
 
     if (event.type === 'progress' && this.runStatus) {
@@ -335,9 +364,15 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   runNewStrategy(): void {
+    const batchSize = this.clamp(this.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
+    const batchCount = this.clamp(this.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX);
+    // Reflect any clamping back into the form so the user sees what was sent.
+    this.batchSize = batchSize;
+    this.batchCount = batchCount;
+
     this.running = true;
     this.error = null;
-    this.api.runStrategyLab({ batch_size: 10 }).subscribe({
+    this.api.runStrategyLab({ batch_size: batchSize, batch_count: batchCount }).subscribe({
       next: (res) => {
         this.activeRunId = res.run_id;
         this.runStatus = {
@@ -348,6 +383,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
           completed_cycles: 0,
           skipped_cycles: 0,
           completed_record_ids: [],
+          batch_size: batchSize,
+          batch_count: batchCount,
+          completed_batches: 0,
+          current_batch: batchCount > 1 ? 1 : null,
         };
         this.connectToStream(res.run_id);
       },
@@ -356,6 +395,20 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         this.running = false;
       },
     });
+  }
+
+  private clamp(value: number, min: number, max: number): number {
+    const n = Number.isFinite(value) ? Math.floor(value) : min;
+    return Math.max(min, Math.min(max, n));
+  }
+
+  /** Label for the run button — adapts to single- vs multi-batch mode. */
+  runButtonLabel(): string {
+    if (this.batchCount > 1) {
+      const total = this.batchSize * this.batchCount;
+      return `Run ${this.batchSize} \u00d7 ${this.batchCount} = ${total} strategies`;
+    }
+    return `Run ${this.batchSize} strateg${this.batchSize === 1 ? 'y' : 'ies'}`;
   }
 
   onFilterChange(mode: FilterMode): void {
