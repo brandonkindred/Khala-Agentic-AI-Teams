@@ -1225,6 +1225,11 @@
     background: #e8eaf6;
     color: #5c6bc0;
   }
+
+  &.verdict-running {
+    background: #e3f2fd;
+    color: #1565c0;
+  }
 }
 
 .paper-meta {

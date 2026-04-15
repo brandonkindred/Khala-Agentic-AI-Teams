@@ -1896,20 +1896,96 @@ class PaperTradingResultsResponse(BaseModel):
     not_performant_count: int = 0
 
 
-@app.post("/strategy-lab/paper-trade", response_model=PaperTradingResponse)
-def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
-    """
-    Run a paper trading session for a winning strategy using real market data.
+def _run_paper_trading_background(
+    session_id: str,
+    lab_record_id: str,
+    strategy: StrategySpec,
+    strategy_code: str,
+    backtest_record: BacktestRecord,
+    lookback_days: int,
+    initial_capital: float,
+    transaction_cost_bps: float,
+    slippage_bps: float,
+) -> None:
+    """Background worker: fetch market data, run strategy, compare, and persist final session.
 
-    Executes the strategy's generated Python code against recent market data in
-    the same subprocess sandbox used for backtesting.  Compares performance to the
-    backtest.  Strategies that align with backtest expectations are flagged as ready
-    for live testing.  Underperforming strategies receive a detailed divergence analysis.
+    Long-running (market data fetch + sandbox execution + LLM divergence analysis can
+    take 2-3 minutes), so this runs off the request thread to avoid proxy timeouts.
+    The caller has already stored an initial "running" session under ``session_id``;
+    this worker replaces it with the completed session when done.
     """
     from investment_team.market_data_service import MarketDataService
     from investment_team.paper_trading_agent import PaperTradingAgent
 
-    # 1 — Look up the winning strategy lab record
+    try:
+        market_service = MarketDataService()
+        symbols = market_service.get_symbols_for_strategy(strategy)[:5]
+        logger.info(
+            "Paper trade %s: fetching %d days of market data for %d symbols (%s) ...",
+            session_id, lookback_days, len(symbols), strategy.asset_class,
+        )
+        market_data = market_service.fetch_multi_symbol(
+            symbols, strategy.asset_class, lookback_days
+        )
+
+        if not market_data:
+            with _lock:
+                raw = _paper_trading_sessions.get(session_id)
+                if raw is not None:
+                    session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+                    session.status = PaperTradingStatus.FAILED
+                    session.divergence_analysis = (
+                        "Failed to fetch market data from external sources."
+                    )
+                    session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+                    _paper_trading_sessions[session_id] = session
+            return
+
+        agent = PaperTradingAgent()
+        result_session = agent.run_session(
+            strategy=strategy,
+            strategy_code=strategy_code,
+            backtest_record=backtest_record,
+            market_data=market_data,
+            initial_capital=initial_capital,
+            transaction_cost_bps=transaction_cost_bps,
+            slippage_bps=slippage_bps,
+        )
+        # Preserve the session_id and lab_record_id that the caller committed to.
+        result_session.session_id = session_id
+        result_session.lab_record_id = lab_record_id
+
+        with _lock:
+            _paper_trading_sessions[session_id] = result_session
+        logger.info(
+            "Paper trade %s: completed (status=%s, verdict=%s, trades=%d)",
+            session_id, result_session.status, result_session.verdict, len(result_session.trades),
+        )
+    except Exception as exc:
+        logger.exception("Paper trade %s: background worker crashed", session_id)
+        with _lock:
+            raw = _paper_trading_sessions.get(session_id)
+            if raw is not None:
+                session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+                session.status = PaperTradingStatus.FAILED
+                session.divergence_analysis = f"Paper trading crashed: {exc}"
+                session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+                _paper_trading_sessions[session_id] = session
+
+
+@app.post("/strategy-lab/paper-trade", response_model=PaperTradingResponse)
+def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
+    """
+    Start a paper trading session for a winning strategy. Returns immediately.
+
+    Because paper trading can take 2-3 minutes (market data fetch + sandbox
+    execution + LLM divergence analysis), this endpoint validates inputs, creates
+    a session in ``running`` status, kicks off a background worker, and returns
+    the running session immediately. Clients should poll
+    ``GET /strategy-lab/paper-trade/{session_id}`` for progress until ``status``
+    is ``completed`` or ``failed``.
+    """
+    # 1 — Look up the winning strategy lab record (synchronous validation)
     with _lock:
         raw_record = _strategy_lab_records.get(request.lab_record_id)
 
@@ -1930,7 +2006,6 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     strategy = lab_record.strategy
     backtest_record = lab_record.backtest
 
-    # 1b — Extract strategy code (required for code-based paper trading)
     strategy_code = lab_record.strategy_code or getattr(strategy, "strategy_code", None)
     if not strategy_code:
         raise HTTPException(
@@ -1939,74 +2014,48 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
             "Only strategies with executable code can be paper traded.",
         )
 
-    # 2 — Fetch real market data
-    market_service = MarketDataService()
-    symbols = market_service.get_symbols_for_strategy(strategy)
-    # Use a subset of symbols (top 5) to keep data fetching reasonable
-    symbols = symbols[:5]
-
-    logger.info(
-        "Fetching %d days of market data for %d symbols (%s) ...",
-        request.lookback_days,
-        len(symbols),
-        strategy.asset_class,
+    # 2 — Create initial "running" session and persist immediately
+    session_id = f"pt-{uuid.uuid4().hex[:8]}"
+    now = datetime.now(tz=timezone.utc).isoformat()
+    running_session = PaperTradingSession(
+        session_id=session_id,
+        lab_record_id=request.lab_record_id,
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=request.initial_capital,
+        current_capital=request.initial_capital,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
+        started_at=now,
     )
-    market_data = market_service.fetch_multi_symbol(
-        symbols, strategy.asset_class, request.lookback_days
-    )
-
-    if not market_data:
-        raise HTTPException(
-            status_code=502,
-            detail="Failed to fetch market data from external sources. Please try again later.",
-        )
-
-    # 3 — Run paper trading session
-    agent = PaperTradingAgent()
-
-    try:
-        session = agent.run_session(
-            strategy=strategy,
-            strategy_code=strategy_code,
-            backtest_record=backtest_record,
-            market_data=market_data,
-            initial_capital=request.initial_capital,
-            transaction_cost_bps=request.transaction_cost_bps,
-            slippage_bps=request.slippage_bps,
-        )
-    except Exception as exc:
-        logger.error("Paper trading session failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Paper trading session failed: {exc}") from exc
-
-    session.lab_record_id = request.lab_record_id
-
-    # 4 — Persist the session
     with _lock:
-        _paper_trading_sessions[session.session_id] = session
+        _paper_trading_sessions[session_id] = running_session
 
-    # 5 — Build response message
-    trade_count = len(session.trades)
+    # 3 — Kick off background worker (market data fetch + sandbox + divergence analysis)
+    thread = threading.Thread(
+        target=_run_paper_trading_background,
+        args=(
+            session_id,
+            request.lab_record_id,
+            strategy,
+            strategy_code,
+            backtest_record,
+            request.lookback_days,
+            request.initial_capital,
+            request.transaction_cost_bps,
+            request.slippage_bps,
+        ),
+        name=f"paper-trade-{session_id}",
+        daemon=True,
+    )
+    thread.start()
 
-    if session.status == PaperTradingStatus.FAILED:
-        message = (
-            "Paper trading failed — strategy code could not be executed against recent data. "
-            "See divergence_analysis for error details."
-        )
-    elif session.verdict == PaperTradingVerdict.READY_FOR_LIVE:
-        message = (
-            f"Paper trading completed with {trade_count} trades. "
-            f"Performance aligns with backtest expectations — strategy is READY FOR LIVE TESTING."
-        )
-    elif session.verdict == PaperTradingVerdict.NOT_PERFORMANT:
-        message = (
-            f"Paper trading completed with {trade_count} trades. "
-            f"Performance does NOT align with backtest expectations — strategy is NOT PERFORMANT "
-            f"with live data. See divergence_analysis for details."
-        )
-    else:
-        message = f"Paper trading completed with {trade_count} trades."
-
-    return PaperTradingResponse(session=session, message=message)
+    return PaperTradingResponse(
+        session=running_session,
+        message=f"Paper trading started. Poll GET /strategy-lab/paper-trade/{session_id} for progress.",
+    )
 
 
 @app.get("/strategy-lab/paper-trade/results", response_model=PaperTradingResultsResponse)

@@ -601,35 +601,45 @@
 
               <div class="paper-trading-section">
                 @if (getPaperSession(record); as session) {
-                  <!-- Paper trading results -->
+                  <!-- Paper trading results (or running state) -->
                   <div class="paper-trading-result">
                     <div class="paper-verdict-row">
-                      <div class="paper-verdict-badge"
-                           [class.verdict-ready]="session.verdict === 'ready_for_live'"
-                           [class.verdict-not-performant]="session.verdict === 'not_performant'"
-                           [class.verdict-inconclusive]="!session.verdict">
-                        <mat-icon>{{ session.verdict === 'ready_for_live' ? 'verified' : session.verdict === 'not_performant' ? 'warning' : 'help_outline' }}</mat-icon>
-                        {{ verdictLabel(session.verdict) }}
-                      </div>
-                      <span class="paper-meta">
-                        {{ session.trades.length }} trades &bull;
-                        {{ session.data_period_start | slice:0:10 }} to {{ session.data_period_end | slice:0:10 }}
-                      </span>
-                      @if (paperTradingLabRecordId === record.lab_record_id) {
-                        <button mat-stroked-button class="rerun-paper-btn" disabled>
+                      @if (session.status === 'running') {
+                        <div class="paper-verdict-badge verdict-running">
                           <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
-                          Re-run
-                        </button>
+                          RUNNING
+                        </div>
+                        <span class="paper-meta">
+                          Fetching market data and running strategy against recent prices… this can take 2–3 minutes.
+                        </span>
                       } @else {
-                        <button
-                          mat-stroked-button
-                          class="rerun-paper-btn"
-                          (click)="runPaperTrading(record)"
-                          [disabled]="paperTradingLabRecordId !== null || running"
-                        >
-                          <mat-icon>refresh</mat-icon>
-                          Re-run
-                        </button>
+                        <div class="paper-verdict-badge"
+                             [class.verdict-ready]="session.verdict === 'ready_for_live'"
+                             [class.verdict-not-performant]="session.verdict === 'not_performant'"
+                             [class.verdict-inconclusive]="!session.verdict">
+                          <mat-icon>{{ session.verdict === 'ready_for_live' ? 'verified' : session.verdict === 'not_performant' ? 'warning' : 'help_outline' }}</mat-icon>
+                          {{ verdictLabel(session.verdict) }}
+                        </div>
+                        <span class="paper-meta">
+                          {{ session.trades.length }} trades &bull;
+                          {{ session.data_period_start | slice:0:10 }} to {{ session.data_period_end | slice:0:10 }}
+                        </span>
+                        @if (paperTradingLabRecordId === record.lab_record_id) {
+                          <button mat-stroked-button class="rerun-paper-btn" disabled>
+                            <mat-spinner diameter="16" class="btn-spinner"></mat-spinner>
+                            Re-run
+                          </button>
+                        } @else {
+                          <button
+                            mat-stroked-button
+                            class="rerun-paper-btn"
+                            (click)="runPaperTrading(record)"
+                            [disabled]="paperTradingLabRecordId !== null || running"
+                          >
+                            <mat-icon>refresh</mat-icon>
+                            Re-run
+                          </button>
+                        }
                       }
                     </div>
 

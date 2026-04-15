@@ -134,6 +134,8 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   paperTradingLabRecordId: string | null = null;
   /** Paper trading sessions keyed by lab_record_id for quick lookup. */
   paperTradingSessions: Record<string, PaperTradingSession> = {};
+  /** Active polling subscriptions per lab_record_id (so we can cancel on destroy). */
+  private paperTradingPollSubs: Record<string, Subscription> = {};
 
   // Run progress tracking
   activeRunId: string | null = null;
@@ -158,6 +160,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.sseSub?.unsubscribe();
     this.pollSub?.unsubscribe();
     this.activeRunCheckSub?.unsubscribe();
+    for (const sub of Object.values(this.paperTradingPollSubs)) {
+      sub.unsubscribe();
+    }
+    this.paperTradingPollSubs = {};
   }
 
   // ---------------------------------------------------------------------------
@@ -599,12 +605,24 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       next: (res) => {
         const sessions: Record<string, PaperTradingSession> = {};
         for (const s of res.items) {
-          // Keep the most recent session per lab record
-          if (!sessions[s.lab_record_id] || s.completed_at > sessions[s.lab_record_id].completed_at) {
+          // Keep the most recent session per lab record. Running sessions win
+          // over older completed ones so we can resume polling below.
+          const existing = sessions[s.lab_record_id];
+          if (!existing) {
+            sessions[s.lab_record_id] = s;
+          } else if (s.status === 'running' && existing.status !== 'running') {
+            sessions[s.lab_record_id] = s;
+          } else if (existing.status !== 'running' && (s.completed_at || '') > (existing.completed_at || '')) {
             sessions[s.lab_record_id] = s;
           }
         }
         this.paperTradingSessions = sessions;
+        // Resume polling for any sessions still running (e.g. after a page reload).
+        for (const [labRecordId, s] of Object.entries(sessions)) {
+          if (s.status === 'running') {
+            this.pollPaperTradingSession(labRecordId, s.session_id);
+          }
+        }
       },
     });
   }
@@ -614,14 +632,40 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.paperTradingLabRecordId = record.lab_record_id;
     this.api.runPaperTrading({ lab_record_id: record.lab_record_id }).subscribe({
       next: (res) => {
-        this.paperTradingLabRecordId = null;
+        // Backend returns a "running" session immediately; store it so the UI
+        // shows in-progress state, then poll until the worker finishes.
         this.paperTradingSessions[record.lab_record_id] = res.session;
+        this.pollPaperTradingSession(record.lab_record_id, res.session.session_id);
       },
       error: (err) => {
         this.paperTradingLabRecordId = null;
         this.error = err?.error?.detail || err?.message || 'Paper trading failed.';
       },
     });
+  }
+
+  /** Poll GET /strategy-lab/paper-trade/{session_id} until status is terminal. */
+  private pollPaperTradingSession(labRecordId: string, sessionId: string): void {
+    this.paperTradingPollSubs[labRecordId]?.unsubscribe();
+    this.paperTradingPollSubs[labRecordId] = timer(3000, 3000)
+      .pipe(
+        switchMap(() => this.api.getPaperTradingSession(sessionId)),
+        takeWhile((res) => res.session.status === 'running', true),
+      )
+      .subscribe({
+        next: (res) => {
+          this.paperTradingSessions[labRecordId] = res.session;
+          if (res.session.status !== 'running') {
+            this.paperTradingLabRecordId = null;
+            delete this.paperTradingPollSubs[labRecordId];
+          }
+        },
+        error: (err) => {
+          this.paperTradingLabRecordId = null;
+          delete this.paperTradingPollSubs[labRecordId];
+          this.error = err?.error?.detail || err?.message || 'Paper trading polling failed.';
+        },
+      });
   }
 
   getPaperSession(record: StrategyLabRecord): PaperTradingSession | null {
