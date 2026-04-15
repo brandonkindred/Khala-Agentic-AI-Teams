@@ -1072,13 +1072,16 @@ def _run_one_strategy_lab_cycle(
     else:
         _emit("paper_trading", {"strategy": strategy_preview})
         try:
+            # Use the backtest record's config which has asset-class-resolved
+            # fees (the orchestrator may have overridden generic defaults).
+            bt_config = record.backtest.config
             session = _run_paper_trading_step(
                 strategy=record.strategy,
                 strategy_code=record.strategy_code,
                 backtest_record=record.backtest,
-                initial_capital=config.initial_capital,
-                transaction_cost_bps=config.transaction_cost_bps,
-                slippage_bps=config.slippage_bps,
+                initial_capital=bt_config.initial_capital,
+                transaction_cost_bps=bt_config.transaction_cost_bps,
+                slippage_bps=bt_config.slippage_bps,
                 lookback_days=paper_trading_lookback_days,
             )
             session.lab_record_id = record.lab_record_id

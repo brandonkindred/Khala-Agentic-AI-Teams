@@ -226,9 +226,11 @@ class CodeSafetyChecker:
                     )
                 )
 
-        # 6. Look-ahead bias detection
+        # 6. Look-ahead bias detection (run against executable code only,
+        #    excluding comments and string literals to avoid false positives)
+        executable = _strip_comments_and_strings(code)
         for pattern, reason in _LOOKAHEAD_PATTERNS:
-            if pattern.search(code):
+            if pattern.search(executable):
                 results.append(
                     QualityGateResult(
                         gate_name=GATE,
@@ -239,11 +241,9 @@ class CodeSafetyChecker:
                 )
 
         # 6b. Detect DataFrame access after del df (loop body should not use df)
-        if "del df" in code:
-            # Find code after 'del df' and check for df usage
-            del_pos = code.index("del df")
-            post_del = code[del_pos:]
-            # Skip the 'del df' line itself, then look for df[, df., df.iloc, etc.
+        if "del df" in executable:
+            del_pos = executable.index("del df")
+            post_del = executable[del_pos:]
             df_after_del = re.search(r"\bdf\s*[\[.]", post_del[len("del df") :])
             if df_after_del:
                 results.append(
@@ -287,3 +287,21 @@ def _get_call_name(node: ast.Call) -> str:
     if isinstance(node.func, ast.Attribute):
         return node.func.attr
     return ""
+
+
+# Regex that matches Python comments and string literals (single/double,
+# triple-quoted, and raw strings).  Used to produce a "code-only" view
+# for look-ahead bias scanning so that examples in comments or docstrings
+# don't trigger false-positive critical failures.
+_COMMENTS_AND_STRINGS = re.compile(
+    r"#[^\n]*"  # line comments
+    r'|"""[\s\S]*?"""'  # triple-double-quoted strings
+    r"|'''[\s\S]*?'''"  # triple-single-quoted strings
+    r'|"(?:\\.|[^"\\])*"'  # double-quoted strings
+    r"|'(?:\\.|[^'\\])*'",  # single-quoted strings
+)
+
+
+def _strip_comments_and_strings(code: str) -> str:
+    """Replace comments and string literals with whitespace-equivalent placeholders."""
+    return _COMMENTS_AND_STRINGS.sub(lambda m: " " * len(m.group()), code)
