@@ -28,23 +28,23 @@
 
 ## You don't need a team. You need a Khala.
 
-Khala is a living collective of specialist AI agents that works like the best company you've ever seen — except it boots in sixty seconds, never sits in meetings, and never leaves Slack unread.
+Khala is a collective of specialist AI agents that runs behind a single FastAPI gateway. Each team is a role-separated orchestration: a team-lead agent coordinates specialists via Pydantic contracts, with HTTP mounts under `/api/<team>` so the whole roster is addressable from one host.
 
-- **Point it at a spec** → a full software engineering org designs, codes, reviews, secures, and ships it end-to-end.
-- **Point it at a market** → researchers interview users, surface demand, and hand a PRD to the planners.
-- **Point it at a launch** → blog writers draft, copy-editors polish, social specialists fan the campaign across every platform, and sales agents prospect, qualify, and close.
-- **Point it at a compliance deadline** → SOC2 agents drag you toward certification; accessibility agents catch every WCAG 2.2 violation before your users do.
-- **Point it at a portfolio** → financial agents write your IPS and backtest your strategy.
-- **Point it at a problem nobody's solved yet** → **Deepthought**, a recursive meta-agent, spawns its own sub-agents until it fits.
+- **Point it at a spec** → the Software Engineering team runs a 4-phase pipeline (Discovery → Design → Execution → Integration) that plans, generates code + tests + docs in parallel backend/frontend queues, and merges to a `development` branch on success.
+- **Point it at a market** → Market Research agents structure user discovery and concept-viability work; Planning V3 turns the output into a PRD for downstream teams.
+- **Point it at a launch** → the Blogging pipeline (research → planning → draft → copy-edit → gates) produces publish-ready posts; Social Media Marketing builds per-platform campaigns; the Sales team runs B2B prospecting, qualification, and close workflows.
+- **Point it at a compliance deadline** → SOC2 Compliance drives an audit workflow; Accessibility Audit reports WCAG 2.2 / Section 508 findings for web and mobile.
+- **Point it at a portfolio** → the Investment team exposes a Financial Advisor (IPS, proposals, memos) and a Strategy Lab (ideation, backtests) under one API prefix.
+- **Point it at an ambiguous problem** → **Deepthought** recursively spawns specialist sub-agents to decompose and answer complex questions.
 
-They share a psionic link — durable Temporal workflows, a Postgres memory, a pluggable LLM brain — so context doesn't evaporate between steps and crashes don't cost you work. They run in parallel. They hand artifacts to each other. They don't sleep.
+The teams share infrastructure — a FastAPI gateway with an optional security pre-scan, a shared Postgres schema registry for migrated teams, a shared artifact cache, and a pluggable LLM client (Ollama Cloud, local Ollama, or Claude). Set `TEMPORAL_ADDRESS` and the teams that export Temporal workflows switch from in-process threads to durable executions that survive restarts; teams without workflows keep using threads.
 
-And the roster keeps growing. The team you need next is probably already being written — or you can **provision your own** by describing it in plain English to the Agentic Team Provisioning team. Agents all the way down.
+The roster grows per release. You can describe a new team in plain English to the **Agentic Team Provisioning** team, or register one yourself in [`backend/unified_api/config.py`](backend/unified_api/config.py).
 
 > **Many minds. One objective. Yours.**
 
 <p align="center">
-  <a href="#ship-in-60-seconds">🚀 Quickstart</a> ·
+  <a href="#quickstart">🚀 Quickstart</a> ·
   <a href="ARCHITECTURE.md">📐 Architecture</a> ·
   <a href="#meet-the-current-roster">👥 Meet the roster</a> ·
   <a href="#add-your-own-team">🧬 Add your own team</a>
@@ -56,12 +56,13 @@ And the roster keeps growing. The team you need next is probably already being w
 
 ## Why Khala?
 
-- **🌩️ One gateway, a whole roster** — every agent mounts under `/api/*`. One auth. One UI. One deploy. New teams join every release.
-- **⚡ Durable by default** — set `TEMPORAL_ADDRESS` and your workflows laugh at restarts, crashes, and redeploys.
-- **🧠 Bring your own brain** — Ollama Cloud, local Ollama, or Claude. Swap per-agent via env vars.
-- **🏗️ Real engineering, not demos** — 4-phase SDLC, parallel worker queues, planning cache, crash recovery, 8+ quality gates. This isn't a toy.
-- **🧬 Built to expand** — add a new team in one PR. Agentic Team Provisioning can even design the roster for you.
-- **🚀 Ship in 60 seconds** — `docker compose up` and the whole stack (Postgres, Temporal, Ollama, API, UI) is live.
+- **🌩️ One gateway, a whole roster** — every team mounts under `/api/<team-slug>` behind a single FastAPI server, with an optional security pre-scan gateway (`SECURITY_GATEWAY_ENABLED`, on by default).
+- **⚡ Opt-in durability** — set `TEMPORAL_ADDRESS` and teams that ship Temporal workflows switch from in-process threads to durable executions that survive server restarts (Temporal 1.24.2). Other teams keep running as background threads.
+- **🧠 Bring your own LLM** — unified client for Ollama Cloud, local Ollama, or Claude via `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL`. A few teams expose per-role overrides (e.g. `ARCHITECT_MODEL_SPECIALIST`, `BLOG_PLANNING_MODEL`).
+- **🏗️ Real engineering inside the SE team** — 4-phase pipeline (Discovery → Design → Execution → Integration), parallel backend/frontend worker queues, a planning cache that short-circuits re-plans when spec/architecture/overview are unchanged, per-task quality gates (lint, build, code review, acceptance verifier, security, QA, DbC, tech-lead review — plus an accessibility gate on frontend tasks), and a Repair Agent for crash recovery.
+- **📊 Observability built in** — every FastAPI service in the Docker stack is auto-instrumented by `prometheus-fastapi-instrumentator`; Prometheus + a provisioned Grafana dashboard ship in `docker-compose.yml`.
+- **🧬 Built to expand** — register a team in `TEAM_CONFIGS` and it mounts at `/api/<slug>` on restart. Agentic Team Provisioning can design the roster conversationally.
+- **🚀 One command to launch the stack** — `docker compose up --build` brings up Postgres, Temporal, every team microservice, the Unified API proxy, the Angular UI, Prometheus, and Grafana. (Healthchecks and first-run image builds mean it's minutes, not seconds.)
 
 ---
 
@@ -118,23 +119,30 @@ Khala groups its teams into four *cells* — failure-isolated neighborhoods that
 
 ---
 
-## Ship in 60 seconds
+## Quickstart
 
-### 🚢 The Docker way (recommended — entire stack live)
+### 🚢 The Docker way (recommended — full stack)
 
 ```bash
-cp docker/.env.example docker/.env   # then set OLLAMA_API_KEY (or your LLM provider)
+cp docker/.env.example docker/.env   # set OLLAMA_API_KEY (Ollama Cloud is the default LLM)
+./docker/ensure-network.sh           # one-time: create the external network
 docker compose -f docker/docker-compose.yml --env-file docker/.env up --build
 ```
+
+This brings up Postgres 18, Temporal + Temporal UI, a per-team microservice for every enabled team (ports 8090–8110), the Unified API proxy, the Angular UI, and Prometheus + Grafana. First-run image builds and healthchecks take a few minutes; subsequent starts are much faster.
 
 Then open:
 - 🖥️ **UI:** http://localhost:4201
 - 🔌 **Unified API + docs:** http://localhost:8888/docs
 - ⏱️ **Temporal UI:** http://localhost:8080
+- 📈 **Prometheus:** http://localhost:9090
+- 📊 **Grafana:** http://localhost:3000 (default `admin` / `admin`)
 
-Full details in [`docker/README.md`](docker/README.md).
+Full details — ports, volumes, observability, Podman notes — in [`docker/README.md`](docker/README.md).
 
 ### 🧑‍💻 The local way (hack on the code)
+
+Local dev runs the Unified API as a single FastAPI process that mounts every enabled team's router in-process (no per-team containers). Teams that need Postgres (blogging, branding, startup_advisor, user_agent_founder, agentic_team_provisioning, nutrition, team_assistant, unified_api credentials) require a running Postgres — start one from `docker/docker-compose.yml` and export the `POSTGRES_*` env vars from [`CLAUDE.md`](CLAUDE.md) before launching.
 
 ```bash
 # 1) Backend (terminal 1)
@@ -160,20 +168,24 @@ Handy Makefile targets: `make lint`, `make lint-fix`, `make test`, `make run`, `
 ```mermaid
 flowchart LR
     User([👤 You]) --> UI[Angular 19 UI]
-    UI -->|/api/*| Gateway{{Unified API<br/>Gateway}}
+    UI -->|/api/*| Gateway{{Unified API<br/>FastAPI + security pre-scan}}
 
     Gateway --> Core[🛠️ Core Dev teams]
     Gateway --> Biz[💼 Business teams]
     Gateway --> Content[✍️ Content teams]
     Gateway --> Personal[🧘 Personal teams]
-    Gateway --> Grow[⚡ …and growing]
 
-    Gateway -.-> Temporal[(Temporal<br/>durable workflows)]
-    Gateway -.-> Postgres[(Postgres<br/>shared brain)]
-    Gateway -.-> LLM[[LLM backend<br/>Ollama · Claude]]
+    Gateway -.->|opt-in| Temporal[(Temporal 1.24.2<br/>durable workflows)]
+    Gateway -.->|migrated teams| Postgres[(Postgres 18<br/>schema registry)]
+    Gateway -.-> LLM[[LLM client<br/>Ollama Cloud · local Ollama · Claude]]
 ```
 
-The full system — 4-phase SDLC, task graphs, parallel worker queues, planning cache, quality gates, DevOps pipeline — is documented with Mermaid diagrams in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+**Runtime modes.**
+- *Local dev* (`python run_unified_api.py` or `make run`): a single FastAPI process mounts every enabled team's router under `/api/<slug>`; teams execute as Python threads.
+- *Docker*: each team runs as its own microservice (ports 8090–8110) and the `khala` container on port 8888 acts as a reverse proxy, forwarding `/api/<slug>` to the matching `*_SERVICE_URL`. Prometheus scrapes every service's `/metrics` endpoint.
+- *Temporal mode*: when `TEMPORAL_ADDRESS` is set, teams that export `WORKFLOWS`/`ACTIVITIES` register workers on the shared task queue and run durable workflows instead of threads.
+
+The full system — SDLC phases, task graphs, planning loop, quality gates, the DevOps pipeline — is documented with Mermaid diagrams in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
