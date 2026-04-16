@@ -10,6 +10,11 @@
 </p>
 
 <p align="center">
+  <strong>An open-source platform that runs 20 specialist AI agent teams behind a single API</strong><br/>
+  <sub>Ship software, content, business ops, and personal workflows from one durable, pluggable stack.</sub>
+</p>
+
+<p align="center">
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white">
   <img alt="Node" src="https://img.shields.io/badge/node-22-339933?logo=node.js&logoColor=white">
   <img alt="Angular" src="https://img.shields.io/badge/angular-19-DD0031?logo=angular&logoColor=white">
@@ -25,13 +30,25 @@
 
 Khala is a living collective of specialist AI agents that works like the best company you've ever seen — except it boots in sixty seconds, never sits in meetings, and never leaves Slack unread.
 
-Point it at a spec and a full software engineering org spins up to design, code, review, secure, and ship the feature end-to-end. Point it at a market and researchers interview users, surface demand, and hand a PRD to the planners. Point it at a launch and blog writers draft, copy-editors polish, and social specialists fan the campaign across every platform. Sales agents prospect, qualify, and close. Compliance agents drag you toward SOC2. Accessibility agents catch every WCAG 2.2 violation before your users do. Financial agents write your IPS and backtest your strategy. A recursive meta-agent called **Deepthought** spawns its own sub-agents when the problem doesn't fit anywhere else.
+- **Point it at a spec** → a full software engineering org designs, codes, reviews, secures, and ships it end-to-end.
+- **Point it at a market** → researchers interview users, surface demand, and hand a PRD to the planners.
+- **Point it at a launch** → blog writers draft, copy-editors polish, social specialists fan the campaign across every platform, and sales agents prospect, qualify, and close.
+- **Point it at a compliance deadline** → SOC2 agents drag you toward certification; accessibility agents catch every WCAG 2.2 violation before your users do.
+- **Point it at a portfolio** → financial agents write your IPS and backtest your strategy.
+- **Point it at a problem nobody's solved yet** → **Deepthought**, a recursive meta-agent, spawns its own sub-agents until it fits.
 
 They share a psionic link — durable Temporal workflows, a Postgres memory, a pluggable LLM brain — so context doesn't evaporate between steps and crashes don't cost you work. They run in parallel. They hand artifacts to each other. They don't sleep.
 
 And the roster keeps growing. The team you need next is probably already being written — or you can **provision your own** by describing it in plain English to the Agentic Team Provisioning team. Agents all the way down.
 
 > **Many minds. One objective. Yours.**
+
+<p align="center">
+  <a href="#ship-in-60-seconds">🚀 Quickstart</a> ·
+  <a href="ARCHITECTURE.md">📐 Architecture</a> ·
+  <a href="#meet-the-current-roster">👥 Meet the roster</a> ·
+  <a href="#add-your-own-team">🧬 Add your own team</a>
+</p>
 
 <sub>*(Named after the Protoss unifying religion from StarCraft — a psionic link joining many minds into one.)*</sub>
 
