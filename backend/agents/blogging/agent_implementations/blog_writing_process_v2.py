@@ -18,6 +18,7 @@ from blog_compliance_agent import BlogComplianceAgent
 from blog_copy_editor_agent import BlogCopyEditorAgent, CopyEditorInput
 from blog_copy_editor_agent.models import FeedbackItem
 from blog_fact_check_agent import BlogFactCheckAgent
+from blog_plan_critic_agent import BlogPlanCriticAgent
 from blog_publication_agent.models import PublishingPack
 from blog_research_agent.models import ResearchBriefInput
 from blog_writer_agent import BlogWriterAgent, ReviseWriterInput, WriterInput
@@ -53,7 +54,12 @@ from shared.errors import (
     PlanningError,
 )
 from shared.models import BlogPhase, get_phase_progress
-from shared.planning_config import planning_model_override
+from shared.planning_config import (
+    plan_critic_enabled,
+    plan_critic_max_iterations,
+    plan_critic_model_override,
+    planning_model_override,
+)
 from shared.style_loader import append_guidelines, load_style_file
 from temporalio.exceptions import CancelledError
 from validators.runner import run_validators_from_work_dir
@@ -107,6 +113,28 @@ def planning_llm_client(base: LLMClient) -> LLMClient:
     return base
 
 
+def plan_critic_llm_client(base: LLMClient) -> LLMClient:
+    """Use BLOG_PLAN_CRITIC_MODEL for the plan critic when set (Ollama clients only).
+
+    Per the architectural tenet, the critic runs on the same model as the writer
+    by default. This hook exists so per-role model diversification can be flipped
+    on later without further code changes.
+    """
+    model = plan_critic_model_override()
+    if not model:
+        return base
+    if isinstance(base, OllamaLLMClient):
+        return OllamaLLMClient(model=model, base_url=base.base_url, timeout=base.timeout)
+    return base
+
+
+def build_plan_critic_agent(base: LLMClient) -> Optional[BlogPlanCriticAgent]:
+    """Construct the plan-critic agent when enabled, else return None."""
+    if not plan_critic_enabled():
+        return None
+    return BlogPlanCriticAgent(llm_client=plan_critic_llm_client(base))
+
+
 def run_planning(
     brief: ResearchBriefInput,
     *,
@@ -156,16 +184,43 @@ def run_planning(
         series_context_block=series_context_block(series_context),
     )
 
+    # Load the author's brand spec + writing guidelines so the plan critic can
+    # evaluate against the author-owned sources of truth. These are safe to load
+    # even when the critic is disabled — the BlogWriterAgent used for drafting
+    # wants them too, but planning uses an empty-style instance by design.
+    try:
+        brand_spec_for_critic = load_brand_spec_prompt(BRAND_SPEC_PROMPT_PATH)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Could not load brand spec for plan critic: %s", e)
+        brand_spec_for_critic = ""
+    try:
+        writing_guidelines_for_critic = load_style_file(STYLE_GUIDE_PATH)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Could not load writing guidelines for plan critic: %s", e)
+        writing_guidelines_for_critic = ""
+
+    plan_critic = build_plan_critic_agent(llm_client)
+
+    # Planning convergence cap: honour the critic's max iterations when the
+    # critic is enabled, since the critic can reject plans the planner would
+    # otherwise accept. Fall back to the planner's own iteration cap otherwise.
+    planning_max_iter = (
+        plan_critic_max_iterations() if plan_critic is not None else 5
+    )
+
     try:
         planning_draft_agent = BlogWriterAgent(
             llm_client=planning_llm_client(llm_client),
-            writing_style_guide_content="",
-            brand_spec_content="",
+            writing_style_guide_content=writing_guidelines_for_critic,
+            brand_spec_content=brand_spec_for_critic,
         )
         planning_phase_result = planning_draft_agent.plan_content(
             planning_input,
             length_policy=length_policy,
             on_llm_request=lambda msg: _update(BlogPhase.PLANNING, status_text=msg),
+            plan_critic=plan_critic,
+            work_dir=work_dir,
+            max_iterations=planning_max_iter,
         )
     except BloggingError:
         raise
@@ -201,6 +256,18 @@ def run_planning(
         write_artifact(work_dir, "outline.md", content_plan_to_outline_markdown(plan))
         write_artifact(work_dir, "content_brief.md", content_plan_to_content_brief_markdown(plan))
         logger.info("Persisted content_plan.json, content_plan.md, outline.md, content_brief.md")
+        # Persist the critic's final verdict under a stable filename for easy inspection;
+        # per-iteration reports (plan_critic_report_v{N}.json) remain in work_dir too.
+        if planning_phase_result.plan_critic_report is not None:
+            write_artifact(
+                work_dir,
+                "plan_critic_report.json",
+                planning_phase_result.plan_critic_report,
+            )
+            logger.info(
+                "Persisted plan_critic_report.json (status=%s)",
+                planning_phase_result.plan_critic_report.get("status"),
+            )
 
     return planning_phase_result
 

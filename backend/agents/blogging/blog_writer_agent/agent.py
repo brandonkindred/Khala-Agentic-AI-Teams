@@ -12,6 +12,9 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+from blog_plan_critic_agent import BlogPlanCriticAgent
+from blog_plan_critic_agent.agent import build_refine_feedback_from_critic
+from blog_plan_critic_agent.models import PlanCriticReport
 from blog_planning_agent.json_utils import parse_json_object
 from blog_planning_agent.prompts import GENERATE_PLAN_SYSTEM, REFINE_PLAN_SYSTEM
 from shared.content_plan import (
@@ -301,22 +304,35 @@ class BlogWriterAgent:
         on_llm_request: Optional[Callable[[str], None]] = None,
         max_iterations: int = 5,
         max_parse_retries: int = 3,
+        plan_critic: Optional[BlogPlanCriticAgent] = None,
+        work_dir: Optional[Union[str, Path]] = None,
     ) -> PlanningPhaseResult:
+        """Generate and refine a ContentPlan until the planner (and optional critic) agree.
+
+        When ``plan_critic`` is supplied, its verdict is authoritative: the loop
+        terminates only when the planner's self-eval is done AND the critic
+        approves. Refine feedback comes from the critic's structured violations
+        instead of a generic string. When absent, legacy planner-self-eval only.
+        """
         t0 = time.monotonic()
         total_parse_retries = 0
         last_plan: Optional[ContentPlan] = None
+        last_critic_report: Optional[PlanCriticReport] = None
         for iteration in range(1, max_iterations + 1):
             if iteration == 1:
                 prompt = self._build_generate_plan_prompt(planning_input)
                 system = GENERATE_PLAN_SYSTEM
             else:
                 assert last_plan is not None
-                feedback = (
-                    "The plan is not yet acceptable. "
-                    f"requirements_analysis: plan_acceptable={last_plan.requirements_analysis.plan_acceptable}, "
-                    f"scope_feasible={last_plan.requirements_analysis.scope_feasible}. "
-                    "Fix gaps, scope, and research alignment."
-                )
+                if last_critic_report is not None:
+                    feedback = build_refine_feedback_from_critic(last_critic_report)
+                else:
+                    feedback = (
+                        "The plan is not yet acceptable. "
+                        f"requirements_analysis: plan_acceptable={last_plan.requirements_analysis.plan_acceptable}, "
+                        f"scope_feasible={last_plan.requirements_analysis.scope_feasible}. "
+                        "Fix gaps, scope, and research alignment."
+                    )
                 prompt = self._build_refine_plan_prompt(planning_input, last_plan, feedback)
                 system = REFINE_PLAN_SYSTEM
             data, pr = self._complete_plan_json(
@@ -347,13 +363,30 @@ class BlogWriterAgent:
                     }
                 )
             last_plan = plan.model_copy(update={"plan_version": iteration})
-            if self._planning_done(last_plan):
+
+            planner_ok = self._planning_done(last_plan)
+            critic_report: Optional[PlanCriticReport] = None
+            if plan_critic is not None:
+                critic_report = plan_critic.run(
+                    plan=last_plan,
+                    brand_spec_prompt=self._brand_spec_prompt,
+                    writing_guidelines=self._writing_style_prompt,
+                    research_digest=planning_input.research_digest,
+                    on_llm_request=on_llm_request,
+                    work_dir=work_dir,
+                    artifact_name=f"plan_critic_report_v{iteration}.json",
+                )
+                last_critic_report = critic_report
+
+            critic_ok = critic_report is None or critic_report.approved
+            if planner_ok and critic_ok:
                 wall_ms = (time.monotonic() - t0) * 1000.0
                 return PlanningPhaseResult(
                     content_plan=last_plan,
                     planning_iterations_used=iteration,
                     parse_retry_count=total_parse_retries,
                     planning_wall_ms_total=wall_ms,
+                    plan_critic_report=critic_report.to_dict() if critic_report is not None else None,
                 )
         raise PlanningError(
             f"Planning did not converge after {max_iterations} iterations",
