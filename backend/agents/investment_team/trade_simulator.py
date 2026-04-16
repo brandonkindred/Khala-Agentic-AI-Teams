@@ -180,6 +180,7 @@ class SimulationResult:
     forced_close_count: int = 0
     evaluations_performed: int = 0
     bars_skipped_by_filter: int = 0
+    terminated_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +420,10 @@ class TradeSimulationEngine:
         pre_filter_pct: float = 1.0,
         max_evaluations: int = 5000,
         lookahead_safe: bool = True,
+        risk_limits: Optional[Dict[str, Any]] = None,
     ) -> None:
+        from .execution.risk_filter import RiskFilter, RiskLimits
+
         self.initial_capital = initial_capital
         self.cost_pct = transaction_cost_bps / 10_000.0
         self.slippage_bps = slippage_bps
@@ -427,6 +431,7 @@ class TradeSimulationEngine:
         self.pre_filter_pct = pre_filter_pct
         self.max_evaluations = max_evaluations
         self.lookahead_safe = lookahead_safe
+        self._risk = RiskFilter(RiskLimits.from_legacy_dict(risk_limits or {}))
 
     # ------------------------------------------------------------------
 
@@ -475,6 +480,8 @@ class TradeSimulationEngine:
         symbol_history: Dict[str, List[OHLCVBar]] = {sym: [] for sym in market_data}
 
         capital = self.initial_capital
+        peak_equity = self.initial_capital
+        terminated_reason: Optional[str] = None
         open_positions: Dict[str, OpenPosition] = {}
         pending_entries: Dict[str, Dict[str, Any]] = {}
         pending_exits: Dict[str, bool] = {}
@@ -486,16 +493,40 @@ class TradeSimulationEngine:
         skipped = 0
 
         for bar_date, symbol, bar in timeline:
+            # --- Drawdown circuit-breaker (Phase 3) ---
+            current_equity = capital + sum(
+                getattr(p, "position_value", 0) for p in open_positions.values()
+            )
+            if current_equity > peak_equity:
+                peak_equity = current_equity
+            dd = self._risk.check_drawdown(current_equity, peak_equity)
+            if dd.breached:
+                terminated_reason = (
+                    f"max_drawdown breached ({dd.current_drawdown_pct:.1f}% >= {dd.limit_pct}%)"
+                )
+                logger.warning("Simulation terminated: %s", terminated_reason)
+                break
+
             # --- 1. Execute pending fills from previous bar's decision ---
             if symbol in pending_entries:
                 pending = pending_entries.pop(symbol)
                 action = pending["action"]
                 shares = float(pending.get("shares", 0))
-                if shares <= 0:
-                    position_pct = 0.06
-                    shares = round(capital * position_pct / bar.open, 4 if bar.open < 10 else 2)
 
-                if shares > 0 and capital >= shares * bar.open and symbol not in open_positions:
+                recent_closes = [b.close for b in symbol_history.get(symbol, [])]
+                if shares <= 0:
+                    sizing = self._risk.size(bar.open, capital, recent_closes)
+                    shares = sizing.shares
+
+                notional = shares * bar.open
+                gate = self._risk.can_enter(symbol, notional, capital, open_positions)
+
+                if (
+                    gate.allowed
+                    and shares > 0
+                    and capital >= notional
+                    and symbol not in open_positions
+                ):
                     slippage_mult = 1.0 + self.slippage_bps / 10_000.0
                     entry_bid_price = round(bar.open, 4 if bar.open < 10 else 2)
                     entry_price = round(bar.open * slippage_mult, 4 if bar.open < 10 else 2)
@@ -608,6 +639,7 @@ class TradeSimulationEngine:
             forced_close_count=forced,
             evaluations_performed=evaluations,
             bars_skipped_by_filter=skipped,
+            terminated_reason=terminated_reason,
         )
 
     # ------------------------------------------------------------------

@@ -12,12 +12,15 @@ from .metrics import (
     build_equity_curve_from_trades,
     compute_performance_metrics,
 )
+from .risk_filter import RiskFilter, RiskLimits
 from .risk_free_rate import get_risk_free_rate
 
 __all__ = [
     "DEFAULT_BENCHMARK_BY_ASSET_CLASS",
     "EquityCurve",
     "PerformanceMetrics",
+    "RiskFilter",
+    "RiskLimits",
     "benchmark_for_strategy",
     "build_equity_curve_from_trades",
     "compute_performance_metrics",
