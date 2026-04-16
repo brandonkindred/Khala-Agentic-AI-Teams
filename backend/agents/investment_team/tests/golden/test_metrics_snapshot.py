@@ -17,13 +17,14 @@ from .deterministic_strategies import mean_reversion, sma_crossover
 from .synthetic_data import build_fixture_universe
 
 
-def _run(strategy_factory):
+def _run(strategy_factory, *, lookahead_safe=False):
     engine = TradeSimulationEngine(
         initial_capital=100_000.0,
         transaction_cost_bps=5.0,
         slippage_bps=2.0,
         pre_filter_pct=0.0,
         max_evaluations=100_000,
+        lookahead_safe=lookahead_safe,
     )
     return engine.run(build_fixture_universe(), strategy_factory())
 

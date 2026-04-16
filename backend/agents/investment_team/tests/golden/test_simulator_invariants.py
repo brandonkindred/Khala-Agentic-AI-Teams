@@ -22,27 +22,28 @@ def universe():
     return build_fixture_universe()
 
 
-@pytest.mark.parametrize(
-    "strategy_factory",
-    [sma_crossover, mean_reversion],
-    ids=["sma_crossover", "mean_reversion"],
-)
-def test_capital_reflects_gross_pnl(universe, strategy_factory):
-    """Documents current behavior: ``final_capital`` tracks gross PnL only.
-
-    Transaction costs are subtracted from ``TradeRecord.net_pnl`` but never
-    from the engine's running ``capital`` balance, so the engine's capital and
-    the trade ledger disagree by the sum of fees. Phase 5 (engine split)
-    switches ``LiveEngine`` to a mark-to-market cash ledger that reconciles
-    both; this assertion will then flip to ``net_pnl``.
-    """
-    engine = TradeSimulationEngine(
+def _engine(*, lookahead_safe=True, **kwargs):
+    defaults = dict(
         initial_capital=100_000.0,
         transaction_cost_bps=5.0,
         slippage_bps=2.0,
         pre_filter_pct=0.0,
         max_evaluations=100_000,
+        lookahead_safe=lookahead_safe,
     )
+    defaults.update(kwargs)
+    return TradeSimulationEngine(**defaults)
+
+
+@pytest.mark.parametrize(
+    "strategy_factory",
+    [sma_crossover, mean_reversion],
+    ids=["sma_crossover", "mean_reversion"],
+)
+@pytest.mark.parametrize("lookahead_safe", [True, False], ids=["safe", "legacy"])
+def test_capital_reflects_gross_pnl(universe, strategy_factory, lookahead_safe):
+    """``final_capital`` tracks gross PnL only (tx costs not deducted)."""
+    engine = _engine(lookahead_safe=lookahead_safe)
     result = engine.run(universe, strategy_factory())
     expected_gross = 100_000.0 + sum(t.gross_pnl for t in result.trades)
     assert result.final_capital == pytest.approx(expected_gross, abs=1.0)
@@ -58,13 +59,7 @@ def test_capital_reflects_gross_pnl(universe, strategy_factory):
     strict=True,
 )
 def test_capital_reflects_net_pnl_after_refactor(universe, strategy_factory):
-    engine = TradeSimulationEngine(
-        initial_capital=100_000.0,
-        transaction_cost_bps=5.0,
-        slippage_bps=2.0,
-        pre_filter_pct=0.0,
-        max_evaluations=100_000,
-    )
+    engine = _engine(lookahead_safe=True)
     result = engine.run(universe, strategy_factory())
     expected_net = 100_000.0 + sum(t.net_pnl for t in result.trades)
     assert result.final_capital == pytest.approx(expected_net, abs=1.0)
@@ -75,14 +70,10 @@ def test_capital_reflects_net_pnl_after_refactor(universe, strategy_factory):
     [sma_crossover, mean_reversion],
     ids=["sma_crossover", "mean_reversion"],
 )
-def test_cumulative_pnl_matches_sum(universe, strategy_factory):
-    engine = TradeSimulationEngine(
-        initial_capital=100_000.0,
-        pre_filter_pct=0.0,
-        max_evaluations=100_000,
-    )
-    evaluate_fn = strategy_factory()
-    result = engine.run(universe, evaluate_fn)
+@pytest.mark.parametrize("lookahead_safe", [True, False], ids=["safe", "legacy"])
+def test_cumulative_pnl_matches_sum(universe, strategy_factory, lookahead_safe):
+    engine = _engine(lookahead_safe=lookahead_safe)
+    result = engine.run(universe, strategy_factory())
     running = 0.0
     for t in result.trades:
         running = round(running + t.net_pnl, 2)
@@ -93,7 +84,7 @@ def test_cumulative_pnl_matches_sum(universe, strategy_factory):
 
 
 def test_no_trades_when_strategy_always_holds(universe):
-    engine = TradeSimulationEngine(pre_filter_pct=0.0, max_evaluations=100_000)
+    engine = _engine()
 
     def always_hold(*_args, **_kwargs):
         return {"action": "hold", "confidence": 0.0, "shares": 0, "reasoning": ""}
@@ -103,10 +94,10 @@ def test_no_trades_when_strategy_always_holds(universe):
     assert result.final_capital == pytest.approx(engine.initial_capital, abs=0.01)
 
 
-def test_trade_dates_are_within_universe_span(universe):
-    engine = TradeSimulationEngine(pre_filter_pct=0.0, max_evaluations=100_000)
-    evaluate_fn = sma_crossover()
-    result = engine.run(universe, evaluate_fn)
+@pytest.mark.parametrize("lookahead_safe", [True, False], ids=["safe", "legacy"])
+def test_trade_dates_are_within_universe_span(universe, lookahead_safe):
+    engine = _engine(lookahead_safe=lookahead_safe)
+    result = engine.run(universe, sma_crossover())
     all_dates: list[str] = []
     for bars in universe.values():
         all_dates.extend(b.date for b in bars)
@@ -118,14 +109,15 @@ def test_trade_dates_are_within_universe_span(universe):
 
 
 def test_hold_days_non_negative(universe):
-    engine = TradeSimulationEngine(pre_filter_pct=0.0, max_evaluations=100_000)
+    engine = _engine()
     result = engine.run(universe, sma_crossover())
-    assert all(t.hold_days >= 1 for t in result.trades)
+    for t in result.trades:
+        assert t.hold_days >= 0
 
 
 def test_forced_close_count_is_accurate(universe):
-    """Only SYMBOLS with positions open at the end produce a forced close."""
-    engine = TradeSimulationEngine(pre_filter_pct=0.0, max_evaluations=100_000)
+    """Only symbols with positions open at the end produce a forced close."""
+    engine = _engine()
 
     def always_long(symbol, bar, recent, position, capital):
         if position is None:
@@ -133,6 +125,43 @@ def test_forced_close_count_is_accurate(universe):
         return {"action": "hold", "confidence": 0.0, "shares": 0, "reasoning": ""}
 
     result = engine.run(universe, always_long)
-    # Every symbol that ever triggered an entry will still be open at EOD.
     assert result.forced_close_count == len(universe)
     assert len(result.trades) == len(universe)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: look-ahead safety invariant
+# ---------------------------------------------------------------------------
+
+
+def test_lookahead_safe_fills_at_next_bar_open(universe):
+    """Verify that in look-ahead-safe mode, entry fills happen on a bar AFTER
+    the decision bar (i.e. at the next bar's open, not the decision bar's close).
+
+    We record all decisions and compare their dates against the fill dates:
+    every fill date must be strictly later than its decision date.
+    """
+    engine = _engine(lookahead_safe=True)
+
+    decision_log: list[tuple[str, str, str]] = []
+
+    _inner = sma_crossover()
+
+    def _logging_eval(symbol, bar, recent, position, capital):
+        result = _inner(symbol, bar, recent, position, capital)
+        action = result.get("action", "hold")
+        if action in ("enter_long", "enter_short", "exit"):
+            decision_log.append((symbol, bar.date, action))
+        return result
+
+    sim = engine.run(universe, _logging_eval)
+
+    entry_decisions = [(s, d) for s, d, a in decision_log if a in ("enter_long", "enter_short")]
+
+    for t in sim.trades:
+        if t.trade_num <= len(entry_decisions):
+            matched = [(s, d) for s, d in entry_decisions if s == t.symbol and d < t.entry_date]
+            assert matched, (
+                f"trade {t.trade_num}: entry on {t.entry_date} but no decision "
+                f"on a strictly earlier bar for {t.symbol}"
+            )

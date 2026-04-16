@@ -401,6 +401,12 @@ class TradeSimulationEngine:
     Accepts an ``evaluate_fn`` callback (typically an LLM call) that decides
     entry/exit for each bar.  A pre-filter skips bars with minimal price
     movement when no position is held, substantially reducing evaluate calls.
+
+    When ``lookahead_safe=True`` (Phase 2 default), the strategy evaluates on
+    bar *t* but its fill is deferred to bar *t+1*'s open — preventing the
+    LLM from peeking at a price that hasn't occurred yet.  The older
+    ``lookahead_safe=False`` preserves the pre-Phase-2 behaviour (fill at
+    same-bar close) for one release.
     """
 
     def __init__(
@@ -412,6 +418,7 @@ class TradeSimulationEngine:
         min_history_bars: int = 5,
         pre_filter_pct: float = 1.0,
         max_evaluations: int = 5000,
+        lookahead_safe: bool = True,
     ) -> None:
         self.initial_capital = initial_capital
         self.cost_pct = transaction_cost_bps / 10_000.0
@@ -419,6 +426,7 @@ class TradeSimulationEngine:
         self.min_history_bars = min_history_bars
         self.pre_filter_pct = pre_filter_pct
         self.max_evaluations = max_evaluations
+        self.lookahead_safe = lookahead_safe
 
     # ------------------------------------------------------------------
 
@@ -438,7 +446,182 @@ class TradeSimulationEngine:
             max_trades: stop after this many completed trades (``None`` = no limit)
             record_decisions: store every evaluation result in ``SimulationResult.decisions``
         """
-        # Build unified timeline sorted by date
+        if self.lookahead_safe:
+            return self._run_lookahead_safe(
+                market_data, evaluate_fn, max_trades=max_trades, record_decisions=record_decisions
+            )
+        return self._run_legacy(
+            market_data, evaluate_fn, max_trades=max_trades, record_decisions=record_decisions
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 2: look-ahead-safe loop (fill at next bar's open)
+    # ------------------------------------------------------------------
+
+    def _run_lookahead_safe(
+        self,
+        market_data: Dict[str, List[OHLCVBar]],
+        evaluate_fn: EvaluateCallback,
+        *,
+        max_trades: Optional[int] = None,
+        record_decisions: bool = False,
+    ) -> SimulationResult:
+        timeline: List[tuple[str, str, OHLCVBar]] = []
+        for symbol, bars in market_data.items():
+            for bar in bars:
+                timeline.append((bar.date, symbol, bar))
+        timeline.sort(key=lambda x: x[0])
+
+        symbol_history: Dict[str, List[OHLCVBar]] = {sym: [] for sym in market_data}
+
+        capital = self.initial_capital
+        open_positions: Dict[str, OpenPosition] = {}
+        pending_entries: Dict[str, Dict[str, Any]] = {}
+        pending_exits: Dict[str, bool] = {}
+        trades: List[TradeRecord] = []
+        decisions: List[Dict[str, Any]] = []
+        trade_num = 0
+        cumulative_pnl = 0.0
+        evaluations = 0
+        skipped = 0
+
+        for bar_date, symbol, bar in timeline:
+            # --- 1. Execute pending fills from previous bar's decision ---
+            if symbol in pending_entries:
+                pending = pending_entries.pop(symbol)
+                action = pending["action"]
+                shares = float(pending.get("shares", 0))
+                if shares <= 0:
+                    position_pct = 0.06
+                    shares = round(capital * position_pct / bar.open, 4 if bar.open < 10 else 2)
+
+                if shares > 0 and capital >= shares * bar.open and symbol not in open_positions:
+                    slippage_mult = 1.0 + self.slippage_bps / 10_000.0
+                    entry_bid_price = round(bar.open, 4 if bar.open < 10 else 2)
+                    entry_price = round(bar.open * slippage_mult, 4 if bar.open < 10 else 2)
+                    position_value = round(entry_price * shares, 2)
+                    capital -= position_value
+
+                    open_positions[symbol] = OpenPosition(
+                        symbol=symbol,
+                        side="long" if action == "enter_long" else "short",
+                        entry_date=bar_date,
+                        entry_price=entry_price,
+                        shares=shares,
+                        position_value=position_value,
+                        entry_bid_price=entry_bid_price,
+                        entry_order_type="market",
+                    )
+
+            if symbol in pending_exits and symbol in open_positions:
+                del pending_exits[symbol]
+                pos = open_positions.pop(symbol)
+                trade_num += 1
+                trade = self._close_position(pos, bar.open, bar_date, trade_num, cumulative_pnl)
+                cumulative_pnl = trade.cumulative_pnl
+                capital += round(pos.shares * trade.exit_price, 2)
+                trades.append(trade)
+
+                if max_trades is not None and len(trades) >= max_trades:
+                    break
+
+            # --- 2. Add bar to history, evaluate strategy ---
+            symbol_history[symbol].append(bar)
+            recent = symbol_history[symbol][-20:]
+            has_position = symbol in open_positions
+
+            if evaluations >= self.max_evaluations:
+                logger.warning(
+                    "Reached max evaluations (%d), stopping simulation with %d trades",
+                    self.max_evaluations,
+                    len(trades),
+                )
+                break
+
+            if not self._should_evaluate(recent, has_position):
+                skipped += 1
+                continue
+
+            # Evaluate on bar *t*: the strategy can see bar *t*, but the
+            # fill will happen on bar *t+1*'s open.
+            try:
+                decision = evaluate_fn(symbol, bar, recent, open_positions.get(symbol), capital)
+            except Exception as exc:
+                logger.warning("Evaluation failed for %s on %s: %s", symbol, bar_date, exc)
+                decision = {
+                    "action": "hold",
+                    "confidence": 0.0,
+                    "shares": 0,
+                    "reasoning": f"Error: {exc}",
+                }
+
+            evaluations += 1
+            if record_decisions:
+                decisions.append({"date": bar_date, "symbol": symbol, **decision})
+
+            if evaluations % 500 == 0:
+                logger.info(
+                    "Simulation progress: %d evaluations, %d trades completed",
+                    evaluations,
+                    len(trades),
+                )
+
+            dec_action = decision.get("action", "hold")
+
+            if dec_action in ("enter_long", "enter_short") and not has_position:
+                pending_entries[symbol] = decision
+            elif dec_action == "exit" and has_position:
+                pending_exits[symbol] = True
+
+        # Flush remaining pending exits (last bar → no next bar, fill at last close)
+        for symbol in list(pending_exits):
+            if symbol in open_positions and symbol in symbol_history and symbol_history[symbol]:
+                last_bar = symbol_history[symbol][-1]
+                pos = open_positions.pop(symbol)
+                trade_num += 1
+                trade = self._close_position(
+                    pos, last_bar.close, last_bar.date, trade_num, cumulative_pnl
+                )
+                cumulative_pnl = trade.cumulative_pnl
+                capital += round(pos.shares * trade.exit_price, 2)
+                trades.append(trade)
+        pending_exits.clear()
+
+        # Force-close remaining open positions
+        forced = 0
+        for symbol, pos in list(open_positions.items()):
+            if symbol in symbol_history and symbol_history[symbol]:
+                last_bar = symbol_history[symbol][-1]
+                trade_num += 1
+                trade = self._close_position(
+                    pos, last_bar.close, last_bar.date, trade_num, cumulative_pnl
+                )
+                cumulative_pnl = trade.cumulative_pnl
+                capital += round(pos.shares * trade.exit_price, 2)
+                trades.append(trade)
+                forced += 1
+
+        return SimulationResult(
+            trades=trades,
+            decisions=decisions,
+            final_capital=capital,
+            forced_close_count=forced,
+            evaluations_performed=evaluations,
+            bars_skipped_by_filter=skipped,
+        )
+
+    # ------------------------------------------------------------------
+    # Legacy loop: fills at same-bar close (pre-Phase-2, kept for one release)
+    # ------------------------------------------------------------------
+
+    def _run_legacy(
+        self,
+        market_data: Dict[str, List[OHLCVBar]],
+        evaluate_fn: EvaluateCallback,
+        *,
+        max_trades: Optional[int] = None,
+        record_decisions: bool = False,
+    ) -> SimulationResult:
         timeline: List[tuple[str, str, OHLCVBar]] = []
         for symbol, bars in market_data.items():
             for bar in bars:
@@ -461,7 +644,6 @@ class TradeSimulationEngine:
             recent = symbol_history[symbol][-20:]
             has_position = symbol in open_positions
 
-            # Check evaluation budget
             if evaluations >= self.max_evaluations:
                 logger.warning(
                     "Reached max evaluations (%d), stopping simulation with %d trades",
@@ -470,12 +652,10 @@ class TradeSimulationEngine:
                 )
                 break
 
-            # Pre-filter: skip bars unlikely to trigger signals
             if not self._should_evaluate(recent, has_position):
                 skipped += 1
                 continue
 
-            # Call the evaluate callback
             try:
                 decision = evaluate_fn(symbol, bar, recent, open_positions.get(symbol), capital)
             except Exception as exc:
@@ -534,7 +714,6 @@ class TradeSimulationEngine:
                 capital += round(pos.shares * trade.exit_price, 2)
                 trades.append(trade)
 
-            # Check trade limit
             if max_trades is not None and len(trades) >= max_trades:
                 break
 
