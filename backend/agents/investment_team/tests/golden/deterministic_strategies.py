@@ -61,7 +61,7 @@ def mean_reversion(lookback: int = 10, enter_z: float = 1.0, exit_z: float = 0.2
         closes = [b.close for b in recent[-lookback:]]
         mean = sum(closes) / len(closes)
         var = sum((c - mean) ** 2 for c in closes) / max(1, len(closes) - 1)
-        sd = var ** 0.5
+        sd = var**0.5
         if sd <= 0:
             return {"action": "hold", "confidence": 0.0, "shares": 0, "reasoning": "no vol"}
         z = (bar.close - mean) / sd

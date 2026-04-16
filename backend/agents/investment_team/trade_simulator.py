@@ -219,12 +219,83 @@ def compute_metrics(
     initial_capital: float,
     start_date: str,
     end_date: str,
+    *,
+    metrics_engine: str = "daily",
+    risk_free_rate: Optional[float] = None,
+    benchmark_equity: Optional[List[float]] = None,
+    benchmark_dates: Optional[List[Any]] = None,
 ) -> BacktestResult:
     """Compute aggregate performance metrics from trade records.
 
-    Uses CAGR for annualized returns and an equity-curve approach for volatility,
-    scaling by the average inter-trade gap rather than assuming daily returns.
+    ``metrics_engine="daily"`` (default, Phase 1) uses the
+    :mod:`investment_team.execution.metrics` daily-equity-curve estimator:
+    proper Sharpe/Sortino/Calmar, max-DD duration, and risk-free rate from
+    FRED (or the ``STRATEGY_LAB_RISK_FREE_RATE`` env / ``RFR_DEFAULT``).
+
+    ``metrics_engine="legacy"`` preserves the pre-refactor inter-trade-return
+    estimator for one release so persisted results stay byte-identical when
+    explicitly requested.
     """
+    if metrics_engine == "daily":
+        return _compute_metrics_daily(
+            trades,
+            initial_capital,
+            start_date,
+            end_date,
+            risk_free_rate=risk_free_rate,
+            benchmark_equity=benchmark_equity,
+            benchmark_dates=benchmark_dates,
+        )
+    return _compute_metrics_legacy(trades, initial_capital, start_date, end_date)
+
+
+def _compute_metrics_daily(
+    trades: List[TradeRecord],
+    initial_capital: float,
+    start_date: str,
+    end_date: str,
+    *,
+    risk_free_rate: Optional[float] = None,
+    benchmark_equity: Optional[List[float]] = None,
+    benchmark_dates: Optional[List[Any]] = None,
+) -> BacktestResult:
+    from .execution.metrics import compute_performance_metrics
+
+    m = compute_performance_metrics(
+        trades,
+        initial_capital,
+        start_date=start_date or None,
+        end_date=end_date or None,
+        risk_free_rate=risk_free_rate,
+        benchmark_equity=benchmark_equity,
+        benchmark_dates=benchmark_dates,
+    )
+    return BacktestResult(
+        total_return_pct=round(m.total_return_pct, 2),
+        annualized_return_pct=round(m.annualized_return_pct, 2),
+        volatility_pct=round(m.volatility_pct, 2),
+        sharpe_ratio=round(m.sharpe_ratio, 2),
+        max_drawdown_pct=round(m.max_drawdown_pct, 2),
+        win_rate_pct=round(m.win_rate_pct, 2),
+        profit_factor=m.profit_factor,
+        sortino_ratio=round(m.sortino_ratio, 2),
+        calmar_ratio=round(m.calmar_ratio, 2),
+        max_drawdown_duration_days=m.max_drawdown_duration_days,
+        risk_free_rate=m.risk_free_rate,
+        alpha_pct=m.alpha_pct,
+        beta=m.beta,
+        information_ratio=m.information_ratio,
+        metrics_engine="daily",
+    )
+
+
+def _compute_metrics_legacy(
+    trades: List[TradeRecord],
+    initial_capital: float,
+    start_date: str,
+    end_date: str,
+) -> BacktestResult:
+    """Pre-Phase-1 inter-trade-return estimator. Retained for diff runs."""
     if not trades:
         return BacktestResult(
             total_return_pct=0.0,
@@ -234,6 +305,7 @@ def compute_metrics(
             max_drawdown_pct=0.0,
             win_rate_pct=0.0,
             profit_factor=0.0,
+            metrics_engine="legacy",
         )
 
     wins = [t for t in trades if t.outcome == "win"]
@@ -314,6 +386,7 @@ def compute_metrics(
         max_drawdown_pct=round(max_dd, 2),
         win_rate_pct=win_rate,
         profit_factor=profit_factor,
+        metrics_engine="legacy",
     )
 
 

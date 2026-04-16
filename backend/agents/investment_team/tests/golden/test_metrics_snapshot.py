@@ -53,18 +53,19 @@ def test_mean_reversion_trade_count():
     assert sim.forced_close_count == 2
 
 
-def test_sma_crossover_metrics_snapshot():
-    """Locks the *pre-refactor* metric output.
+def test_sma_crossover_legacy_metrics_snapshot():
+    """Pins the **legacy** inter-trade-return estimator output.
 
     The absurdly high Sharpe (392) and near-zero annualized vol are artifacts
-    of the inter-trade-return estimator in ``compute_metrics``; Phase 1
-    replaces this with a daily-equity-curve estimator and the snapshot will
-    be updated in that PR.
+    of that estimator — the reason Phase 1 introduces the daily-equity-curve
+    engine. Kept here to prove the ``metrics_engine="legacy"`` switch still
+    reproduces pre-refactor numbers byte-for-byte.
     """
     sim = _run(sma_crossover)
     assert sim.trades
     start, end = _window(sim.trades)
-    m = compute_metrics(sim.trades, 100_000.0, start, end)
+    m = compute_metrics(sim.trades, 100_000.0, start, end, metrics_engine="legacy")
+    assert m.metrics_engine == "legacy"
     _assert_metric(m.total_return_pct, 7.50, "total_return_pct")
     _assert_metric(m.annualized_return_pct, 7.84, "annualized_return_pct")
     _assert_metric(m.win_rate_pct, 67.31, "win_rate_pct")
@@ -73,16 +74,34 @@ def test_sma_crossover_metrics_snapshot():
     assert math.isfinite(m.volatility_pct) and m.volatility_pct >= 0.0
 
 
-def test_mean_reversion_metrics_snapshot():
-    """Pre-refactor mean-reversion snapshot. Will change in Phase 1."""
+def test_mean_reversion_legacy_metrics_snapshot():
+    """Legacy estimator mean-reversion snapshot (pre-Phase-1)."""
     sim = _run(mean_reversion)
     start, end = _window(sim.trades)
-    m = compute_metrics(sim.trades, 100_000.0, start, end)
+    m = compute_metrics(sim.trades, 100_000.0, start, end, metrics_engine="legacy")
+    assert m.metrics_engine == "legacy"
     _assert_metric(m.total_return_pct, -8.40, "total_return_pct")
     _assert_metric(m.annualized_return_pct, -8.78, "annualized_return_pct")
     _assert_metric(m.win_rate_pct, 41.18, "win_rate_pct")
     _assert_metric(m.profit_factor, 0.23, "profit_factor")
     _assert_metric(m.max_drawdown_pct, 8.49, "max_drawdown_pct")
+
+
+def test_sma_crossover_daily_metrics_are_sane():
+    """The Phase 1 daily engine must produce plausible vol/Sharpe values.
+
+    Exact pinning is saved for the dedicated Phase 1 metrics tests — here we
+    only assert the pathological legacy artifacts are gone (Sharpe within
+    a reasonable human range, vol > 0).
+    """
+    sim = _run(sma_crossover)
+    start, end = _window(sim.trades)
+    m = compute_metrics(sim.trades, 100_000.0, start, end)  # default: daily
+    assert m.metrics_engine == "daily"
+    assert abs(m.sharpe_ratio) < 10, f"daily sharpe out of range: {m.sharpe_ratio}"
+    assert m.volatility_pct > 0.01, f"daily vol suspiciously low: {m.volatility_pct}"
+    assert 0.0 <= m.max_drawdown_pct <= 100.0
+    assert m.risk_free_rate is not None
 
 
 def test_mean_reversion_metrics_are_finite():
