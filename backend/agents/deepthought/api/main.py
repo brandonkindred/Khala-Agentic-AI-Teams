@@ -89,25 +89,43 @@ async def ask_stream(request: DeepthoughtRequest) -> StreamingResponse:
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
 
+    # How long the stream may go without emitting any bytes before we send
+    # a keepalive comment. Must be shorter than any intermediate proxy's
+    # read-idle timeout (nginx/cloudflare defaults are ~60s).
+    HEARTBEAT_INTERVAL = 10.0
+
     async def _generate():
-        while True:
-            # Non-blocking check — yields control back to the event loop
-            try:
-                event = event_queue.get_nowait()
-            except queue.Empty:
-                await asyncio.sleep(0.1)
-                continue
-            if event is None:
-                break
-            yield f"event: agent_event\ndata: {event.model_dump_json()}\n\n"
+        loop = asyncio.get_event_loop()
+        # Immediate open-stream marker — guarantees the client sees bytes within
+        # ~100ms even if classification + first agent spawn takes a while.
+        yield ": stream open\n\n"
+        last_byte_time = loop.time()
 
-        if result_holder and isinstance(result_holder[0], DeepthoughtResponse):
-            yield f"event: result\ndata: {result_holder[0].model_dump_json()}\n\n"
-        elif result_holder and isinstance(result_holder[0], Exception):
-            error_msg = json.dumps({"error": str(result_holder[0])})
-            yield f"event: error\ndata: {error_msg}\n\n"
+        try:
+            while True:
+                try:
+                    event = event_queue.get_nowait()
+                except queue.Empty:
+                    if loop.time() - last_byte_time >= HEARTBEAT_INTERVAL:
+                        yield ": keepalive\n\n"
+                        last_byte_time = loop.time()
+                    await asyncio.sleep(0.1)
+                    continue
+                if event is None:
+                    break
+                yield f"event: agent_event\ndata: {event.model_dump_json()}\n\n"
+                last_byte_time = loop.time()
 
-        yield "event: done\ndata: {}\n\n"
+            if result_holder and isinstance(result_holder[0], DeepthoughtResponse):
+                yield f"event: result\ndata: {result_holder[0].model_dump_json()}\n\n"
+            elif result_holder and isinstance(result_holder[0], Exception):
+                error_msg = json.dumps({"error": str(result_holder[0])})
+                yield f"event: error\ndata: {error_msg}\n\n"
+        finally:
+            # Always terminate the stream cleanly, even if the client disconnects
+            # or the generator is aborted — prevents dangling connections that
+            # surface as ERR_INCOMPLETE_CHUNKED_ENCODING in the browser.
+            yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(
         _generate(),

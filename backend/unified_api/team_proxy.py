@@ -28,6 +28,7 @@ Usage from a mount function::
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 
@@ -61,8 +62,13 @@ def get_team_client(team_key: str, timeout: float | None = None) -> httpx.AsyncC
     """
     if team_key not in _team_clients:
         t = timeout or _DEFAULT_TIMEOUT
+        # read=None: SSE streams (and other long-lived responses) may have large
+        # idle gaps between chunks; a per-chunk read timeout silently truncates
+        # the stream and surfaces to the browser as ERR_INCOMPLETE_CHUNKED_ENCODING.
+        # connect/write/pool timeouts still guard against dead upstreams and
+        # stuck uploads, so dropping read-timeout does not remove failure-detection.
         _team_clients[team_key] = httpx.AsyncClient(
-            timeout=httpx.Timeout(t, connect=10.0),
+            timeout=httpx.Timeout(connect=10.0, read=None, write=t, pool=10.0),
             follow_redirects=False,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
@@ -144,6 +150,13 @@ async def proxy_request(
                     "Proxy upstream disconnected mid-stream: %s %s -> %s: %s",
                     request.method, request.url.path, url, exc,
                 )
+                # Emit a clean terminating frame so downstream clients see a
+                # proper stream close instead of ERR_INCOMPLETE_CHUNKED_ENCODING.
+                error_payload = json.dumps(
+                    {"error": "upstream disconnected", "detail": type(exc).__name__}
+                )
+                yield f"event: error\ndata: {error_payload}\n\n".encode("utf-8")
+                yield b"event: done\ndata: {}\n\n"
             finally:
                 await resp.aclose()
 
