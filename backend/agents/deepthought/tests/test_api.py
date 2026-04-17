@@ -268,3 +268,34 @@ def test_stream_emits_keepalive_on_silence(mock_orch_cls, monkeypatch):
     body = resp.text
     assert ": keepalive" in body
     assert "event: done" in body
+
+
+@patch("deepthought.api.main.DeepthoughtOrchestrator")
+def test_stream_survives_malformed_keepalive_env(mock_orch_cls, monkeypatch):
+    """A malformed DEEPTHOUGHT_STREAM_KEEPALIVE_SECONDS must not 500 the stream."""
+    from deepthought.models import AgentResult, DeepthoughtResponse
+
+    monkeypatch.setenv("DEEPTHOUGHT_STREAM_KEEPALIVE_SECONDS", "not-a-number")
+
+    mock_orch = MagicMock()
+    mock_orch_cls.return_value = mock_orch
+    mock_orch._collect_event = MagicMock()
+    mock_orch.process_message.return_value = DeepthoughtResponse(
+        answer="A",
+        agent_tree=AgentResult(
+            agent_id="root",
+            agent_name="general_analyst",
+            depth=0,
+            focus_question="Q?",
+            answer="A",
+            confidence=0.9,
+        ),
+        total_agents_spawned=1,
+        max_depth_reached=0,
+    )
+
+    client = TestClient(app)
+    resp = client.post("/deepthought/ask/stream", json={"message": "hi"})
+
+    assert resp.status_code == 200
+    assert "event: done" in resp.text

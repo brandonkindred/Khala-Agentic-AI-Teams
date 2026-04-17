@@ -91,51 +91,58 @@ async def ask_stream(request: DeepthoughtRequest) -> StreamingResponse:
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
 
-    # Keepalive interval in seconds. Overridable for tests.
-    keepalive_interval = float(os.getenv("DEEPTHOUGHT_STREAM_KEEPALIVE_SECONDS", "10"))
+    # Keepalive interval in seconds. Overridable for tests and ops; we fall back
+    # to a safe default on malformed values so one bad env var cannot 500 every
+    # streaming request.
+    _keepalive_raw = os.getenv("DEEPTHOUGHT_STREAM_KEEPALIVE_SECONDS", "10")
+    try:
+        keepalive_interval = float(_keepalive_raw)
+        if keepalive_interval <= 0:
+            raise ValueError("non-positive keepalive interval")
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid DEEPTHOUGHT_STREAM_KEEPALIVE_SECONDS=%r; using default 10s",
+            _keepalive_raw,
+        )
+        keepalive_interval = 10.0
 
     async def _generate():
-        done_sent = False
-        try:
-            # Emit bytes immediately so intermediaries (proxies, LBs) see liveness
-            # before the orchestrator's blocking classify/LLM call begins.
-            yield ": starting\n\n"
+        # Emit bytes immediately so intermediaries (proxies, LBs) see liveness
+        # before the orchestrator's blocking classify/LLM call begins.
+        yield ": starting\n\n"
+        last_yield_ts = time.monotonic()
+
+        while True:
+            try:
+                event = event_queue.get_nowait()
+            except queue.Empty:
+                # Periodic SSE comment keepalive — ignored by EventSource clients
+                # but keeps intermediate read timeouts at bay.
+                if time.monotonic() - last_yield_ts >= keepalive_interval:
+                    yield ": keepalive\n\n"
+                    last_yield_ts = time.monotonic()
+                await asyncio.sleep(0.1)
+                continue
+            if event is None:
+                break
+            yield f"event: agent_event\ndata: {event.model_dump_json()}\n\n"
             last_yield_ts = time.monotonic()
 
-            while True:
-                try:
-                    event = event_queue.get_nowait()
-                except queue.Empty:
-                    # Periodic SSE comment keepalive — ignored by EventSource clients
-                    # but keeps intermediate read timeouts at bay.
-                    if time.monotonic() - last_yield_ts >= keepalive_interval:
-                        yield ": keepalive\n\n"
-                        last_yield_ts = time.monotonic()
-                    await asyncio.sleep(0.1)
-                    continue
-                if event is None:
-                    break
-                yield f"event: agent_event\ndata: {event.model_dump_json()}\n\n"
-                last_yield_ts = time.monotonic()
+        # Orchestrator completed. Errors are surfaced here via result_holder —
+        # this path also guarantees a trailing `event: done` frame even when the
+        # orchestrator raised, because `_run` always queues the sentinel.
+        if result_holder and isinstance(result_holder[0], DeepthoughtResponse):
+            yield f"event: result\ndata: {result_holder[0].model_dump_json()}\n\n"
+        elif result_holder and isinstance(result_holder[0], Exception):
+            error_msg = json.dumps({"error": str(result_holder[0])})
+            yield f"event: error\ndata: {error_msg}\n\n"
 
-            if result_holder and isinstance(result_holder[0], DeepthoughtResponse):
-                yield f"event: result\ndata: {result_holder[0].model_dump_json()}\n\n"
-            elif result_holder and isinstance(result_holder[0], Exception):
-                error_msg = json.dumps({"error": str(result_holder[0])})
-                yield f"event: error\ndata: {error_msg}\n\n"
-
-            yield "event: done\ndata: {}\n\n"
-            done_sent = True
-        except asyncio.CancelledError:
-            # Client disconnected; propagate so FastAPI can clean up.
-            raise
-        finally:
-            if not done_sent:
-                try:
-                    yield 'event: done\ndata: {"reason":"interrupted"}\n\n'
-                except Exception:
-                    # Client already gone — nothing we can do.
-                    pass
+        yield "event: done\ndata: {}\n\n"
+        # No try/finally with yields: yielding during async-generator finalization
+        # (e.g. client disconnect triggers aclose()) raises
+        # RuntimeError: async generator ignored GeneratorExit. If the client is
+        # gone there is nothing to send anyway; orchestrator errors are already
+        # handled above via result_holder.
 
     return StreamingResponse(
         _generate(),
