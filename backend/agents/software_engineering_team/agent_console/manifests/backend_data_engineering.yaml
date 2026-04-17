@@ -1,0 +1,11 @@
+schema_version: 1
+id: se.backend.data_engineering
+team: software_engineering
+name: Backend — Data Engineering Specialist
+summary: Designs schemas, pipelines, and ETL for backend services.
+tags: [backend, data, etl, software-engineering]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: software_engineering_team.backend_code_v2_team.tool_agents.data_engineering.agent:DataEngineeringToolAgent

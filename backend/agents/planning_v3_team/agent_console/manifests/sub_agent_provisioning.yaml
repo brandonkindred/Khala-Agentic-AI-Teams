@@ -1,0 +1,11 @@
+schema_version: 1
+id: planning_v3.sub_agent_provisioning
+team: planning_v3
+name: Planning V3 — Sub-Agent Provisioning
+summary: Routes the produced PRD to downstream specialized teams (SE, branding, blogging).
+tags: [planning, handoff, routing]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: planning_v3_team.phases.sub_agent_provisioning:run_sub_agent_provisioning

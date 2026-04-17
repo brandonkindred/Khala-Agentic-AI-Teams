@@ -1,0 +1,11 @@
+schema_version: 1
+id: planning_v3.intake
+team: planning_v3
+name: Planning V3 — Intake
+summary: Validates and normalizes the incoming client brief for downstream phases.
+tags: [planning, intake, discovery]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: minimal
+source:
+  entrypoint: planning_v3_team.phases.intake:run_intake

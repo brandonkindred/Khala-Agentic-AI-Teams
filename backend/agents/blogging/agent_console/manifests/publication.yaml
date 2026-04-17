@@ -1,0 +1,18 @@
+schema_version: 1
+id: blogging.publication
+team: blogging
+name: Blog Publication
+summary: Publishes the approved draft to Medium (or configured platform).
+description: |
+  Consumes the finalized, compliance-approved draft and publishes it via the configured
+  platform integration (Medium today). Returns the public URL and publication metadata.
+tags: [publication, integration, blogging]
+invoke:
+  kind: http
+  method: POST
+  path: /api/blogging/publish
+sandbox:
+  manifest_path: default.yaml
+  access_tier: elevated
+source:
+  entrypoint: blogging.blog_publication_agent.agent:PublicationAgent

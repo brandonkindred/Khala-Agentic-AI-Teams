@@ -1,0 +1,11 @@
+schema_version: 1
+id: branding.discovery_auditor
+team: branding
+name: Brand Discovery Auditor
+summary: Analyzes brand perception, SWOT, and stakeholder insights to seed strategy.
+tags: [branding, discovery, research]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: branding_team.agents:make_discovery_auditor

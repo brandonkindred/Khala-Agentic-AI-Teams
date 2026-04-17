@@ -326,6 +326,7 @@ except Exception:
     logger.warning("prometheus instrumentator unavailable", exc_info=True)
 
 # Integrations API (Slack config, etc.)
+from unified_api.routes.agents import router as agents_router
 from unified_api.routes.analytics import router as analytics_router
 from unified_api.routes.integrations import router as integrations_router
 from unified_api.routes.llm_tools import router as llm_tools_router
@@ -335,6 +336,7 @@ app.include_router(integrations_router)
 app.include_router(llm_tools_router)
 app.include_router(llm_usage_router)
 app.include_router(analytics_router)
+app.include_router(agents_router)
 
 
 # ---------------------------------------------------------------------------

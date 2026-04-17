@@ -1,0 +1,11 @@
+schema_version: 1
+id: branding.creative_director
+team: branding
+name: Creative Director
+summary: Defines creative direction across color, typography, and imagery.
+tags: [branding, visual, design]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: branding_team.agents:make_creative_director

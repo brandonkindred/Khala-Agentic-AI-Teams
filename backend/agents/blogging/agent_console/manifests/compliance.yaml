@@ -1,0 +1,14 @@
+schema_version: 1
+id: blogging.compliance
+team: blogging
+name: Blog Compliance
+summary: Enforces brand and style standards on a draft — has veto power.
+description: |
+  Runs brand/style/compliance checks on the finalized draft before publication. Can
+  reject the draft and trigger a rewrite loop.
+tags: [compliance, gate, blogging]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: blogging.blog_compliance_agent.agent:BlogComplianceAgent

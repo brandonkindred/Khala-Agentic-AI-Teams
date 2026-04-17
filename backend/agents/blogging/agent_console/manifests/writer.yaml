@@ -1,0 +1,21 @@
+schema_version: 1
+id: blogging.writer
+team: blogging
+name: Blog Writer
+summary: Drafts a blog post from a ContentPlan and research document.
+description: |
+  Consumes the planner's `ContentPlan` plus optional author profile and writing guidelines
+  and produces a full draft ready for the copy editor and fact checker gates.
+tags: [writing, content, blogging]
+inputs:
+  schema_ref: blogging.blog_writer_agent.models:WriterInput
+outputs:
+  schema_ref: blogging.blog_writer_agent.models:WriterOutput
+invoke:
+  kind: function
+  callable_ref: blogging.blog_writer_agent.agent:BlogWriterAgent
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: blogging.blog_writer_agent.agent:BlogWriterAgent

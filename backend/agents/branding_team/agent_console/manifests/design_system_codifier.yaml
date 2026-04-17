@@ -1,0 +1,11 @@
+schema_version: 1
+id: branding.design_system_codifier
+team: branding
+name: Design System Codifier
+summary: Codifies the brand's visual rules into a reusable design system spec.
+tags: [branding, design-system, visual]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: branding_team.agents:make_design_system_codifier

@@ -1,0 +1,11 @@
+schema_version: 1
+id: blogging.copy_editor
+team: blogging
+name: Blog Copy Editor
+summary: Polishes a draft — grammar, clarity, flow, and style adherence.
+tags: [editing, content, blogging]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: blogging.blog_copy_editor_agent.agent:BlogCopyEditorAgent

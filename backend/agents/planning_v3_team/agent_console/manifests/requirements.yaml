@@ -1,0 +1,11 @@
+schema_version: 1
+id: planning_v3.requirements
+team: planning_v3
+name: Planning V3 — Requirements
+summary: Extracts functional and non-functional requirements from discovery.
+tags: [planning, requirements, prd]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: planning_v3_team.phases.requirements:run_requirements

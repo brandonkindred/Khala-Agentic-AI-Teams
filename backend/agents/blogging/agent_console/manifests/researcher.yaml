@@ -1,0 +1,18 @@
+schema_version: 1
+id: blogging.researcher
+team: blogging
+name: Blog Researcher
+summary: Conducts web and academic research for a blog topic.
+description: |
+  Emits search queries, fetches sources, and returns a consolidated research document
+  that downstream agents (planner, fact checker) consume.
+tags: [research, content, blogging]
+invoke:
+  kind: http
+  method: POST
+  path: /api/blogging/research
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: blogging.blog_research_agent.agent:ResearchAgent

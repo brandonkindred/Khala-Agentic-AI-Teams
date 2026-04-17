@@ -1,0 +1,11 @@
+schema_version: 1
+id: se.backend.cicd
+team: software_engineering
+name: Backend — CI/CD Specialist
+summary: Authors GitHub Actions, GitLab CI, and deployment pipeline definitions.
+tags: [backend, cicd, devops, software-engineering]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: elevated
+source:
+  entrypoint: software_engineering_team.backend_code_v2_team.tool_agents.cicd.agent:CicdAdapterAgent

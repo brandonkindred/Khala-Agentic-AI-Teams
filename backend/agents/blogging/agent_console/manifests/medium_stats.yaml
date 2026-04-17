@@ -1,0 +1,14 @@
+schema_version: 1
+id: blogging.medium_stats
+team: blogging
+name: Medium Stats Scraper
+summary: Scrapes per-post analytics from Medium via Playwright.
+description: |
+  Uses a shared browser session (storage_state) to pull view/read/clap counts for
+  previously published posts. Powers downstream performance feedback loops.
+tags: [analytics, integration, blogging]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: elevated
+source:
+  entrypoint: blogging.blog_medium_stats_agent.agent:BlogMediumStatsAgent

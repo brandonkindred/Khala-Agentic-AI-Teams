@@ -1,0 +1,21 @@
+schema_version: 1
+id: branding.governance
+team: branding
+name: Brand Governance & Compliance
+summary: Post-graph compliance enforcement for brand outputs — can veto.
+description: |
+  Checks downstream content and visual outputs against the codified brand rules and
+  can escalate violations back to the appropriate phase agent for revision.
+tags: [branding, compliance, gate]
+inputs:
+  schema_ref: branding_team.models:BrandCheckRequest
+outputs:
+  schema_ref: branding_team.models:BrandCheckResult
+invoke:
+  kind: function
+  callable_ref: branding_team.agents:BrandComplianceAgent
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: branding_team.agents:BrandComplianceAgent

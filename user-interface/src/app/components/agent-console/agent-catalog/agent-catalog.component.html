@@ -1,0 +1,224 @@
+<section class="agent-catalog">
+  <aside class="agent-catalog__filters" aria-label="Catalog filters">
+    <header>
+      <h2>Browse agents</h2>
+      <button
+        type="button"
+        mat-stroked-button
+        (click)="clearFilters()"
+        [disabled]="!query() && !selectedTeam() && !selectedTag()"
+      >
+        <mat-icon>clear</mat-icon>
+        Clear
+      </button>
+    </header>
+
+    <mat-form-field appearance="outline" class="agent-catalog__search">
+      <mat-label>Search agents</mat-label>
+      <mat-icon matPrefix>search</mat-icon>
+      <input
+        matInput
+        type="search"
+        [ngModel]="query()"
+        (ngModelChange)="onSearchChange($event)"
+        placeholder="Name, summary, tag…"
+      />
+    </mat-form-field>
+
+    <h3>Teams</h3>
+    <ul class="agent-catalog__teams">
+      <li>
+        <button
+          type="button"
+          [class.is-active]="!selectedTeam()"
+          (click)="onTeamChange(null)"
+        >
+          <span>All teams</span>
+          <span class="count">{{ agents().length }}</span>
+        </button>
+      </li>
+      <li *ngFor="let team of teams(); trackBy: trackTeam">
+        <button
+          type="button"
+          [class.is-active]="selectedTeam() === team.team"
+          (click)="onTeamChange(team.team)"
+        >
+          <span>{{ team.display_name }}</span>
+          <span class="count">{{ team.agent_count }}</span>
+        </button>
+      </li>
+    </ul>
+
+    <h3>Tags</h3>
+    <mat-chip-set class="agent-catalog__tags" *ngIf="allTags().length; else noTags">
+      <mat-chip
+        *ngFor="let tag of allTags()"
+        [highlighted]="selectedTag() === tag"
+        (click)="onTagToggle(tag)"
+      >
+        {{ tag }}
+      </mat-chip>
+    </mat-chip-set>
+    <ng-template #noTags>
+      <p class="agent-catalog__empty">No tags yet.</p>
+    </ng-template>
+  </aside>
+
+  <main class="agent-catalog__results">
+    <header class="agent-catalog__results-header">
+      <h2>
+        {{ agents().length }} agent{{ agents().length === 1 ? '' : 's' }}
+        <span *ngIf="selectedTeam()" class="filter-pill">in {{ teamDisplayName(selectedTeam()!) }}</span>
+        <span *ngIf="selectedTag()" class="filter-pill">tagged "{{ selectedTag() }}"</span>
+      </h2>
+    </header>
+
+    <div *ngIf="loading()" class="agent-catalog__loading">
+      <mat-spinner diameter="32"></mat-spinner>
+      <span>Loading agents…</span>
+    </div>
+
+    <div *ngIf="error()" class="agent-catalog__error" role="alert">
+      <mat-icon>error</mat-icon>
+      <span>{{ error() }}</span>
+    </div>
+
+    <div *ngIf="!loading() && !error() && agents().length === 0" class="agent-catalog__empty-state">
+      <mat-icon>search_off</mat-icon>
+      <p>No agents match these filters.</p>
+      <button mat-stroked-button (click)="clearFilters()">Clear filters</button>
+    </div>
+
+    <div *ngIf="!loading() && agents().length > 0" class="agent-catalog__grid">
+      <mat-card
+        *ngFor="let agent of agents(); trackBy: trackAgent"
+        class="agent-card"
+        tabindex="0"
+        role="button"
+        (click)="openDetail(agent)"
+        (keyup.enter)="openDetail(agent)"
+      >
+        <mat-card-header>
+          <mat-card-title>{{ agent.name }}</mat-card-title>
+          <mat-card-subtitle>
+            <span class="agent-card__team">{{ teamDisplayName(agent.team) }}</span>
+            <span class="agent-card__id">{{ agent.id }}</span>
+          </mat-card-subtitle>
+        </mat-card-header>
+        <mat-card-content>
+          <p class="agent-card__summary">{{ agent.summary }}</p>
+          <mat-chip-set class="agent-card__tags">
+            <mat-chip *ngFor="let tag of agent.tags">{{ tag }}</mat-chip>
+          </mat-chip-set>
+          <div class="agent-card__flags">
+            <span *ngIf="agent.has_input_schema" matTooltip="Input schema available">
+              <mat-icon>input</mat-icon>
+            </span>
+            <span *ngIf="agent.has_output_schema" matTooltip="Output schema available">
+              <mat-icon>output</mat-icon>
+            </span>
+            <span *ngIf="agent.has_invoke" matTooltip="Invocation configured">
+              <mat-icon>play_arrow</mat-icon>
+            </span>
+            <span *ngIf="agent.has_sandbox" matTooltip="Sandbox provisioning configured">
+              <mat-icon>cloud_queue</mat-icon>
+            </span>
+          </div>
+        </mat-card-content>
+      </mat-card>
+    </div>
+  </main>
+
+  <aside
+    class="agent-catalog__drawer"
+    *ngIf="drawerOpen()"
+    aria-live="polite"
+    aria-label="Agent detail"
+  >
+    <header>
+      <h2>{{ selectedDetail()?.manifest?.name || 'Loading…' }}</h2>
+      <button mat-icon-button (click)="closeDetail()" aria-label="Close detail drawer">
+        <mat-icon>close</mat-icon>
+      </button>
+    </header>
+
+    <div *ngIf="detailLoading()" class="agent-catalog__drawer-loading">
+      <mat-spinner diameter="32"></mat-spinner>
+    </div>
+
+    <div *ngIf="selectedDetail() as detail" class="agent-catalog__drawer-body">
+      <dl class="agent-catalog__meta">
+        <dt>ID</dt><dd><code>{{ detail.manifest.id }}</code></dd>
+        <dt>Team</dt><dd>{{ teamDisplayName(detail.manifest.team) }}</dd>
+        <dt>Entrypoint</dt><dd><code>{{ detail.manifest.source.entrypoint }}</code></dd>
+        <dt *ngIf="detail.manifest.source.anatomy_ref">Anatomy</dt>
+        <dd *ngIf="detail.manifest.source.anatomy_ref"><code>{{ detail.manifest.source.anatomy_ref }}</code></dd>
+      </dl>
+
+      <section>
+        <h3>Summary</h3>
+        <p>{{ detail.manifest.summary }}</p>
+        <p *ngIf="detail.manifest.description" class="agent-catalog__description">
+          {{ detail.manifest.description }}
+        </p>
+      </section>
+
+      <section *ngIf="detail.manifest.tags.length">
+        <h3>Tags</h3>
+        <mat-chip-set>
+          <mat-chip *ngFor="let tag of detail.manifest.tags">{{ tag }}</mat-chip>
+        </mat-chip-set>
+      </section>
+
+      <section *ngIf="detail.manifest.inputs?.schema_ref || detail.manifest.outputs?.schema_ref">
+        <h3>I/O schemas</h3>
+        <ul>
+          <li *ngIf="detail.manifest.inputs?.schema_ref">
+            <strong>Input:</strong> <code>{{ detail.manifest.inputs!.schema_ref }}</code>
+          </li>
+          <li *ngIf="detail.manifest.outputs?.schema_ref">
+            <strong>Output:</strong> <code>{{ detail.manifest.outputs!.schema_ref }}</code>
+          </li>
+        </ul>
+      </section>
+
+      <section *ngIf="detail.manifest.invoke">
+        <h3>Invocation</h3>
+        <p>
+          <strong>Kind:</strong> {{ detail.manifest.invoke.kind }}
+          <ng-container *ngIf="detail.manifest.invoke.path">
+            <br /><strong>HTTP:</strong> {{ detail.manifest.invoke.method || 'POST' }}
+            <code>{{ detail.manifest.invoke.path }}</code>
+          </ng-container>
+          <ng-container *ngIf="detail.manifest.invoke.callable_ref">
+            <br /><strong>Callable:</strong> <code>{{ detail.manifest.invoke.callable_ref }}</code>
+          </ng-container>
+        </p>
+      </section>
+
+      <section *ngIf="detail.manifest.sandbox">
+        <h3>Sandbox</h3>
+        <p>
+          <strong>Manifest:</strong> <code>{{ detail.manifest.sandbox.manifest_path }}</code><br />
+          <strong>Access tier:</strong> {{ detail.manifest.sandbox.access_tier }}
+        </p>
+      </section>
+
+      <section *ngIf="detail.anatomy_markdown" class="agent-catalog__anatomy">
+        <h3>Anatomy</h3>
+        <pre>{{ detail.anatomy_markdown }}</pre>
+      </section>
+
+      <footer class="agent-catalog__drawer-actions">
+        <button mat-stroked-button disabled matTooltip="Coming in Phase 2 — isolated runner">
+          <mat-icon>play_arrow</mat-icon>
+          Run agent
+        </button>
+        <button mat-stroked-button disabled matTooltip="Coming in Phase 4 — warm sandbox provisioning">
+          <mat-icon>cloud_queue</mat-icon>
+          Provision sandbox
+        </button>
+      </footer>
+    </div>
+  </aside>
+</section>

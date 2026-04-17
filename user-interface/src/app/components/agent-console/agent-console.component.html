@@ -1,0 +1,55 @@
+<mat-tab-group
+  class="agent-console"
+  animationDuration="120ms"
+  mat-stretch-tabs="false"
+  mat-align-tabs="start"
+>
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>apps</mat-icon>
+      <span class="tab-label">Catalog</span>
+    </ng-template>
+    <div class="agent-console__tab-content agent-console__catalog-tab">
+      <header class="agent-console__header">
+        <div>
+          <h1>Agent Console</h1>
+          <p>
+            Browse every specialist agent in the system, open their anatomy, and
+            (soon) run them in isolated sandboxes.
+          </p>
+        </div>
+      </header>
+      <app-agent-catalog></app-agent-catalog>
+    </div>
+  </mat-tab>
+
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>play_circle</mat-icon>
+      <span class="tab-label">Runner</span>
+    </ng-template>
+    <div class="agent-console__tab-content agent-console__runner-placeholder">
+      <mat-icon>science</mat-icon>
+      <h2>Runner is coming in Phase 2</h2>
+      <p>
+        Select an agent from the Catalog, load a golden sample input (or author
+        your own), run it in a warm sandbox, and diff the output against
+        expected results — all without leaving this page.
+      </p>
+      <p class="agent-console__phase-note">
+        Phase 1 (this release) shipped the discovery substrate: the registry,
+        manifests, and this page. Phase 2 wires the invoke button.
+      </p>
+    </div>
+  </mat-tab>
+
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>cloud_queue</mat-icon>
+      <span class="tab-label">Provisioning &amp; Environments</span>
+    </ng-template>
+    <div class="agent-console__tab-content">
+      <app-agent-provisioning-dashboard></app-agent-provisioning-dashboard>
+    </div>
+  </mat-tab>
+</mat-tab-group>
