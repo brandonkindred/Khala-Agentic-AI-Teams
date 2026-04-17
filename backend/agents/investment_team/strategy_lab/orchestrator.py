@@ -28,12 +28,11 @@ from ..models import (
 )
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..trade_simulator import compute_metrics
+from ..trading_service.modes.sandbox_compat import run_strategy_code
 from .agents.alignment import TradeAlignmentAgent, TradeAlignmentReport
 from .agents.analysis import AnalysisAgent
 from .agents.ideation import IdeationAgent
 from .agents.refinement import RefinementAgent
-from .executor.sandbox_runner import SandboxRunner
-from .executor.trade_builder import build_trade_records
 from .quality_gates.backtest_anomaly import BacktestAnomalyDetector
 from .quality_gates.code_safety import CodeSafetyChecker
 from .quality_gates.convergence_tracker import ConvergenceTracker
@@ -67,7 +66,6 @@ class StrategyLabOrchestrator:
         self.refinement_agent = RefinementAgent()
         self.alignment_agent = TradeAlignmentAgent()
         self.analysis_agent = AnalysisAgent()
-        self.sandbox = SandboxRunner()
         self.strategy_validator = StrategySpecValidator()
         self.code_safety_checker = CodeSafetyChecker()
         self.anomaly_detector = BacktestAnomalyDetector()
@@ -260,7 +258,7 @@ class StrategyLabOrchestrator:
 
             # ── 2c: EXECUTE (syntax / runtime correctness) ───────────
             emit("backtesting", {"sub_phase": "running_code", "refinement_round": round_num})
-            exec_result = self.sandbox.run(code, market_data, config)
+            exec_result = run_strategy_code(code, market_data, config, strategy=spec)
 
             if not exec_result.success:
                 all_gate_results.append(
@@ -306,51 +304,18 @@ class StrategyLabOrchestrator:
                     )
                     break
 
-            # ── 2d: VALIDATE TRADE OUTPUT ─────────────────────────────
-            try:
-                trades = build_trade_records(exec_result.raw_trades, config)
-            except ValueError as ve:
-                all_gate_results.append(
-                    QualityGateResult(
-                        gate_name="trade_validation",
-                        passed=False,
-                        severity="critical",
-                        details=f"Invalid trade output: {ve}",
-                        refinement_round=round_num,
-                    )
-                )
-                if round_num < MAX_CODE_REFINEMENT_ROUNDS - 1:
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refining",
-                            "refinement_round": round_num,
-                            "failure_phase": "execution",
-                        },
-                    )
-                    updates, code = self._refine(
-                        spec, code, "execution", str(ve), None, refinement_attempts
-                    )
-                    spec = self._apply_updates(spec, updates, code)
-                    changes = updates.get("changes_made", "trade validation fix")
-                    refinement_attempts.append(changes)
-                    emit(
-                        "coding",
-                        {
-                            "sub_phase": "refined",
-                            "refinement_round": round_num,
-                            "changes_made": changes,
-                        },
-                    )
-                    continue
-                else:
-                    break
+            # ── 2d: COLLECT TRADES ────────────────────────────────────
+            # TradingService has already finalised trades through
+            # FillSimulator, so the legacy raw-trade validation step is a
+            # no-op here. Kept the same ``trades`` variable name so the
+            # rest of the loop is untouched.
+            trades = exec_result.trades
 
             emit(
                 "backtesting",
                 {
                     "sub_phase": "completed",
-                    "trades_count": len(exec_result.raw_trades),
+                    "trades_count": len(trades),
                     "execution_time": exec_result.execution_time_seconds,
                 },
             )
@@ -571,7 +536,7 @@ class StrategyLabOrchestrator:
                         "trigger": "trade_alignment_fix",
                     },
                 )
-                align_exec = self.sandbox.run(proposed_code, market_data, config)
+                align_exec = run_strategy_code(proposed_code, market_data, config, strategy=spec)
                 if not align_exec.success:
                     all_gate_results.append(
                         QualityGateResult(
@@ -595,26 +560,9 @@ class StrategyLabOrchestrator:
                     )
                     break
 
-                try:
-                    new_trades = build_trade_records(align_exec.raw_trades, config)
-                except ValueError as ve:
-                    all_gate_results.append(
-                        QualityGateResult(
-                            gate_name="alignment_trade_validation",
-                            passed=False,
-                            severity="critical",
-                            details=f"Invalid trade output after alignment fix: {ve}",
-                            refinement_round=align_round,
-                        )
-                    )
-                    emit(
-                        "aligning",
-                        {
-                            "sub_phase": "re_execution_invalid_trades",
-                            "alignment_round": align_round,
-                        },
-                    )
-                    break
+                # Trades are already finalised by TradingService; the
+                # legacy raw-trade validation step is a no-op here.
+                new_trades = align_exec.trades
 
                 new_metrics = compute_metrics(
                     new_trades, config.initial_capital, config.start_date, config.end_date

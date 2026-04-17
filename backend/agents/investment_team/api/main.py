@@ -870,53 +870,41 @@ def _run_real_data_backtest(
             detail="Failed to fetch historical market data. Please check the date range and try again.",
         )
 
-    from investment_team.strategy_lab.executor import (
-        SandboxRunner,
-        build_trade_records,
-    )
-    from investment_team.trade_simulator import compute_metrics
+    from investment_team.trading_service.modes.backtest import run_backtest
 
     total_bars = sum(len(bars) for bars in market_data.values())
     logger.info(
-        "Executing generated strategy script in sandbox for %s (%d symbols, %d bars)",
+        "Executing generated strategy script through TradingService for %s (%d symbols, %d bars)",
         strategy.strategy_id,
         len(market_data),
         total_bars,
     )
 
-    exec_result = SandboxRunner().run(strategy.strategy_code, market_data, config)
+    run = run_backtest(strategy=strategy, config=config, market_data=market_data)
+    service_result = run.service_result
 
-    if not exec_result.success:
+    if service_result.lookahead_violation:
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Strategy code execution failed ({exec_result.error_type}): "
-                f"{exec_result.stderr[:500]}"
+                f"Strategy code attempted to access look-ahead data: "
+                f"{(service_result.error or '')[:500]}"
             ),
         )
-
-    try:
-        trades = build_trade_records(exec_result.raw_trades, config)
-    except (ValueError, TypeError) as exc:
-        # ``build_trade_records`` raises ``ValueError`` for invalid sides and
-        # ``TypeError`` when numeric coercion fails (e.g. ``entry_price`` is
-        # ``None`` or a non-numeric type).  Both are user-facing output-shape
-        # errors, not server failures — surface as 422 so the caller sees
-        # the actual problem instead of a generic 500.
+    if service_result.error and not run.trades:
+        # Strategy subprocess failed to produce any trades AND emitted an error
+        # — surface as 422 (same contract the sandbox used for exec failures).
         raise HTTPException(
             status_code=422,
-            detail=f"Invalid trade output from strategy code: {exc}",
-        ) from exc
-
-    result = compute_metrics(trades, config.initial_capital, config.start_date, config.end_date)
+            detail=f"Strategy code execution failed: {service_result.error[:500]}",
+        )
 
     logger.info(
-        "Sandbox backtest complete for %s: %d trades, execution %.2fs",
+        "Backtest complete for %s: %d trades",
         strategy.strategy_id,
-        len(trades),
-        exec_result.execution_time_seconds,
+        len(run.trades),
     )
-    return result, trades
+    return run.result, run.trades
 
 
 class _PaperTradingDataUnavailable(Exception):

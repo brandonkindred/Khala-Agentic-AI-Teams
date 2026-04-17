@@ -1,10 +1,16 @@
 """
 Paper Trading Agent — validates strategy code against recent/live market data.
 
-Runs the same Python strategy code through the :class:`SandboxRunner` subprocess
-sandbox that backtesting uses, but against *recent* market data instead of
-historical.  When results diverge from the backtest, an LLM agent reviews both
-sets of trades and produces a factual analysis explaining why.
+Runs the Python strategy code through the unified :class:`TradingService`
+event loop (the same code path backtests use) against *recent* market data
+instead of historical. When results diverge from the backtest, an LLM
+agent reviews both sets of trades and produces a factual analysis
+explaining why.
+
+Note: the live-data path lives in
+``trading_service.modes.paper_trade.run_paper_trade`` (PR 2). This agent
+is the non-live "recent daily bars" path and is only reached when
+``INVESTMENT_LIVE_PAPER_ENABLED`` is off.
 """
 
 from __future__ import annotations
@@ -21,7 +27,6 @@ from llm_service import get_strands_model
 
 from .market_data_service import OHLCVBar
 from .models import (
-    BacktestConfig,
     BacktestRecord,
     BacktestResult,
     PaperTradingComparison,
@@ -32,9 +37,6 @@ from .models import (
     TradeRecord,
     get_fee_defaults,
 )
-from .strategy_lab.executor.sandbox_runner import SandboxRunner
-from .strategy_lab.executor.trade_builder import build_trade_records
-from .trade_simulator import compute_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +133,6 @@ class PaperTradingAgent:
                 system_prompt=_DIVERGENCE_SYSTEM,
             )
         )
-        self._sandbox = SandboxRunner()
 
     def run_session(
         self,
@@ -143,7 +144,12 @@ class PaperTradingAgent:
         transaction_cost_bps: Optional[float] = None,
         slippage_bps: Optional[float] = None,
     ) -> PaperTradingSession:
-        """Run strategy code against recent market data in the subprocess sandbox."""
+        """Run strategy code against recent market data via ``TradingService``."""
+        # Local imports to keep module-load cheap and avoid a circular dep: the
+        # trading_service imports from this package's ``models``.
+        from .models import BacktestConfig
+        from .trading_service.modes.backtest import run_backtest
+
         # Resolve fees from strategy's asset class when not explicitly provided
         if transaction_cost_bps is None or slippage_bps is None:
             fee_defaults = get_fee_defaults(strategy.asset_class)
@@ -179,7 +185,7 @@ class PaperTradingAgent:
             started_at=now,
         )
 
-        # Build config for sandbox execution
+        # Build config for the unified TradingService run.
         config = BacktestConfig(
             start_date=data_start,
             end_date=data_end,
@@ -190,32 +196,48 @@ class PaperTradingAgent:
             rebalance_frequency="daily",
         )
 
-        # Run strategy code in sandbox (same as backtesting)
-        exec_result = self._sandbox.run(strategy_code, market_data, config)
+        # Run the strategy through the same event-driven path backtests use.
+        # The ``strategy_code`` argument is honoured by run_backtest via
+        # ``StrategySpec.strategy_code``; rebuild the spec if the caller
+        # passed it out-of-band so both codepaths remain in lockstep.
+        strategy_for_run = strategy
+        if strategy.strategy_code != strategy_code:
+            strategy_for_run = strategy.model_copy(update={"strategy_code": strategy_code})
 
-        if not exec_result.success:
+        try:
+            run = run_backtest(strategy=strategy_for_run, config=config, market_data=market_data)
+        except ValueError as exc:
+            # Missing strategy_code or config issue — terminal.
+            session.status = PaperTradingStatus.FAILED
+            session.divergence_analysis = f"Paper trading could not start: {exc}"
+            session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+            return session
+
+        service_result = run.service_result
+        if service_result.lookahead_violation:
             logger.warning(
-                "Paper trading sandbox execution failed: %s — %s",
-                exec_result.error_type,
-                exec_result.stderr[:500],
+                "Paper trading aborted: strategy accessed look-ahead data — %s",
+                (service_result.error or "")[:500],
             )
             session.status = PaperTradingStatus.FAILED
             session.divergence_analysis = (
-                f"Strategy code execution failed ({exec_result.error_type}): "
-                f"{exec_result.stderr[:500]}"
+                f"Strategy code attempted to read future data: {(service_result.error or '')[:500]}"
+            )
+            session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+            return session
+        if service_result.error and not run.trades:
+            logger.warning(
+                "Paper trading strategy execution failed: %s",
+                service_result.error[:500],
+            )
+            session.status = PaperTradingStatus.FAILED
+            session.divergence_analysis = (
+                f"Strategy code execution failed: {service_result.error[:500]}"
             )
             session.completed_at = datetime.now(tz=timezone.utc).isoformat()
             return session
 
-        # Build trade records (same as backtesting)
-        try:
-            trades = build_trade_records(exec_result.raw_trades, config)
-        except ValueError as exc:
-            logger.warning("Paper trading trade builder failed: %s", exc)
-            session.status = PaperTradingStatus.FAILED
-            session.divergence_analysis = f"Trade record construction failed: {exc}"
-            session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-            return session
+        trades = run.trades
 
         # Populate session from execution result
         session.trades = trades
@@ -223,9 +245,7 @@ class PaperTradingAgent:
         session.completed_at = datetime.now(tz=timezone.utc).isoformat()
 
         if trades:
-            first_date = trades[0].entry_date
-            last_date = trades[-1].exit_date
-            session.result = compute_metrics(trades, initial_capital, first_date, last_date)
+            session.result = run.result
             session.comparison = self.compare_performance(
                 session.result,
                 backtest_record.result,
