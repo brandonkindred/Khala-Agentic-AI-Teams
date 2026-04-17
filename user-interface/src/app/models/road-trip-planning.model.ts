@@ -158,6 +158,12 @@ export interface RoadTripSessionState {
   previousItineraries: TripItinerary[];
   /** True when the trip context has changed since `itinerary` was produced. */
   dirtyRePlan: boolean;
+  /**
+   * Slot keys the user has explicitly declined (e.g. "skip for now",
+   * "flexible", "I'm done"). These are skipped by the slot picker so
+   * the chat doesn't re-ask a question the user already dismissed.
+   */
+  declinedSlots: TripSlotKey[];
 }
 
 export const DEFAULT_TRIP: TripRequest = {

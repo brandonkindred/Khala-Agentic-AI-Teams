@@ -91,56 +91,120 @@ export function detectIntent(message: string, pendingSlot: TripSlotKey | null): 
 // Value parsers
 // ---------------------------------------------------------------------------
 
+/**
+ * Outcome of trying to parse a user answer into a slot.
+ *
+ * - `accepted` — we stored a real value and should move on.
+ * - `declined` — user explicitly opted out (e.g. "skip for now", "flexible",
+ *   "I'm done"). The slot stays empty and the picker won't ask again.
+ * - neither  — answer was unintelligible; caller should re-prompt.
+ */
+export interface ParseResult {
+  trip: TripRequest;
+  accepted: boolean;
+  declined: boolean;
+}
+
+/**
+ * Per-slot matcher for "I'd rather skip this" phrases. Keyed separately
+ * from the parsers so the decline vocabulary can evolve independently.
+ */
+function isDeclineForSlot(slot: TripSlotKey, raw: string): boolean {
+  const v = raw.trim().toLowerCase();
+  if (!v) return false;
+  switch (slot) {
+    case 'end_location':
+      return /^(round ?trip|same|back|loop|no|none|still deciding|not sure|don'?t know)\b/.test(v);
+    case 'trip_duration_days':
+      return /^(flexible|not sure|don'?t know|tbd|whatever|we'?ll see)\b/.test(v);
+    case 'travel_start_date':
+      return /^(flexible|not sure|don'?t know|tbd|whenever|we'?ll see)\b/.test(v);
+    case 'required_stops':
+      return /^(none(\s+specific|\s+in\s+particular|\s+yet)?|skip(\s+for\s+now)?|no(\s+specific(\s+stops)?)?|nothing|not\s+sure|we'?ll\s+see)\b/.test(v);
+    case 'preferences':
+      return /^(i'?m\s+done|done|we'?re\s+good|that'?s\s+all|that'?s it|nothing( else)?|no( more| thanks)?|skip|none)\b/.test(v);
+    case 'start_location':
+    case 'travelers':
+    case 'vehicle_type':
+    case 'budget_level':
+      return false; // required (or always has a default) — never decline
+  }
+}
+
 export function parseSlotValue(
   slot: TripSlotKey,
   raw: string,
   current: TripRequest,
-): TripRequest {
+): ParseResult {
   const value = raw.trim();
   const trip: TripRequest = { ...current };
+
+  // Decline phrases short-circuit the parser for every slot where they
+  // apply. This is what keeps "None specific" from becoming a literal stop
+  // and "I'm done" from becoming a preference string.
+  if (isDeclineForSlot(slot, value)) {
+    return { trip, accepted: false, declined: true };
+  }
+
   switch (slot) {
     case 'start_location':
+      if (!value) return { trip, accepted: false, declined: false };
       trip.start_location = titleCasePlace(value);
-      break;
+      return { trip, accepted: true, declined: false };
+
     case 'end_location':
-      trip.end_location = /^(same|round ?trip|back|loop|no|none)/i.test(value)
-        ? null
-        : titleCasePlace(value);
-      break;
+      // Decline cases ("round trip" etc.) are handled above; any remaining
+      // value is a real destination.
+      if (!value) return { trip, accepted: false, declined: false };
+      trip.end_location = titleCasePlace(value);
+      return { trip, accepted: true, declined: false };
+
     case 'trip_duration_days': {
       const m = value.match(/(\d+)\s*(day|night|week)?/i);
-      if (m) {
-        const n = parseInt(m[1], 10);
-        const unit = (m[2] || 'day').toLowerCase();
-        trip.trip_duration_days = unit.startsWith('week') ? n * 7 : n;
-      }
-      break;
+      if (!m) return { trip, accepted: false, declined: false };
+      const n = parseInt(m[1], 10);
+      const unit = (m[2] || 'day').toLowerCase();
+      trip.trip_duration_days = unit.startsWith('week') ? n * 7 : n;
+      return { trip, accepted: true, declined: false };
     }
-    case 'travel_start_date':
-      trip.travel_start_date = parseDate(value);
-      break;
-    case 'travelers':
-      trip.travelers = parseTravelers(value);
-      break;
-    case 'required_stops':
-      trip.required_stops = value
+
+    case 'travel_start_date': {
+      const d = parseDate(value);
+      if (d === null) return { trip, accepted: false, declined: false };
+      trip.travel_start_date = d;
+      return { trip, accepted: true, declined: false };
+    }
+
+    case 'travelers': {
+      const parsed = parseTravelers(value);
+      if (parsed.length === 0) return { trip, accepted: false, declined: false };
+      trip.travelers = parsed;
+      return { trip, accepted: true, declined: false };
+    }
+
+    case 'required_stops': {
+      const stops = value
         .split(/[,;]|\band\b/)
         .map((s) => titleCasePlace(s.trim()))
         .filter(Boolean);
-      break;
+      if (stops.length === 0) return { trip, accepted: false, declined: false };
+      trip.required_stops = stops;
+      return { trip, accepted: true, declined: false };
+    }
+
     case 'vehicle_type':
       trip.vehicle_type = parseVehicle(value);
-      break;
+      return { trip, accepted: true, declined: false };
+
     case 'budget_level':
       trip.budget_level = parseBudget(value);
-      break;
+      return { trip, accepted: true, declined: false };
+
     case 'preferences':
-      if (value && !/^(none|skip|no)$/i.test(value)) {
-        trip.preferences = [...trip.preferences, value];
-      }
-      break;
+      if (!value) return { trip, accepted: false, declined: false };
+      trip.preferences = [...trip.preferences, value];
+      return { trip, accepted: true, declined: false };
   }
-  return trip;
 }
 
 function titleCasePlace(s: string): string {
@@ -292,10 +356,18 @@ const GREETING: ChatMessage = {
   quickReplies: ['Start from scratch', 'Surprise me'],
 };
 
-/** Pick the next slot to ask about, preferring required then useful fields. */
-export function pickNextSlot(trip: TripRequest): TripSlotKey | null {
+/**
+ * Pick the next slot to ask about, preferring required then useful fields.
+ * Slots the user has explicitly declined are skipped so the chat doesn't
+ * loop on answered-but-empty optional fields.
+ */
+export function pickNextSlot(
+  trip: TripRequest,
+  declined: ReadonlySet<TripSlotKey> = new Set(),
+): TripSlotKey | null {
+  const isAskable = (key: TripSlotKey) => isSlotEmpty(trip, key) && !declined.has(key);
   for (const key of REQUIRED_SLOTS) {
-    if (isSlotEmpty(trip, key)) return key;
+    if (isAskable(key)) return key;
   }
   const order: TripSlotKey[] = [
     'trip_duration_days',
@@ -307,7 +379,7 @@ export function pickNextSlot(trip: TripRequest): TripSlotKey | null {
     'preferences',
   ];
   for (const key of order) {
-    if (isSlotEmpty(trip, key)) return key;
+    if (isAskable(key)) return key;
   }
   return null;
 }
@@ -317,7 +389,7 @@ export function isSlotEmpty(trip: TripRequest, slot: TripSlotKey): boolean {
     case 'start_location':
       return !trip.start_location;
     case 'end_location':
-      return trip.end_location === null && trip.start_location === '';
+      return trip.end_location === null;
     case 'trip_duration_days':
       return trip.trip_duration_days === null;
     case 'travel_start_date':
@@ -327,7 +399,7 @@ export function isSlotEmpty(trip: TripRequest, slot: TripSlotKey): boolean {
     case 'required_stops':
       return trip.required_stops.length === 0;
     case 'vehicle_type':
-      return trip.vehicle_type === 'car' && !trip.start_location;
+      return trip.vehicle_type === 'car';
     case 'budget_level':
       return false; // always has a default — don't nag
     case 'preferences':

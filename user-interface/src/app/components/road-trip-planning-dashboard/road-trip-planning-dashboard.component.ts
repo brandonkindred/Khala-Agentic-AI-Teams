@@ -85,6 +85,8 @@ export class RoadTripPlanningDashboardComponent implements OnInit, AfterViewChec
   messages: ChatMessage[] = [];
   trip: TripRequest = freshTrip();
   pendingSlot: TripSlotKey | null = null;
+  /** Slots the user has explicitly opted out of ("skip for now", "flexible", "I'm done"). */
+  declinedSlots = new Set<TripSlotKey>();
 
   // --- Itinerary state ---
   itinerary: TripItinerary | null = null;
@@ -116,6 +118,7 @@ export class RoadTripPlanningDashboardComponent implements OnInit, AfterViewChec
       this.itinerary = restored.itinerary;
       this.previousItineraries = restored.previousItineraries;
       this.dirtyRePlan = restored.dirtyRePlan;
+      this.declinedSlots = new Set(restored.declinedSlots ?? []);
     } else {
       this.startFreshConversation();
     }
@@ -158,6 +161,7 @@ export class RoadTripPlanningDashboardComponent implements OnInit, AfterViewChec
     this.itinerary = null;
     this.previousItineraries = [];
     this.dirtyRePlan = false;
+    this.declinedSlots = new Set();
     this.pendingSlot = 'start_location';
     this.messages = [initialGreeting(), promptForSlot('start_location')];
   }
@@ -227,27 +231,41 @@ export class RoadTripPlanningDashboardComponent implements OnInit, AfterViewChec
   }
 
   private applySlotFill(slot: TripSlotKey, raw: string): void {
-    const next = parseSlotValue(slot, raw, this.trip);
-    const changed = JSON.stringify(next) !== JSON.stringify(this.trip);
-    this.trip = next;
-    this.dirtyRePlan = this.itinerary !== null && changed;
-
-    const display = displayValueFor(slot, next);
+    const result = parseSlotValue(slot, raw, this.trip);
     const pretty = labelFor(slot);
-    if (display) {
-      this.respond(`Noted **${pretty}**: ${display}.`);
-    } else {
+
+    // User explicitly opted out of this optional field ("skip", "flexible",
+    // "I'm done"). Mark it declined so advanceSlot() doesn't ask again.
+    if (result.declined) {
+      this.declinedSlots.add(slot);
+      this.pendingSlot = null;
+      this.respond(`Got it — we'll leave **${pretty}** open for now.`);
+      return;
+    }
+
+    // Parser rejected the text (couldn't find a number, unparseable date,
+    // empty traveler list, etc.). Re-prompt rather than storing garbage.
+    if (!result.accepted) {
       this.respond(`I couldn't parse a value for **${pretty}** — want to try again?`);
       this.pendingSlot = slot;
       return;
     }
+
+    const changed = JSON.stringify(result.trip) !== JSON.stringify(this.trip);
+    this.trip = result.trip;
+    this.dirtyRePlan = this.itinerary !== null && changed;
+    // A fresh answer supersedes any prior decline of the same slot.
+    this.declinedSlots.delete(slot);
+
+    const display = displayValueFor(slot, result.trip);
+    this.respond(display ? `Noted **${pretty}**: ${display}.` : `Got it — **${pretty}** updated.`);
     this.pendingSlot = null;
   }
 
   private advanceSlot(): void {
     // If we're already in the middle of a slot, don't advance.
     if (this.pendingSlot) return;
-    const next = pickNextSlot(this.trip);
+    const next = pickNextSlot(this.trip, this.declinedSlots);
     if (next && isSlotEmpty(this.trip, next)) {
       this.pendingSlot = next;
       this.messages = [...this.messages, promptForSlot(next)];
@@ -356,11 +374,25 @@ export class RoadTripPlanningDashboardComponent implements OnInit, AfterViewChec
     this.editingValue = '';
     if (!value) return;
 
-    const next = parseSlotValue(key, value, this.trip);
-    const changed = JSON.stringify(next) !== JSON.stringify(this.trip);
-    this.trip = next;
-    if (changed) {
-      this.dirtyRePlan = this.itinerary !== null;
+    const result = parseSlotValue(key, value, this.trip);
+    if (!result.accepted && !result.declined) {
+      this.snackBar.open(
+        `Couldn't parse "${value}" for ${labelFor(key).toLowerCase()}`,
+        'OK',
+        { duration: 2500 },
+      );
+      return;
+    }
+
+    const changed = JSON.stringify(result.trip) !== JSON.stringify(this.trip);
+    this.trip = result.trip;
+    if (result.declined) {
+      this.declinedSlots.add(key);
+    } else {
+      this.declinedSlots.delete(key);
+    }
+    if (changed || result.declined) {
+      this.dirtyRePlan = this.itinerary !== null && changed;
       this.snackBar.open(`Updated ${labelFor(key).toLowerCase()}`, 'OK', { duration: 1800 });
     }
     this.persistSession();
@@ -469,6 +501,8 @@ export class RoadTripPlanningDashboardComponent implements OnInit, AfterViewChec
         itinerary: this.itinerary,
         previousItineraries: this.previousItineraries,
         dirtyRePlan: this.dirtyRePlan,
+        // Sets don't survive JSON.stringify — serialise to an array.
+        declinedSlots: Array.from(this.declinedSlots),
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch {
