@@ -62,13 +62,12 @@ def get_team_client(team_key: str, timeout: float | None = None) -> httpx.AsyncC
     """
     if team_key not in _team_clients:
         t = timeout or _DEFAULT_TIMEOUT
-        # read=None: SSE streams (and other long-lived responses) may have large
-        # idle gaps between chunks; a per-chunk read timeout silently truncates
-        # the stream and surfaces to the browser as ERR_INCOMPLETE_CHUNKED_ENCODING.
-        # connect/write/pool timeouts still guard against dead upstreams and
-        # stuck uploads, so dropping read-timeout does not remove failure-detection.
+        # Default timeout applies to non-streaming requests: bounded read-timeout
+        # ensures a stalled upstream doesn't hang the proxy indefinitely and that
+        # the circuit breaker gets a chance to record the failure. SSE requests
+        # override `read` to None at build_request time (see proxy_request).
         _team_clients[team_key] = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=None, write=t, pool=10.0),
+            timeout=httpx.Timeout(connect=10.0, read=t, write=t, pool=10.0),
             follow_redirects=False,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
@@ -117,8 +116,30 @@ async def proxy_request(
 
     body = await request.body()
 
+    # If the client is asking for an SSE response, override the read timeout
+    # for this single request so long idle gaps between chunks don't truncate
+    # the stream. Non-streaming calls keep the bounded client default.
+    accept_header = request.headers.get("accept", "").lower()
+    is_sse_request = "text/event-stream" in accept_header
+    effective_timeout = (
+        httpx.Timeout(
+            connect=10.0,
+            read=None,
+            write=timeout or _DEFAULT_TIMEOUT,
+            pool=10.0,
+        )
+        if is_sse_request
+        else httpx.USE_CLIENT_DEFAULT
+    )
+
     try:
-        req = client.build_request(method=request.method, url=url, headers=headers, content=body)
+        req = client.build_request(
+            method=request.method,
+            url=url,
+            headers=headers,
+            content=body,
+            timeout=effective_timeout,
+        )
         resp = await client.send(req, stream=True)
     except httpx.HTTPError as exc:
         circuit_breaker.record_failure(effective_key)

@@ -101,31 +101,33 @@ async def ask_stream(request: DeepthoughtRequest) -> StreamingResponse:
         yield ": stream open\n\n"
         last_byte_time = loop.time()
 
-        try:
-            while True:
-                try:
-                    event = event_queue.get_nowait()
-                except queue.Empty:
-                    if loop.time() - last_byte_time >= HEARTBEAT_INTERVAL:
-                        yield ": keepalive\n\n"
-                        last_byte_time = loop.time()
-                    await asyncio.sleep(0.1)
-                    continue
-                if event is None:
-                    break
-                yield f"event: agent_event\ndata: {event.model_dump_json()}\n\n"
-                last_byte_time = loop.time()
+        while True:
+            try:
+                event = event_queue.get_nowait()
+            except queue.Empty:
+                if loop.time() - last_byte_time >= HEARTBEAT_INTERVAL:
+                    yield ": keepalive\n\n"
+                    last_byte_time = loop.time()
+                await asyncio.sleep(0.1)
+                continue
+            if event is None:
+                break
+            yield f"event: agent_event\ndata: {event.model_dump_json()}\n\n"
+            last_byte_time = loop.time()
 
-            if result_holder and isinstance(result_holder[0], DeepthoughtResponse):
-                yield f"event: result\ndata: {result_holder[0].model_dump_json()}\n\n"
-            elif result_holder and isinstance(result_holder[0], Exception):
-                error_msg = json.dumps({"error": str(result_holder[0])})
-                yield f"event: error\ndata: {error_msg}\n\n"
-        finally:
-            # Always terminate the stream cleanly, even if the client disconnects
-            # or the generator is aborted — prevents dangling connections that
-            # surface as ERR_INCOMPLETE_CHUNKED_ENCODING in the browser.
-            yield "event: done\ndata: {}\n\n"
+        if result_holder and isinstance(result_holder[0], DeepthoughtResponse):
+            yield f"event: result\ndata: {result_holder[0].model_dump_json()}\n\n"
+        elif result_holder and isinstance(result_holder[0], Exception):
+            error_msg = json.dumps({"error": str(result_holder[0])})
+            yield f"event: error\ndata: {error_msg}\n\n"
+
+        # Terminate the stream cleanly on the normal completion path. We
+        # deliberately do NOT emit this from a finally block: if the client
+        # disconnects, Python raises GeneratorExit inside the generator, and
+        # yielding during cleanup raises "async generator ignored GeneratorExit".
+        # A disconnected client cannot receive `done` anyway, so emitting it
+        # only on normal completion is both correct and sufficient.
+        yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(
         _generate(),
