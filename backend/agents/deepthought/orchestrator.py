@@ -150,6 +150,7 @@ class DeepthoughtOrchestrator:
 
     def _register_spawn(self, spec: AgentSpec) -> bool:
         """Track a newly spawned agent.  Returns False to veto if budget exhausted."""
+        budget_warning_event: AgentEvent | None = None
         with self._lock:
             if self._agents_spawned >= self._agent_budget:
                 logger.warning(
@@ -158,27 +159,32 @@ class DeepthoughtOrchestrator:
                     spec.name,
                     spec.depth,
                 )
-                self._events.append(
-                    AgentEvent(
-                        event_type=AgentEventType.BUDGET_WARNING,
-                        agent_id=spec.agent_id,
-                        agent_name=spec.name,
-                        depth=spec.depth,
-                        detail=f"Budget exhausted ({self._agent_budget}), agent vetoed",
-                    )
+                budget_warning_event = AgentEvent(
+                    event_type=AgentEventType.BUDGET_WARNING,
+                    agent_id=spec.agent_id,
+                    agent_name=spec.name,
+                    depth=spec.depth,
+                    detail=f"Budget exhausted ({self._agent_budget}), agent vetoed",
                 )
-                return False
-            self._agents_spawned += 1
-            if spec.depth > self._max_depth_reached:
-                self._max_depth_reached = spec.depth
-            logger.info(
-                "Agent spawned: %s (depth=%d, total=%d/%d)",
-                spec.name,
-                spec.depth,
-                self._agents_spawned,
-                self._agent_budget,
-            )
-            return True
+            else:
+                self._agents_spawned += 1
+                if spec.depth > self._max_depth_reached:
+                    self._max_depth_reached = spec.depth
+                logger.info(
+                    "Agent spawned: %s (depth=%d, total=%d/%d)",
+                    spec.name,
+                    spec.depth,
+                    self._agents_spawned,
+                    self._agent_budget,
+                )
+        # Route the budget-warning through _collect_event (outside the lock) so
+        # the SSE stream's monkey-patched collector sees it. The previous direct
+        # append to self._events bypassed streaming and only showed up in the
+        # final response payload.
+        if budget_warning_event is not None:
+            self._collect_event(budget_warning_event)
+            return False
+        return True
 
     def _collect_event(self, event: AgentEvent) -> None:
         """Thread-safe event collection for streaming."""
