@@ -180,6 +180,7 @@ class SimulationResult:
     forced_close_count: int = 0
     evaluations_performed: int = 0
     bars_skipped_by_filter: int = 0
+    terminated_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -219,12 +220,83 @@ def compute_metrics(
     initial_capital: float,
     start_date: str,
     end_date: str,
+    *,
+    metrics_engine: str = "daily",
+    risk_free_rate: Optional[float] = None,
+    benchmark_equity: Optional[List[float]] = None,
+    benchmark_dates: Optional[List[Any]] = None,
 ) -> BacktestResult:
     """Compute aggregate performance metrics from trade records.
 
-    Uses CAGR for annualized returns and an equity-curve approach for volatility,
-    scaling by the average inter-trade gap rather than assuming daily returns.
+    ``metrics_engine="daily"`` (default, Phase 1) uses the
+    :mod:`investment_team.execution.metrics` daily-equity-curve estimator:
+    proper Sharpe/Sortino/Calmar, max-DD duration, and risk-free rate from
+    FRED (or the ``STRATEGY_LAB_RISK_FREE_RATE`` env / ``RFR_DEFAULT``).
+
+    ``metrics_engine="legacy"`` preserves the pre-refactor inter-trade-return
+    estimator for one release so persisted results stay byte-identical when
+    explicitly requested.
     """
+    if metrics_engine == "daily":
+        return _compute_metrics_daily(
+            trades,
+            initial_capital,
+            start_date,
+            end_date,
+            risk_free_rate=risk_free_rate,
+            benchmark_equity=benchmark_equity,
+            benchmark_dates=benchmark_dates,
+        )
+    return _compute_metrics_legacy(trades, initial_capital, start_date, end_date)
+
+
+def _compute_metrics_daily(
+    trades: List[TradeRecord],
+    initial_capital: float,
+    start_date: str,
+    end_date: str,
+    *,
+    risk_free_rate: Optional[float] = None,
+    benchmark_equity: Optional[List[float]] = None,
+    benchmark_dates: Optional[List[Any]] = None,
+) -> BacktestResult:
+    from .execution.metrics import compute_performance_metrics
+
+    m = compute_performance_metrics(
+        trades,
+        initial_capital,
+        start_date=start_date or None,
+        end_date=end_date or None,
+        risk_free_rate=risk_free_rate,
+        benchmark_equity=benchmark_equity,
+        benchmark_dates=benchmark_dates,
+    )
+    return BacktestResult(
+        total_return_pct=round(m.total_return_pct, 2),
+        annualized_return_pct=round(m.annualized_return_pct, 2),
+        volatility_pct=round(m.volatility_pct, 2),
+        sharpe_ratio=round(m.sharpe_ratio, 2),
+        max_drawdown_pct=round(m.max_drawdown_pct, 2),
+        win_rate_pct=round(m.win_rate_pct, 2),
+        profit_factor=m.profit_factor,
+        sortino_ratio=round(m.sortino_ratio, 2),
+        calmar_ratio=round(m.calmar_ratio, 2),
+        max_drawdown_duration_days=m.max_drawdown_duration_days,
+        risk_free_rate=m.risk_free_rate,
+        alpha_pct=m.alpha_pct,
+        beta=m.beta,
+        information_ratio=m.information_ratio,
+        metrics_engine="daily",
+    )
+
+
+def _compute_metrics_legacy(
+    trades: List[TradeRecord],
+    initial_capital: float,
+    start_date: str,
+    end_date: str,
+) -> BacktestResult:
+    """Pre-Phase-1 inter-trade-return estimator. Retained for diff runs."""
     if not trades:
         return BacktestResult(
             total_return_pct=0.0,
@@ -234,6 +306,7 @@ def compute_metrics(
             max_drawdown_pct=0.0,
             win_rate_pct=0.0,
             profit_factor=0.0,
+            metrics_engine="legacy",
         )
 
     wins = [t for t in trades if t.outcome == "win"]
@@ -314,6 +387,7 @@ def compute_metrics(
         max_drawdown_pct=round(max_dd, 2),
         win_rate_pct=win_rate,
         profit_factor=profit_factor,
+        metrics_engine="legacy",
     )
 
 
@@ -328,6 +402,12 @@ class TradeSimulationEngine:
     Accepts an ``evaluate_fn`` callback (typically an LLM call) that decides
     entry/exit for each bar.  A pre-filter skips bars with minimal price
     movement when no position is held, substantially reducing evaluate calls.
+
+    When ``lookahead_safe=True`` (Phase 2 default), the strategy evaluates on
+    bar *t* but its fill is deferred to bar *t+1*'s open — preventing the
+    LLM from peeking at a price that hasn't occurred yet.  The older
+    ``lookahead_safe=False`` preserves the pre-Phase-2 behaviour (fill at
+    same-bar close) for one release.
     """
 
     def __init__(
@@ -339,13 +419,19 @@ class TradeSimulationEngine:
         min_history_bars: int = 5,
         pre_filter_pct: float = 1.0,
         max_evaluations: int = 5000,
+        lookahead_safe: bool = True,
+        risk_limits: Optional[Dict[str, Any]] = None,
     ) -> None:
+        from .execution.risk_filter import RiskFilter, RiskLimits
+
         self.initial_capital = initial_capital
         self.cost_pct = transaction_cost_bps / 10_000.0
         self.slippage_bps = slippage_bps
         self.min_history_bars = min_history_bars
         self.pre_filter_pct = pre_filter_pct
         self.max_evaluations = max_evaluations
+        self.lookahead_safe = lookahead_safe
+        self._risk = RiskFilter(RiskLimits.from_legacy_dict(risk_limits or {}))
 
     # ------------------------------------------------------------------
 
@@ -365,7 +451,243 @@ class TradeSimulationEngine:
             max_trades: stop after this many completed trades (``None`` = no limit)
             record_decisions: store every evaluation result in ``SimulationResult.decisions``
         """
-        # Build unified timeline sorted by date
+        if self.lookahead_safe:
+            return self._run_lookahead_safe(
+                market_data, evaluate_fn, max_trades=max_trades, record_decisions=record_decisions
+            )
+        return self._run_legacy(
+            market_data, evaluate_fn, max_trades=max_trades, record_decisions=record_decisions
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 2: look-ahead-safe loop (fill at next bar's open)
+    # ------------------------------------------------------------------
+
+    def _run_lookahead_safe(
+        self,
+        market_data: Dict[str, List[OHLCVBar]],
+        evaluate_fn: EvaluateCallback,
+        *,
+        max_trades: Optional[int] = None,
+        record_decisions: bool = False,
+    ) -> SimulationResult:
+        timeline: List[tuple[str, str, OHLCVBar]] = []
+        for symbol, bars in market_data.items():
+            for bar in bars:
+                timeline.append((bar.date, symbol, bar))
+        timeline.sort(key=lambda x: x[0])
+
+        # Group by date so that all symbols for one day are processed
+        # together — prices, fills, and drawdown are evaluated on a
+        # consistent cross-sectional snapshot rather than mixed dates.
+        daily_groups: List[tuple[str, List[tuple[str, OHLCVBar]]]] = []
+        if timeline:
+            cur_date = timeline[0][0]
+            cur_bars: List[tuple[str, OHLCVBar]] = []
+            for bar_date, symbol, bar in timeline:
+                if bar_date != cur_date:
+                    daily_groups.append((cur_date, cur_bars))
+                    cur_date = bar_date
+                    cur_bars = []
+                cur_bars.append((symbol, bar))
+            daily_groups.append((cur_date, cur_bars))
+
+        symbol_history: Dict[str, List[OHLCVBar]] = {sym: [] for sym in market_data}
+        last_price: Dict[str, float] = {}
+
+        capital = self.initial_capital
+        peak_equity = self.initial_capital
+        terminated_reason: Optional[str] = None
+        open_positions: Dict[str, OpenPosition] = {}
+        pending_entries: Dict[str, Dict[str, Any]] = {}
+        pending_exits: Dict[str, bool] = {}
+        trades: List[TradeRecord] = []
+        decisions: List[Dict[str, Any]] = []
+        trade_num = 0
+        cumulative_pnl = 0.0
+        evaluations = 0
+        skipped = 0
+        stop = False
+
+        for bar_date, day_bars in daily_groups:
+            if stop:
+                break
+
+            # --- Phase A: update all prices for this date ---
+            for symbol, bar in day_bars:
+                last_price[symbol] = bar.close
+
+            # --- Phase B: execute all pending fills at this date's opens ---
+            for symbol, bar in day_bars:
+                if symbol in pending_entries:
+                    pending = pending_entries.pop(symbol)
+                    action = pending["action"]
+                    shares = float(pending.get("shares", 0))
+
+                    recent_closes = [b.close for b in symbol_history.get(symbol, [])]
+                    if shares <= 0:
+                        sizing = self._risk.size(bar.open, capital, recent_closes)
+                        shares = sizing.shares
+
+                    notional = shares * bar.open
+                    gate = self._risk.can_enter(symbol, notional, capital, open_positions)
+
+                    if (
+                        gate.allowed
+                        and shares > 0
+                        and capital >= notional
+                        and symbol not in open_positions
+                    ):
+                        slippage_mult = 1.0 + self.slippage_bps / 10_000.0
+                        entry_bid_price = round(bar.open, 4 if bar.open < 10 else 2)
+                        entry_price = round(bar.open * slippage_mult, 4 if bar.open < 10 else 2)
+                        position_value = round(entry_price * shares, 2)
+                        capital -= position_value
+
+                        open_positions[symbol] = OpenPosition(
+                            symbol=symbol,
+                            side="long" if action == "enter_long" else "short",
+                            entry_date=bar_date,
+                            entry_price=entry_price,
+                            shares=shares,
+                            position_value=position_value,
+                            entry_bid_price=entry_bid_price,
+                            entry_order_type="market",
+                        )
+
+                if symbol in pending_exits and symbol in open_positions:
+                    del pending_exits[symbol]
+                    pos = open_positions.pop(symbol)
+                    trade_num += 1
+                    trade = self._close_position(pos, bar.open, bar_date, trade_num, cumulative_pnl)
+                    cumulative_pnl = trade.cumulative_pnl
+                    capital += round(pos.shares * trade.exit_price, 2)
+                    trades.append(trade)
+
+                    if max_trades is not None and len(trades) >= max_trades:
+                        stop = True
+                        break
+
+            if stop:
+                break
+
+            # --- Phase C: drawdown circuit-breaker (once per date) ---
+            mtm_value = 0.0
+            for pos_sym, pos in open_positions.items():
+                price_now = last_price.get(pos_sym, pos.entry_price)
+                if pos.side == "long":
+                    mtm_value += pos.shares * price_now
+                else:
+                    mtm_value += pos.shares * (2 * pos.entry_price - price_now)
+            current_equity = capital + mtm_value
+            if current_equity > peak_equity:
+                peak_equity = current_equity
+            dd = self._risk.check_drawdown(current_equity, peak_equity)
+            if dd.breached:
+                terminated_reason = (
+                    f"max_drawdown breached ({dd.current_drawdown_pct:.1f}% >= {dd.limit_pct}%)"
+                )
+                logger.warning("Simulation terminated: %s", terminated_reason)
+                break
+
+            # --- Phase D: evaluate all symbols for this date ---
+            for symbol, bar in day_bars:
+                symbol_history[symbol].append(bar)
+                recent = symbol_history[symbol][-20:]
+                has_position = symbol in open_positions
+
+                if evaluations >= self.max_evaluations:
+                    logger.warning(
+                        "Reached max evaluations (%d), stopping simulation with %d trades",
+                        self.max_evaluations,
+                        len(trades),
+                    )
+                    stop = True
+                    break
+
+                if not self._should_evaluate(recent, has_position):
+                    skipped += 1
+                    continue
+
+                try:
+                    decision = evaluate_fn(symbol, bar, recent, open_positions.get(symbol), capital)
+                except Exception as exc:
+                    logger.warning("Evaluation failed for %s on %s: %s", symbol, bar_date, exc)
+                    decision = {
+                        "action": "hold",
+                        "confidence": 0.0,
+                        "shares": 0,
+                        "reasoning": f"Error: {exc}",
+                    }
+
+                evaluations += 1
+                if record_decisions:
+                    decisions.append({"date": bar_date, "symbol": symbol, **decision})
+
+                if evaluations % 500 == 0:
+                    logger.info(
+                        "Simulation progress: %d evaluations, %d trades completed",
+                        evaluations,
+                        len(trades),
+                    )
+
+                dec_action = decision.get("action", "hold")
+
+                if dec_action in ("enter_long", "enter_short") and not has_position:
+                    pending_entries[symbol] = decision
+                elif dec_action == "exit" and has_position:
+                    pending_exits[symbol] = True
+
+        # Flush remaining pending exits (last bar → no next bar, fill at last close)
+        for symbol in list(pending_exits):
+            if symbol in open_positions and symbol in symbol_history and symbol_history[symbol]:
+                last_bar = symbol_history[symbol][-1]
+                pos = open_positions.pop(symbol)
+                trade_num += 1
+                trade = self._close_position(
+                    pos, last_bar.close, last_bar.date, trade_num, cumulative_pnl
+                )
+                cumulative_pnl = trade.cumulative_pnl
+                capital += round(pos.shares * trade.exit_price, 2)
+                trades.append(trade)
+        pending_exits.clear()
+
+        # Force-close remaining open positions
+        forced = 0
+        for symbol, pos in list(open_positions.items()):
+            if symbol in symbol_history and symbol_history[symbol]:
+                last_bar = symbol_history[symbol][-1]
+                trade_num += 1
+                trade = self._close_position(
+                    pos, last_bar.close, last_bar.date, trade_num, cumulative_pnl
+                )
+                cumulative_pnl = trade.cumulative_pnl
+                capital += round(pos.shares * trade.exit_price, 2)
+                trades.append(trade)
+                forced += 1
+
+        return SimulationResult(
+            trades=trades,
+            decisions=decisions,
+            final_capital=capital,
+            forced_close_count=forced,
+            evaluations_performed=evaluations,
+            bars_skipped_by_filter=skipped,
+            terminated_reason=terminated_reason,
+        )
+
+    # ------------------------------------------------------------------
+    # Legacy loop: fills at same-bar close (pre-Phase-2, kept for one release)
+    # ------------------------------------------------------------------
+
+    def _run_legacy(
+        self,
+        market_data: Dict[str, List[OHLCVBar]],
+        evaluate_fn: EvaluateCallback,
+        *,
+        max_trades: Optional[int] = None,
+        record_decisions: bool = False,
+    ) -> SimulationResult:
         timeline: List[tuple[str, str, OHLCVBar]] = []
         for symbol, bars in market_data.items():
             for bar in bars:
@@ -388,7 +710,6 @@ class TradeSimulationEngine:
             recent = symbol_history[symbol][-20:]
             has_position = symbol in open_positions
 
-            # Check evaluation budget
             if evaluations >= self.max_evaluations:
                 logger.warning(
                     "Reached max evaluations (%d), stopping simulation with %d trades",
@@ -397,12 +718,10 @@ class TradeSimulationEngine:
                 )
                 break
 
-            # Pre-filter: skip bars unlikely to trigger signals
             if not self._should_evaluate(recent, has_position):
                 skipped += 1
                 continue
 
-            # Call the evaluate callback
             try:
                 decision = evaluate_fn(symbol, bar, recent, open_positions.get(symbol), capital)
             except Exception as exc:
@@ -461,7 +780,6 @@ class TradeSimulationEngine:
                 capital += round(pos.shares * trade.exit_price, 2)
                 trades.append(trade)
 
-            # Check trade limit
             if max_trades is not None and len(trades) >= max_trades:
                 break
 

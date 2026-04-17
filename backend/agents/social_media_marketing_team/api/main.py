@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 import threading
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import List
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 
 from job_service_client import (
     JOB_STATUS_COMPLETED,
@@ -56,6 +58,10 @@ from .request_models import (
     RunMarketingTeamResponse,
     TrendLatestResponse,
     TrendRunResponse,
+    WinningPostCreateRequest,
+    WinningPostCreateResponse,
+    WinningPostDeleteResponse,
+    WinningPostResponse,
 )
 from .trend_scheduler import get_latest_digest, run_trend_job, start_scheduler, stop_scheduler
 
@@ -73,12 +79,25 @@ async def _lifespan(_application: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.exception("social_media_marketing postgres schema registration failed")
     start_scheduler()
+    try:
+        from shared_postgres import register_team_schemas as _register_team_schemas
+        from social_media_marketing_team.postgres import SCHEMA as _SM_SCHEMA
+
+        _register_team_schemas(_SM_SCHEMA)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "social marketing postgres schema registration failed"
+        )
     yield
     stop_scheduler()
     try:
-        close_pool()
+        from shared_postgres import close_pool as _close_pool
+
+        _close_pool()
     except Exception:
-        pass
+        logging.getLogger(__name__).warning(
+            "social marketing shared_postgres close_pool failed", exc_info=True
+        )
 
 
 init_otel(service_name="social-media-marketing-team", team_key="social_marketing")
@@ -111,6 +130,129 @@ def _now() -> str:
 
 def _update_job(job_id: str, **fields) -> None:
     _job_manager.update_job(job_id, **fields)
+
+
+# ---------------------------------------------------------------------------
+# Winning Posts Bank — helpers
+# ---------------------------------------------------------------------------
+
+
+_BANK_TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9]+")
+
+
+def _bank_ingest_threshold() -> float:
+    try:
+        return float(os.getenv("SOCIAL_MARKETING_WINNING_POSTS_INGEST_THRESHOLD", "0.7"))
+    except (TypeError, ValueError):
+        return 0.7
+
+
+def _metric_lookup(metrics: List[Any], name: str) -> float:
+    """Return the value of a named metric from a list of MetricDefinition-like objects."""
+    for m in metrics or []:
+        m_name = getattr(m, "name", None)
+        if m_name is None and isinstance(m, dict):
+            m_name = m.get("name")
+        if m_name == name:
+            value = getattr(m, "value", None)
+            if value is None and isinstance(m, dict):
+                value = m.get("value")
+            try:
+                return float(value or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+def _compute_engagement_score(metrics: List[Any]) -> float:
+    """Derive a 0..1 engagement score from a list of MetricDefinitions.
+
+    Prefers an explicit ``engagement_rate`` metric when present. Falls
+    back to a composite of likes/comments/shares/impressions.
+    """
+    rate = _metric_lookup(metrics, "engagement_rate")
+    if rate > 0:
+        return min(1.0, rate)
+    impressions = _metric_lookup(metrics, "impressions")
+    if impressions <= 0:
+        return 0.0
+    likes = _metric_lookup(metrics, "likes")
+    comments = _metric_lookup(metrics, "comments")
+    shares = _metric_lookup(metrics, "shares")
+    return min(1.0, (likes + 2 * comments + 3 * shares) / impressions)
+
+
+def _tokenize_for_bank(text: str) -> List[str]:
+    seen: set[str] = set()
+    result: List[str] = []
+    for match in _BANK_TOKEN_RE.findall(text or ""):
+        token = match.lower()
+        if len(token) >= 4 and token not in seen:
+            seen.add(token)
+            result.append(token)
+    return result
+
+
+def _linked_goals_from_job(job: Dict[str, Any], concept_title: str) -> List[str]:
+    """Look up linked_goals for a concept_title from a job's result proposal."""
+    result = job.get("result") if isinstance(job, dict) else None
+    if not isinstance(result, dict):
+        return []
+    plan = result.get("content_plan")
+    if isinstance(plan, dict):
+        for idea in plan.get("approved_ideas") or []:
+            if isinstance(idea, dict) and idea.get("title") == concept_title:
+                return list(idea.get("linked_goals") or [])
+    return []
+
+
+def _auto_ingest_winning_posts(job: Dict[str, Any], job_id: str, observations: List[Any]) -> int:
+    """Save observations that beat the engagement threshold to the bank.
+
+    Best-effort: failures are logged and ingestion of other
+    observations continues. Returns the number of rows inserted.
+    """
+    threshold = _bank_ingest_threshold()
+    try:
+        from social_media_marketing_team.shared import save_winning_post
+    except Exception as e:
+        logger.warning("Winning posts bank module unavailable: %s", e)
+        return 0
+
+    inserted = 0
+    for obs in observations or []:
+        try:
+            score = _compute_engagement_score(getattr(obs, "metrics", []) or [])
+            if score < threshold:
+                continue
+            platform = getattr(obs, "platform", "")
+            platform_str = platform.value if hasattr(platform, "value") else str(platform)
+            metrics_dict = {
+                m.name: float(m.value)
+                for m in (getattr(obs, "metrics", None) or [])
+                if getattr(m, "name", None) is not None
+            }
+            keywords = _tokenize_for_bank(
+                f"{getattr(obs, 'concept_title', '')} {getattr(obs, 'campaign_name', '')}"
+            )
+            save_winning_post(
+                title=getattr(obs, "concept_title", ""),
+                body="",
+                platform=platform_str,
+                keywords=keywords,
+                metrics=metrics_dict,
+                engagement_score=score,
+                linked_goals=_linked_goals_from_job(job, getattr(obs, "concept_title", "")),
+                source_job_id=job_id,
+            )
+            inserted += 1
+        except Exception as e:
+            logger.warning("Winning posts bank auto-ingest failed (non-fatal): %s", e)
+    if inserted:
+        logger.info(
+            "Winning posts bank: auto-ingested %d observation(s) from job %s", inserted, job_id
+        )
+    return inserted
 
 
 def mark_all_running_jobs_failed(reason: str) -> None:
@@ -331,9 +473,14 @@ def ingest_performance(job_id: str, payload: PerformanceIngestRequest) -> Perfor
     observations.extend([obs.model_dump() for obs in payload.observations])
     _job_manager.update_job(job_id, performance_observations=observations, last_updated_at=_now())
 
-    persisted_count = persist_observations_to_bank(job, job_id, payload.observations)
+    _auto_ingest_winning_posts(job, job_id, payload.observations)
 
-    campaign_name = _extract_campaign_name(job)
+    campaign_name = None
+    result = job.get("result")
+    if isinstance(result, dict):
+        proposal = result.get("proposal")
+        if isinstance(proposal, dict):
+            campaign_name = proposal.get("campaign_name")
 
     return PerformanceIngestResponse(
         job_id=job_id,
@@ -546,6 +693,93 @@ def get_latest_trends() -> TrendLatestResponse:
             detail="No trend digest available yet. Trigger one via POST /social-marketing/trends/run.",
         )
     return TrendLatestResponse(digest=digest)
+
+
+# ---------------------------------------------------------------------------
+# Routes — Winning Posts Bank
+# ---------------------------------------------------------------------------
+
+
+def _bank_503(exc: Exception) -> HTTPException:
+    """Translate bank-layer errors into an explicit 503 at the CRUD boundary."""
+    return HTTPException(
+        status_code=503,
+        detail=(
+            "Winning posts bank unavailable "
+            f"(is POSTGRES_HOST configured?): {type(exc).__name__}: {exc}"
+        ),
+    )
+
+
+@app.post(
+    "/social-marketing/winning-posts",
+    response_model=WinningPostCreateResponse,
+    status_code=201,
+)
+def create_winning_post(payload: WinningPostCreateRequest) -> WinningPostCreateResponse:
+    try:
+        from social_media_marketing_team.shared import save_winning_post
+    except Exception as e:
+        raise _bank_503(e) from e
+    try:
+        post_id = save_winning_post(
+            title=payload.title,
+            body=payload.body,
+            platform=payload.platform,
+            keywords=list(payload.keywords),
+            metrics=dict(payload.metrics),
+            engagement_score=payload.engagement_score,
+            linked_goals=list(payload.linked_goals),
+            source_job_id=payload.source_job_id,
+            summary=payload.summary,
+        )
+    except Exception as e:
+        raise _bank_503(e) from e
+    return WinningPostCreateResponse(id=post_id)
+
+
+@app.get("/social-marketing/winning-posts", response_model=List[WinningPostResponse])
+def list_winning_posts_route(limit: int = 50, offset: int = 0) -> List[WinningPostResponse]:
+    try:
+        from social_media_marketing_team.shared import list_winning_posts
+    except Exception as e:
+        raise _bank_503(e) from e
+    try:
+        rows = list_winning_posts(limit=max(1, min(limit, 500)), offset=max(0, offset))
+    except Exception as e:
+        raise _bank_503(e) from e
+    return [WinningPostResponse(**r) for r in rows]
+
+
+@app.get("/social-marketing/winning-posts/{post_id}", response_model=WinningPostResponse)
+def get_winning_post_route(post_id: str) -> WinningPostResponse:
+    try:
+        from social_media_marketing_team.shared import get_winning_post
+    except Exception as e:
+        raise _bank_503(e) from e
+    try:
+        row: Optional[Dict[str, Any]] = get_winning_post(post_id)
+    except Exception as e:
+        raise _bank_503(e) from e
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Winning post {post_id} not found")
+    return WinningPostResponse(**row)
+
+
+@app.delete("/social-marketing/winning-posts/{post_id}", response_model=WinningPostDeleteResponse)
+def delete_winning_post_route(post_id: str, response: Response) -> WinningPostDeleteResponse:
+    try:
+        from social_media_marketing_team.shared import delete_winning_post
+    except Exception as e:
+        raise _bank_503(e) from e
+    try:
+        removed = delete_winning_post(post_id)
+    except Exception as e:
+        raise _bank_503(e) from e
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"Winning post {post_id} not found")
+    response.status_code = 200
+    return WinningPostDeleteResponse(id=post_id)
 
 
 @app.get("/health")

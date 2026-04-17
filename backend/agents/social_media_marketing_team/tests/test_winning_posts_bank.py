@@ -1,428 +1,464 @@
-"""Tests for the winning posts bank module.
+"""Unit tests for ``social_media_marketing_team.shared.winning_posts_bank``.
 
-These tests exercise the engagement score computation and the public API
-functions using mock Postgres connections. They do NOT require a live
-Postgres instance — ``get_conn`` is monkeypatched throughout.
+Uses the dict-backed fake-Postgres pattern established by
+``blogging/tests/test_story_bank.py``: a ``_FakeCursor`` routes the SQL
+statements the module issues to an in-process store so save/find/
+rerank/list/get/delete can be exercised without a live Postgres.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from social_media_marketing_team.shared.winning_posts_bank import (
-    _compute_engagement_score,
-    _llm_rerank,
-    find_relevant_winners,
-    save_post,
-)
-
-# ---------------------------------------------------------------------------
-# _compute_engagement_score
-# ---------------------------------------------------------------------------
+import pytest
 
 
-class TestComputeEngagementScore:
-    def test_engagement_rate_used_directly(self):
-        assert _compute_engagement_score({"engagement_rate": 0.85}) == 0.85
+class _FakeCursor:
+    def __init__(self, db: dict[str, Any]) -> None:
+        self._db = db
+        self.rowcount = 0
+        self._last_fetch_one: dict | None = None
+        self._last_fetch_all: list[dict] = []
 
-    def test_engagement_rate_clamped(self):
-        assert _compute_engagement_score({"engagement_rate": 1.5}) == 1.0
-        assert _compute_engagement_score({"engagement_rate": -0.1}) == 0.0
+    def __enter__(self):
+        return self
 
-    def test_engagement_score_field(self):
-        assert _compute_engagement_score({"engagement_score": 0.72}) == 0.72
+    def __exit__(self, *a):
+        return False
 
-    def test_computed_from_likes_views(self):
-        score = _compute_engagement_score({"likes": 50, "comments": 10, "shares": 5, "views": 1000})
-        assert abs(score - 0.065) < 0.001
+    def execute(self, sql: str, params: tuple | list = ()) -> None:
+        sql_l = " ".join(sql.split()).lower()
+        params = tuple(params)
 
-    def test_engagement_fallback(self):
-        assert _compute_engagement_score({"engagement": 0.6}) == 0.6
-
-    def test_empty_metrics_returns_zero(self):
-        assert _compute_engagement_score({}) == 0.0
-
-    def test_unknown_keys_returns_zero(self):
-        assert _compute_engagement_score({"impressions": 5000}) == 0.0
-
-    def test_priority_engagement_rate_over_score(self):
-        score = _compute_engagement_score({"engagement_rate": 0.9, "engagement_score": 0.5})
-        assert score == 0.9
-
-    def test_zero_views_no_crash(self):
-        assert _compute_engagement_score({"likes": 10, "views": 0}) == 0.0
-
-
-# ---------------------------------------------------------------------------
-# save_post
-# ---------------------------------------------------------------------------
-
-
-class TestSavePost:
-    @patch("social_media_marketing_team.shared.winning_posts_bank.get_conn")
-    def test_save_returns_id(self, mock_get_conn):
-        mock_conn = MagicMock()
-        mock_cur = MagicMock()
-        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
-        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-        post_id = save_post(
-            brand_id="brand1",
-            campaign_name="Spring Campaign",
-            platform="linkedin",
-            archetype="Customer story",
-            concept_title="Test concept",
-            engagement_metrics={"engagement_rate": 0.85},
-        )
-        assert isinstance(post_id, str)
-        assert len(post_id) == 12
-        mock_cur.execute.assert_called_once()
-
-    @patch("social_media_marketing_team.shared.winning_posts_bank.get_conn")
-    def test_semantic_summary_generated(self, mock_get_conn):
-        mock_conn = MagicMock()
-        mock_cur = MagicMock()
-        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
-        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-        mock_llm = MagicMock()
-        mock_llm.complete.return_value = "A post about customer onboarding challenges."
-
-        save_post(
-            brand_id="brand1",
-            campaign_name="Test",
-            platform="linkedin",
-            concept_text="Detailed concept text here",
-            engagement_metrics={"engagement_rate": 0.8},
-            llm_client=mock_llm,
-        )
-        mock_llm.complete.assert_called_once()
-        call_args = mock_cur.execute.call_args[0][1]
-        assert call_args[11] == "A post about customer onboarding challenges."
-
-    @patch("social_media_marketing_team.shared.winning_posts_bank.get_conn")
-    def test_semantic_summary_failure_nonfatal(self, mock_get_conn):
-        mock_conn = MagicMock()
-        mock_cur = MagicMock()
-        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
-        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-        mock_llm = MagicMock()
-        mock_llm.complete.side_effect = RuntimeError("LLM unavailable")
-
-        post_id = save_post(
-            brand_id="brand1",
-            campaign_name="Test",
-            platform="linkedin",
-            concept_text="Concept text",
-            engagement_metrics={"engagement_rate": 0.8},
-            llm_client=mock_llm,
-        )
-        assert isinstance(post_id, str)
-        call_args = mock_cur.execute.call_args[0][1]
-        assert call_args[11] == ""
-
-
-# ---------------------------------------------------------------------------
-# find_relevant_winners & _keyword_scored_candidates
-# ---------------------------------------------------------------------------
-
-
-def _make_row(
-    post_id: str,
-    brand_id: str = "brand1",
-    platform: str = "linkedin",
-    keywords: list | None = None,
-    engagement_score: float = 0.8,
-    semantic_summary: str = "",
-    created_at: datetime | None = None,
-    **overrides,
-) -> dict:
-    now = created_at or datetime.now(timezone.utc)
-    return {
-        "id": post_id,
-        "brand_id": brand_id,
-        "campaign_name": "Campaign",
-        "platform": platform,
-        "archetype": overrides.get("archetype", ""),
-        "concept_title": overrides.get("concept_title", f"Concept {post_id}"),
-        "concept_text": "",
-        "post_copy": "",
-        "content_format": "carousel",
-        "cta_variant": "",
-        "keywords": keywords or [],
-        "semantic_summary": semantic_summary,
-        "engagement_metrics": {},
-        "engagement_score": engagement_score,
-        "posted_at": now,
-        "source_job_id": "",
-        "created_at": now,
-    }
-
-
-class TestFindRelevantWinners:
-    def test_empty_keywords_returns_empty(self):
-        assert find_relevant_winners("brand1", []) == []
-
-    @patch("social_media_marketing_team.shared.winning_posts_bank.get_conn")
-    def test_keyword_overlap_ranking(self, mock_get_conn):
-        rows = [
-            _make_row("p1", keywords=["engagement", "growth", "leads"]),
-            _make_row("p2", keywords=["engagement"]),
-            _make_row("p3", keywords=["growth", "engagement"]),
-        ]
-        mock_conn = MagicMock()
-        mock_cur = MagicMock()
-        mock_cur.fetchall.return_value = rows
-        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
-        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-        results = find_relevant_winners(
-            "brand1",
-            ["engagement", "growth"],
-            limit=3,
-        )
-        assert len(results) >= 2
-        assert results[0]["id"] in ("p1", "p3")
-
-    @patch("social_media_marketing_team.shared.winning_posts_bank.get_conn")
-    def test_winner_threshold_passed_to_sql(self, mock_get_conn):
-        """Verify that the min_score threshold is passed to the SQL query params."""
-        mock_conn = MagicMock()
-        mock_cur = MagicMock()
-        mock_cur.fetchall.return_value = []
-        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
-        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-        find_relevant_winners("brand1", ["engagement"], min_score=0.9)
-        sql_args = mock_cur.execute.call_args[0][1]
-        assert sql_args[1] == 0.9
-
-    def test_no_keyword_overlap_returns_empty(self):
-        """Posts with no keyword overlap are filtered out in Python."""
-        from social_media_marketing_team.shared.winning_posts_bank import _keyword_scored_candidates
-
-        with patch("social_media_marketing_team.shared.winning_posts_bank.get_conn") as mock_gc:
-            rows = [_make_row("p1", keywords=["unrelated"], engagement_score=0.9)]
-            mock_conn = MagicMock()
-            mock_cur = MagicMock()
-            mock_cur.fetchall.return_value = rows
-            mock_gc.return_value.__enter__ = MagicMock(return_value=mock_conn)
-            mock_gc.return_value.__exit__ = MagicMock(return_value=False)
-            mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
-            mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-            results = _keyword_scored_candidates("brand1", ["engagement", "growth"])
-            assert len(results) == 0
-
-    @patch("social_media_marketing_team.shared.winning_posts_bank.get_conn")
-    def test_lookback_uses_posted_at_with_created_at_fallback(self, mock_get_conn):
-        """Verify the SQL lookback clause uses COALESCE(posted_at, created_at)."""
-        mock_conn = MagicMock()
-        mock_cur = MagicMock()
-        mock_cur.fetchall.return_value = []
-        mock_get_conn.return_value.__enter__ = MagicMock(return_value=mock_conn)
-        mock_get_conn.return_value.__exit__ = MagicMock(return_value=False)
-        mock_conn.cursor.return_value.__enter__ = MagicMock(return_value=mock_cur)
-        mock_conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
-
-        find_relevant_winners("brand1", ["engagement"], lookback_days=30)
-        sql_text = mock_cur.execute.call_args[0][0]
-        assert "COALESCE(posted_at, created_at) >= %s" in sql_text
-
-
-class TestConceptMetaKeywords:
-    def test_pillar_extracted_from_title_and_added_to_keywords(self):
-        """Pillar prefix of concept title is added to keywords alongside linked_goals."""
-        from social_media_marketing_team.shared.performance_ingestion import (
-            find_concept_meta as _find_concept_meta,
-        )
-
-        result = {
-            "content_plan": {
-                "approved_ideas": [
-                    {
-                        "title": "Practical education \u2013 Customer story",
-                        "concept": "A story",
-                        "content_format": "carousel",
-                        "cta_variant": "CTA",
-                        "linked_goals": ["engagement"],
-                    }
-                ]
+        if sql_l.startswith("insert into social_marketing_winning_posts"):
+            (
+                post_id,
+                title,
+                body,
+                platform,
+                keywords_json,
+                metrics_json,
+                engagement_score,
+                linked_goals_json,
+                summary,
+                source_job_id,
+                created_at,
+            ) = params
+            keywords = keywords_json.obj if hasattr(keywords_json, "obj") else keywords_json
+            metrics = metrics_json.obj if hasattr(metrics_json, "obj") else metrics_json
+            linked_goals = (
+                linked_goals_json.obj if hasattr(linked_goals_json, "obj") else linked_goals_json
+            )
+            self._db["posts"][post_id] = {
+                "id": post_id,
+                "title": title,
+                "body": body,
+                "platform": platform or "",
+                "keywords": list(keywords or []),
+                "metrics": dict(metrics or {}),
+                "engagement_score": float(engagement_score or 0.0),
+                "linked_goals": list(linked_goals or []),
+                "summary": summary or "",
+                "source_job_id": source_job_id,
+                "created_at": created_at,
             }
-        }
-        meta = _find_concept_meta(result, "Practical education \u2013 Customer story")
-        assert meta["archetype"] == "Customer story"
-        assert set(meta["keywords"]) == {"engagement", "Practical education"}
+            self.rowcount = 1
+            return
 
-    def test_pillar_not_duplicated_if_already_in_linked_goals(self):
-        from social_media_marketing_team.shared.performance_ingestion import (
-            find_concept_meta as _find_concept_meta,
-        )
+        if "from social_marketing_winning_posts where platform = any" in sql_l:
+            (platforms,) = params
+            allowed = set(platforms or [])
+            self._last_fetch_all = [
+                dict(row)
+                for row in self._db["posts"].values()
+                if (row["platform"] or "") in allowed
+            ]
+            return
 
-        result = {
-            "content_plan": {
-                "approved_ideas": [
-                    {
-                        "title": "engagement \u2013 Customer story",
-                        "linked_goals": ["engagement"],
-                    }
-                ]
-            }
-        }
-        meta = _find_concept_meta(result, "engagement \u2013 Customer story")
-        assert meta["keywords"] == ["engagement"]
+        if "order by created_at desc limit" in sql_l:
+            limit, offset = params
+            ordered = sorted(
+                self._db["posts"].values(),
+                key=lambda r: r["created_at"],
+                reverse=True,
+            )
+            self._last_fetch_all = [dict(row) for row in ordered[offset : offset + limit]]
+            return
 
+        if "where id = %s" in sql_l and sql_l.startswith("select"):
+            (post_id,) = params
+            row = self._db["posts"].get(post_id)
+            self._last_fetch_one = dict(row) if row else None
+            return
 
-class TestLlmRerank:
-    def test_rerank_reorders_candidates(self):
-        candidates = [
-            {
-                "platform": "linkedin",
-                "engagement_score": 0.8,
-                "semantic_summary": "Post about growth",
-            },
-            {
-                "platform": "linkedin",
-                "engagement_score": 0.9,
-                "semantic_summary": "Post about engagement",
-            },
-            {"platform": "x", "engagement_score": 0.75, "semantic_summary": "Post about leads"},
-        ]
-        mock_llm = MagicMock()
-        mock_llm.complete_json.return_value = [2, 1, 3]
+        if sql_l.startswith("select") and "from social_marketing_winning_posts" in sql_l:
+            self._last_fetch_all = [dict(row) for row in self._db["posts"].values()]
+            return
 
-        result = _llm_rerank(candidates, "Increase engagement", mock_llm, limit=2)
-        assert len(result) == 2
-        assert result[0]["semantic_summary"] == "Post about engagement"
-        assert result[1]["semantic_summary"] == "Post about growth"
+        if sql_l.startswith("delete from social_marketing_winning_posts where id"):
+            (post_id,) = params
+            if self._db["posts"].pop(post_id, None) is not None:
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
 
-    def test_rerank_fallback_on_error(self):
-        candidates = [
-            {"platform": "linkedin", "engagement_score": 0.8, "semantic_summary": "Post A"},
-        ]
-        mock_llm = MagicMock()
-        mock_llm.complete_json.side_effect = RuntimeError("LLM error")
+        raise AssertionError(f"unexpected SQL in fake cursor: {sql!r}")
 
-        result = _llm_rerank(candidates, "Something", mock_llm, limit=1)
-        assert result == []
+    def fetchone(self):
+        return self._last_fetch_one
+
+    def fetchall(self):
+        return self._last_fetch_all
 
 
-# ---------------------------------------------------------------------------
-# Exemplar integration in ContentConceptAgent
-# ---------------------------------------------------------------------------
+class _FakeConn:
+    def __init__(self, db: dict[str, Any]) -> None:
+        self._db = db
+
+    def cursor(self, row_factory=None):  # noqa: ANN001
+        return _FakeCursor(self._db)
 
 
-class TestConceptAgentWithWinners:
-    def test_generate_with_winners_boosts_probability(self):
-        from social_media_marketing_team.agents import ContentConceptAgent
-        from social_media_marketing_team.models import BrandGoals, CampaignProposal
+@pytest.fixture
+def fake_pg(monkeypatch: pytest.MonkeyPatch):
+    """Install a fake ``get_conn`` on the bank module."""
+    db: dict[str, Any] = {"posts": {}}
 
-        agent = ContentConceptAgent("Brand Storytelling Lead")
-        goals = BrandGoals(
-            brand_name="Acme",
-            target_audience="SaaS founders",
-            goals=["engagement"],
-        )
-        proposal = CampaignProposal(
-            campaign_name="Test",
-            objective="engagement growth",
-            audience_hypothesis="SaaS founders face pain with growth.",
-            messaging_pillars=["Practical education"],
-        )
+    @contextmanager
+    def _fake_get_conn(database=None):
+        yield _FakeConn(db)
 
-        winners = [
-            {
-                "id": "w1",
-                "archetype": "Customer story",
-                "concept_title": "Practical education – Customer story",
-                "engagement_score": 0.88,
-                "platform": "linkedin",
-            }
-        ]
+    import social_media_marketing_team.shared.winning_posts_bank as wpb
 
-        ideas_with = agent.generate_candidates(proposal, goals, winners=winners)
-        ideas_without = agent.generate_candidates(proposal, goals, winners=None)
-
-        story_with = [i for i in ideas_with if "Customer story" in i.title]
-        story_without = [i for i in ideas_without if "Customer story" in i.title]
-
-        assert story_with and story_without
-        assert (
-            story_with[0].estimated_engagement_probability
-            >= story_without[0].estimated_engagement_probability
-        )
-        assert story_with[0].exemplar_source_ids == ["w1"]
-        assert "inspired by" in story_with[0].primary_hook
-
-    def test_generate_without_winners_matches_baseline(self):
-        from social_media_marketing_team.agents import ContentConceptAgent
-        from social_media_marketing_team.models import BrandGoals, CampaignProposal
-
-        agent = ContentConceptAgent("Brand Storytelling Lead")
-        goals = BrandGoals(
-            brand_name="Acme",
-            target_audience="SaaS founders",
-            goals=["engagement"],
-        )
-        proposal = CampaignProposal(
-            campaign_name="Test",
-            objective="engagement growth",
-            audience_hypothesis="SaaS founders struggle with growth.",
-            messaging_pillars=["Practical education"],
-        )
-
-        ideas_none = agent.generate_candidates(proposal, goals, winners=None)
-        ideas_empty = agent.generate_candidates(proposal, goals, winners=[])
-        assert len(ideas_none) == len(ideas_empty)
-        for a, b in zip(ideas_none, ideas_empty):
-            assert a.estimated_engagement_probability == b.estimated_engagement_probability
-            assert a.exemplar_source_ids == []
+    monkeypatch.setattr(wpb, "get_conn", _fake_get_conn)
+    yield db
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator brand_id pass-through
+# save_winning_post
 # ---------------------------------------------------------------------------
 
 
-class TestOrchestratorBrandId:
-    def test_run_passes_brand_id_and_reports_winners(self):
-        from social_media_marketing_team.models import HumanReview
-        from social_media_marketing_team.orchestrator import SocialMediaMarketingOrchestrator
+def test_save_persists_row_with_generated_id(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import save_winning_post
 
-        from .conftest import make_goals
+    pid = save_winning_post(
+        title="Why seed rounds fail",
+        body="Founders often skip...",
+        platform="linkedin",
+        keywords=["founders", "seed"],
+        metrics={"engagement_rate": 0.81},
+        engagement_score=0.81,
+        linked_goals=["awareness"],
+        source_job_id="job-1",
+    )
+    assert isinstance(pid, str)
+    assert len(pid) == 12
+    row = fake_pg["posts"][pid]
+    assert row["title"] == "Why seed rounds fail"
+    assert row["platform"] == "linkedin"
+    assert row["keywords"] == ["founders", "seed"]
+    assert row["metrics"] == {"engagement_rate": 0.81}
+    assert row["engagement_score"] == pytest.approx(0.81)
+    assert row["linked_goals"] == ["awareness"]
+    assert row["source_job_id"] == "job-1"
+    assert row["summary"] == ""  # no llm client + no provided summary
+    assert isinstance(row["created_at"], datetime)
+    assert row["created_at"].tzinfo is timezone.utc
 
-        orch = SocialMediaMarketingOrchestrator()
-        result = orch.run(
-            goals=make_goals(),
-            human_review=HumanReview(approved=True),
-            brand_id="test-brand",
-        )
-        assert result.status.value == "approved_for_testing"
-        assert result.winners_retrieved == 0
 
-    def test_run_without_brand_id_still_works(self):
-        from social_media_marketing_team.models import HumanReview
-        from social_media_marketing_team.orchestrator import SocialMediaMarketingOrchestrator
+def test_save_defaults_empty_for_optional_fields(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import save_winning_post
 
-        from .conftest import make_goals
+    pid = save_winning_post(title="t", body="b")
+    row = fake_pg["posts"][pid]
+    assert row["platform"] == ""
+    assert row["keywords"] == []
+    assert row["metrics"] == {}
+    assert row["linked_goals"] == []
+    assert row["source_job_id"] is None
+    assert row["engagement_score"] == 0.0
 
-        orch = SocialMediaMarketingOrchestrator()
-        result = orch.run(
-            goals=make_goals(),
-            human_review=HumanReview(approved=True),
-        )
-        assert result.status.value == "approved_for_testing"
-        assert result.winners_retrieved == 0
-        assert result.content_plan is not None
+
+def test_save_calls_llm_for_summary_when_client_provided(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import save_winning_post
+
+    class _StubLLM:
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, prompt: str, system_prompt: str = "") -> str:
+            self.calls.append(prompt)
+            return "  A concise summary.  "
+
+    llm = _StubLLM()
+    pid = save_winning_post(title="t", body="a long post body", llm_client=llm)
+    assert fake_pg["posts"][pid]["summary"] == "A concise summary."
+    assert len(llm.calls) == 1
+    assert "Summarize this social post" in llm.calls[0]
+
+
+def test_save_llm_failure_is_non_fatal(fake_pg, caplog):
+    from social_media_marketing_team.shared.winning_posts_bank import save_winning_post
+
+    class _ExplodingLLM:
+        def complete(self, *a, **k):
+            raise RuntimeError("llm is down")
+
+    with caplog.at_level("WARNING"):
+        pid = save_winning_post(title="t", body="b", llm_client=_ExplodingLLM())
+
+    assert fake_pg["posts"][pid]["summary"] == ""
+    assert any("summary generation failed" in rec.message for rec in caplog.records)
+
+
+def test_save_uses_provided_summary_and_skips_llm(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import save_winning_post
+
+    class _LLM:
+        def complete(self, *a, **k):
+            raise AssertionError("LLM should not be called when summary is provided")
+
+    pid = save_winning_post(title="t", body="b", summary="Already summarized.", llm_client=_LLM())
+    assert fake_pg["posts"][pid]["summary"] == "Already summarized."
+
+
+# ---------------------------------------------------------------------------
+# find_relevant_winning_posts
+# ---------------------------------------------------------------------------
+
+
+def test_find_returns_empty_for_empty_query(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        find_relevant_winning_posts,
+        save_winning_post,
+    )
+
+    save_winning_post(title="t", body="b", keywords=["founders"])
+    assert find_relevant_winning_posts([]) == []
+
+
+def test_find_scores_by_keyword_overlap(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        find_relevant_winning_posts,
+        save_winning_post,
+    )
+
+    a = save_winning_post(title="A", body="", keywords=["founders", "seed", "growth"])
+    b = save_winning_post(title="B", body="", keywords=["founders", "pricing"])
+    c = save_winning_post(title="C", body="", keywords=["saas", "growth"])
+    _d = save_winning_post(title="D", body="", keywords=["unrelated"])
+
+    results = find_relevant_winning_posts(["founders", "growth"], limit=3)
+    assert [r["id"] for r in results] == [a, b, c]
+
+
+def test_find_ignores_case_and_whitespace(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        find_relevant_winning_posts,
+        save_winning_post,
+    )
+
+    pid = save_winning_post(title="A", body="", keywords=["Founders", "  Growth  "])
+    results = find_relevant_winning_posts(["FOUNDERS"], limit=5)
+    assert [r["id"] for r in results] == [pid]
+
+
+def test_find_applies_platform_filter(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        find_relevant_winning_posts,
+        save_winning_post,
+    )
+
+    save_winning_post(title="LI", body="", platform="linkedin", keywords=["growth"])
+    save_winning_post(title="X", body="", platform="x", keywords=["growth"])
+
+    results = find_relevant_winning_posts(["growth"], platforms=["linkedin"])
+    assert len(results) == 1
+    assert results[0]["platform"] == "linkedin"
+
+
+def test_find_applies_limit(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        find_relevant_winning_posts,
+        save_winning_post,
+    )
+
+    for i in range(6):
+        save_winning_post(title=f"t-{i}", body="", keywords=["growth"])
+    results = find_relevant_winning_posts(["growth"], limit=3)
+    assert len(results) == 3
+
+
+def test_find_tiebreaks_by_engagement_score(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        find_relevant_winning_posts,
+        save_winning_post,
+    )
+
+    low = save_winning_post(title="low", body="", keywords=["growth"], engagement_score=0.4)
+    high = save_winning_post(title="high", body="", keywords=["growth"], engagement_score=0.9)
+
+    results = find_relevant_winning_posts(["growth"], limit=2)
+    assert results[0]["id"] == high
+    assert results[1]["id"] == low
+
+
+def test_find_llm_rerank_reorders_when_enough_candidates(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        find_relevant_winning_posts,
+        save_winning_post,
+    )
+
+    class _SummaryLLM:
+        def complete(self, *a, **k):
+            return "summary"
+
+        def complete_json(self, prompt: str, system_prompt: str = ""):
+            return [3, 2, 1]
+
+    llm = _SummaryLLM()
+    a = save_winning_post(title="A", body="body", keywords=["growth"], llm_client=llm)
+    b = save_winning_post(title="B", body="body", keywords=["growth"], llm_client=llm)
+    c = save_winning_post(title="C", body="body", keywords=["growth"], llm_client=llm)
+
+    results = find_relevant_winning_posts(
+        ["growth"],
+        limit=2,
+        rerank_context="need winners for growth campaign",
+        llm_client=llm,
+    )
+    assert len(results) == 2
+    assert {r["id"] for r in results} <= {a, b, c}
+
+
+def test_find_rerank_failure_falls_back_to_keyword(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        find_relevant_winning_posts,
+        save_winning_post,
+    )
+
+    class _BrokenLLM:
+        def complete(self, *a, **k):
+            return "ok"
+
+        def complete_json(self, *a, **k):
+            raise RuntimeError("llm down")
+
+    llm = _BrokenLLM()
+    for _ in range(6):
+        save_winning_post(title="t", body="b", keywords=["growth"], llm_client=llm)
+
+    results = find_relevant_winning_posts(
+        ["growth"],
+        limit=2,
+        rerank_context="ctx",
+        llm_client=llm,
+    )
+    assert len(results) == 2
+
+
+def test_find_rerank_disabled_via_env(fake_pg, monkeypatch):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        find_relevant_winning_posts,
+        save_winning_post,
+    )
+
+    monkeypatch.setenv("SOCIAL_MARKETING_WINNING_POSTS_RERANK_ENABLED", "false")
+
+    class _LoudLLM:
+        def complete(self, *a, **k):
+            return "summary"
+
+        def complete_json(self, *a, **k):
+            raise AssertionError("rerank must not run when disabled")
+
+    llm = _LoudLLM()
+    for _ in range(6):
+        save_winning_post(title="t", body="b", keywords=["growth"], llm_client=llm)
+
+    results = find_relevant_winning_posts(["growth"], limit=2, rerank_context="ctx", llm_client=llm)
+    assert len(results) == 2  # keyword path only
+
+
+# ---------------------------------------------------------------------------
+# list / get / delete
+# ---------------------------------------------------------------------------
+
+
+def test_list_orders_newest_first(fake_pg, monkeypatch):
+    import social_media_marketing_team.shared.winning_posts_bank as wpb
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    counter = {"i": 0}
+
+    class _FakeDatetime:
+        @staticmethod
+        def now(tz=None):
+            counter["i"] += 1
+            return base + timedelta(minutes=counter["i"])
+
+    monkeypatch.setattr(wpb, "datetime", _FakeDatetime)
+
+    a = wpb.save_winning_post(title="oldest", body="")
+    b = wpb.save_winning_post(title="middle", body="")
+    c = wpb.save_winning_post(title="newest", body="")
+
+    listing = wpb.list_winning_posts(limit=10)
+    assert [r["id"] for r in listing] == [c, b, a]
+    assert all(isinstance(r["created_at"], str) for r in listing)
+
+
+def test_list_respects_limit_and_offset(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        list_winning_posts,
+        save_winning_post,
+    )
+
+    for i in range(5):
+        save_winning_post(title=f"t-{i}", body="")
+    page1 = list_winning_posts(limit=2, offset=0)
+    page2 = list_winning_posts(limit=2, offset=2)
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert {r["id"] for r in page1} & {r["id"] for r in page2} == set()
+
+
+def test_get_returns_dict_for_existing(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        get_winning_post,
+        save_winning_post,
+    )
+
+    pid = save_winning_post(title="t", body="b", keywords=["a", "b"])
+    row = get_winning_post(pid)
+    assert row is not None
+    assert row["id"] == pid
+    assert row["keywords"] == ["a", "b"]
+    assert isinstance(row["created_at"], str)
+
+
+def test_get_returns_none_for_missing(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import get_winning_post
+
+    assert get_winning_post("nope") is None
+
+
+def test_delete_returns_true_on_hit(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import (
+        delete_winning_post,
+        save_winning_post,
+    )
+
+    pid = save_winning_post(title="t", body="")
+    assert delete_winning_post(pid) is True
+    assert pid not in fake_pg["posts"]
+
+
+def test_delete_returns_false_on_miss(fake_pg):
+    from social_media_marketing_team.shared.winning_posts_bank import delete_winning_post
+
+    assert delete_winning_post("never-existed") is False

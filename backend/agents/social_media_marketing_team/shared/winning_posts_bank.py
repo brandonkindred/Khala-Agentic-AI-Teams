@@ -1,19 +1,30 @@
-"""Postgres-backed winning posts bank for the social media marketing team.
+"""Postgres-backed bank of winning social-media posts.
 
-Stores post observations with engagement metrics so that high-performing
-content can be retrieved and injected as few-shot exemplars into future
-concept generation. Modelled on ``blogging/shared/story_bank.py``.
+Ported from ``blogging.shared.story_bank``. Stores posts whose
+engagement signals beat a configurable threshold, tagged with
+keywords, platform, metrics, and a one-sentence semantic summary, so
+they can be retrieved and injected as exemplars into future
+concept-generation prompts.
 
-Storage: the ``social_media_posts`` table declared in
-``social_media_marketing_team.postgres`` and registered from the team's
-FastAPI lifespan.
+Retrieval is two-stage:
+  1. Keyword overlap (set intersection) picks candidates, optionally
+     filtered by platform.
+  2. If an ``rerank_context`` and ``llm_client`` are supplied and the
+     ``SOCIAL_MARKETING_WINNING_POSTS_RERANK_ENABLED`` flag is on, an
+     LLM reranks candidates-with-summaries by semantic relevance.
+
+Storage: ``social_marketing_winning_posts`` table declared in
+``social_media_marketing_team.postgres``. This module is pure data
+access via ``shared_postgres.get_conn``.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Optional
 
 from psycopg.rows import dict_row
@@ -23,10 +34,16 @@ from shared_postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
-_STORE = "social_media_winning_posts"
+_STORE = "social_marketing_winning_posts_bank"
 
-WINNER_THRESHOLD = 0.7
-DEFAULT_LOOKBACK_DAYS = 90
+
+def _rerank_enabled() -> bool:
+    return os.getenv("SOCIAL_MARKETING_WINNING_POSTS_RERANK_ENABLED", "true").lower() not in (
+        "0",
+        "false",
+        "no",
+        "",
+    )
 
 
 def _row_ts(value: Any) -> str:
@@ -35,167 +52,141 @@ def _row_ts(value: Any) -> str:
     return str(value or "")
 
 
+def _to_float(value: Any) -> float:
+    if isinstance(value, Decimal):
+        return float(value)
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a ``dict_row`` cursor row into the public dict shape."""
     return {
         "id": row["id"],
-        "brand_id": row["brand_id"],
-        "campaign_name": row["campaign_name"],
-        "platform": row["platform"],
-        "archetype": row["archetype"],
-        "concept_title": row["concept_title"],
-        "concept_text": row["concept_text"],
-        "post_copy": row["post_copy"],
-        "content_format": row["content_format"],
-        "cta_variant": row["cta_variant"],
+        "title": row["title"],
+        "body": row["body"],
+        "platform": row["platform"] or "",
         "keywords": list(row["keywords"] or []),
-        "semantic_summary": row["semantic_summary"] or "",
-        "engagement_metrics": dict(row["engagement_metrics"] or {}),
-        "engagement_score": float(row["engagement_score"] or 0.0),
-        "posted_at": _row_ts(row.get("posted_at")),
-        "source_job_id": row.get("source_job_id") or "",
+        "metrics": dict(row["metrics"] or {}),
+        "engagement_score": _to_float(row["engagement_score"]),
+        "linked_goals": list(row["linked_goals"] or []),
+        "summary": row["summary"] or "",
+        "source_job_id": row.get("source_job_id"),
         "created_at": _row_ts(row["created_at"]),
     }
 
 
-def _compute_engagement_score(metrics: dict) -> float:
-    """Compute a 0-1 composite from raw metric values.
-
-    Priority: engagement_rate > engagement_score > likes+comments+shares/views > engagement.
-    """
-    if "engagement_rate" in metrics:
-        val = float(metrics["engagement_rate"])
-        return max(0.0, min(1.0, val))
-
-    if "engagement_score" in metrics:
-        val = float(metrics["engagement_score"])
-        return max(0.0, min(1.0, val))
-
-    likes = float(metrics.get("likes", 0))
-    comments = float(metrics.get("comments", 0))
-    shares = float(metrics.get("shares", 0))
-    views = float(metrics.get("views", 0))
-    if views > 0 and (likes + comments + shares) > 0:
-        return max(0.0, min(1.0, (likes + comments + shares) / views))
-
-    if "engagement" in metrics:
-        val = float(metrics["engagement"])
-        return max(0.0, min(1.0, val))
-
-    return 0.0
+_SELECT_COLS = (
+    "id, title, body, platform, keywords, metrics, engagement_score, "
+    "linked_goals, summary, source_job_id, created_at"
+)
 
 
-@timed_query(store=_STORE, op="save_post")
-def save_post(
-    brand_id: str,
-    campaign_name: str,
-    platform: str,
-    archetype: str = "",
-    concept_title: str = "",
-    concept_text: str = "",
-    post_copy: str = "",
-    content_format: str = "",
-    cta_variant: str = "",
+@timed_query(store=_STORE, op="save_winning_post")
+def save_winning_post(
+    title: str,
+    body: str,
+    platform: str = "",
     keywords: Optional[list[str]] = None,
-    engagement_metrics: Optional[dict] = None,
-    posted_at: Optional[str] = None,
+    metrics: Optional[dict[str, Any]] = None,
+    engagement_score: float = 0.0,
+    linked_goals: Optional[list[str]] = None,
     source_job_id: Optional[str] = None,
+    summary: Optional[str] = None,
     llm_client: Any = None,
 ) -> str:
-    """Persist a post observation and return its ID."""
+    """Persist a winning post and return its ID.
+
+    If *summary* is None and *llm_client* is provided, generates a
+    one-sentence semantic summary for improved retrieval. Summary
+    generation is best-effort; failures are logged and the row still
+    lands with ``summary=''``.
+    """
     post_id = uuid.uuid4().hex[:12]
     now = datetime.now(timezone.utc)
-    metrics = engagement_metrics or {}
-    score = _compute_engagement_score(metrics)
 
-    summary = ""
-    if llm_client is not None and concept_text:
+    if summary is None and llm_client is not None and body:
         try:
             summary = (
                 llm_client.complete(
-                    f"Summarize this social media post concept in one sentence:\n\n{concept_text}",
+                    f"Summarize this social post in one sentence:\n\n{title}\n\n{body}",
                     system_prompt="Write a single sentence summary. No preamble, no quotes.",
                 )
                 or ""
             ).strip()
         except Exception as e:
             logger.warning("Winning posts bank: summary generation failed (non-fatal): %s", e)
-
-    parsed_posted_at = None
-    if posted_at:
-        try:
-            parsed_posted_at = datetime.fromisoformat(posted_at)
-        except (ValueError, TypeError):
-            pass
+            summary = ""
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO social_media_posts "
-            "(id, brand_id, campaign_name, platform, archetype, concept_title, "
-            "concept_text, post_copy, content_format, cta_variant, keywords, "
-            "semantic_summary, engagement_metrics, engagement_score, posted_at, "
-            "source_job_id, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "INSERT INTO social_marketing_winning_posts "
+            "(id, title, body, platform, keywords, metrics, engagement_score, "
+            "linked_goals, summary, source_job_id, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 post_id,
-                brand_id,
-                campaign_name,
-                platform,
-                archetype,
-                concept_title,
-                concept_text,
-                post_copy,
-                content_format,
-                cta_variant,
-                Json(keywords or []),
-                summary,
-                Json(metrics),
-                score,
-                parsed_posted_at,
+                title,
+                body,
+                platform or "",
+                Json(list(keywords or [])),
+                Json(dict(metrics or {})),
+                float(engagement_score or 0.0),
+                Json(list(linked_goals or [])),
+                summary or "",
                 source_job_id,
                 now,
             ),
         )
 
     logger.info(
-        "Winning posts bank: saved post %s (brand=%s, platform=%s, score=%.2f, has_summary=%s)",
+        "Winning posts bank: saved %s (platform=%s, score=%.2f, has_summary=%s)",
         post_id,
-        brand_id,
         platform,
-        score,
+        float(engagement_score or 0.0),
         bool(summary),
     )
     return post_id
 
 
-@timed_query(store=_STORE, op="find_relevant_winners")
-def find_relevant_winners(
-    brand_id: str,
+@timed_query(store=_STORE, op="find_relevant_winning_posts")
+def find_relevant_winning_posts(
     query_keywords: list[str],
-    platform: Optional[str] = None,
     limit: int = 5,
-    concept_opportunity: Optional[str] = None,
-    min_score: float = WINNER_THRESHOLD,
-    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    platforms: Optional[list[str]] = None,
+    rerank_context: Optional[str] = None,
     llm_client: Any = None,
 ) -> list[dict[str, Any]]:
-    """Two-stage retrieval: keyword overlap then optional LLM rerank."""
+    """Return winning posts relevant to *query_keywords*, ranked by relevance.
+
+    Two-stage retrieval:
+      1. Keyword overlap (set intersection); optionally filtered by
+         ``platforms`` (matches ``platform = ANY(...)``).
+      2. Optional LLM rerank when ``rerank_context`` + ``llm_client``
+         are supplied and more candidates-with-summaries than *limit*
+         exist.
+    """
     if not query_keywords:
         return []
 
     candidates = _keyword_scored_candidates(
-        brand_id,
-        query_keywords,
-        platform=platform,
-        min_score=min_score,
-        lookback_days=lookback_days,
-        limit=max(limit, 10),
+        query_keywords, limit=max(limit, 10), platforms=platforms
     )
     if not candidates:
         return []
 
-    candidates_with_summaries = [c for c in candidates if c.get("semantic_summary")]
-    if concept_opportunity and llm_client and len(candidates_with_summaries) > limit:
-        reranked = _llm_rerank(candidates_with_summaries, concept_opportunity, llm_client, limit)
+    candidates_with_summaries = [c for c in candidates if c.get("summary")]
+    if (
+        rerank_context
+        and llm_client
+        and _rerank_enabled()
+        and len(candidates_with_summaries) > limit
+    ):
+        reranked = _llm_rerank(candidates_with_summaries, rerank_context, llm_client, limit)
         if reranked:
             return reranked
 
@@ -203,69 +194,58 @@ def find_relevant_winners(
 
 
 def _keyword_scored_candidates(
-    brand_id: str,
     query_keywords: list[str],
-    platform: Optional[str] = None,
-    min_score: float = WINNER_THRESHOLD,
-    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     limit: int = 10,
+    platforms: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    """Retrieve winning posts ranked by keyword-overlap count.
 
-    # Lookback is based on the date the post was published (posted_at),
-    # not when it was ingested into the bank (created_at). This keeps the
-    # recency guardrail honest when older performance data is backfilled.
-    # Fall back to created_at when posted_at is NULL so rows without a
-    # recorded post date still participate in retrieval.
-    sql = (
-        "SELECT id, brand_id, campaign_name, platform, archetype, concept_title, "
-        "concept_text, post_copy, content_format, cta_variant, keywords, "
-        "semantic_summary, engagement_metrics, engagement_score, posted_at, "
-        "source_job_id, created_at "
-        "FROM social_media_posts "
-        "WHERE brand_id = %s AND engagement_score >= %s "
-        "AND COALESCE(posted_at, created_at) >= %s"
-    )
-    params: list[Any] = [brand_id, min_score, cutoff]
-
-    if platform:
-        sql += " AND platform = %s"
-        params.append(platform)
-
+    Reads every row (optionally pre-filtered by platform) because the
+    table is low-volume. Scoring is done in Python; a future
+    optimization could push the overlap into Postgres via the JSONB
+    ``?|`` operator.
+    """
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, params)
+        if platforms:
+            cur.execute(
+                f"SELECT {_SELECT_COLS} FROM social_marketing_winning_posts "
+                "WHERE platform = ANY(%s)",
+                (list(platforms),),
+            )
+        else:
+            cur.execute(f"SELECT {_SELECT_COLS} FROM social_marketing_winning_posts")
         rows = cur.fetchall()
 
-    query_lower = {k.lower().strip() for k in query_keywords if k.strip()}
+    query_lower = {k.lower().strip() for k in query_keywords if k and k.strip()}
     if not query_lower:
         return []
 
-    scored: list[tuple[int, dict[str, Any]]] = []
+    scored: list[tuple[int, float, dict[str, Any]]] = []
     for row in rows:
         post_kw = {str(k).lower().strip() for k in (row["keywords"] or [])}
         overlap = len(query_lower & post_kw)
         if overlap > 0:
-            scored.append((overlap, _row_to_dict(row)))
+            row_dict = _row_to_dict(row)
+            scored.append((overlap, row_dict["engagement_score"], row_dict))
 
-    scored.sort(key=lambda t: (-t[0], -t[1]["engagement_score"]))
-    return [item for _, item in scored[:limit]]
+    # Primary: overlap count desc. Secondary: engagement_score desc.
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [item for _, _, item in scored[:limit]]
 
 
 def _llm_rerank(
     candidates: list[dict[str, Any]],
-    concept_opportunity: str,
+    rerank_context: str,
     llm_client: Any,
     limit: int,
 ) -> list[dict[str, Any]]:
-    summaries = "\n".join(
-        f"{i + 1}. [{c['platform']}, score={c['engagement_score']:.2f}] {c['semantic_summary']}"
-        for i, c in enumerate(candidates)
-    )
+    """Use an LLM to rerank candidates by semantic relevance."""
+    summaries = "\n".join(f"{i + 1}. {c['summary']}" for i, c in enumerate(candidates))
     prompt = (
-        f"Concept needed: {concept_opportunity}\n\n"
+        f"Context: {rerank_context}\n\n"
         f"Candidate winning posts (by summary):\n{summaries}\n\n"
         f"Return a JSON array of the top {limit} indices (1-based) ranked by relevance "
-        f"to the concept needed. Most relevant first."
+        f"to the context. Most relevant first."
     )
     try:
         data = llm_client.complete_json(
@@ -276,51 +256,50 @@ def _llm_rerank(
         if isinstance(indices, list):
             reranked: list[dict[str, Any]] = []
             for idx in indices[:limit]:
-                i = int(idx) - 1
+                try:
+                    i = int(idx) - 1
+                except (TypeError, ValueError):
+                    continue
                 if 0 <= i < len(candidates):
                     reranked.append(candidates[i])
             if reranked:
                 return reranked
     except Exception as e:
         logger.warning(
-            "Winning posts bank LLM reranking failed (falling back to keyword scoring): %s", e
+            "Winning posts bank LLM rerank failed (falling back to keyword scoring): %s", e
         )
     return []
 
 
-@timed_query(store=_STORE, op="list_posts")
-def list_posts(brand_id: str, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+@timed_query(store=_STORE, op="list_winning_posts")
+def list_winning_posts(limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    """Return winning posts, newest first, with LIMIT/OFFSET pagination."""
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT id, brand_id, campaign_name, platform, archetype, concept_title, "
-            "concept_text, post_copy, content_format, cta_variant, keywords, "
-            "semantic_summary, engagement_metrics, engagement_score, posted_at, "
-            "source_job_id, created_at "
-            "FROM social_media_posts "
-            "WHERE brand_id = %s "
+            f"SELECT {_SELECT_COLS} FROM social_marketing_winning_posts "
             "ORDER BY created_at DESC LIMIT %s OFFSET %s",
-            (brand_id, limit, offset),
+            (limit, offset),
         )
-        return [_row_to_dict(row) for row in cur.fetchall()]
+        return [_row_to_dict(r) for r in cur.fetchall()]
 
 
-@timed_query(store=_STORE, op="get_post")
-def get_post(post_id: str) -> Optional[dict[str, Any]]:
+@timed_query(store=_STORE, op="get_winning_post")
+def get_winning_post(post_id: str) -> Optional[dict[str, Any]]:
+    """Return a single winning post by ID, or None."""
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT id, brand_id, campaign_name, platform, archetype, concept_title, "
-            "concept_text, post_copy, content_format, cta_variant, keywords, "
-            "semantic_summary, engagement_metrics, engagement_score, posted_at, "
-            "source_job_id, created_at "
-            "FROM social_media_posts WHERE id = %s",
+            f"SELECT {_SELECT_COLS} FROM social_marketing_winning_posts WHERE id = %s",
             (post_id,),
         )
         row = cur.fetchone()
-        return _row_to_dict(row) if row else None
+        if not row:
+            return None
+        return _row_to_dict(row)
 
 
-@timed_query(store=_STORE, op="delete_post")
-def delete_post(post_id: str) -> bool:
+@timed_query(store=_STORE, op="delete_winning_post")
+def delete_winning_post(post_id: str) -> bool:
+    """Delete a winning post by ID. Returns True if a row was removed."""
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute("DELETE FROM social_media_posts WHERE id = %s", (post_id,))
+        cur.execute("DELETE FROM social_marketing_winning_posts WHERE id = %s", (post_id,))
         return cur.rowcount > 0

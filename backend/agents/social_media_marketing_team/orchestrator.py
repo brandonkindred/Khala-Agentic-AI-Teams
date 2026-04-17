@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+import os
+import re
+from typing import Any, Dict, List, Optional
 
 from .agents import (
     CampaignCollaborationAgent,
@@ -25,6 +27,67 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9]+")
+
+
+def _extract_bank_keywords(goals: BrandGoals) -> List[str]:
+    """Extract ≥4-char lowercase tokens from BrandGoals for bank retrieval."""
+    sources: List[str] = []
+    sources.append(goals.target_audience or "")
+    sources.extend(goals.goals or [])
+    sources.extend(goals.messaging_pillars or [])
+    sources.append(goals.brand_objectives or "")
+    seen: set[str] = set()
+    result: List[str] = []
+    for text in sources:
+        for match in _TOKEN_RE.findall(text):
+            token = match.lower()
+            if len(token) >= 4 and token not in seen:
+                seen.add(token)
+                result.append(token)
+    return result
+
+
+def _bank_top_k() -> int:
+    try:
+        return int(os.getenv("SOCIAL_MARKETING_WINNING_POSTS_TOP_K", "5"))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _retrieve_exemplars(
+    proposal: CampaignProposal, goals: BrandGoals, llm_client: Any
+) -> List[Dict[str, Any]]:
+    """Best-effort retrieval of exemplars from the Winning Posts Bank.
+
+    Returns ``[]`` on any failure (Postgres disabled, empty keyword
+    set, LLM rerank error) so orchestration never regresses.
+    """
+    keywords = _extract_bank_keywords(goals)
+    if not keywords:
+        return []
+    platforms: Optional[List[str]] = (
+        [p.value for p in proposal.channel_mix_strategy.keys()]
+        if proposal.channel_mix_strategy
+        else None
+    )
+    try:
+        from .shared import find_relevant_winning_posts
+
+        exemplars = find_relevant_winning_posts(
+            query_keywords=keywords,
+            limit=_bank_top_k(),
+            platforms=platforms,
+            rerank_context=proposal.objective,
+            llm_client=llm_client,
+        )
+        if exemplars:
+            logger.info("Winning posts bank: %d exemplar(s) injected", len(exemplars))
+        return exemplars
+    except Exception as e:
+        logger.warning("Winning posts bank retrieval failed (non-fatal): %s", e)
+        return []
 
 
 class SocialMediaMarketingOrchestrator:
@@ -220,9 +283,11 @@ class SocialMediaMarketingOrchestrator:
     ) -> ContentPlan:
         required_posts = goals.cadence_posts_per_day * goals.duration_days
 
+        exemplars = _retrieve_exemplars(proposal, goals, getattr(self, "_llm_client", None))
+
         candidates: List[ConceptIdea] = []
         for agent in self.concept_team:
-            candidates.extend(agent.generate_candidates(proposal, goals, winners=winners))
+            candidates.extend(agent.generate_candidates(proposal, goals, exemplars=exemplars))
 
         candidates = self._goal_traceability_filter(candidates, goals)
         candidates = self._calibrate_probabilities(candidates, performance)

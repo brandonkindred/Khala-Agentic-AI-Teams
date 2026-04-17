@@ -163,7 +163,12 @@ class MarketDataService:
     def _fetch_yahoo(
         self, symbol: str, asset_class: str, start_date: str, end_date: str, max_retries: int = 3
     ) -> List[OHLCVBar]:
-        """Fetch OHLCV data via yfinance. Handles all asset classes."""
+        """Fetch OHLCV data via yfinance. Handles all asset classes.
+
+        Uses ``auto_adjust=True`` (Phase 5) so prices are automatically adjusted
+        for splits and dividends — eliminates a class of survivorship/corporate-
+        action bugs in backtests.
+        """
         try:
             import yfinance as yf
         except ImportError:
@@ -179,7 +184,7 @@ class MarketDataService:
         for attempt in range(max_retries):
             try:
                 ticker = yf.Ticker(yf_symbol)
-                df = ticker.history(start=start_date, end=end_date, interval="1d")
+                df = ticker.history(start=start_date, end=end_date, interval="1d", auto_adjust=True)
             except Exception as exc:
                 if attempt < max_retries - 1:
                     wait = 2 ** (attempt + 1)

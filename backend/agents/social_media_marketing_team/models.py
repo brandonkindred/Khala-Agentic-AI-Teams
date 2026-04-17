@@ -67,7 +67,10 @@ class ConceptIdea(BaseModel):
     estimated_engagement_probability: float = Field(ge=0, le=1)
     risk_level: str = "low"
     risk_reasons: List[str] = Field(default_factory=list)
-    exemplar_source_ids: List[str] = Field(default_factory=list)
+    # Reference exemplars from the Winning Posts Bank. Stored on a
+    # separate field — never inlined into ``concept`` — so risk and
+    # routing scanners only see the agent's own copy.
+    prior_winners_context: str = ""
 
 
 class ContentPlan(BaseModel):

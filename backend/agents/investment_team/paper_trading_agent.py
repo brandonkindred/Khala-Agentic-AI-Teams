@@ -226,7 +226,12 @@ class PaperTradingAgent:
             first_date = trades[0].entry_date
             last_date = trades[-1].exit_date
             session.result = compute_metrics(trades, initial_capital, first_date, last_date)
-            session.comparison = self.compare_performance(session.result, backtest_record.result)
+            session.comparison = self.compare_performance(
+                session.result,
+                backtest_record.result,
+                paper_trade_count=len(trades),
+                backtest_trade_count=len(backtest_record.trades),
+            )
 
             if session.comparison.overall_aligned:
                 session.verdict = PaperTradingVerdict.READY_FOR_LIVE
@@ -255,33 +260,40 @@ class PaperTradingAgent:
         session.status = PaperTradingStatus.COMPLETED
         return session
 
+    MIN_TRADES_FOR_ALIGNMENT = 30
+
     @staticmethod
     def compare_performance(
         paper_result: BacktestResult,
         backtest_result: BacktestResult,
+        *,
+        paper_trade_count: int = 0,
+        backtest_trade_count: int = 0,
     ) -> PaperTradingComparison:
-        """Compare paper trading metrics against backtest expectations with tolerances."""
-        # Win rate: within +/-10 percentage points
-        win_rate_aligned = abs(paper_result.win_rate_pct - backtest_result.win_rate_pct) <= 10.0
+        """Compare paper trading metrics against backtest expectations.
 
-        # Annualized return: within +/-40% relative (or +/-3pp absolute for small values)
+        Phase 5 tightened thresholds:
+        - Annualized return: ``|Δ| ≤ 2.0pp`` (was ±40% relative).
+        - Sharpe: ``|Δ| ≤ 0.3`` (unchanged).
+        - Max drawdown: ``|Δ| ≤ 5.0pp`` (was 1.5× backtest).
+        - Win rate: ``|Δ| ≤ 8.0pp`` (was 10pp).
+        - Minimum 30 trades before ``overall_aligned`` can be True.
+        """
+        # Win rate: within ±8pp
+        win_rate_aligned = abs(paper_result.win_rate_pct - backtest_result.win_rate_pct) <= 8.0
+
+        # Annualized return: ±2pp absolute
         bt_ret = backtest_result.annualized_return_pct
         pt_ret = paper_result.annualized_return_pct
-        if abs(bt_ret) > 5.0:
-            return_aligned = abs(pt_ret - bt_ret) / abs(bt_ret) <= 0.40
-        else:
-            return_aligned = abs(pt_ret - bt_ret) <= 3.0
+        return_aligned = abs(pt_ret - bt_ret) <= 2.0
 
-        # Sharpe: within +/-0.3
+        # Sharpe: ±0.3
         sharpe_aligned = abs(paper_result.sharpe_ratio - backtest_result.sharpe_ratio) <= 0.3
 
-        # Max drawdown: paper drawdown no more than 1.5x backtest drawdown
-        if backtest_result.max_drawdown_pct > 0:
-            drawdown_aligned = (
-                paper_result.max_drawdown_pct <= backtest_result.max_drawdown_pct * 1.5
-            )
-        else:
-            drawdown_aligned = paper_result.max_drawdown_pct <= 5.0
+        # Max drawdown: ±5pp absolute
+        drawdown_aligned = (
+            abs(paper_result.max_drawdown_pct - backtest_result.max_drawdown_pct) <= 5.0
+        )
 
         # Profit factor: within ±0.5 (or both above 1.0)
         pf_diff = abs(paper_result.profit_factor - backtest_result.profit_factor)
@@ -290,7 +302,15 @@ class PaperTradingAgent:
         else:
             profit_factor_aligned = pf_diff <= 0.3
 
-        overall = win_rate_aligned and return_aligned and sharpe_aligned and drawdown_aligned
+        insufficient_sample = paper_trade_count < PaperTradingAgent.MIN_TRADES_FOR_ALIGNMENT
+
+        overall = (
+            win_rate_aligned
+            and return_aligned
+            and sharpe_aligned
+            and drawdown_aligned
+            and not insufficient_sample
+        )
 
         return PaperTradingComparison(
             backtest_win_rate_pct=backtest_result.win_rate_pct,

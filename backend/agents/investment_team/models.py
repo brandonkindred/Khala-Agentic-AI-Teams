@@ -229,6 +229,19 @@ class BacktestConfig(BaseModel):
     rebalance_frequency: str = "monthly"
     transaction_cost_bps: float = Field(default=5.0, ge=0)
     slippage_bps: float = Field(default=2.0, ge=0)
+    # Phase 1: metrics engine selection + risk-free rate override.
+    # ``metrics_engine`` defaults to the new daily-equity-curve estimator.
+    # ``"legacy"`` routes through the inter-trade-return estimator used before
+    # the Phase 1 refactor — kept for one release to allow side-by-side diffs.
+    metrics_engine: str = Field(default="daily", pattern=r"^(daily|legacy)$")
+    risk_free_rate: Optional[float] = Field(
+        default=None,
+        description=(
+            "Annualized risk-free rate as a fraction (e.g. 0.04 = 4%). "
+            "``None`` resolves via STRATEGY_LAB_RISK_FREE_RATE env → FRED "
+            "DGS3MO (when FRED_API_KEY is set) → RFR_DEFAULT=0.04."
+        ),
+    )
 
 
 # Asset-class-aware fee defaults.  Crypto uses Kraken taker fees (lowest
@@ -259,6 +272,16 @@ class BacktestResult(BaseModel):
     max_drawdown_pct: float
     win_rate_pct: float
     profit_factor: float
+    # Phase 1 — daily-equity-curve metrics. Optional for backwards compat with
+    # ``BacktestRecord`` rows persisted before the refactor landed.
+    sortino_ratio: Optional[float] = None
+    calmar_ratio: Optional[float] = None
+    max_drawdown_duration_days: Optional[int] = None
+    risk_free_rate: Optional[float] = None
+    alpha_pct: Optional[float] = None
+    beta: Optional[float] = None
+    information_ratio: Optional[float] = None
+    metrics_engine: str = "legacy"
 
 
 class TradeRecord(BaseModel):

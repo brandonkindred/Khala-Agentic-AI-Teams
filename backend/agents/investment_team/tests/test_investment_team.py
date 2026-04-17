@@ -906,8 +906,8 @@ def test_compare_performance_aligned() -> None:
         profit_factor=1.4,
     )
     paper = BacktestResult(
-        total_return_pct=22.0,
-        annualized_return_pct=9.0,
+        total_return_pct=24.0,
+        annualized_return_pct=9.5,
         volatility_pct=13.0,
         sharpe_ratio=0.69,
         max_drawdown_pct=14.0,
@@ -915,7 +915,12 @@ def test_compare_performance_aligned() -> None:
         profit_factor=1.3,
     )
 
-    comparison = PaperTradingAgent.compare_performance(paper, backtest)
+    comparison = PaperTradingAgent.compare_performance(
+        paper,
+        backtest,
+        paper_trade_count=50,
+        backtest_trade_count=60,
+    )
 
     assert comparison.overall_aligned is True
     assert comparison.win_rate_aligned is True
@@ -995,8 +1000,8 @@ def test_compare_performance_zero_backtest_drawdown() -> None:
     assert comparison_bad.drawdown_aligned is False
 
 
-def test_compare_performance_small_return_uses_absolute_tolerance() -> None:
-    """When backtest return is ≤5%, use ±3pp absolute tolerance."""
+def test_compare_performance_return_absolute_tolerance() -> None:
+    """Phase 5: all returns use ±2.0pp absolute tolerance now."""
     from agents.investment_team.paper_trading_agent import PaperTradingAgent
 
     backtest = BacktestResult(
@@ -1008,19 +1013,64 @@ def test_compare_performance_small_return_uses_absolute_tolerance() -> None:
         win_rate_pct=55.0,
         profit_factor=1.2,
     )
-    paper = BacktestResult(
-        total_return_pct=7.0,
-        annualized_return_pct=2.5,
+    paper_close = BacktestResult(
+        total_return_pct=9.0,
+        annualized_return_pct=3.5,
         volatility_pct=11.0,
-        sharpe_ratio=0.23,
+        sharpe_ratio=0.32,
         max_drawdown_pct=12.0,
         win_rate_pct=52.0,
         profit_factor=1.1,
     )
 
-    comparison = PaperTradingAgent.compare_performance(paper, backtest)
-    # |2.5 - 5.0| = 2.5 < 3.0 → aligned
+    comparison = PaperTradingAgent.compare_performance(paper_close, backtest)
+    # |3.5 - 5.0| = 1.5 ≤ 2.0 → aligned
     assert comparison.return_aligned is True
+
+    paper_far = BacktestResult(
+        total_return_pct=5.0,
+        annualized_return_pct=2.0,
+        volatility_pct=11.0,
+        sharpe_ratio=0.18,
+        max_drawdown_pct=12.0,
+        win_rate_pct=52.0,
+        profit_factor=1.1,
+    )
+    comparison_far = PaperTradingAgent.compare_performance(paper_far, backtest)
+    # |2.0 - 5.0| = 3.0 > 2.0 → not aligned
+    assert comparison_far.return_aligned is False
+
+
+def test_compare_performance_insufficient_sample() -> None:
+    """Fewer than 30 paper trades → overall_aligned is always False."""
+    from agents.investment_team.paper_trading_agent import PaperTradingAgent
+
+    backtest = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=10.0,
+        volatility_pct=14.0,
+        sharpe_ratio=0.71,
+        max_drawdown_pct=12.0,
+        win_rate_pct=55.0,
+        profit_factor=1.4,
+    )
+    paper = BacktestResult(
+        total_return_pct=10.0,
+        annualized_return_pct=10.0,
+        volatility_pct=14.0,
+        sharpe_ratio=0.71,
+        max_drawdown_pct=12.0,
+        win_rate_pct=55.0,
+        profit_factor=1.4,
+    )
+
+    comparison = PaperTradingAgent.compare_performance(
+        paper,
+        backtest,
+        paper_trade_count=10,
+        backtest_trade_count=50,
+    )
+    assert comparison.overall_aligned is False
 
 
 def test_paper_trading_verdict_enum_values() -> None:

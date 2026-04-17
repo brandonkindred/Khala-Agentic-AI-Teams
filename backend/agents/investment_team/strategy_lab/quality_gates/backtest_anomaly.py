@@ -105,7 +105,7 @@ class BacktestAnomalyDetector:
                 )
             )
 
-        # 6. Average hold time < 1 day (possible lookahead)
+        # 6. Average hold time < 1 day → hard fail on daily bars (Phase 2).
         if trades:
             avg_hold = sum(t.hold_days for t in trades) / len(trades)
             if avg_hold < 1:
@@ -113,8 +113,12 @@ class BacktestAnomalyDetector:
                     QualityGateResult(
                         gate_name=GATE,
                         passed=False,
-                        severity="warning",
-                        details=f"Average hold time {avg_hold:.1f} days — sub-day holds may indicate lookahead bias in daily data.",
+                        severity="critical",
+                        details=(
+                            f"Average hold time {avg_hold:.1f} days — sub-day holds "
+                            "on daily-bar data are a strong indicator of look-ahead "
+                            "bias or intra-bar execution that cannot be replicated live."
+                        ),
                     )
                 )
 

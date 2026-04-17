@@ -215,6 +215,9 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 | `STRATEGY_LAB_MARKET_DATA_*` | Strategy Lab market-data cache/timeout/provider tuning |
 | `AUTHOR_PROFILE_PATH` | Path to user/author profile YAML injected into blogging prompts. Falls back to `$AGENT_CACHE/author_profile.yaml`, then to the bundled example. See `backend/agents/blogging/author_profile/`. |
 | `AUTHOR_PROFILE_STRICT` | When `true`, missing/invalid profile raises instead of falling back to the bundled example. Recommended for production. |
+| `SOCIAL_MARKETING_WINNING_POSTS_TOP_K` | Max exemplars retrieved from the social marketing Winning Posts Bank per concept run (default `5`). |
+| `SOCIAL_MARKETING_WINNING_POSTS_RERANK_ENABLED` | Enable LLM rerank stage in the Winning Posts Bank retrieval (default `true`; set to `false` to disable). |
+| `SOCIAL_MARKETING_WINNING_POSTS_INGEST_THRESHOLD` | Engagement-score cutoff (0..1) above which performance observations are auto-promoted into the Winning Posts Bank (default `0.7`). |
 
 **Blogging pipeline:** `research → planning (ContentPlan) → writer → gates`; `POST /research-and-review` runs research + the same planning step. See `backend/agents/blogging/README.md` and repo `CHANGELOG.md`.
 

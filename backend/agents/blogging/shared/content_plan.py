@@ -216,6 +216,13 @@ class PlanningPhaseResult(BaseModel):
     parse_retry_count: int = Field(0, ge=0)
     planning_wall_ms_total: float = Field(0.0, ge=0.0)
     planning_failure_reason: Optional[PlanningFailureReason] = None
+    plan_critic_report: Optional[Any] = Field(
+        default=None,
+        description=(
+            "PlanCriticReport from the independent critic pass when enabled. "
+            "Typed as Any here to avoid a hard dependency on blog_plan_critic_agent in this shared module."
+        ),
+    )
 
 
 # --- Section count expectations by profile (for post-validation / thresholds) ---
