@@ -496,27 +496,11 @@ class TradeSimulationEngine:
         for bar_date, symbol, bar in timeline:
             last_price[symbol] = bar.close
 
-            # --- Drawdown circuit-breaker (Phase 3) ---
-            # Mark open positions to market using each symbol's latest price.
-            mtm_value = 0.0
-            for pos_sym, pos in open_positions.items():
-                price_now = last_price.get(pos_sym, pos.entry_price)
-                if pos.side == "long":
-                    mtm_value += pos.shares * price_now
-                else:
-                    mtm_value += pos.shares * (2 * pos.entry_price - price_now)
-            current_equity = capital + mtm_value
-            if current_equity > peak_equity:
-                peak_equity = current_equity
-            dd = self._risk.check_drawdown(current_equity, peak_equity)
-            if dd.breached:
-                terminated_reason = (
-                    f"max_drawdown breached ({dd.current_drawdown_pct:.1f}% >= {dd.limit_pct}%)"
-                )
-                logger.warning("Simulation terminated: %s", terminated_reason)
-                break
-
             # --- 1. Execute pending fills from previous bar's decision ---
+            # Fills must run BEFORE the drawdown check so that (a) the
+            # "fill at next bar's open" contract is honoured even on the bar
+            # that triggers termination, and (b) the MTM snapshot reflects
+            # the just-opened/closed positions rather than stale state.
             if symbol in pending_entries:
                 pending = pending_entries.pop(symbol)
                 action = pending["action"]
@@ -565,7 +549,27 @@ class TradeSimulationEngine:
                 if max_trades is not None and len(trades) >= max_trades:
                     break
 
-            # --- 2. Add bar to history, evaluate strategy ---
+            # --- 2. Drawdown circuit-breaker (Phase 3) ---
+            # Mark open positions to market using each symbol's latest price.
+            mtm_value = 0.0
+            for pos_sym, pos in open_positions.items():
+                price_now = last_price.get(pos_sym, pos.entry_price)
+                if pos.side == "long":
+                    mtm_value += pos.shares * price_now
+                else:
+                    mtm_value += pos.shares * (2 * pos.entry_price - price_now)
+            current_equity = capital + mtm_value
+            if current_equity > peak_equity:
+                peak_equity = current_equity
+            dd = self._risk.check_drawdown(current_equity, peak_equity)
+            if dd.breached:
+                terminated_reason = (
+                    f"max_drawdown breached ({dd.current_drawdown_pct:.1f}% >= {dd.limit_pct}%)"
+                )
+                logger.warning("Simulation terminated: %s", terminated_reason)
+                break
+
+            # --- 3. Add bar to history, evaluate strategy ---
             symbol_history[symbol].append(bar)
             recent = symbol_history[symbol][-20:]
             has_position = symbol in open_positions
