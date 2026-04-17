@@ -39,12 +39,7 @@ from social_media_marketing_team.models import (
     HumanReview,
 )
 from social_media_marketing_team.orchestrator import SocialMediaMarketingOrchestrator
-from social_media_marketing_team.shared.performance_ingestion import (
-    extract_campaign_name as _extract_campaign_name,
-)
-from social_media_marketing_team.shared.performance_ingestion import (
-    persist_observations_to_bank,
-)
+from social_media_marketing_team.postgres import SCHEMA
 
 from .request_models import (
     CancelMarketingJobResponse,
@@ -73,27 +68,16 @@ from .trend_scheduler import get_latest_digest, run_trend_job, start_scheduler, 
 @asynccontextmanager
 async def _lifespan(_application: FastAPI) -> AsyncIterator[None]:
     try:
-        from social_media_marketing_team.postgres import SCHEMA
-
         register_team_schemas(SCHEMA)
-    except Exception:
-        logger.exception("social_media_marketing postgres schema registration failed")
-    start_scheduler()
-    try:
-        from shared_postgres import register_team_schemas as _register_team_schemas
-        from social_media_marketing_team.postgres import SCHEMA as _SM_SCHEMA
-
-        _register_team_schemas(_SM_SCHEMA)
     except Exception:
         logging.getLogger(__name__).exception(
             "social marketing postgres schema registration failed"
         )
+    start_scheduler()
     yield
     stop_scheduler()
     try:
-        from shared_postgres import close_pool as _close_pool
-
-        _close_pool()
+        close_pool()
     except Exception:
         logging.getLogger(__name__).warning(
             "social marketing shared_postgres close_pool failed", exc_info=True
@@ -473,7 +457,7 @@ def ingest_performance(job_id: str, payload: PerformanceIngestRequest) -> Perfor
     observations.extend([obs.model_dump() for obs in payload.observations])
     _job_manager.update_job(job_id, performance_observations=observations, last_updated_at=_now())
 
-    _auto_ingest_winning_posts(job, job_id, payload.observations)
+    bank_count = _auto_ingest_winning_posts(job, job_id, payload.observations)
 
     campaign_name = None
     result = job.get("result")
@@ -486,7 +470,7 @@ def ingest_performance(job_id: str, payload: PerformanceIngestRequest) -> Perfor
         job_id=job_id,
         campaign_name=campaign_name,
         observations_ingested=len(payload.observations),
-        message=f"Performance observations stored. {persisted_count} persisted to bank.",
+        message=f"Performance observations stored. {bank_count} persisted to bank.",
     )
 
 

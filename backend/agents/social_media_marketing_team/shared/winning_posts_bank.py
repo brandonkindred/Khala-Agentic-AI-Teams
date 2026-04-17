@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -35,6 +35,8 @@ from shared_postgres.metrics import timed_query
 logger = logging.getLogger(__name__)
 
 _STORE = "social_marketing_winning_posts_bank"
+
+DEFAULT_LOOKBACK_DAYS = 90
 
 
 def _rerank_enabled() -> bool:
@@ -160,12 +162,14 @@ def find_relevant_winning_posts(
     platforms: Optional[list[str]] = None,
     rerank_context: Optional[str] = None,
     llm_client: Any = None,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
 ) -> list[dict[str, Any]]:
     """Return winning posts relevant to *query_keywords*, ranked by relevance.
 
     Two-stage retrieval:
       1. Keyword overlap (set intersection); optionally filtered by
-         ``platforms`` (matches ``platform = ANY(...)``).
+         ``platforms`` and a ``created_at`` recency window controlled
+         by *lookback_days* (default 90).
       2. Optional LLM rerank when ``rerank_context`` + ``llm_client``
          are supplied and more candidates-with-summaries than *limit*
          exist.
@@ -174,7 +178,10 @@ def find_relevant_winning_posts(
         return []
 
     candidates = _keyword_scored_candidates(
-        query_keywords, limit=max(limit, 10), platforms=platforms
+        query_keywords,
+        limit=max(limit, 10),
+        platforms=platforms,
+        lookback_days=lookback_days,
     )
     if not candidates:
         return []
@@ -197,23 +204,29 @@ def _keyword_scored_candidates(
     query_keywords: list[str],
     limit: int = 10,
     platforms: Optional[list[str]] = None,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
 ) -> list[dict[str, Any]]:
     """Retrieve winning posts ranked by keyword-overlap count.
 
-    Reads every row (optionally pre-filtered by platform) because the
-    table is low-volume. Scoring is done in Python; a future
-    optimization could push the overlap into Postgres via the JSONB
-    ``?|`` operator.
+    Only considers posts created within the *lookback_days* window so
+    stale historical data does not dominate exemplar retrieval.
+    Optionally pre-filtered by platform. Scoring is done in Python; a
+    future optimization could push the overlap into Postgres via the
+    JSONB ``?|`` operator.
     """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         if platforms:
             cur.execute(
                 f"SELECT {_SELECT_COLS} FROM social_marketing_winning_posts "
-                "WHERE platform = ANY(%s)",
-                (list(platforms),),
+                "WHERE platform = ANY(%s) AND created_at >= %s",
+                (list(platforms), cutoff),
             )
         else:
-            cur.execute(f"SELECT {_SELECT_COLS} FROM social_marketing_winning_posts")
+            cur.execute(
+                f"SELECT {_SELECT_COLS} FROM social_marketing_winning_posts WHERE created_at >= %s",
+                (cutoff,),
+            )
         rows = cur.fetchall()
 
     query_lower = {k.lower().strip() for k in query_keywords if k and k.strip()}

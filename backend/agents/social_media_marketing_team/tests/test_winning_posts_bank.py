@@ -68,7 +68,7 @@ class _FakeCursor:
             return
 
         if "from social_marketing_winning_posts where platform = any" in sql_l:
-            (platforms,) = params
+            platforms, _cutoff = params
             allowed = set(platforms or [])
             self._last_fetch_all = [
                 dict(row)

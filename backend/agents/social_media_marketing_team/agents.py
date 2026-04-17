@@ -307,32 +307,6 @@ class ContentConceptAgent:
         # Fallback: combined set (deduped by name)
         return _STORYTELLING_ARCHETYPES + _CREATIVE_TESTING_ARCHETYPES
 
-    @staticmethod
-    def _matching_winners(
-        winners: list[dict[str, Any]], archetype_name: str
-    ) -> list[dict[str, Any]]:
-        """Filter winners whose archetype or concept_title matches the current archetype."""
-        if not winners:
-            return []
-        name_lower = archetype_name.lower()
-        matched = []
-        for w in winners:
-            w_arch = (w.get("archetype") or "").lower()
-            w_title = (w.get("concept_title") or "").lower()
-            if name_lower in w_arch or name_lower in w_title:
-                matched.append(w)
-        return matched
-
-    @staticmethod
-    def _exemplar_boost(matched_winners: list[dict[str, Any]]) -> float:
-        """Compute a data-grounded engagement boost from matched winners."""
-        if not matched_winners:
-            return 0.0
-        avg_score = sum(w.get("engagement_score", 0.0) for w in matched_winners) / len(
-            matched_winners
-        )
-        return min(0.08, max(0.0, avg_score - 0.70))
-
     def generate_candidates(
         self,
         proposal: CampaignProposal,
@@ -408,20 +382,9 @@ class ContentConceptAgent:
                 if goal.lower() in proposal.objective.lower():
                     goal_alignment_score += 0.08
 
-                matched = self._matching_winners(winners or [], archetype_name)
-                exemplar_boost = self._exemplar_boost(matched)
-                exemplar_ids = [w["id"] for w in matched if "id" in w]
-
-                if matched:
-                    winner_titles = [w.get("concept_title", "") for w in matched[:3]]
-                    primary_hook = (
-                        f"{archetype_name}: {topic} (inspired by: {', '.join(winner_titles)})"
-                    )
-
                 estimated_engagement_probability = min(
                     0.92,
-                    (brand_fit_score + audience_resonance_score + goal_alignment_score) / 3.0
-                    + exemplar_boost,
+                    (brand_fit_score + audience_resonance_score + goal_alignment_score) / 3.0,
                 )
 
                 ideas.append(
