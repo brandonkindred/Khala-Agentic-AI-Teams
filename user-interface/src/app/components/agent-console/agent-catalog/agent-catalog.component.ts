@@ -1,4 +1,4 @@
-import { Component, inject, OnInit, signal, computed } from '@angular/core';
+import { Component, EventEmitter, inject, OnInit, Output, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
@@ -44,6 +44,9 @@ import type {
 })
 export class AgentCatalogComponent implements OnInit {
   private readonly api = inject(AgentCatalogApiService);
+
+  /** Emitted when the user clicks "Run agent" in the detail drawer. Consumed by AgentConsoleComponent. */
+  @Output() readonly requestRun = new EventEmitter<string>();
 
   readonly agents = signal<AgentSummary[]>([]);
   readonly teams = signal<TeamGroup[]>([]);
@@ -135,6 +138,19 @@ export class AgentCatalogComponent implements OnInit {
   closeDetail(): void {
     this.drawerOpen.set(false);
     this.selectedDetail.set(null);
+  }
+
+  runFromDrawer(): void {
+    const detail = this.selectedDetail();
+    if (!detail) return;
+    this.requestRun.emit(detail.manifest.id);
+    this.closeDetail();
+  }
+
+  requiresLiveIntegration(): boolean {
+    const detail = this.selectedDetail();
+    if (!detail) return false;
+    return detail.manifest.tags?.includes('requires-live-integration') ?? false;
   }
 
   teamDisplayName(teamKey: string): string {

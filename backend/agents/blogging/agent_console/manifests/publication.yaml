@@ -6,7 +6,9 @@ summary: Publishes the approved draft to Medium (or configured platform).
 description: |
   Consumes the finalized, compliance-approved draft and publishes it via the configured
   platform integration (Medium today). Returns the public URL and publication metadata.
-tags: [publication, integration, blogging]
+tags: [publication, integration, blogging, requires-live-integration]
+inputs:
+  schema_ref: blogging.blog_publication_agent.models:SubmitDraftInput
 invoke:
   kind: http
   method: POST

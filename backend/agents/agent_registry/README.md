@@ -123,7 +123,24 @@ python3 -m pytest agents/agent_registry/tests/ unified_api/tests/test_agents_rou
 
 ## Roadmap
 
-1. **Phase 1 — Catalog** *(this release)*: registry + API + browsable UI.
-2. **Phase 2 — Runner**: `POST /api/agents/{id}/invoke`, auto-generated form from `inputs.schema_ref`.
-3. **Phase 3 — Samples**: golden sample inputs per agent, saved runs, diffs.
-4. **Phase 4 — Sandbox reuse**: warm sandboxes via the provisioning team, reused across invocations.
+1. **Phase 1 — Catalog** *(shipped)*: registry + API + browsable UI.
+2. **Phase 2 — Runner + Sandboxes** *(shipped)*: `POST /api/agents/{id}/invoke`, warm per-team Docker sandboxes (`agent_sandbox`), invoke shim (`shared_agent_invoke`), auto-generated golden samples. See [`agent_sandbox/README.md`](../agent_sandbox/README.md) and [`shared_agent_invoke/README.md`](../shared_agent_invoke/README.md).
+3. **Phase 3 — Runs**: Postgres-backed run history, user-saved ad-hoc inputs, run diffing, JSON-schema-driven form UI.
+4. **Phase 4 — Breadth**: manifest coverage for all 20 teams, pre-warming, batch invocation.
+
+## Authoring golden samples (Phase 2+)
+
+Location: `backend/agents/<team_dir>/agent_console/samples/<agent_id>/*.json`
+(team_dir is the manifest's on-disk parent, e.g. `branding_team/`, not the
+`manifest.team` key).
+
+Auto-generate a minimal skeleton for every manifest with `inputs.schema_ref`:
+
+```bash
+cd backend
+PYTHONPATH="agents:." python3 -m agent_registry.scripts.generate_sample_skeletons
+```
+
+The script never clobbers hand-edited samples. Edit the emitted
+`default.json` to make it realistic — the Runner UI's "Sample" dropdown
+surfaces every `.json` file in the directory.

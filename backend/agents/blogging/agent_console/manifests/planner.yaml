@@ -9,6 +9,7 @@ description: |
   Used by the blogging pipeline upstream of the writer.
 tags: [planning, content, blogging]
 inputs:
+  schema_ref: blogging.shared.content_plan:PlanningInput
   description: Topic brief plus prior research document.
 outputs:
   schema_ref: blogging.shared.content_plan:ContentPlan

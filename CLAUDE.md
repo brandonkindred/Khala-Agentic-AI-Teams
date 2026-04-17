@@ -36,6 +36,8 @@ backend/
     deepthought/
     llm_service/             # Centralized LLM client (Ollama, Claude)
     agent_registry/          # Agent Console catalog: loads per-agent YAML manifests, serves /api/agents
+    agent_sandbox/           # Warm per-team Docker sandbox lifecycle for the Agent Console Runner
+    shared_agent_invoke/     # One-line-mount invoke shim each team's api/main.py includes
     integrations/            # Shared integration contracts (Google login, Medium, etc.)
     artifact_registry/       # Shared artifact persistence
     event_bus/               # Cross-team event publishing
@@ -179,7 +181,9 @@ The **Agent Console** (UI at `/agent-console`, replaces the old `/agent-provisio
 - **Runner** — placeholder; isolated agent invocation ships in Phase 2.
 - **Provisioning & Environments** — embeds the existing `AgentProvisioningDashboardComponent` unchanged.
 
-The catalog is backed by `backend/agents/agent_registry/`, which loads declarative per-agent YAML manifests from `backend/agents/<team>/agent_console/manifests/*.yaml` and exposes them via `/api/agents` (router lives in `backend/unified_api/routes/agents.py`). Manifests describe each agent's id, team, summary, I/O schema refs, invoke metadata, and sandbox provisioning hints. See `backend/agents/agent_registry/README.md` for the authoring guide.
+The catalog is backed by `backend/agents/agent_registry/`, which loads declarative per-agent YAML manifests from `backend/agents/<team_dir>/agent_console/manifests/*.yaml` and exposes them via `/api/agents` (router lives in `backend/unified_api/routes/agents.py`). Manifests describe each agent's id, team, summary, I/O schema refs, invoke metadata, and sandbox provisioning hints. See `backend/agents/agent_registry/README.md` for the authoring guide.
+
+**Phase 2 — Runner + sandboxes (shipped):** the Runner tab invokes a single specialist agent in a warm per-team Docker sandbox. The lifecycle service lives in `backend/agents/agent_sandbox/` and drives `docker/sandbox.compose.yml` (dedicated `sandbox-postgres`, isolated `khala-sandbox` network, ports 8200–8220). Each team's `api/main.py` mounts `shared_agent_invoke.mount_invoke_shim(app, team_key="...")` which exposes `POST /_agents/{id}/invoke`; the unified API proxies via `POST /api/agents/{id}/invoke`. Idle sandboxes are reaped after `SANDBOX_IDLE_TEARDOWN_MINUTES` (default 15). Golden sample inputs are generated from `inputs.schema_ref` via `python3 -m agent_registry.scripts.generate_sample_skeletons`. Four teams are wired in Phase 2: blogging, software_engineering, planning_v3, branding. Agents with the `requires-live-integration` tag (e.g. `blogging.publication`) are catalogued but not runnable in sandboxes — the Runner's Run button is disabled with an explainer.
 
 The old `/agent-provisioning` route redirects to `/agent-console` for backward compatibility.
 

@@ -7,6 +7,10 @@ description: |
   Emits search queries, fetches sources, and returns a consolidated research document
   that downstream agents (planner, fact checker) consume.
 tags: [research, content, blogging]
+inputs:
+  schema_ref: blogging.blog_research_agent.models:ResearchBriefInput
+outputs:
+  schema_ref: blogging.blog_research_agent.models:ResearchAgentOutput
 invoke:
   kind: http
   method: POST

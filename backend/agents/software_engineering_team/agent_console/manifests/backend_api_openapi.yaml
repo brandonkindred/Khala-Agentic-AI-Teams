@@ -4,6 +4,10 @@ team: software_engineering
 name: Backend — API/OpenAPI Specialist
 summary: Designs and generates OpenAPI specifications and route scaffolding.
 tags: [backend, api, openapi, software-engineering]
+inputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentInput
+outputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentOutput
 sandbox:
   manifest_path: default.yaml
   access_tier: standard

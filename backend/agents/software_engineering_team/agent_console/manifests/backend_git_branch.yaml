@@ -4,6 +4,10 @@ team: software_engineering
 name: Backend — Git Branch Manager
 summary: Manages feature branch workflows, rebases, merges, and PR prep.
 tags: [backend, git, workflow, software-engineering]
+inputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentInput
+outputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentOutput
 sandbox:
   manifest_path: default.yaml
   access_tier: elevated

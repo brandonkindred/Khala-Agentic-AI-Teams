@@ -1,0 +1,15 @@
+{
+  "draft": "",
+  "audience": null,
+  "tone_or_purpose": null,
+  "human_feedback": null,
+  "previous_feedback_items": null,
+  "target_word_count": 1000,
+  "length_guidance": "",
+  "soft_min_words": null,
+  "soft_max_words": null,
+  "editor_must_fix_over_ratio": 1.3,
+  "editor_should_fix_over_ratio": 1.1,
+  "content_profile": null,
+  "content_plan_context": null
+}

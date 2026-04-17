@@ -1,0 +1,149 @@
+<section class="agent-runner">
+  <header class="agent-runner__header">
+    <div>
+      <mat-form-field appearance="outline" class="agent-runner__picker">
+        <mat-label>Agent</mat-label>
+        <mat-select
+          [value]="selectedAgentId()"
+          (valueChange)="onAgentChange($event)"
+          panelClass="agent-runner__picker-panel"
+        >
+          <mat-option [value]="null">— select an agent —</mat-option>
+          <mat-option
+            *ngFor="let a of agents(); trackBy: trackAgent"
+            [value]="a.id"
+          >
+            {{ a.name }}
+            <span class="agent-runner__picker-team">· {{ a.team }}</span>
+          </mat-option>
+        </mat-select>
+      </mat-form-field>
+    </div>
+
+    <div class="agent-runner__sandbox-status" *ngIf="selectedAgent() as detail">
+      <span class="agent-runner__sandbox-label">Sandbox · {{ detail.manifest.team }}</span>
+      <span class="agent-runner__sandbox-chip" [attr.data-status]="sandboxStatusLabel()">
+        <mat-icon *ngIf="sandboxStatusLabel() === 'warm'">check_circle</mat-icon>
+        <mat-icon *ngIf="sandboxStatusLabel() === 'warming'" class="spin">hourglass_empty</mat-icon>
+        <mat-icon *ngIf="sandboxStatusLabel() === 'cold'">power_settings_new</mat-icon>
+        <mat-icon *ngIf="sandboxStatusLabel() === 'error'">error</mat-icon>
+        {{ sandboxStatusLabel() }}
+      </span>
+      <span *ngIf="sandbox()?.idle_seconds != null" class="agent-runner__idle">
+        idle {{ sandbox()?.idle_seconds }}s
+      </span>
+      <button
+        *ngIf="sandboxStatusLabel() === 'cold'"
+        mat-stroked-button
+        color="primary"
+        (click)="warmSandbox()"
+        [disabled]="sandboxPolling()"
+      >
+        <mat-icon>play_arrow</mat-icon> Warm sandbox
+      </button>
+      <button
+        *ngIf="sandboxStatusLabel() === 'warm'"
+        mat-stroked-button
+        (click)="tearDownSandbox()"
+      >
+        <mat-icon>stop</mat-icon> Teardown
+      </button>
+    </div>
+  </header>
+
+  <div *ngIf="!selectedAgent()" class="agent-runner__empty">
+    <mat-icon>science</mat-icon>
+    <p>Pick an agent above to run it in a sandbox.</p>
+    <button mat-stroked-button (click)="returnToCatalog()">Browse catalog</button>
+  </div>
+
+  <ng-container *ngIf="selectedAgent() as detail">
+    <div *ngIf="requiresLiveIntegration()" class="agent-runner__banner" role="alert">
+      <mat-icon>warning</mat-icon>
+      <div>
+        <strong>Not runnable in sandbox</strong>
+        <p>
+          {{ detail.manifest.name }} requires live integrations (e.g. OAuth sessions,
+          third-party APIs) and can only run in its team's production service.
+          Use its dedicated team dashboard instead.
+        </p>
+      </div>
+    </div>
+
+    <div class="agent-runner__body">
+      <section class="agent-runner__input">
+        <header>
+          <h3>Input</h3>
+          <mat-form-field appearance="outline" class="agent-runner__sample-select">
+            <mat-label>Sample</mat-label>
+            <mat-select
+              [value]="selectedSample()"
+              (valueChange)="applySample($event)"
+              [disabled]="samples().length === 0"
+            >
+              <mat-option *ngFor="let s of samples()" [value]="s">{{ s }}</mat-option>
+            </mat-select>
+          </mat-form-field>
+          <button mat-stroked-button (click)="resetInput()">
+            <mat-icon>refresh</mat-icon> Reset
+          </button>
+        </header>
+        <mat-form-field appearance="outline" class="agent-runner__input-textarea">
+          <mat-label>Request body (JSON)</mat-label>
+          <textarea
+            matInput
+            rows="14"
+            spellcheck="false"
+            [ngModel]="inputText()"
+            (ngModelChange)="onInputTextChange($event)"
+          ></textarea>
+          <mat-error *ngIf="inputError()">{{ inputError() }}</mat-error>
+        </mat-form-field>
+      </section>
+
+      <section class="agent-runner__schema" *ngIf="inputSchema() as schema">
+        <header><h3>Input schema</h3></header>
+        <pre>{{ prettySchema() }}</pre>
+      </section>
+    </div>
+
+    <footer class="agent-runner__actions">
+      <button
+        mat-flat-button
+        color="primary"
+        (click)="run()"
+        [disabled]="!canRun()"
+      >
+        <mat-icon>play_arrow</mat-icon>
+        Run {{ detail.manifest.name }}
+      </button>
+      <mat-spinner *ngIf="running()" diameter="24"></mat-spinner>
+      <span *ngIf="inputError()" class="agent-runner__error-inline">
+        <mat-icon>error</mat-icon> Fix JSON before running
+      </span>
+    </footer>
+
+    <section class="agent-runner__output" *ngIf="lastResponse() as env">
+      <header>
+        <h3>Output</h3>
+        <span class="agent-runner__meta">
+          {{ env.duration_ms }}ms · trace {{ env.trace_id.slice(0, 8) }}
+        </span>
+      </header>
+      <div *ngIf="env.error" class="agent-runner__error-banner" role="alert">
+        <mat-icon>error</mat-icon>
+        <pre>{{ env.error }}</pre>
+      </div>
+      <pre class="agent-runner__output-body">{{ prettyOutput() }}</pre>
+      <details *ngIf="env.logs_tail?.length">
+        <summary>Logs ({{ env.logs_tail.length }} lines)</summary>
+        <pre class="agent-runner__logs">{{ env.logs_tail.join('\n') }}</pre>
+      </details>
+    </section>
+
+    <div *ngIf="lastError() && !lastResponse()" class="agent-runner__error-banner" role="alert">
+      <mat-icon>error</mat-icon>
+      <span>{{ lastError() }}</span>
+    </div>
+  </ng-container>
+</section>

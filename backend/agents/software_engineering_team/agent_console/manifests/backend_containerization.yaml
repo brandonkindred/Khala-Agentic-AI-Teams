@@ -4,6 +4,10 @@ team: software_engineering
 name: Backend — Containerization Specialist
 summary: Writes Dockerfiles, docker-compose, and Kubernetes manifests.
 tags: [backend, docker, kubernetes, software-engineering]
+inputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentInput
+outputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentOutput
 sandbox:
   manifest_path: default.yaml
   access_tier: elevated

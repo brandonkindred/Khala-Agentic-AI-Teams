@@ -4,6 +4,10 @@ team: software_engineering
 name: Backend — Testing/QA Specialist
 summary: Designs test strategy and implements unit/integration/acceptance tests.
 tags: [backend, testing, qa, software-engineering]
+inputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentInput
+outputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentOutput
 sandbox:
   manifest_path: default.yaml
   access_tier: standard

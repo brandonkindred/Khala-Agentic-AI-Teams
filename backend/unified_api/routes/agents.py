@@ -1,13 +1,16 @@
 """
-Read-only Agent Console catalog API.
+Agent Console API — read-only catalog + invoke + samples.
 
+Phase 1 routes:
 - GET /api/agents                        — list AgentSummary[] (filter by team/tag/q)
 - GET /api/agents/teams                  — list TeamGroup[] for the catalog sidebar
 - GET /api/agents/{agent_id}             — full AgentDetail + anatomy markdown if present
-- GET /api/agents/{agent_id}/schema/input  — resolved JSON Schema (404 if unavailable)
-- GET /api/agents/{agent_id}/schema/output — resolved JSON Schema (404 if unavailable)
+- GET /api/agents/{agent_id}/schema/{input|output} — resolved JSON Schema
 
-Invocation is out of scope for Phase 1 (Catalog only).
+Phase 2 additions:
+- GET /api/agents/{agent_id}/samples              — list golden sample stems
+- GET /api/agents/{agent_id}/samples/{name}       — load a sample
+- POST /api/agents/{agent_id}/invoke              — warm sandbox + proxy invoke
 """
 
 from __future__ import annotations
@@ -15,10 +18,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+import httpx
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 
 from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
 from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
+from agent_sandbox import SandboxStatus, get_manager
+from unified_api.config import TEAM_CONFIGS
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +73,105 @@ def get_output_schema(agent_id: str) -> dict[str, Any]:
     if not (manifest.outputs and manifest.outputs.schema_ref):
         raise HTTPException(status_code=404, detail="Agent has no output schema_ref configured.")
     return _resolve_or_404(manifest.outputs.schema_ref, kind="output")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — samples
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{agent_id}/samples")
+def list_samples(agent_id: str) -> list[str]:
+    reg = get_registry()
+    if reg.get(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    return reg.list_samples(agent_id)
+
+
+@router.get("/{agent_id}/samples/{name}")
+def get_sample(agent_id: str, name: str) -> dict[str, Any]:
+    reg = get_registry()
+    if reg.get(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    body = reg.get_sample(agent_id, name)
+    if body is None:
+        raise HTTPException(status_code=404, detail=f"Unknown sample: {agent_id}/{name}")
+    return body
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — invoke
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{agent_id}/invoke")
+async def invoke_agent(agent_id: str, request: Request) -> Response:
+    manifest = get_registry().get(agent_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_id}")
+    if "requires-live-integration" in manifest.tags:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Agent {agent_id} requires live integrations and cannot be run in a sandbox. "
+                "Invoke it through its team's production API instead."
+            ),
+        )
+
+    mgr = get_manager()
+    try:
+        handle = await mgr.ensure_warm(manifest.team)
+    except Exception as exc:  # UnknownTeamError or infra problems
+        logger.exception("sandbox warm failed for %s", manifest.team)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Sandbox for team {manifest.team!r} is not available: {exc}",
+        ) from exc
+
+    if handle.status == SandboxStatus.ERROR:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": f"Sandbox for {manifest.team} failed to warm.",
+                "sandbox_error": handle.error,
+            },
+        )
+    if handle.status != SandboxStatus.WARM or handle.url is None:
+        # Warming; let the UI poll.
+        return JSONResponse(
+            status_code=202,
+            headers={"Retry-After": "5"},
+            content={
+                "status": handle.status,
+                "message": "Sandbox is warming. Retry shortly.",
+                "sandbox": {"team": manifest.team, "status": handle.status},
+            },
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    timeout_s = TEAM_CONFIGS.get(manifest.team).timeout_seconds if manifest.team in TEAM_CONFIGS else 120.0
+    target = f"{handle.url}/_agents/{agent_id}/invoke"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
+            upstream = await client.post(target, json=body)
+    except httpx.HTTPError as exc:
+        logger.exception("invoke proxy failed %s", target)
+        raise HTTPException(status_code=502, detail=f"Sandbox invoke failed: {exc}") from exc
+
+    # Update idle tracker only on a real response (any status — the user still engaged with it).
+    await mgr.note_activity(manifest.team)
+
+    content: Any
+    try:
+        content = upstream.json()
+    except ValueError:
+        content = {"raw": upstream.text}
+    if isinstance(content, dict):
+        content.setdefault("sandbox", {"team": manifest.team, "url": handle.url})
+    return JSONResponse(status_code=upstream.status_code, content=content)
 
 
 def _resolve_or_404(schema_ref: str, *, kind: str) -> dict[str, Any]:

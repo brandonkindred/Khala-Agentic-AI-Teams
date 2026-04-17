@@ -258,8 +258,20 @@ async def lifespan(app: FastAPI):
     health_task = asyncio.create_task(_health_check_loop())
     logger.info("Started background health checker (interval=%ds)", _HEALTH_CHECK_INTERVAL)
 
+    # 4. Start the Agent Console sandbox idle reaper.
+    sandbox_reaper_task: asyncio.Task | None = None
+    try:
+        from agent_sandbox import get_manager
+
+        sandbox_reaper_task = asyncio.create_task(get_manager().run_idle_reaper())
+        logger.info("Started Agent Console sandbox idle reaper")
+    except Exception:
+        logger.warning("Agent Console sandbox reaper failed to start", exc_info=True)
+
     yield
 
+    if sandbox_reaper_task is not None:
+        sandbox_reaper_task.cancel()
     health_task.cancel()
 
     # Close Postgres connection pools owned by shared_postgres.
@@ -331,12 +343,14 @@ from unified_api.routes.analytics import router as analytics_router
 from unified_api.routes.integrations import router as integrations_router
 from unified_api.routes.llm_tools import router as llm_tools_router
 from unified_api.routes.llm_usage import router as llm_usage_router
+from unified_api.routes.sandboxes import router as sandboxes_router
 
 app.include_router(integrations_router)
 app.include_router(llm_tools_router)
 app.include_router(llm_usage_router)
 app.include_router(analytics_router)
 app.include_router(agents_router)
+app.include_router(sandboxes_router)
 
 
 # ---------------------------------------------------------------------------

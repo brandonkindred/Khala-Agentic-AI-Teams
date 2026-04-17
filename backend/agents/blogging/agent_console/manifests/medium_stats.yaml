@@ -6,7 +6,11 @@ summary: Scrapes per-post analytics from Medium via Playwright.
 description: |
   Uses a shared browser session (storage_state) to pull view/read/clap counts for
   previously published posts. Powers downstream performance feedback loops.
-tags: [analytics, integration, blogging]
+tags: [analytics, integration, blogging, requires-live-integration]
+inputs:
+  schema_ref: blogging.blog_medium_stats_agent.models:MediumStatsRunConfig
+outputs:
+  schema_ref: blogging.blog_medium_stats_agent.models:MediumStatsReport
 sandbox:
   manifest_path: default.yaml
   access_tier: elevated

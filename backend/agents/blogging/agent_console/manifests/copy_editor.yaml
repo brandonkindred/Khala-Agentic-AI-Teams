@@ -4,6 +4,10 @@ team: blogging
 name: Blog Copy Editor
 summary: Polishes a draft — grammar, clarity, flow, and style adherence.
 tags: [editing, content, blogging]
+inputs:
+  schema_ref: blogging.blog_copy_editor_agent.models:CopyEditorInput
+outputs:
+  schema_ref: blogging.blog_copy_editor_agent.models:CopyEditorOutput
 sandbox:
   manifest_path: default.yaml
   access_tier: standard

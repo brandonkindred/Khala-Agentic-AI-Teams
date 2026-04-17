@@ -9,10 +9,11 @@ kept but logged as orphans.
 
 from __future__ import annotations
 
+import json
 import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import yaml
 from pydantic import ValidationError
@@ -54,9 +55,19 @@ def _load_team_display_names() -> dict[str, str]:
 class AgentRegistry:
     """In-memory registry of agent manifests loaded from disk."""
 
-    def __init__(self, manifests: list[AgentManifest], team_display_names: dict[str, str]) -> None:
+    def __init__(
+        self,
+        manifests: list[AgentManifest],
+        team_display_names: dict[str, str],
+        source_paths: dict[str, Path] | None = None,
+    ) -> None:
         self._by_id: dict[str, AgentManifest] = {m.id: m for m in manifests}
         self._team_display_names = team_display_names
+        # Map agent_id → the YAML file it was loaded from. Used to locate
+        # per-agent ``samples/`` directories without assuming that the team
+        # directory name matches ``manifest.team`` (e.g. ``branding_team`` vs.
+        # ``branding``).
+        self._source_paths: dict[str, Path] = source_paths or {}
 
     # ---------------------------------------------------------------
     # Construction
@@ -67,6 +78,7 @@ class AgentRegistry:
         root = root or _agents_root()
         team_names = _load_team_display_names()
         manifests: dict[str, AgentManifest] = {}
+        source_paths: dict[str, Path] = {}
 
         for path in _discover_manifest_files(root):
             try:
@@ -95,9 +107,10 @@ class AgentRegistry:
                     manifest.team,
                 )
             manifests[manifest.id] = manifest
+            source_paths[manifest.id] = path
 
         logger.info("Agent registry loaded %d manifest(s) from %s", len(manifests), root)
-        return cls(list(manifests.values()), team_names)
+        return cls(list(manifests.values()), team_names, source_paths)
 
     # ---------------------------------------------------------------
     # Queries
@@ -147,6 +160,46 @@ class AgentRegistry:
         ]
         groups.sort(key=lambda g: g.display_name.lower())
         return groups
+
+    def list_samples(self, agent_id: str) -> list[str]:
+        """Return the stem names of golden samples for ``agent_id``. Empty list if none."""
+        directory = self._samples_dir(agent_id)
+        if directory is None or not directory.is_dir():
+            return []
+        return sorted(p.stem for p in directory.glob("*.json"))
+
+    def get_sample(self, agent_id: str, name: str) -> dict[str, Any] | None:
+        """Load a golden sample by stem name. ``None`` if unknown."""
+        directory = self._samples_dir(agent_id)
+        if directory is None:
+            return None
+        path = directory / f"{name}.json"
+        if not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read sample %s for %s: %s", name, agent_id, exc)
+            return None
+
+    def _samples_dir(self, agent_id: str) -> Path | None:
+        """Locate the samples dir for ``agent_id`` without assuming a team-dir naming convention.
+
+        Derives it from the manifest's actual on-disk path:
+        ``<team_dir>/agent_console/manifests/<file>.yaml``
+        → ``<team_dir>/agent_console/samples/<agent_id>/``.
+
+        Falls back to ``<agents_root>/<manifest.team>/...`` when the source
+        path is unknown (e.g. tests that instantiate ``AgentRegistry`` manually).
+        """
+        source = self._source_paths.get(agent_id)
+        if source is not None:
+            team_console_dir = source.parent.parent  # manifests/ → agent_console/
+            return team_console_dir / "samples" / agent_id
+        manifest = self.get(agent_id)
+        if manifest is None:
+            return None
+        return _agents_root() / manifest.team / "agent_console" / "samples" / agent_id
 
     def detail(self, agent_id: str, *, repo_root: Path | None = None) -> AgentDetail | None:
         manifest = self.get(agent_id)

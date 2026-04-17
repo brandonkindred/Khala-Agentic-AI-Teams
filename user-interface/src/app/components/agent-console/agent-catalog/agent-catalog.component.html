@@ -210,13 +210,15 @@
       </section>
 
       <footer class="agent-catalog__drawer-actions">
-        <button mat-stroked-button disabled matTooltip="Coming in Phase 2 — isolated runner">
+        <button
+          mat-flat-button
+          color="primary"
+          (click)="runFromDrawer()"
+          [disabled]="requiresLiveIntegration()"
+          [matTooltip]="requiresLiveIntegration() ? 'This agent requires live integrations and cannot run in a sandbox.' : 'Open this agent in the Runner tab'"
+        >
           <mat-icon>play_arrow</mat-icon>
           Run agent
-        </button>
-        <button mat-stroked-button disabled matTooltip="Coming in Phase 4 — warm sandbox provisioning">
-          <mat-icon>cloud_queue</mat-icon>
-          Provision sandbox
         </button>
       </footer>
     </div>

@@ -15,11 +15,11 @@
           <h1>Agent Console</h1>
           <p>
             Browse every specialist agent in the system, open their anatomy, and
-            (soon) run them in isolated sandboxes.
+            run them in isolated sandboxes.
           </p>
         </div>
       </header>
-      <app-agent-catalog></app-agent-catalog>
+      <app-agent-catalog (requestRun)="onRunAgent($event)"></app-agent-catalog>
     </div>
   </mat-tab>
 
@@ -28,18 +28,11 @@
       <mat-icon>play_circle</mat-icon>
       <span class="tab-label">Runner</span>
     </ng-template>
-    <div class="agent-console__tab-content agent-console__runner-placeholder">
-      <mat-icon>science</mat-icon>
-      <h2>Runner is coming in Phase 2</h2>
-      <p>
-        Select an agent from the Catalog, load a golden sample input (or author
-        your own), run it in a warm sandbox, and diff the output against
-        expected results — all without leaving this page.
-      </p>
-      <p class="agent-console__phase-note">
-        Phase 1 (this release) shipped the discovery substrate: the registry,
-        manifests, and this page. Phase 2 wires the invoke button.
-      </p>
+    <div class="agent-console__tab-content">
+      <app-agent-runner
+        [preselectedAgentId]="preselectedAgentId()"
+        (requestCatalogReturn)="onReturnToCatalog()"
+      ></app-agent-runner>
     </div>
   </mat-tab>
 
