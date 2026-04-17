@@ -16,9 +16,15 @@ from ..strategy.contract import Bar
 
 
 class BarEvent(BaseModel):
-    """A single finalized candle destined for the strategy."""
+    """A single finalized candle destined for the strategy.
+
+    When ``is_warmup`` is True, the service delivers the bar to the strategy
+    with ``ctx.is_warmup = True`` and suppresses fill simulation for that
+    bar — warm-up bars populate indicator history without side effects.
+    """
 
     bar: Bar
+    is_warmup: bool = False
 
 
 class EndOfStreamEvent(BaseModel):

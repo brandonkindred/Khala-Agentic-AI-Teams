@@ -413,6 +413,12 @@ class PaperTradingStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    # PR 2 live-mode states. The legacy three values remain for backwards
+    # compatibility with records created before live streaming landed; the
+    # paper-trade mode reports its progress through the new ones.
+    OPENING = "opening"
+    WARMING_UP = "warming_up"
+    LIVE = "live"
 
 
 class PaperTradingVerdict(str, Enum):
@@ -507,6 +513,40 @@ class PaperTradingSession(BaseModel):
     data_period_end: str = ""
     started_at: str = ""
     completed_at: str = ""
+
+    # PR 2 live-mode fields (all optional; null on legacy records).
+    provider_id: Optional[str] = Field(
+        default=None,
+        description="Resolved live provider id (e.g. 'binance', 'coinbase'). Null for legacy rows.",
+    )
+    cutover_ts: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 timestamp of the first live bar — boundary between warm-up and live phase.",
+    )
+    fill_count: int = Field(
+        default=0,
+        description="Running count of closed trades during the live phase.",
+    )
+    terminated_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "'fill_target_reached' | 'user_stop' | 'max_hours' | 'max_drawdown' "
+            "| 'provider_error' | 'region_blocked' | 'lookahead_violation' "
+            "| 'no_provider' | 'provider_end' | 'upstream_end'; null for legacy rows."
+        ),
+    )
+    user_stop_requested_at: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 instant the user invoked POST /stop; null if not stopped.",
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Non-fatal advisories (e.g. 'min_fills_below_recommended').",
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Truncated error text if the session ended abnormally.",
+    )
 
 
 # ---------------------------------------------------------------------------

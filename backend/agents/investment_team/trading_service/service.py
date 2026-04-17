@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from ..execution.risk_filter import RiskFilter, RiskLimits
 from ..models import BacktestConfig, TradeRecord
@@ -34,6 +34,10 @@ class TradingServiceResult:
     terminated_reason: Optional[str] = None
     lookahead_violation: bool = False
     error: Optional[str] = None
+    #: Orders the strategy tried to submit during a warm-up bar. These are
+    #: dropped as a belt-and-suspenders guard — strategies should check
+    #: ``ctx.is_warmup``. Populated only during paper-trade warm-up phase.
+    warmup_orders_dropped: int = 0
 
 
 class TradingService:
@@ -52,7 +56,19 @@ class TradingService:
 
     # ------------------------------------------------------------------
 
-    def run(self, stream: Iterable[StreamEvent]) -> TradingServiceResult:
+    def run(
+        self,
+        stream: Iterable[StreamEvent],
+        *,
+        on_trade: Optional[Callable[[TradeRecord], None]] = None,
+    ) -> TradingServiceResult:
+        """Run the strategy against ``stream``.
+
+        ``on_trade`` is invoked once per closed trade as they happen —
+        used by paper-trade mode to read the running fill count inside
+        its termination-check closure without peeking into service
+        internals.
+        """
         portfolio = Portfolio(initial_capital=self.config.initial_capital)
         order_book = OrderBook()
         fill_sim = FillSimulator(
@@ -94,47 +110,71 @@ class TradingService:
                     if not isinstance(event, BarEvent):
                         continue
                     cur_bar = event.bar
+                    is_warmup = event.is_warmup
 
-                    # 1) Expire day orders on date change.
-                    if prev_bar is not None and (cur_bar.timestamp[:10] != prev_bar.timestamp[:10]):
-                        order_book.expire_day_orders(cur_bar.timestamp)
+                    if not is_warmup:
+                        # 1) Expire day orders on date change.
+                        if prev_bar is not None and (
+                            cur_bar.timestamp[:10] != prev_bar.timestamp[:10]
+                        ):
+                            order_book.expire_day_orders(cur_bar.timestamp)
 
-                    # 2) Fill any orders from the previous iteration against
-                    #    *this* (current) bar. These were submitted by the
-                    #    strategy after seeing `prev_bar`.
-                    if pending_for_prev:
-                        for req in pending_for_prev:
-                            equity = portfolio.mark_to_market()
-                            order_book.submit(
-                                req, submitted_at=prev_bar.timestamp, submitted_equity=equity
+                        # 2) Fill any orders from the previous iteration against
+                        #    *this* (current) bar. These were submitted by the
+                        #    strategy after seeing `prev_bar`.
+                        if pending_for_prev:
+                            for req in pending_for_prev:
+                                equity = portfolio.mark_to_market()
+                                order_book.submit(
+                                    req,
+                                    submitted_at=prev_bar.timestamp,
+                                    submitted_equity=equity,
+                                )
+                            pending_for_prev = []
+
+                        outcome = fill_sim.process_bar(cur_bar)
+                        for fill in outcome.entry_fills + outcome.exit_fills:
+                            harness.send_fill(
+                                fill=fill.model_dump(mode="json"),
+                                state=self._state(portfolio),
                             )
-                        pending_for_prev = []
+                        result.trades.extend(outcome.closed_trades)
+                        if on_trade is not None:
+                            for trade in outcome.closed_trades:
+                                on_trade(trade)
 
-                    outcome = fill_sim.process_bar(cur_bar)
-                    for fill in outcome.entry_fills + outcome.exit_fills:
-                        harness.send_fill(
-                            fill=fill.model_dump(mode="json"), state=self._state(portfolio)
-                        )
-                    result.trades.extend(outcome.closed_trades)
-
-                    # 3) Drawdown circuit-breaker.
-                    portfolio.update_last_price(cur_bar.symbol, cur_bar.close)
-                    equity = portfolio.mark_to_market()
-                    dd = self._risk.check_drawdown(equity, portfolio.peak_equity)
-                    if dd.breached:
-                        result.terminated_reason = (
-                            f"max_drawdown breached "
-                            f"({dd.current_drawdown_pct:.1f}% >= {dd.limit_pct}%)"
-                        )
-                        break
+                        # 3) Drawdown circuit-breaker.
+                        portfolio.update_last_price(cur_bar.symbol, cur_bar.close)
+                        equity = portfolio.mark_to_market()
+                        dd = self._risk.check_drawdown(equity, portfolio.peak_equity)
+                        if dd.breached:
+                            result.terminated_reason = (
+                                f"max_drawdown breached "
+                                f"({dd.current_drawdown_pct:.1f}% >= {dd.limit_pct}%)"
+                            )
+                            break
 
                     # 4) Deliver the current bar to the strategy and collect
-                    #    any orders it submits in response.
+                    #    any orders it submits in response. Warm-up bars set
+                    #    ``ctx.is_warmup = True`` in the subprocess so the
+                    #    strategy can short-circuit order emission; we also
+                    #    drop any orders it emits anyway as a safety net.
                     resp = harness.send_bar(
                         bar=cur_bar.model_dump(mode="json"),
                         state=self._state(portfolio),
-                        is_warmup=False,
+                        is_warmup=is_warmup,
                     )
+
+                    if is_warmup:
+                        if resp.orders:
+                            result.warmup_orders_dropped += len(resp.orders)
+                            logger.info(
+                                "dropped %d order(s) submitted during warm-up bar",
+                                len(resp.orders),
+                            )
+                        # Cancels during warm-up are also no-ops (no live order book).
+                        prev_bar = cur_bar
+                        continue
 
                     # Map cancels.
                     for c in resp.cancels:

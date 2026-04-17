@@ -2234,7 +2234,14 @@ def clear_strategy_lab_storage() -> ClearStrategyLabStorageResponse:
 
 
 class RunPaperTradingRequest(BaseModel):
-    """Start a paper trading session for a winning strategy."""
+    """Start a paper trading session for a winning strategy.
+
+    PR 2 live-mode fields (``provider_id``, ``min_fills``, ``max_hours``,
+    ``warmup_bars``, ``timeframe``) take effect only when
+    ``INVESTMENT_LIVE_PAPER_ENABLED=true``. When the flag is off (the
+    default), the legacy recent-OHLCV path runs and the new fields are
+    ignored so existing clients and tests remain unaffected.
+    """
 
     lab_record_id: str = Field(..., description="ID of a winning StrategyLabRecord to paper trade")
     initial_capital: float = Field(default=100000.0, gt=0)
@@ -2249,7 +2256,44 @@ class RunPaperTradingRequest(BaseModel):
         description="Override slippage (bps); auto-detected from asset class when omitted",
     )
     lookback_days: int = Field(
-        default=365, ge=30, description="Days of recent market data to fetch"
+        default=365, ge=30, description="Days of recent market data to fetch (legacy path)"
+    )
+    # ------------------------------------------------------------------
+    # Live-mode additions (honored only when INVESTMENT_LIVE_PAPER_ENABLED=true)
+    # ------------------------------------------------------------------
+    provider_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Explicit provider override (e.g. 'binance', 'coinbase', 'polygon'). "
+            "Omit to use registry default. See GET /providers for the configured list."
+        ),
+    )
+    min_fills: int = Field(
+        default=20,
+        ge=1,
+        le=10_000,
+        description=(
+            "Terminate the session once this many trades have closed. "
+            "Values below 20 are accepted but add 'min_fills_below_recommended' to session.warnings."
+        ),
+    )
+    max_hours: float = Field(
+        default=72.0,
+        gt=0.0,
+        description="Wall-clock safety guard — session terminates after this many hours regardless of fill count.",
+    )
+    warmup_bars: int = Field(
+        default=500,
+        ge=0,
+        le=5_000,
+        description="Historical bars to replay as ctx.is_warmup=True before the live feed starts.",
+    )
+    timeframe: Optional[str] = Field(
+        default=None,
+        description=(
+            "Override the strategy's declared timeframe. Must be one of "
+            "{'1s','15s','30s','1m','5m','15m','30m','1h','4h','1d'}."
+        ),
     )
 
 
@@ -2392,15 +2436,50 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     # 2 — Create initial "running" session and persist immediately
     session_id = f"pt-{uuid.uuid4().hex[:8]}"
     now = datetime.now(tz=timezone.utc).isoformat()
+    use_live = _live_paper_enabled()
+
+    # 2a — Concurrency guard (spec §7.2): one live session per strategy_id.
+    # Only enforced for the live path — the legacy recent-OHLCV path
+    # completes in seconds and isn't subject to the "one at a time"
+    # invariant.
+    if use_live:
+        _active_states = {
+            PaperTradingStatus.OPENING,
+            PaperTradingStatus.WARMING_UP,
+            PaperTradingStatus.LIVE,
+            PaperTradingStatus.RUNNING,  # legacy value — treat as active too
+        }
+        with _lock:
+            for existing in _paper_trading_sessions.values():
+                existing_session = (
+                    PaperTradingSession(**existing) if isinstance(existing, dict) else existing
+                )
+                if (
+                    existing_session.strategy.strategy_id == strategy.strategy_id
+                    and existing_session.status in _active_states
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Strategy '{strategy.strategy_id}' already has an "
+                            f"active live paper-trading session "
+                            f"'{existing_session.session_id}' "
+                            f"(status={existing_session.status.value}). Stop it "
+                            f"via POST /strategy-lab/paper-trade/"
+                            f"{existing_session.session_id}/stop before "
+                            f"starting a new one."
+                        ),
+                    )
+
     running_session = PaperTradingSession(
         session_id=session_id,
         lab_record_id=request.lab_record_id,
         strategy=strategy,
-        status=PaperTradingStatus.RUNNING,
+        status=PaperTradingStatus.OPENING if use_live else PaperTradingStatus.RUNNING,
         initial_capital=request.initial_capital,
         current_capital=request.initial_capital,
         symbols_traded=[],
-        data_source="yahoo_finance",
+        data_source="live" if use_live else "yahoo_finance",
         data_period_start="",
         data_period_end="",
         started_at=now,
@@ -2408,31 +2487,233 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
     with _lock:
         _paper_trading_sessions[session_id] = running_session
 
-    # 3 — Kick off background worker (market data fetch + sandbox + divergence analysis).
-    # Non-daemon so graceful shutdown (SIGTERM) waits for in-flight work to finalize the
-    # session status instead of leaving it stuck in "running". Orphaned sessions from
-    # hard kills are recovered on startup (see _recover_orphaned_paper_trading_sessions).
-    thread = threading.Thread(
-        target=_run_paper_trading_background,
-        args=(
-            session_id,
-            request.lab_record_id,
-            strategy,
-            strategy_code,
-            backtest_record,
-            request.lookback_days,
-            request.initial_capital,
-            request.transaction_cost_bps,
-            request.slippage_bps,
-        ),
-        name=f"paper-trade-{session_id}",
-        daemon=False,
-    )
+    # 3 — Kick off background worker. The live path (PR 2) is gated behind
+    # INVESTMENT_LIVE_PAPER_ENABLED so operators opt in; otherwise the legacy
+    # recent-OHLCV replay path remains the default.
+    if use_live:
+        thread = threading.Thread(
+            target=_run_live_paper_trading_background,
+            args=(session_id, request.lab_record_id, strategy, request),
+            name=f"live-paper-trade-{session_id}",
+            daemon=False,
+        )
+    else:
+        thread = threading.Thread(
+            target=_run_paper_trading_background,
+            args=(
+                session_id,
+                request.lab_record_id,
+                strategy,
+                strategy_code,
+                backtest_record,
+                request.lookback_days,
+                request.initial_capital,
+                request.transaction_cost_bps,
+                request.slippage_bps,
+            ),
+            name=f"paper-trade-{session_id}",
+            daemon=False,
+        )
     thread.start()
 
     return PaperTradingResponse(
         session=running_session,
         message=f"Paper trading started. Poll GET /strategy-lab/paper-trade/{session_id} for progress.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Live-mode paper trading (PR 2)
+# ---------------------------------------------------------------------------
+#
+# The live path consumes a streaming market-data feed and drives the same
+# TradingService used by backtests. It is gated behind INVESTMENT_LIVE_PAPER_ENABLED
+# so existing deployments keep the legacy recent-OHLCV behavior until operators
+# opt in. See ``system_design/pr2_live_data_and_paper_cutover.md``.
+
+
+def _live_paper_enabled() -> bool:
+    """Return True when the live paper-trading path is opted in via env var."""
+    return os.environ.get("INVESTMENT_LIVE_PAPER_ENABLED", "false").lower() in {
+        "true",
+        "1",
+        "yes",
+    }
+
+
+# Per-session StopController registry. The POST /stop endpoint looks up the
+# controller by session_id and calls ``request_stop()``; the running session
+# polls it between bars. Guarded by ``_lock`` shared with other session state.
+_live_paper_stop_controllers: Dict[str, Any] = {}
+
+
+def _run_live_paper_trading_background(
+    session_id: str,
+    lab_record_id: str,
+    strategy: StrategySpec,
+    request: "RunPaperTradingRequest",
+) -> None:
+    """Background worker for the PR 2 live paper-trading path.
+
+    Resolves a provider, opens the live stream, drives ``TradingService``
+    until termination, then writes the final ``PaperTradingSession``.
+    """
+    from investment_team.models import BacktestConfig as _BC
+    from investment_team.trading_service.modes.paper_trade import (
+        PaperTradeConfig,
+        StopController,
+        run_paper_trade,
+    )
+
+    controller = StopController()
+    with _lock:
+        _live_paper_stop_controllers[session_id] = controller
+
+    try:
+        # Choose symbols the same way the legacy path does — but only up to the
+        # first few to keep bandwidth bounded during paper trading.
+        from investment_team.market_data_service import MarketDataService
+
+        market_service = MarketDataService()
+        symbols = market_service.get_symbols_for_strategy(strategy)[:5]
+        if not symbols:
+            raise RuntimeError("no symbols resolved for strategy")
+
+        strategy_timeframe = request.timeframe or getattr(strategy, "timeframe", None) or "1m"
+
+        bt_config = _BC(
+            start_date=datetime.now(tz=timezone.utc).date().isoformat(),
+            end_date=datetime.now(tz=timezone.utc).date().isoformat(),
+            initial_capital=request.initial_capital,
+            transaction_cost_bps=request.transaction_cost_bps or 5.0,
+            slippage_bps=request.slippage_bps or 2.0,
+            metrics_engine="legacy",
+        )
+        paper_cfg = PaperTradeConfig(
+            symbols=symbols,
+            asset_class=strategy.asset_class,
+            strategy_timeframe=strategy_timeframe,
+            min_fills=request.min_fills,
+            max_hours=request.max_hours,
+            warmup_bars=request.warmup_bars,
+            provider_id=request.provider_id,
+        )
+
+        run_result = run_paper_trade(
+            strategy=strategy,
+            backtest_config=bt_config,
+            paper_config=paper_cfg,
+            stop_controller=controller,
+        )
+
+        # Persist the completed session.
+        with _lock:
+            raw = _paper_trading_sessions.get(session_id)
+            if raw is None:
+                return
+            session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+            session.trades = run_result.trades
+            session.fill_count = run_result.fill_count
+            session.cutover_ts = run_result.cutover_ts
+            session.provider_id = run_result.provider_id
+            session.terminated_reason = run_result.terminated_reason
+            session.warnings = run_result.warnings
+            session.error = (run_result.error or "")[:500] or None
+            session.symbols_traded = symbols
+            session.data_source = f"live:{run_result.provider_id}"
+            session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+            if run_result.error or run_result.terminated_reason in {
+                "lookahead_violation",
+                "provider_error",
+                "region_blocked",
+                "no_provider",
+            }:
+                session.status = PaperTradingStatus.FAILED
+            else:
+                session.status = PaperTradingStatus.COMPLETED
+            _paper_trading_sessions[session_id] = session
+        logger.info(
+            "Live paper trade %s: terminated (%s), provider=%s, fills=%d, trades=%d",
+            session_id,
+            run_result.terminated_reason,
+            run_result.provider_id,
+            run_result.fill_count,
+            len(run_result.trades),
+        )
+    except Exception as exc:
+        logger.exception("Live paper trade %s: background worker crashed", session_id)
+        with _lock:
+            raw = _paper_trading_sessions.get(session_id)
+            if raw is not None:
+                session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+                session.status = PaperTradingStatus.FAILED
+                session.error = str(exc)[:500]
+                session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+                _paper_trading_sessions[session_id] = session
+    finally:
+        with _lock:
+            _live_paper_stop_controllers.pop(session_id, None)
+
+
+@app.post("/strategy-lab/paper-trade/{session_id}/stop", response_model=PaperTradingResponse)
+def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
+    """Idempotent user-stop for a live paper-trading session.
+
+    Sets the session's stop flag; the background worker terminates at the next
+    bar boundary. Returns the session's current state (still ``live`` /
+    ``warming_up`` if the worker hasn't yet noticed — clients poll
+    ``GET /strategy-lab/paper-trade/{session_id}`` for the final record).
+    """
+    if not _live_paper_enabled():
+        raise HTTPException(
+            status_code=404,
+            detail="Live paper trading is not enabled (set INVESTMENT_LIVE_PAPER_ENABLED=true).",
+        )
+    with _lock:
+        raw = _paper_trading_sessions.get(session_id)
+        if raw is None:
+            raise HTTPException(
+                status_code=404, detail=f"Paper trading session '{session_id}' not found."
+            )
+        session = PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+        controller = _live_paper_stop_controllers.get(session_id)
+        if controller is not None:
+            controller.request_stop()
+            session.user_stop_requested_at = datetime.now(tz=timezone.utc).isoformat()
+            _paper_trading_sessions[session_id] = session
+    return PaperTradingResponse(
+        session=session,
+        message="Stop requested. Poll the session to see the final state.",
+    )
+
+
+class ProviderDescriptor(BaseModel):
+    """One row of the ``GET /providers`` response."""
+
+    name: str
+    supports: List[str] = Field(default_factory=list)
+    is_paid: bool = False
+    has_key: bool = False
+    is_default_for: List[str] = Field(default_factory=list)
+    historical_timeframes: List[str] = Field(default_factory=list)
+    live_timeframes: List[str] = Field(default_factory=list)
+
+
+class ProvidersListResponse(BaseModel):
+    live_paper_enabled: bool
+    providers: List[ProviderDescriptor] = Field(default_factory=list)
+
+
+@app.get("/providers", response_model=ProvidersListResponse)
+def list_providers() -> ProvidersListResponse:
+    """Enumerate registered market-data providers and their capabilities."""
+    from investment_team.trading_service.providers import default_registry
+
+    registry = default_registry()
+    rows = [ProviderDescriptor(**row) for row in registry.describe_all()]
+    return ProvidersListResponse(
+        live_paper_enabled=_live_paper_enabled(),
+        providers=rows,
     )
 
 
