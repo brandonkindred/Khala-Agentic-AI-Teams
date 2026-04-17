@@ -205,3 +205,63 @@ def test_drawdown_uses_mtm_not_frozen_position_value():
     result = engine.run(market_data, always_long)
     assert result.terminated_reason is not None
     assert "max_drawdown" in result.terminated_reason
+
+
+def test_drawdown_evaluated_after_all_symbols_for_date():
+    """Drawdown must use a same-date cross-section of all symbol prices.
+
+    Two symbols with equal-weight positions: A gaps down 8% and B gaps up
+    8% on the same date. Net equity is roughly flat. A tight 5% DD limit
+    must NOT fire — but it would if drawdown were checked after processing
+    A's bar alone (before B's price update).
+    """
+    from investment_team.market_data_service import OHLCVBar
+
+    def _bars(symbol, prices):
+        bars = []
+        prev = prices[0][1]
+        for i, (d, p) in enumerate(prices):
+            bars.append(
+                OHLCVBar(
+                    date=d, open=prev, high=max(p, prev), low=min(p, prev), close=p, volume=1e6
+                )
+            )
+            prev = p
+        return bars
+
+    dates = [
+        "2023-01-02",
+        "2023-01-03",
+        "2023-01-04",
+        "2023-01-05",
+        "2023-01-06",
+        "2023-01-09",
+        "2023-01-10",
+    ]
+    # Both symbols stable for 5 bars, then A drops 8% and B rises 8%.
+    a_prices = [(d, 100.0) for d in dates[:6]] + [(dates[6], 92.0)]
+    b_prices = [(d, 100.0) for d in dates[:6]] + [(dates[6], 108.0)]
+
+    market_data = {"A": _bars("A", a_prices), "B": _bars("B", b_prices)}
+
+    def always_long(symbol, bar, recent, position, capital):
+        if position is None:
+            return {"action": "enter_long", "confidence": 1.0, "shares": 0, "reasoning": ""}
+        return {"action": "hold", "confidence": 0.0, "shares": 0, "reasoning": ""}
+
+    engine = TradeSimulationEngine(
+        initial_capital=100_000.0,
+        pre_filter_pct=0.0,
+        max_evaluations=100_000,
+        lookahead_safe=True,
+        risk_limits={
+            "max_drawdown_pct": 5.0,
+            "max_position_pct": 40.0,
+            "max_symbol_concentration_pct": 100.0,
+        },
+    )
+    result = engine.run(market_data, always_long)
+    assert result.terminated_reason is None, (
+        f"False termination: {result.terminated_reason}. "
+        "Drawdown was evaluated on a partial-date snapshot."
+    )

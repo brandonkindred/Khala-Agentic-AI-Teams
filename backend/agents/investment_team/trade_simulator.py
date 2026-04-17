@@ -477,6 +477,21 @@ class TradeSimulationEngine:
                 timeline.append((bar.date, symbol, bar))
         timeline.sort(key=lambda x: x[0])
 
+        # Group by date so that all symbols for one day are processed
+        # together — prices, fills, and drawdown are evaluated on a
+        # consistent cross-sectional snapshot rather than mixed dates.
+        daily_groups: List[tuple[str, List[tuple[str, OHLCVBar]]]] = []
+        if timeline:
+            cur_date = timeline[0][0]
+            cur_bars: List[tuple[str, OHLCVBar]] = []
+            for bar_date, symbol, bar in timeline:
+                if bar_date != cur_date:
+                    daily_groups.append((cur_date, cur_bars))
+                    cur_date = bar_date
+                    cur_bars = []
+                cur_bars.append((symbol, bar))
+            daily_groups.append((cur_date, cur_bars))
+
         symbol_history: Dict[str, List[OHLCVBar]] = {sym: [] for sym in market_data}
         last_price: Dict[str, float] = {}
 
@@ -492,12 +507,71 @@ class TradeSimulationEngine:
         cumulative_pnl = 0.0
         evaluations = 0
         skipped = 0
+        stop = False
 
-        for bar_date, symbol, bar in timeline:
-            last_price[symbol] = bar.close
+        for bar_date, day_bars in daily_groups:
+            if stop:
+                break
 
-            # --- Drawdown circuit-breaker (Phase 3) ---
-            # Mark open positions to market using each symbol's latest price.
+            # --- Phase A: update all prices for this date ---
+            for symbol, bar in day_bars:
+                last_price[symbol] = bar.close
+
+            # --- Phase B: execute all pending fills at this date's opens ---
+            for symbol, bar in day_bars:
+                if symbol in pending_entries:
+                    pending = pending_entries.pop(symbol)
+                    action = pending["action"]
+                    shares = float(pending.get("shares", 0))
+
+                    recent_closes = [b.close for b in symbol_history.get(symbol, [])]
+                    if shares <= 0:
+                        sizing = self._risk.size(bar.open, capital, recent_closes)
+                        shares = sizing.shares
+
+                    notional = shares * bar.open
+                    gate = self._risk.can_enter(symbol, notional, capital, open_positions)
+
+                    if (
+                        gate.allowed
+                        and shares > 0
+                        and capital >= notional
+                        and symbol not in open_positions
+                    ):
+                        slippage_mult = 1.0 + self.slippage_bps / 10_000.0
+                        entry_bid_price = round(bar.open, 4 if bar.open < 10 else 2)
+                        entry_price = round(bar.open * slippage_mult, 4 if bar.open < 10 else 2)
+                        position_value = round(entry_price * shares, 2)
+                        capital -= position_value
+
+                        open_positions[symbol] = OpenPosition(
+                            symbol=symbol,
+                            side="long" if action == "enter_long" else "short",
+                            entry_date=bar_date,
+                            entry_price=entry_price,
+                            shares=shares,
+                            position_value=position_value,
+                            entry_bid_price=entry_bid_price,
+                            entry_order_type="market",
+                        )
+
+                if symbol in pending_exits and symbol in open_positions:
+                    del pending_exits[symbol]
+                    pos = open_positions.pop(symbol)
+                    trade_num += 1
+                    trade = self._close_position(pos, bar.open, bar_date, trade_num, cumulative_pnl)
+                    cumulative_pnl = trade.cumulative_pnl
+                    capital += round(pos.shares * trade.exit_price, 2)
+                    trades.append(trade)
+
+                    if max_trades is not None and len(trades) >= max_trades:
+                        stop = True
+                        break
+
+            if stop:
+                break
+
+            # --- Phase C: drawdown circuit-breaker (once per date) ---
             mtm_value = 0.0
             for pos_sym, pos in open_positions.items():
                 price_now = last_price.get(pos_sym, pos.entry_price)
@@ -516,102 +590,53 @@ class TradeSimulationEngine:
                 logger.warning("Simulation terminated: %s", terminated_reason)
                 break
 
-            # --- 1. Execute pending fills from previous bar's decision ---
-            if symbol in pending_entries:
-                pending = pending_entries.pop(symbol)
-                action = pending["action"]
-                shares = float(pending.get("shares", 0))
+            # --- Phase D: evaluate all symbols for this date ---
+            for symbol, bar in day_bars:
+                symbol_history[symbol].append(bar)
+                recent = symbol_history[symbol][-20:]
+                has_position = symbol in open_positions
 
-                recent_closes = [b.close for b in symbol_history.get(symbol, [])]
-                if shares <= 0:
-                    sizing = self._risk.size(bar.open, capital, recent_closes)
-                    shares = sizing.shares
-
-                notional = shares * bar.open
-                gate = self._risk.can_enter(symbol, notional, capital, open_positions)
-
-                if (
-                    gate.allowed
-                    and shares > 0
-                    and capital >= notional
-                    and symbol not in open_positions
-                ):
-                    slippage_mult = 1.0 + self.slippage_bps / 10_000.0
-                    entry_bid_price = round(bar.open, 4 if bar.open < 10 else 2)
-                    entry_price = round(bar.open * slippage_mult, 4 if bar.open < 10 else 2)
-                    position_value = round(entry_price * shares, 2)
-                    capital -= position_value
-
-                    open_positions[symbol] = OpenPosition(
-                        symbol=symbol,
-                        side="long" if action == "enter_long" else "short",
-                        entry_date=bar_date,
-                        entry_price=entry_price,
-                        shares=shares,
-                        position_value=position_value,
-                        entry_bid_price=entry_bid_price,
-                        entry_order_type="market",
+                if evaluations >= self.max_evaluations:
+                    logger.warning(
+                        "Reached max evaluations (%d), stopping simulation with %d trades",
+                        self.max_evaluations,
+                        len(trades),
                     )
-
-            if symbol in pending_exits and symbol in open_positions:
-                del pending_exits[symbol]
-                pos = open_positions.pop(symbol)
-                trade_num += 1
-                trade = self._close_position(pos, bar.open, bar_date, trade_num, cumulative_pnl)
-                cumulative_pnl = trade.cumulative_pnl
-                capital += round(pos.shares * trade.exit_price, 2)
-                trades.append(trade)
-
-                if max_trades is not None and len(trades) >= max_trades:
+                    stop = True
                     break
 
-            # --- 2. Add bar to history, evaluate strategy ---
-            symbol_history[symbol].append(bar)
-            recent = symbol_history[symbol][-20:]
-            has_position = symbol in open_positions
+                if not self._should_evaluate(recent, has_position):
+                    skipped += 1
+                    continue
 
-            if evaluations >= self.max_evaluations:
-                logger.warning(
-                    "Reached max evaluations (%d), stopping simulation with %d trades",
-                    self.max_evaluations,
-                    len(trades),
-                )
-                break
+                try:
+                    decision = evaluate_fn(symbol, bar, recent, open_positions.get(symbol), capital)
+                except Exception as exc:
+                    logger.warning("Evaluation failed for %s on %s: %s", symbol, bar_date, exc)
+                    decision = {
+                        "action": "hold",
+                        "confidence": 0.0,
+                        "shares": 0,
+                        "reasoning": f"Error: {exc}",
+                    }
 
-            if not self._should_evaluate(recent, has_position):
-                skipped += 1
-                continue
+                evaluations += 1
+                if record_decisions:
+                    decisions.append({"date": bar_date, "symbol": symbol, **decision})
 
-            # Evaluate on bar *t*: the strategy can see bar *t*, but the
-            # fill will happen on bar *t+1*'s open.
-            try:
-                decision = evaluate_fn(symbol, bar, recent, open_positions.get(symbol), capital)
-            except Exception as exc:
-                logger.warning("Evaluation failed for %s on %s: %s", symbol, bar_date, exc)
-                decision = {
-                    "action": "hold",
-                    "confidence": 0.0,
-                    "shares": 0,
-                    "reasoning": f"Error: {exc}",
-                }
+                if evaluations % 500 == 0:
+                    logger.info(
+                        "Simulation progress: %d evaluations, %d trades completed",
+                        evaluations,
+                        len(trades),
+                    )
 
-            evaluations += 1
-            if record_decisions:
-                decisions.append({"date": bar_date, "symbol": symbol, **decision})
+                dec_action = decision.get("action", "hold")
 
-            if evaluations % 500 == 0:
-                logger.info(
-                    "Simulation progress: %d evaluations, %d trades completed",
-                    evaluations,
-                    len(trades),
-                )
-
-            dec_action = decision.get("action", "hold")
-
-            if dec_action in ("enter_long", "enter_short") and not has_position:
-                pending_entries[symbol] = decision
-            elif dec_action == "exit" and has_position:
-                pending_exits[symbol] = True
+                if dec_action in ("enter_long", "enter_short") and not has_position:
+                    pending_entries[symbol] = decision
+                elif dec_action == "exit" and has_position:
+                    pending_exits[symbol] = True
 
         # Flush remaining pending exits (last bar → no next bar, fill at last close)
         for symbol in list(pending_exits):
