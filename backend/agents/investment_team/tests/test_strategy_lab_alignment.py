@@ -60,6 +60,44 @@ def _trade(num: int) -> Dict[str, Any]:
     }
 
 
+def _benign_sandbox_trades(offset: int = 0) -> List[Dict[str, Any]]:
+    """Return a raw-trade ledger that passes all critical anomaly gates.
+
+    The alignment loop's post-rerun anomaly gates flag zero-trade, too-few-
+    trade, >95% win-rate, >200% annualized, and other extreme outputs as
+    critical. Tests that exercise the audit loop's control flow (not the
+    anomaly branch) need sandbox outputs that are "normal-looking" so the
+    loop proceeds to the next audit rather than tripping anomaly_detected.
+
+    Produces 12 AAPL trades on two symbols across two sides, alternating
+    winners and losers, with multi-day holds — enough to clear the
+    min-trades and single-direction-warning thresholds.
+    """
+    raw: List[Dict[str, Any]] = []
+    for i in range(12):
+        symbol = "AAPL" if i % 2 == 0 else "MSFT"
+        side = "long" if i % 3 != 0 else "short"
+        base = 100.0 + i + offset
+        is_win = i % 2 == 0
+        # Long-win = exit>entry; long-loss = exit<entry; short-win = exit<entry.
+        if side == "long":
+            exit_px = base + 2.0 if is_win else base - 1.5
+        else:
+            exit_px = base - 2.0 if is_win else base + 1.5
+        raw.append(
+            {
+                "symbol": symbol,
+                "side": side,
+                "entry_date": f"2023-01-{(i % 28) + 1:02d}",
+                "entry_price": base,
+                "exit_date": f"2023-02-{(i % 28) + 1:02d}",
+                "exit_price": exit_px,
+                "shares": 10.0,
+            }
+        )
+    return raw
+
+
 def _spec() -> StrategySpec:
     return StrategySpec(
         strategy_id="strat-align-test",
@@ -283,11 +321,26 @@ def _drive_alignment_loop(
             emit("aligning", {"sub_phase": "max_rounds_reached", "alignment_round": align_round})
             break
 
-        code = report.proposed_code
-        spec = orch._apply_updates(spec, {}, code)
-        alignment_attempts.append(report.changes_made or "alignment fix")
+        # Stage the proposal — commit to ``code`` / ``spec`` / ``trades`` /
+        # ``metrics`` / ``alignment_attempts`` only after every gate passes,
+        # so that a rejected proposal never leaks into the persisted record.
+        proposed_code = report.proposed_code
+        proposed_spec = orch._apply_updates(spec, {}, proposed_code)
+        change_summary = report.changes_made or "alignment fix"
 
-        align_exec = orch.sandbox.run(code, market_data, config)
+        safety_gates = orch.code_safety_checker.check(proposed_code)
+        for g in safety_gates:
+            g.refinement_round = align_round
+            g.gate_name = f"alignment_{g.gate_name}"
+        gate_results.extend(safety_gates)
+        if any(not g.passed and g.severity == "critical" for g in safety_gates):
+            emit(
+                "aligning",
+                {"sub_phase": "rejected_unsafe_code", "alignment_round": align_round},
+            )
+            break
+
+        align_exec = orch.sandbox.run(proposed_code, market_data, config)
         if not align_exec.success:
             gate_results.append(
                 QualityGateResult(
@@ -305,7 +358,7 @@ def _drive_alignment_loop(
             break
 
         try:
-            trades = build_trade_records(align_exec.raw_trades, config)
+            new_trades = build_trade_records(align_exec.raw_trades, config)
         except ValueError as ve:
             gate_results.append(
                 QualityGateResult(
@@ -322,9 +375,29 @@ def _drive_alignment_loop(
             )
             break
 
-        metrics = compute_metrics(
-            trades, config.initial_capital, config.start_date, config.end_date
+        new_metrics = compute_metrics(
+            new_trades, config.initial_capital, config.start_date, config.end_date
         )
+
+        anomaly_gates = orch.anomaly_detector.check(new_metrics, new_trades)
+        for g in anomaly_gates:
+            g.refinement_round = align_round
+            g.gate_name = f"alignment_{g.gate_name}"
+        gate_results.extend(anomaly_gates)
+        if any(not g.passed and g.severity == "critical" for g in anomaly_gates):
+            emit(
+                "aligning",
+                {"sub_phase": "anomaly_detected", "alignment_round": align_round},
+            )
+            break
+
+        # All gates pass — commit the proposal.
+        code = proposed_code
+        spec = proposed_spec
+        trades = new_trades
+        metrics = new_metrics
+        alignment_attempts.append(change_summary)
+
         emit(
             "aligning",
             {
@@ -399,8 +472,9 @@ def test_alignment_loop_recovers_after_one_fix_and_re_execution() -> None:
             TradeAlignmentReport(aligned=True, rationale="now aligned"),
         ],
         sandbox_results=[
-            # The fix gets re-executed; emit a fresh trade ledger
-            CodeExecutionResult(success=True, raw_trades=[_trade(1), _trade(2), _trade(3)]),
+            # The fix gets re-executed; emit a fresh trade ledger that
+            # passes the anomaly gates so the loop proceeds to re-audit.
+            CodeExecutionResult(success=True, raw_trades=_benign_sandbox_trades()),
         ],
     )
 
@@ -420,8 +494,8 @@ def test_alignment_loop_recovers_after_one_fix_and_re_execution() -> None:
     assert sandbox_stub.calls[0] == fixed_code
     assert final_code == fixed_code
     assert final_spec.strategy_code == fixed_code
-    # New trade ledger was rebuilt from the sandbox output (3 trades)
-    assert len(final_trades) == 3
+    # New trade ledger was rebuilt from the sandbox output
+    assert len(final_trades) == len(_benign_sandbox_trades())
 
     sub_phases = [d["sub_phase"] for p, d in events if p == "aligning"]
     assert sub_phases == ["evaluating", "not_aligned", "refined", "evaluating", "aligned"]
@@ -447,11 +521,13 @@ def test_alignment_loop_caps_at_max_rounds() -> None:
         changes_made="another attempt",
     )
     # Need MAX_ALIGNMENT_ROUNDS reports (one per audit) and MAX-1 sandbox runs
-    # (the final round audits but does not re-execute).
+    # (the final round audits but does not re-execute). Each sandbox run
+    # must return trades that pass anomaly gates so the loop proceeds to
+    # the next audit rather than tripping ``anomaly_detected`` early.
     orch, align_stub, sandbox_stub = _make_orchestrator(
         alignment_reports=[misaligned for _ in range(MAX_ALIGNMENT_ROUNDS)],
         sandbox_results=[
-            CodeExecutionResult(success=True, raw_trades=[_trade(i)])
+            CodeExecutionResult(success=True, raw_trades=_benign_sandbox_trades(offset=i))
             for i in range(MAX_ALIGNMENT_ROUNDS - 1)
         ],
     )
@@ -510,14 +586,18 @@ def test_alignment_loop_breaks_when_no_proposed_code() -> None:
 
 
 def test_alignment_loop_breaks_when_re_execution_fails() -> None:
-    """Sandbox failure on the post-fix re-execution stops the loop."""
+    """Sandbox failure on the post-fix re-execution stops the loop and leaves
+    the last-good ``code`` / ``spec`` / ``trades`` / ``metrics`` intact so
+    the persisted record never contains code that was never successfully
+    executed for the reported results."""
+    proposed_code = "def run_strategy(data, config):\n    raise RuntimeError\n"
     orch, align_stub, sandbox_stub = _make_orchestrator(
         alignment_reports=[
             TradeAlignmentReport(
                 aligned=False,
                 rationale="still wrong",
                 issues=[AlignmentIssue(rule_type="entry_rules", description="x")],
-                proposed_code="def run_strategy(data, config):\n    raise RuntimeError\n",
+                proposed_code=proposed_code,
                 predicted_aligned_after_fix=True,
                 changes_made="risky rewrite",
             ),
@@ -531,12 +611,15 @@ def test_alignment_loop_breaks_when_re_execution_fails() -> None:
         ],
     )
 
-    events, gates, _code, _trades, _metrics_out, _spec_out = _drive_alignment_loop(
+    original_spec = _spec()
+    original_trades = _trade_records()
+    original_metrics = _metrics()
+    events, gates, final_code, final_trades, final_metrics, final_spec = _drive_alignment_loop(
         orch,
-        spec=_spec(),
+        spec=original_spec,
         code="code-v0",
-        trades=_trade_records(),
-        metrics=_metrics(),
+        trades=original_trades,
+        metrics=original_metrics,
         market_data=_market_data(),
         config=_config(),
     )
@@ -547,6 +630,115 @@ def test_alignment_loop_breaks_when_re_execution_fails() -> None:
     assert align_subs[-1] == "re_execution_failed"
     # An execution failure is recorded
     assert any(g.gate_name == "alignment_code_execution" and not g.passed for g in gates)
+    # State preservation — the rejected proposal did NOT overwrite anything
+    assert final_code == "code-v0"
+    assert final_spec is original_spec
+    assert final_trades is original_trades
+    assert final_metrics is original_metrics
+
+
+def test_alignment_loop_breaks_on_critical_anomaly_after_rerun() -> None:
+    """An alignment fix that yields critical anomalies (e.g. zero trades)
+    must fail the anomaly gate and NOT commit the proposal into the
+    persisted state. The loop exits with the prior backtest intact."""
+    proposed_code = "def run_strategy(data, config):\n    return []  # breaks everything\n"
+    orch, align_stub, sandbox_stub = _make_orchestrator(
+        alignment_reports=[
+            TradeAlignmentReport(
+                aligned=False,
+                rationale="off-spec",
+                issues=[AlignmentIssue(rule_type="entry_rules", description="x")],
+                proposed_code=proposed_code,
+                predicted_aligned_after_fix=True,
+                changes_made="apply zero-trade fix",
+            ),
+        ],
+        # Sandbox runs cleanly but returns zero trades, which
+        # BacktestAnomalyDetector flags critical ("never entered a position").
+        sandbox_results=[CodeExecutionResult(success=True, raw_trades=[])],
+    )
+
+    original_spec = _spec()
+    original_trades = _trade_records()
+    original_metrics = _metrics()
+    events, gates, final_code, final_trades, final_metrics, final_spec = _drive_alignment_loop(
+        orch,
+        spec=original_spec,
+        code="code-v0",
+        trades=original_trades,
+        metrics=original_metrics,
+        market_data=_market_data(),
+        config=_config(),
+    )
+
+    # Audit ran once; sandbox ran once for the fix.
+    assert len(align_stub.calls) == 1
+    assert len(sandbox_stub.calls) == 1
+
+    align_subs = [d["sub_phase"] for p, d in events if p == "aligning"]
+    assert align_subs[-1] == "anomaly_detected"
+    # Anomaly was recorded as an ``alignment_backtest_anomaly`` gate failure
+    anomaly_failures = [
+        g
+        for g in gates
+        if g.gate_name.startswith("alignment_") and not g.passed and g.severity == "critical"
+    ]
+    assert anomaly_failures, "expected at least one critical alignment anomaly gate"
+
+    # State preservation — the anomalous proposal did NOT overwrite anything
+    assert final_code == "code-v0"
+    assert final_spec is original_spec
+    assert final_trades is original_trades
+    assert final_metrics is original_metrics
+
+
+def test_alignment_loop_breaks_on_unsafe_proposed_code() -> None:
+    """A proposed rewrite that fails code-safety checks must be rejected
+    without re-execution, and must NOT overwrite the last-good state."""
+    orch, align_stub, sandbox_stub = _make_orchestrator(
+        alignment_reports=[
+            TradeAlignmentReport(
+                aligned=False,
+                rationale="off-spec",
+                issues=[AlignmentIssue(rule_type="entry_rules", description="x")],
+                # Obvious safety violation: imports `os` + calls `os.system`.
+                proposed_code=(
+                    "import os\n\n"
+                    "def run_strategy(data, config):\n"
+                    "    os.system('rm -rf /')  # prohibited\n"
+                    "    return []\n"
+                ),
+                predicted_aligned_after_fix=True,
+                changes_made="unsafe rewrite",
+            ),
+        ],
+        sandbox_results=[],  # sandbox must NOT be invoked
+    )
+
+    original_spec = _spec()
+    original_trades = _trade_records()
+    events, gates, final_code, final_trades, _metrics_out, final_spec = _drive_alignment_loop(
+        orch,
+        spec=original_spec,
+        code="code-v0",
+        trades=original_trades,
+        metrics=_metrics(),
+        market_data=_market_data(),
+        config=_config(),
+    )
+
+    assert len(align_stub.calls) == 1
+    assert sandbox_stub.calls == []  # safety gate short-circuited the re-exec
+    align_subs = [d["sub_phase"] for p, d in events if p == "aligning"]
+    assert align_subs[-1] == "rejected_unsafe_code"
+    assert any(
+        g.gate_name.startswith("alignment_") and not g.passed and g.severity == "critical"
+        for g in gates
+    )
+    # State preservation
+    assert final_code == "code-v0"
+    assert final_spec is original_spec
+    assert final_trades is original_trades
 
 
 def test_alignment_audit_recovers_from_agent_exception() -> None:

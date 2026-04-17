@@ -520,11 +520,13 @@ class StrategyLabOrchestrator:
                     break
 
                 # The agent is confident enough to propose a rewrite.
-                # Apply it, then send the script back through the
-                # sandbox for a fresh backtest. ``predicted_aligned_after_fix``
-                # is recorded for telemetry but we always re-run while
-                # iterations remain so the next round can re-audit on
-                # the updated trades.
+                # Validate, re-execute in the sandbox, rebuild trades, and
+                # re-run anomaly detection BEFORE committing the proposal
+                # over the last known-good ``code`` / ``spec`` / ``trades``
+                # / ``metrics``. If any of those checks fail, the loop
+                # breaks with the prior backtest intact so the persisted
+                # record never holds code that was never successfully
+                # executed for the reported results.
                 emit(
                     "aligning",
                     {
@@ -533,13 +535,12 @@ class StrategyLabOrchestrator:
                         "predicted_aligned_after_fix": report.predicted_aligned_after_fix,
                     },
                 )
-                code = report.proposed_code
-                spec = self._apply_updates(spec, {}, code)
+                proposed_code = report.proposed_code
+                proposed_spec = self._apply_updates(spec, {}, proposed_code)
                 change_summary = report.changes_made or "alignment fix"
-                alignment_attempts.append(change_summary)
 
-                # ── Re-validate code safety on the new code ───────────
-                safety_gates = self.code_safety_checker.check(code)
+                # ── Re-validate code safety on the proposed code ──────
+                safety_gates = self.code_safety_checker.check(proposed_code)
                 for g in safety_gates:
                     g.refinement_round = align_round
                     g.gate_name = f"alignment_{g.gate_name}"
@@ -570,7 +571,7 @@ class StrategyLabOrchestrator:
                         "trigger": "trade_alignment_fix",
                     },
                 )
-                align_exec = self.sandbox.run(code, market_data, config)
+                align_exec = self.sandbox.run(proposed_code, market_data, config)
                 if not align_exec.success:
                     all_gate_results.append(
                         QualityGateResult(
@@ -595,7 +596,7 @@ class StrategyLabOrchestrator:
                     break
 
                 try:
-                    trades = build_trade_records(align_exec.raw_trades, config)
+                    new_trades = build_trade_records(align_exec.raw_trades, config)
                 except ValueError as ve:
                     all_gate_results.append(
                         QualityGateResult(
@@ -615,9 +616,46 @@ class StrategyLabOrchestrator:
                     )
                     break
 
-                metrics = compute_metrics(
-                    trades, config.initial_capital, config.start_date, config.end_date
+                new_metrics = compute_metrics(
+                    new_trades, config.initial_capital, config.start_date, config.end_date
                 )
+
+                # ── Anomaly gates on the post-fix backtest ────────────
+                # The main refinement loop runs these checks after every
+                # sandbox round; the alignment loop must too, otherwise a
+                # fix could introduce zero-trade or implausible-return
+                # output that bypasses quality gates and still flows into
+                # analysis and the win/loss classification.
+                anomaly_gates = self.anomaly_detector.check(new_metrics, new_trades)
+                for g in anomaly_gates:
+                    g.refinement_round = align_round
+                    g.gate_name = f"alignment_{g.gate_name}"
+                all_gate_results.extend(anomaly_gates)
+                critical_anomalies = [
+                    g for g in anomaly_gates if not g.passed and g.severity == "critical"
+                ]
+                if critical_anomalies:
+                    emit(
+                        "aligning",
+                        {
+                            "sub_phase": "anomaly_detected",
+                            "alignment_round": align_round,
+                            "details": "; ".join(g.details for g in critical_anomalies)[:400],
+                        },
+                    )
+                    logger.warning(
+                        "Alignment fix introduced backtest anomaly for %s", spec.strategy_id
+                    )
+                    break
+
+                # All gates passed — commit the proposal as the new
+                # known-good state and continue to the next audit.
+                code = proposed_code
+                spec = proposed_spec
+                trades = new_trades
+                metrics = new_metrics
+                alignment_attempts.append(change_summary)
+
                 emit(
                     "aligning",
                     {
