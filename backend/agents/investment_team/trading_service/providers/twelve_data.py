@@ -21,6 +21,9 @@ CAPABILITIES = ProviderCapabilities(
     is_paid=True,
     historical_timeframes={"1m", "5m", "15m", "30m", "1h", "4h", "1d"},
     live_timeframes={"1m"},  # no true tick stream on standard plans
+    # Pumps are stubbed — flipped to True when the Twelve Data Pro
+    # client is wired up.
+    implemented=False,
 )
 
 

@@ -2707,6 +2707,7 @@ class ProviderDescriptor(BaseModel):
     supports: List[str] = Field(default_factory=list)
     is_paid: bool = False
     has_key: bool = False
+    implemented: bool = True
     is_default_for: List[str] = Field(default_factory=list)
     historical_timeframes: List[str] = Field(default_factory=list)
     live_timeframes: List[str] = Field(default_factory=list)

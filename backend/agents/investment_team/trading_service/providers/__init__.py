@@ -18,7 +18,7 @@ from .base import (
     ProviderError,
     ProviderRegionBlocked,
 )
-from .registry import LiveResolution, ProviderRegistry
+from .registry import LiveResolution, ProviderRegistry, canonical_asset_class
 
 
 @lru_cache(maxsize=1)
@@ -84,5 +84,6 @@ __all__ = [
     "ProviderError",
     "ProviderRegionBlocked",
     "ProviderRegistry",
+    "canonical_asset_class",
     "default_registry",
 ]

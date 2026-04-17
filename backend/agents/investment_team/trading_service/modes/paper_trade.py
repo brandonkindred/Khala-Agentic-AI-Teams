@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Iterator, List, Optional
 
 from ...models import BacktestConfig, StrategySpec, TradeRecord
@@ -37,7 +37,12 @@ from ..data_stream.live_stream import (
     WarmupBarEvent,
 )
 from ..data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
-from ..providers import ProviderRegionBlocked, ProviderRegistry, default_registry
+from ..providers import (
+    ProviderRegionBlocked,
+    ProviderRegistry,
+    canonical_asset_class,
+    default_registry,
+)
 from ..service import TradingService, TradingServiceResult
 
 logger = logging.getLogger(__name__)
@@ -122,6 +127,17 @@ def run_paper_trade(
         )
 
     reg = registry or default_registry()
+
+    # Normalise the asset_class so every downstream component — the
+    # registry, LiveStream, and the adapter's ``smallest_available`` call —
+    # sees the same canonical label. Strategy-Lab specs commonly use
+    # "stocks" / "forex" whereas providers declare ``supports={"equities",
+    # "fx"}``; without this step non-crypto paper sessions would either
+    # resolve to nothing (``LookupError`` → ``no_provider``) or resolve
+    # but then have the adapter return ``None`` from ``smallest_available``.
+    canonical_cls = canonical_asset_class(paper_config.asset_class)
+    if canonical_cls != paper_config.asset_class:
+        paper_config = replace(paper_config, asset_class=canonical_cls)
 
     # ------------------------------------------------------------------
     # Resolve provider (with crypto geo-failover at session open).

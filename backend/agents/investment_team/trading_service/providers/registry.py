@@ -27,6 +27,42 @@ logger = logging.getLogger(__name__)
 AdapterFactory = Callable[[], ProviderAdapter]
 
 
+# The Strategy Lab's ideation agent and the market-data service use labels
+# like "stocks" / "forex" / "equity", while this registry standardises on
+# "equities" / "fx" / "crypto" (matching how the free-default adapters
+# declare their ``supports`` sets). Normalise at registry-entry so every
+# selection path works regardless of the caller's convention. Unknown
+# values pass through unchanged so an explicit registration can still
+# opt into a novel label.
+_ASSET_CLASS_ALIASES: Dict[str, str] = {
+    "stocks": "equities",
+    "stock": "equities",
+    "equity": "equities",
+    "equities": "equities",
+    "forex": "fx",
+    "fx": "fx",
+    "crypto": "crypto",
+    "cryptocurrency": "crypto",
+    "cryptocurrencies": "crypto",
+}
+
+
+def canonical_asset_class(asset_class: str) -> str:
+    """Normalise caller-supplied asset-class labels to the registry's vocabulary.
+
+    Exposed publicly so callers that need to pass the same label to an
+    adapter directly (e.g. ``LiveStream`` invoking ``smallest_available``)
+    can use the canonical form without duplicating the mapping.
+    """
+    if not asset_class:
+        return asset_class
+    return _ASSET_CLASS_ALIASES.get(asset_class.lower(), asset_class.lower())
+
+
+# Backwards-compatible alias — internal call sites created during this fix.
+_canonical_asset_class = canonical_asset_class
+
+
 @dataclass
 class _Registration:
     factory: AdapterFactory
@@ -97,6 +133,7 @@ class ProviderRegistry:
                     "supports": sorted(reg.capabilities.supports),
                     "is_paid": reg.capabilities.is_paid,
                     "has_key": has_key,
+                    "implemented": reg.capabilities.implemented,
                     "is_default_for": list(reg.default_for),
                     "historical_timeframes": sorted(reg.capabilities.historical_timeframes),
                     "live_timeframes": sorted(reg.capabilities.live_timeframes),
@@ -123,7 +160,8 @@ class ProviderRegistry:
         """
         if direction not in {"historical", "live"}:
             raise ValueError("direction must be 'historical' or 'live'")
-        reg = self._pick(asset_class=asset_class, direction=direction, explicit=explicit)
+        normalised = _canonical_asset_class(asset_class)
+        reg = self._pick(asset_class=normalised, direction=direction, explicit=explicit)
         if reg is None:
             raise LookupError(
                 f"no provider available for asset_class={asset_class!r} direction={direction!r}"
@@ -143,7 +181,8 @@ class ProviderRegistry:
         :class:`ProviderRegionBlocked` *before the first bar is emitted*.
         Only applies when ``direction="live"``.
         """
-        primary_reg = self._pick(asset_class=asset_class, direction="live", explicit=explicit)
+        normalised = _canonical_asset_class(asset_class)
+        primary_reg = self._pick(asset_class=normalised, direction="live", explicit=explicit)
         if primary_reg is None:
             raise LookupError(
                 f"no provider available for asset_class={asset_class!r} direction='live'"
@@ -155,7 +194,7 @@ class ProviderRegistry:
             for reg in self._registrations.values():
                 if reg is primary_reg:
                     continue
-                if asset_class in reg.secondary_for:
+                if normalised in reg.secondary_for:
                     fallback_reg = reg
                     break
 
@@ -199,9 +238,17 @@ class ProviderRegistry:
                     exc,
                 )
 
-        # 3. Paid provider with API key configured.
+        # 3. Paid provider with API key configured. An unimplemented adapter
+        #    must NOT be auto-selected on key presence alone — otherwise an
+        #    unrelated env var (``POLYGON_API_KEY`` set for a different tool)
+        #    would reroute the user off the working free defaults and into a
+        #    ``NotImplementedError`` at runtime. Explicit / env-var pins
+        #    (handled above) still resolve to unimplemented adapters so that
+        #    opting in to a stub is visible.
         for reg in self._registrations.values():
             if not reg.capabilities.is_paid:
+                continue
+            if not reg.capabilities.implemented:
                 continue
             if asset_class not in reg.capabilities.supports:
                 continue

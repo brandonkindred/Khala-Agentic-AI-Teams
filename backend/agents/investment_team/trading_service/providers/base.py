@@ -50,6 +50,14 @@ class ProviderCapabilities:
     #: Live-feed granularity labels the adapter can stream. ``"tick"`` means
     #: a trade/quote stream the resampler will turn into 1s+ candles.
     live_timeframes: Set[str] = field(default_factory=set)
+    #: Whether the adapter's pumps are actually wired up. When ``False``,
+    #: the registry must not auto-select it just because its API key is
+    #: configured — otherwise an unrelated key in the environment (e.g.
+    #: ``POLYGON_API_KEY`` for a separate tool) would route the user off
+    #: the working free defaults and into a ``NotImplementedError`` at
+    #: runtime. Paid providers ship with this set to ``False`` until their
+    #: pumps land in a follow-up commit; free defaults default to ``True``.
+    implemented: bool = True
 
 
 @runtime_checkable
