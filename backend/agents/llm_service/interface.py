@@ -57,10 +57,34 @@ class LLMJsonParseError(LLMPermanentError):
         *,
         error_kind: str = "json_parse",
         response_preview: str = "",
+        correction_attempts_used: int = 0,
     ):
         super().__init__(message)
         self.error_kind = error_kind
         self.response_preview = response_preview
+        self.correction_attempts_used = correction_attempts_used
+
+
+class LLMSchemaValidationError(LLMPermanentError):
+    """Raised when the LLM returned valid JSON that fails Pydantic schema validation.
+
+    Produced by the ``complete_validated`` helper after all corrective retries
+    have been exhausted. Wraps the underlying ``pydantic.ValidationError`` so
+    callers see a consistent ``LLMPermanentError`` subclass with the same
+    ``correction_attempts_used`` shape as ``LLMJsonParseError``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        response_preview: str = "",
+        correction_attempts_used: int = 0,
+        cause: Optional[Exception] = None,
+    ):
+        super().__init__(message, cause=cause)
+        self.response_preview = response_preview
+        self.correction_attempts_used = correction_attempts_used
 
 
 class LLMTruncatedError(LLMError):

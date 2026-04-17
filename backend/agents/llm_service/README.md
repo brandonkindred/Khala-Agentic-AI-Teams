@@ -20,6 +20,41 @@ text = client.complete(prompt, temperature=0.0, max_tokens=4096)
 max_ctx = client.get_max_context_tokens()
 ```
 
+## When to use which entrypoint
+
+New code should prefer the top-level helpers — they make the output contract
+explicit at the call site and eliminate the class of "Markdown prompt routed
+through a JSON parser" bugs that motivated
+[FEATURE_SPEC_structured_output_contract.md](FEATURE_SPEC_structured_output_contract.md).
+
+```python
+from llm_service import generate_text, generate_structured
+from pydantic import BaseModel
+
+# Free-form prose / Markdown / code — never JSON-parsed.
+spec_md = generate_text(prompt, system_prompt=PERSONA, agent_key="user_agent_founder")
+
+# Typed structured output — JSON mode + one self-correction retry applied automatically.
+class Answer(BaseModel):
+    selected_option_id: str
+    rationale: str
+
+answer = generate_structured(prompt, schema=Answer, agent_key="user_agent_founder")
+```
+
+Rule of thumb:
+
+| Use | When |
+|-----|------|
+| `generate_text` | The response is prose, Markdown, code, or any free-form text. |
+| `generate_structured` | The response must conform to a schema. Caller gets a validated Pydantic instance; single-shot parse/validation failures are auto-corrected once. |
+
+The legacy methods (`client.complete`, `client.complete_text`,
+`client.complete_json`, `client.chat_json_round`) remain fully supported for
+existing callers — no migration is required. See
+[FEATURE_SPEC_structured_output_contract.md](FEATURE_SPEC_structured_output_contract.md)
+for the design rationale and migration notes.
+
 ## Config (environment variables)
 
 | Variable | Meaning |

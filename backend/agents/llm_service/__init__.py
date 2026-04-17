@@ -9,6 +9,7 @@ and config (env vars, known context, per-agent defaults) are centralized here.
 from typing import TYPE_CHECKING, Any
 
 from . import config as _config
+from .api import generate_structured, generate_text
 from .clients import DummyLLMClient, OllamaLLMClient
 from .compaction import compact_text
 from .factory import _clear_client_cache_for_testing, get_client
@@ -19,11 +20,13 @@ from .interface import (
     LLMJsonParseError,
     LLMPermanentError,
     LLMRateLimitError,
+    LLMSchemaValidationError,
     LLMTemporaryError,
     LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
 )
 from .strands_provider import _clear_strands_model_cache_for_testing, get_strands_model
+from .structured import complete_validated
 from .telemetry import get_recent_calls, get_usage_summary, record_llm_call
 from .tool_loop import complete_json_with_tool_loop
 from .util import call_llm_with_retries, extract_json_from_response
@@ -63,9 +66,12 @@ __all__ = [
     "_clear_client_cache_for_testing",
     "_clear_strands_model_cache_for_testing",
     "complete_json_with_tool_loop",
+    "complete_validated",
     "call_llm_with_retries",
     "compact_text",
     "extract_json_from_response",
+    "generate_structured",
+    "generate_text",
     "get_client",
     "get_strands_model",
     "get_llm_config_summary",
@@ -78,6 +84,7 @@ __all__ = [
     "LLMUnreachableAfterRetriesError",
     "LLMPermanentError",
     "LLMJsonParseError",
+    "LLMSchemaValidationError",
     "LLMTruncatedError",
     "OLLAMA_WEEKLY_LIMIT_MESSAGE",
     "OllamaLLMClient",

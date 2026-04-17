@@ -6,12 +6,34 @@ through the lens of a bootstrapped founder building a task management service.
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 logger = logging.getLogger(__name__)
+
+
+class FounderAnswer(BaseModel):
+    """Schema for a founder's answer to a question from the SE team.
+
+    Validated at the ``llm_service.generate_structured`` boundary; a single
+    schema-grounded self-correction retry is applied automatically before
+    the caller sees a failure.
+    """
+
+    selected_option_id: str = Field(
+        ...,
+        description="Chosen option id, or 'other' for a custom answer",
+    )
+    other_text: str | None = Field(
+        None,
+        description="Custom answer text when selected_option_id == 'other'",
+    )
+    rationale: str = Field(
+        ...,
+        description="Short explanation of the decision in founder-values terms",
+    )
 
 FOUNDER_SYSTEM_PROMPT = """\
 You are Alex Chen, a bootstrapped startup founder building a task management \
@@ -133,26 +155,6 @@ Respond with a JSON object (no markdown fencing):
 """
 
 
-def _parse_answer(raw: str) -> dict[str, Any]:
-    """Parse LLM answer JSON with fallback."""
-    cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip())
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-    try:
-        parsed = json.loads(cleaned)
-        return {
-            "selected_option_id": parsed.get("selected_option_id", "other"),
-            "other_text": parsed.get("other_text"),
-            "rationale": parsed.get("rationale", ""),
-        }
-    except (json.JSONDecodeError, AttributeError):
-        logger.warning("Failed to parse answer JSON, using raw text as custom answer")
-        return {
-            "selected_option_id": "other",
-            "other_text": raw.strip(),
-            "rationale": "Could not parse structured response; using raw text.",
-        }
-
-
 class FounderAgent:
     """Simulates a budget-conscious, speed-first, UX-obsessed startup founder."""
 
@@ -195,12 +197,70 @@ class FounderAgent:
                     continue
                 raise
 
+    def _call_text(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        max_retries: int = 3,
+    ) -> str:
+        """Invoke the LLM via a text-only path (bypasses Strands / JSON transport).
+
+        Use for prompts that expect Markdown or prose. The response is returned
+        verbatim and is never JSON-parsed. Mirrors ``_call``'s transient-error
+        retry/backoff so flaky-network behavior is unchanged.
+        """
+        import time as _time
+
+        from llm_service import get_client
+
+        client = get_client(agent_key="user_agent_founder")
+        for attempt in range(max_retries + 1):
+            try:
+                result = client.complete(
+                    prompt,
+                    system_prompt=system_prompt,
+                    temperature=0.7,
+                )
+                return str(result).strip()
+            except Exception as exc:
+                exc_text = str(exc).lower()
+                is_transient = any(k in exc_text for k in (
+                    "500", "502", "503", "504",
+                    "internal server error", "service unavailable",
+                    "timeout", "connection", "reset",
+                ))
+                if is_transient and attempt < max_retries:
+                    wait = 2 ** attempt * 5  # 5s, 10s, 20s
+                    logger.warning(
+                        "LLM call failed (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1, max_retries + 1, wait, str(exc)[:200],
+                    )
+                    _time.sleep(wait)
+                    continue
+                raise
+
     def generate_spec(self) -> str:
-        """Generate the TaskFlow product specification."""
-        return self._call(SPEC_GENERATION_PROMPT)
+        """Generate the TaskFlow product specification.
+
+        Returns raw Markdown. The response is never JSON-parsed downstream —
+        ``orchestrator.run_workflow`` stores ``spec_content`` verbatim and
+        POSTs it as a string body to ``/product-analysis/start-from-spec``.
+        Routed through ``_call_text`` (direct ``LLMClient.complete``) rather
+        than the Strands ``Agent`` to avoid the JSON-only transport rejecting
+        a Markdown reply.
+        """
+        return self._call_text(SPEC_GENERATION_PROMPT, system_prompt=FOUNDER_SYSTEM_PROMPT)
 
     def answer_question(self, question: dict[str, Any]) -> dict[str, Any]:
         """Answer a pending question from the SE team.
+
+        Delegates to :func:`llm_service.generate_structured` with the
+        :class:`FounderAnswer` schema, which enforces JSON-mode output and
+        applies one schema-grounded self-correction retry before failing.
+        The bespoke regex-stripping / ``json.loads`` fallback that lived here
+        previously is no longer needed — the guard covers both the parse
+        and validation failure modes.
 
         Args:
             question: Dict with keys: id, question_text, context, recommendation, options.
@@ -208,7 +268,14 @@ class FounderAgent:
 
         Returns:
             Dict with: selected_option_id, other_text (or None), rationale.
+
+        Raises:
+            LLMJsonParseError / LLMSchemaValidationError: surfaced only when
+            the corrective retry also fails. The orchestrator catches these
+            in its ``try`` block and records the question as unanswered.
         """
+        from llm_service import generate_structured
+
         options = question.get("options") or []
         options_lines = []
         for opt in options:
@@ -231,7 +298,13 @@ class FounderAgent:
             options_text=options_text,
         )
 
-        return _parse_answer(self._call(prompt))
+        answer = generate_structured(
+            prompt,
+            schema=FounderAnswer,
+            system_prompt=FOUNDER_SYSTEM_PROMPT,
+            agent_key="user_agent_founder",
+        )
+        return answer.model_dump()
 
     def chat(self, message: str, context: dict[str, Any]) -> str:
         """Respond to a user chat message in the founder persona."""
