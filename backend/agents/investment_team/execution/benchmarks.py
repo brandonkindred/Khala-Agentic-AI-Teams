@@ -82,7 +82,8 @@ def benchmark_for_strategy(
     default = DEFAULT_BENCHMARK_BY_ASSET_CLASS.get(asset, "SPY")
 
     if asset == "futures" and primary_symbol:
-        root = primary_symbol.upper().rstrip("=F")[:2]
+        sym = primary_symbol.upper()
+        root = sym.removesuffix("=F")[:2]
         return _FUTURES_FAMILY_BENCHMARK.get(root, default)
 
     return default

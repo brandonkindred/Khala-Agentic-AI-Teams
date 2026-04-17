@@ -478,6 +478,7 @@ class TradeSimulationEngine:
         timeline.sort(key=lambda x: x[0])
 
         symbol_history: Dict[str, List[OHLCVBar]] = {sym: [] for sym in market_data}
+        last_price: Dict[str, float] = {}
 
         capital = self.initial_capital
         peak_equity = self.initial_capital
@@ -493,10 +494,18 @@ class TradeSimulationEngine:
         skipped = 0
 
         for bar_date, symbol, bar in timeline:
+            last_price[symbol] = bar.close
+
             # --- Drawdown circuit-breaker (Phase 3) ---
-            current_equity = capital + sum(
-                getattr(p, "position_value", 0) for p in open_positions.values()
-            )
+            # Mark open positions to market using each symbol's latest price.
+            mtm_value = 0.0
+            for pos_sym, pos in open_positions.items():
+                price_now = last_price.get(pos_sym, pos.entry_price)
+                if pos.side == "long":
+                    mtm_value += pos.shares * price_now
+                else:
+                    mtm_value += pos.shares * (2 * pos.entry_price - price_now)
+            current_equity = capital + mtm_value
             if current_equity > peak_equity:
                 peak_equity = current_equity
             dd = self._risk.check_drawdown(current_equity, peak_equity)

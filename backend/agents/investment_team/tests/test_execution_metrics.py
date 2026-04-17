@@ -119,6 +119,9 @@ def test_benchmark_futures_routes_by_family():
     assert benchmark_for_strategy(spec, primary_symbol="ES=F") == "SPY"
     assert benchmark_for_strategy(spec, primary_symbol="NQ") == "SPY"
     assert benchmark_for_strategy(spec, primary_symbol="ZN=F") == "AGG"
+    # ZF root ends in F — rstrip("=F") would mangle this to "Z"; removesuffix is correct
+    assert benchmark_for_strategy(spec, primary_symbol="ZF") == "AGG"
+    assert benchmark_for_strategy(spec, primary_symbol="ZF=F") == "AGG"
     assert benchmark_for_strategy(spec, primary_symbol="CL") == "DBC"
     assert benchmark_for_strategy(spec, primary_symbol="GC") == "DBC"
     # Unknown root → SPY (conservative default)
