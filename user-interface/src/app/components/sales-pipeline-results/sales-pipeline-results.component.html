@@ -149,7 +149,7 @@
               </mat-panel-description>
             </mat-expansion-panel-header>
 
-            @for (variant of seq.variants; track variant.angle) {
+            @for (variant of seq.variants; track $index) {
               <div class="variant-block">
                 <div class="variant-header">
                   <span class="variant-angle">{{ variant.angle }}</span>

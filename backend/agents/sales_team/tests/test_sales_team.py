@@ -669,7 +669,14 @@ class TestAPI:
         response = api_client.post("/sales/outreach", json=payload)
         assert response.status_code == 200
         data = response.json()
+        # When no dossier exists for the prospect, the endpoint returns an
+        # empty sequences list plus the prospect id in skipped_prospect_ids —
+        # rather than 500ing or silently fabricating personalization.
         assert "sequences" in data
+        assert "skipped_prospect_ids" in data
+        assert data["count"] == len(data["sequences"])
+        if not data["sequences"]:
+            assert sample_prospect.id in data["skipped_prospect_ids"]
 
     def test_qualify_endpoint(self, api_client, sample_prospect):
         payload = {

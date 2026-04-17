@@ -626,12 +626,15 @@ class SalesPodOrchestrator:
         except ValueError:
             return False
 
-    def _load_dossiers_for_prospects(self, prospects: List[Prospect]) -> dict[str, ProspectDossier]:
+    def load_dossiers_for_prospects(self, prospects: List[Prospect]) -> dict[str, ProspectDossier]:
         """Batch-load dossiers for the prospects we're about to run outreach on.
 
         Returns a map keyed by prospect.id. Prospects without a saved dossier
         are simply absent from the map — the caller decides whether to skip
         them. Safe to call when Postgres is unreachable (returns empty map).
+
+        Public so HTTP handlers can build the ``dossier_map`` argument for
+        :meth:`outreach_only` by prospect id.
         """
         ids = [p.id for p in prospects if p.id]
         if not ids:
@@ -709,7 +712,7 @@ class SalesPodOrchestrator:
         if self._should_run(PipelineStage.OUTREACH, entry):
             update("outreach", 20)
             logger.info("Sales pod [%s]: outreach stage for %d prospects", job_id, len(prospects))
-            dossier_map = self._load_dossiers_for_prospects(prospects)
+            dossier_map = self.load_dossiers_for_prospects(prospects)
             sequences: List[OutreachSequence] = []
             for p in prospects:
                 dossier = dossier_map.get(p.id)

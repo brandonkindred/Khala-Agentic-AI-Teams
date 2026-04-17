@@ -371,16 +371,27 @@ def generate_outreach(request: OutreachRequest) -> Dict[str, Any]:
     """Generate personalized cold outreach sequences for a list of prospects.
 
     Grounded in Salesfolk, Jill Konrath SNAP, and the Jeb Blount 6-touch cadence.
+    Every prospect must have a dossier in the store (keyed by ``prospect.id``);
+    prospects without one are skipped with a ``sales.outreach.dossier_missing``
+    log line and do not appear in ``sequences`` or ``skipped_prospects``
+    beyond a count.
     """
     orchestrator = SalesPodOrchestrator()
+    dossier_map = orchestrator.load_dossiers_for_prospects(request.prospects)
     sequences = orchestrator.outreach_only(
         prospects=request.prospects,
+        dossier_map=dossier_map,
         product_name=request.product_name,
         value_proposition=request.value_proposition,
         case_study_snippets=request.case_study_snippets,
         company_context=request.company_context,
     )
-    return {"sequences": [s.model_dump() for s in sequences], "count": len(sequences)}
+    skipped = [p.id for p in request.prospects if p.id not in dossier_map]
+    return {
+        "sequences": [s.model_dump() for s in sequences],
+        "count": len(sequences),
+        "skipped_prospect_ids": skipped,
+    }
 
 
 @app.post("/sales/qualify", tags=["stages"])
