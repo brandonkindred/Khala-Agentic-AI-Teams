@@ -147,7 +147,12 @@ def _spec() -> StrategySpec:
         sizing_rules=["risk 2% per trade"],
         risk_limits={"max_position_pct": 5},
         speculative=False,
-        strategy_code="def run_strategy(data, config):\n    return []\n",
+        strategy_code=(
+            "from contract import Strategy\n\n"
+            "class S(Strategy):\n"
+            "    def on_bar(self, ctx, bar):\n"
+            "        pass\n"
+        ),
     )
 
 
@@ -477,7 +482,12 @@ def test_alignment_loop_exits_immediately_when_first_audit_aligned() -> None:
 
 def test_alignment_loop_recovers_after_one_fix_and_re_execution() -> None:
     """One misaligned audit → one fix → re-backtest → second audit aligned."""
-    fixed_code = "def run_strategy(data, config):\n    return []  # fixed\n"
+    fixed_code = (
+        "from contract import Strategy\n\n"
+        "class S(Strategy):\n"
+        "    def on_bar(self, ctx, bar):\n"
+        "        pass  # fixed\n"
+    )
     orch, align_stub, sandbox_stub = _make_orchestrator(
         alignment_reports=[
             TradeAlignmentReport(
@@ -542,7 +552,12 @@ def test_alignment_loop_caps_at_max_rounds() -> None:
                 severity="critical",
             )
         ],
-        proposed_code="def run_strategy(data, config):\n    return []  # try again\n",
+        proposed_code=(
+            "from contract import Strategy\n\n"
+            "class S(Strategy):\n"
+            "    def on_bar(self, ctx, bar):\n"
+            "        pass  # try again\n"
+        ),
         predicted_aligned_after_fix=True,
         changes_made="another attempt",
     )
@@ -616,7 +631,12 @@ def test_alignment_loop_breaks_when_re_execution_fails() -> None:
     the last-good ``code`` / ``spec`` / ``trades`` / ``metrics`` intact so
     the persisted record never contains code that was never successfully
     executed for the reported results."""
-    proposed_code = "def run_strategy(data, config):\n    raise RuntimeError\n"
+    proposed_code = (
+        "from contract import Strategy\n\n"
+        "class S(Strategy):\n"
+        "    def on_bar(self, ctx, bar):\n"
+        "        raise RuntimeError\n"
+    )
     orch, align_stub, sandbox_stub = _make_orchestrator(
         alignment_reports=[
             TradeAlignmentReport(
@@ -667,7 +687,12 @@ def test_alignment_loop_breaks_on_critical_anomaly_after_rerun() -> None:
     """An alignment fix that yields critical anomalies (e.g. zero trades)
     must fail the anomaly gate and NOT commit the proposal into the
     persisted state. The loop exits with the prior backtest intact."""
-    proposed_code = "def run_strategy(data, config):\n    return []  # breaks everything\n"
+    proposed_code = (
+        "from contract import Strategy\n\n"
+        "class S(Strategy):\n"
+        "    def on_bar(self, ctx, bar):\n"
+        "        pass  # breaks everything\n"
+    )
     orch, align_stub, sandbox_stub = _make_orchestrator(
         alignment_reports=[
             TradeAlignmentReport(
@@ -727,12 +752,15 @@ def test_alignment_loop_breaks_on_unsafe_proposed_code() -> None:
                 aligned=False,
                 rationale="off-spec",
                 issues=[AlignmentIssue(rule_type="entry_rules", description="x")],
-                # Obvious safety violation: imports `os` + calls `os.system`.
+                # Obvious safety violation: imports `os` + calls `os.system`,
+                # wrapped in the new Strategy-subclass shape so that
+                # code_safety flags the prohibited import (not the shape).
                 proposed_code=(
                     "import os\n\n"
-                    "def run_strategy(data, config):\n"
-                    "    os.system('rm -rf /')  # prohibited\n"
-                    "    return []\n"
+                    "from contract import Strategy\n\n"
+                    "class S(Strategy):\n"
+                    "    def on_bar(self, ctx, bar):\n"
+                    "        os.system('rm -rf /')  # prohibited\n"
                 ),
                 predicted_aligned_after_fix=True,
                 changes_made="unsafe rewrite",
@@ -843,14 +871,19 @@ def test_coerce_report_keeps_well_formed_fix() -> None:
         "aligned": False,
         "rationale": "entries early",
         "issues": [],
-        "proposed_code": "def run_strategy(data, config):\n    return []\n",
+        "proposed_code": (
+            "from contract import Strategy\n\n"
+            "class S(Strategy):\n"
+            "    def on_bar(self, ctx, bar):\n"
+            "        pass\n"
+        ),
         "predicted_aligned_after_fix": True,
         "changes_made": "guard added",
     }
     report = _coerce_report(raw, fallback_code="orig")
     assert report.aligned is False
     assert report.proposed_code is not None
-    assert "run_strategy" in report.proposed_code
+    assert "class S(Strategy)" in report.proposed_code
     assert report.predicted_aligned_after_fix is True
     assert report.changes_made == "guard added"
 
@@ -860,7 +893,12 @@ def test_coerce_report_tolerates_invalid_severity() -> None:
         "aligned": False,
         "rationale": "x",
         "issues": [{"rule_type": "exit_rules", "description": "d", "severity": "bogus"}],
-        "proposed_code": "def run_strategy(data, config):\n    return []\n",
+        "proposed_code": (
+            "from contract import Strategy\n\n"
+            "class S(Strategy):\n"
+            "    def on_bar(self, ctx, bar):\n"
+            "        pass\n"
+        ),
         "changes_made": "fix",
     }
     report = _coerce_report(raw, fallback_code="orig")

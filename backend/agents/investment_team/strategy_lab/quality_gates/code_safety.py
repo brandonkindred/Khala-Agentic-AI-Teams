@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import List
+from typing import List, Optional
 
 from .models import QualityGateResult
 
@@ -43,9 +43,14 @@ BANNED_IMPORTS = frozenset(
 
 ALLOWED_IMPORTS = frozenset(
     {
-        "pandas",
-        "numpy",
+        # The event-driven Strategy contract types — injected into the
+        # subprocess by :class:`StreamingHarness`.
+        "contract",
+        # Pre-built technical indicators still copied into the sandbox.
         "indicators",
+        # Stdlib-only helpers. pandas / numpy are deliberately excluded:
+        # the event-driven contract delivers bars one at a time via
+        # ``on_bar(ctx, bar)`` and strategies never need a DataFrame.
         "math",
         "datetime",
         "collections",
@@ -75,15 +80,24 @@ _BANNED_CALL_PATTERNS = [
     re.compile(r"\bbreakpoint\s*\("),
 ]
 
-# Look-ahead bias patterns — accessing future data in the trading loop.
+# Look-ahead bias patterns — accessing future data from within the
+# ``Strategy`` subclass. Most look-ahead is structurally impossible in the
+# event-driven contract (``ctx`` has no accessor for future data, and
+# ``AttributeError`` on a forward field is trapped as ``lookahead_violation``
+# at runtime), but these regexes catch obvious tripwires before the code
+# even runs.
 _LOOKAHEAD_PATTERNS = [
     (
-        re.compile(r"\.shift\s*\(\s*-"),
-        "shift(-N) accesses future data — use only positive shift values",
+        re.compile(r"\bctx\s*\.\s*future_\w+"),
+        "ctx.future_* does not exist — use only ctx.history(symbol, n)",
     ),
     (
-        re.compile(r"rows\s*\[\s*i\s*\+"),
-        "rows[i+N] accesses future bars — use only row and prev_row",
+        re.compile(r"\bbar\s*\.\s*(?:next|future)_\w+"),
+        "bar.next_* / bar.future_* does not exist — only current-bar fields are delivered",
+    ),
+    (
+        re.compile(r"\bctx\s*\.\s*peek\b"),
+        "ctx.peek(...) does not exist — the engine does not expose forward bars",
     ),
 ]
 
@@ -108,32 +122,50 @@ class CodeSafetyChecker:
             )
             return results
 
-        # 2. Check run_strategy function exists with correct signature
-        run_strategy_found = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "run_strategy":
-                run_strategy_found = True
-                param_count = len(node.args.args)
-                if param_count != 2:
-                    results.append(
-                        QualityGateResult(
-                            gate_name=GATE,
-                            passed=False,
-                            severity="critical",
-                            details=f"run_strategy() must accept exactly 2 parameters (data, config), found {param_count}.",
-                        )
-                    )
-                break
-
-        if not run_strategy_found:
+        # 2. Check the module defines exactly one contract.Strategy subclass
+        #    with a correctly-shaped ``on_bar`` method. The PR-3 streaming
+        #    harness requires this shape and raises at runtime otherwise;
+        #    flagging here turns a runtime classification error into an
+        #    actionable refinement hint.
+        strategy_classes = _find_strategy_subclasses(tree)
+        if len(strategy_classes) == 0:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
                     passed=False,
                     severity="critical",
-                    details="Code does not define a run_strategy() function.",
+                    details=(
+                        "Code must define exactly one subclass of contract.Strategy; "
+                        "none found. Use `from contract import Strategy` and `class "
+                        "MyStrategy(Strategy): ...`."
+                    ),
                 )
             )
+        elif len(strategy_classes) > 1:
+            names = ", ".join(sorted(c.name for c in strategy_classes))
+            results.append(
+                QualityGateResult(
+                    gate_name=GATE,
+                    passed=False,
+                    severity="critical",
+                    details=(
+                        f"Code defines multiple Strategy subclasses ({names}); the "
+                        "harness accepts exactly one."
+                    ),
+                )
+            )
+        else:
+            strategy_cls = strategy_classes[0]
+            on_bar_issue = _validate_on_bar(strategy_cls)
+            if on_bar_issue is not None:
+                results.append(
+                    QualityGateResult(
+                        gate_name=GATE,
+                        passed=False,
+                        severity="critical",
+                        details=on_bar_issue,
+                    )
+                )
 
         # 3. Walk AST for banned imports
         for node in ast.walk(tree):
@@ -240,21 +272,6 @@ class CodeSafetyChecker:
                     )
                 )
 
-        # 6b. Detect DataFrame access after del df (loop body should not use df)
-        if "del df" in executable:
-            del_pos = executable.index("del df")
-            post_del = executable[del_pos:]
-            df_after_del = re.search(r"\bdf\s*[\[.]", post_del[len("del df") :])
-            if df_after_del:
-                results.append(
-                    QualityGateResult(
-                        gate_name=GATE,
-                        passed=False,
-                        severity="critical",
-                        details="Look-ahead bias: code references 'df' after 'del df' — use only row and prev_row in the trading loop.",
-                    )
-                )
-
         # 7. Code length
         line_count = len(code.splitlines())
         if line_count > 1000:
@@ -287,6 +304,68 @@ def _get_call_name(node: ast.Call) -> str:
     if isinstance(node.func, ast.Attribute):
         return node.func.attr
     return ""
+
+
+def _find_strategy_subclasses(tree: ast.AST) -> List[ast.ClassDef]:
+    """Return every top-level class whose bases include a reference to
+    ``Strategy`` or ``contract.Strategy``.
+
+    We can't resolve inheritance across modules statically, so this is a
+    syntactic check — but the harness uses the same shape (``issubclass``
+    against the imported ``contract.Strategy``) and will agree with our
+    classification for any direct subclass defined in the module.
+    """
+    out: List[ast.ClassDef] = []
+    for node in ast.iter_child_nodes(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for base in node.bases:
+            if isinstance(base, ast.Name) and base.id == "Strategy":
+                out.append(node)
+                break
+            if (
+                isinstance(base, ast.Attribute)
+                and base.attr == "Strategy"
+                and isinstance(base.value, ast.Name)
+                and base.value.id == "contract"
+            ):
+                out.append(node)
+                break
+    return out
+
+
+def _validate_on_bar(cls: ast.ClassDef) -> Optional[str]:
+    """Return a human-readable error string if ``cls`` lacks a usable
+    ``on_bar`` override, else ``None``.
+
+    The harness requires ``on_bar(self, ctx, bar)``. Missing the method is
+    allowed (the base class no-op runs and produces no trades — caught by
+    anomaly gates), but a wrong signature would crash at the first call
+    and deserves a clearer up-front error.
+    """
+    for node in ast.iter_child_nodes(cls):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != "on_bar":
+            continue
+        if isinstance(node, ast.AsyncFunctionDef):
+            return (
+                "on_bar must be a regular (non-async) method — the harness calls "
+                "it synchronously once per finalised bar."
+            )
+        param_count = len(node.args.args)
+        if param_count != 3:
+            return (
+                f"{cls.name}.on_bar must accept exactly 3 parameters (self, ctx, bar); "
+                f"found {param_count}."
+            )
+        return None
+    # No on_bar at all — not strictly fatal (base class no-op), but no
+    # orders will be emitted so flag it.
+    return (
+        f"{cls.name} does not override on_bar(self, ctx, bar); the base class "
+        "no-op will run and the strategy will emit zero trades."
+    )
 
 
 # Regex that matches Python comments and string literals (single/double,
