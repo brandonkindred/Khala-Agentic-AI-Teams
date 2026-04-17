@@ -21,3 +21,4 @@ export * from './startup-advisor.model';
 export * from './agentic-team.model';
 export * from './team-assistant.model';
 export * from './persona-testing.model';
+export * from './road-trip-planning.model';

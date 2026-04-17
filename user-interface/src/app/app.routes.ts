@@ -26,6 +26,7 @@ import { PlanningArtifactDetailComponent } from './components/planning-artifact-
 import { PersonaTestingDashboardComponent } from './components/persona-testing-dashboard/persona-testing-dashboard.component';
 import { PersonaTestAuditPanelComponent } from './components/persona-test-audit-panel/persona-test-audit-panel.component';
 import { DeepthoughtDashboardComponent } from './components/deepthought-dashboard/deepthought-dashboard.component';
+import { RoadTripPlanningDashboardComponent } from './components/road-trip-planning-dashboard/road-trip-planning-dashboard.component';
 
 export const routes: Routes = [
   {
@@ -64,6 +65,7 @@ export const routes: Routes = [
       { path: 'persona-testing', component: PersonaTestingDashboardComponent, data: { breadcrumb: 'Persona Testing', title: 'Persona Testing' } },
       { path: 'persona-testing/audit/:runId', component: PersonaTestAuditPanelComponent, data: { breadcrumb: 'Audit', title: 'Persona Test Audit' } },
       { path: 'deepthought', component: DeepthoughtDashboardComponent, data: { breadcrumb: 'Deepthought', title: 'Deepthought' } },
+      { path: 'road-trip-planning', component: RoadTripPlanningDashboardComponent, data: { breadcrumb: 'Road Trip Planning', title: 'Road Trip Planning' } },
     ],
   },
   { path: '**', redirectTo: '/dashboard' },

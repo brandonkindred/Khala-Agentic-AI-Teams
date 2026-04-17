@@ -1,0 +1,425 @@
+<app-dashboard-shell
+  title="Road Trip Planning"
+  subtitle="Chat with the planning team. Tell them where you want to go, who's coming, and what you care about — they'll build a day-by-day itinerary and rework it anytime plans change."
+  icon="directions_car"
+  healthLabel="Road Trip API"
+  [healthCheck]="getHealth"
+>
+  <ng-container dashboardActions>
+    <button
+      mat-stroked-button
+      (click)="onRestart()"
+      class="header-button"
+      aria-label="Start a new trip"
+    >
+      <mat-icon>refresh</mat-icon>
+      New trip
+    </button>
+    <button
+      mat-flat-button
+      color="primary"
+      class="header-button"
+      [disabled]="!readyToPlan() || planning"
+      (click)="generateItinerary()"
+      [attr.aria-label]="itinerary ? 'Re-plan itinerary' : 'Generate itinerary'"
+    >
+      <mat-icon>{{ itinerary ? 'autorenew' : 'auto_awesome' }}</mat-icon>
+      {{ itinerary ? (dirtyRePlan ? 'Re-plan' : 'Re-plan (no changes)') : 'Generate itinerary' }}
+    </button>
+  </ng-container>
+
+  <div class="rt-layout">
+    <!-- ============================== CHAT ============================== -->
+    <mat-card class="chat-card">
+      <mat-card-content>
+        <div class="messages-container" #messagesContainer role="log" aria-live="polite">
+          @for (msg of messages; track $index) {
+            <div
+              class="message"
+              [class.user]="msg.role === 'user'"
+              [class.assistant]="msg.role === 'assistant'"
+            >
+              <div class="message-content" [innerHTML]="formatMessage(msg.content)"></div>
+              @if (msg.timestamp) {
+                <div class="message-time">{{ formatTime(msg.timestamp) }}</div>
+              }
+            </div>
+          }
+
+          @if (sending || planning) {
+            <div class="message assistant typing">
+              <div class="typing-indicator">
+                <span></span><span></span><span></span>
+              </div>
+              @if (planningStep) {
+                <div class="planning-step">
+                  <mat-icon>group_work</mat-icon>
+                  {{ planningStep }}
+                </div>
+              }
+            </div>
+          }
+        </div>
+
+        <form [formGroup]="form" (ngSubmit)="onSubmit()" class="input-form" autocomplete="off">
+          <mat-form-field appearance="outline" class="message-input">
+            <mat-label>
+              @if (pendingSlot) {
+                Answering: {{ labelForSlot(pendingSlot) }}
+              } @else {
+                Tell me about your trip, or what to change…
+              }
+            </mat-label>
+            <input
+              matInput
+              formControlName="message"
+              [attr.aria-label]="'Message input'"
+              (keydown.enter)="$event.preventDefault(); onSubmit()"
+            />
+          </mat-form-field>
+          <button
+            mat-fab
+            color="primary"
+            type="submit"
+            [disabled]="form.invalid || sending"
+            aria-label="Send message"
+          >
+            <mat-icon>send</mat-icon>
+          </button>
+        </form>
+
+        @if (lastQuickReplies() && lastQuickReplies()!.length > 0) {
+          <div class="quick-replies">
+            @for (chip of lastQuickReplies(); track chip) {
+              <button
+                mat-stroked-button
+                class="quick-reply-chip"
+                (click)="onQuickReply(chip)"
+                [disabled]="sending || planning"
+              >
+                {{ chip }}
+              </button>
+            }
+          </div>
+        }
+
+        @if (error) {
+          <div class="error-banner" role="alert">
+            <mat-icon>error_outline</mat-icon>
+            <span>{{ error }}</span>
+            <button mat-stroked-button (click)="generateItinerary()" [disabled]="!readyToPlan() || planning">
+              Retry
+            </button>
+          </div>
+        }
+      </mat-card-content>
+    </mat-card>
+
+    <!-- ============================== RIGHT PANEL ============================== -->
+    <div class="rt-sidebar">
+      <!-- Trip context -->
+      <mat-card class="context-card">
+        <mat-card-header>
+          <mat-icon mat-card-avatar>luggage</mat-icon>
+          <mat-card-title>Trip so far</mat-card-title>
+          <mat-card-subtitle>
+            @if (readyToPlan()) {
+              Ready to plan — click Generate above
+            } @else {
+              Missing: {{ missingLabels().join(', ') }}
+            }
+          </mat-card-subtitle>
+        </mat-card-header>
+
+        <mat-card-content>
+          <div class="context-grid">
+            @for (field of contextFields(); track field.key) {
+              <div class="context-row" [class.empty]="!field.displayValue">
+                <span class="context-label">
+                  {{ field.label }}
+                  @if (field.required) {
+                    <span class="required-dot" aria-label="required">*</span>
+                  }
+                </span>
+
+                @if (editingKey === field.key) {
+                  <div class="context-edit">
+                    <input
+                      class="context-edit-input"
+                      [value]="editingValue"
+                      (input)="editingValue = $any($event.target).value"
+                      (keydown.enter)="saveEdit()"
+                      (keydown.escape)="cancelEdit()"
+                      [attr.aria-label]="'Edit ' + field.label"
+                    />
+                    <button mat-icon-button (click)="saveEdit()" aria-label="Save">
+                      <mat-icon>check</mat-icon>
+                    </button>
+                    <button mat-icon-button (click)="cancelEdit()" aria-label="Cancel">
+                      <mat-icon>close</mat-icon>
+                    </button>
+                  </div>
+                } @else {
+                  <div class="context-value-row">
+                    <span class="context-value">
+                      {{ field.displayValue ?? '—' }}
+                    </span>
+                    <button
+                      mat-icon-button
+                      class="context-edit-btn"
+                      (click)="startEdit(field.key)"
+                      [attr.aria-label]="'Edit ' + field.label"
+                    >
+                      <mat-icon>edit</mat-icon>
+                    </button>
+                  </div>
+                }
+              </div>
+            }
+          </div>
+
+          @if (trip.required_stops.length > 0) {
+            <div class="chip-group">
+              <span class="chip-label">Stops</span>
+              <div class="chip-list">
+                @for (stop of trip.required_stops; track stop) {
+                  <span class="rt-chip removable">
+                    {{ stop }}
+                    <button
+                      mat-icon-button
+                      (click)="removeStop(stop)"
+                      [attr.aria-label]="'Remove ' + stop"
+                    >
+                      <mat-icon>close</mat-icon>
+                    </button>
+                  </span>
+                }
+              </div>
+            </div>
+          }
+
+          @if (trip.preferences.length > 0) {
+            <div class="chip-group">
+              <span class="chip-label">Preferences</span>
+              <div class="chip-list">
+                @for (pref of trip.preferences; track pref) {
+                  <span class="rt-chip removable subtle">
+                    {{ pref }}
+                    <button
+                      mat-icon-button
+                      (click)="removePreference(pref)"
+                      [attr.aria-label]="'Remove preference'"
+                    >
+                      <mat-icon>close</mat-icon>
+                    </button>
+                  </span>
+                }
+              </div>
+            </div>
+          }
+
+          @if (dirtyRePlan && itinerary) {
+            <div class="replan-hint">
+              <mat-icon>sync</mat-icon>
+              <span>Trip changed since the current itinerary was built. Re-plan to refresh.</span>
+            </div>
+          }
+        </mat-card-content>
+      </mat-card>
+
+      <!-- Itinerary -->
+      @if (itinerary) {
+        <mat-card class="itinerary-card">
+          <mat-card-header>
+            <mat-icon mat-card-avatar>map</mat-icon>
+            <mat-card-title>{{ itinerary.title || 'Your itinerary' }}</mat-card-title>
+            <mat-card-subtitle>
+              {{ itinerary.total_days }} day{{ itinerary.total_days === 1 ? '' : 's' }}
+              @if (itinerary.total_driving_miles) {
+                · {{ itinerary.total_driving_miles | number:'1.0-0' }} mi total
+              }
+              @if (itinerary.budget_estimate) {
+                · Est. {{ itinerary.budget_estimate }}
+              }
+            </mat-card-subtitle>
+          </mat-card-header>
+
+          <mat-card-content>
+            <mat-tab-group class="itinerary-tabs" animationDuration="150ms">
+              <mat-tab label="Overview">
+                <div class="tab-body">
+                  @if (itinerary.overview) {
+                    <p class="overview-text">{{ itinerary.overview }}</p>
+                  }
+                  @if (itinerary.traveler_highlights) {
+                    <p class="overview-text subtle">{{ itinerary.traveler_highlights }}</p>
+                  }
+
+                  @if (itinerary.route_summary.length > 0) {
+                    <h4>Route</h4>
+                    <ol class="route-list">
+                      @for (leg of itinerary.route_summary; track leg) {
+                        <li>{{ leg }}</li>
+                      }
+                    </ol>
+                  }
+
+                  @if (itinerary.travel_tips.length > 0) {
+                    <h4>Travel tips</h4>
+                    <ul class="tip-list">
+                      @for (tip of itinerary.travel_tips; track tip) {
+                        <li>{{ tip }}</li>
+                      }
+                    </ul>
+                  }
+
+                  @if (itinerary.packing_suggestions.length > 0) {
+                    <h4>Packing</h4>
+                    <div class="chip-list">
+                      @for (item of itinerary.packing_suggestions; track item) {
+                        <span class="rt-chip subtle">{{ item }}</span>
+                      }
+                    </div>
+                  }
+                </div>
+              </mat-tab>
+
+              @for (day of itinerary.days; track day.day_number) {
+                <mat-tab [label]="'Day ' + day.day_number">
+                  <div class="tab-body">
+                    <div class="day-head">
+                      <div>
+                        <h3 class="day-title">Day {{ day.day_number }} · {{ day.location }}</h3>
+                        @if (day.date) {
+                          <p class="day-date">{{ day.date }}</p>
+                        }
+                      </div>
+                      @if (dayBadge(day)) {
+                        <span class="day-badge" aria-label="driving distance">
+                          <mat-icon>directions_car</mat-icon>
+                          {{ dayBadge(day) }}
+                        </span>
+                      }
+                    </div>
+
+                    @if (day.driving_from) {
+                      <p class="drive-from">From {{ day.driving_from }}{{ day.driving_notes ? ' · ' + day.driving_notes : '' }}</p>
+                    }
+
+                    @if (day.day_summary) {
+                      <p class="day-summary">{{ day.day_summary }}</p>
+                    }
+
+                    @if (day.morning_activities.length > 0) {
+                      <h4>Morning</h4>
+                      <ul class="activity-list">
+                        @for (act of day.morning_activities; track act.name) {
+                          <li>
+                            <strong>{{ act.name }}</strong>
+                            @if (act.description) { — {{ act.description }} }
+                          </li>
+                        }
+                      </ul>
+                    }
+
+                    @if (day.afternoon_activities.length > 0) {
+                      <h4>Afternoon</h4>
+                      <ul class="activity-list">
+                        @for (act of day.afternoon_activities; track act.name) {
+                          <li>
+                            <strong>{{ act.name }}</strong>
+                            @if (act.description) { — {{ act.description }} }
+                          </li>
+                        }
+                      </ul>
+                    }
+
+                    @if (day.evening_activities.length > 0) {
+                      <h4>Evening</h4>
+                      <ul class="activity-list">
+                        @for (act of day.evening_activities; track act.name) {
+                          <li>
+                            <strong>{{ act.name }}</strong>
+                            @if (act.description) { — {{ act.description }} }
+                          </li>
+                        }
+                      </ul>
+                    }
+
+                    @if (day.meals.length > 0) {
+                      <h4>Meals</h4>
+                      <ul class="activity-list">
+                        @for (meal of day.meals; track meal.name) {
+                          <li>
+                            <strong>{{ meal.name }}</strong>
+                            @if (meal.description) { — {{ meal.description }} }
+                          </li>
+                        }
+                      </ul>
+                    }
+
+                    @if (day.accommodation) {
+                      <h4>Stay</h4>
+                      <p class="accommodation">
+                        <strong>{{ day.accommodation.name }}</strong>
+                        @if (day.accommodation.accommodation_type) {
+                          · {{ day.accommodation.accommodation_type }}
+                        }
+                        @if (day.accommodation.approximate_cost_per_night) {
+                          · {{ day.accommodation.approximate_cost_per_night }}/night
+                        }
+                      </p>
+                      @if (day.accommodation.booking_tips) {
+                        <p class="accommodation-tip">{{ day.accommodation.booking_tips }}</p>
+                      }
+                    }
+
+                    @if (day.day_tips.length > 0) {
+                      <ul class="tip-list">
+                        @for (tip of day.day_tips; track tip) {
+                          <li>{{ tip }}</li>
+                        }
+                      </ul>
+                    }
+
+                    <div class="day-footer">
+                      <button
+                        mat-stroked-button
+                        (click)="reworkDay(day)"
+                        class="rework-btn"
+                      >
+                        <mat-icon>edit_note</mat-icon>
+                        Rework this day in chat
+                      </button>
+                    </div>
+                  </div>
+                </mat-tab>
+              }
+            </mat-tab-group>
+          </mat-card-content>
+        </mat-card>
+      }
+
+      @if (previousItineraries.length > 0) {
+        <mat-card class="history-card">
+          <mat-card-header>
+            <mat-icon mat-card-avatar>history</mat-icon>
+            <mat-card-title>Previous plans</mat-card-title>
+            <mat-card-subtitle>Your last {{ previousItineraries.length }} itinerary
+              {{ previousItineraries.length === 1 ? 'version' : 'versions' }}</mat-card-subtitle>
+          </mat-card-header>
+          <mat-card-content>
+            <ul class="history-list">
+              @for (prev of previousItineraries; track $index) {
+                <li>
+                  <span class="history-title">{{ prev.title || 'Untitled trip' }}</span>
+                  <span class="history-meta">{{ prev.total_days }} days</span>
+                </li>
+              }
+            </ul>
+          </mat-card-content>
+        </mat-card>
+      }
+    </div>
+  </div>
+</app-dashboard-shell>

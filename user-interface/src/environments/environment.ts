@@ -26,5 +26,6 @@ export const environment = {
   startupAdvisorApiUrl: `${apiBase}/api/startup-advisor`,
   personaTestingApiUrl: `${apiBase}/api/user-agent-founder`,
   deepthoughtApiUrl: `${apiBase}/api/deepthought`,
+  roadTripPlanningApiUrl: `${apiBase}/api/road-trip-planning`,
 };
 
