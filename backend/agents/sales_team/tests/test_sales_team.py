@@ -1030,8 +1030,15 @@ class TestDeepResearchAPI:
             notes="monkeypatched",
         )
 
+        captured: Dict[str, object] = {}
+
         class _FakeOrch:
-            def deep_research_only(self, _req):
+            def deep_research_only(self, req, dossier_url_builder=None, persist=True):
+                # The route handler must pass a URL builder so that emitted
+                # URLs match the actual registered route (including mount prefix).
+                captured["builder"] = dossier_url_builder
+                captured["req"] = req
+                captured["persist"] = persist
                 return fake_result
 
         monkeypatch.setattr(api_main, "SalesPodOrchestrator", _FakeOrch)
@@ -1050,3 +1057,35 @@ class TestDeepResearchAPI:
         body = response.json()
         assert body["list_id"] == "plst_test"
         assert body["total_prospects"] == 0
+
+        # The handler must have passed a URL builder that resolves against
+        # the app's actual route ("get_dossier"). In the TestClient, routes
+        # are registered at /sales/..., so url_for includes that path.
+        builder = captured["builder"]
+        assert callable(builder)
+        built = builder("dsr_abc123")
+        assert "/sales/dossiers/dsr_abc123" in built
+
+    def test_get_dossier_runtime_store_failure_returns_503(self, api_client, monkeypatch):
+        """Runtime failures from the store (not just import failures) map to 503."""
+        import sales_team.dossier_store as ds
+
+        class _ExplodingStore:
+            def get_dossier(self, _id):
+                raise RuntimeError("postgres unreachable")
+
+        monkeypatch.setattr(ds, "DossierStore", _ExplodingStore)
+        response = api_client.get("/sales/dossiers/dsr_anything")
+        assert response.status_code == 503
+        assert "unavailable" in response.json()["detail"].lower()
+
+    def test_list_prospect_lists_runtime_store_failure_returns_503(self, api_client, monkeypatch):
+        import sales_team.dossier_store as ds
+
+        class _ExplodingStore:
+            def list_prospect_lists(self, limit: int = 50):
+                raise RuntimeError("postgres unreachable")
+
+        monkeypatch.setattr(ds, "DossierStore", _ExplodingStore)
+        response = api_client.get("/sales/prospect-lists")
+        assert response.status_code == 503

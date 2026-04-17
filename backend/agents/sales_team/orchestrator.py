@@ -820,6 +820,7 @@ class SalesPodOrchestrator:
         self,
         request: DeepResearchRequest,
         persist: bool = True,
+        dossier_url_builder: Optional[Callable[[str], str]] = None,
     ) -> DeepResearchResult:
         """Run company → decision-maker → dossier and return a ranked top-N list.
 
@@ -828,7 +829,21 @@ class SalesPodOrchestrator:
         (default), dossiers and the list are saved via :class:`DossierStore`.
         If the store is unavailable (e.g. ``POSTGRES_HOST`` not set), the
         run still returns a valid result in-memory — the shortfall is noted.
+
+        ``dossier_url_builder`` is an optional callable that maps a
+        ``dossier_id`` to the public URL at which that dossier can be
+        fetched. Pass ``lambda d: str(request.url_for("get_dossier",
+        dossier_id=d))`` from a FastAPI route to produce a URL that matches
+        the actual registered path (including any mount prefix). If omitted,
+        the URL defaults to ``/api/sales/dossiers/<id>`` which matches the
+        unified-api mount; this is a reasonable fallback but not guaranteed
+        to match every deployment.
         """
+        if dossier_url_builder is None:
+
+            def dossier_url_builder(dossier_id: str) -> str:
+                return f"/api/sales/dossiers/{dossier_id}"
+
         ctx = self._load_insights_ctx()
         icp_json = request.icp.model_dump_json(indent=2)
         # Request more companies than needed so that dedupe, failures, and
@@ -969,7 +984,7 @@ class SalesPodOrchestrator:
                     rank=rank,
                     prospect=p,
                     dossier_id=dossier.dossier_id,
-                    dossier_url=f"/api/sales/dossiers/{dossier.dossier_id}",
+                    dossier_url=dossier_url_builder(dossier.dossier_id),
                 )
             )
 
