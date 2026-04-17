@@ -1,11 +1,12 @@
 """Tests for the Strategy Lab trade-alignment problem-solving loop.
 
 The orchestrator runs a fresh ``TradeAlignmentAgent`` audit after each
-sandbox-validated backtest. When the agent reports the trades do not match
-the strategy spec, the orchestrator loops up to ``MAX_ALIGNMENT_ROUNDS``
-times: apply the agent's proposed code fix, re-execute the sandbox, and
-re-audit. These tests stub the LLM-driven agents and the sandbox so we can
-assert the loop's control flow directly.
+code-execution cycle. When the agent reports the trades do not match the
+strategy spec, the orchestrator loops up to ``MAX_ALIGNMENT_ROUNDS`` times:
+apply the agent's proposed code fix, re-execute via
+:func:`run_strategy_code` (which routes through TradingService), and re-
+audit. These tests stub the LLM agent and the code-execution helper so we
+can assert the loop's control flow directly.
 """
 
 from __future__ import annotations
@@ -24,12 +25,48 @@ from investment_team.strategy_lab.agents.alignment import (
     TradeAlignmentReport,
     _coerce_report,
 )
-from investment_team.strategy_lab.executor.sandbox_runner import CodeExecutionResult
+from investment_team.strategy_lab.executor.trade_builder import build_trade_records
 from investment_team.strategy_lab.orchestrator import (
     MAX_ALIGNMENT_ROUNDS,
     StrategyLabOrchestrator,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
+from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
+
+
+def _code_exec(
+    *,
+    success: bool,
+    raw_trades: Optional[List[Dict[str, Any]]] = None,
+    stderr: str = "",
+    error_type: Optional[str] = None,
+) -> StrategyRunResult:
+    """Build a ``StrategyRunResult`` from raw-trade dicts for test fixtures.
+
+    The alignment tests predate PR 3 and model sandbox output as raw trade
+    dicts (what the strategy subprocess emitted pre-PR 3). We translate
+    those into ``TradeRecord`` objects via the still-available
+    :func:`build_trade_records` so the existing fixtures remain usable.
+    """
+    trades: List[TradeRecord] = []
+    if raw_trades:
+        trades = build_trade_records(
+            raw_trades,
+            BacktestConfig(
+                start_date="2023-01-01",
+                end_date="2023-12-31",
+                initial_capital=100_000.0,
+                transaction_cost_bps=5.0,
+                slippage_bps=2.0,
+            ),
+        )
+    return StrategyRunResult(
+        success=success,
+        trades=trades,
+        stderr=stderr,
+        error_type=error_type,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -203,9 +240,9 @@ class _StubAlignmentAgent:
 
 
 class _StubSandbox:
-    """Sandbox stub. ``run_seq`` is consumed in order on each call."""
+    """Stub for ``run_strategy_code``. ``run_seq`` is consumed in order."""
 
-    def __init__(self, run_seq: List[CodeExecutionResult]) -> None:
+    def __init__(self, run_seq: List[StrategyRunResult]) -> None:
         self._results = list(run_seq)
         self.calls: List[str] = []
 
@@ -214,24 +251,29 @@ class _StubSandbox:
         strategy_code: str,
         market_data: Dict[str, List[OHLCVBar]],
         config: BacktestConfig,
-    ) -> CodeExecutionResult:
+        *,
+        strategy: Optional[StrategySpec] = None,
+    ) -> StrategyRunResult:
         self.calls.append(strategy_code)
         if not self._results:
-            raise AssertionError("Sandbox.run called more times than scripted")
+            raise AssertionError("sandbox stub called more times than scripted")
         return self._results.pop(0)
 
 
 def _make_orchestrator(
     *,
     alignment_reports: List[TradeAlignmentReport],
-    sandbox_results: List[CodeExecutionResult],
+    sandbox_results: List[StrategyRunResult],
 ) -> Tuple[StrategyLabOrchestrator, _StubAlignmentAgent, _StubSandbox]:
     """Build an orchestrator with stubbed alignment agent + sandbox."""
     orch = StrategyLabOrchestrator()
     align_stub = _StubAlignmentAgent(alignment_reports)
     sandbox_stub = _StubSandbox(sandbox_results)
     orch.alignment_agent = align_stub  # type: ignore[assignment]
-    orch.sandbox = sandbox_stub  # type: ignore[assignment]
+    # Attach the sandbox as a plain attribute so ``_drive_alignment_loop``
+    # can invoke it; the real orchestrator reaches for ``run_strategy_code``
+    # from its module import instead.
+    orch._test_sandbox = sandbox_stub  # type: ignore[attr-defined]
     return orch, align_stub, sandbox_stub
 
 
@@ -260,7 +302,6 @@ def _drive_alignment_loop(
     intentionally a copy of the orchestrator's loop semantics so a drift
     in the orchestrator surfaces as a test failure.
     """
-    from investment_team.strategy_lab.executor.trade_builder import build_trade_records
     from investment_team.trade_simulator import compute_metrics
 
     events: List[Tuple[str, Dict[str, Any]]] = []
@@ -340,7 +381,7 @@ def _drive_alignment_loop(
             )
             break
 
-        align_exec = orch.sandbox.run(proposed_code, market_data, config)
+        align_exec = orch._test_sandbox.run(proposed_code, market_data, config, strategy=spec)
         if not align_exec.success:
             gate_results.append(
                 QualityGateResult(
@@ -357,23 +398,8 @@ def _drive_alignment_loop(
             )
             break
 
-        try:
-            new_trades = build_trade_records(align_exec.raw_trades, config)
-        except ValueError as ve:
-            gate_results.append(
-                QualityGateResult(
-                    gate_name="alignment_trade_validation",
-                    passed=False,
-                    severity="critical",
-                    details=str(ve),
-                    refinement_round=align_round,
-                )
-            )
-            emit(
-                "aligning",
-                {"sub_phase": "re_execution_invalid_trades", "alignment_round": align_round},
-            )
-            break
+        # TradingService-finalised trades — no raw-dict validation step.
+        new_trades = align_exec.trades
 
         new_metrics = compute_metrics(
             new_trades, config.initial_capital, config.start_date, config.end_date
@@ -474,7 +500,7 @@ def test_alignment_loop_recovers_after_one_fix_and_re_execution() -> None:
         sandbox_results=[
             # The fix gets re-executed; emit a fresh trade ledger that
             # passes the anomaly gates so the loop proceeds to re-audit.
-            CodeExecutionResult(success=True, raw_trades=_benign_sandbox_trades()),
+            _code_exec(success=True, raw_trades=_benign_sandbox_trades()),
         ],
     )
 
@@ -527,7 +553,7 @@ def test_alignment_loop_caps_at_max_rounds() -> None:
     orch, align_stub, sandbox_stub = _make_orchestrator(
         alignment_reports=[misaligned for _ in range(MAX_ALIGNMENT_ROUNDS)],
         sandbox_results=[
-            CodeExecutionResult(success=True, raw_trades=_benign_sandbox_trades(offset=i))
+            _code_exec(success=True, raw_trades=_benign_sandbox_trades(offset=i))
             for i in range(MAX_ALIGNMENT_ROUNDS - 1)
         ],
     )
@@ -603,7 +629,7 @@ def test_alignment_loop_breaks_when_re_execution_fails() -> None:
             ),
         ],
         sandbox_results=[
-            CodeExecutionResult(
+            _code_exec(
                 success=False,
                 stderr="RuntimeError: boom",
                 error_type="runtime_error",
@@ -655,7 +681,7 @@ def test_alignment_loop_breaks_on_critical_anomaly_after_rerun() -> None:
         ],
         # Sandbox runs cleanly but returns zero trades, which
         # BacktestAnomalyDetector flags critical ("never entered a position").
-        sandbox_results=[CodeExecutionResult(success=True, raw_trades=[])],
+        sandbox_results=[_code_exec(success=True, raw_trades=[])],
     )
 
     original_spec = _spec()
