@@ -270,6 +270,177 @@ def test_empty_env_var_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     assert adapter.capabilities.name == "binance"
 
 
+# ---------------------------------------------------------------------------
+# Asset-class normalization (Codex P1 on PR #188)
+# ---------------------------------------------------------------------------
+
+
+def test_stocks_alias_routes_to_equities_default() -> None:
+    """Strategy Lab records use "stocks"; registry resolves on "equities"."""
+    reg = ProviderRegistry()
+    reg.register(
+        lambda: _StubAdapter("alpaca", supports={"equities"}),
+        ProviderCapabilities(
+            name="alpaca",
+            supports={"equities"},
+            historical_timeframes={"1m"},
+            live_timeframes={"1m"},
+        ),
+        default_for=["equities"],
+    )
+    adapter = reg.resolve(asset_class="stocks", direction="live")
+    assert adapter.capabilities.name == "alpaca"
+
+
+def test_forex_alias_routes_to_fx_default() -> None:
+    reg = ProviderRegistry()
+    reg.register(
+        lambda: _StubAdapter("oanda", supports={"fx"}),
+        ProviderCapabilities(
+            name="oanda",
+            supports={"fx"},
+            historical_timeframes={"1m"},
+            live_timeframes={"1m"},
+        ),
+        default_for=["fx"],
+    )
+    adapter = reg.resolve(asset_class="forex", direction="live")
+    assert adapter.capabilities.name == "oanda"
+
+
+def test_resolve_live_normalizes_asset_class_for_fallback() -> None:
+    """Geo-failover secondary lookup must match the normalized label."""
+    reg = ProviderRegistry()
+    reg.register(
+        lambda: _StubAdapter("binance", supports={"crypto"}),
+        ProviderCapabilities(
+            name="binance",
+            supports={"crypto"},
+            historical_timeframes={"1m"},
+            live_timeframes={"1m"},
+        ),
+        default_for=["crypto"],
+    )
+    reg.register(
+        lambda: _StubAdapter("coinbase", supports={"crypto"}),
+        ProviderCapabilities(
+            name="coinbase",
+            supports={"crypto"},
+            historical_timeframes={"1m"},
+            live_timeframes={"1m"},
+        ),
+        secondary_for=["crypto"],
+    )
+    # Even though "cryptocurrency" isn't the registered key, it should
+    # resolve to both primary and secondary.
+    resolution = reg.resolve_live(asset_class="cryptocurrency")
+    assert resolution.primary_name == "binance"
+    assert resolution.fallback_name == "coinbase"
+
+
+# ---------------------------------------------------------------------------
+# Paid-provider implementation-readiness (Codex P1 on PR #188)
+# ---------------------------------------------------------------------------
+
+
+def _registry_with_unimplemented_paid() -> ProviderRegistry:
+    """Build a registry where the paid provider is registered but not wired."""
+    reg = ProviderRegistry()
+    reg.register(
+        lambda: _StubAdapter("binance", supports={"crypto"}),
+        ProviderCapabilities(
+            name="binance",
+            supports={"crypto"},
+            historical_timeframes={"1m"},
+            live_timeframes={"1m"},
+        ),
+        default_for=["crypto"],
+    )
+    reg.register(
+        lambda: _StubAdapter("polygon", supports={"crypto", "equities"}, is_paid=True),
+        ProviderCapabilities(
+            name="polygon",
+            supports={"crypto", "equities"},
+            is_paid=True,
+            historical_timeframes={"1m"},
+            live_timeframes={"1m"},
+            implemented=False,  # ← the guard under test
+        ),
+        api_key_env="POLYGON_API_KEY_TEST",
+    )
+    return reg
+
+
+def test_unimplemented_paid_provider_not_auto_selected_on_key_presence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Key presence alone must NOT route past the working free default.
+
+    Real-world scenario: a user sets POLYGON_API_KEY for an unrelated tool;
+    without this guard the registry would select Polygon even though its
+    pumps are stubbed, and paper trading would fail at runtime with
+    NotImplementedError.
+    """
+    reg = _registry_with_unimplemented_paid()
+    monkeypatch.setenv("POLYGON_API_KEY_TEST", "sekret")
+    adapter = reg.resolve(asset_class="crypto", direction="live")
+    # Must fall through to the implemented free default.
+    assert adapter.capabilities.name == "binance"
+
+
+def test_implemented_paid_provider_still_preferred_when_key_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression baseline: once the paid pump is wired (implemented=True),
+    the key-presence preference rule still fires — no behaviour change for
+    the happy path.
+    """
+    reg = ProviderRegistry()
+    reg.register(
+        lambda: _StubAdapter("binance", supports={"crypto"}),
+        ProviderCapabilities(
+            name="binance",
+            supports={"crypto"},
+            historical_timeframes={"1m"},
+            live_timeframes={"1m"},
+        ),
+        default_for=["crypto"],
+    )
+    reg.register(
+        lambda: _StubAdapter("polygon", supports={"crypto"}, is_paid=True),
+        ProviderCapabilities(
+            name="polygon",
+            supports={"crypto"},
+            is_paid=True,
+            historical_timeframes={"1m"},
+            live_timeframes={"1m"},
+            implemented=True,
+        ),
+        api_key_env="POLYGON_API_KEY_TEST",
+    )
+    monkeypatch.setenv("POLYGON_API_KEY_TEST", "sekret")
+    adapter = reg.resolve(asset_class="crypto", direction="live")
+    assert adapter.capabilities.name == "polygon"
+
+
+def test_explicit_pin_still_resolves_unimplemented_provider() -> None:
+    """Users who explicitly opt into a stub adapter get the stub (so the
+    opt-in is visible via NotImplementedError at stream time), not a silent
+    fallback. Only *auto-selection* skips unimplemented adapters."""
+    reg = _registry_with_unimplemented_paid()
+    adapter = reg.resolve(asset_class="crypto", direction="live", explicit="polygon")
+    assert adapter.capabilities.name == "polygon"
+
+
+def test_describe_all_reports_implemented_field() -> None:
+    reg = _registry_with_unimplemented_paid()
+    listing = reg.describe_all()
+    binance_row = next(r for r in listing if r["name"] == "binance")
+    polygon_row = next(r for r in listing if r["name"] == "polygon")
+    assert binance_row["implemented"] is True
+    assert polygon_row["implemented"] is False
+
+
 def test_registering_duplicate_name_raises() -> None:
     reg = _registry_with_defaults()
     with pytest.raises(ValueError, match="already registered"):

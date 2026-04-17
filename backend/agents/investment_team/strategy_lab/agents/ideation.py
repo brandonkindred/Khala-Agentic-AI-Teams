@@ -50,7 +50,7 @@ Return ONLY a JSON object with no markdown:
   "risk_limits": {{"max_position_pct": 5, "stop_loss_pct": 3}},
   "speculative": false,
   "rationale": "Why this strategy and asset class now, given priors and the diversity hint",
-  "strategy_code": "COMPLETE Python code implementing run_strategy(data, config) -> list"
+  "strategy_code": "COMPLETE Python module defining exactly one subclass of contract.Strategy (see system prompt for the template)"
 }}
 """
 
@@ -73,8 +73,14 @@ class IdeationAgent:
         system_prompt = (_PROMPT_DIR / "ideation_system.md").read_text(encoding="utf-8")
 
         # Build user prompt
-        prior_text = format_prior_results(prior_records) if prior_records else "No prior strategies tested yet."
-        mix_hint = asset_class_mix_hint(prior_records) if prior_records else "No history — choose freely."
+        prior_text = (
+            format_prior_results(prior_records)
+            if prior_records
+            else "No prior strategies tested yet."
+        )
+        mix_hint = (
+            asset_class_mix_hint(prior_records) if prior_records else "No history — choose freely."
+        )
 
         if exclude_asset_classes:
             mix_hint += f"\nMANDATORY EXCLUSION: Do NOT use these asset classes: {', '.join(exclude_asset_classes)}."

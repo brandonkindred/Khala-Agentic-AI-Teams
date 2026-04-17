@@ -1,0 +1,181 @@
+"""Unit tests for :func:`run_strategy_code` — the PR 3 compat shim.
+
+Focus: mid-run strategy crashes that accumulate partial fills before
+raising must surface as ``success=False`` with ``error_type="runtime_error"``,
+not silently pass through as a truncated successful run. See the Codex
+review on PR #185 for the original bug report.
+"""
+
+from __future__ import annotations
+
+from typing import List
+
+from investment_team.models import (
+    BacktestConfig,
+    BacktestResult,
+    StrategySpec,
+    TradeRecord,
+)
+from investment_team.trading_service.modes import sandbox_compat
+from investment_team.trading_service.modes.backtest import BacktestRunResult
+from investment_team.trading_service.service import TradingServiceResult
+
+
+def _config() -> BacktestConfig:
+    return BacktestConfig(
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+        initial_capital=100_000.0,
+        transaction_cost_bps=0.0,
+        slippage_bps=0.0,
+        metrics_engine="legacy",
+    )
+
+
+def _strategy() -> StrategySpec:
+    return StrategySpec(
+        strategy_id="s",
+        authored_by="test",
+        asset_class="equity",
+        hypothesis="h",
+        signal_definition="s",
+        entry_rules=[],
+        exit_rules=[],
+        strategy_code="# unused — run_backtest is patched in tests below\n",
+    )
+
+
+def _partial_trade() -> TradeRecord:
+    return TradeRecord(
+        trade_num=1,
+        entry_date="2024-01-02",
+        exit_date="2024-01-05",
+        symbol="AAA",
+        side="long",
+        entry_price=100.0,
+        exit_price=102.0,
+        shares=10,
+        position_value=1_000.0,
+        gross_pnl=20.0,
+        net_pnl=20.0,
+        return_pct=2.0,
+        hold_days=3,
+        outcome="win",
+        cumulative_pnl=20.0,
+    )
+
+
+def _empty_metrics() -> BacktestResult:
+    """Build a zero-valued BacktestResult for test stubs."""
+    return BacktestResult(
+        total_return_pct=0.0,
+        annualized_return_pct=0.0,
+        volatility_pct=0.0,
+        sharpe_ratio=0.0,
+        max_drawdown_pct=0.0,
+        win_rate_pct=0.0,
+        profit_factor=0.0,
+    )
+
+
+def _patch_run_backtest(monkeypatch, *, service_result: TradingServiceResult) -> None:
+    """Replace ``run_backtest`` with a stub returning a canned service result."""
+
+    def _fake(*, strategy, config, market_data=None, **_kwargs):
+        return BacktestRunResult(
+            result=_empty_metrics(),
+            trades=service_result.trades,
+            service_result=service_result,
+        )
+
+    monkeypatch.setattr(sandbox_compat, "run_backtest", _fake)
+
+
+# ---------------------------------------------------------------------------
+# Mid-run crash regression (Codex P1 on PR #185)
+# ---------------------------------------------------------------------------
+
+
+def test_mid_run_crash_with_partial_trades_fails_not_succeeds(monkeypatch) -> None:
+    """A service error after earlier fills must NOT pass through as success.
+
+    ``TradingService.run`` appends closed trades to ``result.trades`` *before*
+    the harness raises ``StrategyRuntimeError``, so a partial ledger can
+    coexist with ``service_result.error``. The legacy guard (``error and
+    not trades``) would have treated this as success with truncated data
+    — a path that could promote a broken strategy to paper/live.
+    """
+    partial: List[TradeRecord] = [_partial_trade()]
+    _patch_run_backtest(
+        monkeypatch,
+        service_result=TradingServiceResult(
+            trades=partial,
+            error="IndexError: list index out of range\n<traceback>",
+            lookahead_violation=False,
+        ),
+    )
+
+    result = sandbox_compat.run_strategy_code("dummy", {}, _config(), strategy=_strategy())
+
+    assert result.success is False, "partial crash must fail the run so refinement / 422 paths fire"
+    assert result.error_type == "runtime_error"
+    assert "IndexError" in (result.stderr or "")
+    # Partial trades are carried through for diagnostic visibility.
+    assert result.trades == partial
+
+
+def test_lookahead_violation_with_partial_trades_still_classified_as_lookahead(
+    monkeypatch,
+) -> None:
+    """A lookahead_violation with prior fills keeps its own error_type."""
+    partial: List[TradeRecord] = [_partial_trade()]
+    _patch_run_backtest(
+        monkeypatch,
+        service_result=TradingServiceResult(
+            trades=partial,
+            error="AttributeError: Bar has no 'next_close'",
+            lookahead_violation=True,
+        ),
+    )
+
+    result = sandbox_compat.run_strategy_code("dummy", {}, _config(), strategy=_strategy())
+
+    assert result.success is False
+    assert result.error_type == "lookahead_violation"
+    assert result.trades == partial
+
+
+def test_clean_run_reports_success(monkeypatch) -> None:
+    """Baseline: no error + trades present → success=True."""
+    trades: List[TradeRecord] = [_partial_trade()]
+    _patch_run_backtest(
+        monkeypatch,
+        service_result=TradingServiceResult(
+            trades=trades,
+            error=None,
+            lookahead_violation=False,
+        ),
+    )
+    result = sandbox_compat.run_strategy_code("dummy", {}, _config(), strategy=_strategy())
+    assert result.success is True
+    assert result.error_type is None
+    assert result.trades == trades
+
+
+def test_initialisation_failure_with_empty_ledger_still_fails(monkeypatch) -> None:
+    """Regression check — the happy path for initialisation-time errors
+    (strategy module missing, subprocess startup failure) still reports
+    ``success=False`` now that the guard no longer depends on
+    ``not run.trades``."""
+    _patch_run_backtest(
+        monkeypatch,
+        service_result=TradingServiceResult(
+            trades=[],
+            error="strategy module must define a subclass of contract.Strategy",
+            lookahead_violation=False,
+        ),
+    )
+    result = sandbox_compat.run_strategy_code("dummy", {}, _config(), strategy=_strategy())
+    assert result.success is False
+    assert result.error_type == "runtime_error"
+    assert "strategy module" in (result.stderr or "")

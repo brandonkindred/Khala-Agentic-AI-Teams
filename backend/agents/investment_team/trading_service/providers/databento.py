@@ -19,6 +19,9 @@ CAPABILITIES = ProviderCapabilities(
     is_paid=True,
     historical_timeframes={"1s", "1m", "5m", "15m", "30m", "1h", "1d"},
     live_timeframes={"tick", "1s", "1m"},
+    # Pumps are stubbed — see polygon.py for the same note. Flip to True
+    # in the follow-up commit that wires Databento's client.
+    implemented=False,
 )
 
 

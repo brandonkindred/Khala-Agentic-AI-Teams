@@ -6,7 +6,9 @@ next backtest run will execute the strategy correctly.
 You will be given:
 1. The strategy specification — hypothesis, signal_definition, entry_rules,
    exit_rules, sizing_rules, risk_limits, asset_class.
-2. The current Python strategy code (defines `run_strategy(data, config) -> list`).
+2. The current Python strategy code (a subclass of `contract.Strategy` whose
+   `on_bar(self, ctx, bar)` method drives event-driven order submission via
+   `ctx.submit_order(...)`).
 3. The simulated trade ledger produced by the most recent backtest run.
 4. Aggregate backtest metrics.
 5. A history of prior alignment-fix attempts (to avoid repeating the same fix).
@@ -50,9 +52,14 @@ meaningfully diverges from the specification.
    misalignment and describe the concrete bug (wrong comparison, missing
    stop-loss check, size based on future price, etc.).
 4. **PROPOSE A FIX** — rewrite the Python code so the flagged misalignments
-   are resolved. Preserve the overall contract (`run_strategy(data, config)`)
-   and continue to use only allowed imports (pandas, numpy, math, datetime,
-   `indicators` module).
+   are resolved. Preserve the contract: exactly one subclass of
+   `contract.Strategy` with the `on_bar(self, ctx, bar)` method driving
+   order submission through `ctx.submit_order(...)`. Use only allowed
+   imports: `contract`, `indicators`, `math`, `datetime`, `collections`,
+   `itertools`, `functools`, `typing`, `dataclasses`, `enum`, `abc`, `re`,
+   `copy`, `statistics`, `operator`. Do NOT import pandas, numpy, or any
+   filesystem / network module — the event-driven contract delivers bars
+   one at a time and has no use for a DataFrame.
 5. **PREDICT** — decide whether your fixed code will, when re-executed,
    produce trades that meet every spec rule. Only set
    `predicted_aligned_after_fix` to `true` when you are highly confident.
@@ -86,4 +93,4 @@ Return ONLY a JSON object with no markdown:
 - When `aligned` is `true`, `proposed_code` MUST be null and `changes_made`
   MUST be empty.
 - When `aligned` is `false`, `proposed_code` MUST be the complete Python
-  source for the revised `run_strategy` (not a diff).
+  source for the revised `Strategy` subclass module (not a diff).

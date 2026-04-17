@@ -19,6 +19,10 @@ CAPABILITIES = ProviderCapabilities(
     is_paid=True,
     historical_timeframes={"1s", "1m", "5m", "15m", "30m", "1h", "4h", "1d"},
     live_timeframes={"tick", "1s", "1m"},
+    # Pumps are stubbed — flipped to True in the follow-up commit that
+    # wires the Polygon REST + websocket clients. Until then the registry
+    # must not auto-select this adapter just because POLYGON_API_KEY is set.
+    implemented=False,
 )
 
 

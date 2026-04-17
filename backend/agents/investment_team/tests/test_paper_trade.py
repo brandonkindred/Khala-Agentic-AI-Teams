@@ -364,6 +364,61 @@ def test_min_fills_below_20_emits_warning() -> None:
     assert "min_fills_below_recommended" in result.warnings
 
 
+def test_stocks_asset_class_routes_to_equities_provider() -> None:
+    """Codex P1 on PR #188: Strategy-Lab specs use "stocks"; the registry
+    resolves on "equities". ``run_paper_trade`` must normalise before
+    asking the registry, and it must also pass the canonical label to
+    the adapter so ``smallest_available`` returns a real timeframe rather
+    than ``None`` (which would trip LiveStream into a ``no_live_feed``
+    error).
+    """
+    live = [
+        _native_bar("2024-05-01T12:01:00Z", 100.0, symbol="AAPL"),
+        _native_bar("2024-05-01T12:02:00Z", 101.0, symbol="AAPL"),
+    ]
+    provider = _StubProvider(
+        name="alpaca",
+        supports={"equities"},
+        historical_bars=[],
+        live_events=live,
+    )
+    reg = ProviderRegistry()
+    reg.register(
+        lambda p=provider: p,
+        provider.capabilities,
+        default_for=["equities"],
+    )
+
+    strategy = StrategySpec(
+        strategy_id="equities-strat",
+        authored_by="test",
+        asset_class="stocks",  # ← the key: legacy label, not "equities"
+        hypothesis="h",
+        signal_definition="s",
+        entry_rules=[],
+        exit_rules=[],
+        strategy_code=_ALTERNATING_STRATEGY,
+    )
+
+    result = run_paper_trade(
+        strategy=strategy,
+        backtest_config=_btc_config(),
+        paper_config=PaperTradeConfig(
+            symbols=["AAPL"],
+            asset_class="stocks",  # legacy label flows through paper_config too
+            strategy_timeframe="1m",
+            min_fills=1,
+            max_hours=1.0,
+            warmup_bars=0,
+        ),
+        registry=reg,
+    )
+    # Must NOT terminate with no_provider — that's the bug the fix prevents.
+    assert result.terminated_reason != "no_provider"
+    assert result.provider_id == "alpaca"
+    assert result.cutover_ts == "2024-05-01T12:01:00Z"
+
+
 def test_missing_strategy_code_raises() -> None:
     provider = _StubProvider()
     with pytest.raises(ValueError, match="strategy_code is required"):
