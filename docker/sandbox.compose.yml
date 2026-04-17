@@ -28,7 +28,7 @@ x-sandbox-env-base: &sandbox-env-base
   POSTGRES_HOST: sandbox-postgres
   POSTGRES_PORT: "5432"
   POSTGRES_USER: ${POSTGRES_USER:-postgres}
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env before starting sandboxes}
   AGENT_CACHE: /data/agents
   AGENT_CONSOLE_MODE: sandbox
 
@@ -43,7 +43,7 @@ services:
     container_name: khala-sandbox-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env before starting sandboxes}
       POSTGRES_DB: postgres
     ports:
       - "5433:5432"

@@ -13,7 +13,6 @@ import { PlanningV3PageComponent } from './components/planning-v3-page/planning-
 import { CodingTeamPageComponent } from './components/coding-team-page/coding-team-page.component';
 import { PersonalAssistantDashboardComponent } from './components/personal-assistant-dashboard/personal-assistant-dashboard.component';
 import { AccessibilityDashboardComponent } from './components/accessibility-dashboard/accessibility-dashboard.component';
-import { AgentProvisioningDashboardComponent } from './components/agent-provisioning-dashboard/agent-provisioning-dashboard.component';
 import { AgentConsoleComponent } from './components/agent-console/agent-console.component';
 import { AISystemsDashboardComponent } from './components/ai-systems-dashboard/ai-systems-dashboard.component';
 import { InvestmentDashboardComponent } from './components/investment-dashboard/investment-dashboard.component';
