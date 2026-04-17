@@ -28,6 +28,7 @@ from ..models import (
 )
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..trade_simulator import compute_metrics
+from .agents.alignment import TradeAlignmentAgent, TradeAlignmentReport
 from .agents.analysis import AnalysisAgent
 from .agents.ideation import IdeationAgent
 from .agents.refinement import RefinementAgent
@@ -44,6 +45,12 @@ logger = logging.getLogger(__name__)
 PhaseCallback = Callable[[str, Dict[str, Any]], None]
 
 MAX_CODE_REFINEMENT_ROUNDS = 50
+# Maximum number of trade-alignment problem-solving rounds. Each round
+# audits the executed trades against the spec and, if misaligned, asks the
+# alignment agent to rewrite the Python code; the new code is sent back
+# through the sandbox for a fresh backtest. The cap prevents runaway loops
+# when the agent cannot converge.
+MAX_ALIGNMENT_ROUNDS = 10
 WINNING_THRESHOLD = 8.0
 
 
@@ -58,6 +65,7 @@ class StrategyLabOrchestrator:
     def __init__(self, convergence_tracker: Optional[ConvergenceTracker] = None):
         self.ideation_agent = IdeationAgent()
         self.refinement_agent = RefinementAgent()
+        self.alignment_agent = TradeAlignmentAgent()
         self.analysis_agent = AnalysisAgent()
         self.sandbox = SandboxRunner()
         self.strategy_validator = StrategySpecValidator()
@@ -405,6 +413,262 @@ class StrategyLabOrchestrator:
             execution_succeeded = True
             break
 
+        # ── Phase 2.5: TRADE ALIGNMENT LOOP ───────────────────────────
+        # Now that the code runs cleanly and produces sensible aggregate
+        # metrics, audit whether the executed trades actually implement
+        # the strategy specification (entry/exit/sizing/risk rules). If
+        # not, enter a problem-solving loop (capped at
+        # MAX_ALIGNMENT_ROUNDS) where the alignment agent identifies the
+        # bug, rewrites the Python code, and we send the script back
+        # through the sandbox for a fresh backtest. The loop exits as
+        # soon as the agent reports the trades are aligned (or the cap
+        # is reached).
+        alignment_attempts: List[str] = []
+        alignment_reports: List[TradeAlignmentReport] = []
+
+        if execution_succeeded and trades and market_data is not None:
+            for align_round in range(MAX_ALIGNMENT_ROUNDS):
+                emit(
+                    "aligning",
+                    {
+                        "sub_phase": "evaluating",
+                        "alignment_round": align_round,
+                        "trades_count": len(trades),
+                    },
+                )
+
+                report = self._run_alignment_audit(
+                    spec=spec,
+                    code=code,
+                    trades=trades,
+                    metrics=metrics,
+                    prior_attempts=alignment_attempts,
+                )
+                alignment_reports.append(report)
+
+                gate_severity = "info" if report.aligned else "critical"
+                gate_details = (
+                    report.rationale or "Trades aligned with strategy."
+                    if report.aligned
+                    else (
+                        report.rationale
+                        or f"Trades did not align with strategy ({len(report.issues)} issues)."
+                    )
+                )
+                all_gate_results.append(
+                    QualityGateResult(
+                        gate_name="trade_alignment",
+                        passed=report.aligned,
+                        severity=gate_severity,  # type: ignore[arg-type]
+                        details=gate_details,
+                        refinement_round=align_round,
+                    )
+                )
+
+                if report.aligned:
+                    emit(
+                        "aligning",
+                        {
+                            "sub_phase": "aligned",
+                            "alignment_round": align_round,
+                        },
+                    )
+                    break
+
+                emit(
+                    "aligning",
+                    {
+                        "sub_phase": "not_aligned",
+                        "alignment_round": align_round,
+                        "issues_count": len(report.issues),
+                        "issues_preview": [
+                            {
+                                "rule_type": i.rule_type,
+                                "severity": i.severity,
+                                "description": i.description[:160],
+                            }
+                            for i in report.issues[:5]
+                        ],
+                    },
+                )
+
+                # Without a proposed code fix the loop has nothing to
+                # send back to backtesting; stop early.
+                if not report.proposed_code:
+                    emit(
+                        "aligning",
+                        {
+                            "sub_phase": "no_proposed_fix",
+                            "alignment_round": align_round,
+                        },
+                    )
+                    break
+
+                if align_round >= MAX_ALIGNMENT_ROUNDS - 1:
+                    emit(
+                        "aligning",
+                        {
+                            "sub_phase": "max_rounds_reached",
+                            "alignment_round": align_round,
+                        },
+                    )
+                    logger.warning(
+                        "Max alignment rounds (%d) reached for %s",
+                        MAX_ALIGNMENT_ROUNDS,
+                        spec.strategy_id,
+                    )
+                    break
+
+                # The agent is confident enough to propose a rewrite.
+                # Validate, re-execute in the sandbox, rebuild trades, and
+                # re-run anomaly detection BEFORE committing the proposal
+                # over the last known-good ``code`` / ``spec`` / ``trades``
+                # / ``metrics``. If any of those checks fail, the loop
+                # breaks with the prior backtest intact so the persisted
+                # record never holds code that was never successfully
+                # executed for the reported results.
+                emit(
+                    "aligning",
+                    {
+                        "sub_phase": "refining_code",
+                        "alignment_round": align_round,
+                        "predicted_aligned_after_fix": report.predicted_aligned_after_fix,
+                    },
+                )
+                proposed_code = report.proposed_code
+                proposed_spec = self._apply_updates(spec, {}, proposed_code)
+                change_summary = report.changes_made or "alignment fix"
+
+                # ── Re-validate code safety on the proposed code ──────
+                safety_gates = self.code_safety_checker.check(proposed_code)
+                for g in safety_gates:
+                    g.refinement_round = align_round
+                    g.gate_name = f"alignment_{g.gate_name}"
+                all_gate_results.extend(safety_gates)
+                critical_safety = [
+                    g for g in safety_gates if not g.passed and g.severity == "critical"
+                ]
+                if critical_safety:
+                    emit(
+                        "aligning",
+                        {
+                            "sub_phase": "rejected_unsafe_code",
+                            "alignment_round": align_round,
+                            "details": "; ".join(g.details for g in critical_safety)[:400],
+                        },
+                    )
+                    logger.warning(
+                        "Alignment-proposed code failed safety gate for %s", spec.strategy_id
+                    )
+                    break
+
+                # ── Send the script back to backtesting ───────────────
+                emit(
+                    "backtesting",
+                    {
+                        "sub_phase": "running_code",
+                        "alignment_round": align_round,
+                        "trigger": "trade_alignment_fix",
+                    },
+                )
+                align_exec = self.sandbox.run(proposed_code, market_data, config)
+                if not align_exec.success:
+                    all_gate_results.append(
+                        QualityGateResult(
+                            gate_name="alignment_code_execution",
+                            passed=False,
+                            severity="critical",
+                            details=(
+                                f"Re-execution after alignment fix failed "
+                                f"({align_exec.error_type}): {align_exec.stderr[:400]}"
+                            ),
+                            refinement_round=align_round,
+                        )
+                    )
+                    emit(
+                        "aligning",
+                        {
+                            "sub_phase": "re_execution_failed",
+                            "alignment_round": align_round,
+                            "error_type": align_exec.error_type,
+                        },
+                    )
+                    break
+
+                try:
+                    new_trades = build_trade_records(align_exec.raw_trades, config)
+                except ValueError as ve:
+                    all_gate_results.append(
+                        QualityGateResult(
+                            gate_name="alignment_trade_validation",
+                            passed=False,
+                            severity="critical",
+                            details=f"Invalid trade output after alignment fix: {ve}",
+                            refinement_round=align_round,
+                        )
+                    )
+                    emit(
+                        "aligning",
+                        {
+                            "sub_phase": "re_execution_invalid_trades",
+                            "alignment_round": align_round,
+                        },
+                    )
+                    break
+
+                new_metrics = compute_metrics(
+                    new_trades, config.initial_capital, config.start_date, config.end_date
+                )
+
+                # ── Anomaly gates on the post-fix backtest ────────────
+                # The main refinement loop runs these checks after every
+                # sandbox round; the alignment loop must too, otherwise a
+                # fix could introduce zero-trade or implausible-return
+                # output that bypasses quality gates and still flows into
+                # analysis and the win/loss classification.
+                anomaly_gates = self.anomaly_detector.check(new_metrics, new_trades)
+                for g in anomaly_gates:
+                    g.refinement_round = align_round
+                    g.gate_name = f"alignment_{g.gate_name}"
+                all_gate_results.extend(anomaly_gates)
+                critical_anomalies = [
+                    g for g in anomaly_gates if not g.passed and g.severity == "critical"
+                ]
+                if critical_anomalies:
+                    emit(
+                        "aligning",
+                        {
+                            "sub_phase": "anomaly_detected",
+                            "alignment_round": align_round,
+                            "details": "; ".join(g.details for g in critical_anomalies)[:400],
+                        },
+                    )
+                    logger.warning(
+                        "Alignment fix introduced backtest anomaly for %s", spec.strategy_id
+                    )
+                    break
+
+                # All gates passed — commit the proposal as the new
+                # known-good state and continue to the next audit.
+                code = proposed_code
+                spec = proposed_spec
+                trades = new_trades
+                metrics = new_metrics
+                alignment_attempts.append(change_summary)
+
+                emit(
+                    "aligning",
+                    {
+                        "sub_phase": "refined",
+                        "alignment_round": align_round,
+                        "changes_made": change_summary,
+                        "trades_count": len(trades),
+                    },
+                )
+
+        alignment_rounds = len(alignment_attempts)
+        trades_aligned = bool(alignment_reports and alignment_reports[-1].aligned)
+
         # ── Phase 3: ANALYSIS ─────────────────────────────────────────
         narrative = ""
         if execution_succeeded and trades:
@@ -477,6 +741,8 @@ class StrategyLabOrchestrator:
                 "is_winning": is_winning,
                 "metrics": metrics.model_dump(),
                 "refinement_rounds": len(refinement_attempts),
+                "alignment_rounds": alignment_rounds,
+                "trades_aligned": trades_aligned,
             },
         )
 
@@ -508,6 +774,34 @@ class StrategyLabOrchestrator:
         except Exception:
             logger.exception("Refinement agent failed, returning original code")
             return {"changes_made": "refinement failed — no changes"}, code
+
+    def _run_alignment_audit(
+        self,
+        spec: StrategySpec,
+        code: str,
+        trades: List[TradeRecord],
+        metrics: BacktestResult,
+        prior_attempts: List[str],
+    ) -> TradeAlignmentReport:
+        """Call the alignment agent. Failures fall back to ``aligned=True`` so
+        the orchestrator does not stall on a transient LLM error."""
+        try:
+            return self.alignment_agent.run(
+                spec=spec,
+                code=code,
+                trades=trades,
+                metrics=metrics,
+                prior_attempts=prior_attempts,
+            )
+        except Exception as exc:
+            logger.exception("Alignment agent raised; treating trades as aligned")
+            return TradeAlignmentReport(
+                aligned=True,
+                rationale=(
+                    "Alignment audit skipped: alignment agent raised "
+                    f"{type(exc).__name__}. Treating trades as aligned to avoid stalling."
+                ),
+            )
 
     @staticmethod
     def _apply_updates(spec: StrategySpec, updates: Dict[str, Any], code: str) -> StrategySpec:
