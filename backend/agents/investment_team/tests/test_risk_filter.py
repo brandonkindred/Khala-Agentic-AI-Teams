@@ -160,3 +160,48 @@ def test_engine_passes_risk_limits_through():
     )
     result = engine.run(build_fixture_universe(), sma_crossover())
     assert len(result.trades) > 0
+
+
+def test_drawdown_uses_mtm_not_frozen_position_value():
+    """The circuit-breaker must mark open positions to market.
+
+    We use a strategy that enters and never exits (``always_long``). With a
+    tight DD limit the breaker should fire from the unrealized loss on the
+    open position — not wait for an exit trade to realize the loss.
+    """
+    from investment_team.market_data_service import OHLCVBar
+
+    # Stable price for 5 bars (satisfies min_history_bars), then a 20% gap down.
+    bars = [
+        OHLCVBar(date="2023-01-02", open=100, high=101, low=99, close=100, volume=1e6),
+        OHLCVBar(date="2023-01-03", open=100, high=101, low=99, close=100, volume=1e6),
+        OHLCVBar(date="2023-01-04", open=100, high=101, low=99, close=100, volume=1e6),
+        OHLCVBar(date="2023-01-05", open=100, high=101, low=99, close=100, volume=1e6),
+        OHLCVBar(date="2023-01-06", open=100, high=101, low=99, close=100, volume=1e6),
+        # Entry decision made on bar 5 → fills on bar 6's open (100)
+        OHLCVBar(date="2023-01-09", open=100, high=100, low=99, close=100, volume=1e6),
+        # Gap down: close drops to 80 → 20% unrealized loss on long
+        OHLCVBar(date="2023-01-10", open=80, high=82, low=78, close=80, volume=1e6),
+        OHLCVBar(date="2023-01-11", open=78, high=80, low=75, close=75, volume=1e6),
+    ]
+    market_data = {"GAP": bars}
+
+    def always_long(symbol, bar, recent, position, capital):
+        if position is None:
+            return {"action": "enter_long", "confidence": 1.0, "shares": 0, "reasoning": ""}
+        return {"action": "hold", "confidence": 0.0, "shares": 0, "reasoning": ""}
+
+    engine = TradeSimulationEngine(
+        initial_capital=100_000.0,
+        pre_filter_pct=0.0,
+        max_evaluations=100_000,
+        lookahead_safe=True,
+        risk_limits={
+            "max_drawdown_pct": 5.0,
+            "max_position_pct": 50.0,
+            "max_symbol_concentration_pct": 100.0,
+        },
+    )
+    result = engine.run(market_data, always_long)
+    assert result.terminated_reason is not None
+    assert "max_drawdown" in result.terminated_reason
