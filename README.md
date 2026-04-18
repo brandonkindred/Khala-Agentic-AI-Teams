@@ -6,12 +6,12 @@
 
 <p align="center">
   <em>Many minds. One objective… yours.</em><br/>
-  <sub>A growing collective of specialist AI agent teams. One gateway. Your mission.</sub>
+  <sub>A system for building and running agentic teams that act as one mind — with you, not for you.</sub>
 </p>
 
 <p align="center">
-  <strong>An open-source platform that runs 20 specialist AI agent teams behind a single API</strong><br/>
-  <sub>Ship software, content, business ops, and personal workflows from one durable, pluggable stack.</sub>
+  <strong>An open-source system for creating, managing, and working alongside agentic teams</strong><br/>
+  <sub>Today: a roster of 20 specialist teams behind one gateway. Tomorrow: whatever teams you and it design together.</sub>
 </p>
 
 <p align="center">
@@ -28,18 +28,20 @@
 
 ## You don't need a team. You need a Khala.
 
-Khala is a collective of specialist AI agents that runs behind a single FastAPI gateway. Each team is a role-separated orchestration: a team-lead agent coordinates specialists via Pydantic contracts, with HTTP mounts under `/api/<team>` so the whole roster is addressable from one host.
+**You don't *point* Khala at a problem. You work with it.**
 
-- **Point it at a spec** → the Software Engineering team runs a 4-phase pipeline (Discovery → Design → Execution → Integration) that plans, generates code + tests + docs in parallel backend/frontend queues, and merges to a `development` branch on success.
-- **Point it at a market** → Market Research agents structure user discovery and concept-viability work; Planning V3 turns the output into a PRD for downstream teams.
-- **Point it at a launch** → the Blogging pipeline (research → planning → draft → copy-edit → gates) produces publish-ready posts; Social Media Marketing builds per-platform campaigns; the Sales team runs B2B prospecting, qualification, and close workflows.
-- **Point it at a compliance deadline** → SOC2 Compliance drives an audit workflow; Accessibility Audit reports WCAG 2.2 / Section 508 findings for web and mobile.
-- **Point it at a portfolio** → the Investment team exposes a Financial Advisor (IPS, proposals, memos) and a Strategy Lab (ideation, backtests) under one API prefix.
-- **Point it at an ambiguous problem** → **Deepthought** recursively spawns specialist sub-agents to decompose and answer complex questions.
+Under the hood, Khala is a FastAPI gateway that mounts role-separated specialist teams under `/api/<team>` — each one a team-lead agent coordinating specialists over Pydantic contracts. But the point isn't the wiring. The point is that every team plugs into the same shared mind, so you can bring them in on whatever you're working on:
 
-The teams share infrastructure — a FastAPI gateway with an optional security pre-scan, a shared Postgres schema registry for migrated teams, a shared artifact cache, and a pluggable LLM client (Ollama Cloud, local Ollama, or Claude). Set `TEMPORAL_ADDRESS` and the teams that export Temporal workflows switch from in-process threads to durable executions that survive restarts; teams without workflows keep using threads.
+- **Work with Khala to turn a spec into shipped code** → the Software Engineering team runs Discovery → Design → Execution → Integration alongside you: planning, code + tests + docs in parallel backend/frontend queues, merging to a `development` branch when the quality gates pass.
+- **Work with it on a market** → Market Research pairs with you on user discovery and concept viability; Planning V3 turns the conversation into a PRD the dev teams can run with.
+- **Work with it on a launch** → Blogging (research → planning → draft → copy-edit → gates) writes with you; Social Marketing builds per-platform campaigns with you; the Sales team runs B2B prospecting, qualification, and close with you.
+- **Work with it on compliance** → SOC2 Compliance drives the audit workflow; Accessibility Audit reports WCAG 2.2 / Section 508 findings for web and mobile.
+- **Work with it on a portfolio** → the Investment team pairs a Financial Advisor (IPS, proposals, memos) with a Strategy Lab (ideation, backtests) behind one API prefix.
+- **Work with it on an ambiguous problem** → **Deepthought** recursively spawns the specialist sub-agents it needs to decompose and answer the question with you.
 
-The roster grows per release. You can describe a new team in plain English to the **Agentic Team Provisioning** team, or register one yourself in [`backend/unified_api/config.py`](backend/unified_api/config.py).
+The teams share infrastructure — the gateway with its optional security pre-scan, a shared Postgres schema registry for migrated teams, a shared artifact cache, and a pluggable LLM client (Ollama Cloud, local Ollama, or Claude). Set `TEMPORAL_ADDRESS` and the teams that export Temporal workflows switch from in-process threads to durable executions that survive restarts; teams without workflows keep using threads.
+
+**And Khala is built to grow its own roster.** The real project here isn't the current 20 teams — it's the system that *makes* agentic teams and lets them operate as one mind. Describe a new team in plain English to the **Agentic Team Provisioning** team and it will design the roster and the process with you (and hand off to Agent Provisioning for the sandbox), or register one yourself in [`backend/unified_api/config.py`](backend/unified_api/config.py). Every lesson learned building the current teams feeds back into how the next ones get built.
 
 > **Many minds. One objective. Yours.**
 
@@ -56,12 +58,12 @@ The roster grows per release. You can describe a new team in plain English to th
 
 ## Why Khala?
 
-- **🌩️ One gateway, a whole roster** — every team mounts under `/api/<team-slug>` behind a single FastAPI server, with an optional security pre-scan gateway (`SECURITY_GATEWAY_ENABLED`, on by default).
+- **🌩️ One gateway, one mind** — every team mounts under `/api/<team-slug>` behind a single FastAPI server (with an optional security pre-scan, `SECURITY_GATEWAY_ENABLED`, on by default), so the whole roster is addressable — and collaborates — as one.
 - **⚡ Opt-in durability** — set `TEMPORAL_ADDRESS` and teams that ship Temporal workflows switch from in-process threads to durable executions that survive server restarts (Temporal 1.24.2). Other teams keep running as background threads.
 - **🧠 Bring your own LLM** — unified client for Ollama Cloud, local Ollama, or Claude via `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL`. A few teams expose per-role overrides (e.g. `ARCHITECT_MODEL_SPECIALIST`, `BLOG_PLANNING_MODEL`).
 - **🏗️ Real engineering inside the SE team** — 4-phase pipeline (Discovery → Design → Execution → Integration), parallel backend/frontend worker queues, a planning cache that short-circuits re-plans when spec/architecture/overview are unchanged, per-task quality gates (lint, build, code review, acceptance verifier, security, QA, DbC, tech-lead review — plus an accessibility gate on frontend tasks), and a Repair Agent for crash recovery.
 - **📊 Observability built in** — every FastAPI service in the Docker stack is auto-instrumented by `prometheus-fastapi-instrumentator`; Prometheus + a provisioned Grafana dashboard ship in `docker-compose.yml`.
-- **🧬 Built to expand** — register a team in `TEAM_CONFIGS` and it mounts at `/api/<slug>` on restart. Agentic Team Provisioning can design the roster conversationally.
+- **🧬 Built to grow its own roster** — new teams aren't a plugin afterthought; they're the product. Design one by conversation with Agentic Team Provisioning, or register it yourself in `TEAM_CONFIGS` and it mounts at `/api/<slug>` on restart.
 - **🚀 One command to launch the stack** — `docker compose up --build` brings up Postgres, Temporal, every team microservice, the Unified API proxy, the Angular UI, Prometheus, and Grafana. (Healthchecks and first-run image builds mean it's minutes, not seconds.)
 
 ---
@@ -73,7 +75,7 @@ The roster grows per release. You can describe a new team in plain English to th
 
 ## Meet the current roster
 
-Khala groups its teams into four *cells* — failure-isolated neighborhoods that share infrastructure and deploy together. This list grows every release; the authoritative source is always [`backend/unified_api/config.py`](backend/unified_api/config.py).
+Today Khala ships with 20 teams, grouped into four *cells* — failure-isolated neighborhoods that share infrastructure and deploy together. This is the current roster, not the ceiling: Khala is a system for making and running agentic teams, and the list grows every release. The authoritative source is always [`backend/unified_api/config.py`](backend/unified_api/config.py).
 
 ### 🛠️ Core Dev — build, plan, and evolve software
 
@@ -191,9 +193,9 @@ The full system — SDLC phases, task graphs, planning loop, quality gates, the 
 
 ## Add your own team
 
-Khala is built to grow. You have two ways to add a new team:
+Growing the collective is a first-class feature, not an afterthought — it's the system's actual job. You have two ways to add a new team:
 
-1. **Talk to the Agentic Team Provisioning team.** Describe the roster you want in plain English; it validates the design and (optionally) bridges to Agent Provisioning to stand up the environment. See [`backend/agents/agentic_team_provisioning/`](backend/agents/agentic_team_provisioning/).
+1. **Design it conversationally with Agentic Team Provisioning.** Describe the roster you want in plain English; it drafts the agents, roles, and process, validates staffing, and (optionally) bridges to Agent Provisioning to stand up the environment. See [`backend/agents/agentic_team_provisioning/`](backend/agents/agentic_team_provisioning/).
 2. **Write it yourself.** Follow the agent structure in [`AGENT_ANATOMY.md`](backend/agents/agent_provisioning_team/AGENT_ANATOMY.md) (I/O, tools, memory, prompts, guardrails, sub-agents), register the team in [`backend/unified_api/config.py`](backend/unified_api/config.py) (`TEAM_CONFIGS`), and it mounts at `/api/<your-slug>` on next restart.
 
 ---
