@@ -1,0 +1,109 @@
+# Density + per-count mass table keyed by canonical_id.
+#
+# volume_to_mass: grams per one ml (for volume-purchase items).
+# count_to_mass: grams per one count unit (for items sold by number).
+# default_qty_grams: "no quantity specified" fallback ("a handful of
+#   cashews" → 30 g); only set for ingredients whose typical amount
+#   is meaningful.
+#
+# SPEC-005 §4.8. Every value has a citation in a trailing comment or
+# is measured via USDA FDC reference weights. Changing a value is a
+# minor KB_VERSION bump.
+
+# --- Oils + fats (volume purchase) ---------------------------------
+olive_oil:        { volume_to_mass: 0.913 }   # USDA FDC 171413
+butter:           { count_to_mass: 113.0, default_qty_grams: null } # 1 stick
+ghee:             { volume_to_mass: 0.911 }
+sesame_oil:       { volume_to_mass: 0.921 }
+
+# --- Dairy + eggs ---------------------------------------------------
+milk_whole:       { volume_to_mass: 1.03 }
+milk_skim:        { volume_to_mass: 1.035 }
+greek_yogurt:     { volume_to_mass: 1.04 }
+sour_cream:       { volume_to_mass: 0.98 }
+heavy_cream:      { volume_to_mass: 1.01 }
+egg_large:        { count_to_mass: 50.0 }     # USDA avg large egg
+
+# --- Grains + pasta -------------------------------------------------
+rice_white_raw:   { volume_to_mass: 0.78 }    # 1 cup ≈ 185 g
+rice_brown_raw:   { volume_to_mass: 0.81 }
+pasta_dry:        { volume_to_mass: 0.41 }    # varies by shape; conservative avg
+quinoa_raw:       { volume_to_mass: 0.72 }
+oats_rolled:      { volume_to_mass: 0.38 }    # 1 cup ≈ 90 g
+flour_all_purpose: { volume_to_mass: 0.53 }   # 1 cup ≈ 125 g
+almond_flour:     { volume_to_mass: 0.40 }
+
+# --- Canned / pantry ------------------------------------------------
+tomato_canned:    { volume_to_mass: 1.05 }
+chickpeas_cooked: { volume_to_mass: 0.7 }
+black_beans_cooked: { volume_to_mass: 0.72 }
+
+# --- Vegetables (by count) ------------------------------------------
+onion_medium:     { count_to_mass: 170.0 }
+onion_large:      { count_to_mass: 260.0 }
+garlic_clove:     { count_to_mass: 5.0 }
+bell_pepper_medium: { count_to_mass: 120.0 }
+tomato_medium:    { count_to_mass: 150.0 }
+carrot_medium:    { count_to_mass: 60.0 }
+lemon:            { count_to_mass: 58.0 }     # also: juice of 1 lemon ≈ 48 ml
+lime:             { count_to_mass: 44.0 }
+avocado:          { count_to_mass: 150.0 }
+
+# --- Leafy greens + herbs (by volume; loose pack) -------------------
+spinach_raw:      { volume_to_mass: 0.13 }    # 1 cup raw ≈ 30 g
+kale_raw:         { volume_to_mass: 0.09 }    # 1 cup raw ≈ 21 g
+cilantro:         { volume_to_mass: 0.07 }    # 1 cup chopped ≈ 16 g
+parsley:          { volume_to_mass: 0.08 }
+basil:            { volume_to_mass: 0.10 }
+
+# --- Salt + spices (very small defaults) ----------------------------
+salt:             { volume_to_mass: 1.2, default_qty_grams: 1.0 }   # pinch
+black_pepper:     { volume_to_mass: 0.45, default_qty_grams: 0.3 }
+cumin:            { volume_to_mass: 0.46, default_qty_grams: 2.0 }
+paprika:          { volume_to_mass: 0.46, default_qty_grams: 2.0 }
+cinnamon:         { volume_to_mass: 0.52, default_qty_grams: 2.0 }
+
+# --- Nuts (by volume) -----------------------------------------------
+cashew:           { volume_to_mass: 0.55, default_qty_grams: 30.0 } # handful
+almond:           { volume_to_mass: 0.60, default_qty_grams: 30.0 }
+walnut:           { volume_to_mass: 0.42, default_qty_grams: 30.0 }
+peanut:           { volume_to_mass: 0.60, default_qty_grams: 30.0 }
+
+# --- Proteins (assume purchased by weight) --------------------------
+chicken_breast_raw: {}
+chicken_thigh_raw: {}
+beef_ground_raw:   {}
+pork_ground_raw:   {}
+salmon_raw:        {}
+tuna_canned:       { volume_to_mass: 1.0 }
+shrimp_raw:        {}
+tofu_firm:         { volume_to_mass: 1.05 }
+tofu_silken:       { volume_to_mass: 1.02 }
+tempeh:            {}
+
+# --- Condiments / flavor makers ------------------------------------
+soy_sauce:        { volume_to_mass: 1.20 }
+tamari:           { volume_to_mass: 1.20 }
+fish_sauce:       { volume_to_mass: 1.22 }
+worcestershire:   { volume_to_mass: 1.10 }
+vinegar_apple_cider: { volume_to_mass: 1.01 }
+honey:            { volume_to_mass: 1.42 }
+maple_syrup:      { volume_to_mass: 1.32 }
+tahini:           { volume_to_mass: 1.07 }
+peanut_butter:    { volume_to_mass: 1.08 }
+
+# --- Cheeses --------------------------------------------------------
+parmesan:         {}
+mozzarella:       {}
+feta:             {}
+cheddar:          {}
+
+# --- Baking / misc --------------------------------------------------
+sugar_granulated: { volume_to_mass: 0.85 }
+baking_soda:      { volume_to_mass: 0.92, default_qty_grams: 5.0 }
+vanilla_extract:  { volume_to_mass: 0.88, default_qty_grams: 5.0 }
+chocolate_dark:   {}
+
+# --- Bread / baked --------------------------------------------------
+bread_sourdough:  {}
+gnocchi:          {}
