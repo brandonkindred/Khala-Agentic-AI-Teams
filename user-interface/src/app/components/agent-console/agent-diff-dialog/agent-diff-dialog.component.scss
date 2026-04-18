@@ -1,0 +1,110 @@
+.diff-dialog {
+  &__content {
+    min-width: min(720px, 90vw);
+    max-width: 900px;
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  &__picker {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 12px;
+    align-items: center;
+  }
+
+  &__left-summary {
+    grid-column: 1 / -1;
+    margin: 0 0 4px;
+    color: var(--mat-sys-on-surface-variant, #555);
+  }
+
+  &__side-toggle {
+    min-width: 120px;
+  }
+
+  &__loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--mat-sys-on-surface-variant, #555);
+  }
+
+  &__error {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--mat-sys-error, #b00020);
+    margin: 0;
+
+    mat-icon {
+      font-size: 18px;
+      height: 18px;
+      width: 18px;
+    }
+  }
+
+  &__identical {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #0f5c1c;
+
+    mat-icon {
+      color: #0f5c1c;
+    }
+  }
+
+  &__result-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.85rem;
+    color: var(--mat-sys-on-surface-variant, #666);
+  }
+
+  &__label {
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  }
+
+  &__diff {
+    margin: 0;
+    padding: 12px;
+    border-radius: 8px;
+    background: var(--mat-sys-surface-container, #f5f5f5);
+    font-size: 0.78rem;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+    max-height: 40vh;
+    overflow: auto;
+    white-space: pre;
+
+    .diff-add {
+      display: block;
+      background: rgba(34, 139, 34, 0.12);
+      color: #0f5c1c;
+    }
+
+    .diff-del {
+      display: block;
+      background: rgba(178, 34, 34, 0.1);
+      color: #7f0000;
+    }
+
+    .diff-hunk {
+      display: block;
+      font-weight: 700;
+      color: var(--mat-sys-primary, #1f41bb);
+    }
+
+    .diff-header {
+      display: block;
+      color: var(--mat-sys-on-surface-variant, #555);
+    }
+
+    .diff-ctx {
+      display: block;
+    }
+  }
+}

@@ -1,0 +1,86 @@
+.schema-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  &__empty,
+  &__fallback {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    color: var(--mat-sys-on-surface-variant, #555);
+    font-size: 0.9rem;
+  }
+
+  &__object {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  &__field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  &__label {
+    font-size: 0.8rem;
+    color: var(--mat-sys-on-surface-variant, #555);
+  }
+
+  &__hint {
+    margin: 0;
+    font-size: 0.75rem;
+    color: var(--mat-sys-on-surface-variant, #666);
+  }
+
+  &__badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    align-self: flex-start;
+    padding: 2px 8px;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-radius: 999px;
+    background: var(--mat-sys-surface-container, #eee);
+    color: var(--mat-sys-on-surface-variant, #555);
+
+    mat-icon {
+      font-size: 14px;
+      height: 14px;
+      width: 14px;
+    }
+  }
+
+  &__json-fallback {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+
+    textarea {
+      font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+      font-size: 0.8rem;
+    }
+  }
+
+  &__nested {
+    border: 1px solid var(--mat-sys-outline-variant, #ddd);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 0;
+  }
+
+  &__chips {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  &__chip-input {
+    width: 100%;
+  }
+}

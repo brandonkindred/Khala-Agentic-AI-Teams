@@ -225,6 +225,14 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("team_assistant postgres schema registration failed")
 
+    try:
+        from agent_console.postgres import SCHEMA as AGENT_CONSOLE_SCHEMA
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(AGENT_CONSOLE_SCHEMA)
+    except Exception:
+        logger.exception("agent_console postgres schema registration failed")
+
     # 1. Mount team assistant conversational sub-apps (before proxy routes).
     try:
         from team_assistant.api import create_assistant_app
@@ -268,8 +276,20 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Agent Console sandbox reaper failed to start", exc_info=True)
 
+    # 5. Start the Agent Console run pruner (Phase 3).
+    run_pruner_task: asyncio.Task | None = None
+    try:
+        from agent_console.prune import run_pruner
+
+        run_pruner_task = asyncio.create_task(run_pruner())
+        logger.info("Started Agent Console run pruner")
+    except Exception:
+        logger.warning("Agent Console run pruner failed to start", exc_info=True)
+
     yield
 
+    if run_pruner_task is not None:
+        run_pruner_task.cancel()
     if sandbox_reaper_task is not None:
         sandbox_reaper_task.cancel()
     health_task.cancel()
@@ -338,6 +358,10 @@ except Exception:
     logger.warning("prometheus instrumentator unavailable", exc_info=True)
 
 # Integrations API (Slack config, etc.)
+from unified_api.routes.agent_console_diff import router as agent_console_diff_router
+from unified_api.routes.agent_console_saved_inputs import (
+    router as agent_console_saved_inputs_router,
+)
 from unified_api.routes.agents import router as agents_router
 from unified_api.routes.analytics import router as analytics_router
 from unified_api.routes.integrations import router as integrations_router
@@ -351,6 +375,8 @@ app.include_router(llm_usage_router)
 app.include_router(analytics_router)
 app.include_router(agents_router)
 app.include_router(sandboxes_router)
+app.include_router(agent_console_saved_inputs_router)
+app.include_router(agent_console_diff_router)
 
 
 # ---------------------------------------------------------------------------

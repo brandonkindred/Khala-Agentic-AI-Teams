@@ -79,34 +79,83 @@
         <header>
           <h3>Input</h3>
           <mat-form-field appearance="outline" class="agent-runner__sample-select">
-            <mat-label>Sample</mat-label>
+            <mat-label>Load from</mat-label>
             <mat-select
-              [value]="selectedSample()"
-              (valueChange)="applySample($event)"
-              [disabled]="samples().length === 0"
+              [value]="selectedPickerValue()"
+              (valueChange)="onPickerChange($event)"
             >
-              @for (s of samples(); track s) {
-                <mat-option [value]="s">{{ s }}</mat-option>
+              <mat-option [value]="null">— ad-hoc —</mat-option>
+              @if (goldenSamples().length > 0) {
+                <mat-optgroup label="Golden samples">
+                  @for (s of goldenSamples(); track s) {
+                    <mat-option [value]="'golden:' + s">{{ s }}</mat-option>
+                  }
+                </mat-optgroup>
+              }
+              @if (savedInputs().length > 0) {
+                <mat-optgroup label="Saved inputs">
+                  @for (s of savedInputs(); track s.id) {
+                    <mat-option [value]="'saved:' + s.id">
+                      {{ s.name }} · {{ s.author }}
+                    </mat-option>
+                  }
+                </mat-optgroup>
               }
             </mat-select>
           </mat-form-field>
+          <button
+            mat-stroked-button
+            (click)="openSaveInputDialog()"
+            matTooltip="Save this input for later"
+            [disabled]="!!inputError()"
+          >
+            <mat-icon>bookmark_add</mat-icon> Save
+          </button>
+          @if (selectedPickerValue()?.startsWith('saved:')) {
+            <button
+              mat-stroked-button
+              (click)="deleteSavedInput(selectedPickerValue()!.slice(6), $event)"
+              matTooltip="Delete the selected saved input"
+            >
+              <mat-icon>delete</mat-icon>
+            </button>
+          }
           <button mat-stroked-button (click)="resetInput()">
             <mat-icon>refresh</mat-icon> Reset
           </button>
         </header>
-        <mat-form-field appearance="outline" class="agent-runner__input-textarea">
-          <mat-label>Request body (JSON)</mat-label>
-          <textarea
-            matInput
-            rows="14"
-            spellcheck="false"
-            [ngModel]="inputText()"
-            (ngModelChange)="onInputTextChange($event)"
-          ></textarea>
-          @if (inputError()) {
-            <mat-error>{{ inputError() }}</mat-error>
-          }
-        </mat-form-field>
+
+        <mat-button-toggle-group
+          class="agent-runner__mode-toggle"
+          [value]="editorMode()"
+          (change)="editorMode.set($event.value)"
+          hideSingleSelectionIndicator
+        >
+          <mat-button-toggle value="form" [disabled]="!inputSchema()">Form</mat-button-toggle>
+          <mat-button-toggle value="json">JSON</mat-button-toggle>
+        </mat-button-toggle-group>
+
+        @if (editorMode() === 'form' && inputSchema()) {
+          <app-agent-schema-form
+            [schema]="$any(inputSchema())"
+            [value]="parsedInput()"
+            (valueChange)="onFormValueChange($event)"
+          ></app-agent-schema-form>
+        } @else {
+          <mat-form-field appearance="outline" class="agent-runner__input-textarea">
+            <mat-label>Request body (JSON)</mat-label>
+            <textarea
+              matInput
+              rows="14"
+              spellcheck="false"
+              [ngModel]="inputText()"
+              (ngModelChange)="onInputTextChange($event)"
+            ></textarea>
+            @if (inputError()) {
+              <mat-error>{{ inputError() }}</mat-error>
+            }
+          </mat-form-field>
+        }
       </section>
 
       @if (inputSchema()) {
@@ -142,6 +191,13 @@
           <span class="agent-runner__meta">
             {{ env.duration_ms }}ms · trace {{ env.trace_id.slice(0, 8) }}
           </span>
+          <button
+            mat-stroked-button
+            (click)="compareCurrentOutput()"
+            matTooltip="Diff this output against a past run or saved input"
+          >
+            <mat-icon>compare_arrows</mat-icon> Compare
+          </button>
         </header>
         @if (env.error) {
           <div class="agent-runner__error-banner" role="alert">
@@ -165,5 +221,12 @@
         <span>{{ lastError() }}</span>
       </div>
     }
+
+    <app-agent-run-history
+      [agentId]="selectedAgentId()"
+      [activeRunId]="activeRunId()"
+      (loadRun)="onHistoryLoadRun($event)"
+      (compareRun)="onHistoryCompare($event)"
+    ></app-agent-run-history>
   }
 </section>

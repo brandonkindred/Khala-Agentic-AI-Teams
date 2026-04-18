@@ -137,8 +137,13 @@
   }
 
   &__sample-select {
-    min-width: 180px;
+    min-width: 220px;
     margin: 0;
+  }
+
+  &__mode-toggle {
+    align-self: flex-start;
+    margin-bottom: 8px;
   }
 
   &__input-textarea {

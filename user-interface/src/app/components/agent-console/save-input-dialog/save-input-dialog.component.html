@@ -1,0 +1,46 @@
+<h2 mat-dialog-title>
+  {{ data.mode === 'rename' ? 'Rename saved input' : 'Save current input' }}
+</h2>
+
+<mat-dialog-content class="save-input-dialog__content">
+  <mat-form-field appearance="outline">
+    <mat-label>Name</mat-label>
+    <input
+      matInput
+      [ngModel]="name()"
+      (ngModelChange)="name.set($event)"
+      placeholder="e.g. empty-draft, long-brief"
+      cdkFocusInitial
+    />
+  </mat-form-field>
+
+  <mat-form-field appearance="outline">
+    <mat-label>Description (optional)</mat-label>
+    <textarea
+      matInput
+      rows="3"
+      [ngModel]="description()"
+      (ngModelChange)="description.set($event)"
+      placeholder="Why keep this one around? Shown in the picker."
+    ></textarea>
+  </mat-form-field>
+
+  @if (serverError()) {
+    <p class="save-input-dialog__error" role="alert">
+      <mat-icon>error</mat-icon>
+      {{ serverError() }}
+    </p>
+  }
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  <button mat-button (click)="cancel()" [disabled]="busy()">Cancel</button>
+  <button
+    mat-flat-button
+    color="primary"
+    (click)="submit()"
+    [disabled]="busy() || !name().trim()"
+  >
+    {{ data.mode === 'rename' ? 'Save changes' : 'Save' }}
+  </button>
+</mat-dialog-actions>

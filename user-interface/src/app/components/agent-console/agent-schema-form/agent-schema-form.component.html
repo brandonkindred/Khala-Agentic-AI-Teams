@@ -1,0 +1,124 @@
+<section class="schema-form" [attr.data-rendered]="rendered()">
+  @if (!schema) {
+    <p class="schema-form__empty">No schema available for this agent.</p>
+  } @else if (!rendered()) {
+    <p class="schema-form__fallback">
+      <mat-icon>code</mat-icon>
+      This agent's input schema is too dynamic to render as a form. Use the
+      JSON editor.
+    </p>
+  } @else {
+    <ng-container
+      *ngTemplateOutlet="objectTpl; context: { $implicit: schema, depth: 0, parentKey: '' }"
+    ></ng-container>
+  }
+</section>
+
+<ng-template #objectTpl let-node let-depth="depth" let-parentKey="parentKey">
+  <div class="schema-form__object" [attr.data-depth]="depth">
+    @for (entry of entries(node); track entry[0]) {
+      <ng-container
+        *ngTemplateOutlet="fieldTpl; context: { key: entry[0], node: entry[1], depth: depth }"
+      ></ng-container>
+    }
+  </div>
+</ng-template>
+
+<ng-template #fieldTpl let-key="key" let-node="node" let-depth="depth">
+  @let resolved = resolve(node);
+  @let kind = kindOf(resolved);
+  @let current = getField(key);
+
+  <div class="schema-form__field" [attr.data-kind]="kind">
+    <label class="schema-form__label" [for]="'f-' + key">{{ resolved?.title || key }}</label>
+
+    @if (needsJsonFallback(resolved, depth + 1)) {
+      <div class="schema-form__json-fallback">
+        <span class="schema-form__badge" matTooltip="This subtree can't be rendered as a form.">
+          <mat-icon>code</mat-icon> editing as JSON
+        </span>
+        <mat-form-field appearance="outline">
+          <mat-label>{{ key }} (JSON)</mat-label>
+          <textarea
+            matInput
+            rows="4"
+            [ngModel]="jsonFallbackOf(current)"
+            (ngModelChange)="onJsonFallbackChange(key, $event)"
+            spellcheck="false"
+          ></textarea>
+        </mat-form-field>
+      </div>
+    } @else if (kind === 'enum') {
+      <mat-form-field appearance="outline">
+        <mat-select
+          [id]="'f-' + key"
+          [value]="current"
+          (valueChange)="setField(key, $event)"
+        >
+          @for (opt of resolved?.enum; track opt) {
+            <mat-option [value]="opt">{{ opt }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    } @else if (kind === 'boolean') {
+      <mat-slide-toggle
+        [checked]="current === true"
+        (change)="setField(key, $event.checked)"
+      >
+        {{ resolved?.title || key }}
+      </mat-slide-toggle>
+    } @else if (kind === 'number') {
+      <mat-form-field appearance="outline">
+        <input
+          [id]="'f-' + key"
+          matInput
+          type="number"
+          [ngModel]="current"
+          (ngModelChange)="setField(key, $event)"
+        />
+      </mat-form-field>
+    } @else if (kind === 'text' || kind === 'email' || kind === 'url' || kind === 'date' || kind === 'datetime') {
+      <mat-form-field appearance="outline">
+        <input
+          [id]="'f-' + key"
+          matInput
+          [type]="kind === 'email' ? 'email' : kind === 'url' ? 'url' : kind === 'date' ? 'date' : kind === 'datetime' ? 'datetime-local' : 'text'"
+          [ngModel]="current"
+          (ngModelChange)="setField(key, $event)"
+        />
+      </mat-form-field>
+    } @else if (kind === 'chips') {
+      <div class="schema-form__chips">
+        <mat-chip-set>
+          @for (chip of asArray(current); track $index) {
+            <mat-chip (removed)="removeChip(key, $index)">
+              {{ chip }}
+              <button matChipRemove aria-label="Remove">
+                <mat-icon>cancel</mat-icon>
+              </button>
+            </mat-chip>
+          }
+        </mat-chip-set>
+        <mat-form-field appearance="outline" class="schema-form__chip-input">
+          <input
+            matInput
+            placeholder="Add value and press Enter"
+            (keyup.enter)="addChip(key, $any($event.target).value, $event)"
+          />
+        </mat-form-field>
+      </div>
+    } @else if (kind === 'object') {
+      <fieldset class="schema-form__nested">
+        <app-agent-schema-form
+          [schema]="resolved"
+          [value]="current ?? {}"
+          (valueChange)="onNestedChange(key, $event)"
+        ></app-agent-schema-form>
+      </fieldset>
+    }
+
+    @if (resolved?.description) {
+      <p class="schema-form__hint">{{ resolved?.description }}</p>
+    }
+  </div>
+</ng-template>

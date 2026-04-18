@@ -1,0 +1,113 @@
+<h2 mat-dialog-title>Compare</h2>
+
+<mat-dialog-content class="diff-dialog__content">
+  <section class="diff-dialog__picker">
+    <p class="diff-dialog__left-summary">
+      <strong>Left:</strong> {{ data.initialLeftLabel }}
+    </p>
+
+    @if (loadingCandidates()) {
+      <div class="diff-dialog__loading">
+        <mat-spinner diameter="24"></mat-spinner>
+        <span>Loading runs &amp; saved inputs…</span>
+      </div>
+    }
+
+    @if (candidateError()) {
+      <p class="diff-dialog__error" role="alert">
+        <mat-icon>error</mat-icon>
+        {{ candidateError() }}
+      </p>
+    }
+
+    @if (!loadingCandidates() && !candidateError()) {
+      <mat-form-field appearance="outline">
+        <mat-label>Right</mat-label>
+        <mat-select
+          [value]="rightSelection()"
+          (valueChange)="rightSelection.set($event)"
+        >
+          @if (runs().length > 0) {
+            <mat-optgroup label="Runs">
+              @for (r of runs(); track r.id) {
+                <mat-option [value]="'run:' + r.id">
+                  {{ r.created_at | date:'MMM d, HH:mm' }} · {{ r.status }} · {{ r.trace_id.slice(0, 8) }} · {{ r.author }}
+                </mat-option>
+              }
+            </mat-optgroup>
+          }
+          @if (savedInputs().length > 0) {
+            <mat-optgroup label="Saved inputs">
+              @for (s of savedInputs(); track s.id) {
+                <mat-option [value]="'saved:' + s.id">
+                  {{ s.name }} · {{ s.author }}
+                </mat-option>
+              }
+            </mat-optgroup>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      @if (rightSelection()?.startsWith('run:')) {
+        <mat-form-field appearance="outline" class="diff-dialog__side-toggle">
+          <mat-label>Run side</mat-label>
+          <mat-select
+            [value]="rightSideChoice()"
+            (valueChange)="rightSideChoice.set($event)"
+          >
+            <mat-option value="output">output</mat-option>
+            <mat-option value="input">input</mat-option>
+          </mat-select>
+        </mat-form-field>
+      }
+
+      <button
+        mat-flat-button
+        color="primary"
+        (click)="runDiff()"
+        [disabled]="!rightSelection() || diffing()"
+      >
+        <mat-icon>compare_arrows</mat-icon>
+        Compare
+      </button>
+    }
+  </section>
+
+  @if (diffError()) {
+    <p class="diff-dialog__error" role="alert">
+      <mat-icon>error</mat-icon>
+      {{ diffError() }}
+    </p>
+  }
+
+  @if (diffing()) {
+    <div class="diff-dialog__loading">
+      <mat-spinner diameter="24"></mat-spinner>
+      <span>Computing diff…</span>
+    </div>
+  }
+
+  @if (diffResult(); as result) {
+    @if (result.is_identical) {
+      <p class="diff-dialog__identical">
+        <mat-icon>check_circle</mat-icon>
+        The two payloads are identical (sorted, pretty-printed JSON).
+      </p>
+    } @else {
+      <header class="diff-dialog__result-header">
+        <span class="diff-dialog__label">{{ result.left_label }}</span>
+        <mat-icon>arrow_forward</mat-icon>
+        <span class="diff-dialog__label">{{ result.right_label }}</span>
+      </header>
+      <pre class="diff-dialog__diff" role="log">
+@for (line of result.unified_diff.split('\n'); track $index) {
+<span [class]="lineClass(line)">{{ line }}</span>
+}
+      </pre>
+    }
+  }
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  <button mat-button (click)="close()">Close</button>
+</mat-dialog-actions>

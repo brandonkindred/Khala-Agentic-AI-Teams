@@ -12,6 +12,7 @@ export * from './accessibility.model';
 export * from './agent-provisioning.model';
 export * from './agent-catalog.model';
 export * from './agent-runner.model';
+export * from './agent-history.model';
 export * from './ai-systems.model';
 export * from './investment.model';
 export * from './nutrition.model';

@@ -1,0 +1,95 @@
+<section class="run-history" aria-label="Run history">
+  <header class="run-history__header">
+    <h3>Run history</h3>
+    <button
+      mat-icon-button
+      (click)="refresh()"
+      [disabled]="loading() || !agentId"
+      aria-label="Refresh history"
+      matTooltip="Refresh"
+    >
+      <mat-icon>refresh</mat-icon>
+    </button>
+  </header>
+
+  @if (loading() && runs().length === 0) {
+    <div class="run-history__loading">
+      <mat-spinner diameter="24"></mat-spinner>
+      <span>Loading…</span>
+    </div>
+  }
+
+  @if (storageUnavailable()) {
+    <p class="run-history__empty">
+      Run history storage is not configured. Set
+      <code>POSTGRES_HOST</code> to persist runs.
+    </p>
+  }
+
+  @if (error()) {
+    <p class="run-history__error" role="alert">
+      <mat-icon>error</mat-icon>
+      {{ error() }}
+    </p>
+  }
+
+  @if (!loading() && !storageUnavailable() && !error() && runs().length === 0) {
+    <p class="run-history__empty">No runs yet. Hit <strong>Run</strong> to create one.</p>
+  }
+
+  @if (runs().length > 0) {
+    <ol class="run-history__list">
+      @for (run of runs(); track run.id) {
+        <li
+          class="run-history__row"
+          [class.is-active]="activeRunId === run.id"
+          tabindex="0"
+          role="button"
+          (click)="loadRun.emit(run.id)"
+          (keyup.enter)="loadRun.emit(run.id)"
+        >
+          <span class="run-history__status" [attr.data-status]="run.status">
+            @if (run.status === 'ok') { <mat-icon>check_circle</mat-icon> }
+            @if (run.status === 'error') { <mat-icon>error</mat-icon> }
+          </span>
+          <span class="run-history__when" [title]="run.created_at">{{ relativeTime(run.created_at) }}</span>
+          <span class="run-history__duration">{{ run.duration_ms }}ms</span>
+          <span class="run-history__author">{{ run.author }}</span>
+          @if (run.saved_input_id) {
+            <span class="run-history__source" matTooltip="Ran from saved input">
+              <mat-icon>bookmark</mat-icon>
+            </span>
+          }
+          <span class="run-history__trace">{{ run.trace_id.slice(0, 8) }}</span>
+          <button
+            mat-icon-button
+            [matMenuTriggerFor]="rowMenu"
+            (click)="$event.stopPropagation()"
+            aria-label="Run actions"
+          >
+            <mat-icon>more_vert</mat-icon>
+          </button>
+          <mat-menu #rowMenu="matMenu">
+            <button mat-menu-item (click)="emitCompare(run, $event)">
+              <mat-icon>compare_arrows</mat-icon>
+              Compare…
+            </button>
+            <button mat-menu-item (click)="deleteRun(run, $event)">
+              <mat-icon>delete</mat-icon>
+              Delete
+            </button>
+          </mat-menu>
+        </li>
+      }
+    </ol>
+
+    @if (hasMore()) {
+      <div class="run-history__load-more">
+        <button mat-stroked-button (click)="loadMore()" [disabled]="loading()">
+          @if (loading()) { <mat-spinner diameter="16"></mat-spinner> }
+          Load more
+        </button>
+      </div>
+    }
+  }
+</section>

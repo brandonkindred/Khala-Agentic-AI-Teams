@@ -1,17 +1,26 @@
 import { Injectable, inject } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import type {
   InvokeEnvelope,
   SandboxHandle,
 } from '../models/agent-runner.model';
+import type {
+  DiffRequest,
+  DiffResult,
+  RunRecord,
+  RunSummary,
+  SavedInput,
+  SavedInputCreate,
+  SavedInputUpdate,
+} from '../models/agent-history.model';
 
 /**
- * Phase 2 Agent Console Runner API.
+ * Agent Console Runner API (Phases 2 + 3).
  *
- * Handles both the sandbox lifecycle (`/api/agents/sandboxes/*`) and the
- * invoke endpoint (`POST /api/agents/{id}/invoke`).
+ * Phase 2: sandbox lifecycle + invoke + golden samples.
+ * Phase 3: saved inputs, run history, diff.
  */
 @Injectable({ providedIn: 'root' })
 export class AgentRunnerApiService {
@@ -45,11 +54,13 @@ export class AgentRunnerApiService {
   // Invoke + samples
   // ------------------------------------------------------------
 
-  invoke(agentId: string, body: unknown): Observable<InvokeEnvelope> {
+  invoke(agentId: string, body: unknown, savedInputId?: string | null): Observable<InvokeEnvelope> {
+    let params = new HttpParams();
+    if (savedInputId) params = params.set('saved_input_id', savedInputId);
     return this.http.post<InvokeEnvelope>(
       `${this.baseUrl}/${encodeURIComponent(agentId)}/invoke`,
       body,
-      { observe: 'body' },
+      { observe: 'body', params },
     );
   }
 
@@ -61,5 +72,66 @@ export class AgentRunnerApiService {
     return this.http.get<unknown>(
       `${this.baseUrl}/${encodeURIComponent(agentId)}/samples/${encodeURIComponent(name)}`,
     );
+  }
+
+  // ------------------------------------------------------------
+  // Saved inputs (Phase 3)
+  // ------------------------------------------------------------
+
+  listSavedInputs(agentId: string): Observable<SavedInput[]> {
+    return this.http.get<SavedInput[]>(
+      `${this.baseUrl}/${encodeURIComponent(agentId)}/saved-inputs`,
+    );
+  }
+
+  createSavedInput(agentId: string, body: SavedInputCreate): Observable<SavedInput> {
+    return this.http.post<SavedInput>(
+      `${this.baseUrl}/${encodeURIComponent(agentId)}/saved-inputs`,
+      body,
+    );
+  }
+
+  updateSavedInput(savedId: string, body: SavedInputUpdate): Observable<SavedInput> {
+    return this.http.put<SavedInput>(
+      `${this.baseUrl}/saved-inputs/${encodeURIComponent(savedId)}`,
+      body,
+    );
+  }
+
+  deleteSavedInput(savedId: string): Observable<{ id: string; status: string }> {
+    return this.http.delete<{ id: string; status: string }>(
+      `${this.baseUrl}/saved-inputs/${encodeURIComponent(savedId)}`,
+    );
+  }
+
+  // ------------------------------------------------------------
+  // Runs (Phase 3)
+  // ------------------------------------------------------------
+
+  listRuns(agentId: string, cursor?: string | null, limit = 20): Observable<RunSummary[]> {
+    let params = new HttpParams().set('limit', String(limit));
+    if (cursor) params = params.set('cursor', cursor);
+    return this.http.get<RunSummary[]>(
+      `${this.baseUrl}/${encodeURIComponent(agentId)}/runs`,
+      { params },
+    );
+  }
+
+  getRun(runId: string): Observable<RunRecord> {
+    return this.http.get<RunRecord>(`${this.baseUrl}/runs/${encodeURIComponent(runId)}`);
+  }
+
+  deleteRun(runId: string): Observable<{ id: string; status: string }> {
+    return this.http.delete<{ id: string; status: string }>(
+      `${this.baseUrl}/runs/${encodeURIComponent(runId)}`,
+    );
+  }
+
+  // ------------------------------------------------------------
+  // Diff (Phase 3)
+  // ------------------------------------------------------------
+
+  diff(body: DiffRequest): Observable<DiffResult> {
+    return this.http.post<DiffResult>(`${this.baseUrl}/diff`, body);
   }
 }
