@@ -237,6 +237,20 @@ def test_detail_missing_agent_returns_none(tmp_path: Path) -> None:
     assert reg.detail("nope") is None
 
 
+def test_read_anatomy_without_repo_root_does_not_raise_on_shallow_layout() -> None:
+    """Regression: the fallback parent walk used to hard-code here.parents[2..5],
+    which raised IndexError when the module lived fewer than 5 levels above
+    the filesystem root (e.g. a shallow checkout at /repo/backend/...).
+
+    We don't assert a specific return value — only that the method returns
+    gracefully (``None`` when the file isn't found) instead of raising.
+    """
+    reg = AgentRegistry(manifests=[], team_display_names={})
+    # Pass an anatomy_ref that almost certainly doesn't exist on disk.
+    result = reg._read_anatomy("definitely/not/a/real/anatomy.md", repo_root=None)
+    assert result is None
+
+
 def test_orphan_team_is_kept_but_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     _write_manifest(
         tmp_path,

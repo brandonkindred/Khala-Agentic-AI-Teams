@@ -244,9 +244,11 @@ class AgentRegistry:
         if repo_root is not None:
             candidates = [repo_root / anatomy_ref]
         else:
-            # Walk up from this file looking for the path until we hit the repo root.
+            # Walk every parent from this file up to the filesystem root, so we
+            # survive shallow checkouts (e.g. ``/repo/backend/...``) where the
+            # repo root is fewer than four levels above this module.
             here = Path(__file__).resolve()
-            candidates = [p / anatomy_ref for p in [here.parents[i] for i in range(2, 6)]]
+            candidates = [parent / anatomy_ref for parent in here.parents]
         for path in candidates:
             try:
                 if path.is_file():

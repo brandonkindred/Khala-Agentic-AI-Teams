@@ -1,4 +1,5 @@
-import { Component, EventEmitter, inject, OnInit, Output, signal, computed } from '@angular/core';
+import { Component, EventEmitter, inject, OnDestroy, OnInit, Output, signal, computed } from '@angular/core';
+import { Subscription } from 'rxjs';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
@@ -42,11 +43,15 @@ import type {
   templateUrl: './agent-catalog.component.html',
   styleUrl: './agent-catalog.component.scss',
 })
-export class AgentCatalogComponent implements OnInit {
+export class AgentCatalogComponent implements OnInit, OnDestroy {
   private readonly api = inject(AgentCatalogApiService);
 
   /** Emitted when the user clicks "Run agent" in the detail drawer. Consumed by AgentConsoleComponent. */
   @Output() readonly requestRun = new EventEmitter<string>();
+
+  /** Cancellable handle to the in-flight list request so late responses can't
+   *  clobber a newer filter's results. */
+  private refreshSub: Subscription | null = null;
 
   readonly agents = signal<AgentSummary[]>([]);
   readonly teams = signal<TeamGroup[]>([]);
@@ -76,10 +81,18 @@ export class AgentCatalogComponent implements OnInit {
     });
   }
 
+  ngOnDestroy(): void {
+    this.refreshSub?.unsubscribe();
+  }
+
   refresh(): void {
+    // Cancel any in-flight request. Without this, an older HTTP response that
+    // arrives after the user has typed more / changed filters would clobber
+    // the newer result set and leave the UI inconsistent with the controls.
+    this.refreshSub?.unsubscribe();
     this.loading.set(true);
     this.error.set(null);
-    this.api
+    this.refreshSub = this.api
       .listAgents({
         team: this.selectedTeam() ?? undefined,
         tag: this.selectedTag() ?? undefined,
