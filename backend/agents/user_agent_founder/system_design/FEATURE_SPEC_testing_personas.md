@@ -37,36 +37,39 @@ This spec extends the feature so a user can:
 
 ### Testing Personas dashboard (`/persona-testing`)
 
-```
-Testing Personas
-─────────────────────────────────────────────────
-  [ Start Test ]              [ + Create Persona ]
+```mermaid
+flowchart TB
+    Header["Testing Personas"]
+    Actions["[ Start Test ]  |  [ + Create Persona ]"]
 
-  Personas
-  ┌─────────────────┐  ┌─────────────────┐
-  │ Startup Founder │  │ My QA Persona   │
-  │ (builtin)       │  │ (custom)        │
-  │  Edit disabled  │  │  Edit / Delete  │
-  │  [Duplicate]    │  │                 │
-  └─────────────────┘  └─────────────────┘
+    subgraph Personas["Personas"]
+        Builtin["Startup Founder<br/>(builtin)<br/>Edit disabled<br/>[Duplicate]"]
+        Custom["My QA Persona<br/>(custom)<br/>Edit / Delete"]
+    end
 
-  Running tests   (polled every 15s)
-  …
+    Running["Running tests (polled every 15s)"]
+    Completed["Completed tests"]
 
-  Completed tests
-  …
+    Header --> Actions
+    Actions --> Personas
+    Personas --> Running
+    Running --> Completed
 ```
 
 ### Start Test dialog
 
-```
-Start Test
-────────────────────────────────────
-Persona         [ Startup Founder ▼ ]  (required)
-Target team     [ Software Engineering ▼ ]  (required)
-Project name    [ taskflow-mvp           ]  (optional; default = slugified persona name + "-mvp")
+```mermaid
+flowchart TB
+    Title["Start Test"]
+    Persona["Persona: [ Startup Founder &#9662; ] (required)"]
+    Team["Target team: [ Software Engineering &#9662; ] (required)"]
+    Project["Project name: [ taskflow-mvp ]<br/>(optional; default = slugified persona name + '-mvp')"]
+    Buttons["[ Cancel ]  [ Start Test ]"]
 
-                        [ Cancel ]  [ Start Test ]
+    Title --> Persona
+    Persona --> Team
+    Team --> Project
+    Project --> Buttons
 ```
 
 Clicking **Start Test** → `POST /api/user-agent-founder/start` with `{persona_id, target_team_key, project_name}` → navigate to `/persona-testing/audit/:runId` (existing audit panel, unchanged).

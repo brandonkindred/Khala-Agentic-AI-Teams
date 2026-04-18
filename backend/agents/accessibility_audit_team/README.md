@@ -17,22 +17,32 @@ Identify accessibility issues and frame them in two ways:
 
 ## Architecture
 
-```
-                    ┌──────────────────────┐
-                    │  AccessibilityProgram │
-                    │       Lead (APL)      │
-                    └──────────┬───────────┘
-                               │
-           ┌───────────────────┼───────────────────┐
-           │                   │                   │
-    ┌──────▼──────┐     ┌──────▼──────┐     ┌──────▼──────┐
-    │   Lane A    │     │   Lane B    │     │   Quality   │
-    │  Coverage   │     │ Credibility │     │    Layer    │
-    ├─────────────┤     ├─────────────┤     ├─────────────┤
-    │ WAS (Web)   │────▶│ ATS (AT)    │────▶│ QCR (QA)    │
-    │ MAS (Mobile)│     │ SLMS (Stds) │     │ RA (Remed)  │
-    └─────────────┘     │ REE (Evid)  │     └─────────────┘
-                        └─────────────┘
+```mermaid
+flowchart TB
+    APL["Accessibility Program Lead (APL)"]
+
+    subgraph LaneA["Lane A: Coverage"]
+        WAS["WAS (Web)"]
+        MAS["MAS (Mobile)"]
+    end
+
+    subgraph LaneB["Lane B: Credibility"]
+        ATS["ATS (AT)"]
+        SLMS["SLMS (Stds)"]
+        REE["REE (Evid)"]
+    end
+
+    subgraph Quality["Quality Layer"]
+        QCR["QCR (QA)"]
+        RA["RA (Remed)"]
+    end
+
+    APL --> LaneA
+    APL --> LaneB
+    APL --> Quality
+
+    WAS --> ATS
+    ATS --> QCR
 ```
 
 ### Specialist Agents (8 Core)
@@ -58,19 +68,12 @@ Identify accessibility issues and frame them in two ways:
 
 ## Workflow Phases
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                      │
-│  ┌─────────┐   ┌───────────┐   ┌──────────────┐   ┌───────────┐    │
-│  │ Intake  │ → │ Discovery │ → │ Verification │ → │  Report   │    │
-│  │ (APL)   │   │ (WAS/MAS) │   │ (ATS/SLMS)   │   │ Packaging │    │
-│  └─────────┘   └───────────┘   └──────────────┘   └───────────┘    │
-│                                                          │          │
-│                                                    ┌─────▼─────┐    │
-│                                                    │  Retest   │◄───┤
-│                                                    │ (Optional)│    │
-│                                                    └───────────┘    │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    Intake["Intake<br/>(APL)"] --> Discovery["Discovery<br/>(WAS/MAS)"]
+    Discovery --> Verification["Verification<br/>(ATS/SLMS)"]
+    Verification --> Report["Report<br/>Packaging"]
+    Report --> Retest["Retest<br/>(Optional)"]
 ```
 
 ### Phase 0: Intake

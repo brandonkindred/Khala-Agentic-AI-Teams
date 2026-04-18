@@ -629,22 +629,35 @@ strong { font-weight: 600; color: var(--ink); }
 
 /* ============ ARCHITECTURE ============ */
 .arch-diagram {
-  margin: 0 0 72px;
+  margin: 0 0 32px;
   padding: 28px;
   background: rgba(7, 3, 15, 0.6);
   border: 1px solid var(--border);
   border-radius: 16px;
   overflow-x: auto;
 }
-.ascii {
+.arch-diagram .mermaid {
+  display: flex;
+  justify-content: center;
   font-family: var(--font-mono);
-  font-size: clamp(0.75rem, 0.95vw, 0.88rem);
-  line-height: 1.5;
-  color: var(--ink-dim);
+  color: var(--ink);
   margin: 0;
-  white-space: pre;
+  min-height: 60px;
 }
-.ascii::selection { background: var(--violet); color: var(--ink); }
+.arch-diagram .mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+.arch-caption {
+  margin: 0 0 16px;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  text-align: center;
+}
+.arch-diagram:last-of-type { margin-bottom: 72px; }
 
 .adr-list {
   display: grid;

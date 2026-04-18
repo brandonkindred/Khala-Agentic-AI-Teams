@@ -17,15 +17,14 @@ Used by `backend/unified_api/routes/sandboxes.py`
 
 ## State machine
 
-```
-           ensure_warm                    health OK
-   COLD ─────────────────► WARMING ──────────────────► WARM
-                               │                         │
-                               │                         │ idle > threshold
-                               │                         ▼
-                               │                        COLD
-                               │
-                               └── health fail ──► ERROR ──► COLD
+```mermaid
+stateDiagram-v2
+    [*] --> COLD
+    COLD --> WARMING: ensure_warm
+    WARMING --> WARM: health OK
+    WARMING --> ERROR: health fail
+    WARM --> COLD: idle > threshold
+    ERROR --> COLD
 ```
 
 ## Adding a new team

@@ -239,26 +239,96 @@
     </p>
   </div>
 
-  <div class="arch-diagram">
-    <pre class="ascii" aria-hidden="true">
-          ┌──────────┐
-  you ─▶  │   UI     │  ─▶  /api/&lt;team&gt;
-          └──────────┘            │
-                                  ▼
-                      ┌──────────────────────┐
-                      │   Unified API        │  ← optional security pre-scan
-                      │   FastAPI gateway    │
-                      └──────────┬───────────┘
-                                 │ mounts
-            ┌────────┬───────────┼───────────┬────────┐
-            ▼        ▼           ▼           ▼        ▼
-         🛠 Core    💼 Biz     ✍ Content   🧘 Personal  …
-            │
-            ├─ threads (default)
-            └─ Temporal workflows (opt-in, set TEMPORAL_ADDRESS)
-                                 │
-                   shared: Postgres · AGENT_CACHE · LLM client
-    </pre>
+  <div class="arch-diagram" aria-label="Khala system topology: UI and clients call a single FastAPI gateway that mounts every specialist team and runs them as threads or Temporal workflows over shared Postgres, AGENT_CACHE, and LLM client">
+    <div class="mermaid">
+flowchart TB
+  user([you / client])
+  ui["Angular UI"]
+  gw["Unified API<br/>FastAPI gateway<br/><i>optional security pre-scan</i>"]
+
+  subgraph teams ["mounted teams · /api/[slug]"]
+    direction LR
+    core["🛠 Core dev"]
+    biz["💼 Biz"]
+    content["✍ Content"]
+    personal["🧘 Personal"]
+    more["…"]
+  end
+
+  subgraph runtime ["execution runtime"]
+    direction LR
+    threads["threads<br/><i>default</i>"]
+    temporal["Temporal workflows<br/><i>opt-in · TEMPORAL_ADDRESS</i>"]
+  end
+
+  shared[("shared · Postgres · AGENT_CACHE · LLM client")]
+
+  user --> ui --> gw
+  gw --> core
+  gw --> biz
+  gw --> content
+  gw --> personal
+  gw --> more
+  teams --> threads
+  teams --> temporal
+  threads --> shared
+  temporal --> shared
+
+  classDef gw fill:#140a2e,stroke:#5ef0ff,stroke-width:1.5px,color:#ece7ff
+  classDef team fill:#0d0622,stroke:#8b5cff,stroke-width:1px,color:#ece7ff
+  classDef rt fill:#0d0622,stroke:#ffd36b,stroke-width:1px,color:#ece7ff
+  classDef shared fill:#140a2e,stroke:#ff5cd4,stroke-width:1.5px,color:#ece7ff
+  class gw gw
+  class core,biz,content,personal,more team
+  class threads,temporal rt
+  class shared shared
+    </div>
+  </div>
+
+  <div class="arch-diagram" aria-label="Software engineering team four phase pipeline: discovery to design to execution with parallel backend and frontend workers to integration and release">
+    <p class="arch-caption">SE team pipeline — one spec in, a deployable system out.</p>
+    <div class="mermaid">
+flowchart LR
+  spec["initial_spec.md"]
+
+  subgraph d1 ["1 · Discovery"]
+    parse["LLM spec parse"]
+    plan["Planning v2/v3<br/>(6-phase)"]
+    parse --> plan
+  end
+
+  subgraph d2 ["2 · Design"]
+    tl["Tech Lead"]
+    arch["Architecture Expert"]
+    master["master_plan.md"]
+    tl --> master
+    arch --> master
+  end
+
+  subgraph d3 ["3 · Execution"]
+    direction TB
+    prefix["Prefix queue<br/>git + DevOps"]
+    be["Backend worker<br/>generate → lint → build → review → QA"]
+    fe["Frontend worker<br/>generate → lint → build → review → QA"]
+    prefix --> be
+    prefix --> fe
+  end
+
+  subgraph d4 ["4 · Integration"]
+    integ["Integration Agent<br/>(contract check)"]
+    devops["DevOps trigger"]
+    sec["Final security pass"]
+    docs["Docs update"]
+    integ --> devops --> sec --> docs
+  end
+
+  spec --> d1 --> d2 --> d3 --> d4
+
+  classDef phase fill:#0d0622,stroke:#8b5cff,stroke-width:1px,color:#ece7ff
+  classDef node fill:#140a2e,stroke:#5ef0ff,stroke-width:1px,color:#ece7ff
+  class d1,d2,d3,d4 phase
+  class spec,parse,plan,tl,arch,master,prefix,be,fe,integ,devops,sec,docs node
+    </div>
   </div>
 
   <div class="adr-list">
@@ -770,6 +840,28 @@ nvm use &amp;&amp; npm ci &amp;&amp; npm start
 }
 </script>
 
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    securityLevel: 'strict',
+    fontFamily: "'JetBrains Mono', 'Space Mono', ui-monospace, monospace",
+    themeVariables: {
+      background: '#07030f',
+      primaryColor: '#140a2e',
+      primaryTextColor: '#ece7ff',
+      primaryBorderColor: '#8b5cff',
+      lineColor: '#8b5cff',
+      secondaryColor: '#0d0622',
+      tertiaryColor: '#0d0622',
+      clusterBkg: '#07030f',
+      clusterBorder: 'rgba(146, 104, 255, 0.4)',
+      edgeLabelBackground: '#0d0622',
+      textColor: '#ece7ff'
+    }
+  });
+</script>
 <script src="app.js"></script>
 </body>
 </html>

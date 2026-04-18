@@ -4,31 +4,19 @@ A comprehensive personal assistant agent team that manages email, calendars, tas
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    PersonalAssistantOrchestrator                │
-│              (Intent Classification & Request Routing)          │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │
-    ┌─────────────────────┼─────────────────────┐
-    │                     │                     │
-    ▼                     ▼                     ▼
-┌─────────┐         ┌─────────┐          ┌─────────┐
-│ Email   │         │Calendar │          │  Task   │
-│ Agent   │         │ Agent   │          │ Agent   │
-└─────────┘         └─────────┘          └─────────┘
-    │                     │                     │
-    ▼                     ▼                     ▼
-┌─────────┐         ┌─────────┐          ┌─────────┐
-│  Deal   │         │Reserv.  │          │  Doc    │
-│ Finder  │         │ Agent   │          │Generator│
-└─────────┘         └─────────┘          └─────────┘
-                          │
-                          ▼
-                    ┌───────────┐
-                    │User Profile│
-                    │   Agent    │
-                    └───────────┘
+```mermaid
+flowchart TB
+    ORCH["PersonalAssistantOrchestrator<br/>(Intent Classification & Request Routing)"]
+
+    ORCH --> EMAIL["Email Agent"]
+    ORCH --> CAL["Calendar Agent"]
+    ORCH --> TASK["Task Agent"]
+
+    EMAIL --> DEAL["Deal Finder"]
+    CAL --> RES["Reservation Agent"]
+    TASK --> DOC["Doc Generator"]
+
+    RES --> PROFILE["User Profile Agent"]
 ```
 
 ## Features
