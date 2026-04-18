@@ -244,7 +244,7 @@
 flowchart TB
   user([you / client])
   ui["Angular UI"]
-  gw["Unified API<br/>FastAPI gateway<br/><i>optional security pre-scan</i>"]
+  gw["Unified API\nFastAPI gateway\n(optional security pre-scan)"]
 
   subgraph teams ["mounted teams · /api/[slug]"]
     direction LR
@@ -257,8 +257,8 @@ flowchart TB
 
   subgraph runtime ["execution runtime"]
     direction LR
-    threads["threads<br/><i>default</i>"]
-    temporal["Temporal workflows<br/><i>opt-in · TEMPORAL_ADDRESS</i>"]
+    threads["threads\n(default)"]
+    temporal["Temporal workflows\n(opt-in · TEMPORAL_ADDRESS)"]
   end
 
   shared[("shared · Postgres · AGENT_CACHE · LLM client")]
@@ -293,7 +293,7 @@ flowchart LR
 
   subgraph d1 ["1 · Discovery"]
     parse["LLM spec parse"]
-    plan["Planning v2/v3<br/>(6-phase)"]
+    plan["Planning v2/v3\n(6-phase)"]
     parse --> plan
   end
 
@@ -307,15 +307,15 @@ flowchart LR
 
   subgraph d3 ["3 · Execution"]
     direction TB
-    prefix["Prefix queue<br/>git + DevOps"]
-    be["Backend worker<br/>generate → lint → build → review → QA"]
-    fe["Frontend worker<br/>generate → lint → build → review → QA"]
+    prefix["Prefix queue\ngit + DevOps"]
+    be["Backend worker\ngenerate → lint → build → review → QA"]
+    fe["Frontend worker\ngenerate → lint → build → review → QA"]
     prefix --> be
     prefix --> fe
   end
 
   subgraph d4 ["4 · Integration"]
-    integ["Integration Agent<br/>(contract check)"]
+    integ["Integration Agent\n(contract check)"]
     devops["DevOps trigger"]
     sec["Final security pass"]
     docs["Docs update"]
