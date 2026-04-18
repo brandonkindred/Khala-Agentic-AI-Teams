@@ -6,7 +6,7 @@
 
 <p align="center">
   <em>Many minds. One objective… yours.</em><br/>
-  <sub>A system for building and running agentic teams that act as one mind — with you, not for you.</sub>
+  <sub>A system for building and running agentic teams that act as one mind</sub>
 </p>
 
 <p align="center">
