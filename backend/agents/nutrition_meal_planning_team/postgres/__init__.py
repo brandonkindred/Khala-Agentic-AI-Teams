@@ -85,6 +85,15 @@ SCHEMA = TeamSchema(
         )""",
         """CREATE INDEX IF NOT EXISTS idx_nutrition_clinical_overrides_log_client_time
             ON nutrition_clinical_overrides_log(client_id, recorded_at DESC)""",
+        # --- SPEC-004 additions (calculator-version-aware plan cache) ---
+        # Adds columns used by the new cache key. Existing rows keep
+        # their NULL values and are correctly treated as cache misses
+        # on the new read path, which forces one regeneration per
+        # client on first read post-migration.
+        "ALTER TABLE nutrition_plans ADD COLUMN IF NOT EXISTS calculator_version TEXT",
+        "ALTER TABLE nutrition_plans ADD COLUMN IF NOT EXISTS profile_cache_vector TEXT",
+        """CREATE INDEX IF NOT EXISTS idx_nutrition_plans_cache_key
+            ON nutrition_plans(client_id, calculator_version, profile_cache_vector)""",
     ],
     table_names=[
         "nutrition_profiles",

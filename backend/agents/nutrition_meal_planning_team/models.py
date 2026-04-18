@@ -228,8 +228,41 @@ class DailyTargets(BaseModel):
     other_nutrients: Dict[str, float] = Field(default_factory=dict)
 
 
+class PlanCohort(str, Enum):
+    """Cohort tag set on a NutritionPlan by SPEC-004.
+
+    Mirrors the ``nutrition_calc.Cohort`` string constants so the UI
+    (SPEC-022) can branch on a single, stable enum exposed through the
+    public API.
+    """
+
+    general_adult = "general_adult"
+    general_adult_sex_unspecified = "general_adult_sex_unspecified"
+    pregnancy_lactation = "pregnancy_lactation"
+    ed_adjacent = "ed_adjacent"
+    minor = "minor"
+    clinician_guided = "clinician_guided"
+
+
 class NutritionPlan(BaseModel):
-    """Structured nutrition plan: targets and guidelines, no recipes."""
+    """Structured nutrition plan: targets and guidelines, no recipes.
+
+    SPEC-004 additions (all additive, defaults preserve the legacy
+    shape for any unmigrated consumer):
+
+    - ``rationale``: structured audit trail from nutrition_calc.
+      Stored as a dict so the JSONB column round-trips cleanly; the
+      ``nutrition_calc.Rationale`` dataclass is not Pydantic-native.
+    - ``calculator_version``: pinned by the SPEC-003 calculator.
+      Downstream caches (SPEC-022) use this for cache invalidation.
+    - ``cohort``: which SPEC-004 cohort produced the plan.
+    - ``is_guidance_only``: True when the cohort is unsupported for
+      numeric targets (minor / clinician_guided) or when the profile
+      is incomplete (missing biometrics).
+    - ``clinician_note``: user-facing note attached to guidance-only
+      plans, e.g. "please work with your clinician".
+    - ``intermediates``: BMR, TDEE for the "why these numbers?" panel.
+    """
 
     daily_targets: DailyTargets = Field(default_factory=DailyTargets)
     balance_guidelines: List[str] = Field(
@@ -239,6 +272,17 @@ class NutritionPlan(BaseModel):
     foods_to_avoid: List[str] = Field(default_factory=list)
     notes: str = ""
     generated_at: Optional[str] = None
+
+    # SPEC-004 additive fields.
+    rationale: Optional[Dict[str, Any]] = None
+    calculator_version: Optional[str] = None
+    cohort: PlanCohort = PlanCohort.general_adult
+    is_guidance_only: bool = False
+    clinician_note: Optional[str] = None
+    intermediates: Dict[str, float] = Field(default_factory=dict)
+    # Downstream consumers (ADR-003 rollup, SPEC-022 dashboard) read
+    # metadata set by the calculator's clinical-override chain.
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 # --- Meal recommendation (output of meal planning agent) ---
@@ -340,6 +384,26 @@ class BiometricPatchRequest(BaseModel):
             return v
         if v not in ("metric", "imperial"):
             raise ValueError("preferred_units must be 'metric' or 'imperial'")
+        return v
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, v: Optional[str]) -> Optional[str]:
+        # Validate at the request boundary so the orchestrator's
+        # direct assignment (`bio.timezone = patch.timezone`) can't
+        # persist an unknown zone that later breaks profile reads.
+        if v is None:
+            return v
+        try:
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+            ZoneInfo(v)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"unknown IANA timezone: {v}") from exc
+        except Exception:
+            # Missing tzdata on host — accept (same tolerance as
+            # BiometricInfo._validate_timezone).
+            return v
         return v
 
 

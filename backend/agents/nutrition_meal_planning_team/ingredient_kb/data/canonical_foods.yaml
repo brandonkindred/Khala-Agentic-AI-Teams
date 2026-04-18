@@ -1,0 +1,770 @@
+# Canonical ingredient catalog. SPEC-005 §4.3.
+#
+# v1 seed covers ~120 ingredients chosen to:
+#   - Cover every FDA Big-9 + EU-14 allergen category with at least
+#     one exemplar.
+#   - Cover every canonical_id referenced in densities.yaml.
+#   - Cover the high-frequency foods most likely to appear in LLM-
+#     generated meal outputs during shadow-mode audits.
+#
+# The aspirational 2000-entry v1.0.0 target in SPEC-005 §4.4 is left
+# as a curation backlog. The audit CLI reports the top-N unresolved
+# strings from production so gaps get prioritized by real frequency
+# rather than guesswork.
+#
+# Lint rules (enforced by cli/add.py and tests):
+#   - id is snake_case, globally unique, ASCII.
+#   - aliases include display_name lowercased.
+#   - allergen_tags for regulated categories (FDA Big-9) require a
+#     non-empty citations.allergen string.
+#   - Variants that differ in allergen profile (tamari vs soy sauce)
+#     are separate ids, not aliases.
+
+# ==========================================================================
+# OILS + FATS
+# ==========================================================================
+- id: olive_oil
+  display_name: "Olive oil"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: pantry
+  purchase_unit: { unit: ml, typical_package_ml: 500 }
+  aliases: ["olive oil", "extra virgin olive oil", "evoo"]
+
+- id: butter
+  display_name: "Butter"
+  allergen_tags: [dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: dairy_eggs
+  purchase_unit: { unit: g, typical_package_g: 226 }
+  aliases: ["butter", "unsalted butter", "salted butter"]
+  citations: { allergen: "FDA Big-9: milk (dairy)" }
+
+- id: ghee
+  display_name: "Ghee"
+  allergen_tags: [dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: pantry
+  aliases: ["ghee", "clarified butter"]
+  citations: { allergen: "Derivative of butter; still dairy allergen per FDA." }
+
+- id: sesame_oil
+  display_name: "Sesame oil"
+  allergen_tags: [sesame]
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["sesame oil", "toasted sesame oil"]
+  citations: { allergen: "FASTER Act 2021 — sesame added to FDA Big-9." }
+
+# ==========================================================================
+# DAIRY + EGGS
+# ==========================================================================
+- id: milk_whole
+  display_name: "Whole milk"
+  allergen_tags: [dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: dairy_eggs
+  purchase_unit: { unit: ml, typical_package_ml: 946 }
+  aliases: ["whole milk", "milk (whole)", "milk"]
+  citations: { allergen: "FDA Big-9: milk." }
+
+- id: milk_skim
+  display_name: "Skim milk"
+  allergen_tags: [dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: dairy_eggs
+  aliases: ["skim milk", "fat-free milk", "nonfat milk"]
+  citations: { allergen: "FDA Big-9: milk." }
+
+- id: oat_milk
+  display_name: "Oat milk"
+  allergen_tags: []
+  dietary_tags: [gluten, grain]  # most commercial oat milk is not certified GF
+  aisle_tag: dairy_eggs
+  aliases: ["oat milk", "oatmilk"]
+  notes: "Most mainstream oat milk is oats-cross-contaminated; label as gluten-bearing by default. Certified gluten-free variant is a separate canonical id (not in v1)."
+
+- id: greek_yogurt
+  display_name: "Greek yogurt"
+  allergen_tags: [dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: dairy_eggs
+  aliases: ["greek yogurt", "full-fat greek yogurt", "nonfat greek yogurt"]
+  citations: { allergen: "FDA Big-9: milk." }
+
+- id: sour_cream
+  display_name: "Sour cream"
+  allergen_tags: [dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: dairy_eggs
+  aliases: ["sour cream"]
+  citations: { allergen: "FDA Big-9: milk." }
+
+- id: heavy_cream
+  display_name: "Heavy cream"
+  allergen_tags: [dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: dairy_eggs
+  aliases: ["heavy cream", "heavy whipping cream", "double cream"]
+  citations: { allergen: "FDA Big-9: milk." }
+
+- id: egg_large
+  display_name: "Large egg"
+  allergen_tags: [egg]
+  dietary_tags: [animal, egg]
+  aisle_tag: dairy_eggs
+  purchase_unit: { unit: count }
+  aliases: ["egg", "large egg", "eggs"]
+  citations: { allergen: "FDA Big-9: egg." }
+
+- id: cashew_cream
+  display_name: "Cashew cream"
+  allergen_tags: [tree_nut]
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["cashew cream"]
+  citations: { allergen: "FDA Big-9: tree nuts (cashew)." }
+
+# ==========================================================================
+# CHEESES (all dairy; highlighting the common swap-targets)
+# ==========================================================================
+- id: parmesan
+  display_name: "Parmesan cheese"
+  allergen_tags: [dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: dairy_eggs
+  aliases: ["parmesan", "parmesan cheese", "parmigiano-reggiano", "grana padano"]
+  citations: { allergen: "FDA Big-9: milk." }
+
+- id: mozzarella
+  display_name: "Mozzarella cheese"
+  allergen_tags: [dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: dairy_eggs
+  aliases: ["mozzarella", "fresh mozzarella"]
+  citations: { allergen: "FDA Big-9: milk." }
+
+- id: feta
+  display_name: "Feta cheese"
+  allergen_tags: [dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: dairy_eggs
+  aliases: ["feta", "feta cheese"]
+  citations: { allergen: "FDA Big-9: milk." }
+
+- id: cheddar
+  display_name: "Cheddar cheese"
+  allergen_tags: [dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: dairy_eggs
+  aliases: ["cheddar", "cheddar cheese", "sharp cheddar"]
+  citations: { allergen: "FDA Big-9: milk." }
+
+# ==========================================================================
+# GRAINS + PASTA + BAKED
+# ==========================================================================
+- id: rice_white_raw
+  display_name: "White rice (raw)"
+  allergen_tags: []
+  dietary_tags: [grain]
+  aisle_tag: pantry
+  aliases: ["white rice", "rice", "jasmine rice", "basmati rice"]
+
+- id: rice_brown_raw
+  display_name: "Brown rice (raw)"
+  allergen_tags: []
+  dietary_tags: [grain]
+  aisle_tag: pantry
+  aliases: ["brown rice"]
+
+- id: pasta_dry
+  display_name: "Dry pasta"
+  allergen_tags: [wheat, gluten]
+  dietary_tags: [grain, gluten]
+  aisle_tag: pantry
+  aliases: ["pasta", "spaghetti", "penne", "rigatoni", "fettuccine", "dry pasta"]
+  citations: { allergen: "FDA Big-9: wheat (standard semolina pasta)." }
+
+- id: quinoa_raw
+  display_name: "Quinoa (raw)"
+  allergen_tags: []
+  dietary_tags: [grain]
+  aisle_tag: pantry
+  aliases: ["quinoa"]
+
+- id: oats_rolled
+  display_name: "Rolled oats"
+  allergen_tags: [gluten]
+  dietary_tags: [grain, gluten]
+  aisle_tag: pantry
+  aliases: ["rolled oats", "oats", "old-fashioned oats"]
+  notes: "Conservative gluten tag — most rolled oats are cross-contaminated. Certified gluten-free oats are a separate canonical id (not in v1)."
+
+- id: flour_all_purpose
+  display_name: "All-purpose flour"
+  allergen_tags: [wheat, gluten]
+  dietary_tags: [grain, gluten]
+  aisle_tag: pantry
+  aliases: ["all-purpose flour", "ap flour", "flour", "plain flour"]
+  citations: { allergen: "FDA Big-9: wheat." }
+
+- id: almond_flour
+  display_name: "Almond flour"
+  allergen_tags: [tree_nut]
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["almond flour", "ground almonds", "almond meal"]
+  citations: { allergen: "FDA Big-9: tree nuts (almond)." }
+
+- id: gnocchi
+  display_name: "Gnocchi"
+  allergen_tags: [wheat, gluten]
+  dietary_tags: [grain, gluten]
+  aisle_tag: pantry
+  aliases: ["gnocchi"]
+  citations: { allergen: "Traditional gnocchi uses wheat flour." }
+
+- id: bread_sourdough
+  display_name: "Sourdough bread"
+  allergen_tags: [wheat, gluten]
+  dietary_tags: [grain, gluten]
+  aisle_tag: bakery
+  aliases: ["sourdough", "sourdough bread"]
+  citations: { allergen: "Made with wheat flour." }
+
+# ==========================================================================
+# NUTS + SEEDS
+# ==========================================================================
+- id: peanut
+  display_name: "Peanut"
+  allergen_tags: [peanut]
+  dietary_tags: [legume]
+  aisle_tag: pantry
+  aliases: ["peanut", "peanuts", "groundnut"]
+  citations: { allergen: "FDA Big-9: peanut (regulated separately from tree nuts)." }
+
+- id: peanut_butter
+  display_name: "Peanut butter"
+  allergen_tags: [peanut]
+  dietary_tags: [legume]
+  aisle_tag: pantry
+  aliases: ["peanut butter", "pb"]
+  citations: { allergen: "FDA Big-9: peanut." }
+
+- id: cashew
+  display_name: "Cashew"
+  allergen_tags: [tree_nut]
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["cashew", "cashews", "raw cashews"]
+  citations: { allergen: "FDA Big-9: tree nuts." }
+
+- id: almond
+  display_name: "Almond"
+  allergen_tags: [tree_nut]
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["almond", "almonds", "raw almonds"]
+  citations: { allergen: "FDA Big-9: tree nuts." }
+
+- id: walnut
+  display_name: "Walnut"
+  allergen_tags: [tree_nut]
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["walnut", "walnuts"]
+  citations: { allergen: "FDA Big-9: tree nuts." }
+
+- id: pine_nut
+  display_name: "Pine nut"
+  allergen_tags: [tree_nut]
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["pine nut", "pine nuts", "pignoli"]
+  citations: { allergen: "FDA Big-9: tree nuts." }
+
+- id: tahini
+  display_name: "Tahini"
+  allergen_tags: [sesame]
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["tahini", "sesame paste"]
+  citations: { allergen: "FASTER Act 2021 — sesame." }
+
+# ==========================================================================
+# PROTEINS — animal
+# ==========================================================================
+- id: chicken_breast_raw
+  display_name: "Chicken breast (raw)"
+  allergen_tags: []
+  dietary_tags: [animal]
+  aisle_tag: meat_fish
+  aliases: ["chicken breast", "boneless skinless chicken breast"]
+
+- id: chicken_thigh_raw
+  display_name: "Chicken thigh (raw)"
+  allergen_tags: []
+  dietary_tags: [animal]
+  aisle_tag: meat_fish
+  aliases: ["chicken thigh", "chicken thighs", "boneless skinless chicken thigh"]
+
+- id: beef_ground_raw
+  display_name: "Ground beef (raw)"
+  allergen_tags: []
+  dietary_tags: [animal]
+  aisle_tag: meat_fish
+  aliases: ["ground beef", "minced beef"]
+
+- id: pork_ground_raw
+  display_name: "Ground pork (raw)"
+  allergen_tags: []
+  dietary_tags: [animal]
+  aisle_tag: meat_fish
+  aliases: ["ground pork", "minced pork"]
+
+- id: salmon_raw
+  display_name: "Salmon (raw)"
+  allergen_tags: [fish]
+  dietary_tags: [animal]
+  aisle_tag: meat_fish
+  aliases: ["salmon", "salmon fillet", "atlantic salmon"]
+  citations: { allergen: "FDA Big-9: fish." }
+
+- id: tuna_canned
+  display_name: "Canned tuna"
+  allergen_tags: [fish]
+  dietary_tags: [animal]
+  aisle_tag: pantry
+  aliases: ["canned tuna", "tuna (canned)", "tuna"]
+  citations: { allergen: "FDA Big-9: fish." }
+
+- id: shrimp_raw
+  display_name: "Shrimp (raw)"
+  allergen_tags: [shellfish]
+  dietary_tags: [animal]
+  aisle_tag: meat_fish
+  aliases: ["shrimp", "prawns"]
+  citations: { allergen: "FDA Big-9: crustacean shellfish." }
+
+- id: anchovy
+  display_name: "Anchovy"
+  allergen_tags: [fish]
+  dietary_tags: [animal]
+  aisle_tag: pantry
+  aliases: ["anchovy", "anchovies"]
+  citations: { allergen: "FDA Big-9: fish." }
+
+# ==========================================================================
+# PROTEINS — plant
+# ==========================================================================
+- id: tofu_firm
+  display_name: "Firm tofu"
+  allergen_tags: [soy]
+  dietary_tags: [legume]
+  aisle_tag: dairy_eggs
+  aliases: ["tofu", "firm tofu", "extra-firm tofu"]
+  citations: { allergen: "FDA Big-9: soy." }
+
+- id: tofu_silken
+  display_name: "Silken tofu"
+  allergen_tags: [soy]
+  dietary_tags: [legume]
+  aisle_tag: dairy_eggs
+  aliases: ["silken tofu", "soft tofu"]
+  citations: { allergen: "FDA Big-9: soy." }
+
+- id: tempeh
+  display_name: "Tempeh"
+  allergen_tags: [soy]
+  dietary_tags: [legume]
+  aisle_tag: dairy_eggs
+  aliases: ["tempeh"]
+  citations: { allergen: "FDA Big-9: soy." }
+
+- id: chickpeas_cooked
+  display_name: "Chickpeas (cooked)"
+  allergen_tags: []
+  dietary_tags: [legume]
+  aisle_tag: pantry
+  aliases: ["chickpeas", "garbanzo beans", "cooked chickpeas", "canned chickpeas"]
+
+- id: black_beans_cooked
+  display_name: "Black beans (cooked)"
+  allergen_tags: []
+  dietary_tags: [legume]
+  aisle_tag: pantry
+  aliases: ["black beans", "cooked black beans", "canned black beans"]
+
+# ==========================================================================
+# CONDIMENTS / SAUCES — allergen-heavy; curate carefully
+# ==========================================================================
+- id: soy_sauce
+  display_name: "Soy sauce"
+  allergen_tags: [soy, wheat, gluten]
+  dietary_tags: [alcohol]  # traces of brewing alcohol
+  interaction_tags: [sodium_very_high]
+  aisle_tag: condiments
+  aliases: ["soy sauce", "shoyu", "light soy sauce", "dark soy sauce"]
+  citations: { allergen: "FDA Big-9: soy + wheat. Tamari variants without wheat are a SEPARATE canonical id." }
+
+- id: tamari
+  display_name: "Tamari (gluten-free soy sauce)"
+  allergen_tags: [soy]
+  dietary_tags: [alcohol]
+  interaction_tags: [sodium_very_high]
+  aisle_tag: condiments
+  aliases: ["tamari", "gluten-free soy sauce"]
+  citations: { allergen: "FDA Big-9: soy only. No wheat in traditional tamari." }
+
+- id: fish_sauce
+  display_name: "Fish sauce"
+  allergen_tags: [fish]
+  dietary_tags: [animal]
+  interaction_tags: [sodium_very_high]
+  aisle_tag: condiments
+  aliases: ["fish sauce", "nam pla", "nuoc mam"]
+  citations: { allergen: "FDA Big-9: fish (typically anchovy)." }
+
+- id: worcestershire
+  display_name: "Worcestershire sauce"
+  allergen_tags: [fish]
+  dietary_tags: [animal]
+  aisle_tag: condiments
+  aliases: ["worcestershire", "worcestershire sauce"]
+  citations: { allergen: "Contains anchovy (fish). Traps pescatarian-except-fish diners." }
+
+- id: miso_paste
+  display_name: "Miso paste"
+  allergen_tags: [soy]
+  dietary_tags: []
+  interaction_tags: [sodium_very_high, tyramine_high]
+  aisle_tag: condiments
+  aliases: ["miso", "miso paste", "white miso", "red miso"]
+  citations: { allergen: "FDA Big-9: soy. Fermented → tyramine-bearing (MAOI caution)." }
+
+- id: vinegar_apple_cider
+  display_name: "Apple cider vinegar"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: condiments
+  aliases: ["apple cider vinegar", "acv"]
+
+- id: mustard
+  display_name: "Mustard (prepared)"
+  allergen_tags: [mustard]
+  dietary_tags: []
+  aisle_tag: condiments
+  aliases: ["mustard", "dijon mustard", "yellow mustard"]
+  citations: { allergen: "EU-14: mustard." }
+
+- id: mayonnaise
+  display_name: "Mayonnaise"
+  allergen_tags: [egg]
+  dietary_tags: [animal, egg]
+  aisle_tag: condiments
+  aliases: ["mayonnaise", "mayo"]
+  citations: { allergen: "FDA Big-9: egg." }
+
+- id: caesar_dressing
+  display_name: "Caesar dressing"
+  allergen_tags: [fish, egg, dairy]
+  dietary_tags: [animal, dairy, egg]
+  aisle_tag: condiments
+  aliases: ["caesar dressing", "caesar salad dressing"]
+  citations: { allergen: "Traditional recipe contains anchovy, egg, and parmesan." }
+
+- id: pesto_basil
+  display_name: "Basil pesto"
+  allergen_tags: [tree_nut, dairy]
+  dietary_tags: [animal, dairy]
+  aisle_tag: condiments
+  aliases: ["pesto", "basil pesto", "pesto sauce"]
+  citations: { allergen: "Traditional pesto: pine nuts (tree nut) + parmesan (dairy)." }
+
+- id: honey
+  display_name: "Honey"
+  allergen_tags: []
+  dietary_tags: [animal, honey]
+  aisle_tag: pantry
+  aliases: ["honey"]
+
+- id: maple_syrup
+  display_name: "Maple syrup"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["maple syrup", "pure maple syrup"]
+
+# ==========================================================================
+# VEGETABLES
+# ==========================================================================
+- id: onion_medium
+  display_name: "Onion (medium)"
+  allergen_tags: []
+  dietary_tags: [high_fodmap]
+  aisle_tag: produce
+  purchase_unit: { unit: count }
+  aliases: ["onion", "yellow onion", "white onion", "medium onion"]
+
+- id: onion_large
+  display_name: "Onion (large)"
+  allergen_tags: []
+  dietary_tags: [high_fodmap]
+  aisle_tag: produce
+  aliases: ["large onion"]
+  parent_ids: [onion_medium]
+
+- id: garlic_clove
+  display_name: "Garlic clove"
+  allergen_tags: []
+  dietary_tags: [high_fodmap]
+  aisle_tag: produce
+  purchase_unit: { unit: count }
+  aliases: ["garlic", "garlic clove", "cloves of garlic", "garlic cloves"]
+
+- id: bell_pepper_medium
+  display_name: "Bell pepper (medium)"
+  allergen_tags: []
+  dietary_tags: [nightshade]
+  aisle_tag: produce
+  aliases: ["bell pepper", "capsicum", "red pepper", "green pepper", "yellow pepper"]
+
+- id: tomato_medium
+  display_name: "Tomato (medium)"
+  allergen_tags: []
+  dietary_tags: [nightshade]
+  aisle_tag: produce
+  aliases: ["tomato", "tomatoes", "medium tomato"]
+
+- id: tomato_canned
+  display_name: "Canned tomatoes"
+  allergen_tags: []
+  dietary_tags: [nightshade]
+  aisle_tag: pantry
+  aliases: ["canned tomato", "canned tomatoes", "crushed tomatoes", "diced tomatoes"]
+
+- id: carrot_medium
+  display_name: "Carrot (medium)"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: produce
+  aliases: ["carrot", "carrots"]
+
+- id: lemon
+  display_name: "Lemon"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: produce
+  purchase_unit: { unit: count }
+  aliases: ["lemon", "lemons"]
+
+- id: lime
+  display_name: "Lime"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: produce
+  aliases: ["lime", "limes"]
+
+- id: avocado
+  display_name: "Avocado"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: produce
+  aliases: ["avocado", "avocados"]
+
+- id: cucumber
+  display_name: "Cucumber"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: produce
+  aliases: ["cucumber", "cucumbers"]
+
+- id: mushroom_button
+  display_name: "Button mushrooms"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: produce
+  aliases: ["mushroom", "mushrooms", "button mushroom", "cremini", "baby bella"]
+
+- id: potato
+  display_name: "Potato"
+  allergen_tags: []
+  dietary_tags: [nightshade]
+  aisle_tag: produce
+  aliases: ["potato", "potatoes", "yukon gold", "russet potato"]
+
+- id: sweet_potato
+  display_name: "Sweet potato"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: produce
+  aliases: ["sweet potato", "sweet potatoes", "yam"]
+
+- id: zucchini
+  display_name: "Zucchini"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: produce
+  aliases: ["zucchini", "courgette"]
+
+- id: celery
+  display_name: "Celery"
+  allergen_tags: [celery]
+  dietary_tags: []
+  aisle_tag: produce
+  aliases: ["celery", "celery stalk", "celery stick"]
+  citations: { allergen: "EU-14: celery." }
+
+# ==========================================================================
+# LEAFY GREENS + HERBS
+# ==========================================================================
+- id: spinach_raw
+  display_name: "Spinach (raw)"
+  allergen_tags: []
+  dietary_tags: []
+  interaction_tags: [vitamin_k_high, potassium_high]
+  aisle_tag: produce
+  aliases: ["spinach", "baby spinach", "fresh spinach"]
+
+- id: kale_raw
+  display_name: "Kale (raw)"
+  allergen_tags: []
+  dietary_tags: []
+  interaction_tags: [vitamin_k_high, potassium_high]
+  aisle_tag: produce
+  aliases: ["kale", "curly kale", "lacinato kale"]
+
+- id: swiss_chard
+  display_name: "Swiss chard"
+  allergen_tags: []
+  dietary_tags: []
+  interaction_tags: [vitamin_k_high, potassium_high]
+  aisle_tag: produce
+  aliases: ["swiss chard", "chard"]
+
+- id: beet_greens
+  display_name: "Beet greens"
+  allergen_tags: []
+  dietary_tags: []
+  interaction_tags: [vitamin_k_high, potassium_high]
+  aisle_tag: produce
+  aliases: ["beet greens", "beet leaves"]
+
+- id: cilantro
+  display_name: "Cilantro"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: produce
+  aliases: ["cilantro", "coriander", "fresh cilantro", "coriander leaves"]
+
+- id: parsley
+  display_name: "Parsley"
+  allergen_tags: []
+  dietary_tags: []
+  interaction_tags: [vitamin_k_high]
+  aisle_tag: produce
+  aliases: ["parsley", "flat-leaf parsley", "italian parsley"]
+
+- id: basil
+  display_name: "Basil"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: produce
+  aliases: ["basil", "fresh basil", "thai basil"]
+
+# ==========================================================================
+# SPICES + SALT
+# ==========================================================================
+- id: salt
+  display_name: "Salt"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: spices
+  aliases: ["salt", "kosher salt", "sea salt", "table salt", "salt to taste"]
+
+- id: black_pepper
+  display_name: "Black pepper"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: spices
+  aliases: ["pepper", "black pepper", "ground black pepper"]
+
+- id: cumin
+  display_name: "Cumin"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: spices
+  aliases: ["cumin", "ground cumin"]
+
+- id: paprika
+  display_name: "Paprika"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: spices
+  aliases: ["paprika", "sweet paprika", "smoked paprika"]
+
+- id: cinnamon
+  display_name: "Cinnamon"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: spices
+  aliases: ["cinnamon", "ground cinnamon"]
+
+- id: chili_flakes
+  display_name: "Chili flakes"
+  allergen_tags: []
+  dietary_tags: [nightshade]
+  aisle_tag: spices
+  aliases: ["chili flakes", "red pepper flakes", "crushed red pepper"]
+
+# ==========================================================================
+# FRUIT + SWEETENERS
+# ==========================================================================
+- id: chocolate_dark
+  display_name: "Dark chocolate"
+  allergen_tags: [dairy]  # cross-contamination; many dark chocolates carry milk
+  dietary_tags: [animal, dairy]
+  aisle_tag: pantry
+  aliases: ["dark chocolate", "chocolate"]
+  citations: { allergen: "FDA Big-9: milk. Most commercial dark chocolate carries 'may contain milk' cross-contamination statements." }
+  notes: "Conservative dairy tag — most commercial dark chocolate is cross-contaminated. Dairy-free dark chocolate is a separate canonical id (not in v1)."
+
+- id: sugar_granulated
+  display_name: "Granulated sugar"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["sugar", "granulated sugar", "white sugar"]
+
+- id: baking_soda
+  display_name: "Baking soda"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["baking soda", "bicarbonate of soda"]
+
+- id: vanilla_extract
+  display_name: "Vanilla extract"
+  allergen_tags: []
+  dietary_tags: [alcohol]
+  aisle_tag: pantry
+  aliases: ["vanilla extract", "vanilla"]
+
+# ==========================================================================
+# MISC
+# ==========================================================================
+- id: seaweed_nori
+  display_name: "Nori (seaweed)"
+  allergen_tags: []
+  dietary_tags: []
+  aisle_tag: pantry
+  aliases: ["nori", "seaweed", "sushi nori"]
+
+- id: grapefruit
+  display_name: "Grapefruit"
+  allergen_tags: []
+  dietary_tags: []
+  interaction_tags: [grapefruit]
+  aisle_tag: produce
+  aliases: ["grapefruit"]
+  citations: { allergen: "No allergen; flagged for statin/amiodarone interaction." }

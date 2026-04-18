@@ -28,6 +28,7 @@ from ..models import (
     ClinicalPatchRequest,
     ClinicianOverrideRequest,
     CompletenessResponse,
+    DailyTargets,
     FeedbackRequest,
     FeedbackResponse,
     MealHistoryResponse,
@@ -37,13 +38,31 @@ from ..models import (
     NutritionPlan,
     NutritionPlanRequest,
     NutritionPlanResponse,
+    PlanCohort,
     ProfileUpdateRequest,
     ReproductiveState,
+)
+from ..nutrition_calc import (
+    CALCULATOR_VERSION,
+    InsufficientInputError,
+    UnsupportedCohortError,
+    compute_daily_targets,
 )
 from ..shared.client_profile_store import ClientProfileStore, get_profile_store
 from ..shared.meal_feedback_store import MealFeedbackStore, get_meal_feedback_store
 from ..shared.nutrition_plan_store import NutritionPlanStore, get_nutrition_plan_store
 from ..units import coerce_height_cm, coerce_weight_kg
+
+
+class SafetyInvariantError(RuntimeError):
+    """Raised when the orchestrator's belt-and-suspenders check catches a
+    calculator bug that produced an unsafe plan (SPEC-004 §4.8).
+
+    Steady-state this must remain zero. A non-zero rate in production
+    is a pageable incident — the calculator is supposed to have
+    prevented the violation already.
+    """
+
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +85,10 @@ class NutritionMealPlanningOrchestrator:
         self.nutrition_plan_store = nutrition_plan_store or get_nutrition_plan_store()
         model = llm_model or get_strands_model("nutrition_meal_planning")
         self.intake_agent = IntakeProfileAgent(model)
-        self.nutritionist_agent = NutritionistAgent(model)
+        # SPEC-004: NutritionistAgent is a narrator on top of the
+        # calculator; it pulls its own llm_service client lazily and
+        # does not take a strands model.
+        self.nutritionist_agent = NutritionistAgent()
         self.meal_planning_agent = MealPlanningAgent(model)
         self.chat_agent = NutritionChatAgent(
             model, self.intake_agent, self.nutritionist_agent, self.meal_planning_agent
@@ -86,13 +108,206 @@ class NutritionMealPlanningOrchestrator:
         return profile
 
     def _get_or_generate_nutrition_plan(self, profile: ClientProfile) -> NutritionPlan:
-        """Return cached nutrition plan if profile unchanged, otherwise generate and cache."""
-        cached = self.nutrition_plan_store.get_cached_plan(profile.client_id, profile)
+        """Return cached nutrition plan if inputs unchanged, otherwise rebuild.
+
+        SPEC-004 §4.4. Cache key includes ``CALCULATOR_VERSION`` so a
+        calculator upgrade invalidates every client's plan
+        deterministically on first read post-deploy.
+        """
+        cached = self.nutrition_plan_store.get_cached_plan(
+            profile.client_id, profile, calculator_version=CALCULATOR_VERSION
+        )
         if cached is not None:
             return cached
-        plan = self.nutritionist_agent.run(profile)
-        self.nutrition_plan_store.save_plan(profile.client_id, profile, plan)
+        plan = self._build_nutrition_plan(profile)
+        self.nutrition_plan_store.save_plan(
+            profile.client_id, profile, plan, calculator_version=CALCULATOR_VERSION
+        )
         return plan
+
+    def _build_nutrition_plan(self, profile: ClientProfile) -> NutritionPlan:
+        """Deterministic calculator → LLM narrator → assembled NutritionPlan.
+
+        SPEC-004 §4.4. Returns a ``NutritionPlan`` with numeric
+        targets from ``nutrition_calc`` and narrative from the
+        refactored ``NutritionistAgent``. On unsupported cohorts
+        (minor / CKD 4-5) or missing biometrics, emits a
+        guidance-only plan.
+        """
+        try:
+            calc = compute_daily_targets(profile)
+        except UnsupportedCohortError as exc:
+            plan = self._build_guidance_only_plan(
+                profile,
+                cohort=PlanCohort(exc.cohort),
+                guidance_key=exc.guidance_key,
+                clinician_note=exc.clinician_note,
+            )
+            return self._assert_safety_invariants(profile, plan)
+        except InsufficientInputError as exc:
+            plan = self._build_insufficient_input_plan(profile, exc)
+            return self._assert_safety_invariants(profile, plan)
+
+        narrative = self.nutritionist_agent.narrate_plan(
+            profile, calc.targets, self._rationale_to_dict(calc.rationale)
+        )
+        plan = NutritionPlan(
+            daily_targets=calc.targets,
+            balance_guidelines=list(narrative.balance_guidelines),
+            foods_to_emphasize=list(narrative.foods_to_emphasize),
+            foods_to_avoid=list(narrative.foods_to_avoid),
+            notes=narrative.notes,
+            rationale=self._rationale_to_dict(calc.rationale),
+            calculator_version=calc.calculator_version,
+            cohort=PlanCohort(calc.cohort),
+            is_guidance_only=False,
+            clinician_note=None,
+            intermediates=dict(calc.intermediates or {}),
+            metadata=dict(calc.metadata or {}),
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return self._assert_safety_invariants(profile, plan)
+
+    def _build_guidance_only_plan(
+        self,
+        profile: ClientProfile,
+        *,
+        cohort: PlanCohort,
+        guidance_key: str,
+        clinician_note: str,
+    ) -> NutritionPlan:
+        """Guidance-only plan for cohorts that refuse numeric targets."""
+        payload = self.nutritionist_agent.narrate_general_guidance(
+            profile, guidance_key, default_clinician_note=clinician_note
+        )
+        return NutritionPlan(
+            daily_targets=DailyTargets(),
+            balance_guidelines=list(payload.balance_guidelines),
+            foods_to_emphasize=list(payload.foods_to_emphasize),
+            foods_to_avoid=list(payload.foods_to_avoid),
+            notes=payload.notes,
+            rationale=None,
+            calculator_version=CALCULATOR_VERSION,
+            cohort=cohort,
+            is_guidance_only=True,
+            clinician_note=payload.clinician_note or clinician_note,
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def _build_insufficient_input_plan(
+        self, profile: ClientProfile, exc: InsufficientInputError
+    ) -> NutritionPlan:
+        """Plan emitted when required biometrics are missing.
+
+        We do not call the LLM on this path — there is nothing useful
+        to narrate. The response's ``notes`` field names the missing
+        fields so the UI can deep-link the user to the right input.
+        """
+        fields = ", ".join(exc.fields) if exc.fields else "biometric inputs"
+        note = (
+            f"We need {fields} before we can compute personalized "
+            "targets. Update your profile to unlock a full plan."
+        )
+        return NutritionPlan(
+            daily_targets=DailyTargets(),
+            balance_guidelines=[],
+            foods_to_emphasize=[],
+            foods_to_avoid=[],
+            notes=note,
+            rationale=None,
+            calculator_version=CALCULATOR_VERSION,
+            cohort=PlanCohort.general_adult,
+            is_guidance_only=True,
+            clinician_note=None,
+            metadata={"missing_fields": list(exc.fields)},
+            generated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def _assert_safety_invariants(
+        self, profile: ClientProfile, plan: NutritionPlan
+    ) -> NutritionPlan:
+        """Belt-and-suspenders re-assertion of the SPEC-003 rails.
+
+        This should never fire: the calculator's cohort router and
+        safety floor already enforce each invariant. Any violation
+        here means a calculator bug made it past testing; we refuse
+        to emit the plan and surface a SafetyInvariantError so the
+        caller can produce a graceful error and the metric pages.
+        """
+        bio = profile.biometrics
+        clin = profile.clinical
+        # Minor: numeric targets are not allowed.
+        if bio.age_years is not None and bio.age_years < 18:
+            if not plan.is_guidance_only:
+                raise SafetyInvariantError("minor profile produced numeric-target plan")
+            if profile.goals and profile.goals.goal_type == "lose_weight":
+                # Still guidance_only — do not throw; just scrub the goal
+                # type from the plan's view. The profile itself is
+                # untouched (that's the profile API's concern).
+                pass
+
+        # ED-history flag: no deficit may be applied.
+        if clin and clin.ed_history_flag and not plan.is_guidance_only:
+            # The calculator's ed_adjacent cohort sets kcal = TDEE.
+            # We re-assert: kcal_target must be >= intermediates.tdee_kcal
+            # (no deficit). Guidance-only plans have no numeric kcal so
+            # they are exempt.
+            kcal = plan.daily_targets.calories_kcal
+            tdee = plan.intermediates.get("tdee_kcal")
+            if kcal is not None and tdee is not None and kcal < tdee - 1:
+                raise SafetyInvariantError("ED-history profile produced deficit-bearing plan")
+
+        # kcal floor: calculator guarantees >=1200; cross-check here.
+        kcal = plan.daily_targets.calories_kcal
+        if kcal is not None and kcal > 0 and kcal < 1200:
+            raise SafetyInvariantError(f"plan kcal {kcal} is below the 1200 safety floor")
+        return plan
+
+    @staticmethod
+    def _rationale_to_dict(rationale) -> dict | None:
+        """Serialize the nutrition_calc Rationale dataclass for JSONB storage."""
+        if rationale is None:
+            return None
+        return {
+            "cohort": rationale.cohort,
+            "applied_overrides": list(rationale.applied_overrides),
+            "steps": [
+                {
+                    "id": step.id,
+                    "label": step.label,
+                    "inputs": step.inputs,
+                    "outputs": step.outputs,
+                    "source": step.source,
+                    "note": step.note,
+                }
+                for step in rationale.steps
+            ],
+        }
+
+    def regenerate_nutrition_plan(self, client_id: str) -> NutritionPlanResponse:
+        """Force a cache miss and rebuild the plan (SPEC-004 §4.7)."""
+        profile = self.profile_store.get_profile(client_id)
+        if profile is None:
+            raise ValueError("Profile not found")
+        self.nutrition_plan_store.invalidate_plan(client_id)
+        plan = self._get_or_generate_nutrition_plan(profile)
+        return NutritionPlanResponse(client_id=client_id, plan=plan)
+
+    def get_rationale(self, client_id: str) -> dict | None:
+        """Return the rationale + intermediates for the latest cached plan
+        (SPEC-004 §4.7). None if no plan exists yet."""
+        profile = self.profile_store.get_profile(client_id)
+        if profile is None:
+            return None
+        plan = self._get_or_generate_nutrition_plan(profile)
+        return {
+            "client_id": client_id,
+            "rationale": plan.rationale,
+            "intermediates": plan.intermediates,
+            "cohort": plan.cohort.value if plan.cohort else None,
+            "calculator_version": plan.calculator_version,
+            "is_guidance_only": plan.is_guidance_only,
+        }
 
     def get_nutrition_plan(self, request: NutritionPlanRequest) -> NutritionPlanResponse:
         """Load profile, run nutritionist agent, return plan."""
@@ -199,11 +414,13 @@ class NutritionMealPlanningOrchestrator:
             bio.preferred_units = patch.preferred_units
             changes.append(("preferred_units", None, bio.preferred_units, None))
 
-        if patch.measured_at is not None:
+        measured_at_changed = False
+        if patch.measured_at is not None and patch.measured_at != bio.measured_at:
             bio.measured_at = patch.measured_at
-            # measured_at is metadata, not a value — no audit row.
+            measured_at_changed = True
+            # measured_at is metadata, not a numeric value — no audit row.
 
-        if changes:
+        if changes or measured_at_changed:
             self.profile_store.save_profile(client_id, profile)
             for field, vnum, vtext, unit in changes:
                 self.profile_store.log_biometric(
@@ -227,8 +444,13 @@ class NutritionMealPlanningOrchestrator:
         """Return biometric log rows for the client, newest first."""
         since_dt: Optional[datetime] = None
         if since_iso:
+            # ``datetime.fromisoformat`` on Python 3.10 rejects the
+            # trailing ``Z`` shorthand common in RFC3339. Normalize
+            # it to ``+00:00`` so callers can pass standard API
+            # timestamps without having to pre-process them.
+            normalized = since_iso[:-1] + "+00:00" if since_iso.endswith("Z") else since_iso
             try:
-                since_dt = datetime.fromisoformat(since_iso)
+                since_dt = datetime.fromisoformat(normalized)
                 if since_dt.tzinfo is None:
                     since_dt = since_dt.replace(tzinfo=timezone.utc)
             except ValueError:
@@ -470,10 +692,17 @@ class NutritionMealPlanningOrchestrator:
     def _handle_generate_nutrition_plan(
         self, client_id: str, profile: Optional[ClientProfile]
     ) -> Optional[NutritionPlan]:
+        """Chat-initiated plan generation (SPEC-004 parity).
+
+        Routes through the same ``_get_or_generate_nutrition_plan``
+        path the direct API uses, so a chat request and a direct
+        ``POST /plan/nutrition`` for the same profile return byte-
+        equal plans (SPEC-004 §6.2 parity test).
+        """
         p = profile or self.profile_store.get_profile(client_id)
         if p:
             try:
-                return self.nutritionist_agent.run(p)
+                return self._get_or_generate_nutrition_plan(p)
             except Exception as e:
                 logger.warning("Nutrition plan generation failed during chat: %s", e)
         return None

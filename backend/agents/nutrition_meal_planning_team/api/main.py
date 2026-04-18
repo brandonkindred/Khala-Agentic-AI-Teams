@@ -242,6 +242,34 @@ def post_plan_nutrition_route(body: NutritionPlanRequest):
         raise HTTPException(status_code=404, detail="Profile not found")
 
 
+@app.post("/plan/nutrition/{client_id}/regenerate", response_model=NutritionPlanResponse)
+def post_plan_nutrition_regenerate_route(client_id: str):
+    """SPEC-004 §4.7: force cache miss and rebuild the plan.
+
+    Rate-limited at the gateway layer in production (not re-enforced
+    here). Use when the user taps "refresh" after a profile change
+    that the UI thinks should produce a different plan.
+    """
+    try:
+        return orchestrator.regenerate_nutrition_plan(client_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+
+@app.get("/plan/nutrition/{client_id}/rationale")
+def get_plan_nutrition_rationale_route(client_id: str):
+    """SPEC-004 §4.7: rationale + intermediates for the latest plan.
+
+    Lighter payload than the full plan (no guidelines / foods lists),
+    designed for the "why these numbers?" UI panel. Returns 404 if
+    no profile exists yet.
+    """
+    payload = orchestrator.get_rationale(client_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return payload
+
+
 @app.post("/plan/meals", response_model=MealPlanResponse)
 def post_plan_meals_route(body: MealPlanRequest):
     """Get meal plan: load profile, nutrition plan, meal history; run meal planning agent."""

@@ -1,0 +1,30 @@
+# Unit registry for the ingredient parser.
+#
+# Mass units carry grams_per_unit; volume units carry ml_per_unit;
+# count units carry neither and require a per-canonical-id mass entry
+# in densities.yaml (e.g. onion_medium: 170 g per count).
+#
+# All values are exact conversion constants. Changing one bumps the
+# KB_VERSION minor per SPEC-005 §4.10.
+
+# Mass
+g:       { kind: mass,   grams_per_unit: 1.0 }
+kg:      { kind: mass,   grams_per_unit: 1000.0 }
+oz:      { kind: mass,   grams_per_unit: 28.349523125 }
+lb:      { kind: mass,   grams_per_unit: 453.59237 }
+
+# Volume — international metric and common US kitchen units.
+ml:      { kind: volume, ml_per_unit: 1.0 }
+l:       { kind: volume, ml_per_unit: 1000.0 }
+tsp:     { kind: volume, ml_per_unit: 4.92892 }
+tbsp:    { kind: volume, ml_per_unit: 14.7868 }
+cup:     { kind: volume, ml_per_unit: 236.588 }
+fl_oz:   { kind: volume, ml_per_unit: 29.5735 }
+pint:    { kind: volume, ml_per_unit: 473.176 }
+quart:   { kind: volume, ml_per_unit: 946.353 }
+gallon:  { kind: volume, ml_per_unit: 3785.41 }
+
+# Count — each canonical_id that uses ``count`` supplies its own mass
+# via densities.yaml (e.g. onion_medium, egg_large).
+count:   { kind: count }
+dozen:   { kind: count }
