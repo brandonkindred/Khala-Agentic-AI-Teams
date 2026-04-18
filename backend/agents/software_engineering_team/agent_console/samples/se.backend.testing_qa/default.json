@@ -1,0 +1,17 @@
+{
+  "microtask": {
+    "id": "",
+    "title": "",
+    "description": "",
+    "tool_agent": "data_engineering",
+    "status": "pending",
+    "depends_on": [
+      ""
+    ],
+    "output_files": {},
+    "notes": ""
+  },
+  "repo_path": "",
+  "existing_code": "",
+  "language": "python"
+}

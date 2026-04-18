@@ -1,0 +1,15 @@
+schema_version: 1
+id: se.backend.auth
+team: software_engineering
+name: Backend — Authentication Specialist
+summary: Implements authentication and authorization patterns (OAuth, JWT, sessions).
+tags: [backend, auth, security, software-engineering]
+inputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentInput
+outputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentOutput
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: software_engineering_team.backend_code_v2_team.tool_agents.auth.agent:AuthToolAgent

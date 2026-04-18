@@ -17,6 +17,7 @@ export const environment = {
   personalAssistantApiUrl: `${apiBase}/api/personal-assistant`,
   accessibilityApiUrl: `${apiBase}/api/accessibility-audit`,
   agentProvisioningApiUrl: `${apiBase}/api/agent-provisioning`,
+  agentRegistryApiUrl: `${apiBase}/api/agents`,
   aiSystemsApiUrl: `${apiBase}/api/ai-systems`,
   investmentApiUrl: `${apiBase}/api/investment`,
   nutritionApiUrl: `${apiBase}/api/nutrition-meal-planning`,

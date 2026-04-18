@@ -1,0 +1,11 @@
+schema_version: 1
+id: branding.message_mapper
+team: branding
+name: Message Mapper
+summary: Develops value props, tone, and key messages per audience segment.
+tags: [branding, messaging, strategy]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: branding_team.agents:make_message_mapper

@@ -13,7 +13,7 @@ import { PlanningV3PageComponent } from './components/planning-v3-page/planning-
 import { CodingTeamPageComponent } from './components/coding-team-page/coding-team-page.component';
 import { PersonalAssistantDashboardComponent } from './components/personal-assistant-dashboard/personal-assistant-dashboard.component';
 import { AccessibilityDashboardComponent } from './components/accessibility-dashboard/accessibility-dashboard.component';
-import { AgentProvisioningDashboardComponent } from './components/agent-provisioning-dashboard/agent-provisioning-dashboard.component';
+import { AgentConsoleComponent } from './components/agent-console/agent-console.component';
 import { AISystemsDashboardComponent } from './components/ai-systems-dashboard/ai-systems-dashboard.component';
 import { InvestmentDashboardComponent } from './components/investment-dashboard/investment-dashboard.component';
 import { InvestmentStrategyLabPageComponent } from './components/investment-strategy-lab-page/investment-strategy-lab-page.component';
@@ -48,7 +48,8 @@ export const routes: Routes = [
       { path: 'branding', component: BrandingDashboardComponent, data: { breadcrumb: 'Branding', title: 'Branding' } },
       { path: 'personal-assistant', component: PersonalAssistantDashboardComponent, data: { breadcrumb: 'Personal Assistant', title: 'Personal Assistant' } },
       { path: 'accessibility', component: AccessibilityDashboardComponent, data: { breadcrumb: 'Accessibility Audit', title: 'Accessibility Audit' } },
-      { path: 'agent-provisioning', component: AgentProvisioningDashboardComponent, data: { breadcrumb: 'Agent Provisioning', title: 'Agent Provisioning' } },
+      { path: 'agent-console', component: AgentConsoleComponent, data: { breadcrumb: 'Agent Console', title: 'Agent Console' } },
+      { path: 'agent-provisioning', redirectTo: '/agent-console', pathMatch: 'full' },
       { path: 'ai-systems', component: AISystemsDashboardComponent, data: { breadcrumb: 'AI Systems', title: 'AI Systems' } },
       { path: 'investment', component: InvestmentDashboardComponent, data: { breadcrumb: 'Investment', title: 'Investment' } },
       {

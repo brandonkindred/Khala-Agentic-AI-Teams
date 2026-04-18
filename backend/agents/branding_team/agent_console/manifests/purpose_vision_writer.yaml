@@ -1,0 +1,11 @@
+schema_version: 1
+id: branding.purpose_vision_writer
+team: branding
+name: Purpose & Vision Writer
+summary: Crafts brand purpose, mission, and vision statements.
+tags: [branding, strategy, copy]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: branding_team.agents:make_purpose_vision_writer

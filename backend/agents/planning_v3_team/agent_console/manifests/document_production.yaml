@@ -1,0 +1,11 @@
+schema_version: 1
+id: planning_v3.doc_production
+team: planning_v3
+name: Planning V3 — Document Production
+summary: Renders the final PRD artifact (Markdown/PDF) from the synthesized spec.
+tags: [planning, documentation, prd]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: planning_v3_team.phases.document_production:run_document_production

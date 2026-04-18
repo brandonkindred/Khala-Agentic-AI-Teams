@@ -158,6 +158,14 @@ app = FastAPI(
 )
 instrument_fastapi_app(app, team_key="software_engineering")
 
+# Agent Console Runner — mounts POST /_agents/{agent_id}/invoke for the sandbox proxy.
+try:
+    from shared_agent_invoke import mount_invoke_shim
+
+    mount_invoke_shim(app, team_key="software_engineering")
+except Exception:  # pragma: no cover — shim is optional
+    logger.warning("Agent Console invoke shim unavailable for software_engineering", exc_info=True)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

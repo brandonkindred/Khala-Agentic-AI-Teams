@@ -1,0 +1,25 @@
+schema_version: 1
+id: blogging.planner
+team: blogging
+name: Blog Planner
+summary: Turns a topic + research brief into a structured ContentPlan.
+description: |
+  The planner runs a refinement loop (bounded by `BLOG_PLANNING_MAX_ITERATIONS`) that
+  produces a `ContentPlan` covering sections, takeaways, CTAs, and publication metadata.
+  Used by the blogging pipeline upstream of the writer.
+tags: [planning, content, blogging]
+inputs:
+  schema_ref: blogging.shared.content_plan:PlanningInput
+  description: Topic brief plus prior research document.
+outputs:
+  schema_ref: blogging.shared.content_plan:ContentPlan
+  description: Structured plan consumed by the writer agent.
+invoke:
+  kind: http
+  method: POST
+  path: /api/blogging/research-and-review
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: blogging.blog_planning_agent.agent:BlogPlanningAgent

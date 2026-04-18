@@ -1,0 +1,15 @@
+schema_version: 1
+id: se.backend.build
+team: software_engineering
+name: Backend — Build Specialist
+summary: Manages build systems and compilation (poetry, pip, uv, webpack, gradle).
+tags: [backend, build, tooling, software-engineering]
+inputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentInput
+outputs:
+  schema_ref: software_engineering_team.backend_code_v2_team.models:ToolAgentOutput
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: software_engineering_team.backend_code_v2_team.tool_agents.build_specialist.agent:BuildSpecialistAdapterAgent

@@ -1,0 +1,14 @@
+schema_version: 1
+id: blogging.fact_checker
+team: blogging
+name: Blog Fact Checker
+summary: Validates claims in a draft against cited sources.
+description: |
+  Scans the draft for factual claims and checks them against the research document,
+  flagging hallucinations and unverified statements.
+tags: [qa, gate, blogging]
+sandbox:
+  manifest_path: default.yaml
+  access_tier: standard
+source:
+  entrypoint: blogging.blog_fact_check_agent.agent:BlogFactCheckAgent

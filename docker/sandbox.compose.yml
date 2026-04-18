@@ -1,0 +1,197 @@
+# Agent Console — per-team sandbox compose file.
+#
+# Spins up isolated team services for the Agent Console Runner to invoke agents in.
+# Completely separate from the production docker-compose.yml:
+#   - Dedicated `sandbox-postgres` (host port 5433) — zero collision with prod postgres.
+#   - Dedicated `khala-sandbox` bridge network (no overlap with `khala-stack`).
+#   - Dedicated port range 8200-8220 for team-sandbox services.
+#   - Same images as production (same Dockerfiles, same image tags) — no rebuild overhead.
+#
+# Usage (driven by backend/agents/agent_sandbox via `docker compose`):
+#   docker compose -f docker/sandbox.compose.yml up -d sandbox-postgres
+#   docker compose -f docker/sandbox.compose.yml up -d blogging-sandbox
+#   docker compose -f docker/sandbox.compose.yml down blogging-sandbox
+#
+# Only the 4 teams that have the shared_agent_invoke shim wired are defined here in
+# Phase 2 (blogging, software_engineering, planning_v3, branding). Additional teams
+# are a trivial follow-up PR: add one service block below and mount the shim in the
+# team's api/main.py.
+
+# Env vars shared by every team sandbox. Each team extends this and adds
+# POSTGRES_DB + TEAM_MODULE/TEAM_PORT as appropriate.
+x-sandbox-env-base: &sandbox-env-base
+  LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+  LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
+  LLM_MODEL: ${LLM_MODEL:-qwen3.5:397b-cloud}
+  OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+  PYTHONUNBUFFERED: "1"
+  POSTGRES_HOST: sandbox-postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: ${POSTGRES_USER:-postgres}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env before starting sandboxes}
+  AGENT_CACHE: /data/agents
+  AGENT_CONSOLE_MODE: sandbox
+
+services:
+  # ---------------------------------------------------------------------------
+  # Shared Postgres instance used by all sandboxes.
+  # Lives on port 5433 (host) to avoid clashing with the prod postgres on 5432.
+  # Each sandbox uses a distinct database name via POSTGRES_DB env.
+  # ---------------------------------------------------------------------------
+  sandbox-postgres:
+    image: postgres:18
+    container_name: khala-sandbox-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env before starting sandboxes}
+      POSTGRES_DB: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - sandbox_postgres_data:/var/lib/postgresql
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      sandbox:
+        aliases: [sandbox-postgres]
+
+  # ---------------------------------------------------------------------------
+  # blogging-sandbox  (port 8200)
+  # Reuses the production `khala-blogging-service` image. Playwright browser
+  # session root lives inside this sandbox's own volume slice.
+  # ---------------------------------------------------------------------------
+  blogging-sandbox:
+    image: khala-blogging-service
+    build:
+      context: ../backend
+      dockerfile: blogging_service/Dockerfile
+    container_name: khala-sandbox-blogging
+    depends_on:
+      sandbox-postgres: { condition: service_healthy }
+    environment:
+      <<: *sandbox-env-base
+      POSTGRES_DB: sandbox_blogging
+    ports:
+      - "${BLOGGING_SANDBOX_PORT:-8200}:8090"
+    volumes:
+      - sandbox_agents_data:/data/agents
+    networks:
+      sandbox:
+        aliases: [blogging-sandbox]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+  # ---------------------------------------------------------------------------
+  # software_engineering sandbox  (port 8201)
+  # ---------------------------------------------------------------------------
+  se-sandbox:
+    image: khala-se-service
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8091" }
+    container_name: khala-sandbox-se
+    depends_on:
+      sandbox-postgres: { condition: service_healthy }
+    environment:
+      <<: *sandbox-env-base
+      POSTGRES_DB: sandbox_software_engineering
+      TEAM_MODULE: software_engineering_team.api.main
+      TEAM_NAME: software_engineering_team
+      TEAM_PORT: "8091"
+      SE_WORKSPACE_DIR: /data/agents/software_engineering_team/workspaces
+    ports:
+      - "${SE_SANDBOX_PORT:-8201}:8091"
+    volumes:
+      - sandbox_agents_data:/data/agents
+    networks:
+      sandbox:
+        aliases: [se-sandbox]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # planning_v3 sandbox  (port 8202)
+  # ---------------------------------------------------------------------------
+  planning-v3-sandbox:
+    image: khala-planning-v3-service
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8102" }
+    container_name: khala-sandbox-planning-v3
+    depends_on:
+      sandbox-postgres: { condition: service_healthy }
+    environment:
+      <<: *sandbox-env-base
+      POSTGRES_DB: sandbox_planning_v3
+      TEAM_MODULE: planning_v3_team.api.main
+      TEAM_NAME: planning_v3_team
+      TEAM_PORT: "8102"
+    ports:
+      - "${PLANNING_V3_SANDBOX_PORT:-8202}:8102"
+    volumes:
+      - sandbox_agents_data:/data/agents
+    networks:
+      sandbox:
+        aliases: [planning-v3-sandbox]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8102/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # branding sandbox  (port 8203)
+  # ---------------------------------------------------------------------------
+  branding-sandbox:
+    image: khala-branding-service
+    build:
+      context: ../backend
+      dockerfile: team_service/Dockerfile
+      args: { TEAM_PORT: "8096" }
+    container_name: khala-sandbox-branding
+    depends_on:
+      sandbox-postgres: { condition: service_healthy }
+    environment:
+      <<: *sandbox-env-base
+      POSTGRES_DB: sandbox_branding
+      TEAM_MODULE: branding_team.api.main
+      TEAM_NAME: branding_team
+      TEAM_PORT: "8096"
+    ports:
+      - "${BRANDING_SANDBOX_PORT:-8203}:8096"
+    volumes:
+      - sandbox_agents_data:/data/agents
+    networks:
+      sandbox:
+        aliases: [branding-sandbox]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8096/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+
+networks:
+  sandbox:
+    name: khala-sandbox
+    driver: bridge
+
+volumes:
+  sandbox_postgres_data:
+    name: khala_sandbox_postgres_data
+  sandbox_agents_data:
+    name: khala_sandbox_agents_data

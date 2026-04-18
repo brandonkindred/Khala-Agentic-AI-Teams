@@ -1,0 +1,263 @@
+<section class="agent-catalog">
+  <aside class="agent-catalog__filters" aria-label="Catalog filters">
+    <header>
+      <h2>Browse agents</h2>
+      <button
+        type="button"
+        mat-stroked-button
+        (click)="clearFilters()"
+        [disabled]="!query() && !selectedTeam() && !selectedTag()"
+      >
+        <mat-icon>clear</mat-icon>
+        Clear
+      </button>
+    </header>
+
+    <mat-form-field appearance="outline" class="agent-catalog__search">
+      <mat-label>Search agents</mat-label>
+      <mat-icon matPrefix>search</mat-icon>
+      <input
+        matInput
+        type="search"
+        [ngModel]="query()"
+        (ngModelChange)="onSearchChange($event)"
+        placeholder="Name, summary, tag…"
+      />
+    </mat-form-field>
+
+    <h3>Teams</h3>
+    <ul class="agent-catalog__teams">
+      <li>
+        <button
+          type="button"
+          [class.is-active]="!selectedTeam()"
+          (click)="onTeamChange(null)"
+        >
+          <span>All teams</span>
+          <span class="count">{{ agents().length }}</span>
+        </button>
+      </li>
+      @for (team of teams(); track team.team) {
+        <li>
+          <button
+            type="button"
+            [class.is-active]="selectedTeam() === team.team"
+            (click)="onTeamChange(team.team)"
+          >
+            <span>{{ team.display_name }}</span>
+            <span class="count">{{ team.agent_count }}</span>
+          </button>
+        </li>
+      }
+    </ul>
+
+    <h3>Tags</h3>
+    @if (allTags().length) {
+      <mat-chip-set class="agent-catalog__tags">
+        @for (tag of allTags(); track tag) {
+          <mat-chip
+            [highlighted]="selectedTag() === tag"
+            (click)="onTagToggle(tag)"
+          >
+            {{ tag }}
+          </mat-chip>
+        }
+      </mat-chip-set>
+    } @else {
+      <p class="agent-catalog__empty">No tags yet.</p>
+    }
+  </aside>
+
+  <main class="agent-catalog__results">
+    <header class="agent-catalog__results-header">
+      <h2>
+        {{ agents().length }} agent{{ agents().length === 1 ? '' : 's' }}
+        @if (selectedTeam()) {
+          <span class="filter-pill">in {{ teamDisplayName(selectedTeam()!) }}</span>
+        }
+        @if (selectedTag()) {
+          <span class="filter-pill">tagged "{{ selectedTag() }}"</span>
+        }
+      </h2>
+    </header>
+
+    @if (loading()) {
+      <div class="agent-catalog__loading">
+        <mat-spinner diameter="32"></mat-spinner>
+        <span>Loading agents…</span>
+      </div>
+    }
+
+    @if (error()) {
+      <div class="agent-catalog__error" role="alert">
+        <mat-icon>error</mat-icon>
+        <span>{{ error() }}</span>
+      </div>
+    }
+
+    @if (!loading() && !error() && agents().length === 0) {
+      <div class="agent-catalog__empty-state">
+        <mat-icon>search_off</mat-icon>
+        <p>No agents match these filters.</p>
+        <button mat-stroked-button (click)="clearFilters()">Clear filters</button>
+      </div>
+    }
+
+    @if (!loading() && agents().length > 0) {
+      <div class="agent-catalog__grid">
+        @for (agent of agents(); track agent.id) {
+          <mat-card
+            class="agent-card"
+            tabindex="0"
+            role="button"
+            (click)="openDetail(agent)"
+            (keyup.enter)="openDetail(agent)"
+          >
+            <mat-card-header>
+              <mat-card-title>{{ agent.name }}</mat-card-title>
+              <mat-card-subtitle>
+                <span class="agent-card__team">{{ teamDisplayName(agent.team) }}</span>
+                <span class="agent-card__id">{{ agent.id }}</span>
+              </mat-card-subtitle>
+            </mat-card-header>
+            <mat-card-content>
+              <p class="agent-card__summary">{{ agent.summary }}</p>
+              <mat-chip-set class="agent-card__tags">
+                @for (tag of agent.tags; track tag) {
+                  <mat-chip>{{ tag }}</mat-chip>
+                }
+              </mat-chip-set>
+              <div class="agent-card__flags">
+                @if (agent.has_input_schema) {
+                  <span matTooltip="Input schema available"><mat-icon>input</mat-icon></span>
+                }
+                @if (agent.has_output_schema) {
+                  <span matTooltip="Output schema available"><mat-icon>output</mat-icon></span>
+                }
+                @if (agent.has_invoke) {
+                  <span matTooltip="Invocation configured"><mat-icon>play_arrow</mat-icon></span>
+                }
+                @if (agent.has_sandbox) {
+                  <span matTooltip="Sandbox provisioning configured"><mat-icon>cloud_queue</mat-icon></span>
+                }
+              </div>
+            </mat-card-content>
+          </mat-card>
+        }
+      </div>
+    }
+  </main>
+
+  @if (drawerOpen()) {
+    <aside
+      class="agent-catalog__drawer"
+      aria-live="polite"
+      aria-label="Agent detail"
+    >
+      <header>
+        <h2>{{ selectedDetail()?.manifest?.name || 'Loading…' }}</h2>
+        <button mat-icon-button (click)="closeDetail()" aria-label="Close detail drawer">
+          <mat-icon>close</mat-icon>
+        </button>
+      </header>
+
+      @if (detailLoading()) {
+        <div class="agent-catalog__drawer-loading">
+          <mat-spinner diameter="32"></mat-spinner>
+        </div>
+      }
+
+      @if (selectedDetail(); as detail) {
+        <div class="agent-catalog__drawer-body">
+          <dl class="agent-catalog__meta">
+            <dt>ID</dt><dd><code>{{ detail.manifest.id }}</code></dd>
+            <dt>Team</dt><dd>{{ teamDisplayName(detail.manifest.team) }}</dd>
+            <dt>Entrypoint</dt><dd><code>{{ detail.manifest.source.entrypoint }}</code></dd>
+            @if (detail.manifest.source.anatomy_ref) {
+              <dt>Anatomy</dt><dd><code>{{ detail.manifest.source.anatomy_ref }}</code></dd>
+            }
+          </dl>
+
+          <section>
+            <h3>Summary</h3>
+            <p>{{ detail.manifest.summary }}</p>
+            @if (detail.manifest.description) {
+              <p class="agent-catalog__description">{{ detail.manifest.description }}</p>
+            }
+          </section>
+
+          @if (detail.manifest.tags.length) {
+            <section>
+              <h3>Tags</h3>
+              <mat-chip-set>
+                @for (tag of detail.manifest.tags; track tag) {
+                  <mat-chip>{{ tag }}</mat-chip>
+                }
+              </mat-chip-set>
+            </section>
+          }
+
+          @if (detail.manifest.inputs?.schema_ref || detail.manifest.outputs?.schema_ref) {
+            <section>
+              <h3>I/O schemas</h3>
+              <ul>
+                @if (detail.manifest.inputs?.schema_ref) {
+                  <li><strong>Input:</strong> <code>{{ detail.manifest.inputs!.schema_ref }}</code></li>
+                }
+                @if (detail.manifest.outputs?.schema_ref) {
+                  <li><strong>Output:</strong> <code>{{ detail.manifest.outputs!.schema_ref }}</code></li>
+                }
+              </ul>
+            </section>
+          }
+
+          @if (detail.manifest.invoke) {
+            <section>
+              <h3>Invocation</h3>
+              <p>
+                <strong>Kind:</strong> {{ detail.manifest.invoke.kind }}
+                @if (detail.manifest.invoke.path) {
+                  <br /><strong>HTTP:</strong> {{ detail.manifest.invoke.method || 'POST' }}
+                  <code>{{ detail.manifest.invoke.path }}</code>
+                }
+                @if (detail.manifest.invoke.callable_ref) {
+                  <br /><strong>Callable:</strong> <code>{{ detail.manifest.invoke.callable_ref }}</code>
+                }
+              </p>
+            </section>
+          }
+
+          @if (detail.manifest.sandbox) {
+            <section>
+              <h3>Sandbox</h3>
+              <p>
+                <strong>Manifest:</strong> <code>{{ detail.manifest.sandbox.manifest_path }}</code><br />
+                <strong>Access tier:</strong> {{ detail.manifest.sandbox.access_tier }}
+              </p>
+            </section>
+          }
+
+          @if (detail.anatomy_markdown) {
+            <section class="agent-catalog__anatomy">
+              <h3>Anatomy</h3>
+              <pre>{{ detail.anatomy_markdown }}</pre>
+            </section>
+          }
+
+          <footer class="agent-catalog__drawer-actions">
+            <button
+              mat-flat-button
+              color="primary"
+              (click)="runFromDrawer()"
+              [disabled]="requiresLiveIntegration()"
+              [matTooltip]="requiresLiveIntegration() ? 'This agent requires live integrations and cannot run in a sandbox.' : 'Open this agent in the Runner tab'"
+            >
+              <mat-icon>play_arrow</mat-icon>
+              Run agent
+            </button>
+          </footer>
+        </div>
+      }
+    </aside>
+  }
+</section>
