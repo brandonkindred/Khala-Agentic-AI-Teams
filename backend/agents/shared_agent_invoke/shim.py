@@ -79,22 +79,21 @@ def mount_invoke_shim(app: FastAPI, *, team_key: str) -> None:
         stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
         error: str | None = None
         output: Any | None = None
+        dispatch_error: AgentNotRunnableError | None = None
         try:
             with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
                 output = await invoke_entrypoint(manifest.source.entrypoint, body)
         except AgentNotRunnableError as exc:
+            # Config / deployment problem — bad entrypoint, missing symbol,
+            # non-zero-arg constructor. Defer the raise until after `finally`
+            # so logs/stdout are still captured in the envelope.
             logger.exception("agent %s not runnable", agent_id)
-            duration_ms = int((time.perf_counter() - start) * 1000)
-            return InvokeEnvelope(
-                output=None,
-                duration_ms=duration_ms,
-                trace_id=trace_id,
-                logs_tail=logs_tail[-50:],
-                error=f"AgentNotRunnable: {exc}",
-            )
+            dispatch_error = exc
         except HTTPException:
             raise
         except Exception as exc:
+            # User-space exception raised by the agent itself — surface it
+            # with logs via a 422 so the caller can still render the envelope.
             logger.exception("agent %s raised during invoke", agent_id)
             error = f"{type(exc).__name__}: {exc}"
         finally:
@@ -105,6 +104,22 @@ def mount_invoke_shim(app: FastAPI, *, team_key: str) -> None:
                 logs_tail.append(f"[stderr] {line}")
 
         duration_ms = int((time.perf_counter() - start) * 1000)
+
+        if dispatch_error is not None:
+            # Infrastructure/config failure — must NOT return 200. Clients
+            # that rely on status codes (including the unified API proxy's
+            # run persistence) treat 5xx as a hard failure, which is what
+            # this is. Body still carries the envelope shape so the UI can
+            # render the error + captured logs.
+            envelope = InvokeEnvelope(
+                output=None,
+                duration_ms=duration_ms,
+                trace_id=trace_id,
+                logs_tail=logs_tail[-50:],
+                error=f"AgentNotRunnable: {dispatch_error}",
+            )
+            raise HTTPException(status_code=500, detail=envelope.model_dump())
+
         envelope = InvokeEnvelope(
             output=_jsonable(output),
             duration_ms=duration_ms,

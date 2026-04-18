@@ -420,18 +420,28 @@ export class AgentRunnerComponent implements OnInit, OnDestroy {
     this.lastError.set(null);
     this.activeRunId.set(null);
     this.runner.invoke(id, body, savedId).subscribe({
-      next: (envelope) => {
-        this.lastResponse.set(envelope);
+      next: (response) => {
         this.running.set(false);
+        // 202 is the sandbox "still warming" signal — HttpClient delivers it
+        // through `next` because 202 ∈ 2xx, but the body is the warming
+        // envelope `{status, message, sandbox}`, NOT an InvokeEnvelope.
+        // Treating it as a success would leave downstream code reading
+        // `trace_id` / `logs_tail` off an object that doesn't have them.
+        if (response.status === 202) {
+          this.lastError.set('Sandbox is still warming — retry in a few seconds.');
+          this.historyPanel?.refresh();
+          return;
+        }
+        this.lastResponse.set(response.body as InvokeEnvelope);
         this.historyPanel?.refresh();
       },
       error: (err: HttpErrorResponse) => {
         this.running.set(false);
-        if (err.status === 202) {
-          this.lastError.set('Sandbox is still warming — retry in a few seconds.');
-        } else if (err.status === 409) {
+        if (err.status === 409) {
           this.lastError.set(err.error?.detail ?? 'Agent not runnable in sandbox.');
         } else if (err.status === 422 && err.error?.detail) {
+          // The shim wraps user-space exceptions in a 422 with the envelope
+          // as `detail`, so we can surface the output + logs inline.
           this.lastResponse.set(err.error.detail as InvokeEnvelope);
         } else {
           this.lastError.set(err.error?.detail ?? err.message ?? 'Invocation failed.');

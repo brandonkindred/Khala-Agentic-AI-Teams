@@ -1,5 +1,5 @@
 import { Injectable, inject } from '@angular/core';
-import { HttpClient, HttpParams } from '@angular/common/http';
+import { HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import type {
@@ -54,13 +54,24 @@ export class AgentRunnerApiService {
   // Invoke + samples
   // ------------------------------------------------------------
 
-  invoke(agentId: string, body: unknown, savedInputId?: string | null): Observable<InvokeEnvelope> {
+  /**
+   * Return the full HttpResponse so the caller can branch on status. A
+   * ``202 Accepted`` body is the sandbox "still warming" envelope, **not** a
+   * real invoke envelope; Angular's HttpClient delivers it through ``next``
+   * (not ``error``) because 202 is 2xx. The runner must inspect ``.status``
+   * and treat 202 as a retry prompt rather than a successful invocation.
+   */
+  invoke(
+    agentId: string,
+    body: unknown,
+    savedInputId?: string | null,
+  ): Observable<HttpResponse<InvokeEnvelope | Record<string, unknown>>> {
     let params = new HttpParams();
     if (savedInputId) params = params.set('saved_input_id', savedInputId);
-    return this.http.post<InvokeEnvelope>(
+    return this.http.post<InvokeEnvelope | Record<string, unknown>>(
       `${this.baseUrl}/${encodeURIComponent(agentId)}/invoke`,
       body,
-      { observe: 'body', params },
+      { observe: 'response', params },
     );
   }
 
