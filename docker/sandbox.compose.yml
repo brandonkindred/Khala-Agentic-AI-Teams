@@ -27,7 +27,7 @@ x-sandbox-env-base: &sandbox-env-base
   PYTHONUNBUFFERED: "1"
   POSTGRES_HOST: sandbox-postgres
   POSTGRES_PORT: "5432"
-  POSTGRES_USER: ${POSTGRES_USER:-postgres}
+  POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in docker/.env before starting sandboxes}
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env before starting sandboxes}
   AGENT_CACHE: /data/agents
   AGENT_CONSOLE_MODE: sandbox
@@ -42,7 +42,7 @@ services:
     image: postgres:18
     container_name: khala-sandbox-postgres
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in docker/.env before starting sandboxes}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in docker/.env before starting sandboxes}
       POSTGRES_DB: postgres
     ports:
