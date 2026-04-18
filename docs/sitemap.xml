@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/0.9">
+  <url>
+    <loc>https://deepthought42.github.io/Khala-Agentic-AI-Teams/</loc>
+    <lastmod>2026-04-18</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+    <image:image>
+      <image:loc>https://deepthought42.github.io/Khala-Agentic-AI-Teams/assets/khala-banner.png</image:loc>
+      <image:title>Khala — multi-agent AI orchestration platform</image:title>
+      <image:caption>Many specialist AI agents converging into a single psionic singularity.</image:caption>
+    </image:image>
+  </url>
+</urlset>

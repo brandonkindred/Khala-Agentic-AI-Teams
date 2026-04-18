@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://deepthought42.github.io/Khala-Agentic-AI-Teams/sitemap.xml

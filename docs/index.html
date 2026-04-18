@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Khala — Open-source Multi-Agent AI Orchestration Platform</title>
+<meta name="description" content="Khala is an open-source multi-agent orchestration platform. 20 specialist AI agent teams — software engineering, planning, research, content, compliance — behind one FastAPI gateway, with pluggable LLMs (Ollama, Claude) and opt-in Temporal durable workflows." />
+<meta name="keywords" content="multi-agent AI, agentic AI framework, open-source AI agents, AI agent orchestration, FastAPI agents, Temporal workflows, Ollama, Claude API, autonomous software development agents, AI agent platform" />
+<meta name="author" content="Khala contributors" />
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1" />
+
+<link rel="canonical" href="https://deepthought42.github.io/Khala-Agentic-AI-Teams/" />
+
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Khala" />
+<meta property="og:url" content="https://deepthought42.github.io/Khala-Agentic-AI-Teams/" />
+<meta property="og:title" content="Khala — Open-source Multi-Agent AI Orchestration Platform" />
+<meta property="og:description" content="Work alongside 20 specialist AI agent teams behind one gateway. Pluggable LLMs (Ollama, Claude), opt-in Temporal durability, Pydantic-typed contracts. Built to grow its own roster." />
+<meta property="og:image" content="https://deepthought42.github.io/Khala-Agentic-AI-Teams/assets/khala-banner.png" />
+<meta property="og:image:width" content="1536" />
+<meta property="og:image:height" content="672" />
+<meta property="og:image:alt" content="Khala — many specialist AI agents converging into a single psionic singularity" />
+
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Khala — Open-source Multi-Agent AI Orchestration Platform" />
+<meta name="twitter:description" content="20 specialist AI agent teams behind one FastAPI gateway. Pluggable LLMs, opt-in Temporal durability. Open-source and built to grow its own roster." />
+<meta name="twitter:image" content="https://deepthought42.github.io/Khala-Agentic-AI-Teams/assets/khala-banner.png" />
+
+<meta name="theme-color" content="#0a0414" />
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="preload" as="image" href="assets/khala-banner.webp" imagesrcset="assets/khala-banner-sm.webp 768w, assets/khala-banner.webp 1536w" imagesizes="100vw" fetchpriority="high" />
+
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Mono&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ============ NAV ============ -->
+<header class="nav" id="nav">
+  <a class="nav-brand" href="#top">
+    <span class="nav-mark" aria-hidden="true"></span>
+    <span class="nav-name">KHALA</span>
+  </a>
+  <nav class="nav-links" aria-label="Primary">
+    <a href="#what">What</a>
+    <a href="#why">Why</a>
+    <a href="#roster">Roster</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#shipping">Shipping</a>
+    <a href="#faq">FAQ</a>
+    <a href="#start">Get started</a>
+  </nav>
+  <a class="nav-cta" href="https://github.com/deepthought42/Khala-Agentic-AI-Teams" target="_blank" rel="noopener">
+    <span>GitHub</span>
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38v-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.18-.89-1.18-.73-.5.05-.49.05-.49.81.06 1.23.83 1.23.83.72 1.23 1.88.87 2.34.67.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.01.08-2.11 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.91.08 2.11.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.19c0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+  </a>
+  <button class="nav-toggle" aria-label="Menu" aria-expanded="false">
+    <span></span><span></span><span></span>
+  </button>
+</header>
+
+<!-- ============ HERO ============ -->
+<section id="top" class="hero">
+  <div class="hero-banner">
+    <picture>
+      <source
+        type="image/webp"
+        srcset="assets/khala-banner-sm.webp 768w, assets/khala-banner.webp 1536w"
+        sizes="100vw" />
+      <img
+        src="assets/khala-banner.png"
+        srcset="assets/khala-banner.png 1536w"
+        sizes="100vw"
+        width="1536"
+        height="672"
+        alt="Khala multi-agent AI platform — dozens of specialist agent glyphs converging into a single psionic singularity of electric cyan and violet energy"
+        fetchpriority="high"
+        decoding="async" />
+    </picture>
+    <div class="hero-banner-fade"></div>
+  </div>
+  <div class="hero-inner">
+    <p class="hero-eyebrow"><span class="dot"></span>open-source · multi-agent · experimental</p>
+    <h1 class="hero-title">
+      You don't need a team.<br/>
+      <span class="grad-text">You need a Khala.</span>
+    </h1>
+    <p class="hero-lede">
+      An open-source system for creating, managing, and working <em>alongside</em> agentic teams.
+      Today, twenty specialists behind one gateway. Tomorrow, however many you design together.
+    </p>
+    <div class="hero-ctas">
+      <a class="btn btn-primary" href="#roster">Meet the roster →</a>
+      <a class="btn btn-ghost" href="#start">Get it running</a>
+    </div>
+    <dl class="hero-stats">
+      <div><dt>specialist teams</dt><dd>20</dd></div>
+      <div><dt>unified gateway</dt><dd>/api/*</dd></div>
+      <div><dt>execution modes</dt><dd>threads · <span class="kbd">Temporal</span></dd></div>
+      <div><dt>LLM backends</dt><dd>Ollama · Claude</dd></div>
+    </dl>
+  </div>
+</section>
+
+<!-- ============ WHAT ============ -->
+<section id="what" class="section">
+  <div class="section-head">
+    <p class="eyebrow">§ 01 · What it is</p>
+    <h2>A shared mind, wired from specialists.</h2>
+  </div>
+  <div class="prose">
+    <p>
+      <strong>Khala is an open-source multi-agent AI orchestration platform.</strong> It bundles
+      twenty specialist agent teams — spanning autonomous software development, product planning,
+      market research, content, compliance, sales, and personal assistance — under a single
+      FastAPI gateway at <code>/api/&lt;team&gt;</code>. Every team is a <strong>team-lead agent</strong>
+      that coordinates domain specialists over typed Pydantic contracts, with a pluggable LLM
+      backend (Ollama, Ollama Cloud, or Claude) and opt-in Temporal durable workflows for
+      crash-resumable execution.
+    </p>
+    <p>
+      But the wiring isn't the point. The point is that every team plugs into the <em>same</em>
+      shared mind, so you can bring them in on whatever you're working on — turning a spec into
+      shipped code, running a market discovery, drafting a launch, pairing on a portfolio, or
+      decomposing a genuinely ambiguous problem with Deepthought's recursive sub-agent spawner.
+    </p>
+  </div>
+
+  <div class="trio">
+    <div class="trio-card">
+      <div class="trio-num">01</div>
+      <h3>You work <em>with</em> it</h3>
+      <p>Khala isn't a tool you point at a problem. It's a collaborator you think alongside — from discovery through ship.</p>
+    </div>
+    <div class="trio-card">
+      <div class="trio-num">02</div>
+      <h3>Many minds, one objective</h3>
+      <p>Twenty specialist teams today — engineering, planning, research, content, compliance, sales, personal, more — addressable as one.</p>
+    </div>
+    <div class="trio-card">
+      <div class="trio-num">03</div>
+      <h3>Grows its own roster</h3>
+      <p>Designing new teams is the product. Describe one in plain English; Agentic Team Provisioning drafts the roster and the process with you.</p>
+    </div>
+  </div>
+
+  <blockquote class="pull">
+    The real project isn't the 20 teams. It's the system that <em>makes</em> agentic teams —
+    and lets them operate as one mind.
+  </blockquote>
+</section>
+
+<!-- ============ WHY ============ -->
+<section id="why" class="section section-alt">
+  <div class="section-head">
+    <p class="eyebrow">§ 02 · Why it's interesting</p>
+    <h2>Not another agent framework.</h2>
+    <p class="sub">Six properties that make Khala worth poking at, even if you already have a favorite orchestrator.</p>
+  </div>
+
+  <div class="why-grid">
+    <article class="why-card">
+      <div class="why-icon" data-icon="gateway"></div>
+      <h3>One gateway, one mind</h3>
+      <p>Every team mounts under <code>/api/&lt;team&gt;</code> behind a single FastAPI server with an optional request-scanning security pre-scan. The whole roster is addressable — and collaborates — as one surface.</p>
+    </article>
+
+    <article class="why-card">
+      <div class="why-icon" data-icon="bolt"></div>
+      <h3>Opt-in durability</h3>
+      <p>Set <code>TEMPORAL_ADDRESS</code> and teams that export workflows switch from in-process threads to Temporal 1.24.2 durable executions that survive restarts. Don't set it and everything still works.</p>
+    </article>
+
+    <article class="why-card">
+      <div class="why-icon" data-icon="brain"></div>
+      <h3>Bring your own LLM</h3>
+      <p>Unified client for <strong>Ollama Cloud</strong>, <strong>local Ollama</strong>, or <strong>Claude</strong>. Per-role overrides where it matters (planning, architecture, specialists).</p>
+    </article>
+
+    <article class="why-card">
+      <div class="why-icon" data-icon="pipeline"></div>
+      <h3>Real engineering inside SE</h3>
+      <p>4-phase pipeline — Discovery → Design → Execution → Integration — with parallel backend/frontend queues, a planning cache, per-task quality gates (lint, build, review, acceptance, security, QA, DbC, a11y), and a Repair Agent for crash recovery.</p>
+    </article>
+
+    <article class="why-card">
+      <div class="why-icon" data-icon="scope"></div>
+      <h3>Observability built in</h3>
+      <p>Every FastAPI service in the Docker stack is auto-instrumented. Prometheus + a provisioned Grafana dashboard ship in <code>docker-compose.yml</code> — no extra setup.</p>
+    </article>
+
+    <article class="why-card">
+      <div class="why-icon" data-icon="seed"></div>
+      <h3>Built to grow</h3>
+      <p>New teams aren't a plugin afterthought — they're the product. Add one by conversation or register it in <code>TEAM_CONFIGS</code>; it mounts at <code>/api/&lt;slug&gt;</code> on next restart.</p>
+    </article>
+  </div>
+</section>
+
+<!-- ============ ROSTER ============ -->
+<section id="roster" class="section">
+  <div class="section-head">
+    <p class="eyebrow">§ 03 · The roster</p>
+    <h2>Twenty specialists. Four cells. One mind.</h2>
+    <p class="sub">Teams are grouped into failure-isolated <em>cells</em> — neighborhoods that share infrastructure and deploy together.</p>
+  </div>
+
+  <div class="roster-tabs" role="tablist">
+    <button class="chip is-active" data-filter="all" role="tab" aria-selected="true">All <span class="chip-count">20</span></button>
+    <button class="chip" data-filter="core" role="tab">🛠️ Core Dev <span class="chip-count">8</span></button>
+    <button class="chip" data-filter="business" role="tab">💼 Business <span class="chip-count">5</span></button>
+    <button class="chip" data-filter="content" role="tab">✍️ Content <span class="chip-count">3</span></button>
+    <button class="chip" data-filter="personal" role="tab">🧘 Personal <span class="chip-count">4</span></button>
+  </div>
+
+  <div id="roster-grid" class="roster-grid" aria-live="polite">
+    <!-- Populated by app.js -->
+  </div>
+
+  <p class="roster-footnote">
+    Authoritative list: <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/backend/unified_api/config.py" target="_blank" rel="noopener"><code>backend/unified_api/config.py</code></a> · run <code>GET /teams</code> on a live instance for the live roster.
+  </p>
+</section>
+
+<!-- ============ ARCHITECTURE ============ -->
+<section id="architecture" class="section section-alt">
+  <div class="section-head">
+    <p class="eyebrow">§ 04 · Architectural decisions</p>
+    <h2>How Khala is wired — and why.</h2>
+    <p class="sub">
+      The interesting choices, not the obvious ones. Every decision below has a trade-off
+      the project accepted on purpose.
+    </p>
+  </div>
+
+  <div class="arch-diagram">
+    <pre class="ascii" aria-hidden="true">
+          ┌──────────┐
+  you ─▶  │   UI     │  ─▶  /api/&lt;team&gt;
+          └──────────┘            │
+                                  ▼
+                      ┌──────────────────────┐
+                      │   Unified API        │  ← optional security pre-scan
+                      │   FastAPI gateway    │
+                      └──────────┬───────────┘
+                                 │ mounts
+            ┌────────┬───────────┼───────────┬────────┐
+            ▼        ▼           ▼           ▼        ▼
+         🛠 Core    💼 Biz     ✍ Content   🧘 Personal  …
+            │
+            ├─ threads (default)
+            └─ Temporal workflows (opt-in, set TEMPORAL_ADDRESS)
+                                 │
+                   shared: Postgres · AGENT_CACHE · LLM client
+    </pre>
+  </div>
+
+  <div class="adr-list">
+
+    <article class="adr">
+      <div class="adr-num">ADR-01</div>
+      <h3>One unified gateway, not a service mesh</h3>
+      <p class="adr-body">
+        Every team mounts under <code>/api/&lt;slug&gt;</code> behind a single FastAPI app. The
+        security pre-scan lives at the gateway (<code>SECURITY_GATEWAY_ENABLED=true</code>) so
+        it's applied once, consistently, and teams don't each re-roll their own auth layer.
+      </p>
+      <p class="adr-tradeoff"><strong>Trade-off we took:</strong> every team shares a process in local dev. Good for velocity, bad for strict blast-radius isolation — Docker mode gives each team its own container for that.</p>
+    </article>
+
+    <article class="adr">
+      <div class="adr-num">ADR-02</div>
+      <h3>Durability is opt-in, not mandatory</h3>
+      <p class="adr-body">
+        If <code>TEMPORAL_ADDRESS</code> is set, teams that export <code>WORKFLOWS</code> /
+        <code>ACTIVITIES</code> from <code>&lt;team&gt;/temporal/__init__.py</code> switch from threads
+        to Temporal 1.24.2 workflows — progress survives server restarts. If it's not set,
+        everything still runs as background threads.
+      </p>
+      <p class="adr-tradeoff"><strong>Trade-off we took:</strong> two execution paths to maintain. In exchange, local dev stays zero-dependency and production gets crash-resumable pipelines.</p>
+    </article>
+
+    <article class="adr">
+      <div class="adr-num">ADR-03</div>
+      <h3>Shared Postgres schema registry</h3>
+      <p class="adr-body">
+        Teams export a <code>SCHEMA: TeamSchema</code> constant (pure data, no side effects); each
+        team's lifespan calls <code>register_team_schemas(SCHEMA)</code> at startup. No
+        <code>POSTGRES_HOST</code>? Registration no-ops. Teams get transactional storage without
+        a per-team migration runner.
+      </p>
+      <p class="adr-tradeoff"><strong>Trade-off we took:</strong> no SQLite fallback for migrated teams — they require Postgres. Docker compose brings one up; local dev needs the env vars. We picked consistency over "runs anywhere."</p>
+    </article>
+
+    <article class="adr">
+      <div class="adr-num">ADR-04</div>
+      <h3>Team-lead orchestrator + Pydantic contracts</h3>
+      <p class="adr-body">
+        Every team has a team-lead agent that coordinates specialists through typed request/response
+        models. You get runtime validation, free OpenAPI docs, and a contract the agents can't
+        silently break.
+      </p>
+      <p class="adr-tradeoff"><strong>Trade-off we took:</strong> contracts are heavier to evolve than loose dict-passing. We picked the compile-time safety net over the freeform flexibility.</p>
+    </article>
+
+    <article class="adr">
+      <div class="adr-num">ADR-05</div>
+      <h3>Pluggable LLM client</h3>
+      <p class="adr-body">
+        A single <code>llm_service</code> wraps Ollama (local or Cloud) and Claude behind one API,
+        with <code>generate_structured</code> doing Pydantic validation + one schema-grounded
+        self-correction retry. Per-role overrides (e.g. <code>ARCHITECT_MODEL_SPECIALIST</code>,
+        <code>BLOG_PLANNING_MODEL</code>) let specific agents pick their own model without
+        forking a client.
+      </p>
+      <p class="adr-tradeoff"><strong>Trade-off we took:</strong> model-specific features lose fidelity behind the abstraction. We keep the escape hatch open: teams that need a raw provider call still have it.</p>
+    </article>
+
+    <article class="adr">
+      <div class="adr-num">ADR-06</div>
+      <h3>Declarative agent manifests</h3>
+      <p class="adr-body">
+        The Agent Console reads per-agent YAML manifests from
+        <code>backend/agents/&lt;team&gt;/agent_console/manifests/*.yaml</code>. Each describes id,
+        team, summary, I/O schema refs, invoke metadata, and sandbox provisioning hints — and they
+        drive the UI catalog plus the <code>/api/agents</code> endpoint automatically.
+      </p>
+      <p class="adr-tradeoff"><strong>Trade-off we took:</strong> every new specialist gets a YAML companion. We took the authoring cost to remove the "how do I even discover this agent?" problem.</p>
+    </article>
+
+    <article class="adr">
+      <div class="adr-num">ADR-07</div>
+      <h3>Warm per-team sandboxes for isolated invocation</h3>
+      <p class="adr-body">
+        The Agent Console Runner invokes a single specialist in a warm Docker sandbox per team
+        (<code>sandbox.compose.yml</code>, dedicated <code>sandbox-postgres</code>, isolated network,
+        ports 8200–8220). Sandboxes are reused across invocations and reaped after
+        <code>SANDBOX_IDLE_TEARDOWN_MINUTES</code> (default 15).
+      </p>
+      <p class="adr-tradeoff"><strong>Trade-off we took:</strong> cold-start latency on first invocation per team. In exchange, agents tagged <code>requires-live-integration</code> stay catalogued but clearly marked unrunnable — no silent breakage.</p>
+    </article>
+
+    <article class="adr">
+      <div class="adr-num">ADR-08</div>
+      <h3>Named volume, team-namespaced paths</h3>
+      <p class="adr-body">
+        Every containerized team mounts the same <code>agents_data</code> named volume at
+        <code>/data/agents</code> and sets <code>AGENT_CACHE=/data/agents</code>. Teams
+        self-namespace under <code>{team_name}/</code>. Job state, caches, profiles, workspaces —
+        all persist across restarts without per-team volume plumbing.
+      </p>
+      <p class="adr-tradeoff"><strong>Trade-off we took:</strong> teams share a filesystem root. We trust namespacing over isolation at this layer; the stronger isolation story lives at the Temporal/Postgres layer.</p>
+    </article>
+
+  </div>
+
+  <p class="arch-footnote">
+    Full diagrams (SDLC phases, task graphs, worker pipelines, DevOps gates):
+    <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/ARCHITECTURE.md" target="_blank" rel="noopener"><code>ARCHITECTURE.md</code></a>
+  </p>
+</section>
+
+<!-- ============ SHIPPING ============ -->
+<section id="shipping" class="section">
+  <div class="section-head">
+    <p class="eyebrow">§ 05 · What's shipping now</p>
+    <h2>The last few heartbeats.</h2>
+    <p class="sub">
+      Pulled from <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/CHANGELOG.md" target="_blank" rel="noopener"><code>CHANGELOG.md</code></a>. This is active research — shapes and surfaces move.
+    </p>
+  </div>
+
+  <ol class="timeline">
+    <li>
+      <div class="time-dot"></div>
+      <div class="time-card">
+        <div class="time-tag">unreleased · added</div>
+        <h3>Agent Console — Phase 2: Runner + Sandboxes</h3>
+        <p>
+          The Runner tab now invokes single specialist agents in warm per-team Docker sandboxes.
+          Dedicated <code>sandbox-postgres</code>, isolated <code>khala-sandbox</code> network, idle
+          reaping after 15 min. Four teams wired day one (<em>blogging</em>, <em>software_engineering</em>,
+          <em>planning_v3</em>, <em>branding</em>); others join as their APIs mount the one-line invoke shim.
+        </p>
+      </div>
+    </li>
+    <li>
+      <div class="time-dot"></div>
+      <div class="time-card">
+        <div class="time-tag">unreleased · added</div>
+        <h3>Agent Console — Phase 1: Catalog</h3>
+        <p>
+          New <code>/agent-console</code> page replaces the old provisioning form. Browsable,
+          searchable catalog of every specialist, team/tag filters, detail drawer — backed by
+          declarative YAML manifests. <code>/agent-provisioning</code> redirects here; provisioning
+          and environments live verbatim in the third tab.
+        </p>
+      </div>
+    </li>
+    <li>
+      <div class="time-dot"></div>
+      <div class="time-card">
+        <div class="time-tag">unreleased · added</div>
+        <h3>Structured-output contract in <code>llm_service</code></h3>
+        <p>
+          New <code>generate_text</code> / <code>generate_structured</code> entrypoints layer Pydantic
+          validation + one schema-grounded self-correction retry on top of <code>complete_json</code>.
+          A CI static check blocks Markdown-body prompts from JSON-only methods.
+        </p>
+      </div>
+    </li>
+    <li>
+      <div class="time-dot"></div>
+      <div class="time-card">
+        <div class="time-tag">unreleased · breaking</div>
+        <h3>Blogging pipeline simplified</h3>
+        <p>
+          <code>BlogReviewAgent</code> removed. The pipeline is now <em>research → planning → writer</em>
+          with a persisted <code>ContentPlan</code>. Planning failure returns HTTP 422 with a
+          specific reason instead of a muddled success.
+        </p>
+      </div>
+    </li>
+  </ol>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section id="faq" class="section">
+  <div class="section-head">
+    <p class="eyebrow">§ 05.5 · Frequently asked</p>
+    <h2>Questions people actually ask.</h2>
+    <p class="sub">Short answers to the things that come up in every first conversation about Khala.</p>
+  </div>
+
+  <div class="faq">
+    <details class="faq-item">
+      <summary><h3>What is Khala?</h3><span class="faq-arrow" aria-hidden="true">+</span></summary>
+      <div class="faq-body">
+        <p>
+          Khala is an open-source multi-agent AI orchestration platform. It mounts twenty specialist
+          agent teams — each a team-lead agent coordinating role-separated specialists over typed
+          Pydantic contracts — behind a single FastAPI gateway. Think of it as a runtime for
+          <em>agentic teams</em>: you don't point it at a problem; you work with it the way you'd
+          work with a real cross-functional team.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq-item">
+      <summary><h3>Is Khala production-ready?</h3><span class="faq-arrow" aria-hidden="true">+</span></summary>
+      <div class="faq-body">
+        <p>
+          <strong>No — Khala is experimental, active research.</strong> Outputs can be incomplete,
+          inconsistent, or wrong. APIs change without notice. Run it in isolated environments, keep
+          humans in the loop on anything that matters, and treat every generated artifact (code,
+          audits, trades, compliance reports) as a <em>draft that needs review</em>. If you're
+          looking for a hardened platform with SLAs, this isn't it yet.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq-item">
+      <summary><h3>What LLMs does Khala support?</h3><span class="faq-arrow" aria-hidden="true">+</span></summary>
+      <div class="faq-body">
+        <p>
+          Out of the box: <strong>Ollama</strong> (local inference or Ollama Cloud), and
+          <strong>Claude</strong> via direct API calls. Configure with <code>LLM_PROVIDER</code>,
+          <code>LLM_BASE_URL</code>, and <code>LLM_MODEL</code>. Individual teams can override
+          per role (e.g. <code>ARCHITECT_MODEL_SPECIALIST</code>, <code>BLOG_PLANNING_MODEL</code>)
+          so planning, architecture, and domain specialists can each pick their own model without
+          forking the client.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq-item">
+      <summary><h3>How is Khala different from LangChain, CrewAI, or AutoGen?</h3><span class="faq-arrow" aria-hidden="true">+</span></summary>
+      <div class="faq-body">
+        <p>
+          Most agent frameworks give you primitives — tools, memories, chains — and leave team
+          design to you. Khala ships a <em>complete roster</em> of opinionated specialist teams
+          (software engineering, planning, research, blogging, compliance, and more) with
+          production-style wiring: a unified HTTP gateway, Pydantic contracts, a shared Postgres
+          schema registry, Temporal-backed durability, a warm Docker sandbox runner, and
+          Prometheus + Grafana observability out of the box. And the meta-layer — designing new
+          teams by conversation — is a first-class feature, not a plugin.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq-item">
+      <summary><h3>Can I run Khala without Docker?</h3><span class="faq-arrow" aria-hidden="true">+</span></summary>
+      <div class="faq-body">
+        <p>
+          Yes. Local dev runs the Unified API as a single FastAPI process with every enabled team's
+          router mounted in-process on port 8080, and agents run as Python threads. You still need
+          Postgres for the migrated teams (blogging, branding, startup_advisor, user_agent_founder,
+          agentic_team_provisioning, nutrition, team_assistant, and unified_api credentials) — the
+          easiest way is to start just Postgres from the Docker compose file and export the
+          <code>POSTGRES_*</code> env vars.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq-item">
+      <summary><h3>How do I add a new agent team?</h3><span class="faq-arrow" aria-hidden="true">+</span></summary>
+      <div class="faq-body">
+        <p>
+          Two ways. <strong>Conversationally:</strong> describe the roster you want in plain English
+          to the Agentic Team Provisioning team — it drafts agents, roles, and process, validates
+          staffing, and can bridge to Agent Provisioning to stand up the environment.
+          <strong>By hand:</strong> follow <code>AGENT_ANATOMY.md</code> (I/O, tools, memory,
+          prompts, guardrails, sub-agents), register the team in <code>backend/unified_api/config.py</code>
+          (<code>TEAM_CONFIGS</code>), and it mounts at <code>/api/&lt;your-slug&gt;</code> on next restart.
+        </p>
+      </div>
+    </details>
+
+    <details class="faq-item">
+      <summary><h3>What does "Khala" mean?</h3><span class="faq-arrow" aria-hidden="true">+</span></summary>
+      <div class="faq-body">
+        <p>
+          Named after the Protoss unifying religion from StarCraft — a psionic link joining many
+          minds into one. The metaphor is literal: every specialist agent in Khala shares the same
+          gateway, the same artifact cache, the same observability plane. Many minds. One
+          objective. Yours.
+        </p>
+      </div>
+    </details>
+  </div>
+</section>
+
+<!-- ============ WARNING ============ -->
+<section class="section warning-wrap">
+  <div class="warning">
+    <div class="warning-label">⚠ being honest about where this is</div>
+    <p>
+      <strong>Khala is experimental.</strong> The agents here are active research, not a production product.
+      Outputs can be incomplete, inconsistent, or just plain wrong. APIs change without notice. A team that
+      shipped a feature yesterday may hit a wall today. Run it in isolated environments, keep humans in the
+      loop on anything that matters, and treat every generated artifact as a <em>draft that needs review</em>.
+    </p>
+    <p>
+      Looking for a hardened platform with SLAs? This isn't it — yet. Looking to build, tinker, and push the
+      frontier of multi-agent systems? Welcome aboard.
+    </p>
+  </div>
+</section>
+
+<!-- ============ GET STARTED ============ -->
+<section id="start" class="section section-alt">
+  <div class="section-head">
+    <p class="eyebrow">§ 06 · Get it running</p>
+    <h2>Two ways in.</h2>
+  </div>
+
+  <div class="start-split">
+
+    <div class="start-card">
+      <div class="start-num">01</div>
+      <h3>🚢 Docker — full stack</h3>
+      <p>
+        Brings up Postgres, Temporal + UI, a per-team microservice for every enabled team,
+        the Unified API proxy, the Angular UI, Prometheus, and Grafana.
+      </p>
+      <pre class="code"><code>cp docker/.env.example docker/.env   <span class="cmt"># set OLLAMA_API_KEY</span>
+./docker/ensure-network.sh           <span class="cmt"># one-time</span>
+docker compose -f docker/docker-compose.yml \
+  --env-file docker/.env up --build</code></pre>
+      <ul class="bullets">
+        <li><span class="pill">UI</span> <code>localhost:4201</code></li>
+        <li><span class="pill">API</span> <code>localhost:8888/docs</code></li>
+        <li><span class="pill">Temporal</span> <code>localhost:8080</code></li>
+        <li><span class="pill">Grafana</span> <code>localhost:3000</code></li>
+      </ul>
+    </div>
+
+    <div class="start-card">
+      <div class="start-num">02</div>
+      <h3>🧑‍💻 Local — hack on the code</h3>
+      <p>
+        The Unified API as a single FastAPI process with every team's router mounted
+        in-process. Postgres required for migrated teams — start one from Docker.
+      </p>
+      <pre class="code"><code><span class="cmt"># terminal 1 — backend</span>
+cd backend
+make install
+python run_unified_api.py
+<span class="cmt"># → http://localhost:8080/docs</span>
+
+<span class="cmt"># terminal 2 — frontend</span>
+cd user-interface
+nvm use &amp;&amp; npm ci &amp;&amp; npm start
+<span class="cmt"># → http://localhost:4200</span></code></pre>
+      <ul class="bullets">
+        <li><span class="pill">make lint</span> ruff check + format</li>
+        <li><span class="pill">make test</span> per-team pytest suites</li>
+        <li><span class="pill">make run</span> reload-enabled dev server</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <div class="add-team">
+    <h3>Add your own team</h3>
+    <div class="add-team-split">
+      <div>
+        <div class="num-tag">A</div>
+        <h4>Conversationally</h4>
+        <p>
+          Describe the roster you want in plain English. <strong>Agentic Team Provisioning</strong>
+          drafts the agents, roles, and process, validates staffing, and (optionally) bridges to
+          Agent Provisioning to stand up the environment.
+        </p>
+      </div>
+      <div>
+        <div class="num-tag">B</div>
+        <h4>By hand</h4>
+        <p>
+          Follow <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/backend/agents/agent_provisioning_team/AGENT_ANATOMY.md" target="_blank" rel="noopener"><code>AGENT_ANATOMY.md</code></a>
+          (I/O, tools, memory, prompts, guardrails, sub-agents), register in
+          <code>TEAM_CONFIGS</code>, and it mounts at <code>/api/&lt;your-slug&gt;</code> on next restart.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FOOTER ============ -->
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <span class="nav-mark"></span>
+      <div>
+        <strong>KHALA</strong>
+        <p>Many minds. One objective. Yours.</p>
+      </div>
+    </div>
+    <div class="footer-cols">
+      <div>
+        <h5>Project</h5>
+        <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+        <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/CONTRIBUTORS.md" target="_blank" rel="noopener">Contributors</a>
+      </div>
+      <div>
+        <h5>Docs</h5>
+        <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/README.md" target="_blank" rel="noopener">README</a>
+        <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/ARCHITECTURE.md" target="_blank" rel="noopener">Architecture</a>
+        <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+        <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/CLAUDE.md" target="_blank" rel="noopener">CLAUDE.md</a>
+      </div>
+      <div>
+        <h5>Anatomy</h5>
+        <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/backend/agents/agent_provisioning_team/AGENT_ANATOMY.md" target="_blank" rel="noopener">AGENT_ANATOMY.md</a>
+        <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/backend/agents/agent_registry/README.md" target="_blank" rel="noopener">Agent Registry</a>
+        <a href="https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/backend/agents/shared_postgres/README.md" target="_blank" rel="noopener">shared_postgres</a>
+      </div>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <small>Built by humans and their Khala. Named after the Protoss unifying religion from StarCraft — a psionic link joining many minds into one.</small>
+  </div>
+</footer>
+
+<!-- ============ JSON-LD Structured Data ============ -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://deepthought42.github.io/Khala-Agentic-AI-Teams/#website",
+      "url": "https://deepthought42.github.io/Khala-Agentic-AI-Teams/",
+      "name": "Khala",
+      "description": "Open-source multi-agent AI orchestration platform. Twenty specialist agent teams behind one FastAPI gateway.",
+      "inLanguage": "en"
+    },
+    {
+      "@type": "SoftwareSourceCode",
+      "@id": "https://deepthought42.github.io/Khala-Agentic-AI-Teams/#software",
+      "name": "Khala",
+      "alternateName": "Khala Agentic AI Teams",
+      "description": "An open-source multi-agent AI orchestration platform that bundles twenty specialist AI agent teams — software engineering, planning, research, content, compliance, sales, and personal — behind a single FastAPI gateway with pluggable LLM backends (Ollama, Claude) and opt-in Temporal durable workflows.",
+      "url": "https://deepthought42.github.io/Khala-Agentic-AI-Teams/",
+      "codeRepository": "https://github.com/deepthought42/Khala-Agentic-AI-Teams",
+      "programmingLanguage": ["Python", "TypeScript"],
+      "runtimePlatform": ["Python 3.10+", "Node.js 22", "Docker"],
+      "operatingSystem": "Cross-platform",
+      "applicationCategory": "DeveloperApplication",
+      "keywords": "multi-agent AI, agentic AI, AI orchestration, LLM agents, FastAPI, Temporal workflows, Ollama, Claude API, open source, autonomous agents",
+      "image": "https://deepthought42.github.io/Khala-Agentic-AI-Teams/assets/khala-banner.png",
+      "author": {
+        "@type": "Organization",
+        "name": "Khala contributors",
+        "url": "https://github.com/deepthought42/Khala-Agentic-AI-Teams/graphs/contributors"
+      },
+      "license": "https://github.com/deepthought42/Khala-Agentic-AI-Teams/blob/main/LICENSE",
+      "isAccessibleForFree": true
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://deepthought42.github.io/Khala-Agentic-AI-Teams/#faq",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "What is Khala?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Khala is an open-source multi-agent AI orchestration platform. It mounts twenty specialist agent teams — each a team-lead agent coordinating role-separated specialists over typed Pydantic contracts — behind a single FastAPI gateway. It's a runtime for agentic teams: you don't point it at a problem; you work with it the way you'd work with a real cross-functional team."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is Khala production-ready?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No — Khala is experimental, active research. Outputs can be incomplete, inconsistent, or wrong. APIs change without notice. Run it in isolated environments, keep humans in the loop on anything that matters, and treat every generated artifact as a draft that needs review."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "What LLMs does Khala support?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Out of the box: Ollama (local inference or Ollama Cloud), and Claude via direct API calls. Configure with LLM_PROVIDER, LLM_BASE_URL, and LLM_MODEL. Individual teams can override per role so planning, architecture, and domain specialists can each pick their own model."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How is Khala different from LangChain, CrewAI, or AutoGen?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Most agent frameworks give you primitives and leave team design to you. Khala ships a complete roster of opinionated specialist teams with production-style wiring: a unified HTTP gateway, Pydantic contracts, a shared Postgres schema registry, Temporal-backed durability, a warm Docker sandbox runner, and Prometheus + Grafana observability. Designing new teams by conversation is a first-class feature, not a plugin."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Can I run Khala without Docker?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes. Local dev runs the Unified API as a single FastAPI process with every enabled team's router mounted in-process on port 8080, and agents run as Python threads. You still need Postgres for the migrated teams — the easiest path is to start just Postgres from the Docker compose file and export the POSTGRES_* env vars."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How do I add a new agent team to Khala?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Two ways. Conversationally: describe the roster you want in plain English to the Agentic Team Provisioning team — it drafts agents, roles, and process. By hand: follow AGENT_ANATOMY.md, register the team in backend/unified_api/config.py (TEAM_CONFIGS), and it mounts at /api/<your-slug> on next restart."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "What does the name Khala mean?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Khala is named after the Protoss unifying religion from StarCraft — a psionic link joining many minds into one. The metaphor is literal: every specialist agent in Khala shares the same gateway, the same artifact cache, the same observability plane."
+          }
+        }
+      ]
+    }
+  ]
+}
+</script>
+
+<script src="app.js"></script>
+</body>
+</html>
