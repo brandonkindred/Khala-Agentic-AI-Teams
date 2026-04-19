@@ -5,7 +5,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatCardModule } from '@angular/material/card';
 import { Subject, Subscription, timer, of } from 'rxjs';
-import { catchError, startWith, switchMap } from 'rxjs/operators';
+import { catchError, startWith, switchMap, tap } from 'rxjs/operators';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import { SalesPipelineFormComponent } from '../sales-pipeline-form/sales-pipeline-form.component';
@@ -56,6 +56,7 @@ export class SalesDashboardComponent implements OnInit, OnDestroy {
   private readonly refreshTrigger$ = new Subject<void>();
   private jobsSub: Subscription | null = null;
   private statusSub: Subscription | null = null;
+  private initialJobsLoad = true;
 
   // --- Lifecycle ---------------------------------------------------------
 
@@ -66,6 +67,11 @@ export class SalesDashboardComponent implements OnInit, OnDestroy {
         switchMap(() => timer(0, JOBS_POLL_MS)),
         switchMap(() =>
           this.api.listPipelineJobs(false).pipe(
+            // Clear the error banner only on a successful fetch — a fallback
+            // emission from catchError below must not wipe the error we just set.
+            tap(() => {
+              this.listError = null;
+            }),
             catchError((err) => {
               this.listError = err?.error?.detail ?? err?.message ?? 'Failed to load jobs';
               return of([] as SalesPipelineJobListItem[]);
@@ -74,12 +80,15 @@ export class SalesDashboardComponent implements OnInit, OnDestroy {
         ),
       )
       .subscribe((jobs) => {
-        this.listError = null;
         this.jobs = jobs;
-        if (this.view === 'chat' && jobs.length > 0 && !this.launchContext) {
-          // First-time-load nudge: if there are existing jobs and we haven't
-          // started a new campaign in this session, land on the jobs view.
-          this.view = 'jobs';
+        // Auto-land on the jobs view only on the very first emission — never on
+        // later poll ticks, so the user can freely navigate back to chat/form
+        // without getting bounced back every 15 seconds.
+        if (this.initialJobsLoad) {
+          this.initialJobsLoad = false;
+          if (this.view === 'chat' && jobs.length > 0) {
+            this.view = 'jobs';
+          }
         }
         // If the selected job got deleted upstream, clear it.
         if (this.selectedJobId && !jobs.find((j) => j.job_id === this.selectedJobId)) {
