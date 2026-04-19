@@ -250,6 +250,99 @@ def test_min_sharpe_at_2x_rejects_overfit_strategy() -> None:
     assert result.result.reject_reason == "fails_cost_stress"
 
 
+def test_cost_stress_trade_counts_reflect_each_stressed_run(monkeypatch) -> None:
+    """Each row's ``trade_count`` must come from its own stressed run, not the baseline.
+
+    White-box test: patches ``TradingService.run`` to return a fresh
+    ``TradingServiceResult`` whose ``len(trades)`` depends on the
+    config's ``transaction_cost_bps``.  Because the cost-stress replay
+    scales that field per multiplier, the rows will show distinct trade
+    counts only when the source is the stressed run (not the baseline).
+    """
+    import investment_team.trading_service.modes.backtest as backtest_mod
+    from investment_team.models import TradeRecord
+    from investment_team.trading_service.service import TradingServiceResult
+
+    def _make_trade(i: int) -> TradeRecord:
+        return TradeRecord(
+            trade_num=i,
+            entry_date="2024-01-02",
+            exit_date="2024-01-03",
+            symbol="AAA",
+            side="long",
+            entry_price=100.0,
+            exit_price=101.0,
+            shares=1.0,
+            position_value=100.0,
+            gross_pnl=1.0,
+            net_pnl=1.0,
+            return_pct=1.0,
+            hold_days=1,
+            outcome="win",
+            cumulative_pnl=float(i),
+        )
+
+    class _Fake:
+        def __init__(self, *, strategy_code, config, risk_limits=None):
+            self.config = config
+
+        def run(self, stream, *, on_trade=None):
+            # Shrink the ledger as costs scale so each multiplier's row
+            # must see a distinct count if sourced from its own run.
+            trades = max(0, 10 - int(self.config.transaction_cost_bps))
+            return TradingServiceResult(
+                trades=[_make_trade(i) for i in range(trades)],
+                bars_processed=20,
+            )
+
+    monkeypatch.setattr(backtest_mod, "TradingService", _Fake)
+
+    result = run_backtest(
+        strategy=_spec(_ROUND_TRIP_CODE, "stress-counts"),
+        config=_config(
+            transaction_cost_bps=1.0,
+            slippage_bps=1.0,
+            cost_stress=True,
+        ),
+        market_data={"AAA": _bars(20)},
+    )
+    rows = result.result.cost_stress_results
+    assert rows is not None and len(rows) == 3
+    # 1x tx=1 → 10-1=9 trades; 2x tx=2 → 8; 3x tx=3 → 7.  If trade_count
+    # were sourced from the baseline service_result, every row would
+    # report the same value.
+    assert [r["trade_count"] for r in rows] == [9, 8, 7]
+
+
+def test_signals_per_bar_computed_even_without_prefetched_market_data() -> None:
+    """TradingService.bars_processed must feed signals_per_bar for either data path.
+
+    Regression guard: an earlier implementation counted bars from the
+    pre-fetched ``market_data`` dict, so provider-driven backtests
+    (which pass ``symbols`` + ``asset_class`` instead) reported
+    ``signals_per_bar=None`` and silently skipped the
+    ``min_signals_per_bar`` gate.
+    """
+    # Direct TradingService invocation — matches the shape of the
+    # provider-driven path where ``market_data`` is never materialized in
+    # ``run_backtest``'s scope.
+    from investment_team.trading_service.data_stream.historical_replay import (
+        HistoricalReplayStream,
+    )
+    from investment_team.trading_service.service import TradingService
+
+    spec = _spec(_ROUND_TRIP_CODE, "provider-like")
+    config = _config()
+    stream = HistoricalReplayStream({"AAA": _bars(20)}, timeframe="1d")
+    service = TradingService(
+        strategy_code=spec.strategy_code,
+        config=config,
+        risk_limits=spec.risk_limits,
+    )
+    outcome = service.run(stream)
+    assert outcome.bars_processed == 20
+
+
 def test_cost_stress_disabled_leaves_results_none() -> None:
     result = run_backtest(
         strategy=_spec(_ROUND_TRIP_CODE, "no-stress"),

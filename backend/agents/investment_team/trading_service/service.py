@@ -39,6 +39,11 @@ class TradingServiceResult:
     #: dropped as a belt-and-suspenders guard — strategies should check
     #: ``ctx.is_warmup``. Populated only during paper-trade warm-up phase.
     warmup_orders_dropped: int = 0
+    #: Number of non-warmup bars delivered to the strategy.  Phase 4's
+    #: ``signals_per_bar`` diagnostic divides ``len(trades) / bars_processed``.
+    #: Populated for every ``run`` regardless of data source (legacy
+    #: pre-fetched vs provider-driven).
+    bars_processed: int = 0
 
 
 class TradingService:
@@ -173,6 +178,12 @@ class TradingService:
                         state=self._state(portfolio),
                         is_warmup=is_warmup,
                     )
+
+                    if not is_warmup:
+                        # Track only post-warmup bars — Phase 4's
+                        # signals_per_bar diagnostic divides trades by
+                        # bars the strategy could actually have signaled on.
+                        result.bars_processed += 1
 
                     if is_warmup:
                         if resp.orders:

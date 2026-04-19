@@ -135,32 +135,31 @@ def run_backtest(
     if service_result.terminated_reason:
         update["terminated_reason"] = service_result.terminated_reason
 
-    # Phase 4: signals-per-bar is computed off the bars that actually
-    # reached the strategy subprocess.  For the legacy path the count is
-    # the sum of ``len(bars)`` across symbols; the provider-stream path
-    # sets ``bars_delivered`` on the service_result (populated by
-    # HistoricalReplayStream / ProviderHistoricalStream when available).
-    bar_count = _count_bars(has_legacy, market_data)
-    if bar_count > 0:
-        signals_per_bar = len(service_result.trades) / bar_count
+    # Phase 4: signals-per-bar is computed off the bars the strategy
+    # subprocess actually received — the TradingService counts non-warmup
+    # bars as it runs, so both the legacy pre-fetched path and the
+    # provider-driven path populate the same ``bars_processed`` counter.
+    if service_result.bars_processed > 0:
+        signals_per_bar = len(service_result.trades) / service_result.bars_processed
         update["signals_per_bar"] = round(signals_per_bar, 6)
         if config.min_signals_per_bar and signals_per_bar < config.min_signals_per_bar:
             update.setdefault("reject_reason", "low_signals_per_bar")
 
-    # Phase 4: cost-stress replay.  Only runs when the flag is on; reuses
-    # the legacy path's pre-fetched market data so we don't re-pull from
-    # providers between multipliers.
+    # Phase 4: cost-stress replay.  Only runs when the flag is on.
     if config.cost_stress and config.cost_stress_multipliers:
         report = CostStressReport()
         for multiplier in config.cost_stress_multipliers:
-            _, stress_metrics = _run_once(_scaled_cost_config(config, multiplier))
+            stress_result, stress_metrics = _run_once(_scaled_cost_config(config, multiplier))
             report.rows.append(
                 CostStressRow(
                     multiplier=multiplier,
                     sharpe_ratio=stress_metrics.sharpe_ratio,
                     annualized_return_pct=stress_metrics.annualized_return_pct,
                     max_drawdown_pct=stress_metrics.max_drawdown_pct,
-                    trade_count=len(service_result.trades),
+                    # Each stressed run generates its own trade ledger —
+                    # turnover shifts with costs, so use the stressed
+                    # run's count, not the baseline's.
+                    trade_count=len(stress_result.trades),
                 )
             )
         update["cost_stress_results"] = report.to_payload()
@@ -198,12 +197,3 @@ def _scaled_cost_config(base: BacktestConfig, multiplier: float) -> BacktestConf
             "min_signals_per_bar": 0.0,
         }
     )
-
-
-def _count_bars(
-    has_legacy: bool,
-    market_data: Optional[Dict[str, List[OHLCVBar]]],
-) -> int:
-    if has_legacy and market_data:
-        return sum(len(v) for v in market_data.values())
-    return 0
