@@ -5,7 +5,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .execution.risk_filter import RiskLimits
 
 
 class RiskTolerance(str, Enum):
@@ -198,10 +200,25 @@ class StrategySpec(BaseModel):
     entry_rules: List[str] = Field(default_factory=list)
     exit_rules: List[str] = Field(default_factory=list)
     sizing_rules: List[str] = Field(default_factory=list)
-    risk_limits: Dict[str, Any] = Field(default_factory=dict)
+    # Phase 3: risk_limits is validated at spec construction time.  Dicts
+    # authored by the LLM (or persisted before this field was typed) are
+    # accepted and routed through ``RiskLimits.from_legacy_dict``, which
+    # silently drops unknown keys so old specs stay deserializable.
+    risk_limits: RiskLimits = Field(default_factory=RiskLimits)
     speculative: bool = False
     strategy_code: Optional[str] = None
     audit: AuditContext = Field(default_factory=AuditContext)
+
+    @field_validator("risk_limits", mode="before")
+    @classmethod
+    def _coerce_risk_limits(cls, v: Any) -> Any:
+        if v is None:
+            return RiskLimits()
+        if isinstance(v, RiskLimits):
+            return v
+        if isinstance(v, dict):
+            return RiskLimits.from_legacy_dict(v)
+        return v
 
 
 class ValidationCheck(BaseModel):
@@ -282,6 +299,10 @@ class BacktestResult(BaseModel):
     beta: Optional[float] = None
     information_ratio: Optional[float] = None
     metrics_engine: str = "legacy"
+    # Phase 3: set when the drawdown circuit-breaker or a hard termination
+    # condition (look-ahead, data error) short-circuited the run.  None
+    # means the run completed through end-of-stream.
+    terminated_reason: Optional[str] = None
 
 
 class TradeRecord(BaseModel):

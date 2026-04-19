@@ -22,6 +22,7 @@
     "risk_free_rate": 0.04,
     "sharpe_ratio": -95.44,
     "sortino_ratio": -105.59,
+    "terminated_reason": null,
     "total_return_pct": -0.13,
     "volatility_pct": 0.04,
     "win_rate_pct": 0.0
@@ -39,6 +40,7 @@
     "risk_free_rate": null,
     "sharpe_ratio": 0.0,
     "sortino_ratio": null,
+    "terminated_reason": null,
     "total_return_pct": -0.13,
     "volatility_pct": 0.0,
     "win_rate_pct": 0.0

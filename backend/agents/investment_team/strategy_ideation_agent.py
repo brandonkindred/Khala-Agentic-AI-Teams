@@ -352,7 +352,7 @@ class StrategyIdeationAgent:
 
         simulated_trades_section = _format_simulated_trades_summary(trades)
         sizing_rules = "; ".join(strategy.sizing_rules) if strategy.sizing_rules else "(none)"
-        risk_limits = str(strategy.risk_limits) if strategy.risk_limits else "{}"
+        risk_limits = strategy.risk_limits.model_dump_json()
 
         common = dict(
             asset_class=strategy.asset_class,

@@ -21,10 +21,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Iterable, List, Optional, Sequence
+from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence
 
-from ..models import TradeRecord
 from .risk_free_rate import get_risk_free_rate
+
+if TYPE_CHECKING:  # pragma: no cover — avoids models ↔ execution import cycle
+    from ..models import TradeRecord
 
 TRADING_DAYS_PER_YEAR = 252
 

@@ -190,11 +190,16 @@ class MarketDataService:
                     wait = 2 ** (attempt + 1)
                     logger.warning(
                         "yfinance failed for %s, retrying in %ds (attempt %d): %s",
-                        yf_symbol, wait, attempt + 1, exc,
+                        yf_symbol,
+                        wait,
+                        attempt + 1,
+                        exc,
                     )
                     time.sleep(wait)
                     continue
-                logger.warning("yfinance failed for %s after %d attempts: %s", yf_symbol, max_retries, exc)
+                logger.warning(
+                    "yfinance failed for %s after %d attempts: %s", yf_symbol, max_retries, exc
+                )
                 return []
 
             if df is not None and not df.empty:
@@ -202,10 +207,17 @@ class MarketDataService:
 
             if attempt < max_retries - 1:
                 wait = 2 ** (attempt + 1)
-                logger.warning("No data from yfinance for %s, retrying in %ds (attempt %d)", yf_symbol, wait, attempt + 1)
+                logger.warning(
+                    "No data from yfinance for %s, retrying in %ds (attempt %d)",
+                    yf_symbol,
+                    wait,
+                    attempt + 1,
+                )
                 time.sleep(wait)
             else:
-                logger.warning("No data from yfinance for %s after %d attempts", yf_symbol, max_retries)
+                logger.warning(
+                    "No data from yfinance for %s after %d attempts", yf_symbol, max_retries
+                )
 
         return []
 
@@ -236,7 +248,9 @@ class MarketDataService:
                     data = resp.json()
 
                 if data.get("status") == "error":
-                    logger.warning("Twelve Data error for %s: %s", td_symbol, data.get("message", ""))
+                    logger.warning(
+                        "Twelve Data error for %s: %s", td_symbol, data.get("message", "")
+                    )
                     return []
 
                 values = data.get("values")
@@ -263,7 +277,9 @@ class MarketDataService:
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 429 and attempt < max_retries - 1:
                     wait = 2 ** (attempt + 1)
-                    logger.warning("Twelve Data rate limited for %s, retrying in %ds", td_symbol, wait)
+                    logger.warning(
+                        "Twelve Data rate limited for %s, retrying in %ds", td_symbol, wait
+                    )
                     time.sleep(wait)
                     continue
                 logger.warning("Twelve Data HTTP error for %s: %s", td_symbol, exc)
@@ -421,7 +437,9 @@ class MarketDataService:
                         open=round(float(entry.get("1. open", entry.get("1a. open (USD)", 0))), 4),
                         high=round(float(entry.get("2. high", entry.get("2a. high (USD)", 0))), 4),
                         low=round(float(entry.get("3. low", entry.get("3a. low (USD)", 0))), 4),
-                        close=round(float(entry.get("4. close", entry.get("4a. close (USD)", 0))), 4),
+                        close=round(
+                            float(entry.get("4. close", entry.get("4a. close (USD)", 0))), 4
+                        ),
                         volume=float(entry.get("5. volume", entry.get("5. market cap (USD)", 0))),
                     )
                 )

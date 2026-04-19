@@ -112,8 +112,12 @@ def adx(
     atr_wilder = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     safe_atr = atr_wilder.replace(0, np.nan)
 
-    plus_di = 100 * plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / safe_atr
-    minus_di = 100 * minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / safe_atr
+    plus_di = (
+        100 * plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / safe_atr
+    )
+    minus_di = (
+        100 * minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / safe_atr
+    )
 
     di_sum = (plus_di + minus_di).replace(0, np.nan)
     dx = 100 * (plus_di - minus_di).abs() / di_sum

@@ -59,8 +59,6 @@ Return ONLY a JSON object with no markdown:
 """
 
 
-
-
 class RefinementAgent:
     """Refine strategy code based on quality gate or execution failures."""
 
@@ -92,8 +90,10 @@ class RefinementAgent:
                 f"Profit factor: {metrics.profit_factor:.2f}"
             )
 
-        prior_text = "None yet." if not prior_attempts else "\n".join(
-            f"  Round {i + 1}: {a}" for i, a in enumerate(prior_attempts)
+        prior_text = (
+            "None yet."
+            if not prior_attempts
+            else "\n".join(f"  Round {i + 1}: {a}" for i, a in enumerate(prior_attempts))
         )
 
         user_prompt = _REFINEMENT_USER_TEMPLATE.format(
@@ -103,7 +103,7 @@ class RefinementAgent:
             entry_rules=", ".join(spec.entry_rules),
             exit_rules=", ".join(spec.exit_rules),
             sizing_rules=", ".join(spec.sizing_rules),
-            risk_limits=json.dumps(spec.risk_limits),
+            risk_limits=spec.risk_limits.model_dump_json(),
             strategy_code=code,
             failure_details=failure_details,
             metrics_section=metrics_section,

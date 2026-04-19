@@ -82,23 +82,25 @@ def build_trade_records(
 
         cumulative_pnl += net_pnl
 
-        records.append(TradeRecord(
-            trade_num=i + 1,
-            entry_date=entry_date,
-            exit_date=exit_date,
-            symbol=symbol,
-            side=side,
-            entry_price=round(adj_entry, 4),
-            exit_price=round(adj_exit, 4),
-            shares=round(shares, 6),
-            position_value=round(position_value, 2),
-            gross_pnl=round(gross_pnl, 2),
-            net_pnl=round(net_pnl, 2),
-            return_pct=return_pct,
-            hold_days=hold_days,
-            outcome=outcome,
-            cumulative_pnl=round(cumulative_pnl, 2),
-        ))
+        records.append(
+            TradeRecord(
+                trade_num=i + 1,
+                entry_date=entry_date,
+                exit_date=exit_date,
+                symbol=symbol,
+                side=side,
+                entry_price=round(adj_entry, 4),
+                exit_price=round(adj_exit, 4),
+                shares=round(shares, 6),
+                position_value=round(position_value, 2),
+                gross_pnl=round(gross_pnl, 2),
+                net_pnl=round(net_pnl, 2),
+                return_pct=return_pct,
+                hold_days=hold_days,
+                outcome=outcome,
+                cumulative_pnl=round(cumulative_pnl, 2),
+            )
+        )
 
     return records
 

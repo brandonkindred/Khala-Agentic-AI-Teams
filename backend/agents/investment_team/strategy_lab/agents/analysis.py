@@ -93,7 +93,9 @@ class AnalysisAgent:
             simulated_trades_section=trades_summary,
         )
 
-        agent = Agent(model=get_strands_model("strategy_ideation"), system_prompt=system_prompt, tools=[])
+        agent = Agent(
+            model=get_strands_model("strategy_ideation"), system_prompt=system_prompt, tools=[]
+        )
 
         try:
             draft_result = agent(draft_prompt)
@@ -133,7 +135,9 @@ class AnalysisAgent:
             "You correct any contradiction or overclaim before signing off."
         )
 
-        review_agent = Agent(model=get_strands_model("strategy_ideation"), system_prompt=review_system, tools=[])
+        review_agent = Agent(
+            model=get_strands_model("strategy_ideation"), system_prompt=review_system, tools=[]
+        )
 
         try:
             review_result = review_agent(review_prompt)

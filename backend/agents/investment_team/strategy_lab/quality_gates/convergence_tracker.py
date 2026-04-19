@@ -45,9 +45,9 @@ class ConvergenceTracker:
 
         # Trim to max history
         if len(self._signatures) > self._max_history:
-            self._signatures = self._signatures[-self._max_history:]
+            self._signatures = self._signatures[-self._max_history :]
         if len(self._asset_class_history) > self._max_history:
-            self._asset_class_history = self._asset_class_history[-self._max_history:]
+            self._asset_class_history = self._asset_class_history[-self._max_history :]
 
     # ------------------------------------------------------------------
     # Stall detection
@@ -61,7 +61,7 @@ class ConvergenceTracker:
         if len(self._signatures) < self._window_size:
             return False
 
-        recent = self._signatures[-self._window_size:]
+        recent = self._signatures[-self._window_size :]
         for i in range(len(recent) - 1):
             j = _jaccard(recent[i], recent[i + 1])
             if j < threshold:

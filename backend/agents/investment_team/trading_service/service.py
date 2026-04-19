@@ -49,11 +49,19 @@ class TradingService:
         *,
         strategy_code: str,
         config: BacktestConfig,
-        risk_limits: Optional[Dict] = None,
+        risk_limits: Optional["RiskLimits | Dict"] = None,
     ) -> None:
         self.strategy_code = strategy_code
         self.config = config
-        self._risk = RiskFilter(RiskLimits.from_legacy_dict(risk_limits or {}))
+        # Phase 3: StrategySpec.risk_limits is now a validated RiskLimits
+        # instance; keep accepting raw dicts for callers that haven't
+        # migrated (the backtest API still carries a ``Dict[str, Any]`` at
+        # the request boundary).
+        if isinstance(risk_limits, RiskLimits):
+            limits = risk_limits
+        else:
+            limits = RiskLimits.from_legacy_dict(risk_limits or {})
+        self._risk = RiskFilter(limits)
 
     # ------------------------------------------------------------------
 

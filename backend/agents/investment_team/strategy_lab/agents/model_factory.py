@@ -51,9 +51,7 @@ def get_strands_model(agent_key: str = "strategy_ideation"):
 
     host = os.environ.get("OLLAMA_HOST") or base_url
     api_key = (
-        os.environ.get("OLLAMA_API_KEY")
-        or os.environ.get("LLM_OLLAMA_API_KEY")
-        or ""
+        os.environ.get("OLLAMA_API_KEY") or os.environ.get("LLM_OLLAMA_API_KEY") or ""
     ).strip()
 
     if not api_key and "ollama.com" in host:

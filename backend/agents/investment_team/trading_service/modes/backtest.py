@@ -118,6 +118,12 @@ def run_backtest(
         config.start_date,
         config.end_date,
     )
+    # Phase 3: propagate the drawdown / look-ahead termination reason from
+    # the TradingService layer into the persisted BacktestResult so the API
+    # and downstream recording layers can surface it without peeking at the
+    # raw service_result.
+    if service_result.terminated_reason:
+        metrics = metrics.model_copy(update={"terminated_reason": service_result.terminated_reason})
     return BacktestRunResult(
         result=metrics,
         trades=service_result.trades,

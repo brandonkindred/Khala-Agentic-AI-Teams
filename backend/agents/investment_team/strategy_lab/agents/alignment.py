@@ -145,7 +145,7 @@ class TradeAlignmentAgent:
             entry_rules=", ".join(spec.entry_rules),
             exit_rules=", ".join(spec.exit_rules),
             sizing_rules=", ".join(spec.sizing_rules),
-            risk_limits=json.dumps(spec.risk_limits),
+            risk_limits=spec.risk_limits.model_dump_json(),
             annualized_return_pct=metrics.annualized_return_pct,
             total_return_pct=metrics.total_return_pct,
             sharpe_ratio=metrics.sharpe_ratio,
