@@ -13,5 +13,10 @@
       {key: 'repo_path', label: 'Repository path', placeholder: 'Path to repository to audit', required: true},
       {key: 'compliance_scope', label: 'Compliance scope', placeholder: 'Specific trust service categories to focus on'}
     ]"
+    [useBackendLaunch]="true"
+    (workflowLaunched)="onWorkflowLaunched($event)"
   />
+  @if (latestJobId) {
+    <p class="launched-banner">Audit queued — job <code>{{ latestJobId }}</code>.</p>
+  }
 </app-dashboard-shell>

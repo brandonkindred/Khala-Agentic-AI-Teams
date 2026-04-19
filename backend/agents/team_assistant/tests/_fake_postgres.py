@@ -120,6 +120,33 @@ class _FakeCursor:
                 self.rowcount = 0
             return
 
+        # UPDATE conversation job_id (store.link_job)
+        if norm.startswith(
+            "update team_assistant_conversations set job_id = %s, updated_at = %s "
+            "where conversation_id = %s and team_key"
+        ):
+            job_id, ts, cid, team_key = params
+            conv = self._db["conversations"].get(cid)
+            if conv and conv["team_key"] == team_key:
+                conv["job_id"] = job_id
+                conv["updated_at"] = ts
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+            return
+
+        # SELECT conversation_id by job_id
+        if norm.startswith(
+            "select conversation_id from team_assistant_conversations where job_id = %s and team_key"
+        ):
+            job_id, team_key = params
+            for conv in self._db["conversations"].values():
+                if conv.get("job_id") == job_id and conv["team_key"] == team_key:
+                    self._last_fetch_one = (conv["conversation_id"],)
+                    return
+            self._last_fetch_one = None
+            return
+
         # INSERT artifact ... RETURNING id
         if norm.startswith("insert into team_assistant_conv_artifacts"):
             cid, artifact_type, title, payload, ts = params

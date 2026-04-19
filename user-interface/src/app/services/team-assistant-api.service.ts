@@ -3,6 +3,7 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import type {
   TeamAssistantConversationState,
+  TeamAssistantLaunchResponse,
   TeamAssistantReadiness,
   TeamConversationSummary,
 } from '../models/team-assistant.model';
@@ -51,6 +52,24 @@ export class TeamAssistantApiService {
     return this.http.get<TeamAssistantReadiness>(`${baseUrl}/readiness`, {
       params: this._params(conversationId),
     });
+  }
+
+  /**
+   * Trigger the team's real workflow from the conversation context.
+   *
+   * The backend (`POST {baseUrl}/launch`) validates readiness, builds the
+   * team-specific request from the stored context, dispatches it in-process,
+   * and links the returned `job_id` to the conversation.
+   */
+  launch(
+    baseUrl: string,
+    conversationId?: string,
+  ): Observable<TeamAssistantLaunchResponse> {
+    return this.http.post<TeamAssistantLaunchResponse>(
+      `${baseUrl}/launch`,
+      null,
+      { params: this._params(conversationId) },
+    );
   }
 
   resetConversation(baseUrl: string, conversationId?: string): Observable<TeamAssistantConversationState> {

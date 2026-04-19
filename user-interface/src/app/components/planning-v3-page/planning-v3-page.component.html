@@ -14,4 +14,9 @@
     {key: 'initial_brief', label: 'Project brief', placeholder: 'Describe what needs to be built', required: true},
     {key: 'client_name', label: 'Client name', placeholder: 'Name of client or project'}
   ]"
+  [useBackendLaunch]="true"
+  (workflowLaunched)="onWorkflowLaunched($event)"
 />
+@if (latestJobId) {
+  <p class="launched-banner">Planning job queued — id <code>{{ latestJobId }}</code>.</p>
+}

@@ -20,6 +20,15 @@ import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-
 export class MarketResearchDashboardComponent {
   private readonly api = inject(MarketResearchApiService);
 
+  /** Last-launched result payload — Market Research returns synchronously. */
+  lastResult: Record<string, unknown> | null = null;
+
   healthCheck = (): ReturnType<MarketResearchApiService['health']> =>
     this.api.health();
+
+  onWorkflowLaunched(event: { job_id: string | null; conversation_id: string }): void {
+    // Market Research is synchronous; the upstream body carries the results.
+    // `job_id` is always null for this team — documented in the assistant config.
+    void event;
+  }
 }

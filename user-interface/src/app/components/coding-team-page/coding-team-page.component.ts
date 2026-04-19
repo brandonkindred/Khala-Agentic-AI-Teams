@@ -22,5 +22,11 @@ import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistan
 export class CodingTeamPageComponent {
   private readonly api = inject(CodingTeamApiService);
 
+  latestJobId: string | null = null;
+
   healthCheck = (): ReturnType<CodingTeamApiService['health']> => this.api.health();
+
+  onWorkflowLaunched(event: { job_id: string | null; conversation_id: string }): void {
+    this.latestJobId = event.job_id;
+  }
 }

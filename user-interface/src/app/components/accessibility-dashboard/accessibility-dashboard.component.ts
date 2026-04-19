@@ -110,6 +110,15 @@ export class AccessibilityDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
+  /** Handle a launch triggered by the shared team assistant chat. */
+  onAssistantLaunched(event: { job_id: string | null; conversation_id: string }): void {
+    if (event.job_id) {
+      this.jobId = event.job_id;
+      this.selectedTabIndex = 1;
+      this.activeTab = 'status';
+    }
+  }
+
   onStatusChange(status: AccessibilityAuditStatusResponse): void {
     this.lastStatus = status;
     this.auditId = status.audit_id;

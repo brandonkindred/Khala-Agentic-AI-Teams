@@ -1,13 +1,19 @@
 """Per-team assistant configurations.
 
 Each entry defines the system prompt context, required/optional fields,
-welcome message, and default suggested questions for a team's assistant.
+welcome message, default suggested questions, and — when the team has a
+runnable workflow — a :class:`LaunchSpec` describing how to translate the
+conversation context into an HTTP call against the team's real run
+endpoint. ``launch_spec=None`` marks teams that have no workflow to
+launch (e.g. the personal assistant, which is CRUD-only).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import Any, List
+
+from team_assistant.launch_spec import BuiltBody, LaunchSpec, declarative_builder
 
 
 @dataclass
@@ -22,6 +28,91 @@ class TeamAssistantConfig:
     welcome_message: str = ""
     default_suggested_questions: List[str] = field(default_factory=list)
     llm_agent_key: str | None = None
+    launch_spec: LaunchSpec | None = None
+
+
+# ---------------------------------------------------------------------------
+# Per-team body builders that need custom logic (not just a declarative map)
+# ---------------------------------------------------------------------------
+
+
+def _se_body_builder(context: dict[str, Any]) -> BuiltBody:
+    """Software Engineering: either pass an existing workspace or upload a spec.
+
+    - If the user supplied ``repo_path``, POST JSON to ``/run-team``.
+    - Otherwise, take the free-text ``spec`` and upload it as a multipart
+      spec file to ``/run-team/upload``. Optional ``tech_stack`` and
+      ``constraints`` are appended as markdown sections so nothing the
+      user told the assistant is lost.
+    """
+    repo_path = str(context.get("repo_path") or "").strip()
+    if repo_path:
+        return BuiltBody(json={"repo_path": repo_path})
+
+    spec = str(context.get("spec") or "").strip()
+    tech_stack = str(context.get("tech_stack") or "").strip()
+    constraints = str(context.get("constraints") or "").strip()
+    parts: list[str] = [spec]
+    if tech_stack:
+        parts.append(f"## Tech Stack\n{tech_stack}")
+    if constraints:
+        parts.append(f"## Constraints\n{constraints}")
+    spec_text = "\n\n".join(p for p in parts if p)
+
+    # Derive a short project name from the first line of the spec.
+    first_line = spec.splitlines()[0] if spec else ""
+    project_name = (
+        "".join(ch for ch in first_line[:60] if ch.isalnum() or ch in " -_").strip()
+        or "assistant-project"
+    )
+
+    return BuiltBody(
+        form={"project_name": project_name},
+        files={"spec_file": ("initial_spec.md", spec_text.encode("utf-8"), "text/markdown")},
+        path_override="/api/software-engineering/run-team/upload",
+    )
+
+
+def _accessibility_body_builder(context: dict[str, Any]) -> BuiltBody:
+    """Accessibility: branch on audit_type, rename audit_name → name."""
+    audit_type = str(context.get("audit_type") or "webpage").strip().lower()
+    body: dict[str, Any] = {
+        "name": context.get("audit_name"),
+    }
+    if audit_type == "mobile":
+        mobile_apps = context.get("mobile_apps") or context.get("web_urls")
+        if mobile_apps:
+            body["mobile_apps"] = mobile_apps
+    else:
+        web_urls = context.get("web_urls")
+        if web_urls:
+            body["web_urls"] = web_urls
+    for key in ("critical_journeys", "timebox_hours", "auth_required", "wcag_levels"):
+        value = context.get(key)
+        if value is not None and value != "":
+            body[key] = value
+    return BuiltBody(json=body)
+
+
+def _road_trip_body_builder(context: dict[str, Any]) -> BuiltBody:
+    """Road trip: nest slot-filled fields under a ``trip`` key."""
+    trip: dict[str, Any] = {
+        "start_location": context.get("start_location"),
+        "travelers": context.get("travelers") or [],
+    }
+    for key in (
+        "end_location",
+        "trip_duration_days",
+        "travel_start_date",
+        "required_stops",
+        "vehicle_type",
+        "budget_level",
+        "preferences",
+    ):
+        value = context.get(key)
+        if value is not None and value != "":
+            trip[key] = value
+    return BuiltBody(json={"trip": trip})
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +152,10 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "I have an existing codebase that needs new features.",
             "I need help writing a project specification.",
         ],
+        launch_spec=LaunchSpec(
+            path="/api/software-engineering/run-team",
+            body_builder=_se_body_builder,
+        ),
     ),
     # -----------------------------------------------------------------------
     "blogging": TeamAssistantConfig(
@@ -97,6 +192,13 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "Help me plan a technical deep-dive article.",
             "I have a topic but need help narrowing the angle.",
         ],
+        launch_spec=LaunchSpec(
+            path="/api/blogging/full-pipeline-async",
+            body_builder=declarative_builder(
+                required=["brief"],
+                optional=["audience", "tone_or_purpose", "content_profile"],
+            ),
+        ),
     ),
     # -----------------------------------------------------------------------
     "soc2_compliance": TeamAssistantConfig(
@@ -125,6 +227,10 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "What does the SOC2 audit check for?",
             "Can I focus the audit on specific trust service categories?",
         ],
+        launch_spec=LaunchSpec(
+            path="/api/soc2-compliance/soc2-audit/run",
+            body_builder=declarative_builder(required=["repo_path"]),
+        ),
     ),
     # -----------------------------------------------------------------------
     "market_research": TeamAssistantConfig(
@@ -159,6 +265,14 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "I need competitive analysis for my market.",
             "I have user interview transcripts to analyse.",
         ],
+        launch_spec=LaunchSpec(
+            path="/api/market-research/market-research/run",
+            body_builder=declarative_builder(
+                required=["product_concept", "target_users", "business_goal"],
+                optional=["topology", "transcripts"],
+            ),
+            synchronous=True,
+        ),
     ),
     # -----------------------------------------------------------------------
     "social_marketing": TeamAssistantConfig(
@@ -199,6 +313,13 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "Help me create a content calendar using my brand's voice and messaging.",
             "I haven't defined my brand yet -- where do I start?",
         ],
+        launch_spec=LaunchSpec(
+            path="/api/social-marketing/social-marketing/run",
+            body_builder=declarative_builder(
+                required=["client_id", "brand_id"],
+                optional=["goals", "cadence_posts_per_day", "duration_days"],
+            ),
+        ),
     ),
     # -----------------------------------------------------------------------
     "road_trip_planning": TeamAssistantConfig(
@@ -233,6 +354,11 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "We're a family of four looking for a scenic route.",
             "I want to drive the Pacific Coast Highway.",
         ],
+        launch_spec=LaunchSpec(
+            path="/api/road-trip-planning/plan",
+            body_builder=_road_trip_body_builder,
+            synchronous=True,
+        ),
     ),
     # -----------------------------------------------------------------------
     "accessibility_audit": TeamAssistantConfig(
@@ -265,6 +391,10 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "I need a WCAG 2.2 AA compliance check.",
             "Can you audit a mobile app for accessibility?",
         ],
+        launch_spec=LaunchSpec(
+            path="/api/accessibility-audit/audit/create",
+            body_builder=_accessibility_body_builder,
+        ),
     ),
     # -----------------------------------------------------------------------
     "coding_team": TeamAssistantConfig(
@@ -293,6 +423,13 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "I need help implementing a specific module.",
             "I have a repo that needs refactoring.",
         ],
+        launch_spec=LaunchSpec(
+            path="/api/coding-team/run",
+            body_builder=declarative_builder(
+                required=["repo_path"],
+                optional=["plan_input"],
+            ),
+        ),
     ),
     # -----------------------------------------------------------------------
     "personal_assistant": TeamAssistantConfig(
@@ -315,6 +452,10 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "What tasks do I have pending?",
             "Help me find deals on something I want to buy.",
         ],
+        # Personal Assistant is a CRUD surface (email/calendar/tasks/deals/
+        # reservations) with no "run a workflow" entry point — the Launch
+        # button is hidden in the UI for this team.
+        launch_spec=None,
     ),
     # -----------------------------------------------------------------------
     "planning_v3": TeamAssistantConfig(
@@ -344,6 +485,13 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "I want to create a PRD for a greenfield project.",
             "Help me run a discovery session with requirements.",
         ],
+        launch_spec=LaunchSpec(
+            path="/api/planning-v3/run",
+            body_builder=declarative_builder(
+                required=["repo_path", "initial_brief"],
+                optional=["client_name"],
+            ),
+        ),
     ),
     # -----------------------------------------------------------------------
     "ai_systems": TeamAssistantConfig(
@@ -372,6 +520,13 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "I have a spec file ready for an AI system.",
             "Help me design an AI agent architecture.",
         ],
+        launch_spec=LaunchSpec(
+            path="/api/ai-systems/build",
+            body_builder=declarative_builder(
+                required=["project_name", "spec_path"],
+                optional=["constraints"],
+            ),
+        ),
     ),
     # -----------------------------------------------------------------------
     "agent_provisioning": TeamAssistantConfig(
@@ -400,6 +555,13 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "I want to set up infrastructure for an existing agent.",
             "What access tiers are available?",
         ],
+        launch_spec=LaunchSpec(
+            path="/api/agent-provisioning/provision",
+            body_builder=declarative_builder(
+                required=["agent_id"],
+                optional=["manifest_path", "access_tier"],
+            ),
+        ),
     ),
     # -----------------------------------------------------------------------
     "deepthought": TeamAssistantConfig(
@@ -411,7 +573,9 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "expert sub-agents to provide comprehensive answers. Each sub-agent can "
             "further decompose its task up to 10 levels deep."
         ),
-        required_fields=[],
+        required_fields=[
+            {"key": "message", "description": "The question or message to decompose and answer"},
+        ],
         optional_fields=[
             {"key": "max_depth", "description": "Maximum recursion depth (1-10, default 10)"},
         ],
@@ -427,6 +591,14 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "What would it take to establish a self-sustaining Mars colony?",
         ],
         llm_agent_key="deepthought",
+        launch_spec=LaunchSpec(
+            path="/api/deepthought/deepthought/ask",
+            body_builder=declarative_builder(
+                required=["message"],
+                optional=["max_depth"],
+            ),
+            synchronous=True,
+        ),
     ),
     # -----------------------------------------------------------------------
     "sales_team": TeamAssistantConfig(
@@ -458,5 +630,11 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
             "Help me set up prospecting for my SaaS product.",
             "I need to create a sales pipeline from scratch.",
         ],
+        # TODO: schema drift — the assistant collects {product_name,
+        # target_prospects} but /api/sales/sales/pipeline/run wants
+        # {pipeline_stage, prospect_ids?, account_ids?, deal_ids?}. Author a
+        # launch_spec after the assistant's required_fields are redesigned
+        # to match the sales pipeline stage model.
+        launch_spec=None,
     ),
 }

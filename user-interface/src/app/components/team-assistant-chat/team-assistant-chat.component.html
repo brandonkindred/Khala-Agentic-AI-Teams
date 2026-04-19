@@ -103,15 +103,21 @@
       }
     </div>
 
-    @if (ready) {
+    @if (ready && !hideLaunchButton) {
       <div class="launch-section">
         <p class="ready-text">All required information collected!</p>
-        <button mat-flat-button color="primary" class="launch-btn" (click)="onLaunch()">
+        <button
+          mat-flat-button
+          color="primary"
+          class="launch-btn"
+          [disabled]="loading"
+          (click)="onLaunch()"
+        >
           <mat-icon>rocket_launch</mat-icon>
           Launch workflow
         </button>
       </div>
-    } @else if (missingFields.length > 0) {
+    } @else if (!ready && missingFields.length > 0) {
       <div class="missing-section">
         <span class="missing-label">Still needed:</span>
         @for (f of missingFields; track f) {

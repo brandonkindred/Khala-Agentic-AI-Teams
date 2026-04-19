@@ -16,5 +16,7 @@
       {key: 'topology', label: 'Research topology', placeholder: 'unified or split'},
       {key: 'transcripts', label: 'Interview transcripts', placeholder: 'Paste or describe user interview data'}
     ]"
+    [useBackendLaunch]="true"
+    (workflowLaunched)="onWorkflowLaunched($event)"
   />
 </app-dashboard-shell>

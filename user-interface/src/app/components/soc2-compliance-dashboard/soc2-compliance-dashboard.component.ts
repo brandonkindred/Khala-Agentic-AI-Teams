@@ -20,6 +20,13 @@ import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-
 export class Soc2ComplianceDashboardComponent {
   private readonly api = inject(Soc2ComplianceApiService);
 
+  /** Latest job id launched from the assistant — read by the template. */
+  latestJobId: string | null = null;
+
   healthCheck = (): ReturnType<Soc2ComplianceApiService['health']> =>
     this.api.health();
+
+  onWorkflowLaunched(event: { job_id: string | null; conversation_id: string }): void {
+    this.latestJobId = event.job_id;
+  }
 }
