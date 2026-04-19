@@ -1,7 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Observable, of, throwError, timer } from 'rxjs';
-import { first, switchMap } from 'rxjs/operators';
+import { Observable, EMPTY, of, throwError, timer } from 'rxjs';
+import { expand, first, switchMap } from 'rxjs/operators';
 import { environment } from '../../environments/environment';
 import type {
   ClientProfile,
@@ -85,8 +85,13 @@ export class NutritionApiService {
   }
 
   private pollJob<T>(jobId: string): Observable<T> {
-    return timer(0, NUTRITION_POLL_INTERVAL_MS).pipe(
-      switchMap(() => this.getJob<T>(jobId)),
+    const poll$ = this.getJob<T>(jobId);
+    return poll$.pipe(
+      expand((job) =>
+        job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
+          ? EMPTY
+          : timer(NUTRITION_POLL_INTERVAL_MS).pipe(switchMap(() => poll$))
+      ),
       first((job) =>
         job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
       ),

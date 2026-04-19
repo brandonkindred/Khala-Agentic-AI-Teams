@@ -1,7 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable, of, throwError, timer } from 'rxjs';
-import { first, switchMap } from 'rxjs/operators';
+import { Observable, EMPTY, of, throwError, timer } from 'rxjs';
+import { expand, first, switchMap } from 'rxjs/operators';
 import { environment } from '../../environments/environment';
 import type {
   AssistantRequest,
@@ -67,9 +67,13 @@ export class PersonalAssistantApiService {
   }
 
   private pollAssistantJob(jobId: string): Observable<AssistantResponse> {
-    return timer(0, ASSISTANT_POLL_INTERVAL_MS).pipe(
-      switchMap(() =>
-        this.http.get<AssistantJobStatusResponse>(`${this.baseUrl}/assistant/jobs/${jobId}`)
+    const statusUrl = `${this.baseUrl}/assistant/jobs/${jobId}`;
+    const poll$ = this.http.get<AssistantJobStatusResponse>(statusUrl);
+    return poll$.pipe(
+      expand((job) =>
+        job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
+          ? EMPTY
+          : timer(ASSISTANT_POLL_INTERVAL_MS).pipe(switchMap(() => poll$))
       ),
       first((job) =>
         job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
