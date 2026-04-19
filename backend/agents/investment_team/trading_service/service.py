@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional
 
+from ..execution.bar_safety import LookAheadError
 from ..execution.risk_filter import RiskFilter, RiskLimits
 from ..models import BacktestConfig, TradeRecord
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
@@ -204,6 +205,13 @@ class TradingService:
                     )
 
                 harness.send_end()
+            except LookAheadError as exc:
+                # Parent-side look-ahead guard fired inside the fill
+                # simulator: classify the same way as a subprocess-side
+                # violation so operators see a single error category.
+                result.error = str(exc)
+                result.lookahead_violation = True
+                return result
             except StrategyRuntimeError as exc:
                 result.error = str(exc)
                 result.lookahead_violation = exc.etype == "lookahead_violation"

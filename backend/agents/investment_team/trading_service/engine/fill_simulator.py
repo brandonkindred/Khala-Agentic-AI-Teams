@@ -28,6 +28,7 @@ import logging
 from dataclasses import dataclass
 from typing import List, Optional
 
+from ...execution.bar_safety import BarSafetyAssertion
 from ...execution.risk_filter import RiskFilter
 from ...models import TradeRecord
 from ..strategy.contract import Bar, Fill, OrderSide, OrderType
@@ -62,11 +63,17 @@ class FillSimulator:
         order_book: OrderBook,
         risk_filter: RiskFilter,
         config: FillSimulatorConfig,
+        bar_safety: Optional[BarSafetyAssertion] = None,
     ) -> None:
         self.portfolio = portfolio
         self.order_book = order_book
         self.risk = risk_filter
         self.config = config
+        # Defaults to an enabled assertion so any engine refactor that
+        # accidentally fills an order against a not-strictly-future bar
+        # fails loudly.  Tests that construct pathological traces can pass
+        # ``BarSafetyAssertion(enabled=False)`` to suppress it.
+        self.bar_safety = bar_safety or BarSafetyAssertion()
         self._trade_num = 0
 
     # ------------------------------------------------------------------
@@ -94,6 +101,14 @@ class FillSimulator:
             ref_price = self._touched(req, bar)
             if ref_price is None:
                 continue
+
+            # Parent-side look-ahead guard: any triggered order must belong
+            # to a strictly-earlier bar than the one we're filling against.
+            self.bar_safety.check_fill(
+                order_id=po.order_id,
+                submitted_at=po.submitted_at,
+                fill_bar_timestamp=bar.timestamp,
+            )
 
             has_position = bar.symbol in self.portfolio.positions
             is_entry = (
