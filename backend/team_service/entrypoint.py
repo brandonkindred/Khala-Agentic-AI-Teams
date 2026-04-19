@@ -13,11 +13,18 @@ import atexit
 import importlib
 import logging
 import os
+import re
 
 import uvicorn
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("team_service")
+
+# Uvicorn access log format: '%(client_addr)s - "%(request_line)s" %(status_code)s'
+# Anchoring on the quoted request line avoids false matches against IPv6 client
+# addresses (e.g. 2001:...) or "200" appearing inside a request path.
+_ACCESS_LINE_RE = re.compile(r'"GET (?P<path>[^ "]+) HTTP/[^"]+"\s+(?P<status>\d{3})')
+_QUIET_PATHS = frozenset({"/health", "/metrics"})
 
 
 class _HealthCheckFilter(logging.Filter):
@@ -29,10 +36,13 @@ class _HealthCheckFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno <= logging.DEBUG:
             return True  # Always show in debug mode
-        msg = record.getMessage()
-        if "200" not in msg:
+        match = _ACCESS_LINE_RE.search(record.getMessage())
+        if not match:
             return True
-        return not ("GET /health" in msg or "GET /metrics" in msg)
+        if not match["status"].startswith("2"):
+            return True
+        path = match["path"].split("?", 1)[0]
+        return path not in _QUIET_PATHS
 
 
 # Apply to uvicorn's access logger so health probes and Prometheus scrapes
