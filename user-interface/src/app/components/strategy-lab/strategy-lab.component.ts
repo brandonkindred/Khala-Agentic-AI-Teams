@@ -182,7 +182,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         }
       },
       // Keep the hardcoded fallback silently; batch controls still work.
-      error: () => {},
+      error: () => undefined,
     });
   }
 
