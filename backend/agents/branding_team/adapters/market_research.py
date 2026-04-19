@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Optional
 
 import httpx
 
 from branding_team.models import BrandingMission, CompetitiveSnapshot
+
+_POLL_INTERVAL_S = 2.0
+_TOTAL_TIMEOUT_S = 600.0
+_REQUEST_TIMEOUT_S = 30.0
+_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 def _base_url() -> Optional[str]:
@@ -16,12 +22,14 @@ def _base_url() -> Optional[str]:
 
 def request_market_research(mission: BrandingMission) -> Optional[CompetitiveSnapshot]:
     """
-    Call the Market Research API with brand context; return CompetitiveSnapshot or None on failure.
+    Submit a market-research job and poll until it completes; return
+    CompetitiveSnapshot or None when the service is unavailable. Raises
+    RuntimeError on transport/parse errors or terminal job failure.
     """
     base = _base_url()
     if not base:
         return None
-    url = f"{base.rstrip('/')}/api/market-research/market-research/run"
+    root = f"{base.rstrip('/')}/api/market-research"
     product_concept = (
         f"Competitive and similar brands for {mission.company_name}: {mission.company_description}"
     )
@@ -38,16 +46,34 @@ def request_market_research(mission: BrandingMission) -> Optional[CompetitiveSna
         "human_approved": True,
         "human_feedback": "Branding team requested competitive snapshot.",
     }
-    timeout = 120.0
     try:
-        with httpx.Client(timeout=timeout) as client:
-            resp = client.post(url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
+        with httpx.Client(timeout=_REQUEST_TIMEOUT_S) as client:
+            submit = client.post(f"{root}/market-research/run", json=payload)
+            submit.raise_for_status()
+            job_id = submit.json().get("job_id")
+            if not job_id:
+                raise RuntimeError("Market research submit returned no job_id")
+
+            deadline = time.monotonic() + _TOTAL_TIMEOUT_S
+            while True:
+                status = client.get(f"{root}/market-research/status/{job_id}")
+                status.raise_for_status()
+                data = status.json()
+                if data.get("status") in _TERMINAL_STATUSES:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"Market research job {job_id} timed out after {_TOTAL_TIMEOUT_S}s")
+                time.sleep(_POLL_INTERVAL_S)
     except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError) as e:
         raise RuntimeError(f"Market research request failed: {e}") from e
 
-    return _map_to_competitive_snapshot(data)
+    if data.get("status") != "completed":
+        raise RuntimeError(
+            f"Market research job {job_id} ended with status {data.get('status')}: {data.get('error')}"
+        )
+
+    result = data.get("result") or {}
+    return _map_to_competitive_snapshot(result)
 
 
 def _map_to_competitive_snapshot(data: dict) -> CompetitiveSnapshot:

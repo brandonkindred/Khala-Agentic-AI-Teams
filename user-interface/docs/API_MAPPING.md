@@ -36,7 +36,8 @@ UI actions mapped to HTTP endpoints.
 
 | UI Action | Method | Path | Request | Response |
 |-----------|--------|------|---------|----------|
-| Run market research | POST | `/market-research/run` | `RunMarketResearchRequest` | `TeamOutput` |
+| Submit market research job | POST | `/market-research/run` | `RunMarketResearchRequest` | `{job_id, status}` |
+| Poll job status | GET | `/market-research/status/{job_id}` | - | `{status, result?: TeamOutput, error?}` |
 | Health check | GET | `/health` | - | `{ status: "ok" }` |
 
 ## SOC2 Compliance API (port 8020)

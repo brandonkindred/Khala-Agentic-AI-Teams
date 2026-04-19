@@ -22,8 +22,9 @@ import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-
 export class MarketResearchDashboardComponent {
   private readonly api = inject(MarketResearchApiService);
 
-  /** Last-launched result payload. Market Research is synchronous — the
-   * upstream body is the ``TeamOutput`` returned inline by /market-research/run. */
+  /** Last-launched result payload. Market Research is async — the upstream
+   * body is a ``{job_id, status}`` submission; the dashboard surfaces it so
+   * the user can track it via the jobs UI. */
   lastResult: Record<string, unknown> | null = null;
   /** Pretty-printed JSON for display; derived from ``lastResult``. */
   lastResultJson = '';
@@ -37,8 +38,6 @@ export class MarketResearchDashboardComponent {
     upstream_status: number;
     upstream_body: Record<string, unknown>;
   }): void {
-    // Market Research returns its TeamOutput inline with no job_id. Surface
-    // the body so the run isn't invisible to the user.
     this.lastResult = event.upstream_body;
     try {
       this.lastResultJson = JSON.stringify(event.upstream_body, null, 2);
