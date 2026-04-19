@@ -9,8 +9,9 @@ Or from project root:
   python -m agents.personal_assistant_team.agent_implementations.run_api_server
 
 Then access the UI at http://127.0.0.1:8015/
-Or POST to http://127.0.0.1:8015/users/{user_id}/assistant with:
+Or POST to http://127.0.0.1:8015/assistant/jobs?user_id={user_id} with:
   {"message": "your request here"}
+and poll GET /assistant/jobs/{job_id} for the result.
 """
 
 import sys

@@ -1,6 +1,7 @@
 import { Injectable, inject } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
-import { Observable } from 'rxjs';
+import { HttpClient, HttpParams } from '@angular/common/http';
+import { Observable, of, throwError, timer } from 'rxjs';
+import { first, switchMap } from 'rxjs/operators';
 import { environment } from '../../environments/environment';
 import type {
   AssistantRequest,
@@ -27,6 +28,24 @@ import type {
   HealthResponse,
 } from '../models';
 
+interface AssistantJobSubmitResponse {
+  job_id: string;
+  status: string;
+  message?: string;
+}
+
+interface AssistantJobStatusResponse {
+  job_id: string;
+  user_id: string;
+  status: string;
+  progress?: number;
+  status_text?: string;
+  response?: AssistantResponse | null;
+  error?: string | null;
+}
+
+const ASSISTANT_POLL_INTERVAL_MS = 1000;
+
 /**
  * Service for Personal Assistant API endpoints.
  * Base URL from environment.personalAssistantApiUrl (default port 8015).
@@ -37,13 +56,29 @@ export class PersonalAssistantApiService {
   private readonly baseUrl = environment.personalAssistantApiUrl;
 
   /**
-   * POST /users/{userId}/assistant
-   * Send a message to the personal assistant.
+   * Submit an assistant job and poll until it terminates.
+   * POST /assistant/jobs?user_id=... → GET /assistant/jobs/{job_id}.
    */
   sendMessage(userId: string, request: AssistantRequest): Observable<AssistantResponse> {
-    return this.http.post<AssistantResponse>(
-      `${this.baseUrl}/users/${userId}/assistant`,
-      request
+    const params = new HttpParams().set('user_id', userId);
+    return this.http
+      .post<AssistantJobSubmitResponse>(`${this.baseUrl}/assistant/jobs`, request, { params })
+      .pipe(switchMap((submit) => this.pollAssistantJob(submit.job_id)));
+  }
+
+  private pollAssistantJob(jobId: string): Observable<AssistantResponse> {
+    return timer(0, ASSISTANT_POLL_INTERVAL_MS).pipe(
+      switchMap(() =>
+        this.http.get<AssistantJobStatusResponse>(`${this.baseUrl}/assistant/jobs/${jobId}`)
+      ),
+      first((job) =>
+        job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
+      ),
+      switchMap((job) =>
+        job.status === 'completed' && job.response
+          ? of(job.response)
+          : throwError(() => new Error(job.error || `Assistant job ${job.status}`))
+      )
     );
   }
 

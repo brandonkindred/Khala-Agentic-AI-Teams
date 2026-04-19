@@ -227,9 +227,10 @@ curl -X POST http://localhost:8080/api/blogging/research-and-review \
 ### Call Personal Assistant API
 
 ```bash
-curl -X POST http://localhost:8080/api/personal-assistant/users/default/assistant \
+curl -X POST "http://localhost:8080/api/personal-assistant/assistant/jobs?user_id=default" \
   -H "Content-Type: application/json" \
   -d '{"message": "What tasks do I have today?"}'
+# Then poll GET /api/personal-assistant/assistant/jobs/{job_id}
 ```
 
 ### Start Software Engineering Job
@@ -371,7 +372,7 @@ To allow answering open questions and PA chat from Slack (instead of only the UI
 1. **Slack App setup:** Create a Slack App at api.slack.com. Enable **Incoming Webhooks** (for outbound). For inbound: add a **Bot token** and enable **Events API** (e.g. `message.channels`, `message.im`) or **Socket Mode** so the backend can receive events without a public URL. Install the app to your workspace.
 2. **Events service:** Run a small service (e.g. in `unified_api` or a separate process) that receives Slack events (HTTP endpoint for Events API or Socket Mode client). Map Slack channel/thread to `job_id` (e.g. when posting "open questions" to Slack, store `thread_ts` → `job_id` in a file or cache).
 3. **Submit answers:** On message events in the question thread, parse the user reply (or use interactive Block Kit buttons), build `AnswerSubmission[]`, and call the existing `store_submit_answers(job_id, answers)` (and planning-v2 / product-analysis equivalents by job type).
-4. **PA chat from Slack:** On message events (e.g. DM to bot or message in configured channel), call `POST /users/{user_id}/assistant` (map Slack user to `user_id` via config or store), then post `AssistantResponse.message` back to Slack via `chat.postMessage` (Bot token).
+4. **PA chat from Slack:** On message events (e.g. DM to bot or message in configured channel), call `POST /assistant/jobs?user_id={user_id}` (map Slack user to `user_id` via config or store), poll `GET /assistant/jobs/{job_id}` until completed, then post `AssistantResponse.message` back to Slack via `chat.postMessage` (Bot token).
 
 ### CORS Issues
 
