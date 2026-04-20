@@ -150,7 +150,7 @@ def _run_product_analysis(
 
     resp = client.post(
         _se_url("/product-analysis/start-from-spec"),
-        json={"project_name": "taskflow-mvp", "spec_content": spec_content},
+        json={"project_name": f"user-agent-founder-{run_id}", "spec_content": spec_content},
         timeout=HTTP_TIMEOUT,
     )
     if resp.status_code >= 400:

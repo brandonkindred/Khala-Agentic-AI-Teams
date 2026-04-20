@@ -105,6 +105,26 @@ from shared_observability import init_otel, instrument_fastapi_app
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; falling back to default %d", name, raw, default)
+        return default
+    if value < 1:
+        logger.warning("%s=%d is < 1; falling back to default %d", name, value, default)
+        return default
+    return value
+
+
+# Upper bound on batch_count for Strategy Lab runs. Evaluated at import time so
+# it becomes the Pydantic Field `le=` constraint; operators can override via env.
+_MAX_BATCH_COUNT = _env_positive_int("STRATEGY_LAB_MAX_BATCH_COUNT", 100)
+
 init_otel(service_name="investment-team", team_key="investment")
 
 app = FastAPI(
@@ -239,6 +259,13 @@ class ActiveRunsResponse(BaseModel):
     """List of all tracked strategy lab runs (active and recently completed)."""
 
     runs: List[StrategyLabRunStatusResponse] = Field(default_factory=list)
+
+
+class StrategyLabConfigResponse(BaseModel):
+    """Operator-tunable limits the UI needs to render its run form."""
+
+    batch_count_min: int
+    batch_count_max: int
 
 
 def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusResponse:
@@ -1133,10 +1160,11 @@ class RunStrategyLabRequest(BaseModel):
     batch_count: int = Field(
         default=1,
         ge=1,
-        le=10,
+        le=_MAX_BATCH_COUNT,
         description=(
             "Number of batches to run back-to-back. Each new batch ideates with full context "
-            "of every strategy from prior batches and refreshes the signal-intelligence brief."
+            "of every strategy from prior batches and refreshes the signal-intelligence brief. "
+            "Upper bound is configurable via STRATEGY_LAB_MAX_BATCH_COUNT (default 100)."
         ),
     )
     max_parallel: int = Field(
@@ -1726,6 +1754,15 @@ def _strategy_lab_worker(
         timer = threading.Timer(300.0, _cleanup)
         timer.daemon = True
         timer.start()
+
+
+@app.get("/strategy-lab/config", response_model=StrategyLabConfigResponse)
+def get_strategy_lab_config() -> StrategyLabConfigResponse:
+    """Return operator-tunable Strategy Lab limits for the UI to read on load."""
+    return StrategyLabConfigResponse(
+        batch_count_min=1,
+        batch_count_max=_MAX_BATCH_COUNT,
+    )
 
 
 @app.post("/strategy-lab/run", response_model=StrategyLabRunStartResponse)

@@ -104,10 +104,13 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   deletingLabRecordId: string | null = null;
 
   // User-configurable batch settings (mirror backend Field bounds).
+  // BATCH_COUNT_MAX is hydrated from GET /strategy-lab/config on init so the
+  // operator-tunable STRATEGY_LAB_MAX_BATCH_COUNT (default 100) propagates to
+  // the UI; 100 here is only the fallback if the config fetch fails.
   readonly BATCH_SIZE_MIN = 1;
   readonly BATCH_SIZE_MAX = 25;
   readonly BATCH_COUNT_MIN = 1;
-  readonly BATCH_COUNT_MAX = 10;
+  BATCH_COUNT_MAX = 100;
   batchSize = 10;
   batchCount = 1;
 
@@ -165,9 +168,22 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   @ViewChild('logContainer') logContainer?: ElementRef<HTMLElement>;
 
   ngOnInit(): void {
+    this.loadConfig();
     this.loadResults();
     this.loadPaperTradingResults();
     this.checkForActiveRun();
+  }
+
+  private loadConfig(): void {
+    this.api.getStrategyLabConfig().subscribe({
+      next: (cfg) => {
+        if (cfg.batch_count_max >= this.BATCH_COUNT_MIN) {
+          this.BATCH_COUNT_MAX = cfg.batch_count_max;
+        }
+      },
+      // Keep the hardcoded fallback silently; batch controls still work.
+      error: () => undefined,
+    });
   }
 
   ngOnDestroy(): void {

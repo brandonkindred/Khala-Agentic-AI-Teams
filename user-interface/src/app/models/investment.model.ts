@@ -501,11 +501,18 @@ export interface RunStrategyLabRequest {
   /** Strategies to generate per batch (sequential; default 10, max 25). */
   batch_size?: number;
   /**
-   * Number of batches to run back-to-back (default 1, max 10). Each batch
+   * Number of batches to run back-to-back (default 1). Upper bound is
+   * operator-configurable via STRATEGY_LAB_MAX_BATCH_COUNT (default 100);
+   * fetch the current limit from GET /strategy-lab/config. Each batch
    * ideates with full context of every strategy from prior batches and
    * refreshes the signal-intelligence brief.
    */
   batch_count?: number;
+}
+
+export interface StrategyLabConfigResponse {
+  batch_count_min: number;
+  batch_count_max: number;
 }
 
 export interface StrategyLabRunResponse {

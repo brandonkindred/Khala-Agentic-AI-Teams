@@ -23,6 +23,7 @@ import type {
   CreateMemoResponse,
   InvestmentHealthResponse,
   RunStrategyLabRequest,
+  StrategyLabConfigResponse,
   StrategyLabRunStartResponse,
   StrategyLabResultsResponse,
   StrategyLabRunStatus,
@@ -165,6 +166,12 @@ export class InvestmentApiService {
   // ---------------------------------------------------------------------------
   // Strategy Lab
   // ---------------------------------------------------------------------------
+
+  getStrategyLabConfig(): Observable<StrategyLabConfigResponse> {
+    return this.http.get<StrategyLabConfigResponse>(
+      `${this.baseUrl}/strategy-lab/config`
+    );
+  }
 
   runStrategyLab(request?: RunStrategyLabRequest): Observable<StrategyLabRunStartResponse> {
     return this.http.post<StrategyLabRunStartResponse>(

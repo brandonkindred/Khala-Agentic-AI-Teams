@@ -285,10 +285,11 @@ def test_total_cycles_is_batch_size_times_batch_count(empty_lab_state: None) -> 
     request = RunStrategyLabRequest(batch_size=5, batch_count=4)
     assert request.batch_size * request.batch_count == 20
 
-    # Field bounds remain enforced.
+    # Field bounds remain enforced. batch_count upper bound is the operator-
+    # tunable _MAX_BATCH_COUNT (default 100 via STRATEGY_LAB_MAX_BATCH_COUNT).
     with pytest.raises(Exception):
         RunStrategyLabRequest(batch_size=0)
     with pytest.raises(Exception):
         RunStrategyLabRequest(batch_count=0)
     with pytest.raises(Exception):
-        RunStrategyLabRequest(batch_count=11)
+        RunStrategyLabRequest(batch_count=lab_main._MAX_BATCH_COUNT + 1)

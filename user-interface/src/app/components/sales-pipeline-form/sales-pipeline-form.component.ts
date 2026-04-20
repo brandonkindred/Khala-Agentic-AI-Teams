@@ -1,4 +1,4 @@
-import { Component, Output, EventEmitter, inject } from '@angular/core';
+import { Component, Input, OnChanges, Output, EventEmitter, SimpleChanges, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ReactiveFormsModule, FormBuilder, Validators } from '@angular/forms';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -50,7 +50,13 @@ function splitCommas(val: string): string[] {
   templateUrl: './sales-pipeline-form.component.html',
   styleUrl: './sales-pipeline-form.component.scss',
 })
-export class SalesPipelineFormComponent {
+export class SalesPipelineFormComponent implements OnChanges {
+  /** Prefill values harvested from a conversational assistant. Keys match the
+   *  assistant's `context` map (product_name, target_prospects, sales_strategy,
+   *  target_revenue, timeline). Fields the form doesn't have a slot for are
+   *  stitched into `company_context` so the user can edit them. */
+  @Input() initialContext: Record<string, unknown> | null = null;
+
   @Output() pipelineStarted = new EventEmitter<string>();
 
   private readonly api = inject(SalesApiService);
@@ -88,6 +94,39 @@ export class SalesPipelineFormComponent {
 
   get maxProspectsValue(): number {
     return this.form.get('max_prospects')?.value ?? 5;
+  }
+
+  ngOnChanges(changes: SimpleChanges): void {
+    if (changes['initialContext'] && this.initialContext) {
+      this.applyInitialContext(this.initialContext);
+    }
+  }
+
+  private applyInitialContext(ctx: Record<string, unknown>): void {
+    const str = (key: string): string => {
+      const v = ctx[key];
+      return typeof v === 'string' ? v.trim() : '';
+    };
+    const patch: Record<string, string> = {};
+
+    const productName = str('product_name');
+    if (productName) patch['product_name'] = productName;
+
+    const strategy = str('sales_strategy');
+    if (strategy) patch['value_proposition'] = strategy;
+
+    const companyLines: string[] = [];
+    const prospects = str('target_prospects');
+    if (prospects) companyLines.push(`Target prospects: ${prospects}`);
+    const revenue = str('target_revenue');
+    if (revenue) companyLines.push(`Target revenue: ${revenue}`);
+    const timeline = str('timeline');
+    if (timeline) companyLines.push(`Timeline: ${timeline}`);
+    if (companyLines.length) patch['company_context'] = companyLines.join('\n');
+
+    if (Object.keys(patch).length) {
+      this.form.patchValue(patch);
+    }
   }
 
   submit(): void {

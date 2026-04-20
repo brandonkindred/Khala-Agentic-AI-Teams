@@ -3,30 +3,151 @@
   subtitle="The full B2B pod — prospect, qualify, nurture, close."
   icon="trending_up"
 >
-  <app-team-assistant-chat
-    [teamApiUrl]="'/api/sales/assistant'"
-    [teamName]="'AI Sales Team'"
-    [teamDescription]="'Decompose your ideal customer profile and launch a full sales pipeline'"
-    [fields]="[
-      {key: 'product_name', label: 'Product name', placeholder: 'Name of product or service', required: true},
-      {key: 'value_proposition', label: 'Value proposition', placeholder: 'What problem does it solve and for whom', required: true},
-      {key: 'icp_industry', label: 'Target industries', placeholder: 'Comma-separated (e.g. SaaS, FinTech)', required: true},
-      {key: 'icp_job_titles', label: 'Buyer roles', placeholder: 'Comma-separated (e.g. VP Sales, CRO)', required: true},
-      {key: 'icp_pain_points', label: 'Pain points', placeholder: 'One per line', required: true},
-      {key: 'icp_company_size_min', label: 'Min company size', placeholder: 'Employees (default 10)'},
-      {key: 'icp_company_size_max', label: 'Max company size', placeholder: 'Employees (default 5000)'},
-      {key: 'icp_budget_range', label: 'Budget range', placeholder: 'e.g. $10k-$100k/yr'},
-      {key: 'icp_geographic_focus', label: 'Geographic focus', placeholder: 'Comma-separated regions'},
-      {key: 'icp_tech_stack', label: 'Tech stack keywords', placeholder: 'Comma-separated tools'},
-      {key: 'icp_disqualifying_traits', label: 'Disqualifying traits', placeholder: 'One per line'},
-      {key: 'company_context', label: 'Your company context', placeholder: 'Size, mission, differentiators'},
-      {key: 'case_study_snippets', label: 'Case study snippets', placeholder: 'One per line'},
-      {key: 'entry_stage', label: 'Entry stage', placeholder: 'prospecting (default)'},
-      {key: 'max_prospects', label: 'Max prospects', placeholder: '1-100 (default 5)'}
-    ]"
-    (workflowLaunched)="onWorkflowLaunched($event)"
-  />
-  @if (latestJobId) {
-    <p class="launched-banner">Sales pipeline queued — job <code>{{ latestJobId }}</code>.</p>
+  <ng-container dashboardActions>
+    @if (view !== 'chat') {
+      <button mat-raised-button color="primary" (click)="showChat()">
+        <mat-icon>add</mat-icon>
+        New campaign
+      </button>
+    }
+    @if (view !== 'jobs' && jobs.length > 0) {
+      <button mat-stroked-button (click)="showJobs()">
+        <mat-icon>list</mat-icon>
+        Jobs ({{ jobs.length }})
+      </button>
+    }
+  </ng-container>
+
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <!-- Chat view — collect campaign info and launch via backend              -->
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  @if (view === 'chat') {
+    <app-team-assistant-chat
+      [teamApiUrl]="'/api/sales/assistant'"
+      [teamName]="'AI Sales Team'"
+      [teamDescription]="'Decompose your ideal customer profile and launch a full sales pipeline'"
+      [fields]="[
+        {key: 'product_name', label: 'Product name', placeholder: 'Name of product or service', required: true},
+        {key: 'value_proposition', label: 'Value proposition', placeholder: 'What problem does it solve and for whom', required: true},
+        {key: 'icp_industry', label: 'Target industries', placeholder: 'Comma-separated (e.g. SaaS, FinTech)', required: true},
+        {key: 'icp_job_titles', label: 'Buyer roles', placeholder: 'Comma-separated (e.g. VP Sales, CRO)', required: true},
+        {key: 'icp_pain_points', label: 'Pain points', placeholder: 'One per line', required: true},
+        {key: 'icp_company_size_min', label: 'Min company size', placeholder: 'Employees (default 10)'},
+        {key: 'icp_company_size_max', label: 'Max company size', placeholder: 'Employees (default 5000)'},
+        {key: 'icp_budget_range', label: 'Budget range', placeholder: 'e.g. $10k-$100k/yr'},
+        {key: 'icp_geographic_focus', label: 'Geographic focus', placeholder: 'Comma-separated regions'},
+        {key: 'icp_tech_stack', label: 'Tech stack keywords', placeholder: 'Comma-separated tools'},
+        {key: 'icp_disqualifying_traits', label: 'Disqualifying traits', placeholder: 'One per line'},
+        {key: 'company_context', label: 'Your company context', placeholder: 'Size, mission, differentiators'},
+        {key: 'case_study_snippets', label: 'Case study snippets', placeholder: 'One per line'},
+        {key: 'entry_stage', label: 'Entry stage', placeholder: 'prospecting (default)'},
+        {key: 'max_prospects', label: 'Max prospects', placeholder: '1-100 (default 5)'}
+      ]"
+      (workflowLaunched)="onWorkflowLaunched($event)"
+    />
+  }
+
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  <!-- Jobs view — list on left, live status + result on right              -->
+  <!-- ════════════════════════════════════════════════════════════════════ -->
+  @if (view === 'jobs') {
+    @if (listError) {
+      <div class="inline-error">
+        <mat-icon>error_outline</mat-icon>
+        <span>{{ listError }}</span>
+      </div>
+    }
+
+    <div class="jobs-layout">
+      <aside class="jobs-list-col">
+        <app-sales-jobs-panel
+          [jobs]="jobs"
+          [selectedJobId]="selectedJobId"
+          (jobSelected)="selectJob($event)"
+          (jobDeleted)="deleteJob($event)"
+        />
+      </aside>
+
+      <section class="jobs-detail-col">
+        @if (!selectedJobId) {
+          <div class="detail-empty">
+            <mat-icon>arrow_back</mat-icon>
+            <p>Select a pipeline run on the left to see live status and results.</p>
+          </div>
+        } @else {
+          @if (statusError) {
+            <div class="inline-error">
+              <mat-icon>error_outline</mat-icon>
+              <span>{{ statusError }}</span>
+            </div>
+          }
+
+          @if (selectedJobStatus; as s) {
+            <mat-card class="status-card">
+              <div class="status-header">
+                <div class="status-header-text">
+                  <div class="status-title-row">
+                    <span class="status-title">{{ s.product_name || 'Sales pipeline run' }}</span>
+                    <span class="status-pill status-{{ s.status }}">{{ s.status }}</span>
+                  </div>
+                  <div class="status-sub">
+                    <mat-icon class="status-sub-icon">timeline</mat-icon>
+                    <span>{{ stageLabel(s.current_stage) }}</span>
+                    @if (s.eta_hint) {
+                      <span class="status-eta">· {{ s.eta_hint }}</span>
+                    }
+                  </div>
+                </div>
+                <div class="status-actions">
+                  @if (!isTerminal(s.status)) {
+                    <button
+                      mat-stroked-button
+                      (click)="cancelSelectedJob()"
+                      [disabled]="cancelling"
+                    >
+                      <mat-icon>stop_circle</mat-icon>
+                      {{ cancelling ? 'Cancelling…' : 'Cancel' }}
+                    </button>
+                  }
+                </div>
+              </div>
+
+              <mat-progress-bar
+                mode="determinate"
+                [value]="s.progress"
+                class="status-progress"
+              />
+              <div class="status-progress-label">{{ s.progress }}%</div>
+
+              @if (s.error) {
+                <div class="status-error">
+                  <mat-icon>error_outline</mat-icon>
+                  <span>{{ s.error }}</span>
+                </div>
+              }
+
+              <div class="status-meta">
+                <span><strong>Job ID:</strong> <code>{{ s.job_id }}</code></span>
+                <span><strong>Last update:</strong> {{ s.last_updated_at }}</span>
+              </div>
+            </mat-card>
+
+            @if (s.result) {
+              <app-sales-pipeline-results [result]="s.result" />
+            } @else if (!isTerminal(s.status)) {
+              <div class="detail-pending">
+                <mat-icon class="spin">progress_activity</mat-icon>
+                <p>Pipeline is running. Full results will appear here when it finishes.</p>
+              </div>
+            }
+          } @else {
+            <div class="detail-pending">
+              <mat-icon class="spin">progress_activity</mat-icon>
+              <p>Loading job status…</p>
+            </div>
+          }
+        }
+      </section>
+    </div>
   }
 </app-dashboard-shell>
