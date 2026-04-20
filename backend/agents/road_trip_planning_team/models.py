@@ -168,9 +168,3 @@ class PlanTripRequest(BaseModel):
     """Body for POST /plan."""
 
     trip: TripRequest
-
-
-class PlanTripResponse(BaseModel):
-    """Response for POST /plan."""
-
-    itinerary: TripItinerary

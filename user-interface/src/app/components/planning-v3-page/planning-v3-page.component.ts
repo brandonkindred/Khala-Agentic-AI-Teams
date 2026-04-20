@@ -20,6 +20,12 @@ import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistan
 export class PlanningV3PageComponent {
   private readonly api = inject(PlanningV3ApiService);
 
+  latestJobId: string | null = null;
+
   healthCheck = (): ReturnType<PlanningV3ApiService['health']> =>
     this.api.health();
+
+  onWorkflowLaunched(event: { job_id: string | null; conversation_id: string }): void {
+    this.latestJobId = event.job_id;
+  }
 }

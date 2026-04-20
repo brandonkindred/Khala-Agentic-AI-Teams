@@ -28,13 +28,17 @@ Start:
 uvicorn market_research_team.api.main:app --reload --host 0.0.0.0 --port 8010
 ```
 
-Run:
+Run (async):
 
 ```http
-POST /market-research/run
+POST /market-research/run        # submit -> { job_id, status }
+GET  /market-research/status/{job_id}
+GET  /market-research/jobs
+POST /market-research/jobs/{job_id}/cancel
+DELETE /market-research/jobs/{job_id}
 ```
 
-Example payload:
+Example submit payload:
 
 ```json
 {
@@ -47,6 +51,10 @@ Example payload:
   "human_feedback": "Need evidence about willingness to pay before greenlighting MVP"
 }
 ```
+
+The response is `{ "job_id": "...", "status": "pending" }`. Poll
+`GET /market-research/status/{job_id}` until `status` is `completed`;
+the `TeamOutput` is then in the `result` field.
 
 ## Khala platform
 

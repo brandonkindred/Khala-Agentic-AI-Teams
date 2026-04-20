@@ -50,8 +50,23 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
   @Input() fields: TeamAssistantFieldSpec[] = [];
   /** When set, use this specific conversation instead of the singleton. */
   @Input() conversationId: string | null = null;
+  /** Hide the "Launch workflow" button entirely (teams with no runnable workflow). */
+  @Input() hideLaunchButton = false;
 
-  @Output() launchWorkflow = new EventEmitter<Record<string, unknown>>();
+  /**
+   * Emitted after the backend launch completes. For async teams, consumers
+   * typically read ``job_id`` and navigate to a jobs view. For synchronous
+   * teams (market_research, branding, nutrition, deepthought, road_trip,
+   * agentic_team_provisioning, investment), ``job_id`` is ``null`` and the
+   * actual results are carried in ``upstream_body`` — dashboards that
+   * embed a sync team should read that directly.
+   */
+  @Output() workflowLaunched = new EventEmitter<{
+    job_id: string | null;
+    conversation_id: string;
+    upstream_status: number;
+    upstream_body: Record<string, unknown>;
+  }>();
   /** Emitted when a conversation is loaded/created, so parent can track the ID. */
   @Output() conversationLoaded = new EventEmitter<string>();
 
@@ -105,7 +120,31 @@ export class TeamAssistantChatComponent implements OnInit, OnChanges, AfterViewC
   }
 
   onLaunch(): void {
-    this.launchWorkflow.emit({ ...this.context });
+    if (!this.teamApiUrl) return;
+    this.loading = true;
+    this.error = null;
+    this.api.launch(this.teamApiUrl, this.conversationId ?? undefined).subscribe({
+      next: (r) => {
+        this.loading = false;
+        this.workflowLaunched.emit({
+          job_id: r.job_id,
+          conversation_id: r.conversation_id,
+          upstream_status: r.upstream_status,
+          upstream_body: r.upstream_body,
+        });
+      },
+      error: (err) => {
+        this.loading = false;
+        const detail = err?.error?.detail;
+        if (detail && typeof detail === 'object') {
+          this.error = detail.error === 'missing_required_fields'
+            ? `Still missing: ${(detail.missing ?? []).join(', ')}`
+            : detail.message ?? JSON.stringify(detail);
+        } else {
+          this.error = detail ?? err?.message ?? 'Failed to launch workflow';
+        }
+      },
+    });
   }
 
   retryLoad(): void {

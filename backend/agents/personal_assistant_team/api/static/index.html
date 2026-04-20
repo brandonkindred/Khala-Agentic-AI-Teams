@@ -1085,25 +1085,48 @@ How can I help you today?</div>
             showTypingIndicator();
             
             try {
-                const response = await fetch(`${API_BASE}/users/${currentUserId}/assistant`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message })
-                });
-                
-                const data = await response.json();
-                removeTypingIndicator();
-                
-                if (response.ok) {
-                    addMessage(data.response || data.message || 'I processed your request.', 'assistant');
-                } else {
+                const submitRes = await fetch(
+                    `${API_BASE}/assistant/jobs?user_id=${encodeURIComponent(currentUserId)}`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message })
+                    }
+                );
+                if (!submitRes.ok) {
+                    removeTypingIndicator();
                     addMessage('Sorry, something went wrong. Please try again.', 'assistant');
+                    setLoading(false);
+                    return;
+                }
+                const { job_id } = await submitRes.json();
+
+                const terminal = new Set(['completed', 'failed', 'cancelled']);
+                let statusData = null;
+                while (true) {
+                    const statusRes = await fetch(
+                        `${API_BASE}/assistant/jobs/${encodeURIComponent(job_id)}`
+                    );
+                    statusData = await statusRes.json();
+                    if (terminal.has(statusData.status)) break;
+                    await new Promise((r) => setTimeout(r, 1000));
+                }
+
+                removeTypingIndicator();
+                if (statusData.status === 'completed') {
+                    const resp = statusData.response || {};
+                    addMessage(resp.message || 'I processed your request.', 'assistant');
+                } else {
+                    addMessage(
+                        `Sorry, the request ${statusData.status}: ${statusData.error || 'unknown error'}`,
+                        'assistant'
+                    );
                 }
             } catch (error) {
                 removeTypingIndicator();
                 addMessage('Unable to connect to the assistant. Please check if the server is running.', 'assistant');
             }
-            
+
             setLoading(false);
         }
 

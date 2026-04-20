@@ -6,14 +6,18 @@
   <app-team-assistant-chat
     [teamApiUrl]="'/api/social-marketing/assistant'"
     [teamName]="'Social Media Marketing'"
-    [teamDescription]="'Plan a social media campaign for your brand'"
+    [teamDescription]="'Plan a social media campaign using your existing brand definition'"
     [fields]="[
-      {key: 'brand_name', label: 'Brand name', placeholder: 'Name of your brand', required: true},
-      {key: 'target_audience', label: 'Target audience', placeholder: 'Who are you targeting?', required: true},
+      {key: 'client_id', label: 'Client ID', placeholder: 'Client identifier from the branding team', required: true},
+      {key: 'brand_id', label: 'Brand ID', placeholder: 'Brand identifier from the branding team', required: true},
       {key: 'goals', label: 'Campaign goals', placeholder: 'e.g. engagement, follower growth'},
-      {key: 'voice_and_tone', label: 'Voice and tone', placeholder: 'e.g. professional, playful'},
       {key: 'cadence_posts_per_day', label: 'Posts per day', placeholder: 'Number of posts per day'},
-      {key: 'duration_days', label: 'Duration (days)', placeholder: 'Campaign length in days'}
+      {key: 'duration_days', label: 'Duration (days)', placeholder: 'Campaign length in days'},
+      {key: 'llm_model_name', label: 'LLM model', placeholder: 'Override the LLM_MODEL env default'}
     ]"
+    (workflowLaunched)="onWorkflowLaunched($event)"
   />
+  @if (latestJobId) {
+    <p class="launched-banner">Campaign queued — job <code>{{ latestJobId }}</code>.</p>
+  }
 </app-dashboard-shell>

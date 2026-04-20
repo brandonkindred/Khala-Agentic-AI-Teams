@@ -59,14 +59,37 @@ describe('PersonalAssistantApiService', () => {
     req.flush({ item_id: itemId, status: 'completed' });
   });
 
-  it('should call POST /users/{userId}/assistant for sendMessage', () => {
+  it('should submit an assistant job and poll until completed', () => {
     const userId = 'u1';
     const body = { message: 'Hello', context: {} };
-    service.sendMessage(userId, body).subscribe((res) => expect(res.message).toBeDefined());
-    const req = httpMock.expectOne(`${baseUrl}/users/${userId}/assistant`);
-    expect(req.request.method).toBe('POST');
-    expect(req.request.body).toEqual(body);
-    req.flush({ request_id: 'r1', message: 'Hi', actions_taken: [], data: {} });
+    const jobId = 'job-123';
+    const assistantResponse = {
+      request_id: 'r1',
+      message: 'Hi',
+      actions_taken: [],
+      data: {},
+      timestamp: new Date().toISOString(),
+    };
+
+    let received: any = null;
+    service.sendMessage(userId, body).subscribe((res) => (received = res));
+
+    const submitReq = httpMock.expectOne((r) => r.url === `${baseUrl}/assistant/jobs`);
+    expect(submitReq.request.method).toBe('POST');
+    expect(submitReq.request.body).toEqual(body);
+    expect(submitReq.request.params.get('user_id')).toBe(userId);
+    submitReq.flush({ job_id: jobId, status: 'running' });
+
+    const pollReq = httpMock.expectOne(`${baseUrl}/assistant/jobs/${jobId}`);
+    expect(pollReq.request.method).toBe('GET');
+    pollReq.flush({
+      job_id: jobId,
+      user_id: userId,
+      status: 'completed',
+      response: assistantResponse,
+    });
+
+    expect(received).toEqual(assistantResponse);
   });
 
   it('should call GET /health for health', () => {

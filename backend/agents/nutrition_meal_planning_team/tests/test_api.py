@@ -1,6 +1,8 @@
 """API tests for Nutrition & Meal Planning team (profile, plan, meals, feedback, history)."""
 
+import time
 from pathlib import Path
+from typing import Any, Dict
 
 import pytest
 
@@ -14,6 +16,18 @@ if str(_agents_dir) not in __import__("sys").path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 from nutrition_meal_planning_team.api.main import app  # noqa: E402
+
+
+def _poll_job(client: TestClient, job_id: str, deadline_s: float = 10.0) -> Dict[str, Any]:
+    start = time.time()
+    while time.time() - start < deadline_s:
+        r = client.get(f"/jobs/{job_id}")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        if data.get("status") in {"completed", "failed", "cancelled"}:
+            return data
+        time.sleep(0.05)
+    raise AssertionError(f"Nutrition job {job_id} did not terminate in {deadline_s}s")
 
 
 @pytest.fixture
@@ -77,9 +91,12 @@ def test_get_profile_after_put(client):
     not is_postgres_enabled(),
     reason="Postgres-backed profile store required (set POSTGRES_HOST).",
 )
-def test_post_plan_nutrition_404(client):
+def test_post_plan_nutrition_unknown_profile_fails_job(client):
     r = client.post("/plan/nutrition", json={"client_id": "nonexistent"})
-    assert r.status_code == 404
+    assert r.status_code == 200
+    final = _poll_job(client, r.json()["job_id"])
+    assert final["status"] == "failed"
+    assert final.get("not_found") is True
 
 
 @pytest.mark.skipif(
@@ -93,18 +110,23 @@ def test_post_plan_nutrition_success(client):
     )
     r = client.post("/plan/nutrition", json={"client_id": "p1"})
     assert r.status_code == 200
-    data = r.json()
-    assert data.get("client_id") == "p1"
-    assert "plan" in data
+    final = _poll_job(client, r.json()["job_id"])
+    assert final["status"] == "completed"
+    result = final["result"]
+    assert result.get("client_id") == "p1"
+    assert "plan" in result
 
 
 @pytest.mark.skipif(
     not is_postgres_enabled(),
     reason="Postgres-backed profile store required (set POSTGRES_HOST).",
 )
-def test_post_plan_meals_404(client):
+def test_post_plan_meals_unknown_profile_fails_job(client):
     r = client.post("/plan/meals", json={"client_id": "nonexistent"})
-    assert r.status_code == 404
+    assert r.status_code == 200
+    final = _poll_job(client, r.json()["job_id"])
+    assert final["status"] == "failed"
+    assert final.get("not_found") is True
 
 
 @pytest.mark.skipif(
@@ -119,7 +141,10 @@ def test_post_feedback_recorded(client):
     )
     r_meals = client.post("/plan/meals", json={"client_id": "fb1", "period_days": 1})
     assert r_meals.status_code == 200
-    suggestions = r_meals.json().get("suggestions", [])
+    final = _poll_job(client, r_meals.json()["job_id"])
+    if final["status"] != "completed":
+        pytest.skip(f"Meal plan job did not complete: {final.get('error')}")
+    suggestions = (final.get("result") or {}).get("suggestions", [])
     if not suggestions:
         pytest.skip("No suggestions returned (LLM may be unavailable)")
     rec_id = suggestions[0].get("recommendation_id")

@@ -48,15 +48,9 @@
     [teamDescription]="'Describe what you want to write about and the team will plan, draft, and refine it'"
     [fields]="newPostFields"
     [conversationId]="currentConversationId"
-    (launchWorkflow)="launchBlogPipeline($event)"
+    (workflowLaunched)="onWorkflowLaunched($event)"
     (conversationLoaded)="onConversationLoaded($event)"
   />
-  @if (launchError) {
-    <app-error-message [message]="launchError" />
-  }
-  @if (launching) {
-    <p style="color: var(--kh-text-tertiary); font-size: var(--kh-text-sm);">Starting pipeline...</p>
-  }
 }
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->

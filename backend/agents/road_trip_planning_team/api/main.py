@@ -14,7 +14,7 @@ from shared_graph import extract_node_text, invoke_graph_sync
 from shared_observability import init_otel, instrument_fastapi_app
 
 from ..graphs.trip_graph import build_trip_graph
-from ..models import PlanTripRequest, PlanTripResponse, TripItinerary
+from ..models import PlanTripRequest, TripItinerary
 from ..shared.job_store import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -167,38 +167,12 @@ def _translate_itinerary_keys(data: dict) -> dict:
                 acc["booking_tips"] = acc.pop("notes")
 
     return data
+
+
 @app.get("/health")
 async def health():
     """Health check for the Road Trip Planning team."""
     return {"status": "ok", "team": "road_trip_planning"}
-
-
-@app.post("/plan", response_model=PlanTripResponse, summary="Plan a road trip itinerary")
-async def post_plan(body: PlanTripRequest) -> PlanTripResponse:
-    """
-    Plan a complete road trip itinerary (synchronous).
-
-    Runs the full multi-agent pipeline via a Strands sequential Graph:
-    1. **Traveler Profiler** — synthesizes who is going and their collective needs
-    2. **Route Planner** — builds the optimal ordered route through required stops
-    3. **Activities Expert** — tailors activities and dining to the group at each stop
-    4. **Logistics Agent** — recommends accommodations, packing lists, and travel tips
-    5. **Itinerary Composer** — assembles everything into a polished day-by-day plan
-
-    Returns a complete `TripItinerary` with day-by-day plans, activities, meals, and accommodations.
-    """
-    if not body.trip.start_location:
-        raise HTTPException(status_code=400, detail="start_location is required")
-    if not body.trip.travelers:
-        raise HTTPException(status_code=400, detail="At least one traveler is required")
-
-    try:
-        itinerary = _run_pipeline(body)
-    except Exception as e:
-        logger.exception("Road trip planning pipeline failed")
-        raise HTTPException(status_code=500, detail=f"Planning failed: {e}") from e
-
-    return PlanTripResponse(itinerary=itinerary)
 
 
 def _run_plan_job(job_id: str, body: PlanTripRequest) -> None:
@@ -212,13 +186,20 @@ def _run_plan_job(job_id: str, body: PlanTripRequest) -> None:
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
 
 
-@app.post("/plan/async", summary="Start async road trip planning")
-async def post_plan_async(body: PlanTripRequest):
+@app.post("/plan", summary="Start a road trip planning job")
+async def post_plan(body: PlanTripRequest):
     """
-    Start road trip planning as a background job (asynchronous).
+    Submit a road trip planning job.
 
-    Returns a `job_id` immediately. Poll `GET /jobs/{job_id}` to check status.
-    When `status` is `completed`, the full itinerary is in the `result` field.
+    Runs the full multi-agent pipeline via a Strands sequential Graph:
+    1. **Traveler Profiler** — synthesizes who is going and their collective needs
+    2. **Route Planner** — builds the optimal ordered route through required stops
+    3. **Activities Expert** — tailors activities and dining to the group at each stop
+    4. **Logistics Agent** — recommends accommodations, packing lists, and travel tips
+    5. **Itinerary Composer** — assembles everything into a polished day-by-day plan
+
+    Returns `{job_id, status}` immediately. Poll `GET /jobs/{job_id}` for progress;
+    when `status` is `completed`, the full `TripItinerary` is in the `result` field.
     """
     if not body.trip.start_location:
         raise HTTPException(status_code=400, detail="start_location is required")

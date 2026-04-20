@@ -1,3 +1,5 @@
+import time
+from typing import Any, Dict
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -6,6 +8,18 @@ from branding_team.api.main import app
 from branding_team.models import BrandingMission
 
 client = TestClient(app)
+
+
+def _poll_brand_job(job_id: str, deadline_s: float = 10.0) -> Dict[str, Any]:
+    start = time.time()
+    while time.time() - start < deadline_s:
+        r = client.get(f"/branding/status/{job_id}")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        if data.get("status") in {"completed", "failed", "cancelled"}:
+            return data
+        time.sleep(0.05)
+    raise AssertionError(f"Branding job {job_id} did not terminate in {deadline_s}s")
 
 
 def _payload() -> dict:
@@ -124,7 +138,7 @@ def test_put_brand_update() -> None:
     assert put_resp.json()["mission"]["company_description"] == "Updated description here"
 
 
-def test_post_brands_run_returns_team_output() -> None:
+def test_post_brands_run_returns_job_and_completes() -> None:
     create_c = client.post("/clients", json={"name": "Run Test Client"})
     client_id = create_c.json()["id"]
     create_b = client.post(
@@ -141,12 +155,14 @@ def test_post_brands_run_returns_team_output() -> None:
         json={"human_approved": True},
     )
     assert run_resp.status_code == 200
-    out = run_resp.json()
-    assert "status" in out
+    submission = run_resp.json()
+    assert "job_id" in submission
+    assert submission["status"] in {"pending", "running"}
+
+    final = _poll_brand_job(submission["job_id"])
+    assert final["status"] == "completed"
+    out = final["result"]
     assert "brand_book" in out
-    assert "current_phase" in out
-    assert "phase_gates" in out
-    assert "strategic_core" in out
     assert out["strategic_core"] is not None
     assert out["narrative_messaging"] is not None
     assert out["visual_identity"] is not None
@@ -171,7 +187,9 @@ def test_post_brands_run_with_target_phase() -> None:
         json={"human_approved": True, "target_phase": "strategic_core"},
     )
     assert run_resp.status_code == 200
-    out = run_resp.json()
+    final = _poll_brand_job(run_resp.json()["job_id"])
+    assert final["status"] == "completed"
+    out = final["result"]
     assert out["strategic_core"] is not None
     assert out["narrative_messaging"] is None
 
@@ -193,10 +211,17 @@ def test_post_brands_run_phase_endpoint() -> None:
         json={"human_approved": True},
     )
     assert run_resp.status_code == 200
-    out = run_resp.json()
+    final = _poll_brand_job(run_resp.json()["job_id"])
+    assert final["status"] == "completed"
+    out = final["result"]
     assert out["strategic_core"] is not None
     assert out["narrative_messaging"] is not None
     assert out["visual_identity"] is None
+
+
+def test_branding_status_404_for_unknown_job() -> None:
+    r = client.get("/branding/status/does-not-exist")
+    assert r.status_code == 404
 
 
 def test_request_market_research_returns_503_without_service() -> None:

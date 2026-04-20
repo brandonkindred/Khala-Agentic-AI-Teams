@@ -111,7 +111,7 @@ flowchart TB
     PAD --> Documents[PaDocumentsComponent]
   end
   subgraph api [Personal Assistant API]
-    Chat --> AssistantEndpoint["/users/{id}/assistant"]
+    Chat --> AssistantEndpoint["/assistant/jobs?user_id={id}"]
     Profile --> ProfileEndpoint["/users/{id}/profile"]
     Tasks --> TasksEndpoint["/users/{id}/tasks"]
     Calendar --> CalendarEndpoint["/users/{id}/calendar"]

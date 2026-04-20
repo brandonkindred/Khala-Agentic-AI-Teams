@@ -34,8 +34,6 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
   private jobsSub: Subscription | null = null;
 
   activeView: 'empty' | 'new-project' | 'jobs' = 'empty';
-  launching = false;
-  launchError: string | null = null;
 
   allJobs: RunningJobSummary[] = [];
   runningJobs: RunningJobSummary[] = [];
@@ -73,40 +71,13 @@ export class SoftwareEngineeringDashboardComponent implements OnInit, OnDestroy 
   }
 
   /**
-   * Launch an SE project from the assistant context.
-   * Creates a spec file from the context and uploads it via /run-team/upload.
+   * Handle a launch that went through the backend `/assistant/launch` endpoint.
+   * The backend's SE body builder produces the same multipart spec upload this
+   * dashboard used to build client-side, so we only need to navigate to jobs;
+   * the polling loop in ngOnInit will pick the new job up automatically.
    */
-  launchProject(context: Record<string, unknown>): void {
-    const spec = ((context['spec'] as string) ?? '').trim();
-    if (!spec) {
-      this.launchError = 'A project specification is required.';
-      return;
-    }
-    this.launching = true;
-    this.launchError = null;
-
-    // Build a spec document from context fields
-    let specContent = spec;
-    const techStack = ((context['tech_stack'] as string) ?? '').trim();
-    const constraints = ((context['constraints'] as string) ?? '').trim();
-    if (techStack) specContent += `\n\n## Tech Stack\n${techStack}`;
-    if (constraints) specContent += `\n\n## Constraints\n${constraints}`;
-
-    const blob = new Blob([specContent], { type: 'text/markdown' });
-    const file = new File([blob], 'initial_spec.md', { type: 'text/markdown' });
-    const projectName = spec.substring(0, 60).replace(/[^a-zA-Z0-9 -]/g, '').trim() || 'New Project';
-
-    this.api.runTeamFromUpload(projectName, file).subscribe({
-      next: () => {
-        this.launching = false;
-        this.launchError = null;
-        this.activeView = 'jobs';
-      },
-      error: (err: unknown) => {
-        this.launching = false;
-        const e = err as { error?: { detail?: string }; message?: string };
-        this.launchError = e?.error?.detail ?? e?.message ?? 'Failed to start project';
-      },
-    });
+  onWorkflowLaunched(event: { job_id: string | null; conversation_id: string }): void {
+    void event;
+    this.activeView = 'jobs';
   }
 }

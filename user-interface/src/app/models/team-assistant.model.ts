@@ -43,3 +43,14 @@ export interface TeamAssistantFieldSpec {
   placeholder?: string;
   required?: boolean;
 }
+
+/** Result of POST /api/{team}/assistant/launch — the team's real run endpoint
+ *  was dispatched in-process. `job_id` is null when the team returns results
+ *  synchronously (e.g. market research, deepthought, road trip planning). */
+export interface TeamAssistantLaunchResponse {
+  ok: boolean;
+  job_id: string | null;
+  conversation_id: string;
+  upstream_status: number;
+  upstream_body: Record<string, unknown>;
+}

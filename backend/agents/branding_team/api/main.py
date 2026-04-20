@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException
@@ -30,6 +31,20 @@ from branding_team.models import (
 )
 from branding_team.orchestrator import BrandingTeamOrchestrator
 from branding_team.postgres import SCHEMA as BRANDING_POSTGRES_SCHEMA
+from branding_team.shared.job_store import (
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    cancel_job,
+    create_job,
+    delete_job,
+    get_job,
+    is_job_cancelled,
+    list_jobs,
+    update_job,
+)
 from branding_team.store import get_default_store
 from shared_observability import init_otel, instrument_fastapi_app
 from shared_postgres import get_conn
@@ -556,49 +571,189 @@ def get_brand_conversation(client_id: str, brand_id: str) -> ConversationStateRe
 # ---------------------------------------------------------------------------
 
 
-@app.post("/clients/{client_id}/brands/{brand_id}/run", response_model=TeamOutput)
-def run_brand(client_id: str, brand_id: str, payload: RunBrandRequest) -> TeamOutput:
+class RunBrandJobResponse(BaseModel):
+    job_id: str
+    status: str = JOB_STATUS_PENDING
+
+
+class BrandJobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    client_id: Optional[str] = None
+    brand_id: Optional[str] = None
+    current_phase: Optional[str] = None
+    progress: Optional[int] = None
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class BrandJobListItem(BaseModel):
+    job_id: str
+    status: str
+    client_id: Optional[str] = None
+    brand_id: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class BrandJobListResponse(BaseModel):
+    jobs: List[BrandJobListItem]
+
+
+def _run_branding_background(
+    job_id: str,
+    mission: BrandingMission,
+    human_review: HumanReview,
+    brand_checks: List[BrandCheckRequest],
+    client_id: Optional[str],
+    brand_id: Optional[str],
+    include_market_research: bool,
+    include_design_assets: bool,
+    target_phase: Optional[BrandPhase],
+) -> None:
+    try:
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_RUNNING)
+        result = orchestrator.run(
+            mission=mission,
+            human_review=human_review,
+            brand_checks=brand_checks,
+            store=branding_store if (client_id and brand_id) else None,
+            client_id=client_id,
+            brand_id=brand_id,
+            include_market_research=include_market_research,
+            include_design_assets=include_design_assets,
+            target_phase=target_phase,
+        )
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
+    except Exception as e:
+        logger.exception("Branding job %s failed", job_id)
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+
+
+def _submit_brand_run(
+    client_id: str,
+    brand_id: str,
+    payload: RunBrandRequest,
+    target_phase: Optional[BrandPhase],
+) -> RunBrandJobResponse:
     brand = branding_store.get_brand(client_id, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
     human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
-    target_phase = _parse_target_phase(payload.target_phase)
-    return orchestrator.run(
-        mission=brand.mission,
-        human_review=human_review,
-        brand_checks=payload.brand_checks,
-        store=branding_store,
+    job_id = str(uuid4())
+    create_job(
+        job_id,
         client_id=client_id,
         brand_id=brand_id,
-        include_market_research=payload.include_market_research,
-        include_design_assets=payload.include_design_assets,
-        target_phase=target_phase,
+        current_phase=target_phase.value if target_phase else None,
     )
+    thread = threading.Thread(
+        target=_run_branding_background,
+        args=(
+            job_id,
+            brand.mission,
+            human_review,
+            payload.brand_checks,
+            client_id,
+            brand_id,
+            payload.include_market_research,
+            payload.include_design_assets,
+            target_phase,
+        ),
+        daemon=True,
+    )
+    thread.start()
+    return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
 
-@app.post("/clients/{client_id}/brands/{brand_id}/run/{phase}", response_model=TeamOutput)
+@app.post("/clients/{client_id}/brands/{brand_id}/run", response_model=RunBrandJobResponse)
+def run_brand(
+    client_id: str, brand_id: str, payload: RunBrandRequest
+) -> RunBrandJobResponse:
+    """Submit a branding run job. Poll GET /branding/status/{job_id} for results."""
+    target_phase = _parse_target_phase(payload.target_phase)
+    return _submit_brand_run(client_id, brand_id, payload, target_phase)
+
+
+@app.post(
+    "/clients/{client_id}/brands/{brand_id}/run/{phase}", response_model=RunBrandJobResponse
+)
 def run_brand_phase(
     client_id: str, brand_id: str, phase: str, payload: RunBrandRequest
-) -> TeamOutput:
-    """Run the branding pipeline up to a specific phase."""
-    brand = branding_store.get_brand(client_id, brand_id)
-    if not brand:
-        raise HTTPException(status_code=404, detail="Brand not found")
+) -> RunBrandJobResponse:
+    """Submit a branding run job scoped to a specific phase."""
     target_phase = _parse_target_phase(phase)
     if target_phase is None:
         raise HTTPException(status_code=400, detail=f"Invalid phase: {phase}")
-    human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
-    return orchestrator.run(
-        mission=brand.mission,
-        human_review=human_review,
-        brand_checks=payload.brand_checks,
-        store=branding_store,
-        client_id=client_id,
-        brand_id=brand_id,
-        include_market_research=payload.include_market_research,
-        include_design_assets=payload.include_design_assets,
-        target_phase=target_phase,
+    return _submit_brand_run(client_id, brand_id, payload, target_phase)
+
+
+@app.get("/branding/status/{job_id}", response_model=BrandJobStatusResponse)
+def get_branding_job_status(job_id: str) -> BrandJobStatusResponse:
+    data = get_job(job_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return BrandJobStatusResponse(
+        job_id=data.get("job_id", job_id),
+        status=data.get("status", JOB_STATUS_PENDING),
+        client_id=data.get("client_id"),
+        brand_id=data.get("brand_id"),
+        current_phase=data.get("current_phase"),
+        progress=data.get("progress"),
+        result=data.get("result"),
+        error=data.get("error"),
+        created_at=data.get("created_at"),
+        updated_at=data.get("updated_at"),
     )
+
+
+@app.get("/branding/jobs", response_model=BrandJobListResponse)
+def list_branding_jobs(running_only: bool = False) -> BrandJobListResponse:
+    statuses = [JOB_STATUS_PENDING, JOB_STATUS_RUNNING] if running_only else None
+    items = [
+        BrandJobListItem(
+            job_id=j.get("job_id", ""),
+            status=j.get("status", JOB_STATUS_PENDING),
+            client_id=j.get("client_id"),
+            brand_id=j.get("brand_id"),
+            created_at=j.get("created_at"),
+            updated_at=j.get("updated_at"),
+        )
+        for j in list_jobs(statuses=statuses)
+    ]
+    return BrandJobListResponse(jobs=items)
+
+
+@app.post("/branding/jobs/{job_id}/cancel")
+def cancel_branding_job(job_id: str) -> Dict[str, Any]:
+    data = get_job(job_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if cancel_job(job_id):
+        return {"job_id": job_id, "status": JOB_STATUS_CANCELLED, "success": True}
+    return {
+        "job_id": job_id,
+        "status": data.get("status"),
+        "success": False,
+        "message": f"Cannot cancel job in status {data.get('status')}",
+    }
+
+
+@app.delete("/branding/jobs/{job_id}")
+def delete_branding_job(job_id: str) -> Dict[str, Any]:
+    if get_job(job_id) is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not delete_job(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job_id": job_id, "deleted": True}
 
 
 # ---------------------------------------------------------------------------

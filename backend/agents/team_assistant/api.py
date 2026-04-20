@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from team_assistant.agent import TeamAssistantAgent
 from team_assistant.config import TeamAssistantConfig
+from team_assistant.launch_dispatcher import dispatch as launch_dispatch
 from team_assistant.prompts import build_system_prompt
 from team_assistant.store import get_store
 
@@ -78,6 +79,14 @@ class ReadinessResponse(BaseModel):
     ready: bool
     missing_fields: List[str]
     context: Dict[str, Any]
+
+
+class LaunchResponse(BaseModel):
+    ok: bool
+    job_id: Optional[str]
+    conversation_id: str
+    upstream_status: int
+    upstream_body: Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +321,79 @@ def create_assistant_app(config: TeamAssistantConfig) -> FastAPI:
         _, context = state
         ready, missing = agent.check_readiness(context)
         return ReadinessResponse(ready=ready, missing_fields=missing, context=context)
+
+    @assistant_app.post("/launch", response_model=LaunchResponse)
+    async def launch(
+        conversation_id: Optional[str] = Query(None),
+    ) -> LaunchResponse:
+        """Trigger this team's real workflow from the conversation context.
+
+        Validates readiness, then dispatches the team-specific request
+        in-process via the ASGI transport. On success, links the returned
+        ``job_id`` to the conversation so future readers can look the job
+        up via ``GET /conversations/by-job/{job_id}``.
+        """
+        store = get_store(team_key)
+        agent = _get_agent(config)
+        cid = _resolve_cid(conversation_id)
+        state = store.get(cid)
+        if state is None:
+            raise HTTPException(status_code=404, detail=f"Conversation {cid} not found")
+        _, context = state
+
+        ready, missing = agent.check_readiness(context)
+        if not ready:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "missing_required_fields", "missing": missing},
+            )
+
+        if config.launch_spec is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Team '{team_key}' has no launch workflow configured",
+            )
+
+        try:
+            result = await launch_dispatch(config.launch_spec, context)
+        except Exception as exc:
+            logger.exception("Launch dispatch raised for team=%s cid=%s", team_key, cid)
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "dispatch_failed", "message": str(exc)},
+            ) from exc
+
+        if result.status >= 500:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "upstream_error",
+                    "upstream_status": result.status,
+                    "upstream_body": result.body,
+                },
+            )
+        if not (200 <= result.status < 300):
+            # Propagate 4xx directly so the caller sees the real reason
+            # (e.g. security gateway 403, upstream 422 validation error).
+            raise HTTPException(
+                status_code=result.status,
+                detail={
+                    "error": "upstream_rejected",
+                    "upstream_status": result.status,
+                    "upstream_body": result.body,
+                },
+            )
+
+        if result.job_id:
+            store.link_job(cid, result.job_id)
+
+        return LaunchResponse(
+            ok=True,
+            job_id=result.job_id,
+            conversation_id=cid,
+            upstream_status=result.status,
+            upstream_body=result.body,
+        )
 
     # ------------------------------------------------------------------
     # New per-conversation endpoints

@@ -8,7 +8,6 @@ import { Subject, Subscription, timer, of } from 'rxjs';
 import { catchError, startWith, switchMap, tap } from 'rxjs/operators';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
-import { SalesPipelineFormComponent } from '../sales-pipeline-form/sales-pipeline-form.component';
 import { SalesJobsPanelComponent } from '../sales-jobs-panel/sales-jobs-panel.component';
 import { SalesPipelineResultsComponent } from '../sales-pipeline-results/sales-pipeline-results.component';
 import { SalesApiService } from '../../services/sales-api.service';
@@ -32,7 +31,6 @@ const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
     MatCardModule,
     TeamAssistantChatComponent,
     DashboardShellComponent,
-    SalesPipelineFormComponent,
     SalesJobsPanelComponent,
     SalesPipelineResultsComponent,
   ],
@@ -42,8 +40,7 @@ const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 export class SalesDashboardComponent implements OnInit, OnDestroy {
   private readonly api = inject(SalesApiService);
 
-  view: 'chat' | 'form' | 'jobs' = 'chat';
-  launchContext: Record<string, unknown> | null = null;
+  view: 'chat' | 'jobs' = 'chat';
 
   jobs: SalesPipelineJobListItem[] = [];
   selectedJobId: string | null = null;
@@ -82,7 +79,7 @@ export class SalesDashboardComponent implements OnInit, OnDestroy {
       .subscribe((jobs) => {
         this.jobs = jobs;
         // Auto-land on the jobs view only on the very first emission — never on
-        // later poll ticks, so the user can freely navigate back to chat/form
+        // later poll ticks, so the user can freely navigate back to chat
         // without getting bounced back every 15 seconds.
         if (this.initialJobsLoad) {
           this.initialJobsLoad = false;
@@ -107,33 +104,27 @@ export class SalesDashboardComponent implements OnInit, OnDestroy {
 
   showChat(): void {
     this.view = 'chat';
-    this.launchContext = null;
   }
 
   showJobs(): void {
     this.view = 'jobs';
   }
 
-  backToChat(): void {
-    this.view = 'chat';
-  }
+  // --- Chat → backend launch → jobs view --------------------------------
 
-  // --- Chat → form handoff ----------------------------------------------
-
-  onReadyToLaunch(context: Record<string, unknown>): void {
-    this.launchContext = context;
-    this.view = 'form';
-  }
-
-  // --- Form → real launch -----------------------------------------------
-
-  onPipelineStarted(jobId: string): void {
-    this.launchContext = null;
-    this.view = 'jobs';
-    this.selectJob(jobId);
-    // Refresh the list immediately so the new job appears without waiting
-    // for the next poll tick.
+  onWorkflowLaunched(event: {
+    job_id: string | null;
+    conversation_id: string;
+    upstream_status: number;
+    upstream_body: Record<string, unknown>;
+  }): void {
+    // Refresh the jobs list immediately so the new job appears without
+    // waiting for the next poll tick.
     this.refreshTrigger$.next();
+    if (event.job_id) {
+      this.view = 'jobs';
+      this.selectJob(event.job_id);
+    }
   }
 
   // --- Jobs panel interactions ------------------------------------------

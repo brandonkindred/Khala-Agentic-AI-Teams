@@ -26,6 +26,7 @@
       {key: 'wcag_levels', label: 'WCAG levels', placeholder: 'A, AA, or AAA'},
       {key: 'timebox_hours', label: 'Timebox (hours)', placeholder: 'Maximum hours for audit'}
     ]"
+    (workflowLaunched)="onAssistantLaunched($event)"
   />
   <mat-tab-group
     [selectedIndex]="selectedTabIndex"

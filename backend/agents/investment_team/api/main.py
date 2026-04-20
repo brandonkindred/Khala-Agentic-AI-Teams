@@ -58,6 +58,42 @@ from investment_team.models import (
     WorkflowMode,
 )
 from investment_team.orchestrator import InvestmentTeamOrchestrator, WorkflowState
+from investment_team.shared.job_store import (
+    JOB_STATUS_CANCELLED as _BT_JOB_STATUS_CANCELLED,
+)
+from investment_team.shared.job_store import (
+    JOB_STATUS_COMPLETED as _BT_JOB_STATUS_COMPLETED,
+)
+from investment_team.shared.job_store import (
+    JOB_STATUS_FAILED as _BT_JOB_STATUS_FAILED,
+)
+from investment_team.shared.job_store import (
+    JOB_STATUS_PENDING as _BT_JOB_STATUS_PENDING,
+)
+from investment_team.shared.job_store import (
+    JOB_STATUS_RUNNING as _BT_JOB_STATUS_RUNNING,
+)
+from investment_team.shared.job_store import (
+    cancel_job as _bt_cancel_job,
+)
+from investment_team.shared.job_store import (
+    create_job as _bt_create_job,
+)
+from investment_team.shared.job_store import (
+    delete_job as _bt_delete_job,
+)
+from investment_team.shared.job_store import (
+    get_job as _bt_get_job,
+)
+from investment_team.shared.job_store import (
+    is_job_cancelled as _bt_is_job_cancelled,
+)
+from investment_team.shared.job_store import (
+    list_jobs as _bt_list_jobs,
+)
+from investment_team.shared.job_store import (
+    update_job as _bt_update_job,
+)
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
 from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
@@ -691,14 +727,89 @@ def validate_strategy(
     )
 
 
-@app.post("/backtests", response_model=RunBacktestResponse)
-def run_backtest(request: RunBacktestRequest) -> RunBacktestResponse:
-    """Run a backtest using real historical market data.
+class BacktestJobSubmission(BaseModel):
+    job_id: str
+    status: str = _BT_JOB_STATUS_PENDING
 
-    Executes the strategy's generated Python script in a sandbox when
-    ``strategy.strategy_code`` is present (the normal Strategy Lab path);
-    falls back to LLM-driven bar-by-bar evaluation only for legacy
-    strategies that have no generated code.
+
+class BacktestJobStatus(BaseModel):
+    job_id: str
+    status: str
+    strategy_id: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class BacktestJobListItem(BaseModel):
+    job_id: str
+    status: str
+    strategy_id: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class BacktestJobListResponse(BaseModel):
+    jobs: List[BacktestJobListItem]
+
+
+def _run_backtest_background(
+    job_id: str,
+    strategy: StrategySpec,
+    config: BacktestConfig,
+    submitted_by: str,
+    notes: Optional[str],
+) -> None:
+    try:
+        if _bt_is_job_cancelled(job_id):
+            return
+        _bt_update_job(job_id, status=_BT_JOB_STATUS_RUNNING)
+        result, trades = _run_real_data_backtest(strategy, config)
+        if _bt_is_job_cancelled(job_id):
+            return
+        backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
+        now = _now()
+        record = BacktestRecord(
+            backtest_id=backtest_id,
+            strategy_id=strategy.strategy_id,
+            strategy=strategy,
+            config=config,
+            submitted_by=submitted_by,
+            submitted_at=now,
+            completed_at=now,
+            result=result,
+            notes=notes,
+            trades=trades,
+        )
+        with _lock:
+            _backtests[backtest_id] = record
+        _bt_update_job(
+            job_id,
+            status=_BT_JOB_STATUS_COMPLETED,
+            result=RunBacktestResponse(backtest=record).model_dump(mode="json"),
+            backtest_id=backtest_id,
+        )
+    except HTTPException as exc:
+        if _bt_is_job_cancelled(job_id):
+            return
+        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc.detail))
+    except Exception as exc:
+        logger.exception("Backtest job %s failed", job_id)
+        if _bt_is_job_cancelled(job_id):
+            return
+        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
+
+
+@app.post("/backtests", response_model=BacktestJobSubmission)
+def run_backtest(request: RunBacktestRequest) -> BacktestJobSubmission:
+    """Submit a backtest job against real historical market data.
+
+    Returns `{job_id, status}` immediately; poll
+    `GET /backtests/status/{job_id}` for the completed ``RunBacktestResponse``
+    in the ``result`` field. Strategies with generated ``strategy_code`` run
+    in a sandbox (the normal Strategy Lab path); legacy code-less strategies
+    fall back to LLM-driven bar-by-bar evaluation.
     """
     with _lock:
         strategy = _strategies.get(request.strategy_id)
@@ -718,33 +829,71 @@ def run_backtest(request: RunBacktestRequest) -> RunBacktestResponse:
         slippage_bps=request.slippage_bps,
     )
 
-    try:
-        result, trades = _run_real_data_backtest(strategy, config)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error("Backtest failed for strategy %s: %s", request.strategy_id, exc)
-        raise HTTPException(status_code=500, detail=f"Backtest failed: {exc}") from exc
+    job_id = str(uuid.uuid4())
+    _bt_create_job(job_id, strategy_id=strategy.strategy_id)
+    thread = threading.Thread(
+        target=_run_backtest_background,
+        args=(job_id, strategy, config, request.submitted_by, request.notes),
+        daemon=True,
+    )
+    thread.start()
+    return BacktestJobSubmission(job_id=job_id, status=_BT_JOB_STATUS_PENDING)
 
-    backtest_id = f"bt-{uuid.uuid4().hex[:8]}"
-    now = _now()
-    record = BacktestRecord(
-        backtest_id=backtest_id,
-        strategy_id=strategy.strategy_id,
-        strategy=strategy,
-        config=config,
-        submitted_by=request.submitted_by,
-        submitted_at=now,
-        completed_at=now,
-        result=result,
-        notes=request.notes,
-        trades=trades,
+
+@app.get("/backtests/status/{job_id}", response_model=BacktestJobStatus)
+def get_backtest_job_status(job_id: str) -> BacktestJobStatus:
+    data = _bt_get_job(job_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return BacktestJobStatus(
+        job_id=data.get("job_id", job_id),
+        status=data.get("status", _BT_JOB_STATUS_PENDING),
+        strategy_id=data.get("strategy_id"),
+        result=data.get("result"),
+        error=data.get("error"),
+        created_at=data.get("created_at"),
+        updated_at=data.get("updated_at"),
     )
 
-    with _lock:
-        _backtests[backtest_id] = record
 
-    return RunBacktestResponse(backtest=record)
+@app.get("/backtests/jobs", response_model=BacktestJobListResponse)
+def list_backtest_jobs(running_only: bool = False) -> BacktestJobListResponse:
+    statuses = [_BT_JOB_STATUS_PENDING, _BT_JOB_STATUS_RUNNING] if running_only else None
+    items = [
+        BacktestJobListItem(
+            job_id=j.get("job_id", ""),
+            status=j.get("status", _BT_JOB_STATUS_PENDING),
+            strategy_id=j.get("strategy_id"),
+            created_at=j.get("created_at"),
+            updated_at=j.get("updated_at"),
+        )
+        for j in _bt_list_jobs(statuses=statuses)
+    ]
+    return BacktestJobListResponse(jobs=items)
+
+
+@app.post("/backtests/jobs/{job_id}/cancel")
+def cancel_backtest_job(job_id: str) -> Dict[str, Any]:
+    data = _bt_get_job(job_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if _bt_cancel_job(job_id):
+        return {"job_id": job_id, "status": _BT_JOB_STATUS_CANCELLED, "success": True}
+    return {
+        "job_id": job_id,
+        "status": data.get("status"),
+        "success": False,
+        "message": f"Cannot cancel job in status {data.get('status')}",
+    }
+
+
+@app.delete("/backtests/jobs/{job_id}")
+def delete_backtest_job(job_id: str) -> Dict[str, Any]:
+    if _bt_get_job(job_id) is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not _bt_delete_job(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job_id": job_id, "deleted": True}
 
 
 @app.get("/backtests", response_model=ListBacktestsResponse)

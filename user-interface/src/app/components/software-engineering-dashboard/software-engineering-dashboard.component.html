@@ -45,14 +45,8 @@
       {key: 'tech_stack', label: 'Tech stack', placeholder: 'Preferred languages or frameworks'},
       {key: 'constraints', label: 'Constraints', placeholder: 'Deadlines, NFRs, or limitations'}
     ]"
-    (launchWorkflow)="launchProject($event)"
+    (workflowLaunched)="onWorkflowLaunched($event)"
   />
-  @if (launchError) {
-    <p style="color: var(--kh-error); font-size: var(--kh-text-sm);">{{ launchError }}</p>
-  }
-  @if (launching) {
-    <p style="color: var(--kh-text-tertiary); font-size: var(--kh-text-sm);">Starting project...</p>
-  }
 }
 
 <!-- ════════════════════════════════════════════════════════════════════════ -->

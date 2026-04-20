@@ -7,7 +7,6 @@ import type {
   PlanJob,
   PlanJobSubmission,
   PlanTripRequestBody,
-  TripItinerary,
 } from '../models';
 
 /**
@@ -27,9 +26,9 @@ export class RoadTripPlanningApiService {
     return this.http.get<{ status?: string }>(`${this.baseUrl}/health`);
   }
 
-  /** Submit an async planning job. Returns immediately with a job_id. */
+  /** Submit a planning job. Returns immediately with a job_id. */
   submitPlanJob(body: PlanTripRequestBody): Observable<PlanJobSubmission> {
-    return this.http.post<PlanJobSubmission>(`${this.baseUrl}/plan/async`, body);
+    return this.http.post<PlanJobSubmission>(`${this.baseUrl}/plan`, body);
   }
 
   /** Single poll of a job's status. */
@@ -66,13 +65,5 @@ export class RoadTripPlanningApiService {
       ),
     );
     return stream$;
-  }
-
-  /**
-   * One-shot synchronous planning. Kept for callers that want a blocking
-   * call (not used by the dashboard, but handy for integration/tests).
-   */
-  planSync(body: PlanTripRequestBody): Observable<{ itinerary: TripItinerary }> {
-    return this.http.post<{ itinerary: TripItinerary }>(`${this.baseUrl}/plan`, body);
   }
 }

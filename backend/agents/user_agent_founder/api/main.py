@@ -58,9 +58,12 @@ instrument_fastapi_app(app, team_key="user_agent_founder")
 
 
 class StartRunResponse(BaseModel):
-    run_id: str
+    # External-facing key used by the team-assistant launch endpoint and the
+    # jobs UI. Internally the team still uses ``run_id`` for its own rows;
+    # we only rename at the wire.
+    job_id: str
     status: str = "pending"
-    message: str = "Founder workflow started. Poll GET /status/{run_id} for progress."
+    message: str = "Founder workflow started. Poll GET /status/{job_id} for progress."
 
 
 class DecisionResponse(BaseModel):
@@ -127,7 +130,7 @@ def start_founder_workflow() -> StartRunResponse:
     thread.start()
     logger.info("Founder workflow thread started: run_id=%s", run_id)
 
-    return StartRunResponse(run_id=run_id)
+    return StartRunResponse(job_id=run_id)
 
 
 @app.get("/status/{run_id}", response_model=RunStatusResponse)
@@ -347,8 +350,7 @@ def send_chat_message(run_id: str, request: SendChatRequest) -> ChatHistoryRespo
     context: dict[str, Any] = {
         "status": run.status,
         "recent_decisions": [
-            {"question_text": d.question_text, "answer_text": d.answer_text}
-            for d in decisions[-5:]
+            {"question_text": d.question_text, "answer_text": d.answer_text} for d in decisions[-5:]
         ],
     }
 
@@ -409,14 +411,16 @@ def list_jobs(running_only: bool = False) -> FounderJobListResponse:
     jobs = []
     for j in raw:
         data = j.get("data", j)
-        jobs.append(FounderJobSummary(
-            job_id=j.get("job_id", ""),
-            status=j.get("status", data.get("status", "unknown")),
-            label=data.get("label", "Persona: founder workflow"),
-            current_phase=data.get("current_phase"),
-            created_at=j.get("created_at", data.get("created_at")),
-            error=data.get("error"),
-        ))
+        jobs.append(
+            FounderJobSummary(
+                job_id=j.get("job_id", ""),
+                status=j.get("status", data.get("status", "unknown")),
+                label=data.get("label", "Persona: founder workflow"),
+                current_phase=data.get("current_phase"),
+                created_at=j.get("created_at", data.get("created_at")),
+                error=data.get("error"),
+            )
+        )
     return FounderJobListResponse(jobs=jobs)
 
 

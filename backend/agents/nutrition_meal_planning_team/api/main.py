@@ -26,9 +26,7 @@ from ..models import (
     FeedbackResponse,
     MealHistoryResponse,
     MealPlanRequest,
-    MealPlanResponse,
     NutritionPlanRequest,
-    NutritionPlanResponse,
     ProfileUpdateRequest,
 )
 from ..orchestrator.agent import NutritionMealPlanningOrchestrator
@@ -39,6 +37,7 @@ from ..shared.job_store import (
     JOB_STATUS_RUNNING,
     create_job,
     get_job,
+    is_job_cancelled,
     update_job,
 )
 
@@ -233,27 +232,96 @@ def get_profile_completeness_route(client_id: str):
     return orchestrator.get_completeness(client_id)
 
 
-@app.post("/plan/nutrition", response_model=NutritionPlanResponse)
+def _run_nutrition_plan_job(job_id: str, body: NutritionPlanRequest) -> None:
+    """Background: run nutrition plan, store result in job."""
+    try:
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_RUNNING)
+        result = orchestrator.get_nutrition_plan(body)
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
+    except ValueError as e:
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), not_found=True)
+    except Exception as e:
+        logger.exception("Nutrition plan job %s failed", job_id)
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+
+
+def _run_nutrition_regenerate_job(job_id: str, client_id: str) -> None:
+    try:
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_RUNNING)
+        result = orchestrator.regenerate_nutrition_plan(client_id)
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
+    except ValueError as e:
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), not_found=True)
+    except Exception as e:
+        logger.exception("Nutrition regenerate job %s failed", job_id)
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+
+
+def _run_meal_plan_job(job_id: str, body: MealPlanRequest) -> None:
+    """Background: run meal plan, store result in job."""
+    try:
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_RUNNING)
+        result = orchestrator.get_meal_plan(body)
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
+    except ValueError as e:
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), not_found=True)
+    except Exception as e:
+        logger.exception("Meal plan job %s failed", job_id)
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+
+
+def _submit_thread_job(job_id: str, target, args) -> None:
+    threading.Thread(target=target, args=args, daemon=True).start()
+
+
+@app.post("/plan/nutrition")
 def post_plan_nutrition_route(body: NutritionPlanRequest):
-    """Get nutrition plan for client. Loads profile, runs nutritionist agent, returns plan."""
-    try:
-        return orchestrator.get_nutrition_plan(body)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Profile not found")
+    """Submit an async nutrition plan job. Poll GET /jobs/{job_id} for the result."""
+    job_id = str(uuid4())
+    create_job(job_id, request=body.model_dump(), kind="nutrition_plan")
+    _submit_thread_job(job_id, _run_nutrition_plan_job, (job_id, body))
+    return {"job_id": job_id, "status": JOB_STATUS_PENDING}
 
 
-@app.post("/plan/nutrition/{client_id}/regenerate", response_model=NutritionPlanResponse)
+@app.post("/plan/nutrition/{client_id}/regenerate")
 def post_plan_nutrition_regenerate_route(client_id: str):
-    """SPEC-004 §4.7: force cache miss and rebuild the plan.
+    """Submit an async regenerate job. Poll GET /jobs/{job_id} for the rebuilt plan.
 
-    Rate-limited at the gateway layer in production (not re-enforced
-    here). Use when the user taps "refresh" after a profile change
-    that the UI thinks should produce a different plan.
+    SPEC-004 §4.7: force cache miss and rebuild the plan. Rate-limited at
+    the gateway layer in production.
     """
-    try:
-        return orchestrator.regenerate_nutrition_plan(client_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Profile not found")
+    job_id = str(uuid4())
+    create_job(
+        job_id,
+        client_id=client_id,
+        kind="nutrition_regenerate",
+    )
+    _submit_thread_job(job_id, _run_nutrition_regenerate_job, (job_id, client_id))
+    return {"job_id": job_id, "status": JOB_STATUS_PENDING}
 
 
 @app.get("/plan/nutrition/{client_id}/rationale")
@@ -270,50 +338,27 @@ def get_plan_nutrition_rationale_route(client_id: str):
     return payload
 
 
-@app.post("/plan/meals", response_model=MealPlanResponse)
+@app.post("/plan/meals")
 def post_plan_meals_route(body: MealPlanRequest):
-    """Get meal plan: load profile, nutrition plan, meal history; run meal planning agent."""
-    try:
-        return orchestrator.get_meal_plan(body)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Profile not found")
-
-
-def _run_meal_plan_job(job_id: str, body: MealPlanRequest) -> None:
-    """Background: run meal plan, store result in job."""
-    try:
-        update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = orchestrator.get_meal_plan(body)
-        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
-    except ValueError as e:
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
-    except Exception as e:
-        logger.exception("Meal plan job %s failed", job_id)
-        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
-
-
-@app.post("/plan/meals/async")
-def post_plan_meals_async_route(body: MealPlanRequest):
-    """Start async meal plan generation. Returns job_id; poll GET /jobs/{job_id} for result."""
+    """Submit an async meal plan job. Poll GET /jobs/{job_id} for the result."""
     job_id = str(uuid4())
-    create_job(job_id, status=JOB_STATUS_PENDING, request=body.model_dump())
+    create_job(job_id, request=body.model_dump(), kind="meal_plan")
     try:
         from nutrition_meal_planning_team.temporal.client import is_temporal_enabled
         from nutrition_meal_planning_team.temporal.start_workflow import start_meal_plan_workflow
 
         if is_temporal_enabled():
             start_meal_plan_workflow(job_id, body.model_dump())
-            return {"job_id": job_id}
+            return {"job_id": job_id, "status": JOB_STATUS_PENDING}
     except ImportError:
         pass
-    thread = threading.Thread(target=_run_meal_plan_job, args=(job_id, body), daemon=True)
-    thread.start()
-    return {"job_id": job_id}
+    _submit_thread_job(job_id, _run_meal_plan_job, (job_id, body))
+    return {"job_id": job_id, "status": JOB_STATUS_PENDING}
 
 
 @app.get("/jobs/{job_id}")
 def get_job_route(job_id: str):
-    """Get job status and result (for async meal plan). Result in payload when status is completed."""
+    """Get job status and result. Completed results live in the `result` field."""
     data = get_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")

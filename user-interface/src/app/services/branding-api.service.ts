@@ -1,6 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Observable } from 'rxjs';
+import { Observable, EMPTY, of, throwError, timer } from 'rxjs';
+import { expand, first, switchMap } from 'rxjs/operators';
 import { environment } from '../../environments/environment';
 import type {
   Brand,
@@ -19,6 +20,21 @@ import type {
   UpdateBrandRequest,
   HealthResponse,
 } from '../models';
+
+interface BrandJobSubmission {
+  job_id: string;
+  status: string;
+}
+
+interface BrandJobStatus {
+  job_id: string;
+  status: string;
+  current_phase?: string | null;
+  result?: BrandingTeamOutput | null;
+  error?: string | null;
+}
+
+const BRANDING_POLL_INTERVAL_MS = 2000;
 
 @Injectable({ providedIn: 'root' })
 export class BrandingApiService {
@@ -53,10 +69,53 @@ export class BrandingApiService {
     return this.http.put<Brand>(`${this.baseUrl}/clients/${clientId}/brands/${brandId}`, request);
   }
 
-  runBrand(clientId: string, brandId: string, request?: RunBrandRequest): Observable<BrandingTeamOutput> {
-    return this.http.post<BrandingTeamOutput>(
+  /**
+   * Submit a branding run job and poll until it completes. Emits the final
+   * `BrandingTeamOutput`; errors on `failed` / `cancelled`.
+   */
+  runBrand(
+    clientId: string,
+    brandId: string,
+    request?: RunBrandRequest
+  ): Observable<BrandingTeamOutput> {
+    return this.submitRun(clientId, brandId, request).pipe(
+      switchMap((submission) => this.pollJob(submission.job_id))
+    );
+  }
+
+  /** Submit a branding run job; returns immediately with a `job_id`. */
+  submitRun(
+    clientId: string,
+    brandId: string,
+    request?: RunBrandRequest
+  ): Observable<BrandJobSubmission> {
+    return this.http.post<BrandJobSubmission>(
       `${this.baseUrl}/clients/${clientId}/brands/${brandId}/run`,
       request ?? { human_approved: true }
+    );
+  }
+
+  /** Single status poll for a branding job. */
+  getJobStatus(jobId: string): Observable<BrandJobStatus> {
+    return this.http.get<BrandJobStatus>(`${this.baseUrl}/branding/status/${jobId}`);
+  }
+
+  private pollJob(jobId: string): Observable<BrandingTeamOutput> {
+    const poll$ = this.getJobStatus(jobId);
+    return poll$.pipe(
+      expand((job) =>
+        job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
+          ? EMPTY
+          : timer(BRANDING_POLL_INTERVAL_MS).pipe(switchMap(() => poll$))
+      ),
+      first((job) =>
+        job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
+      ),
+      switchMap((job) =>
+        job.status === 'completed' && job.result
+          ? of(job.result)
+          : throwError(() => new Error(job.error || `Branding job ${job.status}`))
+      )
     );
   }
 

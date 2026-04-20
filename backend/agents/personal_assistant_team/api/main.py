@@ -15,10 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from ..models import (
-    AssistantRequest,
-    AssistantResponse,
-)
+from ..models import AssistantRequest
 from ..orchestrator.agent import PersonalAssistantOrchestrator
 from ..shared.credential_store import CredentialStore
 from ..shared.llm import get_llm_client
@@ -95,13 +92,6 @@ llm = get_llm_client("personal_assistant")
 credential_store = CredentialStore()
 profile_store = UserProfileStore()
 orchestrator = PersonalAssistantOrchestrator(llm, credential_store, profile_store)
-
-
-class AssistantRequestBody(BaseModel):
-    """Request body for assistant endpoint."""
-
-    message: str
-    context: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ProfileUpdateBody(BaseModel):
@@ -220,10 +210,6 @@ class AssistantJobRequest(BaseModel):
 
     message: str
     context: Dict[str, Any] = Field(default_factory=dict)
-    async_mode: bool = Field(
-        default=True,
-        description="If True, run in background and return job_id. If False, run synchronously.",
-    )
 
 
 class AssistantJobResponse(BaseModel):
@@ -355,49 +341,9 @@ async def start_assistant_job(user_id: str, body: AssistantJobRequest):
     """
     Start an async assistant job.
 
-    Returns a job_id that can be used to poll for status.
-    If async_mode is False, runs synchronously and returns result directly.
+    Returns a job_id that can be used to poll GET /assistant/jobs/{job_id}.
     """
     job_id = str(uuid4())
-
-    if not body.async_mode:
-        request = AssistantRequest(
-            request_id=job_id,
-            user_id=user_id,
-            message=body.message,
-            context=body.context,
-        )
-        response = orchestrator.handle_request(request)
-        create_job(
-            job_id=job_id,
-            user_id=user_id,
-            request_type="assistant",
-            message=body.message,
-            context=body.context,
-        )
-        update_job(
-            job_id,
-            status=PA_JOB_STATUS_COMPLETED,
-            progress=100,
-            response=response.model_dump(),
-        )
-        if slack_notify_pa_response:
-            threading.Thread(
-                target=slack_notify_pa_response,
-                args=(
-                    user_id,
-                    body.message,
-                    response.message,
-                    response.actions_taken,
-                    response.follow_up_suggestions,
-                ),
-                daemon=True,
-            ).start()
-        return AssistantJobResponse(
-            job_id=job_id,
-            status=PA_JOB_STATUS_COMPLETED,
-            message="Request completed synchronously.",
-        )
 
     create_job(
         job_id=job_id,
@@ -517,36 +463,6 @@ async def list_user_assistant_jobs(
     ]
 
     return AssistantJobListResponse(jobs=items, total=len(items))
-
-
-@app.post("/users/{user_id}/assistant", response_model=AssistantResponse)
-async def assistant_request(user_id: str, body: AssistantRequestBody):
-    """
-    Send a free-form request to the personal assistant.
-
-    The assistant will classify the intent and route to the appropriate agent.
-    """
-    request = AssistantRequest(
-        request_id=str(uuid4()),
-        user_id=user_id,
-        message=body.message,
-        context=body.context,
-    )
-
-    response = orchestrator.handle_request(request)
-    if slack_notify_pa_response:
-        threading.Thread(
-            target=slack_notify_pa_response,
-            args=(
-                user_id,
-                body.message,
-                response.message,
-                response.actions_taken,
-                response.follow_up_suggestions,
-            ),
-            daemon=True,
-        ).start()
-    return response
 
 
 @app.get("/users/{user_id}/profile")

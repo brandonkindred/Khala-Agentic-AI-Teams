@@ -24,4 +24,8 @@
     {key: 'repo_path', label: 'Repository path', placeholder: 'Path to project repository', required: true},
     {key: 'plan_input', label: 'Plan / tasks (optional)', placeholder: 'Feature descriptions or structured plan hints'}
   ]"
+  (workflowLaunched)="onWorkflowLaunched($event)"
 />
+@if (latestJobId) {
+  <p class="launched-banner">Coding job queued — id <code>{{ latestJobId }}</code>.</p>
+}

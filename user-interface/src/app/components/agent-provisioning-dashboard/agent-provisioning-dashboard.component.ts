@@ -145,6 +145,14 @@ export class AgentProvisioningDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
+  /** Handle a launch triggered from the assistant chat. */
+  onAssistantLaunched(event: { job_id: string | null; conversation_id: string }): void {
+    if (event.job_id) {
+      this.currentJobId = event.job_id;
+      this.startJobPolling(event.job_id);
+    }
+  }
+
   private startJobPolling(jobId: string): void {
     this.jobPollSub?.unsubscribe();
 

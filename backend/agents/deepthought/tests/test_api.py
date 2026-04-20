@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -11,9 +12,21 @@ from fastapi.testclient import TestClient
 from deepthought.api.main import app
 
 
+def _poll_deepthought(client: TestClient, job_id: str, deadline_s: float = 5.0) -> Dict[str, Any]:
+    start = time.time()
+    while time.time() - start < deadline_s:
+        r = client.get(f"/deepthought/status/{job_id}")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        if data.get("status") in {"completed", "failed", "cancelled"}:
+            return data
+        time.sleep(0.05)
+    raise AssertionError(f"Deepthought job {job_id} did not terminate in {deadline_s}s")
+
+
 @patch("deepthought.api.main.DeepthoughtOrchestrator")
 def test_ask_endpoint(mock_orch_cls):
-    """POST /deepthought/ask returns a valid DeepthoughtResponse."""
+    """POST /deepthought/ask submits a job; poll status for the answer."""
     from deepthought.models import AgentResult, DeepthoughtResponse
 
     mock_orch = MagicMock()
@@ -41,10 +54,16 @@ def test_ask_endpoint(mock_orch_cls):
     )
 
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["answer"] == "The answer is 42."
-    assert data["total_agents_spawned"] == 1
-    assert data["agent_tree"]["agent_name"] == "general_analyst"
+    submission = resp.json()
+    assert "job_id" in submission
+    assert submission["status"] in {"pending", "running"}
+
+    final = _poll_deepthought(client, submission["job_id"])
+    assert final["status"] == "completed"
+    result = final["result"]
+    assert result["answer"] == "The answer is 42."
+    assert result["total_agents_spawned"] == 1
+    assert result["agent_tree"]["agent_name"] == "general_analyst"
 
 
 def test_health_endpoint():
@@ -57,7 +76,7 @@ def test_health_endpoint():
 
 @patch("deepthought.api.main.DeepthoughtOrchestrator")
 def test_ask_with_custom_depth(mock_orch_cls):
-    """POST /deepthought/ask respects max_depth parameter."""
+    """POST /deepthought/ask forwards max_depth to the orchestrator."""
     from deepthought.models import AgentResult, DeepthoughtResponse
 
     mock_orch = MagicMock()
@@ -85,13 +104,14 @@ def test_ask_with_custom_depth(mock_orch_cls):
     )
 
     assert resp.status_code == 200
+    _poll_deepthought(client, resp.json()["job_id"])
     call_args = mock_orch.process_message.call_args
     assert call_args[0][0].max_depth == 3
 
 
 @patch("deepthought.api.main.DeepthoughtOrchestrator")
 def test_ask_with_decomposition_strategy(mock_orch_cls):
-    """POST /deepthought/ask respects decomposition_strategy parameter."""
+    """POST /deepthought/ask forwards decomposition_strategy to the orchestrator."""
     from deepthought.models import AgentResult, DeepthoughtResponse
 
     mock_orch = MagicMock()
@@ -117,8 +137,30 @@ def test_ask_with_decomposition_strategy(mock_orch_cls):
     )
 
     assert resp.status_code == 200
+    _poll_deepthought(client, resp.json()["job_id"])
     call_args = mock_orch.process_message.call_args
     assert call_args[0][0].decomposition_strategy.value == "by_option"
+
+
+@patch("deepthought.api.main.DeepthoughtOrchestrator")
+def test_ask_failure_captured_in_job(mock_orch_cls):
+    """When the orchestrator raises, the job ends in `failed` with error set."""
+    mock_orch = MagicMock()
+    mock_orch_cls.return_value = mock_orch
+    mock_orch.process_message.side_effect = RuntimeError("deepthought exploded")
+
+    client = TestClient(app)
+    resp = client.post("/deepthought/ask", json={"message": "fail please"})
+    assert resp.status_code == 200
+    final = _poll_deepthought(client, resp.json()["job_id"])
+    assert final["status"] == "failed"
+    assert "deepthought exploded" in (final.get("error") or "")
+
+
+def test_status_404_for_unknown_job():
+    client = TestClient(app)
+    r = client.get("/deepthought/status/does-not-exist")
+    assert r.status_code == 404
 
 
 @patch("deepthought.api.main.DeepthoughtOrchestrator")

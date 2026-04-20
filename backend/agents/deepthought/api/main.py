@@ -7,13 +7,30 @@ import logging
 import os
 import queue
 import threading
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from deepthought.models import AgentEvent, DeepthoughtRequest, DeepthoughtResponse
 from deepthought.orchestrator import DeepthoughtOrchestrator
+from deepthought.shared.job_store import (
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    cancel_job,
+    create_job,
+    delete_job,
+    get_job,
+    is_job_cancelled,
+    list_jobs,
+    update_job,
+)
 from shared_observability import init_otel, instrument_fastapi_app
 
 logger = logging.getLogger(__name__)
@@ -44,15 +61,121 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/deepthought/ask", response_model=DeepthoughtResponse)
-def ask(request: DeepthoughtRequest) -> DeepthoughtResponse:
-    """Submit a question and receive a recursively-decomposed answer.
+class DeepthoughtJobSubmission(BaseModel):
+    job_id: str
+    status: str = JOB_STATUS_PENDING
 
-    The response includes the synthesised answer, the full agent
-    decomposition tree, knowledge base entries, and event log.
+
+class DeepthoughtJobStatus(BaseModel):
+    job_id: str
+    status: str
+    progress: Optional[int] = None
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class DeepthoughtJobListItem(BaseModel):
+    job_id: str
+    status: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class DeepthoughtJobListResponse(BaseModel):
+    jobs: List[DeepthoughtJobListItem]
+
+
+def _run_deepthought_background(job_id: str, request: DeepthoughtRequest) -> None:
+    try:
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_RUNNING)
+        orchestrator = DeepthoughtOrchestrator()
+        result = orchestrator.process_message(request)
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump())
+    except Exception as e:
+        logger.exception("Deepthought job %s failed", job_id)
+        if is_job_cancelled(job_id):
+            return
+        update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))
+
+
+@app.post("/deepthought/ask", response_model=DeepthoughtJobSubmission)
+def ask(request: DeepthoughtRequest) -> DeepthoughtJobSubmission:
+    """Submit a question; returns a ``job_id`` to poll for the answer.
+
+    Poll ``GET /deepthought/status/{job_id}`` until ``status`` is
+    ``completed``; the full ``DeepthoughtResponse`` (answer, agent tree,
+    knowledge entries, event log) lives in the ``result`` field. Clients
+    that want live agent events should use ``POST /deepthought/ask/stream``
+    (SSE) instead.
     """
-    orchestrator = DeepthoughtOrchestrator()
-    return orchestrator.process_message(request)
+    job_id = str(uuid4())
+    create_job(job_id, message=request.message)
+    thread = threading.Thread(
+        target=_run_deepthought_background, args=(job_id, request), daemon=True
+    )
+    thread.start()
+    return DeepthoughtJobSubmission(job_id=job_id, status=JOB_STATUS_PENDING)
+
+
+@app.get("/deepthought/status/{job_id}", response_model=DeepthoughtJobStatus)
+def get_deepthought_status(job_id: str) -> DeepthoughtJobStatus:
+    data = get_job(job_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return DeepthoughtJobStatus(
+        job_id=data.get("job_id", job_id),
+        status=data.get("status", JOB_STATUS_PENDING),
+        progress=data.get("progress"),
+        result=data.get("result"),
+        error=data.get("error"),
+        created_at=data.get("created_at"),
+        updated_at=data.get("updated_at"),
+    )
+
+
+@app.get("/deepthought/jobs", response_model=DeepthoughtJobListResponse)
+def list_deepthought_jobs(running_only: bool = False) -> DeepthoughtJobListResponse:
+    statuses = [JOB_STATUS_PENDING, JOB_STATUS_RUNNING] if running_only else None
+    items = [
+        DeepthoughtJobListItem(
+            job_id=j.get("job_id", ""),
+            status=j.get("status", JOB_STATUS_PENDING),
+            created_at=j.get("created_at"),
+            updated_at=j.get("updated_at"),
+        )
+        for j in list_jobs(statuses=statuses)
+    ]
+    return DeepthoughtJobListResponse(jobs=items)
+
+
+@app.post("/deepthought/jobs/{job_id}/cancel")
+def cancel_deepthought_job(job_id: str) -> Dict[str, Any]:
+    data = get_job(job_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if cancel_job(job_id):
+        return {"job_id": job_id, "status": JOB_STATUS_CANCELLED, "success": True}
+    return {
+        "job_id": job_id,
+        "status": data.get("status"),
+        "success": False,
+        "message": f"Cannot cancel job in status {data.get('status')}",
+    }
+
+
+@app.delete("/deepthought/jobs/{job_id}")
+def delete_deepthought_job(job_id: str) -> Dict[str, Any]:
+    if get_job(job_id) is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not delete_job(job_id):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job_id": job_id, "deleted": True}
 
 
 @app.post("/deepthought/ask/stream")

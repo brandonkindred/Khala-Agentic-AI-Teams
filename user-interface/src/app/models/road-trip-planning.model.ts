@@ -89,10 +89,6 @@ export interface TripItinerary {
   generated_at: string | null;
 }
 
-export interface PlanTripResponse {
-  itinerary: TripItinerary;
-}
-
 // Async job wire types (GET /jobs/{id})
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed';
 

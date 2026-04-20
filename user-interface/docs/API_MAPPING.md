@@ -36,7 +36,8 @@ UI actions mapped to HTTP endpoints.
 
 | UI Action | Method | Path | Request | Response |
 |-----------|--------|------|---------|----------|
-| Run market research | POST | `/market-research/run` | `RunMarketResearchRequest` | `TeamOutput` |
+| Submit market research job | POST | `/market-research/run` | `RunMarketResearchRequest` | `{job_id, status}` |
+| Poll job status | GET | `/market-research/status/{job_id}` | - | `{status, result?: TeamOutput, error?}` |
 | Health check | GET | `/health` | - | `{ status: "ok" }` |
 
 ## SOC2 Compliance API (port 8020)
@@ -61,7 +62,8 @@ UI actions mapped to HTTP endpoints.
 
 | UI Action | Method | Path | Request | Response |
 |-----------|--------|------|---------|----------|
-| Send message to assistant | POST | `/users/{user_id}/assistant` | `AssistantRequest` | `AssistantResponse` |
+| Submit assistant request | POST | `/assistant/jobs?user_id={user_id}` | `AssistantRequest` | `{job_id, status}` |
+| Poll assistant job | GET | `/assistant/jobs/{job_id}` | - | `AssistantJobStatus` (with `response: AssistantResponse` on completion) |
 | Get user profile | GET | `/users/{user_id}/profile` | - | `UserProfile` |
 | Update user profile | PUT | `/users/{user_id}/profile` | `UserProfile` | `UserProfile` |
 | Get tasks | GET | `/users/{user_id}/tasks` | - | `TaskList` |
@@ -87,7 +89,7 @@ The unified API mounts all team APIs under namespaced prefixes:
 |------|--------|-----------------|
 | Blogging | `/api/blogging` | `/api/blogging/research-and-review` |
 | Software Engineering | `/api/software-engineering` | `/api/software-engineering/run-team` |
-| Personal Assistant | `/api/personal-assistant` | `/api/personal-assistant/users/{id}/assistant` |
+| Personal Assistant | `/api/personal-assistant` | `/api/personal-assistant/assistant/jobs?user_id={id}` |
 | Market Research | `/api/market-research` | `/api/market-research/run` |
 | SOC2 Compliance | `/api/soc2-compliance` | `/api/soc2-compliance/soc2-audit/run` |
 | Social Marketing | `/api/social-marketing` | `/api/social-marketing/run` |

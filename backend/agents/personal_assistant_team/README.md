@@ -101,10 +101,13 @@ The server will start on http://127.0.0.1:8015
 ### 4. Make Requests
 
 ```bash
-# Send a request to the assistant
-curl -X POST "http://127.0.0.1:8015/users/user123/assistant" \
+# Send a request to the assistant (returns a job_id)
+curl -X POST "http://127.0.0.1:8015/assistant/jobs?user_id=user123" \
   -H "Content-Type: application/json" \
   -d '{"message": "Add milk and eggs to my grocery list"}'
+
+# Poll for the result
+curl "http://127.0.0.1:8015/assistant/jobs/{job_id}"
 
 # Get user profile
 curl "http://127.0.0.1:8015/users/user123/profile"
@@ -116,7 +119,11 @@ curl "http://127.0.0.1:8015/users/user123/tasks/lists"
 ## API Endpoints
 
 ### Assistant
-- `POST /users/{user_id}/assistant` - Free-form assistant request
+- `POST /assistant/jobs?user_id={user_id}` - Submit a free-form assistant request (returns `{job_id, status}`)
+- `GET /assistant/jobs/{job_id}` - Poll for job status and result
+- `POST /assistant/jobs/{job_id}/cancel` - Cancel a running job
+- `DELETE /assistant/jobs/{job_id}` - Delete a job from the store
+- `GET /users/{user_id}/assistant/jobs` - List a user's jobs
 
 ### Profile
 - `GET /users/{user_id}/profile` - Get full profile

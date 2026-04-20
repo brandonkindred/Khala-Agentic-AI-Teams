@@ -151,10 +151,6 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
     );
     return fields;
   }
-  // Pipeline launch state
-  launching = false;
-  launchError: string | null = null;
-
   viewArtifactModal: { name: string; content: string | object } | null = null;
   viewArtifactLoading = false;
   viewArtifactError: string | null = null;
@@ -367,54 +363,21 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Launch the blog pipeline from the assistant's conversation context.
-   * Maps context fields to FullPipelineRequest and starts the async pipeline.
+   * Handle a launch that went through the backend `/assistant/launch` endpoint.
+   * The backend already linked the conversation to the job; we just navigate
+   * to the jobs view, auto-select the new job, and refresh the list once the
+   * job row has had time to persist.
    */
-  launchBlogPipeline(context: Record<string, unknown>): void {
-    const brief = ((context['brief'] as string) ?? '').trim();
-    if (!brief) {
-      this.launchError = 'A blog brief is required to start the pipeline.';
-      return;
-    }
-    this.launching = true;
-    this.launchError = null;
-
-    const request: import('../../models').FullPipelineRequest = {
-      brief,
-      audience: (context['audience'] as string) || undefined,
-      tone_or_purpose: (context['tone_or_purpose'] as string) || undefined,
-      content_profile: (context['content_profile'] as import('../../models').BlogContentProfile) || undefined,
-    };
-
-    this.api.startFullPipelineAsync(request).subscribe({
-      next: (resp) => {
-        this.launching = false;
-        this.launchError = null;
-        // Link conversation to the new job
-        if (this.currentConversationId) {
-          this.assistantApi.linkConversationToJob(
-            BloggingDashboardComponent.ASSISTANT_URL,
-            this.currentConversationId,
-            resp.job_id,
-          ).subscribe({
-            next: () => {
-              // Remove from drafts list since it's now linked
-              this.draftConversations = this.draftConversations.filter(
-                (c) => c.conversation_id !== this.currentConversationId
-              );
-            },
-          });
-        }
-        this.pendingJobId = resp.job_id;
-        this.activeView = 'jobs';
-        // Small delay so the backend has time to persist the new job record
-        setTimeout(() => this.triggerJobsRefresh(), 500);
-      },
-      error: (err) => {
-        this.launching = false;
-        this.launchError = err?.error?.detail ?? err?.message ?? 'Failed to start pipeline';
-      },
-    });
+  onWorkflowLaunched(event: { job_id: string | null; conversation_id: string }): void {
+    if (!event.job_id) return;
+    // The conversation is no longer a draft — backend already linked it.
+    this.draftConversations = this.draftConversations.filter(
+      (c) => c.conversation_id !== event.conversation_id,
+    );
+    this.pendingJobId = event.job_id;
+    this.activeView = 'jobs';
+    // Small delay so the backend has time to persist the new job record
+    setTimeout(() => this.triggerJobsRefresh(), 500);
   }
 
   private clearSelection(): void {
