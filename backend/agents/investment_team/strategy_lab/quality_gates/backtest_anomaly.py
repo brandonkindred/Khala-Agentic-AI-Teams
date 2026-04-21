@@ -98,21 +98,26 @@ class BacktestAnomalyDetector:
             )
 
         # 5b. Sharpe ratio thresholds.
-        # Issue #247: DSR (on walk-forward OOS) is now the authoritative
-        # overfitting signal, applied by AcceptanceGate. The raw-Sharpe bands
-        # remain as a cheap warning-level sanity check for single-window paths
-        # and legacy callers that don't populate deflated_sharpe.
+        # Issue #247: the walk-forward + AcceptanceGate + DSR gate is the
+        # eventual authoritative overfitting check, but until it is wired
+        # into StrategyLabOrchestrator (step 8), the orchestrator only
+        # refines/rejects on ``severity == "critical"`` gate failures. Keep
+        # Sharpe > 5.0 at critical severity so clearly-overfit strategies
+        # still trigger refinement on the single-window path; the Sharpe > 3
+        # band remains a warning. Once AcceptanceGate is invoked from the
+        # orchestrator this gate can be revisited.
         if metrics.sharpe_ratio > 5.0:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
                     passed=False,
-                    severity="warning",
+                    severity="critical",
                     details=(
                         f"Sharpe ratio {metrics.sharpe_ratio:.2f} exceeds 5.0 — "
-                        "possible look-ahead bias or calculation artifact. "
-                        "When available, AcceptanceGate's OOS Deflated Sharpe "
-                        "is the authoritative overfitting check."
+                        "almost certainly indicates look-ahead bias or a "
+                        "calculation artifact. When walk-forward is available, "
+                        "AcceptanceGate's OOS Deflated Sharpe is the more "
+                        "precise overfitting check."
                     ),
                 )
             )
