@@ -28,6 +28,12 @@ class ConvergenceTracker:
         self._failure_modes: Counter[str] = Counter()
         self._asset_class_history: List[str] = []
         self._max_history = max_history
+        # Issue #247 — every refinement round across every prior strategy on
+        # the same evaluation window counts as one trial for DSR deflation.
+        # Incremented explicitly by the orchestrator after each refinement
+        # loop completes; ``record()`` does not touch this so parallel cycle
+        # snapshots can keep their accounting independent of diversity state.
+        self._trial_count: int = 0
 
     # ------------------------------------------------------------------
     # Recording
@@ -114,6 +120,30 @@ class ConvergenceTracker:
         )
 
     # ------------------------------------------------------------------
+    # Trial counting (issue #247)
+    # ------------------------------------------------------------------
+
+    @property
+    def trial_count(self) -> int:
+        """Number of refinement rounds observed on the same evaluation window.
+
+        Used as ``n_trials`` in the Deflated Sharpe Ratio computation. See
+        issue #247 and the follow-up issue #269 for parallel-batch trial-count
+        merging across cycle snapshots.
+        """
+        return self._trial_count
+
+    def increment_trials(self, n: int = 1) -> None:
+        """Add ``n`` refinement rounds to the trial counter.
+
+        Orchestrator should call this after each refinement loop exits so
+        the deflation signal reflects every attempt that touched this window.
+        """
+        if n < 0:
+            raise ValueError(f"increment must be non-negative, got {n}")
+        self._trial_count += n
+
+    # ------------------------------------------------------------------
     # Snapshot (for parallel wave execution)
     # ------------------------------------------------------------------
 
@@ -123,6 +153,7 @@ class ConvergenceTracker:
         clone._signatures = list(self._signatures)
         clone._failure_modes = Counter(self._failure_modes)
         clone._asset_class_history = list(self._asset_class_history)
+        clone._trial_count = self._trial_count
         return clone
 
     # ------------------------------------------------------------------

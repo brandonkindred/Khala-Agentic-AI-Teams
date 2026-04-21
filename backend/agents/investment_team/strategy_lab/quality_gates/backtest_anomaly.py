@@ -97,14 +97,23 @@ class BacktestAnomalyDetector:
                 )
             )
 
-        # 5b. Sharpe ratio thresholds
+        # 5b. Sharpe ratio thresholds.
+        # Issue #247: DSR (on walk-forward OOS) is now the authoritative
+        # overfitting signal, applied by AcceptanceGate. The raw-Sharpe bands
+        # remain as a cheap warning-level sanity check for single-window paths
+        # and legacy callers that don't populate deflated_sharpe.
         if metrics.sharpe_ratio > 5.0:
             results.append(
                 QualityGateResult(
                     gate_name=GATE,
                     passed=False,
-                    severity="critical",
-                    details=f"Sharpe ratio {metrics.sharpe_ratio:.2f} exceeds 5.0 — almost certainly indicates look-ahead bias or a calculation artifact.",
+                    severity="warning",
+                    details=(
+                        f"Sharpe ratio {metrics.sharpe_ratio:.2f} exceeds 5.0 — "
+                        "possible look-ahead bias or calculation artifact. "
+                        "When available, AcceptanceGate's OOS Deflated Sharpe "
+                        "is the authoritative overfitting check."
+                    ),
                 )
             )
         elif metrics.sharpe_ratio > 3.0:

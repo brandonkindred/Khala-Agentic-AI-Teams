@@ -19,9 +19,11 @@ The new pipeline:
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence
+from statistics import NormalDist
+from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence, Tuple
 
 from .risk_free_rate import get_risk_free_rate
 
@@ -362,3 +364,191 @@ def _align_benchmark_returns(
         else:
             returns.append((aligned[i] - prev) / prev)
     return returns
+
+
+# ---------------------------------------------------------------------------
+# Deflated Sharpe Ratio + stationary block bootstrap (issue #247 step 2)
+# ---------------------------------------------------------------------------
+
+_NORMAL = NormalDist()
+_EULER_MASCHERONI = 0.5772156649015329
+
+
+def _sample_skewness(returns: Sequence[float]) -> float:
+    """Moment-based sample skewness. Returns 0 for underpowered or degenerate input."""
+    n = len(returns)
+    if n < 3:
+        return 0.0
+    mean = sum(returns) / n
+    m2 = sum((r - mean) ** 2 for r in returns) / n
+    if m2 <= 0:
+        return 0.0
+    m3 = sum((r - mean) ** 3 for r in returns) / n
+    return m3 / (m2**1.5)
+
+
+def _sample_kurtosis(returns: Sequence[float]) -> float:
+    """Non-excess kurtosis (Gaussian → 3). Returns 3 for underpowered input."""
+    n = len(returns)
+    if n < 4:
+        return 3.0
+    mean = sum(returns) / n
+    m2 = sum((r - mean) ** 2 for r in returns) / n
+    if m2 <= 0:
+        return 3.0
+    m4 = sum((r - mean) ** 4 for r in returns) / n
+    return m4 / (m2**2)
+
+
+def _expected_max_sharpe(n_trials: int) -> float:
+    """Bailey & López de Prado (2014) approximation for ``E[max SR]`` over
+    ``n_trials`` i.i.d. zero-mean unit-variance SR estimates.
+
+    For ``n_trials <= 1`` returns 0 — the deflated Sharpe reduces to the
+    Probabilistic Sharpe Ratio against a zero benchmark.
+    """
+    if n_trials <= 1:
+        return 0.0
+    p1 = 1.0 - 1.0 / n_trials
+    p2 = 1.0 - 1.0 / (n_trials * math.e)
+    z1 = _NORMAL.inv_cdf(p1)
+    z2 = _NORMAL.inv_cdf(p2)
+    return (1.0 - _EULER_MASCHERONI) * z1 + _EULER_MASCHERONI * z2
+
+
+def compute_deflated_sharpe(
+    sharpe: float,
+    *,
+    n_trials: int,
+    n_obs: int,
+    skew: float = 0.0,
+    kurtosis: float = 3.0,
+) -> float:
+    """Deflated Sharpe Ratio (Bailey & López de Prado, 2014).
+
+    ``sharpe`` is the observed annualized Sharpe ratio; ``n_obs`` is the
+    number of return observations the Sharpe was computed from; ``n_trials``
+    is the number of strategies / refinement rounds that were tried on the
+    same data before this one was selected. ``skew`` and ``kurtosis`` (non-
+    excess) are the sample moments of the return series.
+
+    Returns a probability in ``[0, 1]`` that the observed Sharpe exceeds the
+    expected-maximum Sharpe of ``n_trials`` random strategies, adjusted for
+    the higher moments of the return series. At ``n_trials=1`` this is
+    Probabilistic Sharpe; as ``n_trials`` grows, DSR deflates monotonically
+    for a fixed raw Sharpe.
+    """
+    if n_obs < 2:
+        return 0.0
+    e_max = _expected_max_sharpe(n_trials)
+    denom_sq = 1.0 - skew * sharpe + ((kurtosis - 1.0) / 4.0) * sharpe * sharpe
+    if denom_sq <= 0.0:
+        # Pathological higher moments — DSR is undefined; treat as "no claim".
+        return 0.0
+    denom = math.sqrt(denom_sq)
+    z = (sharpe - e_max) * math.sqrt(n_obs - 1) / denom
+    # Numerically stable standard-normal CDF for deep-left-tail z values where
+    # ``NormalDist.cdf`` underflows to 0 via ``1 + erf(z/sqrt2)`` cancellation.
+    if z >= 0:
+        return _NORMAL.cdf(z)
+    return 0.5 * math.erfc(-z / math.sqrt(2.0))
+
+
+def _annualized_sharpe_from_returns(
+    returns: Sequence[float],
+    *,
+    periods_per_year: int,
+    rfr_annual: float,
+) -> float:
+    if len(returns) < 2:
+        return 0.0
+    daily_vol = _std(returns)
+    if daily_vol <= 0:
+        return 0.0
+    mean = sum(returns) / len(returns)
+    annual_return = mean * periods_per_year
+    annual_vol = daily_vol * math.sqrt(periods_per_year)
+    return (annual_return - rfr_annual) / annual_vol
+
+
+def _stationary_block_resample(
+    returns: Sequence[float],
+    *,
+    block_size: int,
+    rng: random.Random,
+) -> List[float]:
+    """One Politis-Romano stationary-block resample of length ``len(returns)``.
+
+    Block lengths are shifted-geometric with mean ``block_size``; starting
+    indices are uniform with circular wrap-around.
+    """
+    n = len(returns)
+    p = 1.0 / block_size
+    out: List[float] = []
+    while len(out) < n:
+        start = rng.randrange(n)
+        length = 1
+        while rng.random() > p:
+            length += 1
+        for j in range(length):
+            if len(out) >= n:
+                break
+            out.append(returns[(start + j) % n])
+    return out
+
+
+def bootstrap_sharpe_ci(
+    returns: Sequence[float],
+    *,
+    periods_per_year: int = TRADING_DAYS_PER_YEAR,
+    risk_free_rate: Optional[float] = None,
+    n_resamples: int = 1000,
+    confidence: float = 0.95,
+    block_size: Optional[int] = None,
+    seed: int = 0,
+) -> Tuple[float, float]:
+    """Stationary-block bootstrap confidence interval for annualized Sharpe.
+
+    Resamples the return series ``n_resamples`` times using the Politis-Romano
+    stationary block bootstrap with geometric block lengths of mean
+    ``block_size`` (default ``round(n_obs ** 1/3)``, a standard rule for
+    weakly-dependent series). Returns the ``(lower, upper)`` percentile bounds
+    at the specified ``confidence`` level.
+
+    Deterministic under fixed ``seed``. Falls back to ``(0.0, 0.0)`` when the
+    series is too short to bootstrap.
+    """
+    n = len(returns)
+    if n < 2 or n_resamples < 1:
+        return (0.0, 0.0)
+    if not (0.0 < confidence < 1.0):
+        raise ValueError(f"confidence must be in (0, 1), got {confidence}")
+    if block_size is None:
+        block_size = max(1, int(round(n ** (1.0 / 3.0))))
+    if block_size < 1:
+        raise ValueError(f"block_size must be >= 1, got {block_size}")
+
+    rfr = get_risk_free_rate(override=risk_free_rate)
+    rng = random.Random(seed)
+    sharpes: List[float] = []
+    for _ in range(n_resamples):
+        sample = _stationary_block_resample(returns, block_size=block_size, rng=rng)
+        sharpes.append(
+            _annualized_sharpe_from_returns(
+                sample, periods_per_year=periods_per_year, rfr_annual=rfr
+            )
+        )
+
+    sharpes.sort()
+    lo_q = (1.0 - confidence) / 2.0
+    hi_q = 1.0 - lo_q
+    lo_idx = max(0, min(n_resamples - 1, int(math.floor(lo_q * n_resamples))))
+    hi_idx = max(0, min(n_resamples - 1, int(math.ceil(hi_q * n_resamples)) - 1))
+    return (round(sharpes[lo_idx], 4), round(sharpes[hi_idx], 4))
+
+
+def summarize_return_moments(
+    returns: Sequence[float],
+) -> Tuple[float, float]:
+    """Convenience pair: ``(skewness, non-excess kurtosis)`` for a return series."""
+    return _sample_skewness(returns), _sample_kurtosis(returns)

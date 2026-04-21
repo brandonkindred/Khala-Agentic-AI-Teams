@@ -24,7 +24,7 @@ from investment_team.trade_simulator import compute_metrics
 from investment_team.trading_service.modes.backtest import run_backtest
 
 from .fixtures import DEFAULT_DAYS, golden_market_data
-from .strategies import ROUND_TRIP_CODE, SMA_CROSSOVER_CODE
+from .strategies import OVERFIT_HARDCODED_DATES_CODE, ROUND_TRIP_CODE, SMA_CROSSOVER_CODE
 
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
 UPDATE_SNAPSHOTS = os.environ.get("UPDATE_GOLDEN_SNAPSHOTS") == "1"
@@ -140,3 +140,18 @@ def test_sma_crossover_snapshot() -> None:
 @pytest.mark.slow_subprocess
 def test_round_trip_snapshot() -> None:
     _assert_snapshot("round_trip", _run("round_trip", ROUND_TRIP_CODE))
+
+
+@pytest.mark.slow_subprocess
+def test_overfit_hardcoded_dates_snapshot() -> None:
+    """Snapshot of the known-overfit reference on the full fixture.
+
+    The strategy is curve-fit by construction (see strategies.py), so it will
+    look great on single-window metrics — that is the point. The end-to-end
+    walk-forward rejection of this strategy is covered by
+    ``test_orchestrator_walk_forward.py`` (issue #247 step 8).
+    """
+    _assert_snapshot(
+        "overfit_hardcoded_dates",
+        _run("overfit_hardcoded_dates", OVERFIT_HARDCODED_DATES_CODE),
+    )

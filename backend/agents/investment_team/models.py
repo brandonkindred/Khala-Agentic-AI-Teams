@@ -304,6 +304,65 @@ class BacktestConfig(BaseModel):
             "available."
         ),
     )
+    # Issue #247 — purged walk-forward + DSR acceptance gate. All optional so
+    # existing BacktestConfig callers keep legacy single-window behavior; the
+    # orchestrator opts in via ``walk_forward_enabled``.
+    walk_forward_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, the Strategy Lab orchestrator evaluates the terminal "
+            "acceptance gate on purged walk-forward folds instead of the "
+            "legacy single-window annualized-return threshold."
+        ),
+    )
+    n_folds: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Number of walk-forward folds (contiguous test blocks).",
+    )
+    embargo_days: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Calendar-day embargo between a test fold and the subsequent "
+            "training segment. 0 means derive from ``max(TradeRecord.hold_days)`` "
+            "at runtime."
+        ),
+    )
+    min_oos_trades: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Minimum number of out-of-sample trades required for the "
+            "composite acceptance gate to pass."
+        ),
+    )
+    dsr_threshold: float = Field(
+        default=1.0,
+        description=(
+            "OOS Deflated Sharpe Ratio threshold for the acceptance gate. "
+            "Values are probabilities in [0, 1]; the default 1.0 reserves "
+            "use of a stricter interpretation via quality-gate config."
+        ),
+    )
+    max_is_oos_degradation_pct: float = Field(
+        default=30.0,
+        ge=0,
+        le=100,
+        description=(
+            "Maximum allowed percentage degradation from in-sample to OOS "
+            "Sharpe before the acceptance gate rejects the strategy."
+        ),
+    )
+    benchmark_composition: str = Field(
+        default="60_40",
+        description=(
+            "Benchmark blend for the regime-conditional gate. ``60_40`` "
+            "compounds a 60/40 SPY+AGG equity series; future options can "
+            "support per-asset-class blends."
+        ),
+    )
 
 
 # Asset-class-aware fee defaults.  Crypto uses Kraken taker fees (lowest
@@ -352,6 +411,19 @@ class BacktestResult(BaseModel):
     signals_per_bar: Optional[float] = None
     cost_stress_results: Optional[List[Dict[str, Any]]] = None
     reject_reason: Optional[str] = None
+    # Issue #247 — walk-forward + DSR diagnostics. All Optional so legacy
+    # single-window runs omit these fields entirely.
+    deflated_sharpe: Optional[float] = None
+    sharpe_ci_low: Optional[float] = None
+    sharpe_ci_high: Optional[float] = None
+    is_sharpe: Optional[float] = None
+    oos_sharpe: Optional[float] = None
+    is_oos_degradation_pct: Optional[float] = None
+    oos_trade_count: Optional[int] = None
+    n_trials_when_accepted: Optional[int] = None
+    acceptance_reason: Optional[str] = None
+    regime_results: Optional[List[Dict[str, Any]]] = None
+    fold_results: Optional[List[Dict[str, Any]]] = None
 
 
 class TradeRecord(BaseModel):
