@@ -42,10 +42,20 @@ def test_realized_vol_buckets_partition_eligible_indices():
     assert len(all_idx) == 252 - 20
 
 
-def test_realized_vol_empty_bucket_list_when_series_too_short():
+def test_realized_vol_empty_bucket_list_when_series_shorter_than_window():
     subs = realized_vol_quartile_subwindows([0.01, 0.02, 0.03], window=21)
     assert [label for label, _ in subs] == list(REGIME_LABELS)
     assert all(len(idx) == 0 for _, idx in subs)
+
+
+def test_realized_vol_classifies_minimum_valid_window():
+    # A series of exactly ``window`` observations has one fully-populated
+    # trailing-std value at index ``window-1``. The regime classifier must
+    # assign that index rather than dropping it (PR #271 review: off-by-one).
+    returns = [0.01 * i for i in range(21)]
+    subs = dict(realized_vol_quartile_subwindows(returns, window=21))
+    all_idx = sorted(i for idx in subs.values() for i in idx)
+    assert all_idx == [20]
 
 
 def test_realized_vol_calmer_regime_gets_lower_bucket():
@@ -92,6 +102,18 @@ def test_vix_quartile_uses_provider_output():
     assert max(subs["vix_q4"]) == 99
     # Lowest quartile should contain the earliest eligible indices.
     assert min(subs["vix_q1"]) == 20
+
+
+def test_vix_quartile_classifies_minimum_valid_window():
+    # Same off-by-one fix applies to the VIX path.
+    dates = [date(2022, 1, 3) + timedelta(days=i) for i in range(21)]
+
+    def provider(ds):
+        return [float(i) for i in range(len(ds))]
+
+    subs = dict(vix_quartile_subwindows(dates, [0.0] * 21, vix_provider=provider, window=21))
+    all_idx = sorted(i for idx in subs.values() for i in idx)
+    assert all_idx == [20]
 
 
 def test_vix_provider_length_mismatch_raises():

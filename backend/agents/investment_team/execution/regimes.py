@@ -72,7 +72,10 @@ def realized_vol_quartile_subwindows(
     downstream consumers can iterate a fixed schema.
     """
     n = len(returns)
-    if n <= window:
+    # Index ``window-1`` is the first position whose trailing slice is fully
+    # populated, so we need ``n >= window`` — not ``n > window`` — before
+    # classifying anything.
+    if n < window:
         return [(label, []) for label in REGIME_LABELS]
 
     rolling = _rolling_std(returns, window=window)
@@ -122,9 +125,10 @@ def vix_quartile_subwindows(
     if len(vix_levels) != len(dates):
         raise ValueError(f"vix_provider returned {len(vix_levels)} values, expected {len(dates)}")
     # Match realized-vol semantics: the first ``window-1`` indices are
-    # unassigned (equivalent to "insufficient prior data" in the RV path).
+    # unassigned (equivalent to "insufficient prior data" in the RV path),
+    # but index ``window-1`` itself is classifiable when ``n >= window``.
     n = len(vix_levels)
-    if n <= window:
+    if n < window:
         return [(label, []) for label in REGIME_LABELS]
 
     populated_slice = vix_levels[window - 1 :]
