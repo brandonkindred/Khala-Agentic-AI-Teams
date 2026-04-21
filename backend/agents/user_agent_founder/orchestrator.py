@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from job_service_client import JobServiceClient
+from llm_service import LLMJsonParseError, LLMSchemaValidationError
 from user_agent_founder.agent import FounderAgent
 from user_agent_founder.store import FounderRunStore
 
@@ -77,8 +78,19 @@ def _answer_pending_questions(
     for q in answerable:
         try:
             result = agent.answer_question(q)
+        except (LLMJsonParseError, LLMSchemaValidationError):
+            # Self-correction retry inside generate_structured already ran and
+            # failed — with bounded per-question schemas this should be rare.
+            # Skip just this question so a single LLM glitch doesn't kill the
+            # whole batch; the outer poll loop will re-surface unanswered
+            # required questions on the next tick.
+            logger.warning(
+                "LLM validation failed for question %s after self-correction retry; skipping",
+                q["id"],
+            )
+            continue
         except Exception:
-            logger.exception("LLM failed to answer question %s", q["id"])
+            logger.exception("Unexpected error answering question %s", q["id"])
             return False
         answer_text = result.get("other_text") or result.get("selected_option_id", "")
         rationale = result.get("rationale", "")

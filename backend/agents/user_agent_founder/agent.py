@@ -7,19 +7,28 @@ through the lens of a bootstrapped founder building a task management service.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model, model_validator
 
 logger = logging.getLogger(__name__)
 
 
 class FounderAnswer(BaseModel):
-    """Schema for a founder's answer to a question from the SE team.
+    """Return-shape contract for a founder's answer to an SE-team question.
 
-    Validated at the ``llm_service.generate_structured`` boundary; a single
-    schema-grounded self-correction retry is applied automatically before
-    the caller sees a failure.
+    The live LLM call in :meth:`FounderAgent.answer_question` does **not**
+    validate against this class directly. Instead it builds a per-question
+    bounded schema (via :func:`_build_answer_schema`) whose
+    ``selected_option_id`` is ``Literal[<that question's option ids>, "other"]``,
+    so hallucinated IDs become a correctable Pydantic validation failure at the
+    ``llm_service.generate_structured`` boundary (where one schema-grounded
+    self-correction retry already lives) instead of flowing through to the SE
+    team. This class is retained for:
+
+    * the stable ``{selected_option_id, other_text, rationale}`` dict shape
+      returned by ``answer_question``, and
+    * any future callers that still want a permissive reference schema.
     """
 
     selected_option_id: str = Field(
@@ -34,6 +43,55 @@ class FounderAnswer(BaseModel):
         ...,
         description="Short explanation of the decision in founder-values terms",
     )
+
+
+class _BoundedAnswerBase(BaseModel):
+    """Base class whose ``model_validator`` is inherited by every per-question
+    bounded answer schema produced by :func:`_build_answer_schema`.
+
+    The concrete subclass declares ``selected_option_id`` with a dynamic
+    ``Literal`` type, so by the time this validator runs the field is already
+    guaranteed to be one of the allowed option ids (or ``"other"``). The only
+    remaining invariant is: if the LLM picked ``"other"``, it must supply a
+    non-empty ``other_text``.
+    """
+
+    @model_validator(mode="after")
+    def _require_other_text(self):
+        selected = getattr(self, "selected_option_id", None)
+        other = getattr(self, "other_text", None)
+        if selected == "other" and not (other and other.strip()):
+            raise ValueError(
+                "other_text is required (non-empty) when selected_option_id == 'other'"
+            )
+        return self
+
+
+def _build_answer_schema(options: list[dict[str, Any]]) -> type[BaseModel]:
+    """Build a per-question Pydantic schema whose ``selected_option_id`` is
+    constrained to the question's actual option ids plus ``"other"``.
+
+    Passed to :func:`llm_service.generate_structured` so hallucinated ids become
+    a ``pydantic.ValidationError`` that the schema-grounded self-correction
+    retry can recover from, rather than a string that silently flows to the SE
+    team.
+    """
+    option_ids = tuple(o["id"] for o in options if o.get("id"))
+    if "other" in option_ids:
+        allowed: tuple[str, ...] = option_ids
+    else:
+        allowed = option_ids + ("other",)
+    # ``Literal`` accepts a tuple subscript — ``Literal[("a", "b", "other")]``
+    # is identical to ``Literal["a", "b", "other"]``.
+    selected_t = Literal[allowed]  # type: ignore[valid-type]
+    return create_model(
+        "BoundedFounderAnswer",
+        __base__=_BoundedAnswerBase,
+        selected_option_id=(selected_t, ...),
+        other_text=(str | None, None),
+        rationale=(str, ...),
+    )
+
 
 FOUNDER_SYSTEM_PROMPT = """\
 You are Alex Chen, a bootstrapped startup founder building a task management \
@@ -255,12 +313,13 @@ class FounderAgent:
     def answer_question(self, question: dict[str, Any]) -> dict[str, Any]:
         """Answer a pending question from the SE team.
 
-        Delegates to :func:`llm_service.generate_structured` with the
-        :class:`FounderAnswer` schema, which enforces JSON-mode output and
-        applies one schema-grounded self-correction retry before failing.
-        The bespoke regex-stripping / ``json.loads`` fallback that lived here
-        previously is no longer needed — the guard covers both the parse
-        and validation failure modes.
+        Delegates to :func:`llm_service.generate_structured` with a **per-call
+        bounded schema** whose ``selected_option_id`` is a ``Literal`` of the
+        question's actual option ids (plus ``"other"``). Hallucinated ids
+        therefore trigger a Pydantic validation error which the structured
+        helper recovers from via one schema-grounded self-correction retry
+        before the caller sees a failure. The bespoke regex-stripping /
+        ``json.loads`` fallback that lived here previously is no longer needed.
 
         Args:
             question: Dict with keys: id, question_text, context, recommendation, options.
@@ -298,9 +357,10 @@ class FounderAgent:
             options_text=options_text,
         )
 
+        bounded_schema = _build_answer_schema(options)
         answer = generate_structured(
             prompt,
-            schema=FounderAnswer,
+            schema=bounded_schema,
             system_prompt=FOUNDER_SYSTEM_PROMPT,
             agent_key="user_agent_founder",
         )
