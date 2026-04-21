@@ -123,3 +123,66 @@ ROUND_TRIP_CODE = textwrap.dedent('''\
                     reason="exit",
                 )
 ''')
+
+
+# ---------------------------------------------------------------------------
+# Curve-fit reference strategy (issue #247): hard-coded calendar-date entries
+# selected after the fact to coincide with troughs/peaks in the AAA sinusoidal
+# fixture. The whole point is that the strategy is textbook overfitting —
+# single-window backtests produce a near-perfect Sharpe, but in walk-forward
+# evaluation the held-out test folds intersect only a few (or zero) of the
+# hard-coded dates and the OOS Sharpe collapses. Consumed by
+# test_orchestrator_walk_forward.py (step 8) to verify the acceptance gate
+# rejects it.
+# ---------------------------------------------------------------------------
+
+OVERFIT_HARDCODED_DATES_CODE = textwrap.dedent('''\
+    """Curve-fit reference: hard-coded entry/exit dates aligned with BBB peaks/troughs."""
+    from contract import OrderSide, OrderType, Strategy
+
+
+    # Dates chosen in hindsight to straddle profitable cycles on the "BBB"
+    # symbol of golden_market_data (sinusoid with period=25 weekdays starting
+    # 2024-01-01). These dates are NOT a learned signal — they are data-
+    # snooped; the whole point is to exercise the acceptance gate's rejection
+    # of curve-fit strategies.
+    ENTRY_DATES = {
+        "2024-02-12",
+        "2024-04-08",
+        "2024-06-03",
+        "2024-07-29",
+        "2024-09-23",
+    }
+    EXIT_DATES = {
+        "2024-03-11",
+        "2024-05-06",
+        "2024-07-01",
+        "2024-08-26",
+        "2024-10-21",
+    }
+    TARGET_SYMBOL = "BBB"
+
+
+    class OverfitHardcodedDates(Strategy):
+        def on_bar(self, ctx, bar):
+            if bar.symbol != TARGET_SYMBOL:
+                return
+            d = bar.timestamp[:10]
+            pos = ctx.position(bar.symbol)
+            if d in ENTRY_DATES and pos is None:
+                ctx.submit_order(
+                    symbol=bar.symbol,
+                    side=OrderSide.LONG,
+                    qty=10,
+                    order_type=OrderType.MARKET,
+                    reason="hardcoded-entry",
+                )
+            elif d in EXIT_DATES and pos is not None:
+                ctx.submit_order(
+                    symbol=bar.symbol,
+                    side=OrderSide.SHORT,
+                    qty=pos.qty,
+                    order_type=OrderType.MARKET,
+                    reason="hardcoded-exit",
+                )
+''')
