@@ -1,8 +1,7 @@
 """Route-level tests for the agent-keyed /api/agents/sandboxes/* endpoints.
 
-Phase 3 (issue #265) switched this router from the legacy per-team
-``agent_sandbox`` manager to the agent-keyed ``agent_provisioning_team.sandbox``
-lifecycle. Tests mock the docker CLI so no daemon is touched.
+Backed by the ``agent_provisioning_team.sandbox`` lifecycle. Tests mock the
+docker CLI so no daemon is touched.
 """
 
 from __future__ import annotations

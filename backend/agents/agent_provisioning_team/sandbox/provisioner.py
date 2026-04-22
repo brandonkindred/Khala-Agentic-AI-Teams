@@ -2,9 +2,7 @@
 
 Module-level coroutines (not a class) so tests can patch them cleanly via
 ``patch("agent_provisioning_team.sandbox.provisioner.run_container", ...)``.
-Mirrors the shape of ``agent_sandbox/compose.py`` but talks to ``docker``
-directly rather than ``docker compose`` — Phase 2 runs one ephemeral
-container per agent, not a long-lived compose service.
+Runs one ephemeral container per agent.
 
 The hardening flags from issue #255 (cap-drop, read-only, security-opt,
 resource caps, loopback-bound ports) are assembled here rather than in the
@@ -133,6 +131,23 @@ def _build_run_argv(*, agent_id: str, container_name: str) -> list[str]:
     return argv
 
 
+async def ensure_network() -> None:
+    """Idempotently ensure the sandbox bridge network exists.
+
+    The per-agent lifecycle runs ``docker run`` directly rather than
+    ``docker compose``, so nothing creates the bridge implicitly — we do it
+    here on demand. No-op when the network already exists.
+    """
+    name = sandbox_network()
+    rc, _, _ = await _exec(["docker", "network", "inspect", name], timeout_s=15)
+    if rc == 0:
+        return
+    argv = ["docker", "network", "create", "--driver", "bridge", name]
+    rc2, stdout, stderr = await _exec(argv, timeout_s=30)
+    if rc2 != 0 and "already exists" not in (stderr + stdout).lower():
+        raise _fail(argv, rc2, stderr or stdout)
+
+
 async def run_container(agent_id: str, container_name: str) -> str:
     """Start a hardened sandbox for ``agent_id`` and return its container id.
 
@@ -140,6 +155,7 @@ async def run_container(agent_id: str, container_name: str) -> str:
     as ready — this coroutine returns as soon as the Docker daemon accepts
     the container, not when uvicorn is listening.
     """
+    await ensure_network()
     argv = _build_run_argv(agent_id=agent_id, container_name=container_name)
     rc, stdout, stderr = await _exec(argv, timeout_s=60)
     if rc != 0:

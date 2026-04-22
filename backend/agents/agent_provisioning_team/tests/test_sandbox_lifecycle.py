@@ -1,8 +1,7 @@
 """Unit tests for the agent-keyed sandbox Lifecycle (issue #264, Phase 2).
 
 Docker CLI calls and the ``/health`` probe are patched so tests run without
-a real Docker daemon. Mirrors the pattern in
-``backend/agents/agent_sandbox/tests/test_manager.py``.
+a real Docker daemon.
 """
 
 from __future__ import annotations

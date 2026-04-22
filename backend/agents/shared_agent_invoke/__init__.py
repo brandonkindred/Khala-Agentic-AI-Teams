@@ -1,15 +1,13 @@
 """
-shared_agent_invoke — single-line-mount invoke shim for team FastAPI services.
+shared_agent_invoke — invoke shim mounted inside the agent sandbox runtime.
 
-Every team that wants Agent Console Runner support calls
-``mount_invoke_shim(app, team_key="...")`` once in its ``api/main.py``. That
-mounts ``POST /_agents/{agent_id}/invoke`` — an internal route used only by
-the sandboxed unified_api proxy when it routes Runner invocations to this
-service.
-
-The shim reads manifests from the in-process
-:mod:`agent_registry` singleton and dispatches to the agent's ``source.entrypoint``
-(Python class, factory function, or plain callable) with the request body.
+``mount_invoke_shim(app)`` attaches ``POST /_agents/{agent_id}/invoke`` to the
+sandbox's FastAPI app. The shim reads manifests from the in-process
+:mod:`agent_registry` singleton and dispatches to the agent's
+``source.entrypoint`` (Python class, factory function, or plain callable)
+with the request body. The per-agent guard (reject any ``agent_id`` other
+than ``SANDBOX_AGENT_ID``) is enforced by middleware in
+``agent_sandbox_runtime/entrypoint.py``.
 """
 
 from .shim import InvokeEnvelope, mount_invoke_shim
