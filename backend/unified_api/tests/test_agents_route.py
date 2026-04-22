@@ -139,3 +139,24 @@ def test_schema_input_404_when_missing_ref(client: TestClient) -> None:
 def test_schema_output_404_when_missing_ref(client: TestClient) -> None:
     resp = client.get("/api/agents/blogging.planner/schema/output")
     assert resp.status_code == 404
+
+
+def test_invoke_oversized_body_returns_413_without_acquiring_sandbox(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for issue #256: the payload cap must fire before any sandbox work."""
+    import unified_api.routes.agents as agents_route_mod
+
+    async def _fail_acquire(agent_id: str):  # pragma: no cover — must not run
+        raise AssertionError(f"acquire({agent_id!r}) must not be called on oversized body")
+
+    monkeypatch.setattr(agents_route_mod, "acquire", _fail_acquire)
+    monkeypatch.setenv("AGENT_INVOKE_MAX_PAYLOAD_BYTES", "1024")
+
+    payload = "x" * 4096
+    resp = client.post(
+        "/api/agents/blogging.planner/invoke",
+        content=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 413

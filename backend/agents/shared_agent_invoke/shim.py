@@ -13,6 +13,7 @@ manifest and dispatches.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import time
@@ -24,6 +25,13 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .dispatch import AgentNotRunnableError, invoke_entrypoint
+from .limits import (
+    cap_output,
+    default_exec_timeout_s,
+    max_output_bytes,
+    max_payload_bytes,
+    read_json_capped,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +44,8 @@ class InvokeEnvelope(BaseModel):
     trace_id: str
     logs_tail: list[str] = Field(default_factory=list)
     error: str | None = None
+    truncated: bool = False
+    timeout_hit: bool = False
 
 
 def mount_invoke_shim(app: FastAPI) -> None:
@@ -60,10 +70,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
                 detail=f"Agent {agent_id} requires live integrations and is not runnable in the sandbox.",
             )
 
-        try:
-            body: Any = await request.json()
-        except Exception:
-            body = {}
+        body: Any = await read_json_capped(request, max_bytes=max_payload_bytes())
 
         trace_id = str(uuid.uuid4())
         logs_tail: list[str] = []
@@ -75,9 +82,14 @@ def mount_invoke_shim(app: FastAPI) -> None:
         error: str | None = None
         output: Any | None = None
         dispatch_error: AgentNotRunnableError | None = None
+        timeout_hit = False
+        timeout_s = _resolve_exec_timeout(manifest)
         try:
             with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-                output = await invoke_entrypoint(manifest.source.entrypoint, body)
+                output = await asyncio.wait_for(
+                    invoke_entrypoint(manifest.source.entrypoint, body),
+                    timeout=timeout_s,
+                )
         except AgentNotRunnableError as exc:
             # Config / deployment problem — bad entrypoint, missing symbol,
             # non-zero-arg constructor. Defer the raise until after `finally`
@@ -86,6 +98,10 @@ def mount_invoke_shim(app: FastAPI) -> None:
             dispatch_error = exc
         except HTTPException:
             raise
+        except asyncio.TimeoutError:
+            logger.warning("agent %s exceeded execution timeout (%.1fs)", agent_id, timeout_s)
+            error = f"AgentExecutionTimeout: exceeded {timeout_s:.1f}s"
+            timeout_hit = True
         except Exception as exc:
             # User-space exception raised by the agent itself — surface it
             # with logs via a 422 so the caller can still render the envelope.
@@ -115,16 +131,31 @@ def mount_invoke_shim(app: FastAPI) -> None:
             )
             raise HTTPException(status_code=500, detail=envelope.model_dump())
 
+        capped_output, truncated = cap_output(_jsonable(output), max_bytes=max_output_bytes())
         envelope = InvokeEnvelope(
-            output=_jsonable(output),
+            output=capped_output,
             duration_ms=duration_ms,
             trace_id=trace_id,
             logs_tail=logs_tail[-50:],
             error=error,
+            truncated=truncated,
+            timeout_hit=timeout_hit,
         )
+        if timeout_hit:
+            raise HTTPException(status_code=504, detail=envelope.model_dump())
         if error:
             raise HTTPException(status_code=422, detail=envelope.model_dump())
         return envelope
+
+
+def _resolve_exec_timeout(manifest: Any) -> float:
+    """Per-agent timeout override from ``manifest.invoke.timeout_seconds`` if set."""
+    invoke = getattr(manifest, "invoke", None)
+    if invoke is not None:
+        override = getattr(invoke, "timeout_seconds", None)
+        if override is not None and override > 0:
+            return float(override)
+    return default_exec_timeout_s()
 
 
 def _jsonable(value: Any) -> Any:

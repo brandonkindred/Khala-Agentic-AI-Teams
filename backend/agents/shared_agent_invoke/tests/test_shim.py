@@ -47,8 +47,28 @@ def client(tmp_path: Path):
         def run(self, body):
             raise RuntimeError("user-space failure")
 
+    class SleepAgent:
+        async def run(self, body):
+            import asyncio
+
+            await asyncio.sleep(10)
+            return {"never": "returned"}
+
+    class BigAgent:
+        def run(self, body):
+            # Deliberately larger than the default 1 MiB output cap so tests
+            # that tune AGENT_INVOKE_MAX_OUTPUT_BYTES downward trip truncation.
+            return {"blob": "x" * (2 * 1024 * 1024)}
+
+    class SentinelAgent:
+        def run(self, body):
+            raise AssertionError("SentinelAgent must never be invoked")
+
     runnable_mod.GoodAgent = GoodAgent
     runnable_mod.RaisingAgent = RaisingAgent
+    runnable_mod.SleepAgent = SleepAgent
+    runnable_mod.BigAgent = BigAgent
+    runnable_mod.SentinelAgent = SentinelAgent
     sys.modules["_shim_test_runnable"] = runnable_mod
 
     _write_manifest(
@@ -102,6 +122,61 @@ def client(tmp_path: Path):
         tags: [requires-live-integration]
         source:
           entrypoint: _shim_test_runnable:GoodAgent
+        """,
+    )
+    _write_manifest(
+        tmp_path,
+        "sleeper.yaml",
+        """
+        schema_version: 1
+        id: blogging.sleeper
+        team: blogging
+        name: Sleeper
+        summary: never returns in time
+        source:
+          entrypoint: _shim_test_runnable:SleepAgent
+        """,
+    )
+    _write_manifest(
+        tmp_path,
+        "sleeper_override.yaml",
+        """
+        schema_version: 1
+        id: blogging.sleeper_override
+        team: blogging
+        name: Sleeper with per-manifest override
+        summary: sleeps long, but manifest caps it low
+        invoke:
+          kind: http
+          timeout_seconds: 0.2
+        source:
+          entrypoint: _shim_test_runnable:SleepAgent
+        """,
+    )
+    _write_manifest(
+        tmp_path,
+        "big.yaml",
+        """
+        schema_version: 1
+        id: blogging.big
+        team: blogging
+        name: Big
+        summary: returns oversized output
+        source:
+          entrypoint: _shim_test_runnable:BigAgent
+        """,
+    )
+    _write_manifest(
+        tmp_path,
+        "sentinel.yaml",
+        """
+        schema_version: 1
+        id: blogging.sentinel
+        team: blogging
+        name: Sentinel
+        summary: must not run
+        source:
+          entrypoint: _shim_test_runnable:SentinelAgent
         """,
     )
 
@@ -168,3 +243,57 @@ def test_requires_live_integration_returns_409(client: TestClient) -> None:
 def test_unknown_agent_returns_404(client: TestClient) -> None:
     resp = client.post("/_agents/does.not.exist/invoke", json={})
     assert resp.status_code == 404
+
+
+def test_oversized_body_returns_413(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Cap to 1 KiB so the test doesn't allocate megabytes.
+    monkeypatch.setenv("AGENT_INVOKE_MAX_PAYLOAD_BYTES", "1024")
+    payload = "x" * 4096  # 4 KiB — well over the cap
+    resp = client.post(
+        "/_agents/blogging.sentinel/invoke",
+        content=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 413
+    # Sentinel agent raises AssertionError if called — absence of 500 proves
+    # the cap short-circuits before dispatch.
+
+
+def test_timeout_returns_504_with_envelope(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_EXEC_TIMEOUT_S", "0.1")
+    resp = client.post("/_agents/blogging.sleeper/invoke", json={})
+    assert resp.status_code == 504
+    detail = resp.json()["detail"]
+    assert detail["timeout_hit"] is True
+    assert detail["error"].startswith("AgentExecutionTimeout:")
+    assert "trace_id" in detail
+
+
+def test_oversized_output_sets_truncated_flag(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Cap at 10 KiB — BigAgent returns ~2 MiB.
+    monkeypatch.setenv("AGENT_INVOKE_MAX_OUTPUT_BYTES", "10240")
+    resp = client.post("/_agents/blogging.big/invoke", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["truncated"] is True
+    assert body["error"] is None
+    assert body["output"]["__truncated__"] is True
+    assert body["output"]["original_size"] > 10240
+    assert len(body["output"]["preview"]) == 10240
+
+
+def test_per_manifest_timeout_overrides_env_default(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Env default is very generous; manifest override pins it to 0.2s.
+    monkeypatch.setenv("AGENT_EXEC_TIMEOUT_S", "60")
+    resp = client.post("/_agents/blogging.sleeper_override/invoke", json={})
+    assert resp.status_code == 504
+    detail = resp.json()["detail"]
+    assert detail["timeout_hit"] is True
+    # Timeout message reflects the manifest's 0.2s override, not the env 60s.
+    assert "0.2s" in detail["error"]
