@@ -43,6 +43,11 @@ from agent_provisioning_team.sandbox import (
 )
 from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
 from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
+from shared_agent_invoke.limits import (
+    max_output_bytes,
+    max_payload_bytes,
+    read_json_capped,
+)
 from unified_api.config import TEAM_CONFIGS
 
 logger = logging.getLogger(__name__)
@@ -143,6 +148,11 @@ async def invoke_agent(
             ),
         )
 
+    # Cap the request body *before* spinning up a sandbox — a 2 GB payload
+    # must not tie up Docker or proxy memory. `read_json_capped` raises 413
+    # on overflow and returns {} on empty/malformed JSON.
+    body = await read_json_capped(request, max_bytes=max_payload_bytes())
+
     try:
         handle = await acquire(agent_id)
     except Exception as exc:  # Docker/daemon/infra problems
@@ -172,10 +182,10 @@ async def invoke_agent(
             },
         )
 
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
+    # Outer transport timeout on the proxy → sandbox hop. The inner
+    # per-agent execution timeout (enforced via asyncio.wait_for inside the
+    # shim) is strictly shorter, so the shim always gets to surface a 504
+    # envelope before this fires.
     timeout_s = TEAM_CONFIGS.get(manifest.team).timeout_seconds if manifest.team in TEAM_CONFIGS else 120.0
     target = f"{handle.url}/_agents/{agent_id}/invoke"
     try:
@@ -187,6 +197,23 @@ async def invoke_agent(
 
     # Update idle tracker only on a real response (any status — the user still engaged with it).
     await note_activity(agent_id)
+
+    # Cap the upstream response body. A runaway sandbox that returns 10 GB
+    # should not blow up the proxy or the UI — surface a 502 with a preview.
+    raw_len = len(upstream.content)
+    cap = max_output_bytes()
+    if raw_len > cap:
+        logger.warning("upstream response for %s exceeded %d bytes (got %d)", agent_id, cap, raw_len)
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": f"Upstream response exceeds {cap} bytes",
+                "truncated": True,
+                "original_size": raw_len,
+                "preview": upstream.content[:cap].decode("utf-8", errors="replace"),
+                "sandbox": {"agent_id": agent_id, "url": handle.url},
+            },
+        )
 
     content: Any
     try:

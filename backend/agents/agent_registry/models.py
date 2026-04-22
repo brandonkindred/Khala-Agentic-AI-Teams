@@ -26,6 +26,11 @@ class InvokeSpec(BaseModel):
     path: str | None = None
     workflow: str | None = None
     callable_ref: str | None = None
+    timeout_seconds: float | None = Field(
+        default=None,
+        description="Per-agent execution timeout inside the sandbox. "
+        "Falls back to AGENT_EXEC_TIMEOUT_S (default 60s).",
+    )
 
 
 class SandboxSpec(BaseModel):
