@@ -269,9 +269,9 @@ async def lifespan(app: FastAPI):
     # 4. Start the Agent Console sandbox idle reaper.
     sandbox_reaper_task: asyncio.Task | None = None
     try:
-        from agent_sandbox import get_manager
+        from agent_provisioning_team.sandbox import run_idle_reaper
 
-        sandbox_reaper_task = asyncio.create_task(get_manager().run_idle_reaper())
+        sandbox_reaper_task = asyncio.create_task(run_idle_reaper())
         logger.info("Started Agent Console sandbox idle reaper")
     except Exception:
         logger.warning("Agent Console sandbox reaper failed to start", exc_info=True)

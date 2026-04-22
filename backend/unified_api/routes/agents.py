@@ -36,9 +36,14 @@ from agent_console import (
     resolve_author,
 )
 from agent_console.models import RunCreate
+from agent_provisioning_team.sandbox import (
+    SandboxStatus,
+    UnknownAgentError,
+    acquire,
+    note_activity,
+)
 from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
 from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
-from agent_sandbox import SandboxStatus, get_manager
 from unified_api.config import TEAM_CONFIGS
 
 logger = logging.getLogger(__name__)
@@ -139,21 +144,24 @@ async def invoke_agent(
             ),
         )
 
-    mgr = get_manager()
     try:
-        handle = await mgr.ensure_warm(manifest.team)
-    except Exception as exc:  # UnknownTeamError or infra problems
-        logger.exception("sandbox warm failed for %s", manifest.team)
+        handle = await acquire(agent_id)
+    except UnknownAgentError as exc:
+        # Registry drift: we found a manifest above but the lifecycle
+        # re-resolved and couldn't. Surface as 404 rather than 503.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # Docker/daemon/infra problems
+        logger.exception("sandbox acquire failed for %s", agent_id)
         raise HTTPException(
             status_code=503,
-            detail=f"Sandbox for team {manifest.team!r} is not available: {exc}",
+            detail=f"Sandbox for agent {agent_id!r} is not available: {exc}",
         ) from exc
 
     if handle.status == SandboxStatus.ERROR:
         raise HTTPException(
             status_code=502,
             detail={
-                "message": f"Sandbox for {manifest.team} failed to warm.",
+                "message": f"Sandbox for {agent_id} failed to warm.",
                 "sandbox_error": handle.error,
             },
         )
@@ -165,7 +173,7 @@ async def invoke_agent(
             content={
                 "status": handle.status,
                 "message": "Sandbox is warming. Retry shortly.",
-                "sandbox": {"team": manifest.team, "status": handle.status},
+                "sandbox": {"agent_id": agent_id, "status": handle.status},
             },
         )
 
@@ -183,7 +191,7 @@ async def invoke_agent(
         raise HTTPException(status_code=502, detail=f"Sandbox invoke failed: {exc}") from exc
 
     # Update idle tracker only on a real response (any status — the user still engaged with it).
-    await mgr.note_activity(manifest.team)
+    await note_activity(agent_id)
 
     content: Any
     try:
@@ -191,7 +199,7 @@ async def invoke_agent(
     except ValueError:
         content = {"raw": upstream.text}
     if isinstance(content, dict):
-        content.setdefault("sandbox", {"team": manifest.team, "url": handle.url})
+        content.setdefault("sandbox", {"agent_id": agent_id, "url": handle.url})
 
     # Best-effort run persistence. Never block the invoke on storage failure.
     _persist_run(

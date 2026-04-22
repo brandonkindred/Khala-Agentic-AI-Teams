@@ -67,6 +67,39 @@ def _patched_docker(*, container_id: str = "abc123", host_port: int = 55123, run
 
 
 @pytest.mark.asyncio
+async def test_status_cold_for_unseen_agent(tmp_path: Path) -> None:
+    """status() must return a COLD handle without touching docker for
+    agents that have never been acquired."""
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker() as d:
+        handle = await lc.status("blogging.planner")
+    assert handle.status == SandboxStatus.COLD
+    assert handle.team == "blogging"
+    assert handle.url is None
+    # status() on an unseen agent must not provision anything.
+    d.run.assert_not_awaited()
+    d.port.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_status_reconciles_warm_handle_with_docker(tmp_path: Path) -> None:
+    """If we think a sandbox is WARM but docker says the container is gone,
+    status() must flip the stored state back to COLD."""
+    lc = _lifecycle(tmp_path)
+    with _patched_registry(), _patched_docker():
+        await lc.acquire("blogging.planner")
+    assert lc._state["blogging.planner"].status == SandboxStatus.WARM
+
+    with (
+        _patched_registry(),
+        patch.object(provisioner_mod, "is_running", new=AsyncMock(return_value=False)),
+    ):
+        handle = await lc.status("blogging.planner")
+    assert handle.status == SandboxStatus.COLD
+    assert lc._state["blogging.planner"].status == SandboxStatus.COLD
+
+
+@pytest.mark.asyncio
 async def test_acquire_cold_to_warm(tmp_path: Path) -> None:
     lc = _lifecycle(tmp_path)
     with _patched_registry(), _patched_docker() as d:
@@ -359,3 +392,35 @@ def test_state_file_path_uses_agent_cache(monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
     path = state_mod.state_file_path()
     assert path == tmp_path / "agent_provisioning" / "sandboxes" / "state.json"
+
+
+# ---------------------------------------------------------------------------
+# Module-level free-function wrappers (Phase 3, issue #265).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_module_helpers_delegate_to_singleton(tmp_path: Path) -> None:
+    """`sandbox.acquire/teardown/…` must operate on the same Lifecycle instance
+    so that status swings are observable across calls — the unified API routes
+    rely on this to reconcile invoke + list + teardown."""
+    from agent_provisioning_team import sandbox as sb
+
+    lc = _lifecycle(tmp_path)
+    sb.set_lifecycle_for_testing(lc)
+    try:
+        with _patched_registry(), _patched_docker() as d:
+            handle = await sb.acquire("blogging.planner")
+        assert handle.status == SandboxStatus.WARM
+        assert (await sb.list_active())[0].agent_id == "blogging.planner"
+
+        # note_activity bumps last_used_at on the same state row.
+        await sb.note_activity("blogging.planner")
+
+        # teardown via the module helper clears state.
+        with _patched_registry(), _patched_docker():
+            await sb.teardown("blogging.planner")
+        assert await sb.list_active() == []
+        d.run.assert_awaited_once()
+    finally:
+        sb.set_lifecycle_for_testing(None)

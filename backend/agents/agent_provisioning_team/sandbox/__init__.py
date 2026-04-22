@@ -5,7 +5,18 @@ ephemeral, hardened container per specialist agent under test. The unified
 API and Agent Console switch to this module in Phase 3 (#265).
 """
 
-from .lifecycle import Lifecycle, UnknownAgentError
+from .lifecycle import (
+    Lifecycle,
+    UnknownAgentError,
+    acquire,
+    get_lifecycle,
+    list_active,
+    note_activity,
+    run_idle_reaper,
+    set_lifecycle_for_testing,
+    status,
+    teardown,
+)
 from .state import (
     SandboxHandle,
     SandboxState,
@@ -19,5 +30,13 @@ __all__ = [
     "SandboxState",
     "SandboxStatus",
     "UnknownAgentError",
+    "acquire",
+    "get_lifecycle",
+    "list_active",
+    "note_activity",
+    "run_idle_reaper",
+    "set_lifecycle_for_testing",
     "state_file_path",
+    "status",
+    "teardown",
 ]

@@ -251,6 +251,63 @@ def test_read_anatomy_without_repo_root_does_not_raise_on_shallow_layout() -> No
     assert result is None
 
 
+def test_sandbox_spec_env_and_extra_pip_round_trip(tmp_path: Path) -> None:
+    """Issue #265: SandboxSpec gains `env` + `extra_pip`, both optional with defaults."""
+    _write_manifest(
+        tmp_path,
+        "blogging",
+        "rich.yaml",
+        """
+        schema_version: 1
+        id: blogging.rich
+        team: blogging
+        name: Rich
+        summary: has sandbox extras
+        sandbox:
+          manifest_path: default.yaml
+          access_tier: standard
+          env:
+            EXTRA_FLAG: "on"
+          extra_pip:
+            - some-niche-dep==1.2.3
+        source:
+          entrypoint: x:y
+        """,
+    )
+    _write_manifest(
+        tmp_path,
+        "blogging",
+        "plain.yaml",
+        """
+        schema_version: 1
+        id: blogging.plain
+        team: blogging
+        name: Plain
+        summary: sandbox with only the legacy fields
+        sandbox:
+          manifest_path: default.yaml
+          access_tier: standard
+        source:
+          entrypoint: x:y
+        """,
+    )
+
+    reg = AgentRegistry.load(tmp_path)
+    rich = reg.get("blogging.rich")
+    assert rich is not None
+    assert rich.sandbox is not None
+    assert rich.sandbox.env == {"EXTRA_FLAG": "on"}
+    assert rich.sandbox.extra_pip == ["some-niche-dep==1.2.3"]
+
+    # Backwards-compat: manifests that omit the new fields still load and
+    # see the defaults (empty dict / empty list), never missing attributes.
+    plain = reg.get("blogging.plain")
+    assert plain is not None
+    assert plain.sandbox is not None
+    assert plain.sandbox.env == {}
+    assert plain.sandbox.extra_pip == []
+
+
 def test_orphan_team_is_kept_but_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     _write_manifest(
         tmp_path,

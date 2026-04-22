@@ -124,6 +124,32 @@ class Lifecycle:
                 self._persist()
                 return SandboxHandle.from_state(st)
 
+    async def status(self, agent_id: str) -> SandboxHandle:
+        """Return a handle for ``agent_id`` (COLD if we've never seen it).
+
+        Reconciles against Docker: if we believe the container is WARM but
+        ``docker inspect`` reports it gone, flip the state to COLD so the
+        caller sees reality. Mirrors ``SandboxManager.status`` on the
+        legacy per-team path.
+        """
+        st = self._state.get(agent_id)
+        if st is None:
+            container_name = provisioner_mod.container_name_for(agent_id)
+            try:
+                team = _resolve_team(agent_id)
+            except UnknownAgentError:
+                raise
+            cold = state_mod.new_state(
+                agent_id=agent_id, team=team, container_name=container_name
+            )
+            cold.status = SandboxStatus.COLD
+            return SandboxHandle.from_state(cold)
+        if st.status == SandboxStatus.WARM and st.container_id:
+            if not await provisioner_mod.is_running(st.container_id):
+                st.status = SandboxStatus.COLD
+                self._persist()
+        return SandboxHandle.from_state(st)
+
     async def teardown(self, agent_id: str) -> None:
         """Explicitly stop the sandbox for ``agent_id`` and evict from state.
 
@@ -233,3 +259,55 @@ class Lifecycle:
             state_mod.save(self._state_file, self._state)
         except OSError as exc:
             logger.warning("Could not persist sandbox state: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Module-level process-wide singleton + free-function wrappers.
+# ---------------------------------------------------------------------------
+#
+# Phase 3 (issue #265) wires the unified API straight into these free
+# functions — ``from agent_provisioning_team.sandbox import acquire`` rather
+# than constructing a ``Lifecycle`` at every call site. Tests can still
+# instantiate ``Lifecycle`` directly for isolation, or replace the module
+# singleton via ``set_lifecycle_for_testing``.
+
+
+_LIFECYCLE: Lifecycle | None = None
+
+
+def get_lifecycle() -> Lifecycle:
+    """Return the process-wide ``Lifecycle`` singleton (lazy-constructed)."""
+    global _LIFECYCLE
+    if _LIFECYCLE is None:
+        _LIFECYCLE = Lifecycle()
+    return _LIFECYCLE
+
+
+def set_lifecycle_for_testing(lifecycle: Lifecycle | None) -> None:
+    """Swap the module singleton. Pass ``None`` to reset to lazy construction."""
+    global _LIFECYCLE
+    _LIFECYCLE = lifecycle
+
+
+async def acquire(agent_id: str) -> SandboxHandle:
+    return await get_lifecycle().acquire(agent_id)
+
+
+async def status(agent_id: str) -> SandboxHandle:
+    return await get_lifecycle().status(agent_id)
+
+
+async def teardown(agent_id: str) -> None:
+    await get_lifecycle().teardown(agent_id)
+
+
+async def list_active() -> list[SandboxHandle]:
+    return await get_lifecycle().list_active()
+
+
+async def note_activity(agent_id: str) -> None:
+    await get_lifecycle().note_activity(agent_id)
+
+
+async def run_idle_reaper(*, interval_s: int = 60) -> None:
+    await get_lifecycle().run_idle_reaper(interval_s=interval_s)

@@ -33,6 +33,17 @@ class SandboxSpec(BaseModel):
 
     manifest_path: str | None = "default.yaml"
     access_tier: Literal["minimal", "standard", "elevated", "full"] = "standard"
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-agent env vars injected into the sandbox container in addition "
+        "to the base set forwarded by the lifecycle. Values are passed through verbatim.",
+    )
+    extra_pip: list[str] = Field(
+        default_factory=list,
+        description="Reserved for per-agent pip installs layered on top of the unified "
+        "sandbox image. Empty for every agent today; plumbing is here so future agents "
+        "with niche deps don't require an image rebuild.",
+    )
 
 
 class SourceInfo(BaseModel):

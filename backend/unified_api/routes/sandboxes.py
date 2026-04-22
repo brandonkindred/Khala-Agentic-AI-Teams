@@ -1,10 +1,14 @@
 """
-Agent Console sandbox lifecycle API.
+Agent Console sandbox lifecycle API (issue #265, Phase 3).
 
-- POST   /api/agents/sandboxes/{team} — ensure warm (idempotent)
-- GET    /api/agents/sandboxes/{team} — status + URL + last-used + idle seconds
-- DELETE /api/agents/sandboxes/{team} — teardown
-- GET    /api/agents/sandboxes         — list all warm sandboxes
+All routes are keyed by ``agent_id`` — one sandbox per specialist agent —
+rather than by team. The new agent-keyed lifecycle owner lives in
+``agent_provisioning_team.sandbox``.
+
+- GET    /api/agents/sandboxes                   — list all tracked sandboxes
+- GET    /api/agents/sandboxes/{agent_id}        — status + URL + idle seconds
+- POST   /api/agents/sandboxes/{agent_id}/warm   — eager acquire (idempotent)
+- DELETE /api/agents/sandboxes/{agent_id}        — teardown
 """
 
 from __future__ import annotations
@@ -13,8 +17,14 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
-from agent_sandbox import SandboxHandle, get_manager
-from agent_sandbox.manager import UnknownTeamError
+from agent_provisioning_team.sandbox import (
+    SandboxHandle,
+    UnknownAgentError,
+    acquire,
+    list_active,
+    status,
+    teardown,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,30 +33,27 @@ router = APIRouter(prefix="/api/agents/sandboxes", tags=["agent-console"])
 
 @router.get("", response_model=list[SandboxHandle])
 @router.get("/", response_model=list[SandboxHandle])
-async def list_warm_sandboxes() -> list[SandboxHandle]:
-    return await get_manager().list_warm()
+async def list_sandboxes() -> list[SandboxHandle]:
+    return await list_active()
 
 
-@router.post("/{team}", response_model=SandboxHandle)
-async def ensure_warm(team: str) -> SandboxHandle:
+@router.post("/{agent_id}/warm", response_model=SandboxHandle)
+async def warm_sandbox(agent_id: str) -> SandboxHandle:
     try:
-        return await get_manager().ensure_warm(team)
-    except UnknownTeamError as exc:
+        return await acquire(agent_id)
+    except UnknownAgentError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.get("/{team}", response_model=SandboxHandle)
-async def get_status(team: str) -> SandboxHandle:
+@router.get("/{agent_id}", response_model=SandboxHandle)
+async def get_status(agent_id: str) -> SandboxHandle:
     try:
-        return await get_manager().status(team)
-    except UnknownTeamError as exc:
+        return await status(agent_id)
+    except UnknownAgentError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.delete("/{team}")
-async def teardown(team: str) -> dict[str, str]:
-    try:
-        await get_manager().teardown(team)
-    except UnknownTeamError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"team": team, "status": "torn down"}
+@router.delete("/{agent_id}")
+async def delete_sandbox(agent_id: str) -> dict[str, str]:
+    await teardown(agent_id)
+    return {"agent_id": agent_id, "status": "torn down"}
