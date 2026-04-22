@@ -10,42 +10,6 @@
   line-height: 1.5;
 }
 
-.current-brand-bar {
-  margin-bottom: 12px;
-  padding: 12px 14px;
-  border: 1px solid var(--mat-sys-outline-variant, #e0e0e0);
-  border-radius: 8px;
-  background: var(--mat-sys-surface-container-low, #fafafa);
-}
-
-.current-brand-bar__main {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 16px;
-}
-
-.current-brand-bar__main--empty {
-  justify-content: flex-start;
-}
-
-.current-brand-bar__label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--mat-sys-on-surface-variant, #666);
-  width: 100%;
-}
-
-.current-brand-bar__value {
-  font-weight: 500;
-}
-
-.current-brand-bar__empty {
-  color: var(--mat-sys-on-surface-variant, #555);
-}
-
 .chat-view {
   padding: 0;
 }
@@ -80,20 +44,6 @@
   .split-panel {
     grid-template-columns: 1fr;
     min-height: auto;
-  }
-
-  /* Narrow: brand context → chat → preview → lists */
-  .chat-view {
-    display: flex;
-    flex-direction: column;
-  }
-
-  .current-brand-bar {
-    order: 0;
-  }
-
-  .split-panel {
-    order: 1;
   }
 }
 
@@ -179,10 +129,6 @@ mat-card {
   width: 100%;
 }
 
-.advanced-workspace-panel {
-  margin-top: 16px;
-}
-
 .agency-actions {
   display: flex;
   flex-wrap: wrap;
@@ -204,24 +150,6 @@ mat-card {
   min-width: 180px;
 }
 
-.client-list-label,
-.brands-label {
-  margin-top: 12px;
-  margin-bottom: 8px;
-  font-weight: 500;
-}
-
-.client-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.brand-list-wrap {
-  margin-top: 8px;
-}
-
 .new-brand-form {
   display: grid;
   gap: 12px;
@@ -231,19 +159,14 @@ mat-card {
   border-radius: 8px;
 }
 
-.brand-list {
-  list-style: none;
-  padding: 0;
-  margin: 12px 0 0;
-}
-
-.brand-item {
+.selected-brand-actions {
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 6px;
-  padding: 10px 0;
-  border-bottom: 1px solid #eee;
+  padding: 12px 0;
+  margin-top: 12px;
+  border-top: 1px solid #eee;
   border-radius: 4px;
   transition: background 0.3s ease;
 }
@@ -255,8 +178,19 @@ mat-card {
   gap: 12px;
 }
 
+.brand-meta {
+  color: var(--mat-sys-on-surface-variant, #666);
+  font-size: 0.9rem;
+}
+
 .brand-item--highlight {
   background: rgba(88, 166, 255, 0.12);
+}
+
+.hint {
+  margin-top: 12px;
+  color: var(--mat-sys-on-surface-variant, #666);
+  font-style: italic;
 }
 
 .brand-actions {

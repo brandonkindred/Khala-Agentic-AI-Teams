@@ -1,0 +1,96 @@
+:host {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.brand-context-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--mat-sys-outline-variant, #e0e0e0);
+  border-radius: 8px;
+  background: var(--mat-sys-surface-container-low, #fafafa);
+}
+
+.ctx-field {
+  margin: 0;
+
+  ::ng-deep .mat-mdc-form-field-subscript-wrapper {
+    display: none;
+  }
+}
+
+.ctx-workspace {
+  min-width: 180px;
+}
+
+.ctx-workspace-menu {
+  margin-left: -4px;
+}
+
+.ctx-brand {
+  min-width: 240px;
+  flex: 1 1 240px;
+}
+
+.ctx-version {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 10px;
+  font-size: 0.9rem;
+  color: var(--mat-sys-on-surface-variant, #555);
+}
+
+.ctx-version__label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ctx-version__value {
+  font-weight: 500;
+  color: var(--mat-sys-on-surface, #1c1c1c);
+}
+
+.ctx-spacer {
+  flex: 1 1 auto;
+}
+
+.ctx-new-brand {
+  white-space: nowrap;
+
+  mat-icon {
+    margin-right: 4px;
+  }
+}
+
+.ctx-add-workspace {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px 12px;
+  min-width: 280px;
+}
+
+.ctx-add-workspace__field {
+  flex: 1 1 auto;
+}
+
+@media (max-width: 600px) {
+  .brand-context-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ctx-spacer {
+    display: none;
+  }
+
+  .ctx-version {
+    padding: 0;
+  }
+}

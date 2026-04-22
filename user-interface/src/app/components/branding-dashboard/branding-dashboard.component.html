@@ -7,6 +7,18 @@
   <app-health-indicator [healthCheck]="healthCheck" label="Branding API" />
 </div>
 
+<app-branding-context-selector
+  [clients]="clients"
+  [selectedClient]="selectedClient"
+  [brands]="brands"
+  [selectedBrand]="selectedBrand"
+  (clientChange)="onWorkspaceChange($event)"
+  (brandChange)="onBrandChange($event)"
+  (newBrandRequest)="openFormTabForNewBrand()"
+  (reloadClients)="loadClients()"
+  (addClient)="onAddClientFromSelector($event)"
+/>
+
 @if (loading) {
   <app-loading-spinner message="Loading branding workspace..." />
 }
@@ -26,57 +38,6 @@
       <span class="tab-label">Chat</span>
     </ng-template>
     <div class="chat-view">
-      <div
-        class="current-brand-bar"
-        aria-live="polite"
-        [attr.aria-label]="
-          selectedBrand
-            ? 'Current brand: ' + selectedBrand.name + ', version ' + selectedBrand.version
-            : 'No brand selected'
-        "
-      >
-        @if (selectedBrand) {
-          <div class="current-brand-bar__main">
-            <span class="current-brand-bar__label">Current brand</span>
-            <span class="current-brand-bar__value">
-              {{ selectedBrand.name }} · v{{ selectedBrand.version }} · {{ selectedBrand.status }}
-            </span>
-            @if (brands.length > 1) {
-              <button mat-stroked-button type="button" [matMenuTriggerFor]="brandMenu">Change brand</button>
-              <mat-menu #brandMenu="matMenu">
-                @for (b of brands; track b.id) {
-                  <button mat-menu-item type="button" (click)="selectBrandForChat(b)">
-                    {{ b.name }} · v{{ b.version }} · {{ b.status }}
-                  </button>
-                }
-              </mat-menu>
-            }
-            <button mat-stroked-button color="primary" type="button" (click)="startFreshConversation()">
-              New brand
-            </button>
-          </div>
-        } @else if (brands.length > 0) {
-          <div class="current-brand-bar__main">
-            <span class="current-brand-bar__empty">Pick a brand to scope the assistant.</span>
-            <button mat-stroked-button type="button" [matMenuTriggerFor]="brandMenuEmpty">Select brand</button>
-            <mat-menu #brandMenuEmpty="matMenu">
-              @for (b of brands; track b.id) {
-                <button mat-menu-item type="button" (click)="selectBrandForChat(b)">
-                  {{ b.name }} · v{{ b.version }} · {{ b.status }}
-                </button>
-              }
-            </mat-menu>
-          </div>
-        } @else {
-          <div class="current-brand-bar__main current-brand-bar__main--empty">
-            <span class="current-brand-bar__empty">No brands yet.</span>
-            <button mat-stroked-button color="primary" type="button" (click)="openFormTabForNewBrand()">
-              Create brand
-            </button>
-          </div>
-        }
-      </div>
-
       <div class="split-panel">
         <div class="panel chat-panel">
           <div class="chat-toolbar">
@@ -112,27 +73,6 @@
               [latestOutput]="(($any(selectedBrand)?.latest_output ?? null) || conversationLatestOutput)"
               (saveAsBrand)="onOpenSaveAsBrand()"
             />
-          }
-          @if (brands.length > 0) {
-            <mat-card class="history-card">
-              <mat-card-header>
-                <mat-card-title>Quick switch</mat-card-title>
-                <mat-card-subtitle>Jump between saved brands for this workspace</mat-card-subtitle>
-              </mat-card-header>
-              <mat-card-content>
-                <div class="history-list">
-                  @for (brand of brands; track brand.id) {
-                    <button
-                      mat-stroked-button
-                      [color]="selectedBrand?.id === brand.id ? 'primary' : undefined"
-                      (click)="startNewBrandConversation(brand)"
-                    >
-                      {{ brand.name }} (v{{ brand.version }})
-                    </button>
-                  }
-                </div>
-              </mat-card-content>
-            </mat-card>
           }
         </div>
       </div>
@@ -185,69 +125,67 @@
                 </button>
               </form>
             }
-            <div #brandListWrap class="brand-list-wrap">
-              <ul class="brand-list">
-                @for (b of brands; track b.id) {
-                  <li
-                    class="brand-item"
-                    [class.brand-item--highlight]="highlightedBrandId === b.id"
-                    [attr.data-brand-id]="b.id"
-                  >
-                    <div class="brand-item__header">
-                      <strong>{{ b.name }}</strong> ({{ b.status }}, v{{ b.version }})
-                      <span class="brand-actions">
-                        <span class="split-button">
-                          <button
-                            mat-stroked-button
-                            type="button"
-                            class="split-button__primary"
-                            (click)="runBrand(b)"
-                            [disabled]="isGenerating(b.id)"
-                          >
-                            <mat-icon>bolt</mat-icon>
-                            Generate
-                          </button>
-                          <button
-                            mat-stroked-button
-                            type="button"
-                            class="split-button__menu"
-                            [matMenuTriggerFor]="generateMenu"
-                            [disabled]="isGenerating(b.id)"
-                            aria-label="Generate options"
-                          >
-                            <mat-icon>arrow_drop_down</mat-icon>
-                          </button>
-                        </span>
-                        <mat-menu #generateMenu="matMenu" xPosition="before">
-                          <button mat-menu-item type="button" (click)="runBrand(b)">
-                            <mat-icon>bolt</mat-icon>
-                            <span class="menu-item__title">Run full pipeline</span>
-                            <span class="menu-item__subtitle">Strategic core through governance (5-phase)</span>
-                          </button>
-                          <button mat-menu-item type="button" (click)="requestMarketResearchForBrand(b)">
-                            <mat-icon>travel_explore</mat-icon>
-                            <span class="menu-item__title">Market research only</span>
-                            <span class="menu-item__subtitle">Competitor and audience analysis</span>
-                          </button>
-                          <button mat-menu-item type="button" (click)="requestDesignAssetsForBrand(b)">
-                            <mat-icon>palette</mat-icon>
-                            <span class="menu-item__title">Design assets only</span>
-                            <span class="menu-item__subtitle">Palettes, typography, moodboards</span>
-                          </button>
-                        </mat-menu>
-                      </span>
-                    </div>
-                    <app-brand-activity-strip
-                      [brandId]="b.id"
-                      (open)="onActivityOpen($event)"
-                      (retry)="onActivityRetry(b, $event)"
-                      (dismiss)="onActivityDismiss($event)"
-                    />
-                  </li>
-                }
-              </ul>
-            </div>
-            @if (brands.length === 0 && !showCreateBrand) {
+            @if (selectedBrand) {
+              <div
+                class="selected-brand-actions"
+                [class.brand-item--highlight]="highlightedBrandId === selectedBrand.id"
+                [attr.data-brand-id]="selectedBrand.id"
+              >
+                <div class="brand-item__header">
+                  <strong>{{ selectedBrand.name }}</strong>
+                  <span class="brand-meta">({{ selectedBrand.status }}, v{{ selectedBrand.version }})</span>
+                  <span class="brand-actions">
+                    <span class="split-button">
+                      <button
+                        mat-stroked-button
+                        type="button"
+                        class="split-button__primary"
+                        (click)="runBrand(selectedBrand)"
+                        [disabled]="isGenerating(selectedBrand.id)"
+                      >
+                        <mat-icon>bolt</mat-icon>
+                        Generate
+                      </button>
+                      <button
+                        mat-stroked-button
+                        type="button"
+                        class="split-button__menu"
+                        [matMenuTriggerFor]="generateMenu"
+                        [disabled]="isGenerating(selectedBrand.id)"
+                        aria-label="Generate options"
+                      >
+                        <mat-icon>arrow_drop_down</mat-icon>
+                      </button>
+                    </span>
+                    <mat-menu #generateMenu="matMenu" xPosition="before">
+                      <button mat-menu-item type="button" (click)="runBrand(selectedBrand)">
+                        <mat-icon>bolt</mat-icon>
+                        <span class="menu-item__title">Run full pipeline</span>
+                        <span class="menu-item__subtitle">Strategic core through governance (5-phase)</span>
+                      </button>
+                      <button mat-menu-item type="button" (click)="requestMarketResearchForBrand(selectedBrand)">
+                        <mat-icon>travel_explore</mat-icon>
+                        <span class="menu-item__title">Market research only</span>
+                        <span class="menu-item__subtitle">Competitor and audience analysis</span>
+                      </button>
+                      <button mat-menu-item type="button" (click)="requestDesignAssetsForBrand(selectedBrand)">
+                        <mat-icon>palette</mat-icon>
+                        <span class="menu-item__title">Design assets only</span>
+                        <span class="menu-item__subtitle">Palettes, typography, moodboards</span>
+                      </button>
+                    </mat-menu>
+                  </span>
+                </div>
+                <app-brand-activity-strip
+                  [brandId]="selectedBrand.id"
+                  (open)="onActivityOpen($event)"
+                  (retry)="onActivityRetry(selectedBrand, $event)"
+                  (dismiss)="onActivityDismiss($event)"
+                />
+              </div>
+            } @else if (brands.length > 0) {
+              <p class="hint">Select a brand from the context switcher above to run workflows.</p>
+            } @else if (!showCreateBrand) {
               <p>No brands yet. Use <strong>New brand</strong> to add one.</p>
             }
             @if (brandActionMessage) {
@@ -256,37 +194,6 @@
           } @else if (!loading && !clientLoadError) {
             <p>Preparing workspace…</p>
           }
-
-          <mat-expansion-panel class="advanced-workspace-panel">
-            <mat-expansion-panel-header>
-              <mat-panel-title>Advanced</mat-panel-title>
-              <mat-panel-description>Optional: extra workspace entries (rarely needed)</mat-panel-description>
-            </mat-expansion-panel-header>
-            <div class="agency-actions">
-              <button mat-stroked-button type="button" color="primary" (click)="loadClients()">Reload workspaces</button>
-              <span class="new-client-row">
-                <input type="text" [(ngModel)]="newClientName" placeholder="Additional workspace name" class="client-name-input" />
-                <button mat-stroked-button type="button" (click)="createClient()" [disabled]="!newClientName.trim() || brandFormBusy">
-                  Add workspace
-                </button>
-              </span>
-            </div>
-            @if (clients.length > 0) {
-              <p class="client-list-label">Switch workspace:</p>
-              <div class="client-list">
-                @for (c of clients; track c.id) {
-                  <button
-                    mat-stroked-button
-                    type="button"
-                    [color]="selectedClient?.id === c.id ? 'primary' : null"
-                    (click)="selectClient(c)"
-                  >
-                    {{ c.name }}
-                  </button>
-                }
-              </div>
-            }
-          </mat-expansion-panel>
         </mat-card-content>
       </mat-card>
 

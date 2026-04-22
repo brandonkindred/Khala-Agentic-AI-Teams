@@ -1,0 +1,85 @@
+<div class="brand-context-bar" role="group" aria-label="Brand context">
+  <mat-form-field appearance="outline" class="ctx-field ctx-workspace">
+    <mat-label>Workspace</mat-label>
+    <mat-select
+      [value]="selectedClient?.id ?? null"
+      (selectionChange)="onClientSelect($event.value)"
+      aria-label="Workspace"
+    >
+      @for (c of clients; track c.id) {
+        <mat-option [value]="c.id">{{ c.name }}</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+
+  <button
+    mat-icon-button
+    type="button"
+    class="ctx-workspace-menu"
+    [matMenuTriggerFor]="workspaceMenu"
+    aria-label="Workspace actions"
+  >
+    <mat-icon>more_vert</mat-icon>
+  </button>
+  <mat-menu #workspaceMenu="matMenu">
+    <button mat-menu-item type="button" (click)="reloadClients.emit()">
+      <mat-icon>refresh</mat-icon>
+      <span>Reload workspaces</span>
+    </button>
+    <mat-divider />
+    <div class="ctx-add-workspace" (click)="$event.stopPropagation()" (keydown)="$event.stopPropagation()">
+      <mat-form-field appearance="outline" class="ctx-add-workspace__field" subscriptSizing="dynamic">
+        <mat-label>Add workspace</mat-label>
+        <input
+          matInput
+          type="text"
+          name="ctx-new-workspace"
+          [(ngModel)]="newWorkspaceName"
+          (keydown.enter)="submitNewWorkspace()"
+          placeholder="Workspace name"
+        />
+      </mat-form-field>
+      <button
+        mat-stroked-button
+        color="primary"
+        type="button"
+        [disabled]="!newWorkspaceName.trim()"
+        (click)="submitNewWorkspace()"
+      >
+        Add
+      </button>
+    </div>
+  </mat-menu>
+
+  <mat-form-field appearance="outline" class="ctx-field ctx-brand">
+    <mat-label>Brand</mat-label>
+    <mat-select
+      [value]="selectedBrand?.id ?? null"
+      [disabled]="brands.length === 0"
+      (selectionChange)="onBrandSelect($event.value)"
+      aria-label="Brand"
+    >
+      @for (b of brands; track b.id) {
+        <mat-option [value]="b.id">{{ b.name }} · v{{ b.version }} · {{ b.status }}</mat-option>
+      }
+    </mat-select>
+  </mat-form-field>
+
+  <div class="ctx-version" aria-label="Brand version">
+    <span class="ctx-version__label">Version</span>
+    <span class="ctx-version__value">{{ selectedBrand ? 'v' + selectedBrand.version : '—' }}</span>
+  </div>
+
+  <span class="ctx-spacer"></span>
+
+  <button
+    mat-stroked-button
+    color="primary"
+    type="button"
+    class="ctx-new-brand"
+    (click)="newBrandRequest.emit()"
+  >
+    <mat-icon>add</mat-icon>
+    New brand
+  </button>
+</div>

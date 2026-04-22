@@ -1,4 +1,4 @@
-import { Component, ElementRef, OnDestroy, OnInit, ViewChild, inject } from '@angular/core';
+import { Component, OnDestroy, OnInit, inject } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 import { BreakpointObserver } from '@angular/cdk/layout';
 import { FormBuilder, FormsModule, ReactiveFormsModule, Validators } from '@angular/forms';
@@ -21,6 +21,7 @@ import { HealthIndicatorComponent } from '../health-indicator/health-indicator.c
 import { BrandingChatComponent } from '../branding-chat/branding-chat.component';
 import { BrandPreviewComponent } from '../brand-preview/brand-preview.component';
 import { BrandActivityStripComponent } from '../brand-activity-strip/brand-activity-strip.component';
+import { BrandingContextSelectorComponent } from './branding-context-selector/branding-context-selector.component';
 import type {
   Brand,
   BrandActivity,
@@ -60,6 +61,7 @@ const WORKSPACE_CLIENT_NAME = 'My brands';
     BrandingChatComponent,
     BrandPreviewComponent,
     BrandActivityStripComponent,
+    BrandingContextSelectorComponent,
   ],
   templateUrl: './branding-dashboard.component.html',
   styleUrl: './branding-dashboard.component.scss',
@@ -74,8 +76,6 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   private readonly activityStore = inject(BrandActivityService);
   /** Per-activity-id polling subscriptions so we can clean up on destroy. */
   private readonly activityPolls = new Map<string, Subscription>();
-
-  @ViewChild('brandListWrap') private brandListWrap?: ElementRef<HTMLElement>;
 
   /** Narrow layout: collapsible brand preview panel. */
   isCompactLayout = false;
@@ -156,6 +156,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
   /** Keep URL query params in sync so the user can bookmark / deep-link back. */
   private syncQueryParams(): void {
     const params: Record<string, string> = {};
+    if (this.selectedClient?.id) params['workspaceId'] = this.selectedClient.id;
     if (this.activeConversationId) params['conversationId'] = this.activeConversationId;
     if (this.selectedBrand?.id) params['brandId'] = this.selectedBrand.id;
     this.router.navigate([], {
@@ -164,6 +165,19 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
       queryParamsHandling: 'replace',
       replaceUrl: true,
     });
+  }
+
+  onWorkspaceChange(client: Client): void {
+    this.selectClient(client);
+  }
+
+  onBrandChange(brand: Brand): void {
+    this.resumeOrStartBrand(brand);
+  }
+
+  onAddClientFromSelector(name: string): void {
+    this.newClientName = name;
+    this.createClient();
   }
 
   onOpenSaveAsBrand(): void {
@@ -264,14 +278,16 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
-  /** Conversation/brand IDs from URL query params, used to restore state on page load. */
+  /** Conversation/brand/workspace IDs from URL query params, used to restore state on page load. */
   private pendingConversationId: string | null = null;
   private pendingBrandId: string | null = null;
+  private pendingWorkspaceId: string | null = null;
 
   ngOnInit(): void {
     const snap = this.route.snapshot.queryParamMap;
     this.pendingConversationId = snap.get('conversationId');
     this.pendingBrandId = snap.get('brandId');
+    this.pendingWorkspaceId = snap.get('workspaceId');
     this.ensureWorkspaceClient();
     this.layoutSub = this.breakpoint.observe('(max-width: 900px)').subscribe((state) => {
       this.isCompactLayout = state.matches;
@@ -312,7 +328,12 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         } else {
           this.clients = list;
           if (!this.selectedClient) {
-            this.selectClient(list[0]);
+            const target =
+              (this.pendingWorkspaceId &&
+                list.find((c) => c.id === this.pendingWorkspaceId)) ||
+              list[0];
+            this.pendingWorkspaceId = null;
+            this.selectClient(target);
           } else {
             this.loading = false;
           }
@@ -345,6 +366,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     this.selectedBrand = null;
     this.brands = [];
     this.brandActionMessage = null;
+    this.syncQueryParams();
     this.api.listBrands(client.id).subscribe({
       next: (list) => {
         this.brands = list;
@@ -414,18 +436,13 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
     this.resumeOrStartBrand(brand);
   }
 
-  startNewBrandConversation(brand: Brand): void {
-    this.resumeOrStartBrand(brand);
-  }
-
   openFormTabForNewBrand(): void {
     this.selectedTabIndex = 1;
     this.showCreateBrand = true;
   }
 
   private scrollBrandRowIntoView(brandId: string): void {
-    const root = this.brandListWrap?.nativeElement;
-    const el = root?.querySelector(`[data-brand-id="${brandId}"]`);
+    const el = document.querySelector(`[data-brand-id="${brandId}"]`);
     el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 
@@ -494,7 +511,7 @@ export class BrandingDashboardComponent implements OnInit, OnDestroy {
         setTimeout(() => {
           this.highlightedBrandId = null;
         }, 2500);
-        this.startNewBrandConversation(brand);
+        this.resumeOrStartBrand(brand);
         this.selectedTabIndex = 0;
         const ref = this.snackBar.open(
           `Brand “${brand.name}” created. Chat is scoped to this brand.`,
