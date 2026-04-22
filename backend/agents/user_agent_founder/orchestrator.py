@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import Any
 
@@ -54,6 +55,36 @@ def _heartbeat(run_id: str) -> None:
         _job_client.heartbeat(run_id)
     except Exception:
         pass
+
+
+# Interval between spec-generation heartbeats. Module-level so tests can shorten it.
+SPEC_HEARTBEAT_INTERVAL = float(os.environ.get("FOUNDER_SPEC_HEARTBEAT_SECONDS", "30"))
+
+
+def _generate_spec_with_heartbeat(agent: FounderAgent, run_id: str) -> str:
+    """Run agent.generate_spec() while a background thread heartbeats the job.
+
+    Spec generation commonly takes 60-180s; without this, the centralised
+    job-service stale-job monitor reaps the run as dead even though Phases 2
+    and 3 still succeed.
+    """
+    stop = threading.Event()
+
+    def _beat() -> None:
+        while not stop.wait(SPEC_HEARTBEAT_INTERVAL):
+            _heartbeat(run_id)
+
+    hb_thread = threading.Thread(
+        target=_beat,
+        name=f"founder-spec-hb-{run_id[:12]}",
+        daemon=True,
+    )
+    hb_thread.start()
+    try:
+        return agent.generate_spec()
+    finally:
+        stop.set()
+        hb_thread.join(timeout=1)
 
 
 def _answer_pending_questions(
@@ -365,7 +396,7 @@ def run_workflow(run_id: str, store: FounderRunStore, agent: FounderAgent) -> No
         store.update_run(run_id, status="generating_spec")
         _sync_job_status(run_id, "running", phase="generating_spec")
         store.add_chat_message(run_id, "system", "Generating product specification...", "status_update")
-        spec_content = agent.generate_spec()
+        spec_content = _generate_spec_with_heartbeat(agent, run_id)
         store.update_run(run_id, spec_content=spec_content)
         logger.info("Spec generated for run %s (%d chars)", run_id, len(spec_content))
         store.add_chat_message(

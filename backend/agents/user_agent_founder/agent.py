@@ -380,17 +380,3 @@ class FounderAgent:
             message=message,
         )
         return self._call(prompt)
-
-
-# ---------------------------------------------------------------------------
-# Singleton
-# ---------------------------------------------------------------------------
-
-_agent: FounderAgent | None = None
-
-
-def get_founder_agent() -> FounderAgent:
-    global _agent
-    if _agent is None:
-        _agent = FounderAgent()
-    return _agent

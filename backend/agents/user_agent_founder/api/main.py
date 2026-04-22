@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from shared_observability import init_otel, instrument_fastapi_app
-from user_agent_founder.agent import get_founder_agent
+from user_agent_founder.agent import FounderAgent
 from user_agent_founder.orchestrator import run_workflow
 from user_agent_founder.postgres import SCHEMA as USER_AGENT_FOUNDER_POSTGRES_SCHEMA
 from user_agent_founder.store import get_founder_store
@@ -118,7 +118,7 @@ def start_founder_workflow() -> StartRunResponse:
     4. Trigger the full SE team build pipeline
     """
     store = get_founder_store()
-    agent = get_founder_agent()
+    agent = FounderAgent()
     run_id = store.create_run()
 
     thread = threading.Thread(
@@ -355,7 +355,7 @@ def send_chat_message(run_id: str, request: SendChatRequest) -> ChatHistoryRespo
     }
 
     # Get persona response
-    agent = get_founder_agent()
+    agent = FounderAgent()
     try:
         response = agent.chat(request.message, context)
     except Exception as exc:
