@@ -13,7 +13,6 @@ from .lifecycle import (
     list_active,
     note_activity,
     run_idle_reaper,
-    set_lifecycle_for_testing,
     status,
     teardown,
 )
@@ -35,7 +34,6 @@ __all__ = [
     "list_active",
     "note_activity",
     "run_idle_reaper",
-    "set_lifecycle_for_testing",
     "state_file_path",
     "status",
     "teardown",

@@ -400,27 +400,27 @@ def test_state_file_path_uses_agent_cache(monkeypatch: pytest.MonkeyPatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_module_helpers_delegate_to_singleton(tmp_path: Path) -> None:
+async def test_module_helpers_delegate_to_singleton(tmp_path: Path, monkeypatch) -> None:
     """`sandbox.acquire/teardown/…` must operate on the same Lifecycle instance
     so that status swings are observable across calls — the unified API routes
     rely on this to reconcile invoke + list + teardown."""
     from agent_provisioning_team import sandbox as sb
+    from agent_provisioning_team.sandbox import lifecycle as lifecycle_mod
 
     lc = _lifecycle(tmp_path)
-    sb.set_lifecycle_for_testing(lc)
-    try:
-        with _patched_registry(), _patched_docker() as d:
-            handle = await sb.acquire("blogging.planner")
-        assert handle.status == SandboxStatus.WARM
-        assert (await sb.list_active())[0].agent_id == "blogging.planner"
+    lifecycle_mod.get_lifecycle.cache_clear()
+    monkeypatch.setattr(lifecycle_mod, "get_lifecycle", lambda: lc)
 
-        # note_activity bumps last_used_at on the same state row.
-        await sb.note_activity("blogging.planner")
+    with _patched_registry(), _patched_docker() as d:
+        handle = await sb.acquire("blogging.planner")
+    assert handle.status == SandboxStatus.WARM
+    assert (await sb.list_active())[0].agent_id == "blogging.planner"
 
-        # teardown via the module helper clears state.
-        with _patched_registry(), _patched_docker():
-            await sb.teardown("blogging.planner")
-        assert await sb.list_active() == []
-        d.run.assert_awaited_once()
-    finally:
-        sb.set_lifecycle_for_testing(None)
+    # note_activity bumps last_used_at on the same state row.
+    await sb.note_activity("blogging.planner")
+
+    # teardown via the module helper clears state.
+    with _patched_registry(), _patched_docker():
+        await sb.teardown("blogging.planner")
+    assert await sb.list_active() == []
+    d.run.assert_awaited_once()

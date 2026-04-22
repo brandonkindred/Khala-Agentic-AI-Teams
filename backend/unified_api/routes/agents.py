@@ -38,7 +38,6 @@ from agent_console import (
 from agent_console.models import RunCreate
 from agent_provisioning_team.sandbox import (
     SandboxStatus,
-    UnknownAgentError,
     acquire,
     note_activity,
 )
@@ -146,10 +145,6 @@ async def invoke_agent(
 
     try:
         handle = await acquire(agent_id)
-    except UnknownAgentError as exc:
-        # Registry drift: we found a manifest above but the lifecycle
-        # re-resolved and couldn't. Surface as 404 rather than 503.
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # Docker/daemon/infra problems
         logger.exception("sandbox acquire failed for %s", agent_id)
         raise HTTPException(

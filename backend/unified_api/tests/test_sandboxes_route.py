@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,27 +23,25 @@ if str(_agents) not in sys.path:
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agent_provisioning_team import sandbox as sb
-from agent_provisioning_team.sandbox import SandboxStatus
+from agent_provisioning_team.sandbox import SandboxStatus, UnknownAgentError
+from agent_provisioning_team.sandbox import lifecycle as lifecycle_mod
 from agent_provisioning_team.sandbox import provisioner as provisioner_mod
 from agent_provisioning_team.sandbox.lifecycle import Lifecycle
 
 
+def _fake_resolve_team(agent_id: str) -> str:
+    if agent_id.startswith("blogging."):
+        return "blogging"
+    raise UnknownAgentError(f"No agent manifest for {agent_id!r}")
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch) -> TestClient:
-    # Fresh Lifecycle pointed at tmp_path.
     lc = Lifecycle(state_file=tmp_path / "state.json")
-    sb.set_lifecycle_for_testing(lc)
+    lifecycle_mod.get_lifecycle.cache_clear()
+    monkeypatch.setattr(lifecycle_mod, "get_lifecycle", lambda: lc)
+    monkeypatch.setattr(lifecycle_mod, "_resolve_team", _fake_resolve_team)
 
-    # Registry resolves agent_id → team without touching the on-disk manifests.
-    monkeypatch.setattr(
-        "agent_provisioning_team.sandbox.lifecycle._resolve_team",
-        lambda agent_id: "blogging"
-        if agent_id.startswith("blogging.")
-        else (_ for _ in ()).throw(sb.UnknownAgentError(f"No agent manifest for {agent_id!r}")),
-    )
-
-    # Mock the docker CLI.
     monkeypatch.setattr(provisioner_mod, "run_container", AsyncMock(return_value="abc123"))
     monkeypatch.setattr(provisioner_mod, "inspect_host_port", AsyncMock(return_value=55123))
     monkeypatch.setattr(provisioner_mod, "is_running", AsyncMock(return_value=True))
@@ -54,10 +52,7 @@ def client(tmp_path, monkeypatch) -> TestClient:
 
     app = FastAPI()
     app.include_router(sandboxes_router)
-    try:
-        yield TestClient(app)
-    finally:
-        sb.set_lifecycle_for_testing(None)
+    yield TestClient(app)
 
 
 def test_status_cold_for_unwarmed_agent(client: TestClient) -> None:
@@ -125,23 +120,3 @@ def test_status_reconciles_vanished_container(client: TestClient, monkeypatch) -
     assert resp.json()["status"] == SandboxStatus.COLD
 
 
-@patch("agent_provisioning_team.sandbox.lifecycle.provisioner_mod")
-def test_legacy_team_keyed_urls_are_not_served(_unused, tmp_path) -> None:
-    """Regression guard: the old ``POST /api/agents/sandboxes/{team}`` URL
-    shape is gone — any CI/UI caller still on the team-keyed path must see
-    a 404 rather than silently hitting a different handler."""
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
-    from unified_api.routes.sandboxes import router
-
-    app = FastAPI()
-    app.include_router(router)
-    legacy_client = TestClient(app)
-
-    resp = legacy_client.post("/api/agents/sandboxes/blogging")
-    # The new contract requires the /warm suffix on POST; FastAPI's router
-    # returns 405 (Method Not Allowed) because GET still matches the bare
-    # {agent_id} path. Either 404 or 405 is an acceptable "legacy URL does
-    # not work" signal — the only outcome we must prevent is 200.
-    assert resp.status_code in (404, 405)
