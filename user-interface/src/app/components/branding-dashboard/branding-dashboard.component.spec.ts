@@ -1,11 +1,13 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { ActivatedRoute } from '@angular/router';
 import { vi } from 'vitest';
 import { MatSnackBar } from '@angular/material/snack-bar';
-import { BrandingApiService } from '../../services/branding-api.service';
+import { BrandingApiService, type BrandJobStatus } from '../../services/branding-api.service';
+import { BrandActivityService } from '../../services/brand-activity.service';
 import { BrandingDashboardComponent } from './branding-dashboard.component';
+import type { Brand } from '../../models';
 
 const fakeRoute = { snapshot: { queryParamMap: { get: () => null } } };
 
@@ -22,6 +24,11 @@ describe('BrandingDashboardComponent', () => {
     createBrand: ReturnType<typeof vi.fn>;
     getBrand: ReturnType<typeof vi.fn>;
     createConversation: ReturnType<typeof vi.fn>;
+    submitRun: ReturnType<typeof vi.fn>;
+    observeJob: ReturnType<typeof vi.fn>;
+    listJobs: ReturnType<typeof vi.fn>;
+    requestMarketResearch: ReturnType<typeof vi.fn>;
+    requestDesignAssets: ReturnType<typeof vi.fn>;
   };
   let snackBarSpy: { open: ReturnType<typeof vi.fn> };
 
@@ -40,6 +47,11 @@ describe('BrandingDashboardComponent', () => {
       createBrand: vi.fn(),
       getBrand: vi.fn(),
       createConversation: vi.fn().mockReturnValue(of(emptyConversationState)),
+      submitRun: vi.fn(),
+      observeJob: vi.fn(),
+      listJobs: vi.fn().mockReturnValue(of([])),
+      requestMarketResearch: vi.fn(),
+      requestDesignAssets: vi.fn(),
     };
     await TestBed.configureTestingModule({
       imports: [BrandingDashboardComponent, NoopAnimationsModule],
@@ -118,6 +130,122 @@ describe('BrandingDashboardComponent', () => {
     component.selectBrandForChat(brand);
     expect(component.selectedBrand).toEqual(brand);
     expect(component.activeConversationId).toBe('conv-123');
+  });
+
+  it('runBrand submits, tracks the job, and updates the activity chip', () => {
+    const brand: Brand = {
+      id: 'b1',
+      client_id: 'w1',
+      name: 'B',
+      status: 'draft',
+      conversation_id: null,
+      mission: {} as any,
+      version: 1,
+      history: [],
+      created_at: '',
+      updated_at: '',
+    };
+    component.selectedClient = { id: 'w1', name: 'My brands', created_at: '', updated_at: '' };
+    component.brands = [brand];
+    const statusSubject = new Subject<BrandJobStatus>();
+    apiSpy.submitRun.mockReturnValue(of({ job_id: 'j1', status: 'queued' }));
+    apiSpy.observeJob.mockReturnValue(statusSubject.asObservable());
+    apiSpy.getBrand.mockReturnValue(of(brand));
+
+    component.runBrand(brand);
+
+    const store = TestBed.inject(BrandActivityService);
+    const running = store.snapshot().find((a) => a.brandId === 'b1');
+    expect(running).toBeTruthy();
+    expect(running!.jobId).toBe('j1');
+    expect(component.isGenerating('b1')).toBe(true);
+
+    statusSubject.next({ job_id: 'j1', status: 'running', current_phase: 'Visual Identity' });
+    const mid = store.snapshot().find((a) => a.id === running!.id);
+    expect(mid!.status).toBe('running');
+    expect(mid!.phase).toBe('Visual Identity');
+
+    statusSubject.next({ job_id: 'j1', status: 'completed', updated_at: '2026-04-22T10:00:00Z' });
+    statusSubject.complete();
+    const final = store.snapshot().find((a) => a.id === running!.id);
+    expect(final!.status).toBe('completed');
+    expect(component.isGenerating('b1')).toBe(false);
+    expect(apiSpy.getBrand).toHaveBeenCalledWith('w1', 'b1');
+  });
+
+  it('runBrand failure pushes a failed activity and exposes the error', () => {
+    const brand: Brand = {
+      id: 'b1', client_id: 'w1', name: 'B', status: 'draft',
+      mission: {} as any, version: 1, history: [], created_at: '', updated_at: '',
+    };
+    component.selectedClient = { id: 'w1', name: 'My brands', created_at: '', updated_at: '' };
+    component.brands = [brand];
+    apiSpy.submitRun.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
+
+    component.runBrand(brand);
+
+    const store = TestBed.inject(BrandActivityService);
+    const activity = store.snapshot().find((a) => a.brandId === 'b1');
+    expect(activity!.status).toBe('failed');
+    expect(activity!.error).toBe('nope');
+  });
+
+  it('requestMarketResearchForBrand pushes a research activity', () => {
+    const brand: Brand = {
+      id: 'b1', client_id: 'w1', name: 'B', status: 'draft',
+      mission: {} as any, version: 1, history: [], created_at: '', updated_at: '',
+    };
+    component.selectedClient = { id: 'w1', name: 'My brands', created_at: '', updated_at: '' };
+    apiSpy.requestMarketResearch.mockReturnValue(
+      of({ summary: 'S', similar_brands: [], insights: [], source: 'x' })
+    );
+
+    component.requestMarketResearchForBrand(brand);
+
+    const store = TestBed.inject(BrandActivityService);
+    const activity = store.snapshot().find((a) => a.brandId === 'b1');
+    expect(activity!.kind).toBe('research');
+    expect(activity!.status).toBe('completed');
+  });
+
+  it('onActivityRetry removes the old chip and re-fires the same kind', () => {
+    const brand: Brand = {
+      id: 'b1', client_id: 'w1', name: 'B', status: 'draft',
+      mission: {} as any, version: 1, history: [], created_at: '', updated_at: '',
+    };
+    component.selectedClient = { id: 'w1', name: 'My brands', created_at: '', updated_at: '' };
+    apiSpy.requestDesignAssets.mockReturnValue(of({ request_id: 'r1', status: 'pending', artifacts: [] }));
+    const store = TestBed.inject(BrandActivityService);
+    const failed = store.start('design', 'b1');
+    store.update(failed.id, { status: 'failed', error: 'prev failure' });
+
+    component.onActivityRetry(brand, store.snapshot()[0]);
+
+    expect(apiSpy.requestDesignAssets).toHaveBeenCalledWith('w1', 'b1');
+    const snap = store.snapshot();
+    expect(snap).toHaveLength(1);
+    expect(snap[0].id).not.toBe(failed.id);
+    expect(snap[0].status).toBe('completed');
+  });
+
+  it('selectClient hydrates running jobs for the workspace', () => {
+    const brand: Brand = {
+      id: 'b1', client_id: 'w1', name: 'B', status: 'draft',
+      mission: {} as any, version: 1, history: [], created_at: '', updated_at: '',
+    };
+    apiSpy.listBrands.mockReturnValue(of([brand]));
+    apiSpy.listJobs.mockReturnValue(
+      of([{ job_id: 'hydrated', status: 'running', brand_id: 'b1' }])
+    );
+    apiSpy.observeJob.mockReturnValue(new Subject().asObservable());
+
+    component.selectClient({ id: 'w1', name: 'My brands', created_at: '', updated_at: '' });
+
+    expect(apiSpy.listJobs).toHaveBeenCalledWith(true);
+    const store = TestBed.inject(BrandActivityService);
+    const hydrated = store.snapshot().find((a) => a.jobId === 'hydrated');
+    expect(hydrated).toBeTruthy();
+    expect(hydrated!.brandId).toBe('b1');
   });
 });
 

@@ -1,7 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable, EMPTY, of, throwError, timer } from 'rxjs';
-import { expand, first, switchMap } from 'rxjs/operators';
+import { expand, first, map, switchMap } from 'rxjs/operators';
 import { environment } from '../../environments/environment';
 import type {
   Brand,
@@ -21,17 +21,36 @@ import type {
   HealthResponse,
 } from '../models';
 
-interface BrandJobSubmission {
+export interface BrandJobSubmission {
   job_id: string;
   status: string;
 }
 
-interface BrandJobStatus {
+export interface BrandJobStatus {
   job_id: string;
   status: string;
+  client_id?: string | null;
+  brand_id?: string | null;
   current_phase?: string | null;
+  progress?: number | null;
   result?: BrandingTeamOutput | null;
   error?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface BrandJobListItem {
+  job_id: string;
+  status: string;
+  client_id?: string | null;
+  brand_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+/** A job status is terminal when no further polls will change it. */
+export function isTerminalJobStatus(status: string): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
 }
 
 const BRANDING_POLL_INTERVAL_MS = 2000;
@@ -100,17 +119,31 @@ export class BrandingApiService {
     return this.http.get<BrandJobStatus>(`${this.baseUrl}/branding/status/${jobId}`);
   }
 
-  private pollJob(jobId: string): Observable<BrandingTeamOutput> {
+  /**
+   * Poll a branding job and emit every status update — including intermediate
+   * phase transitions — until a terminal status. Used by the per-brand activity
+   * strip; unlike `runBrand`, this does not collapse to just the final result.
+   */
+  observeJob(jobId: string): Observable<BrandJobStatus> {
     const poll$ = this.getJobStatus(jobId);
     return poll$.pipe(
       expand((job) =>
-        job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
+        isTerminalJobStatus(job.status)
           ? EMPTY
           : timer(BRANDING_POLL_INTERVAL_MS).pipe(switchMap(() => poll$))
-      ),
-      first((job) =>
-        job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
-      ),
+      )
+    );
+  }
+
+  /** List branding jobs; pass `runningOnly=true` to hydrate the activity strip on mount. */
+  listJobs(runningOnly = false): Observable<BrandJobListItem[]> {
+    const url = `${this.baseUrl}/branding/jobs${runningOnly ? '?running_only=true' : ''}`;
+    return this.http.get<{ jobs: BrandJobListItem[] }>(url).pipe(map((r) => r.jobs));
+  }
+
+  private pollJob(jobId: string): Observable<BrandingTeamOutput> {
+    return this.observeJob(jobId).pipe(
+      first((job) => isTerminalJobStatus(job.status)),
       switchMap((job) =>
         job.status === 'completed' && job.result
           ? of(job.result)

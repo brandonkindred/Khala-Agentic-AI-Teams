@@ -59,4 +59,30 @@ describe('BrandingApiService', () => {
       answered_questions: [],
     });
   });
+
+  it('listJobs(true) hits /branding/jobs?running_only=true', () => {
+    const payload = { jobs: [{ job_id: 'j1', status: 'running', brand_id: 'b1' }] };
+    service.listJobs(true).subscribe((jobs) => {
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0].job_id).toBe('j1');
+    });
+    const req = httpMock.expectOne(`${baseUrl}/branding/jobs?running_only=true`);
+    expect(req.request.method).toBe('GET');
+    req.flush(payload);
+  });
+
+  it('observeJob emits intermediate running status before terminal', () => {
+    const received: string[] = [];
+    const sub = service.observeJob('j1').subscribe({
+      next: (status) => received.push(status.status),
+    });
+
+    const first = httpMock.expectOne(`${baseUrl}/branding/status/j1`);
+    first.flush({ job_id: 'j1', status: 'running', current_phase: 'Visual Identity' });
+
+    // Intermediate status reached the subscriber; no second poll yet (timer).
+    expect(received).toEqual(['running']);
+
+    sub.unsubscribe();
+  });
 });
